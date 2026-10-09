@@ -10620,7 +10620,7 @@ mod tests {
             &object_uri,
             &protection,
             &principal_root_data_key_from_protection(data_dir.path(), &protection).unwrap(),
-            &sha256_label(&plaintext),
+            &sha256_label(plaintext),
         )
         .unwrap();
         #[cfg(unix)]
