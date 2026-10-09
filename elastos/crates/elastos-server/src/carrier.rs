@@ -16796,9 +16796,16 @@ pub(crate) mod tests {
             .err()
             .expect("a foreign ticket must fail before a connection starts");
         assert!(error.to_string().contains("ticket routes do not match"));
-        let error = fetch_file_from_trusted_source_bound(&source, None, "fixture", 1, None)
-            .await
-            .unwrap_err();
+        let error = fetch_file_from_trusted_source_bound(
+            &source,
+            None,
+            "fixture",
+            1,
+            None,
+            MAX_DOWNLOAD_BYTES,
+        )
+        .await
+        .unwrap_err();
         assert!(error.to_string().contains("ticket routes do not match"));
 
         let mixed = serde_json::json!({"endpoints": [
