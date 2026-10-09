@@ -6,6 +6,17 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Removed
+
+- The sign-in screen no longer shows "Use an older security key". To replace a
+  passkey, restore your Recovery Kit and create a new one.
+
+### Developer detail
+
+- Removed `elastos identity passkey-hint` and the private credential-hint
+  sign-in path. Anonymous sign-in options still never list an account's
+  credentials.
+
 ## [0.8.0-alpha.13]
 
 Test-channel release. Signed releases show these notes in System before you update.

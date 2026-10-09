@@ -1572,8 +1572,5 @@ fn home_error_response(err: anyhow::Error) -> Response {
 #[path = "gateway_browser_tests.rs"]
 mod gateway_browser_tests;
 #[cfg(test)]
-#[path = "gateway_legacy_passkey_tests.rs"]
-mod gateway_legacy_passkey_tests;
-#[cfg(test)]
 #[path = "gateway_tests/mod.rs"]
 mod gateway_tests;
