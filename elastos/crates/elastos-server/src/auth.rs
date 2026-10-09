@@ -67,6 +67,7 @@ const PRINCIPAL_ROOT_MIGRATION_RECEIPT_FILE: &str = "receipt.json";
 const PRINCIPAL_ROOT_UPGRADE_RECEIPT_FILE: &str = "upgrade-receipt.json";
 const PRINCIPAL_ROOT_MIGRATION_CLEANUP_SCHEMA: &str = "elastos.principal-root.migration-cleanup/v1";
 const PRINCIPAL_ROOT_MIGRATION_CLEANUP_DIR: &str = "principal-root-migration-cleanup";
+const PRINCIPAL_ROOT_LIFECYCLE_LOCK_FILE: &str = "principal-root-lifecycle.lock";
 const MAX_MIGRATION_CLEANUP_RECORDS: usize = 128;
 const MAX_PRINCIPAL_ROOT_INVENTORY_DECLARATIONS: usize = 128;
 const MAX_PRINCIPAL_ROOT_INVENTORY_OBJECTS: usize = 1024;
@@ -3164,6 +3165,54 @@ fn open_audit_chain_activation_lock(data_dir: &Path) -> anyhow::Result<File> {
     open_regular_lock_file(&path, "audit activation")
 }
 
+// Callers first hold the process-local object mutex. This separate file lock
+// fences migration and cleanup across processes without re-entering auth's
+// short state lock while protection or receipts are written.
+fn lock_principal_root_lifecycle(data_dir: &Path) -> anyhow::Result<FileLock> {
+    let path = auth_state_path(data_dir)?.with_file_name(PRINCIPAL_ROOT_LIFECYCLE_LOCK_FILE);
+    ensure_regular_auth_parent(
+        data_dir,
+        path.parent()
+            .ok_or_else(|| anyhow!("principal-root lifecycle lock parent is missing"))?,
+    )?;
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    options
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    let file = options
+        .open(&path)
+        .context("open principal-root lifecycle lock")?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        anyhow::bail!("principal-root lifecycle lock must be a regular file");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.nlink() != 1
+            || metadata.permissions().mode() & 0o777 != 0o600
+        {
+            anyhow::bail!("principal-root lifecycle lock must be owner-only with one link");
+        }
+    }
+    let lock = FileLock::try_exclusive(file).context(
+        "another process owns principal-root migration or cleanup; retry after it finishes",
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let current = std::fs::symlink_metadata(&path)?;
+        if !current.is_file() || current.dev() != metadata.dev() || current.ino() != metadata.ino()
+        {
+            anyhow::bail!("principal-root lifecycle lock changed while it was acquired");
+        }
+    }
+    Ok(lock)
+}
+
 fn lock_auth_state_file(file: File) -> anyhow::Result<FileLock> {
     FileLock::exclusive(file).context("failed to lock auth state")
 }
@@ -4008,6 +4057,7 @@ pub(crate) fn mark_recovery_kit_handed_to_person(
 
 #[derive(Debug)]
 pub struct PrincipalRootProtectionActivationGuard {
+    _lifecycle: FileLock,
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -4029,6 +4079,7 @@ pub fn begin_declarative_principal_root_protection_activation(
     let guard = principal_root_object_mutation_lock()
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
+    let lifecycle = lock_principal_root_lifecycle(data_dir)?;
     let protection = load_principal_root_protection(data_dir, principal_id, localhost_root)?;
     let classified = classify_declared_principal_root_objects(
         data_dir,
@@ -4046,7 +4097,10 @@ pub fn begin_declarative_principal_root_protection_activation(
         localhost_root,
         classified.plaintext_object_count,
     )?;
-    Ok(PrincipalRootProtectionActivationGuard { _guard: guard })
+    Ok(PrincipalRootProtectionActivationGuard {
+        _guard: guard,
+        _lifecycle: lifecycle,
+    })
 }
 
 pub(crate) struct PrincipalRootProtectionActivationWithPlaintext {
@@ -4070,6 +4124,7 @@ pub(crate) fn begin_declarative_principal_root_protection_activation_migrating_p
     let guard = principal_root_object_mutation_lock()
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
+    let lifecycle = lock_principal_root_lifecycle(data_dir)?;
     let protection = load_principal_root_protection(data_dir, principal_id, localhost_root)?;
     let classified = classify_declared_principal_root_objects(
         data_dir,
@@ -4082,8 +4137,15 @@ pub(crate) fn begin_declarative_principal_root_protection_activation_migrating_p
         protection.as_ref(),
         &classified,
     )?;
+    if !classified.plaintext_objects.is_empty() {
+        // Admission precedes the caller's first protection or step-up write.
+        require_principal_root_migration_capacity(data_dir, 1)?;
+    }
     Ok(PrincipalRootProtectionActivationWithPlaintext {
-        guard: PrincipalRootProtectionActivationGuard { _guard: guard },
+        guard: PrincipalRootProtectionActivationGuard {
+            _guard: guard,
+            _lifecycle: lifecycle,
+        },
         plaintext_objects: classified.plaintext_objects,
     })
 }
@@ -4160,6 +4222,7 @@ pub(crate) fn begin_declarative_principal_root_protection_activation_with_candid
     let guard = principal_root_object_mutation_lock()
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
+    let lifecycle = lock_principal_root_lifecycle(data_dir)?;
     let classified = classify_declared_principal_root_objects(
         data_dir,
         &candidate.principal_id,
@@ -4178,7 +4241,10 @@ pub(crate) fn begin_declarative_principal_root_protection_activation_with_candid
         &candidate.data_key_id,
         data_key,
     )?;
-    Ok(PrincipalRootProtectionActivationGuard { _guard: guard })
+    Ok(PrincipalRootProtectionActivationGuard {
+        _guard: guard,
+        _lifecycle: lifecycle,
+    })
 }
 
 pub(crate) fn inspect_declarative_principal_root_protection(
@@ -6047,6 +6113,7 @@ pub fn migrate_principal_root_objects_offline(
     let _object_guard = principal_root_object_mutation_lock()
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
+    let _lifecycle = lock_principal_root_lifecycle(data_dir)?;
     recover_principal_root_migration_journal(data_dir)?;
 
     match migrate_principal_root_objects_offline_locked(data_dir, plan_path, backup_dir) {
@@ -6103,6 +6170,7 @@ fn migrate_principal_root_objects_plan_locked(
     plan_sha256: &str,
     backup_dir: &Path,
 ) -> anyhow::Result<PrincipalRootMigrationReceiptV1> {
+    require_principal_root_migration_capacity(data_dir, 1)?;
     let protection =
         load_principal_root_protection(data_dir, &plan.principal_id, &plan.localhost_root)?
             .ok_or_else(|| {
@@ -6318,6 +6386,7 @@ pub fn verify_declared_principal_roots_ready(
     let _object_guard = principal_root_object_mutation_lock()
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
+    let _lifecycle = lock_principal_root_lifecycle(data_dir)?;
     require_no_principal_root_migration_journal(data_dir)?;
     let plans = preflight_declared_principal_root_upgrade(data_dir, declarations)?;
     if let Some(plan) = plans.first() {
@@ -6387,6 +6456,7 @@ where
     let _object_guard = principal_root_object_mutation_lock()
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
+    let _lifecycle = lock_principal_root_lifecycle(data_dir)?;
     let declarations = declarations()?;
     if recover_principal_root_migration_journal(data_dir)? {
         anyhow::bail!(
@@ -6407,6 +6477,7 @@ where
     if backup_dir.exists() {
         anyhow::bail!("principal-root upgrade backup directory must not already exist");
     }
+    require_principal_root_migration_capacity(data_dir, plans.len())?;
     ensure_no_symlink_components(data_dir, backup_dir)?;
     ensure_safe_backup_parent(&expected_backup_parent)?;
     create_owner_only_dir(backup_dir)?;
@@ -7053,6 +7124,35 @@ fn migration_cleanup_record_name(journal: &PrincipalRootMigrationJournalV1) -> S
     format!("{}.json", &sha256_label(identity.as_bytes())[7..])
 }
 
+// The lifecycle lock keeps this admission valid until every admitted root has
+// committed. Recovery can always finish a previously committed journal, even
+// if an older writer exceeded this bound before recording its cleanup owner.
+fn require_principal_root_migration_capacity(
+    data_dir: &Path,
+    additional: usize,
+) -> anyhow::Result<()> {
+    let directory = principal_root_migration_cleanup_dir(data_dir)?;
+    ensure_regular_auth_parent(
+        data_dir,
+        directory
+            .parent()
+            .ok_or_else(|| anyhow!("migration cleanup directory parent is missing"))?,
+    )?;
+    ensure_auth_owner_only_directory(&directory)?;
+    let existing = std::fs::read_dir(&directory)?
+        .take(MAX_MIGRATION_CLEANUP_RECORDS + 1)
+        .try_fold(0usize, |count, entry| entry.map(|_| count + 1))?;
+    if existing
+        .checked_add(additional)
+        .is_none_or(|count| count > MAX_MIGRATION_CLEANUP_RECORDS)
+    {
+        anyhow::bail!(
+            "migration cleanup records need owner reconciliation before another migration"
+        );
+    }
+    Ok(())
+}
+
 fn write_principal_root_migration_cleanup(
     data_dir: &Path,
     journal: &PrincipalRootMigrationJournalV1,
@@ -7083,18 +7183,6 @@ fn write_principal_root_migration_cleanup_with_directory(
             .ok_or_else(|| anyhow!("migration cleanup directory parent is missing"))?,
     )?;
     ensure_auth_owner_only_directory(&directory)?;
-    if std::fs::read_dir(&directory)?
-        .take(MAX_MIGRATION_CLEANUP_RECORDS + 1)
-        .count()
-        >= MAX_MIGRATION_CLEANUP_RECORDS
-        && !directory
-            .join(migration_cleanup_record_name(journal))
-            .exists()
-    {
-        anyhow::bail!(
-            "migration cleanup records need owner reconciliation before another migration"
-        );
-    }
     let record = PrincipalRootMigrationCleanupV1 {
         schema: PRINCIPAL_ROOT_MIGRATION_CLEANUP_SCHEMA.to_string(),
         journal: journal.clone(),
@@ -7152,6 +7240,7 @@ pub(crate) fn reconcile_legacy_principal_root_migration(
     let _guard = principal_root_object_mutation_lock()
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
+    let _lifecycle = lock_principal_root_lifecycle(data_dir)?;
     require_no_principal_root_migration_journal(data_dir)?;
     let mut options = OpenOptions::new();
     options.read(true);
@@ -7221,6 +7310,7 @@ pub(crate) fn finalize_declared_principal_root_migrations(
     let _guard = principal_root_object_mutation_lock()
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
+    let _lifecycle = lock_principal_root_lifecycle(data_dir)?;
     require_no_principal_root_migration_journal(data_dir)?;
     let plans = preflight_declared_principal_root_upgrade(data_dir, declarations)?;
     if !plans.is_empty() {
@@ -7238,9 +7328,8 @@ pub(crate) fn finalize_declared_principal_root_migrations(
         .take(MAX_MIGRATION_CLEANUP_RECORDS + 1)
         .collect::<Result<Vec<_>, _>>()?;
     if names.len() > MAX_MIGRATION_CLEANUP_RECORDS {
-        anyhow::bail!(
-            "migration cleanup records exceed their bound; owner reconciliation is required"
-        );
+        names.truncate(MAX_MIGRATION_CLEANUP_RECORDS);
+        tracing::warn!("Migration cleanup retains more records. Run cleanup again to finish the next bounded batch.");
     }
     names.sort();
     let mut removed = 0;
@@ -7340,30 +7429,26 @@ fn import_legacy_principal_root_migration_cleanups(
         return Ok(());
     }
     ensure_no_symlink_components(data_dir, &parent)?;
-    let mut candidates = std::fs::read_dir(&parent)?
-        .filter_map(|entry| match entry {
-            Ok(entry)
-                if entry
+    // Stream retained history with bounded per-receipt reads. Receipt-only
+    // completed directories consume neither active capacity nor batch memory.
+    let candidates = std::fs::read_dir(&parent)?.filter_map(|entry| match entry {
+        Ok(entry)
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("principal-root-migration-")
+                || entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("principal-root-migration-")
-                    || entry
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with("principal-root-upgrade-") =>
-            {
-                Some(Ok(entry.path()))
-            }
-            Ok(_) => None,
-            Err(error) => Some(Err(error)),
-        })
-        .take(MAX_MIGRATION_CLEANUP_RECORDS + 1)
-        .collect::<Result<Vec<_>, _>>()?;
-    if candidates.len() > MAX_MIGRATION_CLEANUP_RECORDS {
-        anyhow::bail!("legacy migration backups exceed their discovery bound; owner reconciliation is required");
-    }
-    candidates.sort();
+                    .starts_with("principal-root-upgrade-") =>
+        {
+            Some(Ok(entry.path()))
+        }
+        Ok(_) => None,
+        Err(error) => Some(Err(error)),
+    });
     for candidate in candidates {
+        let candidate = candidate?;
         let result = (|| {
             let directory = open_migration_backup_directory(&candidate)?;
             if candidate
@@ -7578,6 +7663,7 @@ fn import_legacy_migration_cleanup(
             anyhow::bail!("legacy migration backup hash changed");
         }
     }
+    require_principal_root_migration_capacity(data_dir, 1)?;
     write_principal_root_migration_cleanup_with_directory(data_dir, &journal, &directory)
 }
 
@@ -10800,6 +10886,319 @@ mod tests {
                 object.backup_sha256 = object.plaintext_sha256.clone();
             }
             journal
+        }
+    }
+
+    fn fill_migration_cleanup_slots(data_dir: &Path, count: usize) -> Vec<PathBuf> {
+        let directory = principal_root_migration_cleanup_dir(data_dir).unwrap();
+        ensure_regular_auth_parent(data_dir, directory.parent().unwrap()).unwrap();
+        ensure_auth_owner_only_directory(&directory).unwrap();
+        (0..count)
+            .map(|index| {
+                let path = directory.join(format!("capacity-{index:03}.json"));
+                write_owner_only_new_file(&path, b"retained owner reconciliation fixture").unwrap();
+                path
+            })
+            .collect()
+    }
+
+    #[test]
+    fn migration_capacity_refuses_before_journal_or_object_changes() {
+        let fixture = OfflineMigrationFixture::new(1);
+        fill_migration_cleanup_slots(fixture.data_dir.path(), MAX_MIGRATION_CLEANUP_RECORDS);
+        let auth_path = auth_state_path(fixture.data_dir.path()).unwrap();
+        let before = std::fs::read(&auth_path).unwrap();
+
+        let error = migrate_principal_root_objects_offline(
+            fixture.data_dir.path(),
+            &fixture.plan_path,
+            &fixture.backup_dir,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("owner reconciliation"));
+        fixture.assert_all_plaintext();
+        assert_eq!(std::fs::read(auth_path).unwrap(), before);
+        assert!(!fixture.backup_dir.exists());
+        require_no_principal_root_migration_journal(fixture.data_dir.path()).unwrap();
+    }
+
+    #[test]
+    fn online_migration_capacity_refuses_before_new_protection() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:capacity-first-activation";
+        let root = principal_localhost_root(principal_id);
+        let uri = format!("{root}/.AppData/LocalHost/GBA/ucity/save.sav");
+        let path = rooted_localhost_fs_path(data_dir.path(), &uri).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"first-run save").unwrap();
+        fill_migration_cleanup_slots(data_dir.path(), MAX_MIGRATION_CLEANUP_RECORDS);
+        let before = std::fs::read(auth_state_path(data_dir.path()).unwrap()).ok();
+
+        let error = begin_declarative_principal_root_protection_activation_migrating_plaintext(
+            data_dir.path(),
+            principal_id,
+            &root,
+            &[PrincipalRootProtectedObjectDeclarationV1::exact(uri)],
+        )
+        .err()
+        .expect("full capacity must refuse online activation");
+
+        assert!(error.to_string().contains("owner reconciliation"));
+        assert_eq!(std::fs::read(path).unwrap(), b"first-run save");
+        assert_eq!(
+            std::fs::read(auth_state_path(data_dir.path()).unwrap()).ok(),
+            before
+        );
+        assert!(
+            load_principal_root_protection(data_dir.path(), principal_id, &root)
+                .unwrap()
+                .is_none()
+        );
+        require_no_principal_root_migration_journal(data_dir.path()).unwrap();
+    }
+
+    #[test]
+    fn declared_migration_admits_the_complete_root_batch_before_changes() {
+        let fixture = OfflineMigrationFixture::new(1);
+        let second_principal = "person:local:capacity-second-root";
+        let protection =
+            store_test_principal_root_protection(fixture.data_dir.path(), second_principal);
+        let second_uri = format!(
+            "{}/.AppData/LocalHost/GBA/ucity/second.sav",
+            protection.localhost_root
+        );
+        let second_path = rooted_localhost_fs_path(fixture.data_dir.path(), &second_uri).unwrap();
+        std::fs::create_dir_all(second_path.parent().unwrap()).unwrap();
+        std::fs::write(&second_path, b"second-root save").unwrap();
+        let mut declarations = fixture.declarations();
+        declarations.push(PrincipalRootUpgradeDeclarationV1 {
+            principal_id: second_principal.to_string(),
+            localhost_root: protection.localhost_root,
+            inventory: vec![PrincipalRootProtectedObjectDeclarationV1::exact(second_uri)],
+        });
+        fill_migration_cleanup_slots(fixture.data_dir.path(), MAX_MIGRATION_CLEANUP_RECORDS - 1);
+        let auth_path = auth_state_path(fixture.data_dir.path()).unwrap();
+        let before = std::fs::read(&auth_path).unwrap();
+        let backup = fixture
+            .data_dir
+            .path()
+            .join("backups/principal-root-upgrade-capacity");
+
+        let error =
+            migrate_declared_principal_roots_offline(fixture.data_dir.path(), &backup, || {
+                Ok(declarations)
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("owner reconciliation"));
+        fixture.assert_all_plaintext();
+        assert_eq!(std::fs::read(second_path).unwrap(), b"second-root save");
+        assert_eq!(std::fs::read(auth_path).unwrap(), before);
+        assert!(!backup.exists());
+        require_no_principal_root_migration_journal(fixture.data_dir.path()).unwrap();
+    }
+
+    #[test]
+    fn committed_migration_recovers_at_capacity_and_cleanup_drains_bounded_batches() {
+        let fixture = OfflineMigrationFixture::new(1);
+        inject_principal_root_migration_test_fault(
+            fixture.data_dir.path(),
+            PrincipalRootMigrationTestFault::JournalCommitted,
+        );
+        migrate_principal_root_objects_offline(
+            fixture.data_dir.path(),
+            &fixture.plan_path,
+            &fixture.backup_dir,
+        )
+        .unwrap_err();
+        let journal_path = principal_root_migration_journal_path(fixture.data_dir.path()).unwrap();
+        let journal: PrincipalRootMigrationJournalV1 =
+            serde_json::from_slice(&std::fs::read(&journal_path).unwrap()).unwrap();
+        assert_eq!(
+            journal.phase,
+            PrincipalRootMigrationJournalPhaseV1::Committed
+        );
+        // Model an older writer's full, valid retained-record set. The old
+        // records have already lost their payload but still own their receipts.
+        for index in 0..MAX_MIGRATION_CLEANUP_RECORDS {
+            let mut retained = journal.clone();
+            retained.backup_dir = fixture
+                .operator_dir
+                .path()
+                .join(format!("retained-{index:03}"));
+            create_owner_only_dir(&retained.backup_dir).unwrap();
+            for object in &mut retained.objects {
+                object.backup_path = retained
+                    .backup_dir
+                    .join(object.backup_path.file_name().unwrap());
+            }
+            write_principal_root_migration_receipt(
+                &retained,
+                &principal_root_migration_receipt_from_journal(&retained),
+            )
+            .unwrap();
+            write_principal_root_migration_cleanup(fixture.data_dir.path(), &retained).unwrap();
+        }
+
+        // The production entry first finishes recovery; admission then refuses
+        // a fresh migration without restoring ciphertext to plaintext.
+        let error = migrate_principal_root_objects_offline(
+            fixture.data_dir.path(),
+            &fixture.plan_path,
+            &fixture.backup_dir,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("owner reconciliation"));
+        assert!(!journal_path.exists());
+        fixture.assert_all_encrypted();
+        let records = principal_root_migration_cleanup_dir(fixture.data_dir.path()).unwrap();
+        assert_eq!(
+            std::fs::read_dir(&records).unwrap().count(),
+            MAX_MIGRATION_CLEANUP_RECORDS + 1
+        );
+        let first = fixture.cleanup().unwrap();
+        assert_eq!(std::fs::read_dir(&records).unwrap().count(), 1);
+        let second = fixture.cleanup().unwrap();
+        assert_eq!(first + second, 1);
+        assert_eq!(std::fs::read_dir(&records).unwrap().count(), 0);
+        assert!(!journal.objects[0].backup_path.exists());
+        assert!(fixture
+            .backup_dir
+            .join(PRINCIPAL_ROOT_MIGRATION_RECEIPT_FILE)
+            .is_file());
+    }
+
+    #[test]
+    fn completed_legacy_receipt_history_does_not_exhaust_cleanup_capacity() {
+        let mut fixture = OfflineMigrationFixture::new(1);
+        fixture.migrate();
+        let receipt = std::fs::read(
+            fixture
+                .backup_dir
+                .join(PRINCIPAL_ROOT_MIGRATION_RECEIPT_FILE),
+        )
+        .unwrap();
+        assert_eq!(fixture.cleanup().unwrap(), 1);
+        let parent = fixture.data_dir.path().join("backups");
+        create_owner_only_dir(&parent).unwrap();
+        for index in 0..=MAX_MIGRATION_CLEANUP_RECORDS {
+            let directory = parent.join(format!("principal-root-migration-completed-{index:03}"));
+            create_owner_only_dir(&directory).unwrap();
+            write_owner_only_new_file(
+                &directory.join(PRINCIPAL_ROOT_MIGRATION_RECEIPT_FILE),
+                &receipt,
+            )
+            .unwrap();
+        }
+        assert_eq!(fixture.cleanup().unwrap(), 0);
+        std::fs::write(&fixture.object_paths[0], &fixture.plaintexts[0]).unwrap();
+        fixture.backup_dir = parent.join("principal-root-migration-after-history");
+        fixture.migrate();
+        fixture.assert_all_encrypted();
+        assert_eq!(fixture.cleanup().unwrap(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn principal_root_lifecycle_cleanup_child() {
+        let Some(data_dir) = std::env::var_os("ELASTOS_PRINCIPAL_ROOT_LIFECYCLE_TEST_DIR") else {
+            return;
+        };
+        let data_dir = PathBuf::from(data_dir);
+        let principal_id = "person:local:migration-fixture";
+        let root = principal_localhost_root(principal_id);
+        let declarations = [PrincipalRootUpgradeDeclarationV1 {
+            principal_id: principal_id.to_string(),
+            localhost_root: root.clone(),
+            inventory: vec![PrincipalRootProtectedObjectDeclarationV1::exact(format!(
+                "{root}/.AppData/LocalHost/GBA/ucity/save-0.sav"
+            ))],
+        }];
+        let binary = data_dir.join("elastos");
+        let writer = crate::install_transaction::InstallationGuard::acquire(&data_dir).unwrap();
+        let result =
+            finalize_declared_principal_root_migrations(&data_dir, &declarations, &binary, &writer);
+        if std::env::var_os("ELASTOS_PRINCIPAL_ROOT_LIFECYCLE_TEST_HELD").is_some() {
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains("another process owns"));
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                ErrorKind::WouldBlock
+            );
+        } else {
+            assert_eq!(result.unwrap(), 1);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_fences_cleanup_in_another_process_and_releases() {
+        let fixture = OfflineMigrationFixture::new(1);
+        let other = OfflineMigrationFixture::new(1);
+        fixture.migrate();
+        other.migrate();
+        let (_, record) = fixture.cleanup_record();
+        let activation = begin_declarative_principal_root_protection_activation(
+            fixture.data_dir.path(),
+            &fixture.principal_id,
+            &fixture.localhost_root,
+            &fixture.declarations()[0].inventory,
+        )
+        .unwrap();
+        let child_cleanup = |data_dir: &Path, held: bool| {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "auth::tests::principal_root_lifecycle_cleanup_child",
+                ])
+                .env("ELASTOS_PRINCIPAL_ROOT_LIFECYCLE_TEST_DIR", data_dir)
+                .env_remove("ELASTOS_PRINCIPAL_ROOT_LIFECYCLE_TEST_HELD");
+            if held {
+                child.env("ELASTOS_PRINCIPAL_ROOT_LIFECYCLE_TEST_HELD", "1");
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "child cleanup failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        child_cleanup(fixture.data_dir.path(), true);
+        assert!(record.journal.objects[0].backup_path.exists());
+        // Another data root has its own lifecycle, even with the same principal.
+        child_cleanup(other.data_dir.path(), false);
+        drop(activation);
+        child_cleanup(fixture.data_dir.path(), false);
+        assert!(!record.journal.objects[0].backup_path.exists());
+        assert_eq!(fixture.cleanup().unwrap(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn principal_root_lifecycle_lock_rejects_links_and_unsafe_mode() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        for kind in ["symlink", "hardlink", "mode"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = auth_state_path(dir.path())
+                .unwrap()
+                .with_file_name(PRINCIPAL_ROOT_LIFECYCLE_LOCK_FILE);
+            ensure_regular_auth_parent(dir.path(), path.parent().unwrap()).unwrap();
+            let target = dir.path().join("unrelated");
+            write_owner_only_new_file(&target, b"preserve lock target").unwrap();
+            match kind {
+                "symlink" => symlink(&target, &path).unwrap(),
+                "hardlink" => std::fs::hard_link(&target, &path).unwrap(),
+                "mode" => {
+                    write_owner_only_new_file(&path, b"").unwrap();
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            lock_principal_root_lifecycle(dir.path()).unwrap_err();
+            assert_eq!(std::fs::read(target).unwrap(), b"preserve lock target");
         }
     }
 
