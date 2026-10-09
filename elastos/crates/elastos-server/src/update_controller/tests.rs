@@ -1095,7 +1095,8 @@ async fn migration_cleanup_requires_a_fresh_installed_home_proof() {
         routing::{get, post},
         Json, Router,
     };
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::io::{Seek, SeekFrom};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let fixture = PrivateFixture::new();
     let capsule = fixture.data.join("capsules/home");
     fs::create_dir_all(capsule.join("browser")).unwrap();
@@ -1153,8 +1154,36 @@ async fn migration_cleanup_requires_a_fresh_installed_home_proof() {
         .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
+    let generation = "c".repeat(32);
+    write_private(&crate::runtime_control::gateway_runtime_coord_path(&fixture.data), &json!({
+        "api_url":format!("http://127.0.0.1:{port}"), "home_url":format!("http://127.0.0.1:{port}/home/"),
+        "attach_secret":"fixture-attach", "runtime_kind":"gateway", "pid":std::process::id(),
+        "generation":generation, "binary_sha256":digest(&fs::read(&fixture.binary).unwrap())
+    })).unwrap();
+    let host_guard = crate::host_lock::acquire_host_process_lock(
+        &fixture.data,
+        "gateway",
+        &format!("127.0.0.1:{port}"),
+    )
+    .unwrap();
+    // Migration leaves the real host lock in place. Update its held inode,
+    // just as the host does, instead of replacing it as private controller JSON.
+    let mut host_file: &File = &host_guard;
+    host_file.set_len(0).unwrap();
+    host_file.seek(SeekFrom::Start(0)).unwrap();
+    serde_json::to_writer(
+        &mut host_file,
+        &json!({
+            "pid":std::process::id(), "generation":generation, "role":"gateway",
+            "addr":format!("127.0.0.1:{port}")
+        }),
+    )
+    .unwrap();
+    host_file.sync_data().unwrap();
     let accepted = Arc::new(AtomicBool::new(false));
     let served = accepted.clone();
+    let home_requests = Arc::new(AtomicUsize::new(0));
+    let fetched = home_requests.clone();
     let router = Router::new()
         .route(
             "/api/health",
@@ -1162,12 +1191,17 @@ async fn migration_cleanup_requires_a_fresh_installed_home_proof() {
         )
         .route(
             "/api/auth/attach",
-            post(|| async { Json(json!({"token":"fixture-token"})) }),
+            post(|Json(input): Json<Value>| async move {
+                assert_eq!(input["secret"], "fixture-attach");
+                assert_eq!(input["scope"], "client");
+                Json(json!({"token":"fixture-token"}))
+            }),
         )
         .route(
             "/home/",
             get(move || {
                 let served = served.clone();
+                fetched.fetch_add(1, Ordering::SeqCst);
                 async move {
                     if served.load(Ordering::SeqCst) {
                         document.as_slice()
@@ -1186,37 +1220,35 @@ async fn migration_cleanup_requires_a_fresh_installed_home_proof() {
             .await
             .unwrap();
     });
-    let generation = "c".repeat(32);
-    write_private(&crate::runtime_control::gateway_runtime_coord_path(&fixture.data), &json!({
-        "api_url":format!("http://127.0.0.1:{port}"), "home_url":format!("http://127.0.0.1:{port}/home/"),
-        "attach_secret":"fixture-attach", "runtime_kind":"gateway", "pid":std::process::id(),
-        "generation":generation, "binary_sha256":digest(&fs::read(&fixture.binary).unwrap())
-    })).unwrap();
-    write_private(
-        &fixture.data.join("host-process.lock"),
-        &json!({
-            "pid":std::process::id(), "generation":generation, "role":"gateway"
-        }),
-    )
-    .unwrap();
-    finalize_principal_root_backups(&fixture.data, &fixture.binary, None)
-        .await
-        .unwrap_err();
-    assert!(
-        payload.is_file(),
-        "stale served Home retains the encrypted rollback"
-    );
+    let stale = finalize_principal_root_backups(&fixture.data, &fixture.binary, None).await;
+    let retained_after_stale = payload.is_file();
+    let fetched_after_stale = home_requests.load(Ordering::SeqCst);
     accepted.store(true, Ordering::SeqCst);
-    assert_eq!(
-        finalize_principal_root_backups(&fixture.data, &fixture.binary, None)
-            .await
-            .unwrap(),
-        1
-    );
-    assert!(!payload.exists());
-    assert!(backup.join("receipt.json").is_file());
+    let finalized = finalize_principal_root_backups(&fixture.data, &fixture.binary, None).await;
+    let payload_removed = !payload.exists();
+    let receipt_retained = backup.join("receipt.json").is_file();
     let _ = shutdown.send(());
     server.await.unwrap();
+    drop(host_guard);
+    let stale_error = stale.expect_err("stale served Home refuses migration cleanup");
+    assert!(
+        stale_error
+            .to_string()
+            .contains("Served Home differs from the installed capsule"),
+        "{stale_error:#}"
+    );
+    assert!(
+        retained_after_stale,
+        "stale served Home retains the encrypted rollback"
+    );
+    assert_eq!(fetched_after_stale, 1);
+    assert_eq!(finalized.unwrap(), 1);
+    assert!(payload_removed);
+    assert!(receipt_retained);
+    assert_eq!(home_requests.load(Ordering::SeqCst), 2);
+    assert!(crate::host_lock::active_host_process(&fixture.data)
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
