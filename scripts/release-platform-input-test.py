@@ -1656,7 +1656,7 @@ def load_tests(loader, tests, pattern):
     # Load each inert wrapper case into CI's existing entry point. The same
     # loader keeps unittest -k filters; explicit class/method selections retain
     # unittest's normal behavior and do not enter this module hook.
-    for name in ("release-upstream-input-test.py", "release-source-upstream-test.py"):
+    for name in ("release-upstream-input-test.py", "release-source-upstream-test.py", "release-provenance-seal-test.py"):
         sibling_spec = importlib.util.spec_from_file_location(
             name.replace("-", "_").removesuffix(".py"), Path(__file__).with_name(name))
         sibling = importlib.util.module_from_spec(sibling_spec)
