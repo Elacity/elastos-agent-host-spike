@@ -1059,6 +1059,22 @@ pub fn verify_configured_principal_roots_ready(data_dir: &std::path::Path) -> an
     crate::auth::verify_declared_principal_roots_ready(data_dir, &declarations)
 }
 
+/// Caller first proves the exact installed Home generation is ready and holds
+/// the installation writer throughout that proof and cleanup.
+pub(crate) fn finalize_configured_principal_root_migrations_with_writer(
+    data_dir: &std::path::Path,
+    binary: &std::path::Path,
+    writer: &crate::install_transaction::InstallationGuard,
+) -> anyhow::Result<usize> {
+    let declarations = configured_principal_root_upgrade_declarations(data_dir)?;
+    crate::auth::finalize_declared_principal_root_migrations(
+        data_dir,
+        &declarations,
+        binary,
+        writer,
+    )
+}
+
 pub fn migrate_configured_principal_roots_offline(
     data_dir: &std::path::Path,
     backup_dir: &std::path::Path,
