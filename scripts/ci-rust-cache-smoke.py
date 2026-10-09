@@ -160,6 +160,11 @@ def library_hashes(target):
     return result
 
 
+def client_environment():
+    return {k: v for k, v in os.environ.items()
+            if not k.startswith(("SCCACHE_", "CARGO_", "ACTIONS_")) and k != "OPENDAL_TEST"}
+
+
 def probe(args, report):
     if os.name != "posix":
         raise RuntimeError("this probe uses a private POSIX Unix socket")
@@ -180,17 +185,15 @@ def probe(args, report):
         shutil.copyfile(Path(__file__).resolve().parents[1] / "rust-toolchain.toml",
                         root / "rust-toolchain.toml")
         (root / "sccache.json").write_text("{}\n")
-        env = {k: v for k, v in os.environ.items()
-               if not k.startswith(("SCCACHE_", "CARGO_")) and k != "OPENDAL_TEST"}
+        env = client_environment()
         env.update(SCCACHE_DIR=str(root / "cache"), SCCACHE_CACHE_SIZE="64M",
                    SCCACHE_CONF=str(root / "sccache.json"),
                    SCCACHE_CACHED_CONF=str(root / "sccache-cached.toml"),
                    SCCACHE_SERVER_UDS=str(uds), SCCACHE_GHA_ENABLED="on",
                    SCCACHE_MULTILEVEL_CHAIN="disk,gha", SCCACHE_LOCAL_RW_MODE="READ_WRITE",
                    SCCACHE_GHA_RW_MODE="READ_ONLY", SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY="l0",
-                   ACTIONS_CACHE_SERVICE_V2="1", GITHUB_SERVER_URL="https://github.com",
-                   ACTIONS_RESULTS_URL=gha_url, ACTIONS_CACHE_URL=gha_url,
-                   ACTIONS_RUNTIME_TOKEN="ci-cache-probe", NO_PROXY="127.0.0.1", no_proxy="127.0.0.1",
+                   GITHUB_SERVER_URL="https://github.com",
+                   NO_PROXY="127.0.0.1", no_proxy="127.0.0.1",
                    SCCACHE_NO_DAEMON="1",
                    SCCACHE_IDLE_TIMEOUT="60", CARGO_HOME=str(root / "cargo-home"),
                     CARGO_TARGET_DIR=str(target), CARGO_BUILD_BUILD_DIR=str(build), CARGO_INCREMENTAL="0",
@@ -207,7 +210,12 @@ def probe(args, report):
         # Own the foreground server PID. v0.18.0 cmdline.rs accepts the internal
         # start marker; documented SCCACHE_NO_DAEMON keeps that PID foreground.
         # https://github.com/mozilla/sccache/blob/v0.18.0/src/cmdline.rs
-        server_env = dict(env, SCCACHE_START_SERVER="1")
+        # Match the action: only the daemon receives its runtime credential and
+        # v2 selector. Cargo and sccache clients run with a credential-free env.
+        server_env = dict(env, SCCACHE_START_SERVER="1", ACTIONS_CACHE_SERVICE_V2="1",
+                          ACTIONS_RESULTS_URL=gha_url, ACTIONS_RUNTIME_TOKEN="ci-cache-probe")
+        report["client_runtime_credentials_absent"] = not any(
+            name in env for name in ("ACTIONS_RUNTIME_TOKEN", "ACTIONS_RESULTS_URL", "ACTIONS_CACHE_SERVICE_V2"))
         with (root / "server.log").open("w") as log:
             server = subprocess.Popen([tools["sccache"]], cwd=root, env=server_env,
                                       stdin=subprocess.DEVNULL, stdout=log, stderr=log,

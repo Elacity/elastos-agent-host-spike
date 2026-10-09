@@ -43,19 +43,31 @@ runs:
           echo "SCCACHE_GHA_VERSION=$compiler_key"
           echo "SCCACHE_GHA_RW_MODE=$CACHE_RW_MODE"
         } >> "$GITHUB_ENV"
-    - name: expose Actions cache runtime to sccache
+    - name: start Rust compile cache with the Actions runtime
+      if: steps.install.outcome == 'success'
       uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
       with:
         script: |
-          core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
-          core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-    - name: enable Rust compile cache when ready
-      if: steps.install.outcome == 'success'
-      shell: bash
-      run: |
-        if sccache --start-server; then
-          {
-            echo "RUSTC_WRAPPER=sccache"
-            echo "CARGO_INCREMENTAL=0"
-          } >> "$GITHUB_ENV"
-        fi
+          // The runner gives Node actions the cache protocol flag and credential.
+          // Keep them in this process and its daemon, out of later build steps.
+          if (!process.env.ACTIONS_CACHE_SERVICE_V2 ||
+              !process.env.ACTIONS_RESULTS_URL || !process.env.ACTIONS_RUNTIME_TOKEN) {
+            core.warning('Rust compile cache disabled: the GHA v2 runtime is unavailable.');
+          } else {
+            const { spawnSync } = require('node:child_process');
+            const server = spawnSync('sccache', ['--start-server'], {
+              // Keep this daemon alive across long journey steps. A later client
+              // cannot restart it with a runtime credential after idle shutdown.
+              env: { ...process.env, SCCACHE_IDLE_TIMEOUT: '0' },
+              encoding: 'utf8', timeout: 10000,
+              stdio: ['ignore', 'pipe', 'pipe']
+            });
+            if (!server.error && server.status === 0) {
+              core.exportVariable('RUSTC_WRAPPER', 'sccache');
+              core.exportVariable('CARGO_INCREMENTAL', '0');
+              core.info(`Rust compile cache ready: GHA v2, ${process.env.SCCACHE_GHA_RW_MODE}.`);
+            } else {
+              // Backend errors can include signed URLs. Keep diagnostics credential-free.
+              core.warning('Rust compile cache disabled: sccache server startup failed.');
+            }
+          }
