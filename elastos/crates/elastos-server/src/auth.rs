@@ -11004,7 +11004,7 @@ mod tests {
         let fixture = OfflineMigrationFixture::new(1);
         inject_principal_root_migration_test_fault(
             fixture.data_dir.path(),
-            PrincipalRootMigrationTestFault::JournalCommitted,
+            PrincipalRootMigrationTestFault::CrashAfterCommit(0),
         );
         migrate_principal_root_objects_offline(
             fixture.data_dir.path(),
@@ -11013,12 +11013,16 @@ mod tests {
         )
         .unwrap_err();
         let journal_path = principal_root_migration_journal_path(fixture.data_dir.path()).unwrap();
-        let journal: PrincipalRootMigrationJournalV1 =
+        let mut journal: PrincipalRootMigrationJournalV1 =
             serde_json::from_slice(&std::fs::read(&journal_path).unwrap()).unwrap();
         assert_eq!(
             journal.phase,
-            PrincipalRootMigrationJournalPhaseV1::Committed
+            PrincipalRootMigrationJournalPhaseV1::Committing
         );
+        // This one-object crash retains all installed ciphertext and rollback.
+        // Model the next durable phase before receipt and cleanup ownership.
+        journal.phase = PrincipalRootMigrationJournalPhaseV1::Committed;
+        write_principal_root_migration_journal(fixture.data_dir.path(), &journal).unwrap();
         // Model an older writer's full, valid retained-record set. The old
         // records have already lost their payload but still own their receipts.
         for index in 0..MAX_MIGRATION_CLEANUP_RECORDS {

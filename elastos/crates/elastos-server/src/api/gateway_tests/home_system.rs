@@ -4375,7 +4375,12 @@ async fn test_recovery_readiness_projects_unavailable_and_first_profile_fails_cl
         .unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{text}");
-    assert_eq!(file_snapshot(dir.path()), before);
+    let mut after = file_snapshot(dir.path());
+    assert_eq!(
+        after.remove("ElastOS/System/Auth/principal-root-lifecycle.lock"),
+        Some(Vec::new())
+    );
+    assert_eq!(after, before);
     assert!(
         crate::collaboration_profile_authority::load_profile_authority(
             dir.path(),
