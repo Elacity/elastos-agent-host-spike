@@ -758,8 +758,8 @@ async fn test_full_recovery_activation_migrates_existing_plaintext_gba_save() {
     // plaintext before a person can reach Recovery, while the offline
     // migration path demands protection that cannot exist yet. Activation
     // therefore migrates surviving plaintext under its own guard: the export
-    // succeeds, the object becomes an envelope, and the original bytes land
-    // in a backup under the Home's backups directory.
+    // succeeds, and the object and retained backup become bound encrypted
+    // envelopes that can recover the original bytes.
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(wallet_test_state(dir.path()).await);
     let authority = passkey_authority_with_name(dir.path(), Some("alex"));
@@ -816,9 +816,7 @@ async fn test_full_recovery_activation_migrates_existing_plaintext_gba_save() {
     let migrated = std::fs::read(&save_path).unwrap();
     assert_ne!(migrated, b"existing uCity save");
     let envelope: Value = serde_json::from_slice(&migrated).expect("migrated object is JSON");
-    assert!(envelope["schema"]
-        .as_str()
-        .is_some_and(|schema| schema.starts_with("elastos.principal-root.object/")));
+    assert_eq!(envelope["schema"], "elastos.principal-root.object/v1");
 
     assert!(crate::auth::load_principal_root_protection(
         dir.path(),
@@ -839,27 +837,35 @@ async fn test_full_recovery_activation_migrates_existing_plaintext_gba_save() {
                 .starts_with("principal-root-migration-")
         })
         .expect("migration backup directory exists");
-    let mut backed_up = Vec::new();
-    let mut pending = vec![backup_entry.path()];
-    while let Some(path) = pending.pop() {
-        if path.is_dir() {
-            pending.extend(
-                std::fs::read_dir(&path)
-                    .unwrap()
-                    .filter_map(Result::ok)
-                    .map(|entry| entry.path()),
-            );
-        } else if std::fs::read(&path)
-            .map(|bytes| bytes == b"existing uCity save")
-            .unwrap_or(false)
-        {
-            backed_up.push(path);
-        }
+    let backup_path = std::fs::read_dir(backup_entry.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".encrypted.backup")
+                && std::fs::read(entry.path()).unwrap() == migrated
+        })
+        .expect("backup must retain the bound encrypted save envelope")
+        .path();
+    let backup_bytes = std::fs::read(&backup_path).unwrap();
+    assert!(!backup_bytes
+        .windows(b"existing uCity save".len())
+        .any(|window| window == b"existing uCity save"));
+    for path in [&save_path, &backup_path] {
+        assert_eq!(
+            crate::auth::read_principal_root_object(
+                dir.path(),
+                &authority.principal_id,
+                &principal.localhost_root,
+                &save_uri,
+                path,
+            )
+            .unwrap(),
+            b"existing uCity save"
+        );
     }
-    assert!(
-        !backed_up.is_empty(),
-        "backup must preserve the original plaintext bytes"
-    );
 }
 
 #[tokio::test]
