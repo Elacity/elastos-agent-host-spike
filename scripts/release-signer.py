@@ -484,11 +484,12 @@ def package_artifact(approval, run, prefix, fetch):
 def attestation_result(approval, run, receipt_path, bundle_path, scratch):
     workflow = approval["workflow"]
     identity = f"https://github.com/{REPOSITORY}/{PACKAGE_WORKFLOW}@{workflow['ref']}"
-    # Only the pinned installed verifier runs. Candidate bytes remain data.
+    # gh makes cert-identity and signer-workflow mutually exclusive. The exact
+    # SAN owns the workflow path and ref; immutable signer claims are checked
+    # below as well. Only the pinned verifier runs; candidate bytes remain data.
     result = subprocess.run([approval["gh"]["path"], "attestation", "verify", str(receipt_path),
                              "--bundle", str(bundle_path), "--repo", REPOSITORY,
                              "--cert-identity", identity, "--cert-oidc-issuer", "https://token.actions.githubusercontent.com",
-                             "--signer-workflow", f"{REPOSITORY}/{PACKAGE_WORKFLOW}",
                              "--signer-digest", workflow["commit"], "--source-digest", workflow["commit"],
                              "--source-ref", workflow["ref"], "--deny-self-hosted-runners", "--format", "json"],
                             env={"PATH": "/usr/bin:/bin", "HOME": str(scratch), "GH_CONFIG_DIR": str(scratch / "gh"),

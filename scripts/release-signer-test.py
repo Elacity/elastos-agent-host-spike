@@ -288,7 +288,11 @@ class SignerTests(unittest.TestCase):
         S.validate_delivery(self.stamps)
 
     def test_immutable_attestation_certificate_and_subject_are_required(self):
-        for field, value in (("buildTrigger", "pull_request"), ("runnerEnvironment", "self-hosted"),
+        for field, value in (("issuer", "https://issuer.invalid"),
+                             ("subjectAlternativeName", f"https://github.com/{S.REPOSITORY}/.github/workflows/foreign.yml@refs/heads/develop"),
+                             ("buildSignerURI", f"https://github.com/{S.REPOSITORY}/{S.PACKAGE_WORKFLOW}@refs/heads/foreign"),
+                             ("buildConfigURI", f"https://github.com/{S.REPOSITORY}/.github/workflows/foreign.yml@refs/heads/develop"),
+                             ("buildTrigger", "pull_request"), ("runnerEnvironment", "self-hosted"),
                              ("sourceRepositoryDigest", COMMIT), ("buildSignerDigest", COMMIT),
                              ("sourceRepositoryRef", "refs/heads/feature"), ("sourceRepositoryIdentifier", "999"),
                              ("buildConfigDigest", COMMIT),
@@ -340,11 +344,53 @@ class SignerTests(unittest.TestCase):
         command = process.call_args.args[0]
         self.assertEqual(command[0], self.approval["gh"]["path"])
         self.assertIn("--deny-self-hosted-runners", command)
+        identities = {"--cert-identity", "--cert-identity-regex", "--signer-repo", "--signer-workflow"}
+        self.assertEqual(identities.intersection(command), {"--cert-identity"})
         for flag, expected in (("--source-digest", WORKFLOW), ("--signer-digest", WORKFLOW),
                                ("--source-ref", "refs/heads/develop"),
                                ("--cert-identity", f"https://github.com/{S.REPOSITORY}/{S.PACKAGE_WORKFLOW}@refs/heads/develop")):
             self.assertEqual(command[command.index(flag) + 1], expected)
         self.assertEqual(set(process.call_args.kwargs["env"]), {"PATH", "HOME", "GH_CONFIG_DIR", "GH_HOST", "GH_PROMPT_DISABLED", "GH_NO_UPDATE_NOTIFIER"})
+
+    def test_installed_gh_accepts_production_flags_and_refuses_the_inert_bundle(self):
+        # Exercise the real CLI parser as well as the isolated argument fixture.
+        # The invalid local bundle fails before trust/network verification. This
+        # is compatibility proof, not a successful attestation/signing journey.
+        executable = shutil.which("gh")
+        if executable is None:
+            self.skipTest("installed gh is required for CLI compatibility proof")
+        executable = Path(executable).resolve()
+        self.assertFalse(executable.is_relative_to(self.root))
+        self.proof.stop()
+        self.no_process.stop()
+        real_run = subprocess.run
+        receipt = self.root / "provenance/x86_64-linux.receipt.json"
+        bundle = self.root / "provenance/x86_64-linux.bundle.jsonl"
+        self.assertEqual(bundle.read_bytes(), b"{}")
+        approval = copy.deepcopy(self.approval)
+        approval["gh"] = {"path": str(executable), "sha256": S.sha256(executable.read_bytes())}
+        calls = []
+
+        def execute(*args, **kwargs):
+            result = real_run(*args, **kwargs)
+            calls.append((args[0], kwargs, result))
+            return result
+
+        with mock.patch.object(S.subprocess, "run", side_effect=execute):
+            with self.assertRaisesRegex(ValueError, "attestation verification failed"):
+                S.attestation_result(approval, self.package_run, receipt, bundle, self.snapshot)
+        command, options, result = calls[0]
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"unsupported media type", result.stderr)
+        self.assertNotIn(b"were all set", result.stderr)
+        self.assertNotIn(b"unknown flag", result.stderr)
+        self.assertEqual(options["env"]["GH_CONFIG_DIR"], str(self.snapshot / "gh"))
+        # Reproduce the rejected former command with exactly the same inert
+        # payload, bundle and credential-free environment.
+        old = real_run(command + ["--signer-workflow", f"{S.REPOSITORY}/{S.PACKAGE_WORKFLOW}"],
+                       **{**options, "timeout": 10})
+        self.assertNotEqual(old.returncode, 0)
+        self.assertIn(b"[cert-identity signer-workflow] were all set", old.stderr)
 
     def test_bounded_changes_are_preserved_in_signed_release(self):
         for changes in ([], ["é" * 250], ["change"] * 32,
