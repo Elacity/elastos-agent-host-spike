@@ -7676,7 +7676,7 @@ fn unlink_migration_cleanup_file(
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
-        use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+        use std::os::unix::ffi::OsStrExt;
         let name = std::ffi::CString::new(name.as_bytes())?;
         let mut current: libc::stat = unsafe { std::mem::zeroed() };
         if unsafe {
@@ -7691,9 +7691,13 @@ fn unlink_migration_cleanup_file(
             return Err(std::io::Error::last_os_error())
                 .context("inspect migration cleanup target");
         }
-        let held = verified_file.metadata()?;
-        if current.st_dev as u64 != held.dev()
-            || current.st_ino as u64 != held.ino()
+        let mut held: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(verified_file.as_raw_fd(), &mut held) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("inspect verified migration cleanup file");
+        }
+        if current.st_dev != held.st_dev
+            || current.st_ino != held.st_ino
             || current.st_nlink != 1
             || current.st_mode & libc::S_IFMT != libc::S_IFREG
         {
