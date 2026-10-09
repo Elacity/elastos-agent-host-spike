@@ -1048,8 +1048,10 @@ printf '%s\n' "$PLATFORMS_JSON" > "$TMPDIR/platforms.json"
         self.write_json(cids_path, cids)
         # RFC 8032 public verification key only; no signing seed or backend.
         did = signer.public_did(bytes.fromhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"))
-        stamps = {"MAINTAINER_DID": did, "SOURCE_CONNECT_TICKET": "public-ticket",
-                  "PUBLISHER_NODE_ID": "public-node", "PUBLISHER_GATEWAY": "https://staging.invalid",
+        node = "4" * 64
+        ticket = base64.b32encode(signer.json_bytes({"endpoints": [{"id": node, "addrs": []}]})).decode().lower().rstrip("=")
+        stamps = {"MAINTAINER_DID": did, "SOURCE_CONNECT_TICKET": ticket,
+                  "PUBLISHER_NODE_ID": node, "PUBLISHER_GATEWAY": "https://staging.invalid",
                   "IPNS_NAME": ""}
         stamps_path = self.root / "signing-stamps.json"
         self.write_json(stamps_path, stamps)
@@ -1178,15 +1180,80 @@ printf '%s\n' "$PLATFORMS_JSON" > "$TMPDIR/platforms.json"
             f"{prefix}/git/blobs/{fixture.blob_oid}": {"sha": fixture.blob_oid, "encoding": "base64", "size": len(fixture.template),
                 "content": base64.b64encode(fixture.template).decode()},
         }
+        # Independent approval lives under protected repository ancestors and
+        # outside the system-temp candidate root. All identities are public
+        # fixtures; only the gh verification result is mocked below.
+        approval_temp = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent.parent)
+        self.addCleanup(approval_temp.cleanup)
+        approval_root = Path(approval_temp.name).resolve()
+        workflow, workflow_tree = "9" * 40, "8" * 40
+        gh_path = Path(signer_spec.origin).resolve()
+        approval = {"schema": signer.APPROVAL_SCHEMA, "repository": signer.REPOSITORY,
+                    "source": manifest["source"],
+                    "workflow": {"commit": workflow, "tree": workflow_tree, "ref": "refs/heads/develop"},
+                    "delivery": fixture.stamps,
+                    "gh": {"path": str(gh_path), "sha256": signer.sha256(gh_path.read_bytes())}}
+        approval_path = approval_root / "approval.json"
+        approval_path.write_bytes(signer.json_bytes(approval))
+        approval_path.chmod(0o600)
+        approval_pin = {"path": str(approval_path), "sha256": signer.sha256(approval_path.read_bytes())}
+        run = {"id": 123, "run_attempt": 2, "head_sha": workflow, "head_branch": "develop",
+               "path": signer.PACKAGE_WORKFLOW, "event": "workflow_dispatch", "status": "completed", "conclusion": "success",
+               "repository": {"id": 1234, "full_name": signer.REPOSITORY},
+               "head_repository": {"id": 1234, "full_name": signer.REPOSITORY}}
+        artifact = {"id": 1, "name": f"release-mac-{commit}-1", "digest": "sha256:" + "6" * 64, "attempt": 1}
+        proof_artifact = {"id": 101, "name": f"release-proof-mac-{commit}-2", "digest": "sha256:" + "7" * 64, "attempt": 2}
+        receipt = {"schema": "elastos.release-platform-input/v1", "platform": fixture.platform, "version": manifest["version"],
+                   "source": {**manifest["source"], "clean": True},
+                   "producer": {"artifact": artifact, "run_id": run["id"], "workflow_commit": workflow, "attestation_attempt": 2},
+                   "files": {"artifacts/" + name: inputs.file_record(fixture.stage / "artifacts" / name) for name in fixture.cids}}
+        proof_root = fixture.output / "provenance"
+        proof_root.mkdir(mode=0o700)
+        receipt_path = proof_root / "mac.receipt.json"
+        receipt_path.write_bytes(signer.json_bytes(receipt))
+        (proof_root / "mac.bundle.jsonl").write_bytes(b"{}")
+        manifest["provenance"] = {"schema": signer.PROVENANCE_SCHEMA, "run_id": run["id"], "run_attempt": run["run_attempt"],
+            "approval_sha256": approval_pin["sha256"], "receipts": [{"platform": fixture.platform,
+                "receipt": "provenance/mac.receipt.json", "bundle": "provenance/mac.bundle.jsonl",
+                "artifact": artifact, "proof_artifact": proof_artifact}]}
+        (fixture.output / "signing-input.json").chmod(0o600)
+        (fixture.output / "signing-input.json").write_bytes(signer.json_bytes(manifest))
+        origin = {"id": run["id"], "head_sha": workflow, "head_branch": run["head_branch"]}
+        api.update({f"{prefix}/git/commits/{workflow}": {"sha": workflow, "tree": {"sha": workflow_tree}},
+                    f"{prefix}/actions/runs/{run['id']}": run,
+                    f"{prefix}/actions/runs/{run['id']}/artifacts?per_page=100&page=1":
+                        {"artifacts": [{**item, "expired": False, "workflow_run": origin} for item in (artifact, proof_artifact)]}})
+
+        def verified_attestation(approved, package_run, path, bundle, scratch):
+            uri = f"https://github.com/{signer.REPOSITORY}/{signer.PACKAGE_WORKFLOW}@refs/heads/develop"
+            certificate = {"issuer": "https://token.actions.githubusercontent.com", "subjectAlternativeName": uri,
+                "buildSignerURI": uri, "buildSignerDigest": workflow, "runnerEnvironment": "github-hosted",
+                "sourceRepositoryURI": f"https://github.com/{signer.REPOSITORY}", "sourceRepositoryDigest": workflow,
+                "sourceRepositoryIdentifier": "1234", "sourceRepositoryRef": "refs/heads/develop",
+                "buildConfigURI": uri, "buildConfigDigest": workflow, "buildTrigger": "workflow_dispatch",
+                "runInvocationURI": f"https://github.com/{signer.REPOSITORY}/actions/runs/{run['id']}/attempts/2"}
+            return [{"verificationResult": {"signature": {"certificate": certificate}, "verifiedTimestamps": [{"type": "Tlog"}],
+                "statement": {"predicateType": "https://slsa.dev/provenance/v1", "subject": [{"digest": {"sha256": signer.sha256(path.read_bytes())}}]}}}]
+
         policy = {"repository": signer.REPOSITORY, "develop_oid": commit, "commit": commit, "tree": tree,
                   "version": "0.7.1", "channel": "canary", "publisher_did": fixture.stamps["MAINTAINER_DID"],
-                  "manifest_sha256": signer.sha256(signer.json_bytes(manifest)),
+                  "manifest_sha256": signer.sha256(signer.json_bytes(manifest)), "approval": approval_pin,
                   "max_file_bytes": 1024 * 1024, "max_snapshot_bytes": 8 * 1024 * 1024}
         snapshot = (self.root / "custodian-public-snapshot").resolve()
         snapshot.mkdir(mode=0o700)
-        prepared = signer.prepare(policy, fixture.output.resolve(), "signing-input.json", api.__getitem__, snapshot)
-        self.assertEqual(prepared.release, signer.json_bytes(manifest["release"]))
-        self.assertEqual(dict(prepared.files)["install.sh"].read_bytes(), rendered)
+        with patch.object(signer, "attestation_result", side_effect=verified_attestation) as verifier:
+            prepared = signer.prepare(policy, fixture.output.resolve(), "signing-input.json", api.__getitem__, snapshot)
+            self.assertEqual(prepared.release, signer.json_bytes(manifest["release"]))
+            self.assertEqual(dict(prepared.files)["install.sh"].read_bytes(), rendered)
+            self.assertEqual(verifier.call_count, 1)
+            self.assertEqual(verifier.call_args.args[0], approval)
+            self.assertEqual(verifier.call_args.args[1]["run_attempt"], proof_artifact["attempt"])
+            # A valid verified subject still fails if its receipt claims a
+            # foreign H/tree. The production provenance validator owns this gate.
+            receipt["source"]["tree"] = "f" * 40
+            receipt_path.write_bytes(signer.json_bytes(receipt))
+            with self.assertRaisesRegex(ValueError, "attested platform source/version differs"):
+                signer.prepare(policy, fixture.output.resolve(), "signing-input.json", api.__getitem__, snapshot)
 
     def test_unsigned_handoff_refuses_existing_and_symlink_output(self):
         fixture = self.signing_fixture()
