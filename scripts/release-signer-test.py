@@ -353,9 +353,10 @@ class SignerTests(unittest.TestCase):
         self.assertEqual(set(process.call_args.kwargs["env"]), {"PATH", "HOME", "GH_CONFIG_DIR", "GH_HOST", "GH_PROMPT_DISABLED", "GH_NO_UPDATE_NOTIFIER"})
 
     def test_installed_gh_accepts_production_flags_and_refuses_the_inert_bundle(self):
-        # Exercise the real CLI parser as well as the isolated argument fixture.
-        # The invalid local bundle fails before trust/network verification. This
-        # is compatibility proof, not a successful attestation/signing journey.
+        # Exercise the real CLI parser with an empty test-only trust-root set.
+        # This keeps parser proof offline and refuses the inert bundle. The
+        # exact production vector was also checked with installed gh 2.101.0;
+        # successful hosted attestation remains a separate integration gate.
         executable = shutil.which("gh")
         if executable is None:
             self.skipTest("installed gh is required for CLI compatibility proof")
@@ -370,9 +371,12 @@ class SignerTests(unittest.TestCase):
         approval = copy.deepcopy(self.approval)
         approval["gh"] = {"path": str(executable), "sha256": S.sha256(executable.read_bytes())}
         calls = []
+        roots = self.base / "empty-test-trusted-roots.jsonl"
+        roots.write_bytes(b"")
+        offline = ["--custom-trusted-root", str(roots)]
 
         def execute(*args, **kwargs):
-            result = real_run(*args, **kwargs)
+            result = real_run(args[0] + offline, **kwargs)
             calls.append((args[0], kwargs, result))
             return result
 
@@ -387,7 +391,7 @@ class SignerTests(unittest.TestCase):
         self.assertEqual(options["env"]["GH_CONFIG_DIR"], str(self.snapshot / "gh"))
         # Reproduce the rejected former command with exactly the same inert
         # payload, bundle and credential-free environment.
-        old = real_run(command + ["--signer-workflow", f"{S.REPOSITORY}/{S.PACKAGE_WORKFLOW}"],
+        old = real_run(command + ["--signer-workflow", f"{S.REPOSITORY}/{S.PACKAGE_WORKFLOW}"] + offline,
                        **{**options, "timeout": 10})
         self.assertNotEqual(old.returncode, 0)
         self.assertIn(b"[cert-identity signer-workflow] were all set", old.stderr)
