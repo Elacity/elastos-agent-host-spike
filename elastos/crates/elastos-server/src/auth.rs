@@ -4125,6 +4125,7 @@ pub(crate) fn begin_declarative_principal_root_protection_activation_migrating_p
         .lock()
         .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
     let lifecycle = lock_principal_root_lifecycle(data_dir)?;
+    recover_principal_root_migration_journal(data_dir)?;
     let protection = load_principal_root_protection(data_dir, principal_id, localhost_root)?;
     let classified = classify_declared_principal_root_objects(
         data_dir,
@@ -10956,6 +10957,107 @@ mod tests {
                 .is_none()
         );
         require_no_principal_root_migration_journal(data_dir.path()).unwrap();
+    }
+
+    #[test]
+    fn online_migration_recovers_pending_ownership_before_capacity_admission() {
+        let fixture = OfflineMigrationFixture::new(1);
+        inject_principal_root_migration_test_fault(
+            fixture.data_dir.path(),
+            PrincipalRootMigrationTestFault::CrashAfterCommit(0),
+        );
+        migrate_principal_root_objects_offline(
+            fixture.data_dir.path(),
+            &fixture.plan_path,
+            &fixture.backup_dir,
+        )
+        .unwrap_err();
+        let journal_path = principal_root_migration_journal_path(fixture.data_dir.path()).unwrap();
+        let mut journal: PrincipalRootMigrationJournalV1 =
+            serde_json::from_slice(&std::fs::read(&journal_path).unwrap()).unwrap();
+        assert_eq!(
+            journal.phase,
+            PrincipalRootMigrationJournalPhaseV1::Committing
+        );
+        // Preserve the real installed ciphertext and rollback at the boundary
+        // after durable commit, before its receipt and cleanup ownership.
+        journal.phase = PrincipalRootMigrationJournalPhaseV1::Committed;
+        write_principal_root_migration_journal(fixture.data_dir.path(), &journal).unwrap();
+        for index in 0..MAX_MIGRATION_CLEANUP_RECORDS - 1 {
+            let mut retained = journal.clone();
+            retained.backup_dir = fixture
+                .operator_dir
+                .path()
+                .join(format!("retained-{index:03}"));
+            create_owner_only_dir(&retained.backup_dir).unwrap();
+            for object in &mut retained.objects {
+                object.backup_path = retained
+                    .backup_dir
+                    .join(object.backup_path.file_name().unwrap());
+            }
+            write_principal_root_migration_receipt(
+                &retained,
+                &principal_root_migration_receipt_from_journal(&retained),
+            )
+            .unwrap();
+            write_principal_root_migration_cleanup(fixture.data_dir.path(), &retained).unwrap();
+        }
+        let principal_id = "person:local:capacity-after-pending-commit";
+        let root = principal_localhost_root(principal_id);
+        let uri = format!("{root}/.AppData/LocalHost/GBA/ucity/save.sav");
+        let path = rooted_localhost_fs_path(fixture.data_dir.path(), &uri).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"first-run save").unwrap();
+        let auth_path = auth_state_path(fixture.data_dir.path()).unwrap();
+        let before = std::fs::read(&auth_path).unwrap();
+
+        let error = begin_declarative_principal_root_protection_activation_migrating_plaintext(
+            fixture.data_dir.path(),
+            principal_id,
+            &root,
+            &[PrincipalRootProtectedObjectDeclarationV1::exact(uri)],
+        )
+        .err()
+        .expect("pending ownership must fill capacity before online activation");
+
+        assert!(error.to_string().contains("owner reconciliation"));
+        assert_eq!(std::fs::read(path).unwrap(), b"first-run save");
+        assert!(std::fs::read(auth_path).unwrap() == before);
+        assert!(
+            load_principal_root_protection(fixture.data_dir.path(), principal_id, &root)
+                .unwrap()
+                .is_none()
+        );
+        require_no_principal_root_migration_journal(fixture.data_dir.path()).unwrap();
+        assert_eq!(
+            std::fs::read_dir(
+                principal_root_migration_cleanup_dir(fixture.data_dir.path()).unwrap()
+            )
+            .unwrap()
+            .count(),
+            MAX_MIGRATION_CLEANUP_RECORDS
+        );
+        fixture.assert_all_encrypted();
+        let protection = load_principal_root_protection(
+            fixture.data_dir.path(),
+            &fixture.principal_id,
+            &fixture.localhost_root,
+        )
+        .unwrap()
+        .unwrap();
+        let data_key =
+            principal_root_data_key_from_protection(fixture.data_dir.path(), &protection).unwrap();
+        let object = &journal.objects[0];
+        let backup = std::fs::read(&object.backup_path).unwrap();
+        assert_eq!(sha256_label(&backup), object.backup_sha256);
+        assert_eq!(
+            decrypt_migration_backup(&backup, &journal, object, &protection, &data_key).unwrap(),
+            fixture.plaintexts[0]
+        );
+        assert!(fixture
+            .backup_dir
+            .join(PRINCIPAL_ROOT_MIGRATION_RECEIPT_FILE)
+            .is_file());
     }
 
     #[test]
