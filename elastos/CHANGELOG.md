@@ -282,6 +282,25 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   signed hashes, rebuilding capsule archives as releases build them. On Linux
   and Mac, the `check-result` verdict in the job summary also requires and
   names the next release, the refused tampered offer and each CLI refusal (#320).
+- Linux Browser's prepared rootfs pool names each copy by the admitted rootfs
+  hash from the image manifest. Launch boots only copies of the current image
+  and removes the rest, so an image update or Undo never boots the previous
+  rootfs with the new kernel; a refill that sees the image change discards its
+  copy (#307).
+- `elastos setup` on Linux writes a per-Home TURN credential to the owner-only
+  `runtime-turn/turn-credentials.env` (kept on later runs), so a fresh
+  Linux/Jetson Home gets the session-local TURN configuration the crosvm
+  launcher requires (#307).
+- Browser TURN relays only to its own relay address on both hosts: coturn
+  denies loopback, private ranges and every other peer. On Mac, a loopback relay
+  keeps loopback peers, and the media bridge closes any guest TURN stream that
+  addresses a peer outside the session relay ports or asks for a TCP relay
+  (#307).
+- Linux Browser network setup adds a per-slot output rule: UDP from the TURN
+  relay ports reaches only the slot's TURN ports, so relayed traffic cannot
+  reach other host services such as Carrier's UDP port. coturn's RFC 6062 TCP
+  relays are off on both hosts. `check` refuses a setup receipt without the
+  rule, so Browser asks to re-run the root setup once (#307).
 
 ## [0.8.0-alpha.15]
 

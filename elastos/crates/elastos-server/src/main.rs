@@ -1565,7 +1565,7 @@ async fn run() -> anyhow::Result<()> {
         }
 
         Commands::Source(cmd) => {
-            release_cmd::run_source(cmd)?;
+            release_cmd::run_source(cmd).await?;
         }
 
         Commands::PrincipalRootMigrate {
