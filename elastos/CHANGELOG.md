@@ -52,10 +52,12 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - The `custody-harness-smoke` path filter and the Linux holder canary's paths
   now include every input their jobs build or call (setup and restart scripts,
   `chain-provider`, `elastos-runtime`, the workspace manifest and lock,
-  `rust-toolchain.toml`, `components.json`, the workflow, and the canary's
-  hop observer and Kubo seed scripts). `ci-release-policy-test.py` follows each
-  job's shell scripts and Dockerfiles and fails when a called input is outside
-  the filter (#317).
+  `rust-toolchain.toml`, the Cargo configuration it reads, `components.json`,
+  the workflow, the canary's `localhost-provider` capsule, hop observer and
+  Kubo seed scripts, and the crates each capsule names by path).
+  `ci-release-policy-test.py` follows each job's shell scripts, Dockerfiles,
+  Cargo configuration, `-p` capsule packages and path dependencies, and fails
+  when a called input is outside the filter (#317).
 - `ci.yml` no longer publishes a GitHub Release or uploads `elastos-runtime-*`
   packages on tags, `main` or dispatch: those unsigned assets were a second
   channel beside the signed Carrier release. CI still packages ARM64 for the

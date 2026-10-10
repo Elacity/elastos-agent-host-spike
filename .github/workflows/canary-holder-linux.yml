@@ -9,8 +9,12 @@ on:
     paths:
       - .github/workflows/canary-holder-linux.yml
       - rust-toolchain.toml
+      - .cargo/config.toml
       - components.json
       - capsules/ipfs-provider/**
+      - elastos/capsules/localhost-provider/**
+      - elastos/crates/elastos-common/**
+      - elastos/crates/elastos-guest/**
       - elastos/Cargo.toml
       - elastos/Cargo.lock
       - elastos/crates/elastos-runtime/src/provider/registry.rs

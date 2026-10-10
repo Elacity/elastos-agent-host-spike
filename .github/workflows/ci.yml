@@ -386,6 +386,8 @@ jobs:
             custody:
               - '.github/workflows/ci.yml'
               - 'rust-toolchain.toml'
+              - '.cargo/config.toml'
+              - 'elastos/.cargo/config.toml'
               - 'components.json'
               - 'deploy/custody-host/**'
               - 'scripts/protected-content-installed-e2e-proof.sh'
@@ -401,6 +403,10 @@ jobs:
               - 'elastos/Cargo.lock'
               - 'elastos/crates/elastos-runtime/**'
               - 'elastos/crates/elastos-protected-content-*/**'
+              # Path dependencies of the capsules above.
+              - 'elastos/crates/elastos-auth/**'
+              - 'elastos/crates/elastos-guest/**'
+              - 'elastos/crates/elastos-identity/**'
               # Targeted, not the whole elastos-server crate (which would
               # fire this 60-minute job on most PRs): exactly the modules
               # this smoke actually exercises -- Carrier transport/dial,

@@ -236,6 +236,8 @@ TRACKED = frozenset(subprocess.check_output(["git", "ls-files"], cwd=REPO, text=
 CALLED_PATH = re.compile(r"\$\{?(?:ROOT|REPO_ROOT)\}?/([\w./-]+)|\$\{?SCRIPT_DIR\}?/([\w./-]+)"
                          r"|(?<![\w./$}-])((?:scripts|deploy|capsules|elastos)/[\w./-]+|components\.json)")
 CARGO_WORKSPACE = re.compile(r"--manifest-path ([\w./-]+)/Cargo\.toml|\bcd ([\w./-]+) && cargo\b")
+CARGO_PACKAGE = re.compile(r"(?:\s-p|\s--package)[ =]([\w-]+)")
+PATH_DEPENDENCY = re.compile(r'(?m)^[\w-]+\s*=\s*\{[^}\n]*\bpath\s*=\s*"([^"]+)"')
 # The custody proof driver calls setup-source-home.sh with a mismatched
 # ELASTOS_DATA_DIR on purpose; it refuses before it reads any other input.
 FILTER_LEAVES = {"custody-harness-smoke": {"scripts/setup-source-home.sh"}}
@@ -245,11 +247,41 @@ def tracked_under(path):
     return {path} if path in TRACKED else {name for name in TRACKED if name.startswith(path.rstrip("/") + "/")}
 
 
+def cargo_configs(directory):
+    """Cargo reads .cargo/config.toml (or .cargo/config) in its directory and every ancestor."""
+    parts = Path(directory).parts
+    return {name for depth in range(len(parts) + 1) for config in (".cargo/config.toml", ".cargo/config")
+            for name in [Path(*parts[:depth], config).as_posix()] if name in TRACKED}
+
+
+def capsule_inputs(crate):
+    """A capsule crate is wholly an input, with every crate it names by path, transitively."""
+    found, queue, seen = set(), [crate], set()
+    while queue:
+        crate = queue.pop()
+        if crate in seen:
+            continue
+        seen.add(crate)
+        found |= tracked_under(crate)
+        queue += [os.path.normpath(f"{crate}/{dependency}")
+                  for dependency in PATH_DEPENDENCY.findall((REPO / crate / "Cargo.toml").read_text())]
+    return found
+
+
+def workspace_member(workspace, package):
+    manifest = (REPO / workspace / "Cargo.toml").read_text()
+    members = re.findall(r'"([^"]+)"', manifest.split("members", 1)[1].split("]", 1)[0])
+    return next(f"{workspace}/{member}" for member in members if re.search(
+        r'(?m)^name\s*=\s*"' + re.escape(package) + '"', (REPO / workspace / member / "Cargo.toml").read_text()))
+
+
 def called_inputs(text, directory):
     """Tracked repository files a script or step names outside comments.
 
-    A Cargo workspace brings its manifest and lock; a capsule workspace is
-    wholly an input. Elastos crates stay scoped to the modules a filter names."""
+    A Cargo build brings its toolchain pin, the Cargo configuration it reads and
+    its workspace manifest and lock; a capsule workspace or a capsule package
+    selected with -p is wholly an input, with its path dependencies. Elastos
+    crates stay scoped to the modules a filter names."""
     found = set()
     for line in text.splitlines():
         if line.lstrip().startswith("#"):
@@ -261,10 +293,15 @@ def called_inputs(text, directory):
         for manifest, directory_change in CARGO_WORKSPACE.findall(line):
             workspace = manifest or directory_change
             found |= tracked_under(workspace + "/Cargo.toml") | tracked_under(workspace + "/Cargo.lock")
+            found |= cargo_configs(workspace if directory_change else ".")
             if workspace.startswith("capsules/"):
-                found |= tracked_under(workspace)
+                found |= capsule_inputs(workspace)
+            for package in CARGO_PACKAGE.findall(line):
+                member = workspace_member(workspace, package)
+                if "/capsules/" in "/" + member:
+                    found |= capsule_inputs(member)
         if re.search(r"\bcargo (?:build|test|clippy|run)\b", line):
-            found.add("rust-toolchain.toml")
+            found |= {"rust-toolchain.toml"} | cargo_configs(".")
     return found
 
 
@@ -1070,7 +1107,8 @@ class ReleasePolicyTests(unittest.TestCase):
         canary = CANARY.read_text()
         validate_filter_inputs(CANARY, canary, "holder", canary_filter(canary))
         for entry in ("'scripts/setup-source-home.sh'", "'capsules/chain-provider/**'", "'elastos/Cargo.lock'",
-                      "'rust-toolchain.toml'", "'.github/workflows/ci.yml'"):
+                      "'rust-toolchain.toml'", "'.github/workflows/ci.yml'", "'.cargo/config.toml'",
+                      "'elastos/.cargo/config.toml'", "'elastos/crates/elastos-auth/**'"):
             with self.subTest(removed=entry):
                 trimmed = SOURCE.replace(f"              - {entry}\n", "", 1)
                 self.assertNotEqual(trimmed, SOURCE)
@@ -1078,11 +1116,12 @@ class ReleasePolicyTests(unittest.TestCase):
                                             + re.escape(entry.strip("'").rstrip("*/"))):
                     validate_filter_inputs(WORKFLOW, trimmed, "custody-harness-smoke", custody_filter(trimmed))
         for entry in ("scripts/update-hop-compare.py", "scripts/seed-kubo-cache.sh", "components.json",
-                      "elastos/Cargo.lock", "scripts/release-upstream-input.py"):
+                      "elastos/Cargo.lock", "scripts/release-upstream-input.py", ".cargo/config.toml",
+                      "elastos/capsules/localhost-provider/**", "elastos/crates/elastos-guest/**"):
             with self.subTest(removed=entry):
                 trimmed = canary.replace(f"      - {entry}\n", "", 1)
                 self.assertNotEqual(trimmed, canary)
-                with self.assertRaisesRegex(AssertionError, "holder filter misses inputs: .*" + re.escape(entry)):
+                with self.assertRaisesRegex(AssertionError, "holder filter misses inputs: .*" + re.escape(entry.rstrip("*/"))):
                     validate_filter_inputs(CANARY, trimmed, "holder", canary_filter(trimmed))
         # A new script call joins the job's inputs; one level of `*` stays in its folder.
         called = canary.replace("          python3 -I -S scripts/holder-idle-ci.py\n",
