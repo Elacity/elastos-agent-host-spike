@@ -1243,8 +1243,11 @@ class UninstallTests(unittest.TestCase):
                "tools/media-tools/ffmpeg": b"tool\n", "libexec/llama.cpp/b1/llama-server": b"engine\n",
                "model-catalog.json": b"{}\n", "components.json": b"{}\n", "sources.json": b"{}\n",
                "installation/release-head.json": b"head\n", "installation/release.json": b"release\n",
-               "update-controller/runtime": b"controller\n"}
+               "update-controller/runtime": b"controller\n",
+               "scripts/browser-vm-linux-network.py": b"helper\n",
+               "browser-vm/image-set/rootfs.ext4": b"image\n"}
     DATA = {"identity/device.key": b"device identity\n", "Users/alice/notes.txt": b"user data\n",
+            "Users/alice/BrowserProfiles/default/profile.ext4": b"browser profile\n",
             "managed-runtimes/home/state.json": b"managed Home state\n"}
 
     def installed(self, sandbox):
@@ -1313,12 +1316,13 @@ class UninstallTests(unittest.TestCase):
 
     def test_linked_data_root_or_release_entry_refuses_before_stopping_anything(self):
         did, head, release = installable_fixture()
-        for linked in ("data root", "release entry"):
+        entries = {"data root": "", "release entry": "bin", "release entry parent": "browser-vm"}
+        for linked, entry in entries.items():
             with self.subTest(linked=linked), InstallerSandbox(head, release, did) as sandbox:
                 self.installed(sandbox)
-                outside = sandbox.root / "outside" / ("elastos" if linked == "data root" else "bin")
+                outside = sandbox.root / "outside" / (entry or "elastos")
                 outside.parent.mkdir()
-                moved = sandbox.data if linked == "data root" else sandbox.data / "bin"
+                moved = sandbox.data / entry if entry else sandbox.data
                 moved.rename(outside)
                 moved.symlink_to(outside)
                 outside_files = sorted((path, path.read_bytes()) for path in outside.rglob("*") if path.is_file())

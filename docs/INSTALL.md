@@ -338,7 +338,7 @@ of that key exists.
 | --- | --- | --- |
 | Runtime binary | `~/.local/bin/elastos` | `~/.local/bin/elastos` |
 | Data directory | `~/Library/Application Support/elastos` | `~/.local/share/elastos`, or `$XDG_DATA_HOME/elastos` when set |
-| Components | `bin/`, `capsules/`, `tools/`, `libexec/`, `components.json`, `model-catalog.json` and `update-controller/` in the data directory | same |
+| Components | `bin/`, `capsules/`, `tools/`, `libexec/`, `scripts/`, `browser-vm/image-set/`, `components.json`, `model-catalog.json` and `update-controller/` in the data directory | same |
 | Trusted sources and verified release | `sources.json` and `installation/` in the data directory | same |
 
 `--install-dir` moves only the binary. Everything else in the data directory is
@@ -361,10 +361,18 @@ curl -fsSL https://elastos.elacitylabs.com/install.sh | bash -s -- --uninstall
 The installer stops this installation's Runtime the same way an install does:
 it stops only processes whose ownership records and command match this
 installation, and removes nothing if another process holds them. It then
-removes the binary, the components, the trusted sources and the verified
-release. Your data directory stays, so installing again continues with the same
-identity. Pass the same `--install-dir` you installed with. An install or update
-that is running or was interrupted stops the removal; finish it first.
+removes the binary, the components (including the release scripts and the
+Browser image), the trusted sources and the verified release. Your data
+directory stays, including Browser profiles, so installing again continues with
+the same identity. Pass the same `--install-dir` you installed with. An install
+or update that is running or was interrupted stops the removal; finish it first.
+
+On Linux, the uninstall leaves the one-time Browser host access in place. After
+closing Browser, remove it with:
+
+```sh
+sudo /usr/bin/python3 -I /usr/local/lib/elastos/browser-vm-linux-network.py remove --user "$(id -un)"
+```
 
 To delete your data as well, add `--remove-data`:
 

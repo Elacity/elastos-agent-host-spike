@@ -972,9 +972,11 @@ import stat
 import sys
 
 # What a release installs in the data directory: the Runtime writer's
-# destinations, its support roots, and the Home update controller.
-RELEASE_FILES = ("bin", "capsules", "libexec", "tools", "model-catalog.json", "components.json",
-                 "sources.json", "installation", "update-controller")
+# destinations, its support roots, the release scripts, the Browser image set
+# and the Home update controller. Browser profiles live under Users/ and stay.
+RELEASE_FILES = ("bin", "capsules", "libexec", "tools", "scripts", "browser-vm/image-set",
+                 "model-catalog.json", "components.json", "sources.json", "installation",
+                 "update-controller")
 
 
 def lstat(path):
@@ -1008,11 +1010,17 @@ def data_root(home, data_dir):
 def release_entries(data_dir):
     entries = []
     for name in RELEASE_FILES:
-        metadata = lstat(data_dir / name)
+        # Check every component, so a linked parent is never followed.
+        path, metadata = data_dir, None
+        for part in Path(name).parts:
+            path = path / part
+            metadata = lstat(path)
+            if metadata is None:
+                break
+            if stat.S_ISLNK(metadata.st_mode):
+                raise OSError(f"{path} is a link; remove it by hand")
         if metadata is None:
             continue
-        if stat.S_ISLNK(metadata.st_mode):
-            raise OSError(f"{data_dir / name} is a link; remove it by hand")
         entries.append((data_dir / name, stat.S_ISDIR(metadata.st_mode)))
     return entries
 
