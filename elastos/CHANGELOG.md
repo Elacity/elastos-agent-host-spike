@@ -22,10 +22,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 ### Developer detail
 
 - `elastos update` checks the installed version before connecting to Carrier
-  (#156). The release integrity checker now uses Runtime's platform names
-  (`darwin-arm64` = `aarch64-darwin`, `darwin-amd64` = `x86_64-darwin`)
-  instead of `macos-arm64`, so it no longer skips the Mac entries Runtime
-  admits; `setup.rs` `platform_aliases` gains `darwin-amd64` to match.
+  (#156). Runtime admission and the release integrity checker now read one
+  platform table, `scripts/release-platforms.json` (`darwin-arm64` =
+  `aarch64-darwin`, `darwin-amd64` = `x86_64-darwin`). The checker no longer
+  uses `macos-arm64`, so it no longer skips the Mac entries Runtime admits.
 - Model preparation keeps its stage after any `MetadataRead`, `WeightsRead` or
   `Capacity` failure, not only after a read typed as in transit (`Io`). A part
   that a holder refuses or answers malformed is rejected before it is written,

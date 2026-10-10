@@ -2555,20 +2555,26 @@ fn resolve_component_capsule_metadata_platform_info<'a>(
     resolve_platform_info_from_map(&component.platforms, platform)
 }
 
-// Mirrors RELEASE_PLATFORMS in scripts/components-release-integrity-check.py.
-fn platform_aliases(platform: &str) -> impl Iterator<Item = &'static str> {
-    let aliases: &'static [&'static str] = match platform {
-        "x86_64-linux" => &["linux-amd64"],
-        "aarch64-linux" => &["linux-arm64"],
-        "linux-amd64" => &["x86_64-linux"],
-        "linux-arm64" => &["aarch64-linux"],
-        "aarch64-darwin" => &["darwin-arm64"],
-        "darwin-arm64" => &["aarch64-darwin"],
-        "x86_64-darwin" => &["darwin-amd64"],
-        "darwin-amd64" => &["x86_64-darwin"],
-        _ => &[],
-    };
-    aliases.iter().copied()
+/// Setup platform -> release platform pairs, shared with
+/// scripts/components-release-integrity-check.py.
+static RELEASE_PLATFORM_PAIRS: std::sync::LazyLock<std::collections::BTreeMap<String, String>> =
+    std::sync::LazyLock::new(|| {
+        serde_json::from_str(include_str!("../../../../scripts/release-platforms.json"))
+            .expect("scripts/release-platforms.json is a string map")
+    });
+
+fn platform_aliases(platform: &str) -> impl Iterator<Item = &'static str> + '_ {
+    RELEASE_PLATFORM_PAIRS
+        .iter()
+        .filter_map(move |(setup, release)| {
+            if setup == platform {
+                Some(release.as_str())
+            } else if release == platform {
+                Some(setup.as_str())
+            } else {
+                None
+            }
+        })
 }
 
 fn compute_sha256_checksum(path: &Path) -> anyhow::Result<String> {

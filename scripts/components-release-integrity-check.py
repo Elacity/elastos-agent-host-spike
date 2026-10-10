@@ -9,14 +9,8 @@ import tempfile
 from pathlib import Path
 
 
-# Setup platform -> release platform. Mirrors platform_aliases() in
-# elastos/crates/elastos-server/src/setup.rs; keep both in step.
-RELEASE_PLATFORMS = {
-    "linux-amd64": "x86_64-linux",
-    "linux-arm64": "aarch64-linux",
-    "darwin-arm64": "aarch64-darwin",
-    "darwin-amd64": "x86_64-darwin",
-}
+# Setup platform -> release platform; Runtime's setup.rs embeds the same file.
+RELEASE_PLATFORMS = json.loads(Path(__file__).with_name("release-platforms.json").read_text())
 ALIASES = {
     **{setup: (release,) for setup, release in RELEASE_PLATFORMS.items()},
     **{release: (setup,) for setup, release in RELEASE_PLATFORMS.items()},
