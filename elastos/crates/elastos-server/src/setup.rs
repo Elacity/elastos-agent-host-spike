@@ -5295,14 +5295,13 @@ pub(crate) mod tests {
         let with = developer_providers.map(str::to_string);
         let developer = resolve_components(&manifest, None, &with, &[]).unwrap();
         assert_eq!(developer, developer_providers);
-        assert_eq!(
-            manifest
-                .profiles
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            ["home"]
-        );
+        let mut profiles = manifest
+            .profiles
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        profiles.sort_unstable();
+        assert_eq!(profiles, ["browser-host", "home"]);
     }
 
     #[test]
