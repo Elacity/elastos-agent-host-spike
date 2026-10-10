@@ -1238,7 +1238,7 @@ mod tests {
             .copied()
             // Protected content ships after 0.8.0, so its viewer stays out of Home.
             .filter(|name| {
-                crate::protected_content_runtime::PROTECTED_CONTENT_RELEASED
+                crate::protected_content_runtime::protected_content_enabled(data_dir.path())
                     || *name != crate::protected_content_runtime::ELACITY_PLAYER_CAPSULE_ID
             })
             .collect::<BTreeSet<_>>();

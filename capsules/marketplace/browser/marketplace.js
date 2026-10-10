@@ -608,7 +608,7 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
 
   function syncProtectedContent() {
     document.querySelectorAll('[data-destination="media"]').forEach((node) => {
-      node.hidden = __omp_shell("state.protectedContent;")
+      node.hidden = !state.protectedContent;
     });
     if (!state.protectedContent && state.destination === "media") selectDestination("discover", { silent: true });
   }

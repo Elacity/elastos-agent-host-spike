@@ -274,11 +274,23 @@ pub(in crate::api::gateway) fn store_wallet_price_http_policy(
     Ok(())
 }
 
+/// A dismissed or rejected price request stays quiet this long before Wallet
+/// may ask again.
+const WALLET_PRICE_REQUEST_QUIET_SECS: u64 = 24 * 60 * 60;
+
 pub(in crate::api::gateway) fn upsert_wallet_price_http_request(
     data_dir: &FsPath,
     context: &HomeLaunchTokenContext,
     created_at: u64,
 ) -> anyhow::Result<()> {
+    if crate::notifications::external_http_request_recently_dismissed(
+        data_dir,
+        WALLET_PRICE_HTTP_REQUEST_ID,
+        created_at,
+        WALLET_PRICE_REQUEST_QUIET_SECS,
+    )? {
+        return Ok(());
+    }
     crate::notifications::upsert_external_http_request(
         data_dir,
         WALLET_PRICE_HTTP_REQUEST_ID,

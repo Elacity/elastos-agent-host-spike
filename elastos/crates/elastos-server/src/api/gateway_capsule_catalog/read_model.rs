@@ -21,6 +21,7 @@ pub(in crate::api::gateway) fn capsule_catalog_summary(
         .collect::<BTreeMap<_, _>>();
     let components = load_capsule_components(data_dir);
     let accepted_content_by_viewer = accepted_content_by_viewer(data_dir);
+    let protected_content = crate::protected_content_runtime::protected_content_enabled(data_dir);
 
     let mut capsules = crate::api::capsule_inventory::list_active_capsule_manifests(data_dir)
         .into_iter()
@@ -29,7 +30,7 @@ pub(in crate::api::gateway) fn capsule_catalog_summary(
         // A directory or component entry cannot authenticate model content.
         .filter(|manifest| manifest.model_content.is_none())
         .filter(|manifest| {
-            crate::protected_content_runtime::PROTECTED_CONTENT_RELEASED
+            protected_content
                 || manifest.name != crate::protected_content_runtime::ELACITY_PLAYER_CAPSULE_ID
         })
         .map(|manifest| {
@@ -149,7 +150,7 @@ pub(in crate::api::gateway) fn capsule_catalog_summary(
             payment_note: "Paid apps and services must use wallet/payment provider receipts, not embedded payment SDKs.".to_string(),
             drm_state: "provider-rail-required".to_string(),
             drm_note: "Protected apps and content must use rights, key, and decrypt providers for dDRM enforcement.".to_string(),
-            protected_content: crate::protected_content_runtime::PROTECTED_CONTENT_RELEASED,
+            protected_content,
         },
     }
 }

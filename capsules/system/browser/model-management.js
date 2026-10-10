@@ -20,16 +20,20 @@
   });
   // One phase per Runtime projection. The full view (System) and the compact
   // Marketplace detail read their copy from the same phase.
-  function phaseOf(r, p, message) {
+  function phaseOf(r, p, message, finishingExpired = false) {
     if (message) return "unavailable";
     if (r.dispatch_ready) return "ready";
     // Admitted content whose engine is still being activated is finishing,
     // not broken: Runtime clears activation_pending once dispatch can start.
-    if (r.admitted) return p?.activation_pending && !r.dispatch_unavailable_reason ? "finishing" : "service_unavailable";
+    // Activation failures are not reported, so a finish that takes longer
+    // than FINISHING_DEADLINE_MS reads as unavailable and offers Retry.
+    if (r.admitted) return activating(r, p) && !finishingExpired ? "finishing" : "service_unavailable";
     if (active(p)) return p.cancel_requested ? "cancelling" : p.state === "capacity_pending" ? "capacity" : p.state === "uncertain" ? "settling" : p.state === "verifying" ? "verifying" : "preparing";
     if (!p) return "absent";
     return p.state;
   }
+  const FINISHING_DEADLINE_MS = 120000;
+  const activating = (r, p) => Boolean(r.admitted && p?.activation_pending && !r.dispatch_unavailable_reason);
   const PHASE_TEXT = Object.freeze({
     unavailable: "Current status unavailable", ready: "Available on this device",
     service_unavailable: "Available on this device. Model service unavailable.",
@@ -120,6 +124,8 @@
       // Consecutive failed status reads while a preparation is pending. A short
       // run keeps polling with backoff; only a long run gives up to Refresh.
       let statusFailures = 0, statusFailingSince = 0;
+      // When this view first saw the current operation finishing setup.
+      let finishingOperation = "", finishingSince = 0;
       root.classList.add("model-management");
       root.tabIndex = -1;
       const show = () => visible && !closed && !document.hidden;
@@ -333,7 +339,9 @@
             element("p", `Content ID: ${model.cid}`, "model-identity"));
           row.append(identity);
         }
-        const phase = phaseOf(r, p, message);
+        if (!activating(r, p)) finishingOperation = "";
+        else if (finishingOperation !== p.operation_id) { finishingOperation = p.operation_id; finishingSince = Date.now(); }
+        const phase = phaseOf(r, p, message, Boolean(finishingOperation) && Date.now() - finishingSince >= FINISHING_DEADLINE_MS);
         const label = phase === "failed" ? failureText(p) : phase === "service_unavailable" && r.dispatch_unavailable_reason
           ? DISPATCH_UNAVAILABLE_TEXT[r.dispatch_unavailable_reason] : (compact ? COMPACT_PHASE_TEXT : PHASE_TEXT)[phase];
         row.append(element("p", label));

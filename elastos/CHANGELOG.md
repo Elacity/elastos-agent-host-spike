@@ -21,11 +21,13 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   sign-in.
 - While a model is being set up after its download, Marketplace and System show
   "Finishing setup…" instead of "Model service unavailable." with a Retry button.
+  If setup takes more than two minutes, Retry comes back.
 - When no model is ready yet and one is downloading, Assistant shows, for
   example, "SmolLM2 is downloading (42%)" instead of "No model".
 - Assistant no longer shows a microphone button that cannot work inside Home.
 - A new Home no longer asks in Inbox for market-price access before you open
-  Wallet. Wallet asks the first time you open it.
+  Wallet. Wallet asks when you open it, and not again for a day after you dismiss
+  or reject the request.
 - The Home welcome sheet no longer talks about an "updated" Recovery Kit when
   you have not saved one yet.
 - The lock screen shows the first letter of your name instead of "e".
@@ -45,15 +47,20 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   a candidate. Home host also resets a non-launchable saved shell to `home-gui`
   through `POST /api/apps/home/active-shell`
   (`scripts/home-shell-unavailable-shell-fallback-smoke.mjs`).
-- `protected_content_runtime::PROTECTED_CONTENT_RELEASED` (false) is the one
-  switch for protected content: it drops `elacity-player` from the catalogue,
-  sets catalogue `policy.protected_content` (Marketplace Media tab) and adds the
-  Library `protect` object capability that "Protect and List…" now requires.
+- `protected_content = true` in the host `config.toml` (`elastos config set
+  protected_content true`; default off) is the one switch for protected content:
+  off, the catalogue drops `elacity-player` and reports
+  `policy.protected_content: false` (Marketplace hides Media), Library objects
+  lack the `protect` capability that "Protect and List…" requires, and
+  `object/publish` with `protection` is refused.
 - `GET /api/wallet/prices` raises the CoinGecko Inbox request only with
-  `request_access=true`. Wallet sends it unless it was preloaded by the rail
-  (`preload=1`); opening the rail sends `elastos:wallet-refresh`, which asks.
+  `request_access=true`, and not within 24 hours of a dismissal or rejection
+  (new `dismissed_at` on Inbox entries). Wallet sends it unless it was preloaded
+  by the rail (`preload=1`); opening the rail sends `elastos:wallet-refresh`,
+  which asks.
 - `model-management.js` adds the `finishing` phase (admitted, activation
-  pending, no dispatch-unavailable reason). `model-selection.js` adds
+  pending, no dispatch-unavailable reason), which turns back into the
+  unavailable phase with Retry after 120 s. `model-selection.js` adds
   `downloadPercent` and `downloadingModel`.
 
 ## [0.8.0-alpha.13]

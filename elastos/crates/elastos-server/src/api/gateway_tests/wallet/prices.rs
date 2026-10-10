@@ -158,7 +158,7 @@ fn test_wallet_qr_svg_rejects_invalid_address_and_encodes_valid_address() {
 }
 
 #[tokio::test]
-async fn test_wallet_prices_raise_inbox_request_only_when_wallet_asks() {
+async fn test_wallet_prices_raise_inbox_request_only_when_wallet_asks_and_not_after_dismissal() {
     let dir = tempfile::tempdir().unwrap();
     let authority = passkey_authority(dir.path());
     let token = app_token_for_authority(dir.path(), WALLET_CAPSULE_ID, &authority);
@@ -175,7 +175,19 @@ async fn test_wallet_prices_raise_inbox_request_only_when_wallet_asks() {
     for (uri, expected_requests) in [
         ("/api/wallet/prices", 0),
         ("/api/wallet/prices?request_access=true", 1),
+        // A dismissed request is not raised again on the next Wallet open.
+        ("dismiss", 0),
+        ("/api/wallet/prices?request_access=true", 0),
     ] {
+        if uri == "dismiss" {
+            assert!(crate::notifications::dismiss_external_http_request(
+                dir.path(),
+                WALLET_PRICE_HTTP_REQUEST_ID
+            )
+            .unwrap());
+            assert_eq!(price_requests(), expected_requests);
+            continue;
+        }
         let response = app
             .clone()
             .oneshot(

@@ -77,9 +77,20 @@ use serde_json::{json, Value};
 use sha2::Digest as _;
 
 /// Protected content (Elacity Player, Protect and List, Marketplace Media)
-/// ships after 0.8.0 (#91). Home hides those surfaces while this is false;
-/// the runtime paths stay in place for the release that turns it on.
-pub(crate) const PROTECTED_CONTENT_RELEASED: bool = false;
+/// ships after 0.8.0 (#91). It stays off, and Home hides those surfaces and
+/// refuses protected publishing, unless the host sets
+/// `elastos config set protected_content true`.
+pub(crate) fn protected_content_enabled(data_dir: &Path) -> bool {
+    fs::read_to_string(data_dir.join("config.toml"))
+        .ok()
+        .and_then(|contents| contents.parse::<toml::Table>().ok())
+        .and_then(|config| {
+            config
+                .get("protected_content")
+                .and_then(toml::Value::as_bool)
+        })
+        .unwrap_or(false)
+}
 pub(crate) const ELACITY_PLAYER_CAPSULE_ID: &str = "elacity-player";
 
 pub(crate) const CUSTODY_PROVIDER_ID: &str = "custody";

@@ -118,16 +118,16 @@ class FixtureNode {
   contains() { return false; }
   focus() {}
 }
-let nextTimer = 0, statusCalls = 0, settled = false, catalogUpdated = false, statusFails = false, clock = 0;
+let nextTimer = 0, statusCalls = 0, settled = false, catalogUpdated = false, activating = false, statusFails = false, clock = 0;
 const timers = new Map();
 const fixtureRoot = new FixtureNode("section");
 const fixtureRuntime = () => ({
-  admitted: settled, kept: false, dispatch_ready: settled && !catalogUpdated,
+  admitted: settled, kept: false, dispatch_ready: settled && !catalogUpdated && !activating,
   dispatch_unavailable_reason: catalogUpdated ? "catalog_updated" : null,
-  offer_id: settled && !catalogUpdated ? `model:${"b".repeat(64)}` : null,
+  offer_id: settled && !catalogUpdated && !activating ? `model:${"b".repeat(64)}` : null,
   preparation: { operation_id: "long-preparation", cid, state: settled ? "admitted" : "preparing",
     total_bytes: 1024, completed_bytes: settled ? 1024 : statusCalls,
-    cancel_requested: false, admitted: settled, activation_pending: false },
+    cancel_requested: false, admitted: settled, activation_pending: settled && activating },
 });
 const fixtureContext = {
   window: { addEventListener() {}, removeEventListener() {} },
@@ -150,7 +150,7 @@ const fixtureContext = {
       assert.equal(request.input.operation_id, "long-preparation");
       if (statusFails) return { ok: false, text: async () => "{}" };
       statusCalls++;
-      assert.ok(statusCalls <= 132, "fixture bounds the status requests");
+      assert.ok(statusCalls <= 140, "fixture bounds the status requests");
       const runtime = fixtureRuntime();
       result = { ...request, schema: "elastos.capsules.invoke-result/v1", status: "ok",
         output: { ...runtime, ...runtime.preparation, cid } };
@@ -218,6 +218,29 @@ statusFails = false;
 await control.refresh();
 assert.doesNotMatch(visibleText(fixtureRoot), /Status is unavailable|Checking status…/);
 assert.equal(pendingPolls().length, 1, "Refresh resumes polling");
+// An admitted model whose engine is still being set up finishes quietly, with
+// no Retry, until the setup deadline passes; then Retry is offered.
+const controlButton = name => (function find(node) {
+  if (node.dataset?.modelControl === name) return node;
+  for (const child of node.children || []) { const hit = find(child); if (hit) return hit; }
+  return null;
+})(fixtureRoot);
+settled = true; activating = true;
+await control.refresh();
+assert.match(visibleText(fixtureRoot), /Finishing setup…/);
+assert.equal(controlButton("use"), null, "finishing setup offers no Retry");
+// Each poll also advances the clock by its 1.5 s interval.
+clock += 117000;
+await fireTimer();
+assert.match(visibleText(fixtureRoot), /Finishing setup…/);
+await fireTimer();
+assert.match(visibleText(fixtureRoot), /Model service unavailable/);
+assert.equal(controlButton("use")?.textContent, "Retry", "a setup past its deadline offers Retry");
+assert.equal(pendingPolls().length, 1, "status keeps polling so a late finish still becomes ready");
+activating = false;
+await fireTimer();
+assert.match(visibleText(fixtureRoot), /Available on this device/);
+assert.doesNotMatch(visibleText(fixtureRoot), /Model service unavailable/);
 // An admission bound to an earlier catalogue head reads as a list update whose
 // next action is the Use button, not as a broken model service.
 settled = true; catalogUpdated = true;
