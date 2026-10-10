@@ -116,7 +116,7 @@ class FixtureNode {
   contains() { return false; }
   focus() {}
 }
-let nextTimer = 0, statusCalls = 0, settled = false, catalogUpdated = false;
+let nextTimer = 0, statusCalls = 0, settled = false, catalogUpdated = false, statusFails = false, clock = 0;
 const timers = new Map();
 const fixtureRoot = new FixtureNode("section");
 const fixtureRuntime = () => ({
@@ -131,7 +131,7 @@ const fixtureContext = {
   window: { addEventListener() {}, removeEventListener() {} },
   document: { hidden: false, activeElement: null, createElement: tag => new FixtureNode(tag),
     createTextNode: text => ({ textContent: text }), addEventListener() {}, removeEventListener() {} },
-  AbortController, crypto: { randomUUID: () => `poll-${statusCalls}` },
+  AbortController, crypto: { randomUUID: () => `poll-${statusCalls}` }, Date: { now: () => clock },
   setTimeout: (callback, delay) => { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; },
   clearTimeout: id => timers.delete(id),
   fetch: async (path, options) => {
@@ -146,6 +146,7 @@ const fixtureContext = {
       const request = JSON.parse(options.body);
       assert.equal(request.method, "content.status");
       assert.equal(request.input.operation_id, "long-preparation");
+      if (statusFails) return { ok: false, text: async () => "{}" };
       statusCalls++;
       assert.ok(statusCalls <= 132, "fixture bounds the status requests");
       const runtime = fixtureRuntime();
@@ -180,6 +181,41 @@ assert.equal(timers.size, 0, "hidden controller releases timers");
 control.setVisible(true);
 await new Promise(setImmediate);
 assert.equal(pendingPolls().length, 1);
+// A failed status read during a pending preparation (for example a busy
+// inventory) keeps polling quietly with backoff, and the next read recovers.
+const onlyTimer = () => {
+  assert.equal(timers.size, 1, "one status poll stays scheduled");
+  return [...timers][0];
+};
+const fireTimer = async () => {
+  const [id, timer] = onlyTimer(); timers.delete(id); clock += timer.delay; await timer.callback();
+};
+statusFails = true;
+await fireTimer();
+assert.match(visibleText(fixtureRoot), /Checking status…/);
+assert.doesNotMatch(visibleText(fixtureRoot), /Status is unavailable/);
+assert.equal(onlyTimer()[1].delay, 3000, "first failure backs off");
+statusFails = false;
+const beforeRecovery = statusCalls;
+await fireTimer();
+assert.equal(statusCalls, beforeRecovery + 1);
+assert.doesNotMatch(visibleText(fixtureRoot), /Checking status…/);
+assert.equal(pendingPolls().length, 1, "a successful read restores the normal interval");
+// Only a long run of failures stops polling and asks for Refresh.
+statusFails = true;
+const failingFrom = clock, delays = [];
+while (!/Status is unavailable/.test(visibleText(fixtureRoot))) {
+  assert.ok(delays.length < 20, "polling gives up after a bounded run");
+  delays.push(onlyTimer()[1].delay);
+  await fireTimer();
+}
+assert.deepEqual(delays.slice(0, 5), [1500, 3000, 6000, 10000, 10000]);
+assert.ok(clock - failingFrom >= 60000 && delays.length >= 5, "gives up only after several failures over a minute");
+assert.equal(timers.size, 0, "gave up polling");
+statusFails = false;
+await control.refresh();
+assert.doesNotMatch(visibleText(fixtureRoot), /Status is unavailable|Checking status…/);
+assert.equal(pendingPolls().length, 1, "Refresh resumes polling");
 // An admission bound to an earlier catalogue head reads as a list update whose
 // next action is the Use button, not as a broken model service.
 settled = true; catalogUpdated = true;
@@ -194,4 +230,4 @@ assert.match(visibleText(fixtureRoot), /Model list updated\. Press Use to keep u
 assert.doesNotMatch(visibleText(fixtureRoot), /Model service unavailable/);
 control.destroy();
 assert.equal(timers.size, 0, "destroyed controller releases timers");
-console.log("PASS long model preparation: 131 bounded status reads, terminal render, hide and destroy cleanup");
+console.log("PASS long model preparation: 131 bounded status reads, quiet retry after failed reads, bounded give-up, terminal render, hide and destroy cleanup");

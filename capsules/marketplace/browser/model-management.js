@@ -114,6 +114,9 @@
       let unresolvedUse = null, reconcileRequired = false;
       let pendingFocus = null;
       let reclaimStep = "idle";
+      // Consecutive failed status reads while a preparation is pending. A short
+      // run keeps polling with backoff; only a long run gives up to Refresh.
+      let statusFailures = 0, statusFailingSince = 0;
       root.classList.add("model-management");
       root.tabIndex = -1;
       const show = () => visible && !closed && !document.hidden;
@@ -169,7 +172,7 @@
       async function load() {
         if (!show() || busy) return;
         stopRead(); const epoch = ++generation; const io = controller(); reader = io;
-        loading = true; message = ""; render();
+        loading = true; message = ""; statusFailures = 0; render();
         try {
           const [catalog, interfaces] = await Promise.all([
             request("/api/capsules/catalog", null, io.signal), request("/api/capsules/interfaces", null, io.signal),
@@ -192,7 +195,7 @@
         const runtime = model?.model_runtime, preparation = runtime?.preparation;
         const pending = active(preparation) || (preparation && runtime.admitted && !runtime.dispatch_ready);
         if (!show() || busy || message || !pending) return;
-        timer = setTimeout(poll, 1500);
+        timer = setTimeout(poll, statusFailures ? Math.min(1500 * 2 ** statusFailures, 10000) : 1500);
       }
       async function poll() {
         if (!show() || busy || !model) return;
@@ -205,16 +208,20 @@
           const r = operationRuntime(result, cid);
           check(r.preparation?.operation_id === id);
           model.model_runtime = r;
+          statusFailures = 0;
         } catch {
           if (epoch !== generation || !show()) return;
-          message = "Status is unavailable. Refresh to check before trying again.";
+          if (!statusFailures++) statusFailingSince = Date.now();
+          if (statusFailures >= 5 && Date.now() - statusFailingSince >= 60000) {
+            message = "Status is unavailable. Refresh to check before trying again.";
+          }
         } finally { io.done(); if (epoch === generation) { render(); schedule(); } }
       }
       async function act(operation, keep) {
         if (busy || loading || !show() || !model || reconcileRequired) return;
         stopRead(); const epoch = ++generation, cid = model.cid;
         const id = model.model_runtime.preparation?.operation_id;
-        busy = true; message = ""; render();
+        busy = true; message = ""; statusFailures = 0; render();
         const io = controller();
         try {
           const opening = operation === "open";
@@ -291,7 +298,7 @@
         const refresh = button("Refresh models", () => void load(), loading);
         refresh.dataset.modelControl = "refresh";
         if (!compact) root.append(refresh);
-        const status = element("p", loading ? "Loading models…" : message);
+        const status = element("p", loading ? "Loading models…" : message || (statusFailures ? "Checking status…" : ""));
         status.setAttribute("role", "status"); status.hidden = compact && !status.textContent; root.append(status);
         if (!model) {
           if (!loading && !message && !requiredCid && choices.length > 1) {

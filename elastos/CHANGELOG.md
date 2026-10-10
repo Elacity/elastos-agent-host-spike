@@ -6,6 +6,15 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Fixed
+
+- While a model downloads, Marketplace and System no longer stop at "Status is
+  unavailable. Refresh to check before trying again." after one missed status
+  check. They show "Checking status…" and keep checking; the message appears
+  only if status stays unavailable for about a minute. Home also answers status
+  checks without waiting for the download, and saves download progress less
+  often.
+
 ## [0.8.0-alpha.13]
 
 Test-channel release. Signed releases show these notes in System before you update.
