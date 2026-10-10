@@ -18,6 +18,9 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - If the connection drops while `curl … | bash` is still sending the
   installer, nothing happens: no Runtime is stopped and no file changes. Before,
   bash ran the part that had arrived, which could leave the Runtime stopped.
+- Runtime setup and the first Home started by the installer keep your own
+  temporary folder. Before, they got the installer's temporary folder, which it
+  deleted when it finished.
 
 ### Developer detail
 
@@ -43,6 +46,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   line, so bash parses the whole script before acting. `install-bootstrap-test.py`
   feeds the installer truncated at each step and after the Runtime stop, and
   asserts no request, output, Runtime call or HOME change.
+- `install.sh` keeps its scratch directory in `INSTALL_SCRATCH` and never
+  assigns `TMPDIR`, so `elastos setup`, Home and the update controller's saved
+  launch environment see the caller's `TMPDIR`. Tests: a policy check, and the
+  fixture's `setup` stub records the `TMPDIR` it receives.
 
 ## [0.8.0-alpha.15]
 

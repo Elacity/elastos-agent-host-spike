@@ -1088,33 +1088,33 @@ require_safe_parent_chain "$DATA_DIR"
 step 2 "Verify the release"
 info "Maintainer DID: ${MAINTAINER_DID}"
 
-TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR"' EXIT
+INSTALL_SCRATCH=$(mktemp -d)
+trap 'rm -rf "$INSTALL_SCRATCH"' EXIT
 
 # Publisher gateway is the source of truth. No fallback.
 if [[ -n "$PUBLISHER_GATEWAY" ]]; then
     PG="${PUBLISHER_GATEWAY%/}"
     info "Fetching release head from ${PG}"
-    curl -fsSL --max-time 30 -o "${TMPDIR}/release-head.json" "${PG}/release-head.json" \
+    curl -fsSL --max-time 30 -o "${INSTALL_SCRATCH}/release-head.json" "${PG}/release-head.json" \
         || die "Publisher gateway unreachable: ${PG}/release-head.json"
 else
     # No bootstrap publisher URL — use CID-based fetch (operator/debug bootstrap only)
     [[ -z "$HEAD_CID" ]] && die "No bootstrap publisher URL and no HEAD_CID configured"
     info "Fetching release head by CID: ${HEAD_CID} (bootstrap mode)"
-    ipfs_fetch "$HEAD_CID" "${TMPDIR}/release-head.json"
+    ipfs_fetch "$HEAD_CID" "${INSTALL_SCRATCH}/release-head.json"
 fi
 
-HEAD_SCHEMA=$(json_get "${TMPDIR}/release-head.json" 'd["payload"]["schema"]') \
+HEAD_SCHEMA=$(json_get "${INSTALL_SCRATCH}/release-head.json" 'd["payload"]["schema"]') \
     || die "Invalid release-head.json format"
 [[ "$HEAD_SCHEMA" != "elastos.release.head/v1" ]] && \
     die "Unexpected head schema: ${HEAD_SCHEMA}"
 
 info "Verifying release head signature..."
-verify_signature "${TMPDIR}/release-head.json" "elastos.release.head.v1" "$MAINTAINER_DID"
+verify_signature "${INSTALL_SCRATCH}/release-head.json" "elastos.release.head.v1" "$MAINTAINER_DID"
 
-RELEASE_CID=$(json_get "${TMPDIR}/release-head.json" 'd["payload"]["latest_release_cid"]')
-RELEASE_VERSION=$(json_get "${TMPDIR}/release-head.json" 'd["payload"]["version"]')
-RELEASE_CHANNEL=$(json_get "${TMPDIR}/release-head.json" 'd["payload"].get("channel","stable")')
+RELEASE_CID=$(json_get "${INSTALL_SCRATCH}/release-head.json" 'd["payload"]["latest_release_cid"]')
+RELEASE_VERSION=$(json_get "${INSTALL_SCRATCH}/release-head.json" 'd["payload"]["version"]')
+RELEASE_CHANNEL=$(json_get "${INSTALL_SCRATCH}/release-head.json" 'd["payload"].get("channel","stable")')
 if ! is_allowed_channel "$RELEASE_CHANNEL"; then
     die "Unsupported release channel '${RELEASE_CHANNEL}' in release-head.json. Allowed channels: ${ALLOWED_CHANNELS[*]}"
 fi
@@ -1129,37 +1129,37 @@ fi
 
 if [[ -n "$PUBLISHER_GATEWAY" ]]; then
     info "Fetching release bootstrap metadata from publisher URL"
-    curl -fsSL --max-time 30 -o "${TMPDIR}/release.json" "${PG}/release.json" \
+    curl -fsSL --max-time 30 -o "${INSTALL_SCRATCH}/release.json" "${PG}/release.json" \
         || die "Publisher gateway unreachable: ${PG}/release.json"
 else
     info "Fetching release by CID: ${RELEASE_CID} (bootstrap mode)"
-    ipfs_fetch "$RELEASE_CID" "${TMPDIR}/release.json"
+    ipfs_fetch "$RELEASE_CID" "${INSTALL_SCRATCH}/release.json"
 fi
 
-RELEASE_SCHEMA=$(json_get "${TMPDIR}/release.json" 'd["payload"]["schema"]') \
+RELEASE_SCHEMA=$(json_get "${INSTALL_SCRATCH}/release.json" 'd["payload"]["schema"]') \
     || die "Invalid release.json format"
 [[ "$RELEASE_SCHEMA" != "elastos.release/v1" ]] && \
     die "Unexpected release schema: ${RELEASE_SCHEMA}"
 
 info "Verifying release signature..."
-verify_signature "${TMPDIR}/release.json" "elastos.release.v1" "$MAINTAINER_DID"
-validate_release_identity "${TMPDIR}/release-head.json" "${TMPDIR}/release.json"
+verify_signature "${INSTALL_SCRATCH}/release.json" "elastos.release.v1" "$MAINTAINER_DID"
+validate_release_identity "${INSTALL_SCRATCH}/release-head.json" "${INSTALL_SCRATCH}/release.json"
 
 # ── Extract platform info ────────────────────────────────────────────
 
-BINARY_CID=$(json_get "${TMPDIR}/release.json" "d['payload']['platforms']['${PLATFORM}']['binary']['cid']")
-BINARY_SHA256=$(json_get "${TMPDIR}/release.json" "d['payload']['platforms']['${PLATFORM}']['binary']['sha256']")
-BINARY_SIZE=$(json_get "${TMPDIR}/release.json" "d['payload']['platforms']['${PLATFORM}']['binary']['size']")
+BINARY_CID=$(json_get "${INSTALL_SCRATCH}/release.json" "d['payload']['platforms']['${PLATFORM}']['binary']['cid']")
+BINARY_SHA256=$(json_get "${INSTALL_SCRATCH}/release.json" "d['payload']['platforms']['${PLATFORM}']['binary']['sha256']")
+BINARY_SIZE=$(json_get "${INSTALL_SCRATCH}/release.json" "d['payload']['platforms']['${PLATFORM}']['binary']['size']")
 
 if [[ -z "$BINARY_CID" ]]; then
-    AVAILABLE=$(json_get "${TMPDIR}/release.json" "', '.join(d['payload'].get('platforms',{}).keys())")
+    AVAILABLE=$(json_get "${INSTALL_SCRATCH}/release.json" "', '.join(d['payload'].get('platforms',{}).keys())")
     die "No release available for platform: ${PLATFORM}\n  Available: ${AVAILABLE:-none}"
 fi
 
 # ── Download + verify binary ─────────────────────────────────────────
 
 step 3 "Download ElastOS Runtime"
-require_install_space "$TMPDIR" "$BINARY_SIZE"
+require_install_space "$INSTALL_SCRATCH" "$BINARY_SIZE"
 BINARY_SIZE_LABEL=""
 if [[ "$BINARY_SIZE" =~ ^[0-9]+$ ]] && (( BINARY_SIZE >= 1048576 )); then
     BINARY_SIZE_LABEL=" ($((BINARY_SIZE / 1048576)) MB)"
@@ -1180,15 +1180,15 @@ if [[ -n "$PUBLISHER_GATEWAY" ]]; then
         --connect-timeout "${BINARY_DOWNLOAD_CONNECT_TIMEOUT}" \
         --speed-limit "${BINARY_DOWNLOAD_SPEED_LIMIT}" \
         --speed-time "${BINARY_DOWNLOAD_SPEED_TIME}" \
-        -o "${TMPDIR}/elastos" "${PG}/artifacts/elastos-${PLATFORM}" \
+        -o "${INSTALL_SCRATCH}/elastos" "${PG}/artifacts/elastos-${PLATFORM}" \
         || die "Failed to download binary from ${PG}/artifacts/elastos-${PLATFORM}"
 else
     info "Downloading binary${BINARY_SIZE_LABEL} by CID: ${BINARY_CID} (bootstrap mode)"
-    ipfs_fetch "$BINARY_CID" "${TMPDIR}/elastos"
+    ipfs_fetch "$BINARY_CID" "${INSTALL_SCRATCH}/elastos"
 fi
 
 info "Verifying binary SHA-256..."
-sha256_check "${TMPDIR}/elastos" "$BINARY_SHA256"
+sha256_check "${INSTALL_SCRATCH}/elastos" "$BINARY_SHA256"
 
 # ── Admit the verified release with the shared installation writer ──
 
@@ -1200,14 +1200,14 @@ sha256_check "${TMPDIR}/elastos" "$BINARY_SHA256"
 
 require_install_space "$INSTALL_DIR" "$BINARY_SIZE"
 TMP_INSTALL_BIN="$(mktemp "${INSTALL_DIR}/.elastos.install.XXXXXX")"
-trap 'rm -rf "$TMPDIR" "$TMP_INSTALL_BIN"' EXIT
-cp "${TMPDIR}/elastos" "${TMP_INSTALL_BIN}"
+trap 'rm -rf "$INSTALL_SCRATCH" "$TMP_INSTALL_BIN"' EXIT
+cp "${INSTALL_SCRATCH}/elastos" "${TMP_INSTALL_BIN}"
 chmod +x "${TMP_INSTALL_BIN}"
 
 # The staged executable must report the exact release version on stdout with
 # empty stderr before it can write this installation.
 STAGED_VERSION_STATUS=0
-STAGED_VERSION_STDERR_PATH="${TMPDIR}/elastos-version.stderr"
+STAGED_VERSION_STDERR_PATH="${INSTALL_SCRATCH}/elastos-version.stderr"
 STAGED_VERSION_OUTPUT="$("${TMP_INSTALL_BIN}" --version 2>"${STAGED_VERSION_STDERR_PATH}")" || STAGED_VERSION_STATUS=$?
 STAGED_VERSION_ERROR="$(cat "${STAGED_VERSION_STDERR_PATH}")"
 if [[ "${STAGED_VERSION_STATUS}" -ne 0 ]]; then
@@ -1220,9 +1220,9 @@ ok "Checksum and version match the signed release"
 
 # ── Carrier contact + release metadata for `elastos upgrade` ─────────
 
-SIGNER_DID=$(json_get "${TMPDIR}/release-head.json" 'd["signer_did"]')
+SIGNER_DID=$(json_get "${INSTALL_SCRATCH}/release-head.json" 'd["signer_did"]')
 
-SOURCES_PATH="${TMPDIR}/sources.json"
+SOURCES_PATH="${INSTALL_SCRATCH}/sources.json"
 PUBLISHER_HASH=$(SIGNER_DID="${SIGNER_DID}" python3 - <<'PY'
 import hashlib
 import os
@@ -1288,7 +1288,7 @@ PY
 # update and a concurrent writer before this installer stops Runtime.
 INSTALL_RELEASE=("${TMP_INSTALL_BIN}" install-release --data-dir "$DATA_DIR"
     --binary "${INSTALL_DIR}/elastos" --candidate "${TMP_INSTALL_BIN}" "$SOURCES_PATH"
-    "${TMPDIR}/release-head.json" "${TMPDIR}/release.json")
+    "${INSTALL_SCRATCH}/release-head.json" "${INSTALL_SCRATCH}/release.json")
 step 4 "Install"
 "${INSTALL_RELEASE[@]}" --check || die "This installation was not changed"
 

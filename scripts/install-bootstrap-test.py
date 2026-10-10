@@ -111,7 +111,7 @@ case "${1:-}" in
         cp "${@: -4:1}" "$candidate/runtime"; cp "${@: -3}" "$candidate/"; cp "${@: -4:1}" "$5"
         echo "  fixture writer installed"; exit 0 ;;
     setup)
-        printf '%s\\n' "Runtime setup handoff; Carrier transport is outside this fixture" > "${ELASTOS_TEST_SETUP_MARKER:?fixture marker}"
+        printf '%s\\n' "Runtime setup handoff; Carrier transport is outside this fixture" "TMPDIR=${TMPDIR:-}" > "${ELASTOS_TEST_SETUP_MARKER:?fixture marker}"
         exit 0 ;;
     principal-root-upgrade|home) exit 0 ;;
     *) exit 97 ;;
@@ -841,6 +841,8 @@ class InstallationTests(unittest.TestCase):
                             self.assertNotIn("setup", sandbox.runtime_calls())
                         else:
                             self.assertIn("Carrier transport is outside this fixture", marker.read_text())
+                            # Children see the caller's TMPDIR, not the installer's scratch directory.
+                            self.assertIn(f"\nTMPDIR={sandbox.root / 'tmp'}\n", marker.read_text())
                             self.assertEqual(sandbox.runtime_calls()[-1], "setup")
                         self.assertEqual(list((sandbox.root / "tmp").iterdir()), [])
 
@@ -1245,6 +1247,9 @@ declare -F installer_runtime_control >/dev/null
 ''', text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout, "")
+
+    def test_installer_never_assigns_tmpdir(self):
+        self.assertIsNone(re.search(r"^\s*(export\s+)?TMPDIR=", SOURCE, re.M))
 
     def test_stdin_entry_still_executes_help(self):
         result = subprocess.run([OPTIONS.bash, "--noprofile", "--norc", "-s", "--", "--help"],
