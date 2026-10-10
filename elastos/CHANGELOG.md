@@ -23,6 +23,9 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   deleted when it finished.
 - The installer downloads release data over HTTPS only and stops with a clear
   message if a server redirects it to plain HTTP.
+- Running the installer again while Home is open now works: it closes Home,
+  installs, and opens Home again. Before, it stopped with "Recorded Runtime is
+  foreign or ambiguous".
 
 ### Removed
 
@@ -72,6 +75,11 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   the third-party IPFS host list) and the installer's CID-gateway bootstrap
   (`ipfs_fetch`, `ELASTOS_IPFS_GATEWAYS`) with its docs and fixture transport.
   Dead installer values (`PUBLISHER_HASH`, `LAST_SUCCESS_GATEWAY`) are gone.
+- The installer's identity-checked stop recognises this installation's Home:
+  `<bin> home …` is a Runtime command, and when its parent is this data
+  root's `update-controller/runtime __update-controller --receipt …`, the
+  controller is stopped first so it does not restart Home. Real-process fixture
+  test: `test_open_home_stops_through_its_update_controller`.
 
 ## [0.8.0-alpha.15]
 

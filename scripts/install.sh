@@ -384,7 +384,7 @@ import subprocess
 import sys
 import time
 
-PREFIXES = ("serve", "gateway", "room open")
+PREFIXES = ("serve", "gateway", "room open", "home")
 
 
 def process_snapshot(pid):
@@ -423,6 +423,26 @@ def matches_command(snapshot, binary, prefixes=PREFIXES):
         if snapshot[1] == command or snapshot[1].startswith(command + " "):
             return True
     return False
+
+
+def home_controller(pid, data_dir):
+    """The update controller that owns this installation's Home host, if any."""
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "ppid="],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env=dict(os.environ, LC_ALL="C"), text=True, check=False,
+    )
+    parent = result.stdout.strip()
+    if result.returncode or not parent.isdigit() or int(parent) <= 1:
+        return None
+    directory = os.path.join(os.path.realpath(data_dir), "update-controller")
+    command = (os.path.join(directory, "runtime"),
+               ("__update-controller --receipt " + os.path.join(directory, "receipt.json"),))
+    snapshot = process_snapshot(int(parent))
+    if snapshot is None or not matches_command(snapshot, *command):
+        return None
+    return int(parent), snapshot, command
+
 
 
 def stop_owned_process(pid, expected, binary, prefixes=PREFIXES):
@@ -580,7 +600,17 @@ def stop_installation(data_dir, binary, scan_binary):
                 raise ValueError("A process using this binary has no ownership record in the selected data directory; close it and retry")
             if selected[pid] != snapshot:
                 raise ValueError("Runtime process identity changed during inspection")
-    children = descendant_processes(selected)
+    # Home runs under its update controller; stopping the controller first
+    # stops Home without the controller restarting it.
+    controllers = {}
+    for pid, snapshot in selected.items():
+        if matches_command(snapshot, binary, ("home",)):
+            controller = home_controller(pid, data_dir)
+            if controller is not None:
+                controllers[controller[0]] = controller[1:]
+    children = descendant_processes([*selected, *controllers])
+    for pid, (snapshot, command) in controllers.items():
+        stop_owned_process(pid, snapshot, *command)
     for pid, snapshot in selected.items():
         stop_owned_process(pid, snapshot, binary)
     wait_for_descendants(children)

@@ -1381,6 +1381,45 @@ class NativeProcessTests(unittest.TestCase):
         self.assertFalse(self.coords.exists())
         self.assertTrue(self.binary.is_file())
 
+    def test_open_home_stops_through_its_update_controller(self):
+        # Installed Home: the update controller (its own Runtime copy in the data
+        # root) owns the `home --browser` host named by gateway coordinates.
+        self.child.terminate()
+        self.child.wait(timeout=5)
+        self.coords.unlink()
+        self.binary.unlink()
+        self.binary.symlink_to("/bin/sh")
+        directory = Path(os.path.realpath(self.data)) / "update-controller"
+        directory.mkdir(mode=0o700)
+        (directory / "runtime").symlink_to("/bin/sh")
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        (scripts / "home").write_text('/bin/sleep 30 &\nchild=$!\ntrap \'kill "$child"; exit 0\' TERM\nwait "$child"\n')
+        (scripts / "__update-controller").write_text(
+            '"$HOST" home --browser &\nhost=$!\nprintf "%s\\n" "$host"\n'
+            'trap \'kill "$host"; wait "$host"; exit 0\' TERM\nwait "$host"\n')
+        controller = subprocess.Popen(
+            [str(directory / "runtime"), "__update-controller", "--receipt", str(directory / "receipt.json")],
+            cwd=scripts, env=dict(os.environ, HOST=str(self.binary)),
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        self.extra_children.append(controller)
+        host = int(controller.stdout.readline())
+        controller.stdout.close()
+        time.sleep(0.2)
+        host_snapshot = PROCESSES["process_snapshot"](host)
+        self.assertTrue(PROCESSES["matches_command"](host_snapshot, str(self.binary), ("home --browser",)))
+        self.fixture_descendants.append((host, host_snapshot))
+        gateway = self.data / "gateway-runtime-coords.json"
+        self.write_coords(gateway, host)
+        start = SOURCE.index('info "Stopping verified Runtime processes')
+        block = SOURCE[start:SOURCE.index('info "Installing binary', start)]
+        result = shell('HOME="$1"\nXDG_DATA_HOME="$1/xdg-data"\nINSTALL_DIR="$1/.local/bin"\n'
+                       'DATA_DIR="$(installer_data_dir "$HOME" "$XDG_DATA_HOME")"\n' + block, self.home)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(controller.wait(timeout=5), 0)
+        self.assertIsNone(PROCESSES["process_snapshot"](host))
+        self.assertFalse(gateway.exists())
+
     def test_shared_wrapper_cleanup_finishes_before_home_removal(self):
         descendant, _ = self.start_descendant_fixture(stops_child=True)
         result = shell('''
