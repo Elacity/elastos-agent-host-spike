@@ -27,7 +27,7 @@ from unittest import mock
 INSTALLER = Path(__file__).with_name("install.sh")
 SANDBOX_BASE = Path(__file__).resolve().parent.parent / "target/installer-sandboxes"
 SOURCE = INSTALLER.read_text()
-HELPERS = SOURCE.split("# ── Parse args", 1)[0]
+HELPERS = SOURCE.split("# ── Main", 1)[0]
 PYTHON = SOURCE.split("<<'PY_ED25519'\n", 1)[1].split("\nPY_ED25519", 1)[0]
 CRYPTO = {"__name__": "installer_test"}
 exec(compile(PYTHON, str(INSTALLER) + ":embedded-verifier", "exec"), CRYPTO)
@@ -786,6 +786,26 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(sandbox.runtime_calls(), [])
         self.assertEqual(sandbox.home_state(), before)
         self.assertEqual(list((sandbox.root / "tmp").iterdir()), [])
+
+    def test_truncated_script_acts_on_nothing(self):
+        # curl | bash runs whatever arrived before a dropped connection; main
+        # runs only from the last line, so no prefix may stop or change anything.
+        did, head, release = installable_fixture()
+        lines = SOURCE.splitlines(keepends=True)
+        stop = next(i for i, line in enumerate(lines) if line.startswith("installer_runtime_control "))
+        cuts = [i for i, line in enumerate(lines) if re.match(r"step \d ", line)] + [stop + 2, len(lines) - 1]
+        self.assertEqual(len(cuts), 6)
+        for cut in cuts:
+            with self.subTest(line=cut + 1), InstallerSandbox(head, release, did) as sandbox:
+                self.existing_installation(sandbox)
+                sandbox.respond("binary", RUNTIME_STUB)
+                sandbox.installer.write_text("".join(lines[:cut]))
+                before = sandbox.home_state()
+                result, requests = sandbox.run()
+                self.assertEqual(requests, [])
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(sandbox.runtime_calls(), [])
+                self.assertEqual(sandbox.home_state(), before)
 
     def test_runtime_owns_metadata_handoff_after_three_bootstrap_downloads(self):
         # The shell keeps both existing metadata files and cached capsules. The

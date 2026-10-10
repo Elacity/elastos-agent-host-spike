@@ -907,14 +907,12 @@ finish_install() {
     fi
 }
 
-# ── Parse args ────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────
 
-# Repo smoke/publisher helpers source these definitions inside a subshell.
-# The downloaded installer remains one self-contained script.
-if [[ "${BASH_SOURCE[0]:-$0}" != "$0" ]]; then
-    return 0
-fi
-
+# Every action runs inside main, called on the last line, so `curl | bash`
+# acts only after bash has read the whole script. Repo smoke/publisher
+# helpers source this file for its definitions only.
+main() {
 INSTALL_DIR="${HOME}/.local/bin"
 INSTALL_ONLY="${ELASTOS_INSTALL_ONLY:-false}"
 INSTALL_STARTED_AT=$SECONDS
@@ -1318,3 +1316,6 @@ ok "Saved verified release inputs for Runtime setup and updates"
 # ── Complete installation ─────────────────────────────────────────────
 
 finish_install
+}
+
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then main "$@"; fi

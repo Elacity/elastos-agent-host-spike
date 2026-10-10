@@ -15,6 +15,9 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   file name, such as "qwen2.5-1.5b-instruct-q4-k-m-local". It shows the model's
   name from the model list, such as "Qwen2.5 1.5B Instruct", as soon as Home
   has finished setting it up, without pressing Refresh models.
+- If the connection drops while `curl … | bash` is still sending the
+  installer, nothing happens: no Runtime is stopped and no file changes. Before,
+  bash ran the part that had arrived, which could leave the Runtime stopped.
 
 ### Developer detail
 
@@ -36,6 +39,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   it. Every probe result is published as `assistant:live-models`; the harness
   updates the chip and an open menu from it, keeping keyboard focus on a row or
   menu action. Before, an open menu kept the earlier read while the chip changed.
+- `scripts/install.sh` runs every action inside `main`, called on its last
+  line, so bash parses the whole script before acting. `install-bootstrap-test.py`
+  feeds the installer truncated at each step and after the Runtime stop, and
+  asserts no request, output, Runtime call or HOME change.
 
 ## [0.8.0-alpha.15]
 
