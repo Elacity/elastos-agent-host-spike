@@ -299,8 +299,8 @@ struct PeopleContactStatus {
     handle: Option<String>,
     #[serde(default)]
     relationship: String,
-    #[serde(default)]
-    route: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    conversation_id: Option<String>,
     #[serde(default)]
     can_message: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -887,15 +887,17 @@ fn home_terminal_host_intent_for_action(
             .contacts
             .iter()
             .find(|contact| contact.contact_id == contact_id)?;
-        let target = people_contact_message_target(contact)?;
+        let conversation_id = people_contact_conversation(contact)?;
+        // home-cli.js forwards `switch-shell-open-target` to the Desktop, which
+        // opens Chat at this direct conversation (the same query People sends).
         return Some(serde_json::json!({
             "schema": "elastos.home.terminal-host-intent/v1",
-            "action": "open-target",
+            "action": "switch-shell-open-target",
             "action_id": action_id,
-            "target": target,
+            "target": "chat-room",
             "source": "people-contact",
             "contact_id": contact.contact_id,
-            "route": contact.route,
+            "query": { "conversation_id": conversation_id },
         }));
     }
 
@@ -911,21 +913,16 @@ fn home_terminal_host_intent_for_action(
     }))
 }
 
-fn home_app_target_from_route(route: &str) -> Option<String> {
-    let rest = route.trim().strip_prefix("/apps/")?;
-    let target = rest.split(['/', '?', '#']).next().unwrap_or("").trim();
-    if target.is_empty() {
-        None
-    } else {
-        Some(target.to_string())
-    }
-}
-
-fn people_contact_message_target(contact: &PeopleContactStatus) -> Option<String> {
+/// The direct Chat conversation of a contact that can be messaged.
+fn people_contact_conversation(contact: &PeopleContactStatus) -> Option<&str> {
     if !contact.can_message {
         return None;
     }
-    home_app_target_from_route(&contact.route)
+    contact
+        .conversation_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
 }
 
 fn emit_gateway_home_terminal_host_intent(
@@ -1896,7 +1893,7 @@ async fn dispatch_people_action(
         if !contact.can_message {
             anyhow::bail!("People contact is not message-ready yet");
         }
-        if people_contact_message_target(contact).is_none() {
+        if people_contact_conversation(contact).is_none() {
             anyhow::bail!("People contact has no message route in the current Runtime facts");
         }
         let label = people_contact_display_name(contact, "contact");
@@ -4005,7 +4002,7 @@ mod tests {
                     "contact_id": "contact-a",
                     "display_name": "Owner",
                     "relationship": "accepted",
-                    "route": "elastos://peer/contact-a",
+                    "conversation_id": "direct:v1:contact-a",
                     "can_message": true
                 }],
                 "service_offer_count": 2,
@@ -4188,7 +4185,7 @@ mod tests {
             contact_id: "contact-alice".to_string(),
             display_name: "Alice".to_string(),
             relationship: "conversation".to_string(),
-            route: "/apps/chat-room/".to_string(),
+            conversation_id: Some("direct:v1:alice".to_string()),
             can_message: true,
             ..PeopleContactStatus::default()
         });
@@ -4198,21 +4195,21 @@ mod tests {
                 .unwrap(),
             serde_json::json!({
                 "schema": "elastos.home.terminal-host-intent/v1",
-                "action": "open-target",
+                "action": "switch-shell-open-target",
                 "action_id": "people-message:contact-alice",
                 "target": "chat-room",
                 "source": "people-contact",
                 "contact_id": "contact-alice",
-                "route": "/apps/chat-room/",
+                "query": { "conversation_id": "direct:v1:alice" },
             })
         );
 
-        snapshot.people.contacts[0].route = "elastos://peer/peer-alice".to_string();
+        snapshot.people.contacts[0].conversation_id = None;
         assert!(
             home_terminal_host_intent_for_action("people-message:contact-alice", &snapshot)
                 .is_none()
         );
-        snapshot.people.contacts[0].route = "/apps/chat-room/".to_string();
+        snapshot.people.contacts[0].conversation_id = Some("direct:v1:alice".to_string());
         snapshot.people.contacts[0].can_message = false;
         assert!(
             home_terminal_host_intent_for_action("people-message:contact-alice", &snapshot)
@@ -4234,7 +4231,7 @@ mod tests {
             contact_id: "contact-alice".to_string(),
             display_name: "Alice".to_string(),
             relationship: "conversation".to_string(),
-            route: "/apps/chat-room/".to_string(),
+            conversation_id: Some("direct:v1:alice".to_string()),
             can_message: true,
             ..PeopleContactStatus::default()
         });

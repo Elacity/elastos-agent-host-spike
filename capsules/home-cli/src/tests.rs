@@ -497,7 +497,7 @@ fn people_line_mode_emits_snapshot_backed_people_actions() {
             contact_id: "contact-alice".to_string(),
             display_name: "Alice".to_string(),
             relationship: "connected".to_string(),
-            route: "/apps/chat-room/".to_string(),
+            conversation_id: Some("direct:sha256:alice".to_string()),
             can_message: true,
             ..PeopleContactStatus::default()
         }],
@@ -529,7 +529,7 @@ fn people_line_mode_resolves_visible_contacts_and_requires_message_route() {
             display_name: "Alice".to_string(),
             handle: Some("@alice".to_string()),
             relationship: "conversation".to_string(),
-            route: "/apps/chat-room/".to_string(),
+            conversation_id: Some("direct:sha256:alice".to_string()),
             can_message: true,
             profile_card: Some(PeopleProfileCardStatus {
                 display_name: "Alice A.".to_string(),
@@ -553,7 +553,7 @@ fn people_line_mode_resolves_visible_contacts_and_requires_message_route() {
         Some("people-remove-contact:contact-alice".to_string())
     );
 
-    snapshot.people.contacts[0].route = "elastos://peer/peer-alice".to_string();
+    snapshot.people.contacts[0].conversation_id = None;
     assert!(
         people_line_action("people message contact-alice", &snapshot)
             .unwrap_err()
@@ -576,7 +576,7 @@ fn tui_snapshot_refresh_picks_up_people_changes() {
             contact_id: "contact-alice".to_string(),
             display_name: "Alice".to_string(),
             relationship: "connected".to_string(),
-            route: "/apps/chat-room/".to_string(),
+            conversation_id: Some("direct:sha256:alice".to_string()),
             can_message: true,
             ..PeopleContactStatus::default()
         }],
@@ -1758,7 +1758,7 @@ fn people_tab_uses_people_model_and_keeps_transport_in_debug() {
             display_name: "Alice".to_string(),
             handle: Some("@alice".to_string()),
             relationship: "connected".to_string(),
-            route: "/apps/chat-room/".to_string(),
+            conversation_id: Some("direct:sha256:alice".to_string()),
             can_message: true,
             device_label: Some("peer-alice".to_string()),
             profile_card: None,

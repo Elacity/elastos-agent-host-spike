@@ -574,7 +574,7 @@ fn people_contact_lines(snapshot: &HomeSnapshot, width: usize) -> Vec<String> {
             {
                 details.push(device.to_string());
             }
-            if people_contact_message_target(contact).is_some() {
+            if people_contact_conversation(contact).is_some() {
                 lines.push(format!("  Message  people message {}", contact.contact_id));
             }
             if !contact.contact_id.trim().is_empty() {

@@ -195,7 +195,7 @@ struct PeopleContactStatus {
     #[serde(default)]
     relationship: String,
     #[serde(default)]
-    route: String,
+    conversation_id: Option<String>,
     #[serde(default)]
     can_message: bool,
     #[serde(default)]

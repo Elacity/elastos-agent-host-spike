@@ -14,8 +14,8 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - The terminal Home no longer offers the old native Chat, which used a
   different network from the Chat on the Desktop.
 - People "Message" in the terminal Home no longer opens that old Chat. In the
-  browser terminal it opens Chat on the Desktop; in a native terminal it says
-  "Open Chat on the Desktop to message <name>."
+  browser terminal it opens Chat on the Desktop at that person's conversation;
+  in a native terminal it says "Open Chat on the Desktop to message <name>."
 - In the terminal Inbox, direct messages and service requests say "Open Inbox
   on the Desktop to answer this" instead of "no longer available".
 - In the terminal Apps tab, Enter on an app that only opens on the Desktop
@@ -47,16 +47,20 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   regression test runs two intents against a provider that refuses delete.
 - The `chat` core action and `ManagedChat` launch are removed from Home.
   `elastos chat` is hidden from help and kept only for the native chat smoke
-  scripts. `people-message:` emits the `open-target` terminal host intent the
-  gateway already authorizes (browser terminal) or returns a Desktop notice;
-  `run_chat_from_home` is removed.
+  scripts. `people-message:` emits a `switch-shell-open-target` host intent for
+  `chat-room` with `{conversation_id}` (the query People sends); the gateway
+  accepts only that bounded query for People hand-offs. Home and home-cli key
+  messaging on the contact's `conversation_id` (the People summary never had
+  `route`), and `run_chat_from_home` is removed.
 - `elastos agent`, `agent_cmd.rs` and the shell's `agent` command request are
   removed. The `capsule` help, the serve banner, the first-run welcome and the
   microVM publish hint (no `serve --forward` flag) name commands that exist.
   `docs/COMMAND_MATRIX.md` drops `chat`, `agent` and seven nonexistent `room`
   subcommands; GETTING_STARTED no longer suggests `elastos chat`.
 - Share bundles copy the viewer from its manifest `entrypoint`
-  (`browser/index.html` plus its assets) to the bundle root. The Documents
+  (`browser/index.html` plus its assets) to the bundle root. The entrypoint
+  must be a relative path inside the viewer; symlinks anywhere in the copied
+  tree are refused, and the copy is capped at 256 files and 16 MiB. The Documents
   publish test installs the real `capsules/documents` layout and checks the
   published file list.
 

@@ -6,7 +6,7 @@ fn people_actions(snapshot: &HomeSnapshot) -> Vec<PeopleAction> {
     let mut actions = Vec::new();
     for contact in &snapshot.people.contacts {
         let name = people_contact_display_name(contact, "Person");
-        if people_contact_message_target(contact).is_some() && !contact.contact_id.trim().is_empty()
+        if people_contact_conversation(contact).is_some() && !contact.contact_id.trim().is_empty()
         {
             actions.push(PeopleAction {
                 id: format!("people-message:{}", contact.contact_id),
@@ -105,21 +105,16 @@ fn selected_system_action(snapshot: &HomeSnapshot, selected: usize) -> Option<Sy
         .cloned()
 }
 
-fn home_app_target_from_route(route: &str) -> Option<String> {
-    let rest = route.trim().strip_prefix("/apps/")?;
-    let target = rest.split(['/', '?', '#']).next().unwrap_or("").trim();
-    if target.is_empty() {
-        None
-    } else {
-        Some(target.to_string())
-    }
-}
-
-fn people_contact_message_target(contact: &PeopleContactStatus) -> Option<String> {
+/// The direct Chat conversation of a contact that can be messaged.
+fn people_contact_conversation(contact: &PeopleContactStatus) -> Option<&str> {
     if !contact.can_message {
         return None;
     }
-    home_app_target_from_route(&contact.route)
+    contact
+        .conversation_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
 }
 
 fn people_contact_id_for_reference(snapshot: &HomeSnapshot, contact_ref: &str) -> Option<String> {

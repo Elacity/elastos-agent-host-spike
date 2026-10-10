@@ -148,8 +148,13 @@ pub fn compute_content_digest(files: &[(String, Vec<u8>)]) -> anyhow::Result<Str
     Ok(format!("sha256:{}", digest))
 }
 
+/// Upper bounds for the viewer files copied into a share bundle.
+const MAX_VIEWER_FILES: usize = 256;
+const MAX_VIEWER_BYTES: u64 = 16 * 1024 * 1024;
+
 /// The installed viewer's web entrypoint file, from its `capsule.json`
-/// (`browser/index.html` for Documents). Errors when the viewer is not installed.
+/// (`browser/index.html` for Documents). The entrypoint must be a relative
+/// path inside the viewer directory with no symlinked component.
 pub fn viewer_entrypoint(viewer_dir: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
     let manifest_path = viewer_dir.join("capsule.json");
     let manifest: serde_json::Value =
@@ -161,15 +166,31 @@ pub fn viewer_entrypoint(viewer_dir: &std::path::Path) -> anyhow::Result<std::pa
         .and_then(|value| value.as_str())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("{} has no entrypoint", manifest_path.display()))?;
-    let entry = viewer_dir.join(entrypoint);
-    if !entry.is_file() {
+    let relative = std::path::Path::new(entrypoint);
+    if !relative
+        .components()
+        .all(|part| matches!(part, std::path::Component::Normal(_)))
+    {
+        anyhow::bail!("viewer entrypoint must stay inside the capsule: {entrypoint}");
+    }
+    let mut entry = viewer_dir.to_path_buf();
+    for part in relative.components() {
+        entry.push(part);
+        let metadata = std::fs::symlink_metadata(&entry)
+            .map_err(|_| anyhow::anyhow!("viewer entrypoint missing: {}", entry.display()))?;
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!("viewer entrypoint is a symlink: {}", entry.display());
+        }
+    }
+    if !std::fs::symlink_metadata(&entry)?.is_file() {
         anyhow::bail!("viewer entrypoint missing: {}", entry.display());
     }
     Ok(entry)
 }
 
 /// Copies the viewer's web files (the entrypoint's directory, without its own
-/// Markdown) to the bundle root, with the entrypoint as `index.html`.
+/// Markdown) to the bundle root, with the entrypoint as `index.html`. Refuses
+/// symlinks anywhere in that tree and bounds the file count and total size.
 fn copy_viewer_entrypoint(
     viewer_dir: &std::path::Path,
     bundle_dir: &std::path::Path,
@@ -177,25 +198,78 @@ fn copy_viewer_entrypoint(
     let entry = viewer_entrypoint(viewer_dir)?;
     let web_root = entry.parent().unwrap_or(viewer_dir);
     let mut files = Vec::new();
-    collect_files_for_ipfs(web_root, web_root, &mut files)?;
+    collect_viewer_files(web_root, std::path::Path::new(""), &mut files)?;
+    let mut total = 0u64;
     for rel in files {
         let src = web_root.join(&rel);
-        if src == entry
-            || rel
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("md"))
-        {
+        let is_markdown = rel
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("md"));
+        if src == entry || is_markdown {
             continue;
         }
-        let dest = bundle_dir.join(&rel);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
+        total += copy_viewer_file(&src, &bundle_dir.join(&rel))?;
+        if total > MAX_VIEWER_BYTES {
+            anyhow::bail!("viewer files exceed {MAX_VIEWER_BYTES} bytes");
         }
-        std::fs::copy(&src, dest)?;
     }
-    std::fs::copy(&entry, bundle_dir.join("index.html"))?;
+    total += copy_viewer_file(&entry, &bundle_dir.join("index.html"))?;
+    if total > MAX_VIEWER_BYTES {
+        anyhow::bail!("viewer files exceed {MAX_VIEWER_BYTES} bytes");
+    }
     Ok(())
+}
+
+fn collect_viewer_files(
+    root: &std::path::Path,
+    rel: &std::path::Path,
+    out: &mut Vec<std::path::PathBuf>,
+) -> anyhow::Result<()> {
+    for item in std::fs::read_dir(root.join(rel))? {
+        let item = item?;
+        let name = item.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with('.') || name_str == "target" || name_str == "node_modules" {
+            continue;
+        }
+        let child = rel.join(&name);
+        let file_type = item.file_type()?;
+        if file_type.is_symlink() {
+            anyhow::bail!("viewer file is a symlink: {}", root.join(&child).display());
+        }
+        if file_type.is_dir() {
+            collect_viewer_files(root, &child, out)?;
+        } else if file_type.is_file() {
+            if out.len() >= MAX_VIEWER_FILES {
+                anyhow::bail!("viewer has more than {MAX_VIEWER_FILES} files");
+            }
+            out.push(child);
+        }
+    }
+    Ok(())
+}
+
+/// Copies one regular file without following a symlink at `src`.
+fn copy_viewer_file(src: &std::path::Path, dest: &std::path::Path) -> anyhow::Result<u64> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+    let mut file = options
+        .open(src)
+        .map_err(|err| anyhow::anyhow!("viewer file {}: {err}", src.display()))?;
+    if !file.metadata()?.is_file() {
+        anyhow::bail!("viewer file is not a regular file: {}", src.display());
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut out = std::fs::File::create(dest)?;
+    Ok(std::io::copy(
+        &mut std::io::Read::take(&mut file, MAX_VIEWER_BYTES + 1),
+        &mut out,
+    )?)
 }
 
 pub fn build_share_bundle(
@@ -757,6 +831,97 @@ mod tests {
     // Real IPFS CIDs that pass cid crate validation
     const TEST_CIDV0: &str = "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
     const TEST_CIDV1: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
+
+    fn viewer_with_entrypoint(entrypoint: &str) -> tempfile::TempDir {
+        let viewer = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(viewer.path().join("browser")).unwrap();
+        std::fs::write(viewer.path().join("browser/index.html"), "<html></html>").unwrap();
+        std::fs::write(viewer.path().join("browser/app.js"), "export {};").unwrap();
+        std::fs::write(
+            viewer.path().join("capsule.json"),
+            serde_json::json!({ "entrypoint": entrypoint }).to_string(),
+        )
+        .unwrap();
+        viewer
+    }
+
+    fn share_input() -> tempfile::TempDir {
+        let input = tempfile::tempdir().unwrap();
+        std::fs::write(input.path().join("note.md"), "# Note\n").unwrap();
+        input
+    }
+
+    #[test]
+    fn share_bundle_copies_viewer_from_manifest_entrypoint() {
+        let viewer = viewer_with_entrypoint("browser/index.html");
+        let input = share_input();
+        let (bundle, _) =
+            build_share_bundle_with_viewer_dir(input.path(), "notes", 1, None, None, viewer.path())
+                .unwrap();
+        assert!(bundle.path().join("index.html").is_file());
+        assert!(bundle.path().join("app.js").is_file());
+        assert!(!bundle.path().join("browser").exists());
+    }
+
+    #[test]
+    fn share_bundle_refuses_entrypoints_outside_the_viewer() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.html"), "secret").unwrap();
+        let absolute = outside.path().join("secret.html");
+        for entrypoint in [
+            absolute.to_str().unwrap(),
+            "../secret.html",
+            "browser/../../secret.html",
+        ] {
+            let viewer = viewer_with_entrypoint(entrypoint);
+            let input = share_input();
+            let err =
+                build_share_bundle_with_viewer_dir(input.path(), "n", 1, None, None, viewer.path())
+                    .unwrap_err();
+            assert!(
+                err.to_string().contains("inside the capsule"),
+                "{entrypoint}: {err}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn share_bundle_refuses_symlinked_viewer_files() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("id_rsa"), "private").unwrap();
+
+        let asset = viewer_with_entrypoint("browser/index.html");
+        std::os::unix::fs::symlink(
+            outside.path().join("id_rsa"),
+            asset.path().join("browser/leak.js"),
+        )
+        .unwrap();
+        let input = share_input();
+        let err =
+            build_share_bundle_with_viewer_dir(input.path(), "n", 1, None, None, asset.path())
+                .unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err}");
+
+        let dir_link = viewer_with_entrypoint("web/index.html");
+        std::os::unix::fs::symlink(asset.path().join("browser"), dir_link.path().join("web"))
+            .unwrap();
+        let err =
+            build_share_bundle_with_viewer_dir(input.path(), "n", 1, None, None, dir_link.path())
+                .unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err}");
+
+        let entry_link = viewer_with_entrypoint("browser/entry.html");
+        std::os::unix::fs::symlink(
+            outside.path().join("id_rsa"),
+            entry_link.path().join("browser/entry.html"),
+        )
+        .unwrap();
+        let err =
+            build_share_bundle_with_viewer_dir(input.path(), "n", 1, None, None, entry_link.path())
+                .unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err}");
+    }
 
     #[test]
     fn test_empty_catalog_deserializes() {
