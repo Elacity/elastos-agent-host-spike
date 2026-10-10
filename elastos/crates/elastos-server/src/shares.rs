@@ -257,19 +257,36 @@ fn viewer_dir_names(dir: &std::fs::File) -> anyhow::Result<Vec<std::ffi::OsStrin
     }
     unsafe { libc::rewinddir(stream) };
     let mut names = Vec::new();
-    loop {
+    let result = loop {
+        // readdir returns NULL for both the end and an error; errno tells them apart.
+        set_errno_zero();
         let entry = unsafe { libc::readdir(stream) };
         if entry.is_null() {
-            break;
+            let err = std::io::Error::last_os_error();
+            break match err.raw_os_error() {
+                Some(0) | None => Ok(()),
+                Some(_) => Err(anyhow::anyhow!("read viewer directory: {err}")),
+            };
         }
         let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
         let name = std::ffi::OsStr::from_bytes(name.to_bytes());
         if name != "." && name != ".." {
             names.push(name.to_os_string());
         }
-    }
+    };
     unsafe { libc::closedir(stream) };
-    Ok(names)
+    result.map(|()| names)
+}
+
+fn set_errno_zero() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        *libc::__error() = 0;
+    }
+    #[cfg(target_os = "linux")]
+    unsafe {
+        *libc::__errno_location() = 0;
+    }
 }
 
 /// Lists the regular files under `dir` (relative paths), refusing symlinks.
