@@ -11,7 +11,12 @@ frames. Runtime checks each app's signed launch token and actor before it perfor
 Home can currently obtain every app's capability, so a compromised Home can
 reach those apps' authority. The target limits Home to delegation and gives each
 app a separate, revocable capability. The WASM Component authoring path runs in
-Wasmtime with memory and fuel limits and Runtime Bus hostcalls.
+Wasmtime with memory and fuel limits and Runtime Bus hostcalls. Components run
+inside the Runtime process: separate linear memories, but the same operating
+system process as Runtime keys. Installed Homes run only capsules signed by the
+release publisher, so third-party executable capsules need key-free, confined
+worker processes before they are admitted
+([World Computer plan](https://github.com/Elacity/elastos-runtime/issues/285)).
 
 Providers run as native operating-system processes with the Runtime user's
 rights. Only the model provider is partly confined. The trusted shell helper
