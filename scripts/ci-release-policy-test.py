@@ -1004,7 +1004,7 @@ class ReleasePolicyTests(unittest.TestCase):
         validate_cache_guards(SOURCE)
         caches = [(job, step) for job in JOBS for step in steps(job)
                   if CACHE_RE.search(step) and "type=gha" not in step]
-        self.assertEqual(len(caches), 33)
+        self.assertEqual(len(caches), 31)
         for event, ref, ref_type, override, cached in CASES:
             with self.subTest(event=event, ref=ref, override=override):
                 context = {"github.event_name": event, "github.ref": ref,
@@ -1414,7 +1414,7 @@ class ReleasePolicyTests(unittest.TestCase):
         fetch = names.index("name: fetch the pinned published release")
         save = names.index("name: save the pinned published release")
         self.assertEqual((fetch, save, build), (restore + 1, restore + 2, restore + 3))
-        key = "previous-release-${{ runner.os }}-${{ hashFiles('scripts/update-hop-previous-release.json') }}"
+        key = "previous-release-${{ hashFiles('scripts/update-hop-previous-release.json') }}"
         self.assertEqual(field(mac_steps[restore], "key"), key)
         self.assertEqual(field(mac_steps[save], "key"), key)
         for step in (mac_steps[restore], mac_steps[save]):
@@ -1455,16 +1455,15 @@ class ReleasePolicyTests(unittest.TestCase):
         linux_steps = steps("update-hop-linux")
         names = [step.splitlines()[0] for step in linux_steps]
         order = [names.index("name: " + name) for name in (
-            "source-home into isolated HOME", "prepare installed Home browser", "restore the pinned published release",
-            "fetch the pinned published release", "save the pinned published release", "build two actual Runtime versions",
-            "generate disposable signed install and update fixture",
+            "source-home into isolated HOME", "prepare installed Home browser", "install the pinned published release",
+            "build two actual Runtime versions", "generate disposable signed install and update fixture",
             "prove installed Home account and System update with Carrier hop and refusals",
             "require the update from the published release, no new provider warnings and Undo")]
         self.assertEqual(order, sorted(order))
-        self.assertEqual(order[3:], list(range(order[3], order[3] + 6)))
-        source_home, _, restore, fetch, save, build, generate, prove, verdict = (linux_steps[index] for index in order)
-        key = "previous-release-${{ runner.os }}-${{ hashFiles('scripts/update-hop-previous-release.json') }}"
-        self.assertEqual((field(restore, "key"), field(save, "key")), (key, key))
+        self.assertEqual(order[2:], list(range(order[2], order[2] + 5)))
+        source_home, _, install, build, generate, prove, verdict = (linux_steps[index] for index in order)
+        # The seed's HTTP route does not serve the Linux Runtime; a Home installs the pin over Carrier.
+        self.assertIn('install-previous-release \\\n            "$RUNNER_TEMP/previous-release-home" "$RUNNER_TEMP/previous-release"', install)
         self.assertIn('export XDG_DATA_HOME="${SOURCE_HOME}/.local/share"', source_home)
         self.assertIn('export ELASTOS_RELEASE_VERSION=', source_home)
         self.assertIn('--runtime "$CARGO_TARGET_DIR/release/elastos" --previous "$RUNNER_TEMP/previous-release"', build)
@@ -1472,7 +1471,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertIn("ELASTOS_CI_FIXTURE_SCOPE: ci-rehearsal", prove)
         self.assertIn('ELASTOS_CI_REQUIRE_REAL_RUNTIME: "1"', prove)
         self.assertIn('update-hop-compare.py check-result "$CI_HOP_ROOT/package/results/result.json"', verdict)
-        for step in (fetch, build, generate, prove, verdict):
+        for step in (install, build, generate, prove, verdict):
             self.assertNotIn("if:", step)
             self.assertNotRegex(step, r"FIXTURE_ARTIFACT_ID|GH_TOKEN|inputs\.")
         upload = linux_steps[names.index("name: retain the safe CI hop receipt")]

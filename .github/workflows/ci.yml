@@ -892,7 +892,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ runner.temp }}/previous-release-cache
-          key: previous-release-${{ runner.os }}-${{ hashFiles('scripts/update-hop-previous-release.json') }}
+          key: previous-release-${{ hashFiles('scripts/update-hop-previous-release.json') }}
       - name: fetch the pinned published release
         timeout-minutes: 15
         run: |
@@ -904,7 +904,7 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ runner.temp }}/previous-release-cache
-          key: previous-release-${{ runner.os }}-${{ hashFiles('scripts/update-hop-previous-release.json') }}
+          key: previous-release-${{ hashFiles('scripts/update-hop-previous-release.json') }}
       - name: build two actual Runtime versions
         # This source compiled twice (new and next) over the restored intermediates.
         timeout-minutes: 30
@@ -1135,25 +1135,14 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '26'
-      - name: restore the pinned published release
-        id: previous-release-cache
-        if: env.CI_USE_CACHE == 'true'
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ${{ runner.temp }}/previous-release-cache
-          key: previous-release-${{ runner.os }}-${{ hashFiles('scripts/update-hop-previous-release.json') }}
-      - name: fetch the pinned published release
-        timeout-minutes: 15
+      # The seed's HTTP route does not serve every Linux artifact: after the published
+      # install.sh's HTTPS download, a disposable Home rolls back to the pinned head over Carrier.
+      - name: install the pinned published release
+        timeout-minutes: 30
         run: |
           set -euo pipefail
-          python3 scripts/update-hop-compare.py fetch-previous-release \
-            "$RUNNER_TEMP/previous-release-cache" "$RUNNER_TEMP/previous-release"
-      - name: save the pinned published release
-        if: env.CI_USE_CACHE == 'true' && env.CI_SAVE_CACHE == 'true' && steps.previous-release-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ${{ runner.temp }}/previous-release-cache
-          key: previous-release-${{ runner.os }}-${{ hashFiles('scripts/update-hop-previous-release.json') }}
+          python3 scripts/update-hop-compare.py install-previous-release \
+            "$RUNNER_TEMP/previous-release-home" "$RUNNER_TEMP/previous-release"
       - name: build two actual Runtime versions
         timeout-minutes: 30
         run: |

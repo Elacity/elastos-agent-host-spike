@@ -68,8 +68,14 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   CLI refusals (wrong signers, platform, version, tampered binary) leave Homes
   unchanged, and `update --rollback-to` undoes the hop. `update-hop-compare.py`
   runs CLI fixtures natively on Linux (`HOME/.local/share/elastos`, ELF
-  admission, `xdg-open` fixture opener, Runtime's platform aliases). The pinned
-  release cache key now includes the runner OS (#320).
+  admission, `xdg-open` fixture opener, Runtime's platform aliases). The seed's
+  HTTP route does not serve every Linux artifact, so its new
+  `install-previous-release` installs a disposable Home with the published
+  `install.sh`, rolls it back over Carrier to the pinned head (`head_cid`, new
+  in `update-hop-previous-release.json`) and copies the release out under its
+  signed hashes, rebuilding capsule archives as releases build them. On Linux
+  and Mac, the `check-result` verdict in the job summary also requires and
+  names the next release, the refused tampered offer and each CLI refusal (#320).
 
 ## [0.8.0-alpha.15]
 
