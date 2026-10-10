@@ -575,9 +575,12 @@ async function startSessionTurnServer({ network, sessionDir, turn }) {
     "--no-cli",
     "--no-tls",
     "--no-dtls",
+    "--no-tcp-relay",
     "--no-multicast-peers",
     // The guest and viewer meet at this server's relay address. Every other
     // peer, including loopback (denied by default) and private ranges, is not.
+    // coturn checks peer IPs only; the root network setup (whose receipt
+    // `check` verifies) drops relayed UDP to any port but the TURN ports.
     `--allowed-peer-ip=${network.hostIp}`,
     "--denied-peer-ip=0.0.0.0-255.255.255.255",
     "--denied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",

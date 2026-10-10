@@ -1926,6 +1926,7 @@ impl LaunchTurn {
              no-udp\n\
              no-tls\n\
              no-dtls\n\
+             no-tcp-relay\n\
              no-cli\n\
              no-daemon\n\
              verbose\n\
@@ -6119,6 +6120,7 @@ mod tests {
         assert!(!captured.contains("allow-loopback-peers"));
         assert!(captured.lines().any(|line| line == "log-file=stdout"));
         assert!(captured.lines().any(|line| line == "simple-log"));
+        assert!(captured.lines().any(|line| line == "no-tcp-relay"));
     }
 
     struct EnvVarRestore {

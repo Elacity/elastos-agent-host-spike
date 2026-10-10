@@ -26,6 +26,11 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   keeps loopback peers, and the media bridge closes any guest TURN stream that
   addresses a peer outside the session relay ports or asks for a TCP relay
   (#307).
+- Linux Browser network setup adds a per-slot output rule: UDP from the TURN
+  relay ports reaches only the slot's TURN ports, so relayed traffic cannot
+  reach other host services such as Carrier's UDP port. coturn's RFC 6062 TCP
+  relays are off on both hosts. `check` refuses a setup receipt without the
+  rule, so Browser asks to re-run the root setup once (#307).
 
 ## [0.8.0-alpha.14]
 

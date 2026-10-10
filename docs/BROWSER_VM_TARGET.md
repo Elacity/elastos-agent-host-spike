@@ -449,6 +449,7 @@ The filter policy for each TAP is:
 | Other input from that TAP | Drop |
 | Forwarded IPv4/IPv6 from that TAP | Drop |
 | IPv6 input from that TAP | Drop; interface IPv6 is also disabled |
+| Host output from slot IP, UDP source `49152:49215` | Accept only to the slot IP on UDP `49152:49215` or `41000`; drop all else |
 
 Root inserts per-TAP input chains and forwarding drops ahead of existing host
 filter rules. Runtime keeps its Unix relay and session-local TURN processes;
@@ -457,7 +458,10 @@ Guest control stays on TCP `19092` reached from the host. Guest DHCP, host
 forwarding, NAT and host default-route changes are unnecessary.
 Session TURN relays only to its own relay address (the slot host IP), where the
 guest and viewer allocations meet; loopback, private ranges and every other
-peer are denied. `elastos setup` writes the Home's TURN credential to the
+peer are denied, and TCP relays are off. coturn checks peer IPs only, so the
+relay output rule above confines relayed UDP to the TURN ports; host services
+on the slot IP stay unreachable. `check` refuses a receipt without that rule.
+`elastos setup` writes the Home's TURN credential to the
 owner-only `$DATA_DIR/runtime-turn/turn-credentials.env` and keeps an
 existing one.
 
@@ -644,10 +648,10 @@ use their fixed vsock-to-Runtime bridges. VZ NAT, a media NIC, a default guest
 route, legacy ICE boot configuration, and VZ hibernation are not available.
 Missing, stale, disabled, partial, or mixed legacy/VZ configuration fails before
 VM dispatch.
-The VZ TURN server relays only to its relay host and allows loopback peers only
-when that host is loopback. The media bridge then refuses any guest TURN peer
-outside the session relay port range, and TURN TCP relays, by closing the
-stream.
+The VZ TURN server relays only to its relay host, with TCP relays off, and
+allows loopback peers only when that host is loopback. The media bridge then
+refuses any guest TURN peer outside the session relay port range by closing
+the stream.
 
 Source-home config also loads Runtime-owned TURN credentials from
 `$HOME/runtime-turn/turn-credentials.env` or

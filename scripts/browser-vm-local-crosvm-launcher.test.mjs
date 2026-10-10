@@ -100,6 +100,7 @@ test("session TURN relays only to its own relay address on the leased slot", asy
     "--denied-peer-ip=0.0.0.0-255.255.255.255",
     "--denied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
   ]);
+  assert.ok(args.includes("--no-tcp-relay"), "RFC 6062 TCP relays must stay off");
   assert.equal(args[args.indexOf("--relay-ip") + 1], "192.168.200.1");
 });
 
