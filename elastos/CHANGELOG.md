@@ -14,6 +14,8 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Fixed
 
+- Apps that ask for the ElastOS version now get the same version that
+  `elastos --version` and System show.
 - A model download that stopped with "Model content could not be read" now
   continues from where it stopped when you press Retry. Before, Retry started
   the download again from 0%.
@@ -24,6 +26,9 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Developer detail
 
+- `get_runtime_info` in `resource_bridge.rs` (both the local and the attached
+  bridge) returns `ELASTOS_VERSION` from `build.rs` instead of
+  `CARGO_PKG_VERSION`.
 - `carrier.rs` reads peer lines through `read_peer_line`, which reads through
   `take(max + 1)` under a timeout: `handle_file_stream` uses 64 KiB / 10 s;
   `release_head` and the two control-reply reads use 1 MiB /
