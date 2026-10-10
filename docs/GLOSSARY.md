@@ -52,6 +52,9 @@ The trusted base (`elastos` binary). It checks signatures,
 capabilities, routing, lifecycle, and audit. Capsules and providers run outside
 the trusted core. Native host and engine adapters may also sit outside it, but
 they do not become capsules merely because they are separate processes.
+Rong Chen's posts call this kernel **ElastOS**; the repository calls it the
+Runtime. A PC² Host is the computer it runs on: today an app on macOS or Linux,
+later possibly a dedicated appliance image.
 
 ## Principal
 
@@ -112,7 +115,7 @@ handle string.
 
 ## Digital Capsule
 
-The portable signed package model in ElastOS. A Digital Capsule is capability-governed and explicitly described. It may be an app capsule, provider capsule, shell capsule, agent capsule, or sealed data/content capsule. User objects such as documents remain first-class objects; they become data capsules only when packaged with capsule metadata and provenance. See [CAPSULE_MODEL.md](CAPSULE_MODEL.md) for the full model.
+The portable signed package model in ElastOS. A Digital Capsule is capability-governed and explicitly described. It may be an app capsule, provider capsule, shell capsule, agent capsule, or sealed data/content capsule. User objects such as documents remain first-class objects; they become data capsules only when packaged with capsule metadata and provenance. Rong Chen's posts write DigitCapsule. See [CAPSULE_MODEL.md](CAPSULE_MODEL.md) for the full model.
 
 ## Capsule
 
@@ -124,7 +127,7 @@ alone establishes neither isolation nor granted authority.
 
 ## Capsule Runtime (AppCapsule Runtime)
 
-The per-capsule execution contract. This is the common runtime surface that makes one capsule portable across substrates such as WASM and microVM. It is not the trusted node core and not Carrier. In the current repo, this concept spans `elastos-guest`, `elastos-compute`, `elastos-crosvm`, and the guest bridge protocols rather than one single crate.
+The per-capsule execution contract. This is the common runtime surface that makes one capsule portable across substrates such as WASM and microVM. It is not the trusted node core and not Carrier. In the current repo, this concept spans `elastos-guest`, `elastos-compute`, `elastos-crosvm`, and the guest bridge protocols rather than one single crate. Rong Chen's posts call it the RTOS-Runtime: embedded-style, one flat address space per capsule, with no real-time guarantee. Hard real-time control stays in the device provider or controller (PRINCIPLES.md §19). Licence and right checks belong to Runtime admission and effects, never to code inside the capsule.
 
 ## Capsule Artifact
 
