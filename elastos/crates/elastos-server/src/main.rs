@@ -79,7 +79,6 @@ fn should_isolate_process_group(argv: &[String]) -> bool {
 #[command(name = "elastos")]
 #[command(about = "ElastOS - sovereign Home and runtime\n\n\
     Run `elastos` with no subcommand to open Home.\n\
-    Use `elastos serve` for operator-runtime commands.\n\
     All resource access is capability-gated by the local control plane.")]
 #[command(version = ELASTOS_VERSION)]
 struct Cli {
