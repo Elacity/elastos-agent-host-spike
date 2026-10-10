@@ -29,6 +29,9 @@ signer_spec = importlib.util.spec_from_file_location("release_signer_fixture", P
 signer = importlib.util.module_from_spec(signer_spec)
 sys.modules[signer_spec.name] = signer
 signer_spec.loader.exec_module(signer)
+provenance_spec = importlib.util.spec_from_file_location("release_provenance", Path(__file__).with_name("release-provenance.py"))
+provenance = importlib.util.module_from_spec(provenance_spec)
+provenance_spec.loader.exec_module(provenance)
 
 
 def binary(platform):
@@ -1063,9 +1066,10 @@ printf '%s\n' "$PLATFORMS_JSON" > "$TMPDIR/platforms.json"
                 patch.object(inputs.shutil, "disk_usage", return_value=SimpleNamespace(total=100 * 1024**3, free=50 * 1024**3))):
             context.start()
             self.addCleanup(context.stop)
+        (self.root / "work").mkdir()
         return SimpleNamespace(stage=stage, cids=cids, cids_path=cids_path, stamps=stamps,
                                stamps_path=stamps_path, template=template, blob_oid=blob_oid,
-                               output=self.root / "unsigned-input", platform=platform)
+                               output=self.root / "work/unsigned", platform=platform)
 
     def prepare_signing_fixture(self, fixture, **overrides):
         options = {"channel": "canary", "output": fixture.output, "preview_platform": fixture.platform}
@@ -1214,18 +1218,21 @@ printf '%s\n' "$PLATFORMS_JSON" > "$TMPDIR/platforms.json"
                    "files": {"artifacts/" + name: inputs.file_record(fixture.stage / "artifacts" / name) for name in fixture.cids}}
         bundle_files = json.loads((self.bundles[fixture.platform] / "platform-input.json").read_text())["files"]
         receipt["files"].update({name: bundle_files[name] for name in ("components.json", "components-template.json")})
-        proof_root = fixture.output / "provenance"
-        proof_root.mkdir(mode=0o700)
-        receipt_path = proof_root / "mac.receipt.json"
-        receipt_path.write_bytes(signer.json_bytes(receipt))
-        (proof_root / "mac.bundle.jsonl").write_bytes(b"{}")
-        shutil.copyfile(self.bundles[fixture.platform] / "components.json", proof_root / "mac.components.json")
-        manifest["provenance"] = {"schema": signer.PROVENANCE_SCHEMA, "run_id": run["id"], "run_attempt": run["run_attempt"],
-            "approval_sha256": approval_pin["sha256"], "receipts": [{"platform": fixture.platform,
-                "receipt": "provenance/mac.receipt.json", "bundle": "provenance/mac.bundle.jsonl", "components": "provenance/mac.components.json",
-                "artifact": artifact, "proof_artifact": proof_artifact}]}
-        (fixture.output / "signing-input.json").chmod(0o600)
-        (fixture.output / "signing-input.json").write_bytes(signer.json_bytes(manifest))
+        # The production binder adds the proof to the staged layout prepare writes.
+        work = fixture.output.parent.resolve()
+        platform_input = work / "inputs" / fixture.platform / "N1"
+        platform_input.mkdir(parents=True)
+        (platform_input / "platform-input.json").write_bytes(signer.json_bytes(receipt))
+        shutil.copyfile(self.bundles[fixture.platform] / "components.json", platform_input / "components.json")
+        (platform_input.parent / "provenance.jsonl").write_bytes(b"{}")
+        self.write_json(work / "run.json", {"approval": approval_pin, "platforms": [fixture.platform], "input": "N1",
+                                            "run": str(run["id"]), "run_attempt": run["run_attempt"],
+                                            "receipts": [{"platform": fixture.platform, "artifact": artifact,
+                                                          "proof_artifact": proof_artifact}]})
+        provenance.bind(approval_path, approval, approval_pin["sha256"], work)
+        self.assertEqual((fixture.output / "signing-input.json").stat().st_mode & 0o777, 0o400)
+        manifest = signer.parse_json((fixture.output / "signing-input.json").read_bytes())
+        receipt_path = fixture.output / f"provenance/{fixture.platform}.receipt.json"
         origin = {"id": run["id"], "head_sha": workflow, "head_branch": run["head_branch"]}
         api.update({f"{prefix}/git/commits/{workflow}": {"sha": workflow, "tree": {"sha": workflow_tree}},
                     f"{prefix}/actions/runs/{run['id']}": run,
@@ -1267,6 +1274,7 @@ printf '%s\n' "$PLATFORMS_JSON" > "$TMPDIR/platforms.json"
             # A valid verified subject still fails if its receipt claims a
             # foreign H/tree. The production provenance validator owns this gate.
             receipt["source"]["tree"] = "f" * 40
+            receipt_path.unlink()
             receipt_path.write_bytes(signer.json_bytes(receipt))
             with self.assertRaisesRegex(ValueError, "attested platform source/version differs"):
                 signer.prepare(policy, fixture.output.resolve(), "signing-input.json", api.__getitem__, snapshot)

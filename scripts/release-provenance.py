@@ -72,6 +72,38 @@ def check_receipt(approval, run, path, bundle, scratch, fetch, prefix, payload_r
     return receipt
 
 
+def bind(approval_path, approval, digest, work):
+    """Add the package proof to the prepared signing input, then freeze it."""
+    record = S.parse_json(S.regular_bytes(work / "run.json", S.MAX_JSON))
+    unsigned = work / "unsigned"
+    manifest_path = unsigned / "signing-input.json"
+    manifest = S.parse_json(S.regular_bytes(manifest_path, S.MAX_JSON))
+    S.require(record["approval"] == {"path": str(approval_path), "sha256": digest}, "prepared approval differs")
+    S.require(manifest["source"] == approval["source"] and manifest["installer"]["stamps"] == approval["delivery"],
+              "prepared source/delivery differs from independent approval")
+    S.require("provenance" not in manifest, "signing input already bound")
+    proof_dir = unsigned / "provenance"
+    proof_dir.mkdir(mode=0o700)
+    entries = []
+    for entry in record["receipts"]:
+        platform = entry["platform"]
+        S.require(platform in record["platforms"], "prepared platform refused")
+        receipt = f"provenance/{platform}.receipt.json"
+        bundle = f"provenance/{platform}.bundle.jsonl"
+        components = f"provenance/{platform}.components.json"
+        platform_input = work / "inputs" / platform / record["input"]
+        shutil.copyfile(platform_input / "platform-input.json", unsigned / receipt)
+        shutil.copyfile(work / "inputs" / platform / "provenance.jsonl", unsigned / bundle)
+        shutil.copyfile(platform_input / "components.json", unsigned / components)
+        entries.append({"platform": platform, "receipt": receipt, "bundle": bundle, "components": components,
+                        "artifact": entry["artifact"], "proof_artifact": entry["proof_artifact"]})
+    manifest["provenance"] = {"schema": S.PROVENANCE_SCHEMA, "run_id": int(record["run"]), "run_attempt": record["run_attempt"],
+                              "approval_sha256": digest, "receipts": entries}
+    manifest_path.write_bytes(S.json_bytes(manifest))
+    for path in [manifest_path, *proof_dir.iterdir()]:
+        path.chmod(0o400)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("approval", "run", "artifact", "receipt", "seed", "bind"))
@@ -92,31 +124,7 @@ def main():
         print(json.dumps({"sha256": digest, "source": approval["source"], "workflow": approval["workflow"], "delivery": approval["delivery"], "gh": approval["gh"]}))
         return
     if args.command == "bind":
-        record = S.parse_json(S.regular_bytes(args.work.resolve() / "run.json", S.MAX_JSON))
-        unsigned = args.work.resolve() / "unsigned"
-        manifest_path = unsigned / "signing-input.json"
-        manifest = S.parse_json(S.regular_bytes(manifest_path, S.MAX_JSON))
-        S.require(record["approval"] == {"path": str(args.approval), "sha256": digest}, "prepared approval differs")
-        S.require(manifest["source"] == approval["source"] and manifest["installer"]["stamps"] == approval["delivery"],
-                  "prepared source/delivery differs from independent approval")
-        proof_dir = unsigned / "provenance"
-        proof_dir.mkdir(mode=0o700)
-        entries = []
-        for entry in record["receipts"]:
-            platform = entry["platform"]
-            S.require(platform in record["platforms"], "prepared platform refused")
-            receipt = f"provenance/{platform}.receipt.json"
-            bundle = f"provenance/{platform}.bundle.jsonl"
-            components = f"provenance/{platform}.components.json"
-            platform_input = args.work / "inputs" / platform / record["input"]
-            shutil.copyfile(platform_input / "platform-input.json", unsigned / receipt)
-            shutil.copyfile(args.work / "inputs" / platform / "provenance.jsonl", unsigned / bundle)
-            shutil.copyfile(platform_input / "components.json", unsigned / components)
-            entries.append({"platform": platform, "receipt": receipt, "bundle": bundle, "components": components,
-                            "artifact": entry["artifact"], "proof_artifact": entry["proof_artifact"]})
-        manifest["provenance"] = {"schema": S.PROVENANCE_SCHEMA, "run_id": int(record["run"]), "run_attempt": record["run_attempt"],
-                                  "approval_sha256": digest, "receipts": entries}
-        manifest_path.write_bytes(S.json_bytes(manifest))
+        bind(args.approval, approval, digest, args.work.resolve())
         return
     fetch = lambda path: cli_fetch(approval, path)
     run = S.checked_package_run(approval, args.run, fetch)

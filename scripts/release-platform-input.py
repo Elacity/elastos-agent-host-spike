@@ -1155,8 +1155,8 @@ def signing_input(stage, cids_path, stamps_path, channel, output,
             signer.require(digest(path) == info["sha256"] and path.stat().st_size == info["size"],
                            "artifact changed while preparing signing input")
             path.chmod(0o400)
+        # The provenance binder adds the package proof, then freezes this file.
         (prepared / "signing-input.json").write_bytes(manifest_bytes)
-        (prepared / "signing-input.json").chmod(0o400)
         verify_staged_inputs(stage, allow_generated=True, preview_platform=preview_platform)
         # rename refuses an existing non-empty destination; refuse all existing
         # destinations here, including empty directories and symlinks.
