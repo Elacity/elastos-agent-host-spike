@@ -29,6 +29,9 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - On a Mac without Apple's Command Line Tools, the installer now stops before
   downloading anything and says: run `xcode-select --install`, then run the
   installer again. Before, it failed with "Invalid release-head.json format".
+- The installer no longer prints a raw JSON receipt near the end; it prints
+  "Protected roots are ready". A receipt for moved data stays in its backup
+  folder.
 
 ### Removed
 
@@ -88,6 +91,9 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   `python3 -c ''` and, if the macOS stub (or any broken python3) cannot run,
   stops with one next step before the first request. Test:
   `test_python3_that_cannot_run_stops_before_any_download_with_one_next_step`.
+- `install.sh` discards `principal-root-upgrade`'s stdout receipt (written to
+  the backup directory when objects move) and prints one line. The command's
+  JSON output is unchanged for the source-restart scripts that parse it.
 
 ## [0.8.0-alpha.15]
 

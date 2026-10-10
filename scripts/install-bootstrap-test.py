@@ -116,7 +116,8 @@ case "${1:-}" in
     setup)
         printf '%s\\n' "Runtime setup handoff; Carrier transport is outside this fixture" "TMPDIR=${TMPDIR:-}" > "${ELASTOS_TEST_SETUP_MARKER:?fixture marker}"
         exit 0 ;;
-    principal-root-upgrade|home) exit 0 ;;
+    principal-root-upgrade) echo '{"schema": "fixture-receipt"}'; exit 0 ;;
+    home) exit 0 ;;
     *) exit 97 ;;
 esac
 '''
@@ -997,8 +998,10 @@ class InstallationTests(unittest.TestCase):
         self.assertRegex(calls[1], writer + " --check$")
         self.assertRegex(calls[2], writer + "$")
         steps = ["fixture writer admitted", "Stopping verified Runtime processes",
-                 "Installing binary to", "fixture writer installed", "Verifying and upgrading configured protected roots"]
+                 "Installing binary to", "fixture writer installed", "Verifying and upgrading configured protected roots",
+                 "Protected roots are ready"]
         self.assertEqual(sorted(steps, key=result.stdout.index), steps)
+        self.assertNotIn("fixture-receipt", result.stdout)
         self.assertRegex(calls[3], "^principal-root-upgrade --data-dir %s --backup-dir %s/backups/principal-root-upgrade-[0-9]+-[0-9]+$"
                          % (re.escape(str(sandbox.data)), re.escape(str(sandbox.data))))
         self.assertEqual(len(calls), 4, "setup and Home launch stay out of --install-only")

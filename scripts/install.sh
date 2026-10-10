@@ -1264,9 +1264,11 @@ ok "Installed ElastOS ${RELEASE_VERSION} to $(display_path "${INSTALL_DIR}/elast
 
 PRINCIPAL_ROOT_BACKUP_DIR="${DATA_DIR}/backups/principal-root-upgrade-$(date -u +%s)-$$"
 info "Verifying and upgrading configured protected roots while Runtime is stopped..."
+# The receipt stays in the backup directory; the terminal gets one line.
 "${INSTALL_DIR}/elastos" principal-root-upgrade \
     --data-dir "${DATA_DIR}" \
-    --backup-dir "${PRINCIPAL_ROOT_BACKUP_DIR}"
+    --backup-dir "${PRINCIPAL_ROOT_BACKUP_DIR}" >/dev/null
+ok "Protected roots are ready"
 ok "Saved trusted source config to $(display_path "${DATA_DIR}/sources.json")"
 ok "Saved verified release inputs for Runtime setup and updates"
 
