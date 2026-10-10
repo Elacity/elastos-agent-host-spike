@@ -13,6 +13,8 @@ source: {commit, tree}},
 root/homes/{publisher,controller,cli,operator}; each installs .local/bin/elastos.
 The native data path is HOME/Library/Application Support/elastos on Mac and
 HOME/xdg-data/elastos on Linux (Linux is permitted only for harness self-tests).
+CLI fixtures use each system's installed default: the Mac path above, and
+HOME/.local/share/elastos on Linux, where CLI hops run natively too.
 `preserve` maps cli/operator to {identity, chat, draft, library, model_stub}
 paths relative to that Home's data directory. Each path must exist and contain
 fixture data only. `catalogue` is a data-relative path; `new.catalogue_sha256`
@@ -84,9 +86,9 @@ identity. Package mappings refuse private identity keys.
 Consumer host-process.lock is Runtime coordination, with exact offline upgrade
 metadata and released ownership checked after commands and in snapshots. M2 apply
 binds its recorded PID to the owned command; user data and support remain separate.
-The operator owns real release signing and publication. Native Mac CI creates
-and removes disposable signing keys through generate-ci-hop, using Runtime's
-sign-payload command and offline Kubo content from the existing Mac build.
+The operator owns real release signing and publication. Native Mac and Linux CI
+create and remove disposable signing keys through generate-ci-hop, using
+Runtime's sign-payload command and offline Kubo content from the source-home build.
 Each scope has its own frozen installer, holder, consumers and receipt.
 Generated native CI packages pin the qualified localhost provider and complete
 source Home bytes through fixture archive and native artifact descriptors. Setup
@@ -569,10 +571,37 @@ CLI_REFUSALS = ("wrong-signer-head", "wrong-signer-release", "tampered-binary", 
 CLI_PHASES = ("old", "new", *CLI_REFUSALS)
 # A cross-version fixture also publishes the release after new, which new's System applies.
 CLI_SYSTEM_PHASE = "next"
-CLI_DATA = "Library/Application Support/elastos"
+CLI_DATA = "Library/Application Support/elastos" if sys.platform == "darwin" else ".local/share/elastos"
+# `home --browser` opens Home with `open` on Mac and `xdg-open` on Linux; the fixture's no-op replaces it.
+CLI_OPENER = "fixture-tools/" + ("open" if sys.platform == "darwin" else "xdg-open")
+CLI_PLATFORMS = ("aarch64-darwin", "x86_64-darwin", "aarch64-linux", "x86_64-linux")
+# Runtime setup's platform_aliases: a component descriptor may use either spelling.
+CLI_PLATFORM_ALIASES = {"x86_64-linux": ("linux-amd64",), "aarch64-linux": ("linux-arm64",),
+                        "linux-amd64": ("x86_64-linux",), "linux-arm64": ("aarch64-linux",),
+                        "aarch64-darwin": ("darwin-arm64",), "darwin-arm64": ("aarch64-darwin",)}
 CLI_PUBLISHER = "ElastOS/SystemServices/Publisher"
 CLI_INSTALLED_METADATA = ("installation/release-head.json", "installation/release.json")
 CI_XCODE_APPS = tuple("Xcode_" + version + ".app" for version in ("15.0.1", "15.1", "15.2", "15.3", "15.4", "16.1", "16.2"))
+
+
+def cli_host_platform():
+    """This host's release platform, such as aarch64-darwin or x86_64-linux."""
+    arch = {"arm64": "aarch64", "aarch64": "aarch64", "x86_64": "x86_64", "amd64": "x86_64"}.get(platform.machine().lower())
+    need(arch is not None and sys.platform in ("darwin", "linux"), "native Mac or Linux host required")
+    return arch + ("-darwin" if sys.platform == "darwin" else "-linux")
+
+
+def cli_component_platform(release_platform):
+    """components.json names a release platform system-first: x86_64-linux is linux-amd64."""
+    need(release_platform in CLI_PLATFORMS, "unknown release platform")
+    arch, system = release_platform.split("-")
+    return system + ("-arm64" if arch == "aarch64" else "-amd64")
+
+
+def cli_other_architecture(release_platform):
+    """The same system's other release platform, which a wrong-platform offer names."""
+    arch, system = release_platform.split("-")
+    return ("x86_64" if arch == "aarch64" else "aarch64") + "-" + system
 
 
 def cli_path(root, relative):
@@ -785,11 +814,10 @@ def cli_admit(config, local_rehearsal=None):
     refusals = CLI_REFUSALS if scope in ("ci-rehearsal", "local-rehearsal") else ()
     need(manifest["proof_kind"] in ("real-runtime", "harness-self-test"), "unknown proof kind")
     need(os.environ.get("ELASTOS_CI_REQUIRE_REAL_RUNTIME") != "1" or manifest["proof_kind"] == "real-runtime", "hosted acceptance requires real-runtime fixture")
-    need(sys.platform == "darwin" or manifest["proof_kind"] == "harness-self-test", "CLI installed proof requires native Mac")
-    need(manifest["platform"] in ("aarch64-darwin", "x86_64-darwin"), "native Mac fixture platform required")
+    need(sys.platform in ("darwin", "linux") or manifest["proof_kind"] == "harness-self-test", "CLI installed proof requires native Mac or Linux")
+    need(manifest["platform"] in CLI_PLATFORMS, "native Mac or Linux fixture platform required")
     if manifest["proof_kind"] == "real-runtime":
-        need(manifest["platform"] == ("aarch64" if platform.machine() == "arm64" else "x86_64") + "-darwin",
-             "fixture host architecture differs")
+        need(manifest["platform"] == cli_host_platform(), "fixture host architecture differs")
     for binding in (manifest["source"], manifest["old"]["source"], manifest["new"]["source"]):
         need(all(re.fullmatch(r"[0-9a-f]{40}", binding[key]) for key in ("commit", "tree")), "exact source commit/tree required")
     need(manifest["old"]["version"] != manifest["new"]["version"], "different old/new versions required")
@@ -831,7 +859,7 @@ def cli_admit(config, local_rehearsal=None):
             if phase == "wrong-platform":
                 need(selected not in platforms and len(platforms) == 1, "wrong-platform boundary differs")
                 selected = next(iter(platforms))
-                need(selected in ("aarch64-darwin", "x86_64-darwin"), "wrong-platform fixture is not a Mac release")
+                need(selected == cli_other_architecture(manifest["platform"]), "wrong-platform fixture is not the same system's other release")
             declared = platforms[selected][key]
             actual = manifest["files"][publication[key]]
             need(declared["cid"] == actual["cid"] and declared["size"] == actual["bytes"], "release artifact CID/size differs")
@@ -875,7 +903,7 @@ def cli_admit(config, local_rehearsal=None):
         cli_admit_previous(root, manifest, env)
     if manifest["proof_kind"] == "real-runtime":
         for publication in (old, new):
-            cli_macho(cli_path(root, publication["binary"]), manifest["platform"])
+            cli_native_executable(cli_path(root, publication["binary"]), manifest["platform"])
     for owner in ("holder", "consumer"):
         mapping = manifest[owner]["files"]
         need(isinstance(mapping, dict) and mapping, owner + " public file mapping required")
@@ -924,10 +952,18 @@ def cli_admit(config, local_rehearsal=None):
     return manifest
 
 
-def cli_macho(path, release_platform):
+def cli_native_executable(path, release_platform):
     with path.open("rb") as stream:
         header = stream.read(4096)
-    cpu = 0x0100000c if release_platform == "aarch64-darwin" else 0x01000007
+    arch, system = release_platform.split("-")
+    if system == "linux":
+        # ELF64 little-endian executable or position-independent executable for the release machine.
+        machine = 0xb7 if arch == "aarch64" else 0x3e
+        need(len(header) >= 20 and header[:6] == b"\x7fELF\x02\x01"
+             and int.from_bytes(header[16:18], "little") in (2, 3)
+             and int.from_bytes(header[18:20], "little") == machine, "qualified Runtime requires a native ELF executable for its platform")
+        return
+    cpu = 0x0100000c if arch == "aarch64" else 0x01000007
     magic = header[:4]
     if magic in (b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf"):
         endian = "little" if magic[0] == 0xcf else "big"
@@ -1090,7 +1126,7 @@ def cli_build_hop(root, runtime, previous, local_rehearsal=None):
     local_source = cli_local_rehearsal(local_rehearsal) if local_rehearsal is not None else None
     if local_source is None:
         need(os.environ.get("CI") == "true" and os.environ.get("GITHUB_ACTIONS") == "true"
-             and sys.platform == "darwin", "disposable hop build requires native Mac CI")
+             and sys.platform in ("darwin", "linux"), "disposable hop build requires native Mac or Linux CI")
     need(root.is_absolute() and not root.exists() and root.parent.resolve() == root.parent
          and not any(part in ("tmp", "private", "target") for part in root.parts), "fresh stable build root required")
     need(runtime.is_file() and not runtime.is_symlink(), "built Runtime input is unavailable")
@@ -1098,8 +1134,8 @@ def cli_build_hop(root, runtime, previous, local_rehearsal=None):
     need(disk.free >= 4 * 1024**3, "hop rebuild needs more free disk space than the volume has")
     pin = cli_previous_pin()
     published = cli_previous_release(previous / "release.json", pin)
-    release_platform = "aarch64-darwin" if platform.machine() == "arm64" else "x86_64-darwin"
-    need(release_platform in published["platforms"], "previous release has no build for this Mac")
+    release_platform = cli_host_platform()
+    need(release_platform in published["platforms"], "previous release has no build for this host")
     published_binary = previous / "elastos"
     need(published_binary.is_file() and not published_binary.is_symlink()
          and digest(published_binary) == published["platforms"][release_platform]["binary"]["sha256"],
@@ -1111,7 +1147,7 @@ def cli_build_hop(root, runtime, previous, local_rehearsal=None):
     old = root / "elastos-old"
     shutil.copyfile(published_binary, old)
     old.chmod(0o755)
-    cli_macho(old, release_platform)
+    cli_native_executable(old, release_platform)
     processes = CliProcesses(root)
     command = ["cargo", "build", "--locked", "--release", "-p", "elastos-server", "--bin", "elastos"]
     receipt = {"schema": "elastos.update-hop.build/v1", "source": source, "command": command, "status": "failed"}
@@ -1132,7 +1168,7 @@ def cli_build_hop(root, runtime, previous, local_rehearsal=None):
             binary = root / ("elastos-new" if name == "new" else "elastos-system")
             shutil.copyfile(runtime, binary)
             binary.chmod(0o755)
-            cli_macho(binary, release_platform)
+            cli_native_executable(binary, release_platform)
             reply = processes.command([str(binary), "--version"], cli_environment(root), root, name + "-version", timeout=15)
             need(reply["exit"] == 0 and processes.text(name + "-version") == "elastos " + version + "\n"
                  and not processes.text(name + "-version", "stderr")
@@ -1158,8 +1194,8 @@ def cli_home_activation_descriptor(registry, component_platform):
     need(isinstance(descriptor, dict) and isinstance(descriptor.get("platforms"), dict),
          "Home activation binding is absent or invalid")
     platforms = descriptor["platforms"]
-    aliases = {"darwin-arm64": ("aarch64-darwin",), "aarch64-darwin": ("darwin-arm64",)}.get(component_platform, ())
-    selected = next((platforms[key] for key in (component_platform, *aliases, "*") if key in platforms), None)
+    keys = (component_platform, *CLI_PLATFORM_ALIASES.get(component_platform, ()), "*")
+    selected = next((platforms[key] for key in keys if key in platforms), None)
     need(isinstance(selected, dict), "Home activation binding has no valid platform")
     install_path = selected.get("install_path")
     if install_path is None:
@@ -1216,15 +1252,15 @@ def cli_admit_home_support(root, manifest):
          and fixture["entrypoint"] == "capsules/home/browser/index.html", "initial Home fixture differs")
     mapping = manifest["consumer"]["files"]
     native_paths = {"bin/" + name for name in CLI_NATIVE_SETUP}
-    expected = set(cli_setup_files(manifest)) | {"fixture-tools/open"}
+    expected = set(cli_setup_files(manifest)) | {CLI_OPENER}
     need(fixture["files"] == sorted(expected) and native_paths <= expected
-         and "fixture-tools/open" in expected and "capsules/home/capsule.json" in expected and fixture["entrypoint"] in expected,
+         and CLI_OPENER in expected and "capsules/home/capsule.json" in expected and fixture["entrypoint"] in expected,
          "initial Home support closure is incomplete")
     # Without a previous release, one support set persists across the update.
     need("previous" in manifest or all(any(target == path or target.startswith(path + "/") for path in manifest["preserve"]["support"])
                                        for target in native_paths), "initial Home native support preservation is incomplete")
     components = cli_json(cli_path(root, manifest["publications"][manifest.get("support_of", "old")]["components"]))
-    platform_name = "darwin-arm64" if manifest["platform"] == "aarch64-darwin" else "darwin-amd64"
+    platform_name = cli_component_platform(manifest["platform"])
     cli_home_activation_descriptor(components, platform_name)
     entry = cli_capsule_entries(root, manifest, components)["home"]
     need(entry["install_path"] == "capsules/home" and entry["entrypoint"] == "browser/index.html",
@@ -1247,7 +1283,7 @@ def cli_admit_home_support(root, manifest):
              and selected["size"] == native["bytes"]
              and selected.get("install_path", descriptor.get("install_path")) == target
              and native["mode"] & 0o111, "signed native Home support differs from the inventory")
-    opener = manifest["files"][mapping["fixture-tools/open"]]
+    opener = manifest["files"][mapping[CLI_OPENER]]
     need(opener["mode"] == 0o700, "initial Home opener ownership mode differs")
     for target in expected:
         binding = manifest["files"][mapping[target]]
@@ -1275,8 +1311,8 @@ def cli_localhost_metadata_info(descriptor, platform_name):
         return None
     need(isinstance(metadata, dict) and isinstance(metadata.get("platforms"), dict),
          "localhost metadata descriptor is invalid")
-    aliases = {"darwin-arm64": ("aarch64-darwin",), "aarch64-darwin": ("darwin-arm64",)}.get(platform_name, ())
-    selected = next((metadata["platforms"][key] for key in (platform_name, *aliases, "*")
+    keys = (platform_name, *CLI_PLATFORM_ALIASES.get(platform_name, ()), "*")
+    selected = next((metadata["platforms"][key] for key in keys
                      if key in metadata["platforms"]), None)
     need(isinstance(selected, dict)
          and selected.get("install_path", metadata.get("install_path")) == "capsules/localhost-provider"
@@ -1352,7 +1388,7 @@ def cli_support_view(manifest, release):
         shared = {target: relative for target, relative in manifest["consumer"]["files"].items() if target not in setup_files}
         return {**manifest, "support_of": "old", "setup": previous["setup"], "consumer": {"files": {**shared, **previous["support"]}},
                 "qualified_capsules": previous["qualified_capsules"], "publications": {"old": manifest["publications"]["old"]}}
-    return {**manifest, "support_of": "new", "initial_home": {**manifest["initial_home"], "files": sorted({*setup_files, "fixture-tools/open"})},
+    return {**manifest, "support_of": "new", "initial_home": {**manifest["initial_home"], "files": sorted({*setup_files, CLI_OPENER})},
             "publications": {name: value for name, value in manifest["publications"].items() if name != "old"}}
 
 
@@ -1395,13 +1431,13 @@ def cli_admit_previous(root, manifest, env):
              {manifest["files"][manifest["publications"][name]["binary"]]["sha256"] for name in ("old", "new")}
          and system["components"] == new["components"], "System publication is not this source's following release")
     if manifest["proof_kind"] == "real-runtime":
-        cli_macho(cli_path(root, system["binary"]), manifest["platform"])
+        cli_native_executable(cli_path(root, system["binary"]), manifest["platform"])
     need(cli_installer_metadata(cli_path(root, previous["installer"]), env) == [manifest["signer_did"], ""],
          "previous installer signer or blank HEAD_CID differs")
     # Native support is published unpacked, so its signed hash binds the installed bytes;
     # fetch-previous-release checked the archives (Kubo, capsules) by their signed hashes.
     published = cli_json(cli_path(root, previous["published_components"]))
-    platform_name = "darwin-arm64" if manifest["platform"] == "aarch64-darwin" else "darwin-amd64"
+    platform_name = cli_component_platform(manifest["platform"])
     for name in ("ipfs-provider", "localhost-provider", *CLI_PROTECTED_PROVIDERS):
         signed = cli_platform_entry(published["external"][name], platform_name)
         need(manifest["files"][previous["support"]["bin/" + name]]["sha256"] == signed["checksum"].removeprefix("sha256:"),
@@ -1441,7 +1477,7 @@ def cli_admit_setup(root, manifest):
          "setup output inventory is incomplete")
     need(not any(Path(target).name in CLI_HOME_CACHE for target in mapping),
          "setup cache metadata belongs to installed setup")
-    platform_name = "darwin-arm64" if manifest["platform"] == "aarch64-darwin" else "darwin-amd64"
+    platform_name = cli_component_platform(manifest["platform"])
     for publication in manifest["publications"].values():
         components = cli_json(cli_path(root, publication["components"]))
         need(components.get("profiles", {}).get("home", {}).get("components") == list(CLI_SETUP_COMPONENTS),
@@ -1511,7 +1547,7 @@ def cli_verify_setup_support(root, manifest, home_path):
              and stat.S_IMODE(info.st_mode) == binding["mode"],
              "installed setup support differs: " + target)
     components = cli_json(directory / "components.json")
-    platform_name = "darwin-arm64" if manifest["platform"] == "aarch64-darwin" else "darwin-amd64"
+    platform_name = cli_component_platform(manifest["platform"])
 
     def cache_identity(name):
         # Runtime records a capsules-map entry when it has one, else the signed archive (as releases publish).
@@ -1522,7 +1558,6 @@ def cli_verify_setup_support(root, manifest, home_path):
         return selected["cid"], selected["checksum"]
     caches = [("capsules/" + name, cache_identity(name)) for name in CLI_WEB_CAPSULES]
     if "localhost_metadata" in manifest["setup"]:
-        platform_name = "darwin-arm64" if manifest["platform"] == "aarch64-darwin" else "darwin-amd64"
         selected = cli_localhost_metadata_info(components["external"]["localhost-provider"], platform_name)
         caches.append(("capsules/localhost-provider", (selected["cid"], selected["checksum"])))
         folder = directory / "capsules/localhost-provider"
@@ -1681,8 +1716,8 @@ def cli_fetch_previous_release(cache, output, pin_path=None):
          "fresh previous release output required")
     cache.mkdir(mode=0o700, parents=True, exist_ok=True)
     output.mkdir(mode=0o700)
-    component_platform = "darwin-arm64" if platform.machine() == "arm64" else "darwin-amd64"
-    release_platform = "aarch64-darwin" if platform.machine() == "arm64" else "x86_64-darwin"
+    release_platform = cli_host_platform()
+    component_platform = cli_component_platform(release_platform)
     receipt = {"schema": "elastos.update-hop.previous-release-fetch/v1", "pin": pin, "downloaded": [], "cached": []}
 
     def fetch(cid, sha256, size, name):
@@ -1703,7 +1738,7 @@ def cli_fetch_previous_release(cache, output, pin_path=None):
         return target
 
     release = cli_previous_release(fetch(pin["release_cid"], pin["release_sha256"], None, "release.json"), pin)
-    need(release_platform in release["platforms"], "previous release has no build for this Mac")
+    need(release_platform in release["platforms"], "previous release has no build for this host")
     artifacts = release["platforms"][release_platform]
     for key, name in (("binary", "elastos"), ("components", "components.json")):
         fetch(artifacts[key]["cid"], artifacts[key]["sha256"], artifacts[key]["size"], name)
@@ -1770,11 +1805,11 @@ def cli_generate_hop(root, runtime, next_runtime, system_runtime, build_receipt,
     local_source = cli_local_rehearsal(local_rehearsal) if local_rehearsal is not None else None
     if local_source is None:
         need(os.environ.get("CI") == "true" and os.environ.get("GITHUB_ACTIONS") == "true"
-             and sys.platform == "darwin", "disposable refusal generation requires native Mac CI")
+             and sys.platform in ("darwin", "linux"), "disposable refusal generation requires native Mac or Linux CI")
     need(root.is_absolute() and not root.exists() and root.parent.resolve() == root.parent
          and not any(part in ("tmp", "private", "target") for part in root.parts), "fresh stable refusal root required")
-    component_platform = "darwin-arm64" if platform.machine() == "arm64" else "darwin-amd64"
-    release_platform = "aarch64-darwin" if platform.machine() == "arm64" else "x86_64-darwin"
+    release_platform = cli_host_platform()
+    component_platform = cli_component_platform(release_platform)
 
     def qualify(support, metadata_archive):
         """Admit one release's source-Home-shaped support before any signing."""
@@ -2041,7 +2076,7 @@ def cli_generate_hop(root, runtime, next_runtime, system_runtime, build_receipt,
                 binary_binding["sha256"] = manifest["files"][runtime_relative]["sha256"]
             phase_platform = manifest["platform"]
             if phase == "wrong-platform":
-                phase_platform = "x86_64-darwin" if phase_platform == "aarch64-darwin" else "aarch64-darwin"
+                phase_platform = cli_other_architecture(phase_platform)
             version = cli_phase_version(manifest, phase)
             components = old["components"] if phase == "old" else new["components"]
             # Home's System check requires the signed source; the change note lets
@@ -2070,9 +2105,9 @@ def cli_generate_hop(root, runtime, next_runtime, system_runtime, build_receipt,
         manifest["consumer"] = {"files": {"config/fixture.json": add("consumer/config.json", {"owner": "isolated local rehearsal" if local_rehearsal is not None else "isolated CI refusal test"}),
                                            "state/sentinel": add("consumer/state", b"preserve user data"),
                                            "capsules/sentinel/data": add("consumer/support", b"preserve support"),
-                                           "fixture-tools/open": opener, **new["support"]}}
+                                           CLI_OPENER: opener, **new["support"]}}
         # Installs, setup and the initial Home start on the published release.
-        manifest["initial_home"] = {"entrypoint": "capsules/home/browser/index.html", "files": sorted({*old["support"], "fixture-tools/open"})}
+        manifest["initial_home"] = {"entrypoint": "capsules/home/browser/index.html", "files": sorted({*old["support"], CLI_OPENER})}
         # Release support changes with each update; cli_verify_setup_support checks it per release.
         manifest["preserve"] = {"config": ["config"], "data": ["state"], "support": ["capsules/sentinel", "fixture-tools"]}
         if local_rehearsal is not None:
@@ -2755,8 +2790,8 @@ def cli_initial_home(processes, manifest, home_path, evidence=None, publish=None
         cli_port_released(value)
     env = cli_environment(home_path)
     env["ELASTOS_CARRIER_MDNS"] = "0"
-    opener = cli_path(directory, "fixture-tools/open")
-    binding = manifest["files"][manifest["consumer"]["files"]["fixture-tools/open"]]
+    opener = cli_path(directory, CLI_OPENER)
+    binding = manifest["files"][manifest["consumer"]["files"][CLI_OPENER]]
     info = opener.lstat()
     need(digest(opener) == binding["sha256"] and stat.S_ISREG(info.st_mode) and info.st_nlink == 1
          and info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o700, "initial Home opener differs")

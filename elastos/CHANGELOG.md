@@ -60,6 +60,16 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   packages on tags, `main` or dispatch: those unsigned assets were a second
   channel beside the signed Carrier release. CI still packages ARM64 for the
   Jetson compatibility gate. The nine required checks are unchanged.
+- New `update-hop-linux` CI job (not yet required) proves install and update on
+  Linux x86-64 as `source-home-macos` does on Mac: the pinned published release
+  (0.8.0-alpha.8, which carries x86_64-linux artifacts) installs with its own
+  `install.sh`, its System installs this source and Home reconnects, this
+  source's System refuses a tampered offer and applies the next release, the
+  CLI refusals (wrong signers, platform, version, tampered binary) leave Homes
+  unchanged, and `update --rollback-to` undoes the hop. `update-hop-compare.py`
+  runs CLI fixtures natively on Linux (`HOME/.local/share/elastos`, ELF
+  admission, `xdg-open` fixture opener, Runtime's platform aliases). The pinned
+  release cache key now includes the runner OS (#320).
 
 ## [0.8.0-alpha.15]
 

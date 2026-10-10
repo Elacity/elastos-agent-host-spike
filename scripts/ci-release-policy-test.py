@@ -23,7 +23,7 @@ SOURCE = WORKFLOW.read_text()
 CACHE_ACTION = WORKFLOW.parents[1] / "actions/rust-compile-cache/action.yml"
 LOCAL_CACHE_ACTION = "./.github/actions/rust-compile-cache"
 UNIT_CACHE_JOBS = {"lint", "test-elastos", "test-capsules"}
-SOURCE_HOME_CACHE_JOBS = {"source-home-linux", "source-home-linux-arm64", "source-home-macos"}
+SOURCE_HOME_CACHE_JOBS = {"source-home-linux", "source-home-linux-arm64", "source-home-macos", "update-hop-linux"}
 # Read the fixed job/step indentation used here; actionlint checks YAML syntax.
 def jobs(source):
     return dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)",
@@ -1004,7 +1004,7 @@ class ReleasePolicyTests(unittest.TestCase):
         validate_cache_guards(SOURCE)
         caches = [(job, step) for job in JOBS for step in steps(job)
                   if CACHE_RE.search(step) and "type=gha" not in step]
-        self.assertEqual(len(caches), 27)
+        self.assertEqual(len(caches), 33)
         for event, ref, ref_type, override, cached in CASES:
             with self.subTest(event=event, ref=ref, override=override):
                 context = {"github.event_name": event, "github.ref": ref,
@@ -1323,6 +1323,8 @@ class ReleasePolicyTests(unittest.TestCase):
             "source-home-linux-arm64": ("source-home-linux (${{ matrix.check_name || matrix.os }})", "${{ matrix.os }}"),
             "source-home-macos": ("source-home-macos", "macos-14"),
             "cancel-on-failure": ("cancel-on-failure", "ubuntu-24.04"),
+            # Anders decides whether this becomes a required check (#320).
+            "update-hop-linux": ("update-hop-linux", "ubuntu-24.04"),
         }
         self.assertEqual(set(JOBS), set(expected))
         for job, (name, runner) in expected.items():
@@ -1412,7 +1414,7 @@ class ReleasePolicyTests(unittest.TestCase):
         fetch = names.index("name: fetch the pinned published release")
         save = names.index("name: save the pinned published release")
         self.assertEqual((fetch, save, build), (restore + 1, restore + 2, restore + 3))
-        key = "previous-release-${{ hashFiles('scripts/update-hop-previous-release.json') }}"
+        key = "previous-release-${{ runner.os }}-${{ hashFiles('scripts/update-hop-previous-release.json') }}"
         self.assertEqual(field(mac_steps[restore], "key"), key)
         self.assertEqual(field(mac_steps[save], "key"), key)
         for step in (mac_steps[restore], mac_steps[save]):
@@ -1448,6 +1450,34 @@ class ReleasePolicyTests(unittest.TestCase):
         cleanup = mac_steps[names.index("name: remove stopped CI hop fixture files")]
         self.assertIn("get('cleanup', {}).get('passed')", cleanup)
         self.assertIn("shutil.rmtree(root)", cleanup)
+
+    def test_linux_hop_installs_the_pinned_release_and_proves_update_refusals_and_undo(self):
+        linux_steps = steps("update-hop-linux")
+        names = [step.splitlines()[0] for step in linux_steps]
+        order = [names.index("name: " + name) for name in (
+            "source-home into isolated HOME", "prepare installed Home browser", "restore the pinned published release",
+            "fetch the pinned published release", "save the pinned published release", "build two actual Runtime versions",
+            "generate disposable signed install and update fixture",
+            "prove installed Home account and System update with Carrier hop and refusals",
+            "require the update from the published release, no new provider warnings and Undo")]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(order[3:], list(range(order[3], order[3] + 6)))
+        source_home, _, restore, fetch, save, build, generate, prove, verdict = (linux_steps[index] for index in order)
+        key = "previous-release-${{ runner.os }}-${{ hashFiles('scripts/update-hop-previous-release.json') }}"
+        self.assertEqual((field(restore, "key"), field(save, "key")), (key, key))
+        self.assertIn('export XDG_DATA_HOME="${SOURCE_HOME}/.local/share"', source_home)
+        self.assertIn('export ELASTOS_RELEASE_VERSION=', source_home)
+        self.assertIn('--runtime "$CARGO_TARGET_DIR/release/elastos" --previous "$RUNNER_TEMP/previous-release"', build)
+        self.assertIn('--support-home "$RUNNER_TEMP/elastos-source-home/.local/share/elastos"', generate)
+        self.assertIn("ELASTOS_CI_FIXTURE_SCOPE: ci-rehearsal", prove)
+        self.assertIn('ELASTOS_CI_REQUIRE_REAL_RUNTIME: "1"', prove)
+        self.assertIn('update-hop-compare.py check-result "$CI_HOP_ROOT/package/results/result.json"', verdict)
+        for step in (fetch, build, generate, prove, verdict):
+            self.assertNotIn("if:", step)
+            self.assertNotRegex(step, r"FIXTURE_ARTIFACT_ID|GH_TOKEN|inputs\.")
+        upload = linux_steps[names.index("name: retain the safe CI hop receipt")]
+        self.assertIn("if: always()", upload)
+        self.assertIn("name: linux-cli-update-hop-receipt", upload)
 
     def test_engine_cache_has_exact_recipe_key_and_develop_only_writers(self):
         restore, = [step for step in steps("engine-llama-arm64") if "actions/cache/restore@" in step]

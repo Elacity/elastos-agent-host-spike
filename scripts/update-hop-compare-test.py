@@ -928,12 +928,20 @@ class CliFixtureTests(unittest.TestCase):
                                    self.root / self.manifest["publications"]["old"]["head"],
                                    "elastos.release.head.v1", self.manifest["signer_did"], observer.cli_environment(self.root))
         with self.assertRaisesRegex(ValueError, "Mach-O"):
-            observer.cli_macho(self.root / self.manifest["publications"]["old"]["binary"], "aarch64-darwin")
+            observer.cli_native_executable(self.root / self.manifest["publications"]["old"]["binary"], "aarch64-darwin")
         native = self.root / "header-only"
         native.write_bytes(b"\xcf\xfa\xed\xfe" + (0x0100000c).to_bytes(4, "little") + b"\0" * 4 + (2).to_bytes(4, "little") + b"\0" * 16)
-        observer.cli_macho(native, "aarch64-darwin")
+        observer.cli_native_executable(native, "aarch64-darwin")
         with self.assertRaisesRegex(ValueError, "architecture"):
-            observer.cli_macho(native, "x86_64-darwin")
+            observer.cli_native_executable(native, "x86_64-darwin")
+        with self.assertRaisesRegex(ValueError, "ELF"):
+            observer.cli_native_executable(native, "x86_64-linux")
+        elf = self.root / "elf-header-only"
+        elf.write_bytes(b"\x7fELF\x02\x01" + b"\0" * 10 + (3).to_bytes(2, "little") + (0x3e).to_bytes(2, "little") + b"\0" * 44)
+        observer.cli_native_executable(elf, "x86_64-linux")
+        for platform_name, error in (("aarch64-linux", "ELF"), ("x86_64-darwin", "Mach-O")):
+            with self.subTest(platform=platform_name), self.assertRaisesRegex(ValueError, error):
+                observer.cli_native_executable(elf, platform_name)
 
     def test_stamped_real_installer_defaults_are_read_without_execution(self):
         actual = Path(__file__).with_name("install.sh").read_text()
@@ -1137,7 +1145,7 @@ class CliFixtureTests(unittest.TestCase):
         for path in [*(support / "bin" / name for name in observer.CLI_NATIVE_SETUP), *paths]:
             target = path.relative_to(support).as_posix()
             mapping[target] = self.add("setup/" + target, path.read_bytes(), 0o755 if target.startswith("bin/") else 0o600)
-        mapping["fixture-tools/open"] = self.add("setup/opener", b"fixture no-op utility", 0o700)
+        mapping[observer.CLI_OPENER] = self.add("setup/opener", b"fixture no-op utility", 0o700)
         self.manifest["consumer"]["files"].update(mapping)
         for relative in mapping.values():
             self.manifest["holder"]["content"][self.manifest["files"][relative]["cid"]] = relative
@@ -1419,7 +1427,7 @@ class CliFixtureTests(unittest.TestCase):
             code, _, result = self.fake_run()
         self.assertEqual(code, 0, result)
         self.assertIn("state/value", copied)
-        self.assertIn("fixture-tools/open", copied)
+        self.assertIn(observer.CLI_OPENER, copied)
 
     def test_prepare_refuses_setup_support_drift_before_copying_sentinels(self):
         self.setup_fixture()
@@ -1445,7 +1453,7 @@ class CliFixtureTests(unittest.TestCase):
         for path in [*(support / "bin" / name for name in observer.CLI_NATIVE_SETUP), *paths]:
             target = path.relative_to(support).as_posix()
             mapping[target] = self.add("initial/" + target, path.read_bytes(), 0o755 if target.startswith("bin/") else 0o600)
-        mapping["fixture-tools/open"] = self.add("initial/opener", b"fixture no-op utility", 0o700)
+        mapping[observer.CLI_OPENER] = self.add("initial/opener", b"fixture no-op utility", 0o700)
         self.manifest["consumer"]["files"].update(mapping)
         for relative in mapping.values():
             self.manifest["holder"]["content"][self.manifest["files"][relative]["cid"]] = relative
@@ -2104,7 +2112,8 @@ class CliFixtureTests(unittest.TestCase):
             reads.append(path)
             return served[path]
         cache = self.root / "cache"
-        with patch.object(observer, "cli_origin_bytes", side_effect=origin), patch.object(observer.platform, "machine", return_value="arm64"):
+        with patch.object(observer, "cli_origin_bytes", side_effect=origin), patch.object(observer.sys, "platform", "darwin"), \
+             patch.object(observer.platform, "machine", return_value="arm64"):
             for attempt in ("first", "cached"):
                 with self.subTest(attempt=attempt), self.assertRaisesRegex(ValueError, "elastos differs from its signed hash"):
                     observer.cli_fetch_previous_release(cache, self.root / ("fetched-" + attempt))
@@ -2161,7 +2170,7 @@ class CliFixtureTests(unittest.TestCase):
                 observer.cli_check_result(value)
 
     def test_generator_refuses_operator_or_non_ci_signing(self):
-        with patch.dict(observer.os.environ, {"CI": "false", "GITHUB_ACTIONS": "false"}), self.assertRaisesRegex(ValueError, "native Mac CI"):
+        with patch.dict(observer.os.environ, {"CI": "false", "GITHUB_ACTIONS": "false"}), self.assertRaisesRegex(ValueError, "native Mac or Linux CI"):
             observer.cli_generate_hop(self.root / "generated", *(self.root / "missing" for _ in range(4)), self.root, self.root / "missing")
 
     def test_hop_builder_preserves_n_and_compiles_n_plus_one_with_version_input(self):
@@ -2225,13 +2234,13 @@ class CliFixtureTests(unittest.TestCase):
         if local_rehearsal is not None:
             self.assertEqual((receipt["proof_scope"], receipt["reference"]), ("local-rehearsal", local_rehearsal))
 
-    def test_hop_builder_refuses_a_published_runtime_that_differs_from_its_pin_or_this_mac(self):
+    def test_hop_builder_refuses_a_published_runtime_that_differs_from_its_pin_or_this_host(self):
         header = b"\xcf\xfa\xed\xfe" + (0x0100000c).to_bytes(4, "little") + b"\0" * 4 + (2).to_bytes(4, "little") + b"\0" * 16
         published = self.root / "published-runtime"
         published.write_bytes(header + b"published")
         previous, _ = self.previous_release(published)
         for machine, substituted, message in (("arm64", True, "previous release Runtime differs from its signed hash"),
-                                              ("x86_64", False, "previous release has no build for this Mac")):
+                                              ("x86_64", False, "previous release has no build for this host")):
             with self.subTest(machine=machine):
                 (previous / "elastos").write_bytes(header + (b"substituted" if substituted else b"published"))
                 with patch.dict(observer.os.environ, {"CI": "true", "GITHUB_ACTIONS": "true"}), patch.object(observer.sys, "platform", "darwin"), \
