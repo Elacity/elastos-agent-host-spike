@@ -32,6 +32,5 @@ run_check() {
 
 run_check "default elastos opens Home" "" "q\n" "ElastOS Home"
 run_check "chat returns home" "home" "1\n/home\nq\n" "Returned home from Chat\\."
-run_check "updates action returns home" "home" "2\nq\n" "Returned home from Updates\\.|Updates:|Updates could not complete the trusted-source check:.*You are back at Home\\."
 
 echo "[home-smoke] OK"

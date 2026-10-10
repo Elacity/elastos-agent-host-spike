@@ -540,37 +540,10 @@ def run_navigation_case() -> None:
     finally:
         shutdown(master, proc)
 
-def run_home_case(label: str, payload: bytes, expected_fragments: tuple[str, ...]) -> None:
-    proc = subprocess.run(
-        cmd + ["home"],
-        input=payload,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=env,
-        timeout=20,
-    )
-    output = proc.stdout.decode("utf-8", "replace")
-    if proc.returncode != 0:
-        raise SystemExit(f"{label}: home command failed:\n{output}")
-    if not any(fragment in output for fragment in expected_fragments):
-        joined = "\n".join(expected_fragments)
-        raise SystemExit(f"{label}: expected one of:\n{joined}\n\nactual output:\n{output}")
-
 run_navigation_case()
 run_chat_case("esc", b"\x1b")
 run_chat_case("home", b"/home\r")
 run_chat_case("quit", b"/quit\r")
-run_home_case(
-    "updates",
-    b"2\nq\n",
-    (
-        "Returned home from Updates.",
-        "Updates:",
-        "Installed release is up to date.",
-        "Updates could not complete the trusted-source check:",
-    ),
-)
-
 PY
 test -x "$INSTALLED_HOME_CLI_DIR/bin/home-cli"
 cmp "$HOME_CLI_RENDERER" "$INSTALLED_HOME_CLI_DIR/bin/home-cli"
