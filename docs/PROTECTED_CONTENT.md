@@ -205,29 +205,24 @@ owner-only restart receipt.
 Principal-root migration writes encrypted rollback objects bound to the
 principal, root, object URI and recovery data key. Runtime can restore the
 original plaintext during migration recovery. It keeps the rollback payload
-through release recovery and Home acceptance. The installed Home controller
-then removes verified payload files and keeps the migration receipts.
+through release recovery and Home acceptance. Every Home start, local or public
+and whether the installed Home controller, the installer or the owner started
+it, then removes verified payload files and keeps the migration receipts.
 
-For an installed Home started outside the controller, the owner can run:
+Cleanup holds the installation writer lock and verifies the signed installed
+release, exact Home process and generation, host ownership, health response,
+private attach, served Home hash and configured protected roots. An active
+release transaction or migration journal keeps its recovery copies until it
+finishes. A source-home deployment keeps its encrypted copies until the
+installed release acceptance gate passes. Its owner also reconciles the restart
+receipt and payload-free proof directory before the next source-home restart.
 
-```sh
-"$ELASTOS_INSTALLED_RUNTIME" principal-root-cleanup \
-  --data-dir "$ELASTOS_DATA_DIR" \
-  --binary "$ELASTOS_INSTALLED_RUNTIME"
-```
-
-Use absolute paths. Cleanup holds the installation writer lock and verifies the
-signed installed release, exact Home process and generation, host ownership,
-health response, private attach, served Home hash and configured protected
-roots. An active release transaction or migration journal keeps its recovery
-copies. A source-home deployment keeps its encrypted copies until the installed
-release acceptance gate passes. Its owner also reconciles the restart receipt
-and payload-free proof directory before the next source-home restart.
-
-Cleanup also checks older Runtime migration and upgrade directories. It imports
-a legacy plaintext backup only when its committed receipt, object inventory,
-file names, hashes and ownership agree. The owner of an older manual backup
-supplies the original owner-only plan and exact backup directory:
+Cleanup also checks older Runtime migration and upgrade directories under
+`backups/`. It imports a legacy plaintext backup only when its committed
+receipt, object inventory, file names, hashes and ownership agree; a backup
+that fails any of these checks stays in place and is reported on each Home
+start. The owner of such a backup, or of an older manual backup outside
+`backups/`, supplies the original owner-only plan and exact backup directory:
 
 ```sh
 "$ELASTOS_INSTALLED_RUNTIME" principal-root-cleanup \

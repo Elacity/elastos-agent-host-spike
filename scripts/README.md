@@ -438,7 +438,7 @@ sets the protected Ed25519 PEM key path. Use the signer from its installed,
 reviewed path, with a clean environment and its pinned Python:
 
 ```sh
-env -i /path/to/pinned-python -I -S /path/to/installed-release-signer.py \
+env -i GH_TOKEN="$(gh auth token)" /path/to/pinned-python -I -S /path/to/installed-release-signer.py \
   --policy /path/to/operator-policy.json --input-root /path/to/unsigned-input \
   --output-root /path/to/new-signed-set
 ```
@@ -446,6 +446,8 @@ env -i /path/to/pinned-python -I -S /path/to/installed-release-signer.py \
 The tool verifies the pinned remote `develop` head and candidate ancestry for
 canary, or the approved remote version tag and `main` ancestry for the other
 channels. A moved `develop` head requires a fresh operator policy approval.
+GH_TOKEN avoids anonymous API rate limits. A network, outage or rate-limit
+failure refuses with a retry message distinct from a provenance refusal.
 The tool reads candidate files as data and asks the operator to confirm the
 complete public signer DID before signing. It fetches the installer template
 from that approved tree. Its frozen installer keeps `HEAD_CID` empty to avoid

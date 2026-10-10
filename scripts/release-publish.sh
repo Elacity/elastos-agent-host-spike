@@ -231,7 +231,7 @@ policy() {
          openssl: {path: $openssl, sha256: $openssl_sha256}, key_path: $key,
          max_file_bytes: ($sizes | max), max_snapshot_bytes: ($sizes | add)}' > "$work/policy.json"
     echo "Policy: $work/policy.json (sha256 $(sha "$work/policy.json")). Sign, typing the DID when asked:"
-    echo "env -i '$python' -I -S '$signer' --policy '$work/policy.json' --input-root '$input' --output-root '$work/signed'"
+    echo "env -i GH_TOKEN=\"\$(gh auth token)\" '$python' -I -S '$signer' --policy '$work/policy.json' --input-root '$input' --output-root '$work/signed'"
 }
 
 seed() {

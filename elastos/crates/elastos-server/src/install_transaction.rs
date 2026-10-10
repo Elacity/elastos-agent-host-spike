@@ -266,7 +266,10 @@ pub(crate) fn acquire_installed_writer(
     Ok(Some(guard))
 }
 
-fn installed_binary(data_dir: &Path, retained: Option<PathBuf>) -> anyhow::Result<Option<PathBuf>> {
+pub(crate) fn installed_binary(
+    data_dir: &Path,
+    retained: Option<PathBuf>,
+) -> anyhow::Result<Option<PathBuf>> {
     let binary = match retained {
         Some(binary) => binary,
         None => {

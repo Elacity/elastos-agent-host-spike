@@ -202,7 +202,7 @@ The approval has these fields:
 Replace the descriptive values with independently verified identities. Source H
 and builder W are full Git commit/tree IDs and may differ. Approve W's complete
 workflow source, its helper code and pinned actions, rather than just its YAML
-filename. The producer ref is `refs/heads/develop` or `refs/heads/main`. Approve
+filename. The producer ref is `refs/heads/develop`. Approve
 H through the ordinary exact-source CI acceptance flow before preparation.
 The independent source approval is deliberate key-owner trust; direct signer
 calls retain this operator boundary. Prepare and seed-upgrade enforce the CI gate.
@@ -213,7 +213,7 @@ The IPNS field can be empty when the approved delivery uses Carrier alone.
 The installed `gh` executable has a canonical path outside candidate inputs and
 a SHA-256 pin. It supports the attestation verification flags used by the signer.
 
-1. **Build.** Run the `Release package` workflow from the approved builder ref
+1. **Build.** Run the `Release package` workflow from `develop`
    ([`.github/workflows/release-package.yml`](../.github/workflows/release-package.yml))
    with the source commit, the install version N and the update version N+1.
    The source is the approved commit on `develop`. The run builds native pairs for
@@ -250,11 +250,18 @@ a SHA-256 pin. It supports the attestation verification flags used by the signer
 3. **Sign.** `scripts/release-publish.sh policy VERSION SIGNER KEY OPENSSL`
    writes the exact signer policy (with the current `develop` head and the
    independent approval file's path and SHA-256) and prints the `release-signer.py`
-   command. The installed signer verifies W/tree/ref, the GitHub-hosted certificate
+   command. The installed signer verifies W/tree/ref and that W's
+   `release-package.yml` equals `develop`'s, the GitHub-hosted certificate
    identity, event, run and exact proof attempt, then binds each receipt to its
    selected native artifact ID, digest and name suffix and the frozen
-   native bytes. It shows source, builder, publisher tuple and approval digest
+   native bytes. Every published file is attested bytes, except
+   `components-PLATFORM.json`, which must equal the manifest the signer
+   re-derives from the approved source `components.json` and each platform's
+   attested `components.json`. It shows source, builder, publisher tuple and approval digest
    before the operator types the DID. The source admission gate still applies.
+   A network, outage or rate-limit failure refuses with a retry message,
+   distinct from a provenance refusal; the printed command passes the operator's
+   `gh auth token` to avoid anonymous rate limits.
 4. **Import.** `scripts/release-publish.sh seed VERSION SIGNED_DIR` prints the
    seed sequence for the seed's installed Runtime: copy the signed installer
    and manifests, rebuild the rest from the selected CI artifacts, verify every
