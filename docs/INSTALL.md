@@ -46,7 +46,7 @@ terminal open while you use Home; Ctrl+C stops it. With no interactive terminal,
 setup completes and prints the full command for opening Home later. The installer
 uses the installed binary's full path, so editing PATH is optional.
 
-For automated provisioning or a different setup profile, use `--install-only`:
+For automated provisioning, use `--install-only`:
 
 ```bash
 curl -fsSL https://elastos.elacitylabs.com/install.sh | bash -s -- --install-only
@@ -69,13 +69,11 @@ The installer URL bootstraps trust once. Later first-party setup and update
 operations use the trusted Carrier source by default. Users do not manage a
 release-head CID or gateway on the normal path.
 
-The signed manifest determines which setup profiles are available:
-
-- `elastos setup` installs the core Home profile.
-- `elastos setup --profile demo` adds demo Apps and supporting tools.
-- `elastos setup --profile operator` prepares the separate runtime used by
-  `serve`, remote node control, agents, WASM or microVM `run`, and
-  non-interactive capsule work.
+`elastos setup` installs Home: the Runtime, its providers and the Home Apps.
+Components that only some people need, such as the local model engine, arrive
+on demand from the same signed release. The same install also provides the
+separate operator runtime used by `serve`, remote node control, agents, WASM or
+microVM `run`, and non-interactive capsule work.
 
 Data `run` needs no Runtime, and interactive packaged capsules use managed Home.
 Only one live host may own an ElastOS data home at a time. Do not run Home and
@@ -85,9 +83,8 @@ the operator runtime against the same home at the same time. See the
 ### Source checkout note
 
 A clone contains source code and `components.json`. It does not create a
-trusted source relationship. A binary built from the checkout can read its
-setup profiles, but it still needs a trusted source before fetching published
-components.
+trusted source relationship. A binary built from the checkout can read it, but
+it still needs a trusted source before fetching published components.
 
 See [Getting started](GETTING_STARTED.md#source-built-trusted-source-example)
 for an explicit `source add` example. Use the public installer when testing the

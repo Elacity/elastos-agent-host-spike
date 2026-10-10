@@ -314,37 +314,9 @@ async fn run_with_data_dir(
         }
     });
 
-    if profile.is_none() && with.is_empty() {
-        println!(
-            "Using default setup profile: {} (managed Home).",
-            DEFAULT_SETUP_PROFILE
-        );
-        println!("Use `--profile demo` for site/share/browser demo surfaces.");
-        println!("Use `--profile blockchain` for typed chain/wallet/DRM provider development.");
-        println!("Use `--profile operator` for explicit serve/node/run/agent flows.");
+    if selected_profile == Some(DEFAULT_SETUP_PROFILE) {
+        println!("Installing Home.");
         println!();
-    } else if let Some(selected_profile) = selected_profile {
-        match selected_profile {
-            "home" => {
-                println!("Selected profile: home (managed Home)");
-                println!();
-            }
-            "demo" => {
-                println!("Selected profile: demo (Home + site/share/browser demo surfaces)");
-                println!();
-            }
-            "blockchain" => {
-                println!(
-                    "Selected profile: blockchain (typed chain/wallet/DRM provider development)"
-                );
-                println!();
-            }
-            "operator" => {
-                println!("Selected profile: operator (explicit serve/node/run/agent runtime)");
-                println!();
-            }
-            _ => {}
-        }
     }
 
     let mut components = resolve_components(&manifest, selected_profile, &with, &without)?;
@@ -2988,59 +2960,11 @@ fn list_components(manifest: &ComponentsManifest, data_dir: &Path, platform: &st
         }
     }
 
+    let mut profiles: Vec<_> = manifest.profiles.keys().collect();
+    profiles.sort();
     println!();
-    println!("Quick start:");
-    println!("  elastos setup                # default home profile");
-    println!("  elastos setup --profile demo # Home + site/share/browser demo surfaces");
-    println!("  elastos setup --profile blockchain # typed chain/wallet/DRM provider development");
-    println!("  elastos setup --profile operator # explicit serve/node/run/agent runtime");
-    println!();
-    print_profile_section(
-        "Recommended profiles:",
-        manifest,
-        &["home", "demo", "blockchain", "operator"],
-    );
-    print_profile_section(
-        "Advanced profiles:",
-        manifest,
-        &["minimal", "public-gateway", "agent-local-ai", "full"],
-    );
-
-    let listed = [
-        "home",
-        "demo",
-        "blockchain",
-        "operator",
-        "minimal",
-        "public-gateway",
-        "agent-local-ai",
-        "full",
-    ];
-    let mut other_profiles: Vec<_> = manifest
-        .profiles
-        .keys()
-        .filter(|name| !listed.contains(&name.as_str()))
-        .collect();
-    other_profiles.sort();
-    if !other_profiles.is_empty() {
-        println!("Other profiles:");
-        for name in other_profiles {
-            print_profile_line(name, &manifest.profiles[name]);
-        }
-    }
-}
-
-fn print_profile_section(title: &str, manifest: &ComponentsManifest, names: &[&str]) {
-    let present: Vec<_> = names
-        .iter()
-        .copied()
-        .filter(|name| manifest.profiles.contains_key(*name))
-        .collect();
-    if present.is_empty() {
-        return;
-    }
-    println!("{}", title);
-    for name in present {
+    println!("Profiles:");
+    for name in profiles {
         print_profile_line(name, &manifest.profiles[name]);
     }
 }
@@ -4747,7 +4671,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::sources::{save_trusted_sources, TrustedSource, TrustedSourcesConfig};
     use elastos_common::{CapsuleManifest, CapsuleRole};
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
 
     fn replacement_manifest(targets: &[(&str, &str)]) -> ComponentsManifest {
         let external: serde_json::Map<_, _> = targets
@@ -5547,15 +5471,12 @@ pub(crate) mod tests {
             .any(|component| component == "archive-manager"));
         let selected = resolve_components(&manifest, Some("home"), &[], &[]).unwrap();
         assert!(selected.iter().any(|name| name == "model-provider"));
-        // Home lists only installed capsules; each Home profile installs its apps.
-        for profile_name in ["home", "agent-local-ai", "public-gateway", "demo", "full"] {
-            let selected = resolve_components(&manifest, Some(profile_name), &[], &[]).unwrap();
-            for app in ["chat-room", "people", "inbox"] {
-                assert!(
-                    selected.iter().any(|name| name == app),
-                    "{profile_name} must install {app}"
-                );
-            }
+        // Home lists only installed capsules; Home installs its apps.
+        for app in ["chat-room", "people", "inbox"] {
+            assert!(
+                selected.iter().any(|name| name == app),
+                "home must install {app}"
+            );
         }
         assert!(
             !selected.iter().any(|name| name == "llama-server"
@@ -5571,11 +5492,9 @@ pub(crate) mod tests {
         let on_demand =
             resolve_components(&manifest, None, &["llama-server".to_string()], &[]).unwrap();
         assert_eq!(on_demand, ["llama-server"]);
-        for profile_name in ["home", "demo", "agent-local-ai", "public-gateway", "full"] {
-            let profile = manifest
-                .profiles
-                .get(profile_name)
-                .unwrap_or_else(|| panic!("{profile_name} profile is missing"));
+        {
+            let profile_name = "home";
+            let profile = &manifest.profiles[profile_name];
             let has_wallet_or_browser_surface = profile.components.iter().any(|component| {
                 matches!(
                     component.as_str(),
@@ -5608,8 +5527,9 @@ pub(crate) mod tests {
             "marketplace",
             "elacity-player",
         ];
-        for profile_name in ["home", "demo", "agent-local-ai", "public-gateway", "full"] {
-            let profile = &manifest.profiles[profile_name];
+        {
+            let profile = &manifest.profiles["home"];
+            let profile_name = "home";
             for dependency in protected_home_dependencies {
                 assert_eq!(
                     profile
@@ -5622,65 +5542,35 @@ pub(crate) mod tests {
                 );
             }
         }
-        let private_providers = [
-            "protected-content-protect-provider",
-            "media-provider",
+        // Chain/wallet/DRM development providers stay out of Home and remain
+        // reachable only as an explicit developer `--with`.
+        let developer_providers = [
             "custody-provider",
-            "protected-content-decrypt-provider",
-        ];
-        let provisional_providers = [
             "drm-provider",
             "rights-provider",
             "key-provider",
             "decrypt-provider",
         ];
-        for profile_name in ["blockchain", "full"] {
-            let profile = &manifest.profiles[profile_name];
-            for provider in private_providers.into_iter().chain(provisional_providers) {
-                assert_eq!(
-                    profile
-                        .components
-                        .iter()
-                        .filter(|component| component.as_str() == provider)
-                        .count(),
-                    1,
-                    "{profile_name} profile must include {provider} exactly once"
-                );
-            }
-        }
-        let custody_profiles = manifest
-            .profiles
-            .iter()
-            .filter_map(|(name, profile)| {
-                profile
+        for provider in developer_providers {
+            assert!(
+                !manifest.profiles["home"]
                     .components
                     .iter()
-                    .any(|component| component == "custody-provider")
-                    .then_some(name.as_str())
-            })
-            .collect::<BTreeSet<_>>();
-        assert_eq!(custody_profiles, BTreeSet::from(["blockchain", "full"]));
-        let operator_with_custody = resolve_components(
-            &manifest,
-            Some("operator"),
-            &["chain-provider".to_string(), "custody-provider".to_string()],
-            &[],
-        )
-        .unwrap();
+                    .any(|component| component == provider),
+                "home must not install {provider}"
+            );
+        }
+        let with = developer_providers.map(str::to_string);
+        let developer = resolve_components(&manifest, None, &with, &[]).unwrap();
+        assert_eq!(developer, developer_providers);
         assert_eq!(
-            operator_with_custody,
-            [
-                "shell",
-                "localhost-provider",
-                "did-provider",
-                "chain-provider",
-                "custody-provider",
-            ]
+            manifest
+                .profiles
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["home"]
         );
-        assert!(!manifest.profiles.contains_key("chat"));
-        assert!(manifest.profiles.contains_key("blockchain"));
-        assert!(manifest.profiles.contains_key("operator"));
-        assert!(manifest.profiles.contains_key("full"));
     }
 
     #[test]
@@ -5831,27 +5721,12 @@ pub(crate) mod tests {
             );
         }
 
-        for profile in ["agent-local-ai", "full"] {
-            assert!(
-                components
-                    .profiles
-                    .get(profile)
-                    .unwrap()
-                    .components
-                    .iter()
-                    .any(|value| value == "model-provider"),
-                "profile {profile} must install model-provider"
-            );
-        }
         assert!(
-            !components
-                .profiles
-                .get("public-gateway")
-                .unwrap()
+            components.profiles["home"]
                 .components
                 .iter()
                 .any(|value| value == "model-provider"),
-            "public-gateway must not install model-provider"
+            "home must install model-provider"
         );
     }
 
@@ -5882,16 +5757,14 @@ pub(crate) mod tests {
             components["external"]["assistant"]["install_path"],
             "capsules/assistant"
         );
-        for profile in ["home", "demo", "agent-local-ai", "public-gateway", "full"] {
-            assert!(
-                components["profiles"][profile]["components"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|value| value == "assistant"),
-                "profile {profile} must include the Assistant capsule"
-            );
-        }
+        assert!(
+            components["profiles"]["home"]["components"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "assistant"),
+            "home must include the Assistant capsule"
+        );
     }
 
     #[test]
@@ -5959,16 +5832,14 @@ pub(crate) mod tests {
             components["external"]["elacity-player"]["install_path"],
             "capsules/elacity-player"
         );
-        for profile in ["home", "demo", "agent-local-ai", "public-gateway", "full"] {
-            assert!(
-                components["profiles"][profile]["components"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|value| value == "elacity-player"),
-                "profile {profile} must include the Elacity Player capsule"
-            );
-        }
+        assert!(
+            components["profiles"]["home"]["components"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "elacity-player"),
+            "home must include the Elacity Player capsule"
+        );
     }
 
     #[test]
@@ -7850,19 +7721,14 @@ pub(crate) mod tests {
             admit_release_components(&manifest, platform)
                 .unwrap_or_else(|error| panic!("{platform}: {error:#}"));
         }
-        // This release publishes the microVM pieces for no platform: the
-        // profiles that name them still resolve, setup skips them, and Home
-        // never selects them.
+        // This release publishes the microVM pieces for no platform: Home
+        // never selects them and they resolve to no platform artifact.
         let home = resolve_components(&manifest, Some("home"), &[], &[]).unwrap();
         for name in ["crosvm", "vmlinux"] {
             assert!(!home.iter().any(|selected| selected == name));
             for platform in ["darwin-arm64", "linux-amd64", "linux-arm64"] {
                 assert!(resolve_platform_info(&manifest.external[name], platform).is_none());
             }
-        }
-        for profile in ["minimal", "full"] {
-            let selected = resolve_components(&manifest, Some(profile), &[], &[]).unwrap();
-            assert!(selected.iter().any(|name| name == "vmlinux"));
         }
     }
 

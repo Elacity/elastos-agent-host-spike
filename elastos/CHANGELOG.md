@@ -6,7 +6,22 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
-### Fixed
+### Changed
+
+- Setup installs one Home; it no longer prints options for other setups.
+- The terminal Home no longer quits with "403 Forbidden" after the first
+  action; you can run actions one after another.
+- The terminal Home no longer offers the old native Chat, which used a
+  different network from the Chat on the Desktop.
+- People "Message" in the terminal Home no longer opens that old Chat. In the
+  browser terminal it opens Chat on the Desktop at that person's conversation;
+  in a native terminal it says "Open Chat on the Desktop to message <name>."
+- In the terminal Inbox, direct messages and service requests say "Open Inbox
+  on the Desktop to answer this" instead of "no longer available".
+- In the terminal Apps tab, Enter on an app that only opens on the Desktop
+  says "Open <App> on the Desktop" instead of doing nothing.
+- Publishing a document (Documents Publish and `elastos share`) works again:
+  it copied a viewer file from a place the Documents app does not ship (#128).
 
 ### Removed
 
@@ -15,6 +30,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - Protected content is not part of 0.8.0. Elacity Player is no longer listed in
   Apps or search, Library no longer offers "Protect and List…", and Marketplace
   no longer has a Media tab. They return in a later release.
+- `elastos agent`. Its app was retired earlier and the command could not work.
 
 ### Developer detail
 
@@ -47,6 +63,42 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   pending, no dispatch-unavailable reason), which turns back into the
   unavailable phase with Retry after 120 s. `model-selection.js` adds
   `downloadPercent` and `downloadingModel`.
+- `components.json` keeps only the `home` profile; `demo`, `operator`,
+  `blockchain`, `agent-local-ai`, `public-gateway`, `minimal` and `full` are
+  removed. Developer components (GBA, site, tunnel, cloudflared, availability
+  and the DRM, rights, key, decrypt and custody providers) still publish with
+  each release and install with `elastos setup --with <name>`.
+- `--profile`, `--with` and `--without` are hidden from `elastos setup --help`
+  but still accepted; the help no longer names a nonexistent `chat` profile.
+- MyWebSite and Shared leave the home-cli for 0.8.0; `elastos site`, `share`
+  and `shares` stay operator commands. The Rust `demo` publish profile is gone;
+  `scripts/home-demo-local.sh` runs plain `setup`, and the operator smoke and
+  pinned-model proof use `--with`.
+- `elastos update` and System Update stage this profile change normally; only
+  the standalone frozen offline path refuses a `profiles` difference.
+- Home consumes `intent.json` by overwriting it with empty content instead of
+  deleting it; the session holds only read and write capabilities. A
+  regression test runs two intents against a provider that refuses delete.
+- The `chat` core action and `ManagedChat` launch are removed from Home.
+  `elastos chat` is hidden from help and kept only for the native chat smoke
+  scripts. `people-message:` emits a `switch-shell-open-target` host intent for
+  `chat-room` with `{conversation_id}` (the query People sends); the gateway
+  accepts only that bounded query for People hand-offs. Home and home-cli key
+  messaging on the contact's `conversation_id` (the People summary never had
+  `route`), and `run_chat_from_home` is removed.
+- `elastos agent`, `agent_cmd.rs` and the shell's `agent` command request are
+  removed. The `capsule` help, the serve banner, the first-run welcome and the
+  microVM publish hint (no `serve --forward` flag) name commands that exist.
+  `docs/COMMAND_MATRIX.md` drops `chat`, `agent` and seven nonexistent `room`
+  subcommands; GETTING_STARTED no longer suggests `elastos chat`.
+- Share bundles copy the viewer from its manifest `entrypoint`
+  (`browser/index.html` plus its assets) to the bundle root. The entrypoint
+  must be a relative path inside the viewer. Every path component is opened
+  with `openat(O_NOFOLLOW)` from the viewer directory's descriptor, so a
+  symlink anywhere in the copied tree, even one swapped in after listing, is
+  refused; the copy is capped at 256 files and 16 MiB. The Documents
+  publish test installs the real `capsules/documents` layout and checks the
+  published file list.
 
 ## [0.8.0-alpha.14]
 

@@ -25,8 +25,8 @@ NC='\033[0m'
 
 # Default publish scope: runtime core + first-party Home app surface.
 # Wallet/Browser surfaces require chain-provider and wallet-provider authority.
-# Demo-only capsules such as GBA are published by passing an
-# explicit --capsules list or through the Rust `demo` publish profile.
+# Developer-only capsules such as GBA are published by the release asset
+# loop below and installed with `elastos setup --with <name>`.
 # availability-provider, drm-provider, rights-provider, key-provider,
 # decrypt-provider, and tunnel-provider are supported direct command assets
 # outside the default managed Home. Runtime-only protected providers are
