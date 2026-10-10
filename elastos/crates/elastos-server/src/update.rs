@@ -898,7 +898,12 @@ async fn run_update_with_restart(
             };
         }
 
-        resolved.ok_or_else(|| anyhow::anyhow!(crate::carrier::TRUSTED_SOURCE_UNREACHABLE))?
+        // Covers both an unreachable source and one that did not answer in time.
+        resolved.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Could not discover updates: the trusted release source did not answer over Carrier. Check the network (ElastOS needs outgoing UDP to port 4433), then try again."
+            )
+        })?
     };
 
     // 3. Fetch or reuse release-head.json

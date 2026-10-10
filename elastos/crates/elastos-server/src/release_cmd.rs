@@ -197,8 +197,9 @@ mod tests {
             .await
             .unwrap_err();
             if force {
+                // Past the version gate, the only failure left is the unreachable source.
                 assert!(
-                    error.to_string().contains("Could not discover updates."),
+                    error.to_string().contains("outgoing UDP to port 4433"),
                     "{error:#}"
                 );
             } else {
