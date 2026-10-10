@@ -6,6 +6,24 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Fixed
+
+- Home no longer runs out of memory when it starts with Qwen2.5 1.5B on the
+  device. On an 8 GB Linux computer, Home used more than 7 GB within seconds of
+  starting, and the system stopped it.
+- On Linux, a reply right after Get no longer fails with "Not enough free
+  memory" when most of the memory in use is only cached files.
+
+### Developer detail
+
+- Startup Content restore skips Runtime-private `model-preparation`. It
+  re-imports only objects within the 64 MiB JSON import bound, and it hashes
+  them with a streamed reader. Before this, it read each admitted model file
+  whole, then base64-encoded it and copied it through the provider bridge,
+  using about 8 times the file size.
+- model-provider's cgroup v2 memory check subtracts the reclaimable file cache
+  (`active_file + inactive_file` in `memory.stat`) from `memory.current`.
+
 ## [0.8.0-alpha.14]
 
 Test-channel release. Signed releases show these notes in System before you update.

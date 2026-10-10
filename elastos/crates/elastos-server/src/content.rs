@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -107,6 +107,9 @@ const LOCAL_OBJECT_WALK_SKIP: &[&str] = &[
     "logs",
     "bin",
     "managed-runtimes",
+    // Runtime-private model inventory. Model startup verifies admitted
+    // packages with a streamed digest; they are never Content replicas.
+    "model-preparation",
     "target",
     ".git",
 ];
@@ -8854,37 +8857,53 @@ fn walk_local_object_dirs(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
 }
 
 fn local_object_dir_is_complete(dir: &Path) -> bool {
-    let Ok(bytes) = std::fs::read(dir.join(OBJECT_MANIFEST_PATH)) else {
+    let Some((_, manifest)) = local_object_manifest(dir) else {
         return false;
     };
-    let Ok(manifest) = serde_json::from_slice::<ContentObjectManifest>(&bytes) else {
-        return false;
-    };
-    if manifest.schema != OBJECT_MANIFEST_SCHEMA || manifest.files.is_empty() {
-        return false;
-    }
     manifest.files.iter().all(|file| {
-        if validate_content_path(&file.path).is_err() {
-            return false;
-        }
-        let path = dir.join(&file.path);
-        let Ok(bytes) = std::fs::read(&path) else {
-            return false;
-        };
-        bytes.len() as u64 == file.size
-            && format!("{:x}", sha2::Sha256::digest(&bytes)) == file.sha256
+        validate_content_path(&file.path).is_ok()
+            && local_object_file_sha256(&dir.join(&file.path), file.size).as_deref()
+                == Some(file.sha256.as_str())
     })
 }
 
-fn local_object_dir_files(dir: &Path) -> Result<Vec<Value>, ProviderError> {
-    let manifest_path = dir.join(OBJECT_MANIFEST_PATH);
-    let manifest_bytes = std::fs::read(&manifest_path)?;
-    let manifest: ContentObjectManifest =
-        serde_json::from_slice(&manifest_bytes).map_err(|err| {
-            ProviderError::Provider(format!(
-                "content local object manifest decode failed: {err}"
-            ))
+/// Restore imports a local object as base64 JSON through the provider bridge,
+/// which holds several copies of it at once. The manifest plus its declared
+/// files must fit Content's JSON import bound; a larger object is skipped
+/// before any payload byte is read.
+fn local_object_manifest(dir: &Path) -> Option<(Vec<u8>, ContentObjectManifest)> {
+    let bound = IMPORT_EXACT_MAX_BYTES as u64;
+    let mut bytes = Vec::new();
+    std::fs::File::open(dir.join(OBJECT_MANIFEST_PATH))
+        .ok()?
+        .take(bound + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let manifest: ContentObjectManifest = serde_json::from_slice(&bytes).ok()?;
+    let total = manifest
+        .files
+        .iter()
+        .try_fold(bytes.len() as u64, |total, file| {
+            total.checked_add(file.size)
         })?;
+    (manifest.schema == OBJECT_MANIFEST_SCHEMA && !manifest.files.is_empty() && total <= bound)
+        .then_some((bytes, manifest))
+}
+
+/// Streams a file that must be exactly `size` bytes through SHA-256.
+fn local_object_file_sha256(path: &Path, size: u64) -> Option<String> {
+    let mut file = std::fs::File::open(path).ok()?.take(size + 1);
+    let mut digest = sha2::Sha256::new();
+    let read = std::io::copy(&mut file, &mut digest).ok()?;
+    (read == size).then(|| format!("{:x}", digest.finalize()))
+}
+
+fn local_object_dir_files(dir: &Path) -> Result<Vec<Value>, ProviderError> {
+    let (manifest_bytes, manifest) = local_object_manifest(dir).ok_or_else(|| {
+        ProviderError::Provider(
+            "content local object manifest is invalid or exceeds the import bound".into(),
+        )
+    })?;
     let mut files = Vec::with_capacity(manifest.files.len().saturating_add(1));
     for file in &manifest.files {
         if validate_content_path(&file.path).is_err() {
@@ -8893,7 +8912,16 @@ fn local_object_dir_files(dir: &Path) -> Result<Vec<Value>, ProviderError> {
                 file.path
             )));
         }
-        let bytes = std::fs::read(dir.join(&file.path))?;
+        let mut bytes = Vec::with_capacity(file.size as usize);
+        std::fs::File::open(dir.join(&file.path))?
+            .take(file.size + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != file.size {
+            return Err(ProviderError::Provider(format!(
+                "content local object file {} changed size",
+                file.path
+            )));
+        }
         files.push(json!({
             "path": file.path,
             "data": base64::engine::general_purpose::STANDARD.encode(bytes),
