@@ -4977,6 +4977,7 @@ pub fn ensure_recovered_root_reassignable(
     proof_binding_id: &str,
     recovered_principal_id: &str,
     recovered_localhost_root: &str,
+    recovered_data_key_id: &str,
 ) -> anyhow::Result<()> {
     let mut state = load_auth_state(data_dir)?;
     normalize_principal_records(&mut state);
@@ -4985,6 +4986,7 @@ pub fn ensure_recovered_root_reassignable(
         proof_binding_id,
         recovered_principal_id,
         recovered_localhost_root,
+        recovered_data_key_id,
     )?;
     Ok(())
 }
@@ -5041,6 +5043,7 @@ pub fn commit_recovered_root_reassignment(
             &proof_binding_id,
             &recovered_principal_id,
             &recovered_localhost_root,
+            &protection.data_key_id,
         )?;
         if state.sessions.iter().any(|stored| {
             stored.grant.session_id == replacement_grant.session_id
@@ -5086,16 +5089,6 @@ pub fn commit_recovered_root_reassignment(
         principal.role = role;
         principal.updated_at = updated_at;
         let record = principal.clone();
-        if !state.principals.iter().any(|principal| {
-            principal.role == RuntimePrincipalRole::Admin
-                && principal
-                    .proof_binding
-                    .passkey
-                    .as_ref()
-                    .is_some_and(|passkey| passkey.revoked_at.is_none())
-        }) {
-            anyhow::bail!("recovery would leave this Home without an active admin passkey");
-        }
         for stored in &mut state.sessions {
             if stored.grant.proof_binding_id == proof_binding_id
                 || removed_proof_binding_ids
@@ -5195,8 +5188,9 @@ fn validate_recovery_reassignment_audit(
 fn ensure_recovered_root_reassignable_in_state(
     state: &AuthState,
     proof_binding_id: &str,
-    _recovered_principal_id: &str,
-    _recovered_localhost_root: &str,
+    recovered_principal_id: &str,
+    recovered_localhost_root: &str,
+    recovered_data_key_id: &str,
 ) -> anyhow::Result<()> {
     let current = state
         .principals
@@ -5206,6 +5200,56 @@ fn ensure_recovered_root_reassignable_in_state(
     ensure_proof_binding_not_revoked(current)?;
     if current.proof_binding.passkey.is_none() {
         anyhow::bail!("proof binding is not a passkey");
+    }
+    // A Kit's material only proves itself. When this Home already knows the
+    // recovered principal or root, the Kit must unwrap the same data key this
+    // Home stored for it; otherwise anyone who knows a principal id could
+    // fabricate a Kit and take over that principal's records.
+    let known_here = state.principals.iter().any(|principal| {
+        principal.proof_binding_id != proof_binding_id
+            && (principal.principal_id == recovered_principal_id
+                || principal.localhost_root == recovered_localhost_root)
+    }) || state.principal_root_protections.iter().any(|stored| {
+        stored.principal_id == recovered_principal_id
+            || stored.localhost_root == recovered_localhost_root
+    });
+    if known_here
+        && !state.principal_root_protections.iter().any(|stored| {
+            stored.principal_id == recovered_principal_id
+                && stored.localhost_root == recovered_localhost_root
+                && stored.data_key_id == recovered_data_key_id
+        })
+    {
+        anyhow::bail!(
+            "recovery kit does not hold this Home's root key for the recovered principal"
+        );
+    }
+    // The importer becomes Admin when it or any replaced record was Admin
+    // (see commit_recovered_root_reassignment); some active admin must remain.
+    let replaced = |principal: &PrincipalRecord| {
+        principal.proof_binding_id == proof_binding_id
+            || principal.principal_id == recovered_principal_id
+            || principal.localhost_root == recovered_localhost_root
+    };
+    let active_admin = |principal: &PrincipalRecord| {
+        principal.role == RuntimePrincipalRole::Admin
+            && principal
+                .proof_binding
+                .passkey
+                .as_ref()
+                .is_some_and(|passkey| passkey.revoked_at.is_none())
+    };
+    let importer_becomes_admin = state
+        .principals
+        .iter()
+        .any(|principal| replaced(principal) && principal.role == RuntimePrincipalRole::Admin);
+    if !importer_becomes_admin
+        && !state
+            .principals
+            .iter()
+            .any(|principal| !replaced(principal) && active_admin(principal))
+    {
+        anyhow::bail!("recovery would leave this Home without an active admin passkey");
     }
     Ok(())
 }
@@ -9066,6 +9110,44 @@ mod tests {
             active_admin_passkey_principal_count(data_dir.path()).unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn recovered_root_reassignment_refuses_kit_without_this_homes_root_key() {
+        for case in ["wrong-data-key", "no-stored-binding"] {
+            let data_dir = tempfile::tempdir().unwrap();
+            let (mut reassignment, _, _) = recovered_root_reassignment_fixture(data_dir.path());
+            upsert_principal_for_binding_as_role(
+                data_dir.path(),
+                passkey_binding_with_credential("credential-owner", 1, 10, 10),
+                reassignment.recovered_principal_id.clone(),
+                RuntimePrincipalRole::Admin,
+                10,
+            )
+            .unwrap();
+            match case {
+                // A self-consistent Kit for the admin's id, made with another secret.
+                "wrong-data-key" => {
+                    reassignment.protection.data_key_id = "pdek:fabricated".to_string();
+                }
+                // The admin never made a Kit here: nothing to prove against.
+                "no-stored-binding" => mutate_auth_state(data_dir.path(), |state| {
+                    state.principal_root_protections.clear();
+                    Ok(())
+                })
+                .unwrap(),
+                _ => unreachable!(),
+            }
+            let path = auth_state_path(data_dir.path()).unwrap();
+            let before = std::fs::read(&path).unwrap();
+
+            let error = commit_recovered_root_reassignment(data_dir.path(), reassignment)
+                .unwrap_err()
+                .to_string();
+
+            assert!(error.contains("root key"), "{case}: {error}");
+            assert_eq!(std::fs::read(&path).unwrap(), before, "{case}");
+        }
     }
 
     #[test]

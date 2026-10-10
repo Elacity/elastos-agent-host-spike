@@ -11,7 +11,9 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - Importing your Recovery Kit with a new passkey now keeps your admin role.
   Before, an owner who added a guest passkey and imported their Kit stayed a
   guest, and the Home was left with no admin. Recovery now also refuses any
-  import that would leave the Home without an admin passkey.
+  import that would leave the Home without an admin passkey, and any Kit that
+  was not made on this Home for that person: knowing someone's account id is
+  no longer enough to take over their account with a home-made Kit.
 
 - A model download that stopped with "Model content could not be read" now
   continues from where it stopped when you press Retry. Before, Retry started
@@ -27,6 +29,12 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   same auth-state mutation: Admin if the importer or any replaced record of the
   recovered principal or root was Admin, otherwise Guest. The commit fails, with
   auth state unchanged, if no active admin passkey would remain. (#88)
+  Reassignment also requires that, when this Home already knows the recovered
+  principal or root, a stored `principal_root_protections` entry for that exact
+  principal/root has the Kit's `data_key_id` (the Kit unwraps the same data
+  key). The import route checks this before deriving keys, activating
+  protection or creating the recovery archive key, so a refusal writes only
+  the denial audit event.
 
 - Model preparation keeps its stage after any `MetadataRead`, `WeightsRead` or
   `Capacity` failure, not only after a read typed as in transit (`Io`). A part

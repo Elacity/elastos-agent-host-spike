@@ -2501,6 +2501,25 @@ async fn recovery_kit_import_inner(
             "recovered principal root is not canonical for the recovered principal",
         );
     }
+    // Prove the Kit against this Home before any key material or protection
+    // activation is written, so a refused reassignment leaves nothing behind.
+    if input.reassign_to_current_principal {
+        if let Err(err) = crate::auth::ensure_recovered_root_reassignable(
+            &state.data_dir,
+            &principal.proof_binding_id,
+            &kit.principal_id,
+            &kit.localhost_root,
+            &kit.data_key_id,
+        ) {
+            return fail_recovery_kit_request(
+                state,
+                &context,
+                &principal,
+                "auth.recovery_kit.import.rejected",
+                format!("recovery root reassignment failed: {err}"),
+            );
+        }
+    }
     let now = crate::auth::now_ts();
     let candidate_data_key = crate::auth::recovery_kit_data_key(&kit)?;
     let mut protection = protection_from_recovery_kit(
@@ -2549,20 +2568,6 @@ async fn recovery_kit_import_inner(
         protection.protectors.push(protector);
     }
     if input.reassign_to_current_principal {
-        if let Err(err) = crate::auth::ensure_recovered_root_reassignable(
-            &state.data_dir,
-            &principal.proof_binding_id,
-            &kit.principal_id,
-            &kit.localhost_root,
-        ) {
-            return fail_recovery_kit_request(
-                state,
-                &context,
-                &principal,
-                "auth.recovery_kit.import.rejected",
-                format!("recovery root reassignment failed: {err}"),
-            );
-        }
         let proof_binding_id = principal.proof_binding_id.clone();
         let grant = AuthSessionGrantV1 {
             schema: AuthSessionGrantV1::SCHEMA.to_string(),
@@ -7596,6 +7601,19 @@ mod tests {
                 1_800_000_000,
             )
             .unwrap();
+            let archive = crate::auth::recovery_archive_from_kit(temp.path(), &kit).unwrap();
+            crate::auth::store_principal_root_protection(
+                temp.path(),
+                protection_from_recovery_kit(
+                    &kit,
+                    Some("Recovered root"),
+                    RecoveryKitDelivery::HandedToPerson,
+                    1_800_000_000,
+                    Some(archive),
+                )
+                .unwrap(),
+            )
+            .unwrap();
             crate::auth::revoke_passkey_binding(
                 temp.path(),
                 &recovered.proof_binding_id,
@@ -7614,6 +7632,15 @@ mod tests {
             let current_principal = crate::auth::load_principal_for_proof_binding(
                 temp.path(),
                 &current.proof_binding_id,
+            )
+            .unwrap();
+            let protection_before = serde_json::to_value(
+                crate::auth::load_principal_root_protection(
+                    temp.path(),
+                    &kit.principal_id,
+                    &kit.localhost_root,
+                )
+                .unwrap(),
             )
             .unwrap();
             crate::auth::inject_recovery_reassignment_test_fault(temp.path(), fault);
@@ -7659,13 +7686,18 @@ mod tests {
                     && stored.grant.proof_binding_id == current.proof_binding_id
                     && stored.grant.principal_id == recovered_principal.principal_id
             }));
-            assert!(crate::auth::load_principal_root_protection(
-                temp.path(),
-                &kit.principal_id,
-                &kit.localhost_root,
-            )
-            .unwrap()
-            .is_none());
+            assert_eq!(
+                serde_json::to_value(
+                    crate::auth::load_principal_root_protection(
+                        temp.path(),
+                        &kit.principal_id,
+                        &kit.localhost_root,
+                    )
+                    .unwrap()
+                )
+                .unwrap(),
+                protection_before
+            );
         }
     }
 
@@ -7702,6 +7734,19 @@ mod tests {
             &old_principal.localhost_root,
             Some("orphaned root"),
             1_800_000_000,
+        )
+        .unwrap();
+        let archive = crate::auth::recovery_archive_from_kit(temp.path(), &kit).unwrap();
+        crate::auth::store_principal_root_protection(
+            temp.path(),
+            protection_from_recovery_kit(
+                &kit,
+                Some("Orphaned root"),
+                RecoveryKitDelivery::HandedToPerson,
+                1_800_000_000,
+                Some(archive),
+            )
+            .unwrap(),
         )
         .unwrap();
         crate::auth::revoke_passkey_binding(
@@ -7804,6 +7849,20 @@ mod tests {
             1_800_000_000,
         )
         .unwrap();
+        // The admin made this Kit on this Home, so the Home holds its root binding.
+        let archive = crate::auth::recovery_archive_from_kit(temp.path(), &kit).unwrap();
+        crate::auth::store_principal_root_protection(
+            temp.path(),
+            protection_from_recovery_kit(
+                &kit,
+                Some("Admin Kit"),
+                RecoveryKitDelivery::HandedToPerson,
+                1_800_000_000,
+                Some(archive),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         let current = issue_passkey_session_grant(
             &state,
             "identity-test",
@@ -7844,6 +7903,11 @@ mod tests {
                 .unwrap();
         assert_eq!(recovered.principal_id, active_principal.principal_id);
         assert_eq!(recovered.localhost_root, active_principal.localhost_root);
+        assert_eq!(recovered.role, crate::auth::RuntimePrincipalRole::Admin);
+        assert_eq!(
+            crate::auth::active_admin_passkey_principal_count(temp.path()).unwrap(),
+            1
+        );
         assert!(!crate::auth::is_auth_session_active(
             temp.path(),
             &active.session_id,
@@ -7856,6 +7920,119 @@ mod tests {
             crate::auth::now_ts()
         )
         .unwrap());
+    }
+
+    #[tokio::test]
+    async fn recovery_kit_import_refuses_fabricated_kit_for_admin_principal() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_gateway_state(temp.path());
+        seed_test_passkey_principal(
+            &state,
+            &test_credential(),
+            "https://elastos.elacitylabs.com",
+            crate::auth::RuntimePrincipalRole::Admin,
+        );
+        seed_test_passkey_principal(
+            &state,
+            &test_credential_2(),
+            "https://elastos.elacitylabs.com",
+            crate::auth::RuntimePrincipalRole::Guest,
+        );
+        let admin = issue_passkey_session_grant(
+            &state,
+            "identity-test",
+            &test_credential(),
+            "https://elastos.elacitylabs.com",
+            true,
+            "admin passkey grant",
+        )
+        .unwrap();
+        let admin_principal =
+            crate::auth::load_principal_for_proof_binding(temp.path(), &admin.proof_binding_id)
+                .unwrap();
+        let guest = issue_passkey_session_grant(
+            &state,
+            "identity-test",
+            &test_credential_2(),
+            "https://elastos.elacitylabs.com",
+            true,
+            "guest passkey grant",
+        )
+        .unwrap();
+        let guest_principal =
+            crate::auth::load_principal_for_proof_binding(temp.path(), &guest.proof_binding_id)
+                .unwrap();
+        let archive_key_path =
+            elastos_common::localhost::rooted_localhost_fs_path(temp.path(), "ElastOS/System/Auth")
+                .unwrap()
+                .join("recovery-archive.key");
+        // Correct admin id and canonical root, the guest's own secret, no root objects.
+        let fabricated = create_recovery_kit_for_principal(
+            &admin_principal.principal_id,
+            &admin_principal.localhost_root,
+            Some("fabricated"),
+            1_800_000_000,
+        )
+        .unwrap();
+        for stored_binding in [false, true] {
+            if stored_binding {
+                let genuine = create_recovery_kit_for_principal(
+                    &admin_principal.principal_id,
+                    &admin_principal.localhost_root,
+                    Some("genuine"),
+                    1_800_000_000,
+                )
+                .unwrap();
+                let archive =
+                    crate::auth::recovery_archive_from_kit(temp.path(), &genuine).unwrap();
+                crate::auth::store_principal_root_protection(
+                    temp.path(),
+                    protection_from_recovery_kit(
+                        &genuine,
+                        Some("Admin Kit"),
+                        RecoveryKitDelivery::HandedToPerson,
+                        1_800_000_000,
+                        Some(archive),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            }
+            let key_before = std::fs::read(&archive_key_path).ok();
+            let principals_before = serde_json::to_value(
+                crate::auth::load_auth_state(temp.path())
+                    .unwrap()
+                    .principals,
+            )
+            .unwrap();
+
+            let err = recovery_kit_import_inner(
+                &state,
+                &home_token_headers(&guest.home_token),
+                RecoveryKitMaterialImport {
+                    principal_id: guest_principal.principal_id.clone(),
+                    localhost_root: guest_principal.localhost_root.clone(),
+                    reassign_to_current_principal: true,
+                    kit: fabricated.clone(),
+                    did_recovery_proof: None,
+                },
+            )
+            .await
+            .expect_err("a fabricated Kit must not take over the admin");
+
+            assert!(err.to_string().contains("root key"), "{err}");
+            // Only the denial is recorded; no principal, role or key material changes.
+            let after = crate::auth::load_auth_state(temp.path()).unwrap();
+            assert_eq!(
+                serde_json::to_value(&after.principals).unwrap(),
+                principals_before
+            );
+            assert_eq!(
+                after.audit.last().unwrap().event_type,
+                "auth.recovery_kit.import.rejected"
+            );
+            assert_eq!(std::fs::read(&archive_key_path).ok(), key_before);
+        }
     }
 
     #[tokio::test]
