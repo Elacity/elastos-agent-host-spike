@@ -877,16 +877,28 @@ fn manage(
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
         "invalid preparation operation"
     );
+    let find = |state: &PreparationInventory| {
+        state
+            .records
+            .iter()
+            .position(|record| {
+                record.operation_id == operation_id
+                    && record.request_binding.principal == caller.context.principal_id
+            })
+            .context("preparation operation unavailable")
+    };
+    // A read that changes nothing answers from the last saved inventory, so a
+    // running download's lock never makes it wait or fail.
+    if !cancel {
+        let mut saved = storage::saved_inventory(data_dir)?;
+        let index = find(&saved)?;
+        if !saved.expire(now) && !saved.prune_retention() {
+            return Ok(saved.records.swap_remove(index));
+        }
+    }
     let inventory = Inventory::open(data_dir, false)?;
     let mut state = inventory.load()?;
-    let index = state
-        .records
-        .iter()
-        .position(|record| {
-            record.operation_id == operation_id
-                && record.request_binding.principal == caller.context.principal_id
-        })
-        .context("preparation operation unavailable")?;
+    let index = find(&state)?;
     let mut changed = state.expire(now);
     let retiring = state
         .retirement
@@ -1075,8 +1087,7 @@ impl PreparationOwner {
             }
             _ => anyhow::bail!("preparation method unavailable"),
         };
-        let kept = Inventory::open(data_dir, false)?
-            .load()?
+        let kept = storage::saved_inventory(data_dir)?
             .kept(&caller.context.principal_id, &record.package_cid);
         let project = |record: &PreparationRecord| {
             let mut value = record.projection();
@@ -2074,6 +2085,43 @@ async fn unless_cancelled<T>(
 /// many part reads in flight across its package.
 const MODEL_PARTS_IN_FLIGHT: usize = 8;
 
+/// Each progress save fsyncs the inventory under its lock, so the download
+/// saves progress at most once per MiB or once per second, and at the end of
+/// each file. A resume reads completed bytes from the stage on disk, not from
+/// this saved count.
+struct ProgressSaves {
+    written: u64,
+    saved: u64,
+    saved_at: std::time::Instant,
+}
+
+impl ProgressSaves {
+    const BYTES: u64 = 1024 * 1024;
+    const INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+    fn new(written: u64, now: std::time::Instant) -> Self {
+        Self {
+            written,
+            saved: written,
+            saved_at: now,
+        }
+    }
+
+    /// Counts `bytes` written and returns the total to save when one is due.
+    fn written(&mut self, bytes: u64, file_end: bool, now: std::time::Instant) -> Option<u64> {
+        self.written += bytes;
+        if !file_end
+            && self.written - self.saved < Self::BYTES
+            && now.duration_since(self.saved_at) < Self::INTERVAL
+        {
+            return None;
+        }
+        self.saved = self.written;
+        self.saved_at = now;
+        Some(self.written)
+    }
+}
+
 /// Waits before each repeat of a part read that failed in transit. A holder
 /// that stalls once (for example behind its own serialized provider bridge)
 /// must not stop a download that is otherwise progressing.
@@ -2303,6 +2351,7 @@ async fn prepare(
         refused: None,
     });
     let mut requested = record.completed_bytes;
+    let mut progress = ProgressSaves::new(record.completed_bytes, std::time::Instant::now());
     let mut in_flight = VecDeque::with_capacity(MODEL_PARTS_IN_FLIGHT);
     for expected in closure.files.iter().skip(complete) {
         let weights = expected.path == entry.manifest.entrypoint;
@@ -2401,7 +2450,10 @@ async fn prepare(
             file.write_all(&bytes).context(write_phase)?;
             digest.update(&bytes);
             offset += length;
-            update_operation(data_dir, id, |record| record.completed_bytes += length)?;
+            let file_end = offset == expected.size;
+            if let Some(completed) = progress.written(length, file_end, std::time::Instant::now()) {
+                update_operation(data_dir, id, |record| record.completed_bytes = completed)?;
+            }
         }
         file.sync_all().context(if weights {
             PreparationFailurePhase::WeightsSync
@@ -2417,8 +2469,10 @@ async fn prepare(
             })
         );
     }
+    // Admission requires the complete count, so save it with Verifying.
     update_operation(data_dir, id, |record| {
-        record.state = PreparationState::Verifying
+        record.completed_bytes = progress.written;
+        record.state = PreparationState::Verifying;
     })?;
     finish_admission(
         data_dir,
@@ -3026,33 +3080,48 @@ pub(in crate::api) async fn model_runtime_projection(
             context_is_bounded(context) && canonical_cid(cid, 0x70),
             "model selection unavailable"
         );
-        let inventory = Inventory::open(data_dir, false)?;
-        let state = inventory.snapshot()?;
-        let record = state
-            .records
-            .iter()
-            .filter(|r| {
-                r.request_binding.principal == context.principal_id
-                    && r.package_cid == cid
-                    && operation.is_none_or(|id| r.operation_id == id)
-            })
-            .max_by_key(|r| {
-                (
-                    r.state == PreparationState::Admitted,
-                    r.created_at,
-                    &r.operation_id,
-                )
-            });
-        let Some(record) = record else {
+        let select = |state: &PreparationInventory| -> Option<PreparationRecord> {
+            state
+                .records
+                .iter()
+                .filter(|r| {
+                    r.request_binding.principal == context.principal_id
+                        && r.package_cid == cid
+                        && operation.is_none_or(|id| r.operation_id == id)
+                })
+                .max_by_key(|r| {
+                    (
+                        r.state == PreparationState::Admitted,
+                        r.created_at,
+                        &r.operation_id,
+                    )
+                })
+                .cloned()
+        };
+        // Progress comes from the last saved inventory without the lock, so a
+        // running download never makes this read wait. Admitted readiness
+        // checks files and bindings under the lock.
+        let mut state = storage::saved_inventory(data_dir)?;
+        let mut inventory = None;
+        if select(&state).is_some_and(|r| r.state == PreparationState::Admitted) {
+            let locked = Inventory::open(data_dir, false)?;
+            state = locked.snapshot()?;
+            inventory = Some(locked);
+        }
+        let Some(record) = select(&state) else {
             return Ok((unavailable(), None));
         };
+        let record = &record;
         let mut projection = unavailable();
         projection["kept"] = serde_json::json!(state.kept(&context.principal_id, cid));
         projection["preparation"] = record.projection();
         if record.state != PreparationState::Admitted {
             return Ok((projection, None));
         }
-        let stage = inventory.admitted(&record.admission_id)?;
+        let stage = inventory
+            .as_ref()
+            .context("admitted readiness unavailable")?
+            .admitted(&record.admission_id)?;
         stage.check()?;
         projection["admitted"] = serde_json::json!(true);
         if state
@@ -12136,11 +12205,11 @@ server.serve_forever()
             method: &reader_method,
             ..caller
         };
+        // A read answers from state.json and never adopts the uncommitted file.
         assert_eq!(
             manage(root.path(), &reader, &record.operation_id, false, 3).unwrap(),
             record
         );
-        assert!(!root.path().join("model-preparation/state.next").exists());
         let expired = manage(
             root.path(),
             &reader,
@@ -12149,11 +12218,88 @@ server.serve_forever()
             record.expires_at,
         )
         .unwrap();
+        assert!(
+            !root.path().join("model-preparation/state.next").exists(),
+            "the next change discards the uncommitted file"
+        );
         assert_eq!(expired.state, PreparationState::Expired);
         assert_eq!(expired.reserved_bytes, 0);
         assert_eq!(expired.request_binding, record.request_binding);
         let next = reserve_at(root.path(), &caller, "req-2", &cid, record.expires_at).unwrap();
         assert_ne!(next.operation_id, record.operation_id);
+    }
+
+    #[tokio::test]
+    async fn model_preparation_status_reads_progress_while_the_worker_holds_the_lock() {
+        let (root, cid) = fixture();
+        let context = context();
+        let use_method = method("use");
+        let caller = caller(&context, &use_method);
+        let record = reserve_at(root.path(), &caller, "req-1", &cid, 2).unwrap();
+        let progress = record.total_bytes / 2;
+        update_operation(root.path(), &record.operation_id, |record| {
+            record.state = PreparationState::Preparing;
+            record.index_bytes = 512;
+            record.completed_bytes = progress;
+        })
+        .unwrap();
+        let status_method = method("status");
+        let reader = PreparationCaller {
+            method: &status_method,
+            ..caller
+        };
+        // The worker's progress save holds the inventory lock.
+        let held = Inventory::open(root.path(), false).unwrap();
+        let started = std::time::Instant::now();
+        let polled = manage(root.path(), &reader, &record.operation_id, false, 3).unwrap();
+        assert_eq!(
+            (polled.state, polled.completed_bytes),
+            (PreparationState::Preparing, progress)
+        );
+        let projection = model_runtime_projection(
+            root.path(),
+            None,
+            &context,
+            &cid,
+            Some(&record.operation_id),
+        )
+        .await;
+        assert_eq!(projection["preparation"]["completed_bytes"], progress);
+        assert_eq!(projection["preparation"]["state"], "preparing");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "status reads do not wait for the lock"
+        );
+        // A change, such as cancel, still takes the lock.
+        let cancel_method = method("cancel");
+        let canceller = PreparationCaller {
+            method: &cancel_method,
+            ..reader
+        };
+        assert!(manage(root.path(), &canceller, &record.operation_id, true, 3).is_err());
+        drop(held);
+        let cancelled = manage(root.path(), &canceller, &record.operation_id, true, 3).unwrap();
+        assert!(cancelled.cancel_requested);
+    }
+
+    #[test]
+    fn model_preparation_progress_saves_at_most_once_per_mib_or_second() {
+        let start = std::time::Instant::now();
+        let mut progress = ProgressSaves::new(0, start);
+        let package = 4 * 1024 * 1024;
+        let saves: Vec<u64> = (0..package / 65536)
+            .filter_map(|_| progress.written(65536, false, start))
+            .collect();
+        assert_eq!(saves, [1, 2, 3, 4].map(|mib| mib * 1024 * 1024));
+        // A slow download still shows progress about once a second.
+        let later = start + std::time::Duration::from_secs(1);
+        assert_eq!(progress.written(65536, false, later), Some(package + 65536));
+        assert_eq!(progress.written(65536, false, later), None);
+        // Each finished file is saved, so a failure shows its complete files.
+        assert_eq!(
+            progress.written(100, true, later),
+            Some(package + 2 * 65536 + 100)
+        );
     }
 
     #[test]

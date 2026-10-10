@@ -60,7 +60,7 @@ static HOME_TERMINAL_ARCHIVED_REPLAYS: OnceLock<StdMutex<HomeTerminalArchivedRep
 
 // Runtime owns this setting outside the app storage roots. The host CLI owns
 // changes to developer_mode; the gateway reads the value for each request.
-fn home_terminal_policy_allows(data_dir: &FsPath) -> bool {
+pub(super) fn home_terminal_policy_allows(data_dir: &FsPath) -> bool {
     let developer_mode = std::fs::read_to_string(data_dir.join("config.toml"))
         .ok()
         .and_then(|contents| contents.parse::<toml::Table>().ok())

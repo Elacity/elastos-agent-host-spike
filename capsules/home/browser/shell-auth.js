@@ -389,7 +389,8 @@ function renderUnlockMode({ registered, guestRegistrationEnabled }) {
     unlockPersonName.hidden = !unlockPersonLabel;
   }
   if (unlockMonogram) {
-    unlockMonogram.textContent = "e";
+    // The account's initial; the ElastOS "e" only when no name is known.
+    unlockMonogram.textContent = [...unlockPersonLabel.trim()][0]?.toUpperCase() || "e";
   }
   if (unlockPerson) {
     unlockPerson.disabled = unlockMode === "unsupported";

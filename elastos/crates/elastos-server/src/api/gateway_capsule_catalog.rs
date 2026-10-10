@@ -1070,7 +1070,21 @@ mod tests {
             .filter(|capsule| capsule.role == CapsuleRole::Shell && capsule.launchable)
             .map(|capsule| capsule.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(launchable_shells, vec!["home-cli", "home-gui"]);
+        // The browser terminal needs host developer mode, so Terminal is
+        // offered only once it is on.
+        assert_eq!(launchable_shells, vec!["home-gui"]);
+        fs::write(
+            data_dir.path().join("config.toml"),
+            "developer_mode = true\n",
+        )
+        .unwrap();
+        let developer_shells = capsule_catalog_summary(data_dir.path())
+            .capsules
+            .into_iter()
+            .filter(|capsule| capsule.role == CapsuleRole::Shell && capsule.launchable)
+            .map(|capsule| capsule.name)
+            .collect::<Vec<_>>();
+        assert_eq!(developer_shells, vec!["home-cli", "home-gui"]);
         let marketplace = catalog
             .capsules
             .iter()
@@ -1222,6 +1236,11 @@ mod tests {
         let expected = manifest_names
             .intersection(&active_names)
             .copied()
+            // Protected content ships after 0.8.0, so its viewer stays out of Home.
+            .filter(|name| {
+                crate::protected_content_runtime::protected_content_enabled(data_dir.path())
+                    || *name != crate::protected_content_runtime::ELACITY_PLAYER_CAPSULE_ID
+            })
             .collect::<BTreeSet<_>>();
         assert_eq!(catalog_names, expected);
         assert!(!catalog_names.contains("bus-v1-conformance"));
@@ -1267,7 +1286,7 @@ mod tests {
             .filter(|capsule| capsule.role == CapsuleRole::Shell && capsule.launchable)
             .map(|capsule| capsule.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(launchable_shells, vec!["home-cli", "home-gui"]);
+        assert_eq!(launchable_shells, vec!["home-gui"]);
         let home_gui = catalog
             .capsules
             .iter()

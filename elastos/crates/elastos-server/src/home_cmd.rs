@@ -4468,6 +4468,7 @@ mod tests {
                 }]
             })],
         );
+        std::fs::write(data_dir.join("config.toml"), "developer_mode = true\n").unwrap();
         write_home_cmd_active_shell_state(&data_dir, "person:test-home-cli", "home-cli");
 
         let snapshot = gather_snapshot().await.unwrap();

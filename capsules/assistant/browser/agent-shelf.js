@@ -751,20 +751,19 @@ function toggleVoiceDictation() {
   startVoiceDictation();
 }
 
+// Home frames apps without the microphone permission, so dictation can only
+// work where the embedding page grants it.
+function microphoneAllowed() {
+  const policy = document.permissionsPolicy || document.featurePolicy;
+  return policy?.allowsFeature?.("microphone") === true;
+}
+
 function bindVoiceDictation() {
   const btn = micButton();
-  const Ctor = speechRecognitionCtor();
-  if (!btn) {
+  if (!btn || !speechRecognitionCtor() || !microphoneAllowed()) {
     return;
   }
-  if (!Ctor) {
-    btn.disabled = true;
-    btn.setAttribute("aria-disabled", "true");
-    btn.title = "Voice dictation needs speech recognition in this browser";
-    btn.setAttribute("aria-label", "Voice dictation unavailable");
-    btn.dataset.dictationState = "error";
-    return;
-  }
+  btn.hidden = false;
   btn.disabled = false;
   btn.removeAttribute("aria-disabled");
   setDictationState("idle");

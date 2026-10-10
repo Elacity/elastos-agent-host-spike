@@ -8,17 +8,13 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Fixed
 
-- `elastos setup` on a Home that imported media tools before 0.8.0-alpha.9
-  stopped with "supplied media tools differ from the private imported pair".
-  On an installed signed release, setup now fetches and verifies the release's
-  media tools again and replaces the private copy, keeping your media limits.
-  Tools that do not match the signed release, tools given with
-  `--media-tools-dir`, and tools reached through a link are still refused.
-
 ### Removed
 
 - The sign-in screen no longer shows "Use an older security key". To replace a
   passkey, restore your Recovery Kit and create a new one.
+- Protected content is not part of 0.8.0. Elacity Player is no longer listed in
+  Apps or search, Library no longer offers "Protect and List…", and Marketplace
+  no longer has a Media tab. They return in a later release.
 
 ### Developer detail
 
@@ -29,6 +25,28 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - Removed `elastos identity passkey-hint` and the private credential-hint
   sign-in path. Anonymous sign-in options still never list an account's
   credentials.
+- The capsule catalogue marks `home-cli` not launchable unless the host
+  terminal policy allows it (`developer_mode = true` and closed guest
+  registration), so Home view candidates, System and Marketplace follow the same
+  rule; the active-shell summary already repairs a saved shell that is no longer
+  a candidate. Home host also resets a non-launchable saved shell to `home-gui`
+  through `POST /api/apps/home/active-shell`
+  (`scripts/home-shell-unavailable-shell-fallback-smoke.mjs`).
+- `protected_content = true` in the host `config.toml` (`elastos config set
+  protected_content true`; default off) is the one switch for protected content:
+  off, the catalogue drops `elacity-player` and reports
+  `policy.protected_content: false` (Marketplace hides Media), Library objects
+  lack the `protect` capability that "Protect and List…" requires, and
+  `object/publish` with `protection` is refused.
+- `GET /api/wallet/prices` raises the CoinGecko Inbox request only with
+  `request_access=true`, and not within 24 hours of a dismissal or rejection
+  (new `dismissed_at` on Inbox entries). Wallet sends it unless it was preloaded
+  by the rail (`preload=1`); opening the rail sends `elastos:wallet-refresh`,
+  which asks.
+- `model-management.js` adds the `finishing` phase (admitted, activation
+  pending, no dispatch-unavailable reason), which turns back into the
+  unavailable phase with Retry after 120 s. `model-selection.js` adds
+  `downloadPercent` and `downloadingModel`.
 
 ## [0.8.0-alpha.14]
 

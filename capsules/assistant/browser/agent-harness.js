@@ -82,6 +82,7 @@ import {
   selectedLiveOffer,
   liveContentChoice,
   liveContentModels,
+  liveDownloadingModel,
 } from "./agent-live.js";
 import {
   bindAgentSessions,
@@ -712,6 +713,19 @@ function closeModelMenu() {
   if (returnFocus) anchor?.focus({ preventScroll: true });
 }
 
+// While a model downloads, re-read the catalog so the progress stays current.
+const DOWNLOAD_REFRESH_MS = 3000;
+let downloadRefreshTimer = 0;
+function scheduleDownloadRefresh(downloading) {
+  if (!downloading || downloadRefreshTimer) return;
+  downloadRefreshTimer = setTimeout(() => {
+    downloadRefreshTimer = 0;
+    void probeLiveInference({ force: true }).then(() => {
+      if (active) syncModelTrigger();
+    });
+  }, DOWNLOAD_REFRESH_MS);
+}
+
 function syncModelTrigger() {
   syncAgentSendButton();
   const btn = modelBtnEl();
@@ -723,10 +737,13 @@ function syncModelTrigger() {
   const liveInference = getLiveInferenceState();
   const offer = selectedLiveOffer();
   const content = liveContentModels().find(model => model.offerId === offer?.offerId);
-  const label = content?.title || offer?.label || liveInference.model || "No model";
+  const downloading = offer ? null : liveDownloadingModel();
+  const label = content?.title || offer?.label || liveInference.model ||
+    (downloading ? `${downloading.title} is downloading (${downloading.downloadPercent}%)` : "No model");
   if (name) {
     name.textContent = label;
   }
+  scheduleDownloadRefresh(Boolean(downloading));
   if (tier) {
     tier.textContent = "";
     tier.hidden = true;
