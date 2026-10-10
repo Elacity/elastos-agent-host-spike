@@ -264,7 +264,8 @@ export function validateComponents(components, manifests) {
       }
     }
   }
-  same(Object.keys(components.profiles), ["home"], "Setup installs one Home: profiles");
+  // browser-host is the helper set setup adds on supported hosts, not a user profile.
+  same(Object.keys(components.profiles).filter((name) => name !== "browser-host"), ["home"], "Setup installs one Home: profiles");
   const home = components.profiles.home.components;
   for (const name of homeCore) assert(home.includes(name), `home: required component ${name}`);
   for (const name of ["availability-provider", "site-provider", "tunnel-provider", "cloudflared", "drm-provider", "rights-provider", "key-provider", "decrypt-provider", "custody-provider", "gba-emulator", "gba-ucity"]) assert(!home.includes(name), `Home: ${name} is a developer --with component`);

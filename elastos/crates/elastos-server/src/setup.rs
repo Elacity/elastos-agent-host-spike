@@ -3034,6 +3034,10 @@ fn resolve_components(
     let mut components: Vec<String> = if profile_name.is_empty() {
         Vec::new()
     } else {
+        anyhow::ensure!(
+            profile_name != "browser-host",
+            "browser-host is installed automatically"
+        );
         let profile = manifest
             .profiles
             .get(&profile_name)

@@ -204,6 +204,7 @@ for (const [name, mutate, message] of [
   ["default public edge service", (value) => value.profiles.home.components.push("tunnel-provider"), /developer --with component/],
   ["custody in default Home", (value) => value.profiles.home.components.push("custody-provider"), /developer --with component/],
   ["second setup profile", (value) => value.profiles.demo = { components: ["shell"] }, /Setup installs one Home/],
+  ["helper set as a second user profile", (value) => { value.profiles.demo = value.profiles["browser-host"]; delete value.profiles["browser-host"]; }, /Setup installs one Home/],
   ["missing release path", (value) => delete value.external["chain-provider"].platforms["linux-amd64"].release_path, /release path/],
   ["missing archive extraction path", (value) => delete value.external.browser.platforms["*"].extract_path, /archive extraction/],
   ["artifact path traversal", (value) => value.external.browser.platforms["*"].extract_path = "../outside", /safe artifact path/],
