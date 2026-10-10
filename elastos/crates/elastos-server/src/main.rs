@@ -2298,15 +2298,17 @@ pub(crate) async fn create_runtime(
         }
     }
 
-    let (runtime_config, _) = bootstrap::RuntimeConfig::load(&default_data_dir());
+    let data_dir = default_data_dir();
+    let (runtime_config, _) = bootstrap::RuntimeConfig::load(&data_dir);
     let runtime = Runtime::with_providers_and_component(
         storage,
         compute_providers,
         Some(Arc::new(ComponentProvider::new())),
     );
     runtime
-        .configure_signature_verification(
-            &runtime_config.effective_trusted_keys(),
+        .configure_capsule_admission(
+            &data_dir,
+            &runtime_config.trusted_keys,
             runtime_config.dev_mode,
         )
         .await?;

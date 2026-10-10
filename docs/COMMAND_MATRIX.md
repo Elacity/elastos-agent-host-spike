@@ -57,8 +57,9 @@ The host operator controls web terminal access with
 `elastos config set developer_mode true` and
 `elastos config set developer_mode false`. Runtime stores this boolean in
 `config.toml` in its data folder. The default is off. Home and apps use Runtime
-routes and app storage roots; the host CLI owns this setting. The existing
-`dev_mode` setting controls capsule signature checks separately.
+routes and app storage roots; the host CLI owns this setting. The separate
+`dev_mode` setting lets source and CI Homes run unsigned local capsules; an
+installed signed release ignores it.
 
 Runtime refuses all web terminal routes with HTTP 403 while developer mode is
 off or guest registration is enabled. This includes signed-in owners. A refused

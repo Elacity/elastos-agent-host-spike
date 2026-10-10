@@ -6,6 +6,13 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Changed
+
+- An installed Home now runs a local capsule only when it comes from the
+  signed release or is signed by the release publisher. Before, it also ran
+  unsigned capsules from any folder. Homes built from source keep running
+  unsigned capsules. This needs no action after the update.
+
 ### Fixed
 
 - A model download that stopped with "Model content could not be read" now
@@ -18,6 +25,19 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Developer detail
 
+- Capsule admission (`Runtime::configure_capsule_admission`): a Home with an
+  installed signed release ignores `dev_mode` in `config.toml`, trusts the
+  default trusted source's publisher DID keys plus `trusted_keys`, and admits an
+  unsigned capsule only from its release install path when `components.json`
+  matches the signed release and the capsule's `.elastos-cid` and archive
+  receipts match its entry. Capsules carry no release signature, so the signed
+  release's CID admission is the trust root. Other Homes default to
+  `dev_mode = false`; `setup-source-home.sh` and `ci-installed-journeys.py`
+  set `dev_mode = true` explicitly. A first-run `config.toml` no longer writes
+  `dev_mode = true` and `trusted_keys = []`, and strict mode no longer needs a
+  trusted key to start. The updater is the earlier release's code, so the new
+  Runtime applies this on its first start and leaves `config.toml` unchanged;
+  an Undo to an earlier Runtime still finds the setting it started with.
 - Model preparation keeps its stage after any `MetadataRead`, `WeightsRead` or
   `Capacity` failure, not only after a read typed as in transit (`Io`). A part
   that a holder refuses or answers malformed is rejected before it is written,
