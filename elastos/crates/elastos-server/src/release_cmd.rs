@@ -153,10 +153,14 @@ mod tests {
         sources.upsert_source(source);
         save_trusted_sources(fixture.path(), &sources).unwrap();
         // The fixture source has no reachable Carrier publisher; the hint comes first.
-        let error = run_update_command_for_data_dir(fixture.path(), true, None, true, None, false, "0.7.1")
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("elastos update --force"), "{error:#}");
+        let error =
+            run_update_command_for_data_dir(fixture.path(), true, None, true, None, false, "0.7.1")
+                .await
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("elastos update --force"),
+            "{error:#}"
+        );
         let fetch: update::FetchFn = Box::new(|_| panic!("discovery must fail first"));
         for force in [false, true] {
             // release_cmd maps --force to repair_invalid_version.
