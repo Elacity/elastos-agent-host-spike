@@ -95,15 +95,19 @@ The I/O bridge rejects complete request lines above 1 MiB before parsing. The
 old `carrier_bridge.rs` has been removed. This resolved parse-size check does
 not close the read-time framing gap above.
 
-### Carrier peer line reads
+### Carrier and operator peer reads
 
-**Files:** `elastos/crates/elastos-server/src/carrier.rs`
+**Files:** `elastos/crates/elastos-server/src/carrier.rs`, `elastos/crates/elastos-server/src/operator_control.rs`
 **Status:** Fixed
 
-Incoming Carrier requests are read with a 64 KiB line cap and a 10 second
-deadline; longer lines are refused before they are buffered and stalled peers
-are dropped. Peer replies to release-head and control requests are capped at
-1 MiB and the download header wait.
+Lines from peers are read with a size cap and a deadline, and longer lines are
+refused before they are buffered. Incoming Carrier requests allow one provider
+request or one gossip message plus envelope, within 10 seconds. Operator
+requests, read before their signature is checked, allow 64 KiB within 10
+seconds. Replies are capped by what the request can return: a full gossip
+topic for a pull, one importable object for a provider call, update metadata
+for an operator answer. Relays close after five minutes without bytes in
+either direction, and stream acknowledgements have deadlines.
 
 ## Architecture
 

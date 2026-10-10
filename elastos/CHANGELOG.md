@@ -20,8 +20,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 ### Security
 
 - Another computer connecting to yours can no longer tie it up by sending an
-  endless or very slow request. Requests longer than 64 KiB are refused and a
-  request that is not complete within 10 seconds is dropped.
+  endless or very slow request or reply. Oversized messages are refused,
+  requests that do not arrive within 10 seconds are dropped, and a connection
+  passing data through your computer is closed after five minutes with no data
+  in either direction.
 
 ### Fixed
 
@@ -47,11 +49,18 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - `get_runtime_info` in `resource_bridge.rs` (both the local and the attached
   bridge) returns `ELASTOS_VERSION` from `build.rs` instead of
   `CARGO_PKG_VERSION`.
-- `carrier.rs` reads peer lines through `read_peer_line`, which reads through
-  `take(max + 1)` under a timeout: `handle_file_stream` uses 64 KiB / 10 s;
-  `release_head` and the two control-reply reads use 1 MiB /
-  `DOWNLOAD_HEADER_WAIT`. Closes the Carrier half of the SECURITY.md framing
-  item; the I/O bridge half stays open.
+- `carrier.rs` reads peer lines through `read_peer_line` (`take(max + 1)`
+  under a timeout). Caps come from the protocol limits: `handle_file_stream`
+  takes the I/O bridge line limit or one `GOSSIP_WIRE_MESSAGE_MAX_BYTES`
+  message plus 64 KiB of envelope, within 10 s; `gossip_pull` replies take
+  `GOSSIP_TOPIC_BUFFER_MAX_BYTES` plus envelope; open-ended provider replies
+  take one `MAX_CARRIER_OBJECT_IMPORT_BYTES` object as base64 within an hour;
+  bounded reads keep 128 KiB and now also get the route deadline on peer-DID
+  routes. `operator_control.rs` reads requests (before signature checks) at
+  64 KiB / 10 s and replies at 1 MiB / 1 h. Relays in `carrier.rs`,
+  `carrier_engine_media.rs` and `carrier_engine_binding.rs` close after 5 min
+  with no bytes either way (`RelayActivity`), and stream acks have deadlines.
+  The SECURITY.md item for the I/O bridge is still open.
 - Model preparation keeps its stage after any `MetadataRead`, `WeightsRead` or
   `Capacity` failure, not only after a read typed as in transit (`Io`). A part
   that a holder refuses or answers malformed is rejected before it is written,

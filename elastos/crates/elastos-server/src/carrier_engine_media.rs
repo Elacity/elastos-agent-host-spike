@@ -93,7 +93,7 @@ pub(crate) async fn serve(
     source: iroh::PublicKey,
     request: &Value,
     send: &mut iroh::endpoint::SendStream,
-    mut recv: iroh::endpoint::RecvStream,
+    recv: iroh::endpoint::RecvStream,
     buffered: Vec<u8>,
 ) -> Result<()> {
     let admitted = async {
@@ -153,14 +153,16 @@ pub(crate) async fn serve(
     );
     super::write_json_line(send, &json!({"ok":true})).await?;
     target.write_all(&buffered).await?;
-    let (mut read, mut write) = target.into_split();
+    let (read, mut write) = target.into_split();
+    let activity = super::RelayActivity::new();
+    let mut recv = activity.reader(recv);
+    let mut read = activity.reader(read);
     tokio::select! {
         _=async {loop {tokio::time::sleep(Duration::from_millis(100)).await;if retiring.load(Ordering::Acquire){break;}}}=>{},
-        result=async {
+        result=super::relay_until_idle(&activity, async {
             tokio::try_join!(async {tokio::io::copy(&mut recv,&mut write).await?;write.shutdown().await},
-                async {tokio::io::copy(&mut read,&mut *send).await?;Ok::<_,std::io::Error>(())})?;
-            Ok::<_,anyhow::Error>(())
-        }=>{result?;}
+                async {tokio::io::copy(&mut read,&mut *send).await?;Ok::<_,std::io::Error>(())})
+        })=>{result?;}
     }
     send.finish().ok();
     Ok(())
@@ -638,7 +640,12 @@ async fn connect(
                 }
                 WarmPayload::Pending { client, send, recv } => {
                     tracing::info!("browser_media_warm take_pending");
-                    admit_opened_stream(send, recv, client, authority).await?
+                    tokio::time::timeout(
+                        Duration::from_secs(5),
+                        admit_opened_stream(send, recv, client, authority),
+                    )
+                    .await
+                    .context("Engine media acknowledgement deadline")??
                 }
             }
         } else {
@@ -839,9 +846,12 @@ pub(crate) async fn start_ingress(
                             let _slot=slot;
                             disable_media_nagle(&socket)?;
                             let mut remote=connect(&root,&endpoint,&grant,&authority).await?;
-                            let (mut read,mut write)=socket.into_split();
-                            tokio::try_join!(async {tokio::io::copy(&mut read,&mut remote.send).await?;remote.send.finish()?;Ok::<_,anyhow::Error>(())},
-                                async {tokio::io::copy(&mut remote.recv,&mut write).await?;write.shutdown().await?;Ok::<_,anyhow::Error>(())})?;
+                            let (read,mut write)=socket.into_split();
+                            let activity=super::RelayActivity::new();
+                            let mut read=activity.reader(read);
+                            let mut remote_recv=activity.reader(&mut remote.recv);
+                            super::relay_until_idle(&activity,async {tokio::try_join!(async {tokio::io::copy(&mut read,&mut remote.send).await?;remote.send.finish()?;Ok::<_,anyhow::Error>(())},
+                                async {tokio::io::copy(&mut remote_recv,&mut write).await?;write.shutdown().await?;Ok::<_,anyhow::Error>(())})}).await?;
                             Ok::<_,anyhow::Error>(())
                         });
                     },Err(_)=>break,

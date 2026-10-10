@@ -142,16 +142,135 @@ const GOSSIP_CARRIER_PUSH_MAX_TOPIC_LEN: usize = 256;
 // Maximum complete JSON GossipMessage admitted to the iroh-gossip wire.
 const GOSSIP_WIRE_MESSAGE_MAX_BYTES: usize = 192 * 1024;
 const CARRIER_BOUNDED_INVOKE_MAX_RESPONSE_BYTES: u64 = 128 * 1024;
-/// Largest request line a peer may send to the file-stream handler.
-const CARRIER_PEER_LINE_MAX_BYTES: u64 = 64 * 1024;
-/// Largest reply line read back from a peer on control requests.
-const CARRIER_PEER_REPLY_MAX_BYTES: u64 = 1024 * 1024;
-/// How long a peer may take to send one complete line.
+/// Room a peer line needs around its payload: op, topic, invocation fields.
+const CARRIER_PEER_ENVELOPE_BYTES: u64 = 64 * 1024;
+/// Largest provider request a capsule can make: the I/O bridge line limit.
+const CARRIER_PROVIDER_REQUEST_MAX_BYTES: u64 = 1024 * 1024;
+/// Largest request line a peer may send to the file-stream handler. The
+/// biggest requests are a provider invocation and a gossip push of one
+/// complete wire message; both fit with their envelope.
+const CARRIER_PEER_REQUEST_MAX_BYTES: u64 = max_u64(
+    CARRIER_PROVIDER_REQUEST_MAX_BYTES,
+    GOSSIP_WIRE_MESSAGE_MAX_BYTES as u64,
+) + CARRIER_PEER_ENVELOPE_BYTES;
+/// Largest small reply: a release head or a gossip push answer.
+const CARRIER_PEER_SMALL_REPLY_MAX_BYTES: u64 = 1024 * 1024;
+/// Largest gossip pull answer: a whole topic buffer plus its envelope.
+const CARRIER_GOSSIP_PULL_REPLY_MAX_BYTES: u64 =
+    GOSSIP_TOPIC_BUFFER_MAX_BYTES as u64 + CARRIER_PEER_ENVELOPE_BYTES;
+/// Largest open-ended provider answer: one whole importable object as base64,
+/// which also covers a full gossip peek batch.
+const CARRIER_PROVIDER_REPLY_MAX_BYTES: u64 =
+    (MAX_CARRIER_OBJECT_IMPORT_BYTES as u64).div_ceil(3) * 4 + CARRIER_PEER_ENVELOPE_BYTES;
+const _: () = assert!(CARRIER_PROVIDER_REPLY_MAX_BYTES >= GOSSIP_PEEK_MAX_BATCH_BYTES as u64);
+/// How long a peer may take to send one complete request line.
 const CARRIER_PEER_LINE_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 10 });
+/// How long Runtime waits for an open-ended provider answer. Long model runs
+/// answer within the hosted model stream ceiling of an hour.
+const CARRIER_PROVIDER_REPLY_WAIT: Duration = Duration::from_secs(60 * 60);
+
+/// A relay with no bytes in either direction for this long is closed, so a
+/// stalled peer cannot hold its slot and socket. Live media and TURN traffic
+/// refresh it every few seconds.
+pub(crate) const CARRIER_RELAY_IDLE: Duration =
+    Duration::from_secs(if cfg!(test) { 2 } else { 5 * 60 });
+/// How long a peer may take to acknowledge an opened stream.
+const CARRIER_STREAM_ACK_WAIT: Duration = Duration::from_secs(30);
+
+/// Last time any wrapped reader of one relay produced bytes.
+#[derive(Clone)]
+pub(crate) struct RelayActivity {
+    start: std::time::Instant,
+    last_ms: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl RelayActivity {
+    pub(crate) fn new() -> Self {
+        Self {
+            start: std::time::Instant::now(),
+            last_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    /// Wrap one direction's reader so its bytes count as activity.
+    pub(crate) fn reader<R>(&self, inner: R) -> RelayActivityReader<R> {
+        RelayActivityReader {
+            inner,
+            activity: self.clone(),
+        }
+    }
+
+    fn touch(&self) {
+        let now = self.start.elapsed().as_millis() as u64;
+        self.last_ms
+            .store(now, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Resolves once no wrapped reader has produced bytes for `idle`.
+    pub(crate) async fn idle_for(&self, idle: Duration) {
+        loop {
+            let last =
+                Duration::from_millis(self.last_ms.load(std::sync::atomic::Ordering::Relaxed));
+            let quiet = self.start.elapsed().saturating_sub(last);
+            if quiet >= idle {
+                return;
+            }
+            tokio::time::sleep(idle - quiet).await;
+        }
+    }
+}
+
+pub(crate) struct RelayActivityReader<R> {
+    inner: R,
+    activity: RelayActivity,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for RelayActivityReader<R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let poll = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
+        if buf.filled().len() > before {
+            self.activity.touch();
+        }
+        poll
+    }
+}
+
+/// Run a relay until it finishes or goes quiet for [`CARRIER_RELAY_IDLE`].
+pub(crate) async fn relay_until_idle<T, E>(
+    activity: &RelayActivity,
+    relay: impl std::future::Future<Output = std::result::Result<T, E>>,
+) -> Result<T>
+where
+    E: Into<anyhow::Error>,
+{
+    tokio::select! {
+        result = relay => result.map_err(Into::into),
+        () = activity.idle_for(CARRIER_RELAY_IDLE) => {
+            anyhow::bail!("Carrier relay was idle for {CARRIER_RELAY_IDLE:?}")
+        }
+    }
+}
+
+const fn max_u64(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
 
 /// Read one newline-terminated line from a peer, refusing lines longer than
 /// `max` bytes before they are buffered and peers that stall past `wait`.
-async fn read_peer_line<R>(reader: &mut R, max: u64, wait: Duration) -> Result<String>
+pub(crate) async fn read_peer_line<R>(
+    reader: &mut R,
+    max: u64,
+    wait: Duration,
+) -> std::io::Result<String>
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
@@ -160,9 +279,17 @@ where
     let read = tokio::time::timeout(wait, limited.read_line(&mut line))
         .await
         .map_err(|_| {
-            anyhow::anyhow!("Carrier peer did not send a complete line within {wait:?}")
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("Carrier peer did not send a complete line within {wait:?}"),
+            )
         })??;
-    anyhow::ensure!(read as u64 <= max, "Carrier peer line exceeds {max} bytes");
+    if read as u64 > max {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Carrier peer line exceeds {max} bytes"),
+        ));
+    }
     Ok(line)
 }
 const GOSSIP_TOPIC_BUFFER_MAX_BYTES: usize = 12 * 1024 * 1024;
@@ -1697,7 +1824,7 @@ async fn handle_file_stream(
     let mut reader = BufReader::new(recv);
     let line = read_peer_line(
         &mut reader,
-        CARRIER_PEER_LINE_MAX_BYTES,
+        CARRIER_PEER_REQUEST_MAX_BYTES,
         CARRIER_PEER_LINE_WAIT,
     )
     .await?;
@@ -2346,7 +2473,10 @@ async fn bridge_browser_carrier_stream_to_relay(
     )
     .await??;
     relay_stream.write_all(&trusted).await?;
-    let (mut relay_read, mut relay_write) = relay_stream.split();
+    let (relay_read, mut relay_write) = relay_stream.split();
+    let activity = RelayActivity::new();
+    let mut reader = activity.reader(reader);
+    let mut relay_read = activity.reader(relay_read);
     let to_relay = async {
         io::copy(&mut reader, &mut relay_write).await?;
         relay_write.shutdown().await?;
@@ -2357,7 +2487,7 @@ async fn bridge_browser_carrier_stream_to_relay(
         send.finish()?;
         Ok::<_, anyhow::Error>(())
     };
-    tokio::try_join!(to_relay, from_relay)?;
+    relay_until_idle(&activity, async { tokio::try_join!(to_relay, from_relay) }).await?;
     Ok(())
 }
 
@@ -2601,17 +2731,22 @@ async fn write_json_line(
 
 async fn read_browser_carrier_stream_ack(recv: &mut iroh::endpoint::RecvStream) -> Result<()> {
     let mut line = Vec::new();
-    loop {
-        let mut byte = [0_u8; 1];
-        recv.read_exact(&mut byte).await?;
-        line.push(byte[0]);
-        if byte[0] == b'\n' {
-            break;
+    tokio::time::timeout(CARRIER_STREAM_ACK_WAIT, async {
+        loop {
+            let mut byte = [0_u8; 1];
+            recv.read_exact(&mut byte).await?;
+            line.push(byte[0]);
+            if byte[0] == b'\n' {
+                break;
+            }
+            if line.len() > BROWSER_CARRIER_STREAM_ACK_MAX_BYTES {
+                anyhow::bail!("Browser Carrier stream ack is too large");
+            }
         }
-        if line.len() > BROWSER_CARRIER_STREAM_ACK_MAX_BYTES {
-            anyhow::bail!("Browser Carrier stream ack is too large");
-        }
-    }
+        Ok(())
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("Browser Carrier stream ack did not arrive in time"))??;
     let response: serde_json::Value =
         serde_json::from_slice(line.strip_suffix(b"\n").unwrap_or(line.as_slice()))?;
     if response.get("ok").and_then(|value| value.as_bool()) == Some(true) {
@@ -7971,7 +8106,22 @@ impl ProviderCarrierInvoker for CarrierProviderInvoker {
                             "no verified Carrier route to the requested peer".to_string(),
                         )
                     })?;
-                match client.invoke_provider(invocation, request).await {
+                // A bounded Content read carries no effect, so a silent peer
+                // gets the same budget as the connect, as on ticket routes.
+                let bounded = bounded_content_fetch(invocation, &request);
+                let invoke = client.invoke_provider(invocation, request);
+                let result = if bounded {
+                    tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), invoke)
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(anyhow::anyhow!(
+                                "response deadline of {timeout_secs}s passed"
+                            ))
+                        })
+                } else {
+                    invoke.await
+                };
+                match result {
                     Ok(response) => Ok(response),
                     Err(err) => {
                         self.forget_peer(public_key).await;
@@ -8373,7 +8523,7 @@ impl CarrierClient {
         let mut reader = BufReader::new(recv);
         let line = read_peer_line(
             &mut reader,
-            CARRIER_PEER_REPLY_MAX_BYTES,
+            CARRIER_PEER_SMALL_REPLY_MAX_BYTES,
             DOWNLOAD_HEADER_WAIT,
         )
         .await?;
@@ -8499,26 +8649,16 @@ impl CarrierClient {
             .context(CarrierTransportFailure)?;
         send.finish().context(CarrierTransportFailure)?;
 
-        let mut reader = BufReader::new(recv);
-        let mut line = String::new();
-        if bounded {
-            // A bounded read holds at most 64 KiB of base64 plus its envelope;
-            // a holder that sends more is refused before it is buffered.
-            let mut limited = (&mut reader).take(CARRIER_BOUNDED_INVOKE_MAX_RESPONSE_BYTES);
-            limited
-                .read_line(&mut line)
-                .await
-                .map_err(carrier_answer_read_error)?;
-            anyhow::ensure!(
-                line.ends_with('\n'),
-                "bounded Carrier provider response exceeds {CARRIER_BOUNDED_INVOKE_MAX_RESPONSE_BYTES} bytes"
-            );
+        // A bounded read holds at most 64 KiB of base64 plus its envelope;
+        // a holder that sends more is refused before it is buffered.
+        let max = if bounded {
+            CARRIER_BOUNDED_INVOKE_MAX_RESPONSE_BYTES
         } else {
-            reader
-                .read_line(&mut line)
-                .await
-                .map_err(carrier_answer_read_error)?;
-        }
+            CARRIER_PROVIDER_REPLY_MAX_BYTES
+        };
+        let line = read_peer_line(&mut BufReader::new(recv), max, CARRIER_PROVIDER_REPLY_WAIT)
+            .await
+            .map_err(carrier_answer_read_error)?;
         let response: serde_json::Value = serde_json::from_str(line.trim())?;
         carrier_provider_invoke_result(response)
     }
@@ -8558,7 +8698,7 @@ impl CarrierClient {
         let mut reader = BufReader::new(recv);
         let line = read_peer_line(
             &mut reader,
-            CARRIER_PEER_REPLY_MAX_BYTES,
+            CARRIER_PEER_SMALL_REPLY_MAX_BYTES,
             DOWNLOAD_HEADER_WAIT,
         )
         .await?;
@@ -8596,7 +8736,7 @@ impl CarrierClient {
         let mut reader = BufReader::new(recv);
         let line = read_peer_line(
             &mut reader,
-            CARRIER_PEER_REPLY_MAX_BYTES,
+            CARRIER_GOSSIP_PULL_REPLY_MAX_BYTES,
             DOWNLOAD_HEADER_WAIT,
         )
         .await?;
@@ -8751,7 +8891,7 @@ pub(crate) mod tests {
         let mut reader = BufReader::new(reader);
         let err = read_peer_line(
             &mut reader,
-            CARRIER_PEER_LINE_MAX_BYTES,
+            CARRIER_PEER_REQUEST_MAX_BYTES,
             CARRIER_PEER_LINE_WAIT,
         )
         .await
@@ -8766,7 +8906,7 @@ pub(crate) mod tests {
         let mut reader = BufReader::new(reader);
         let err = read_peer_line(
             &mut reader,
-            CARRIER_PEER_LINE_MAX_BYTES,
+            CARRIER_PEER_REQUEST_MAX_BYTES,
             CARRIER_PEER_LINE_WAIT,
         )
         .await
@@ -8782,12 +8922,50 @@ pub(crate) mod tests {
         let mut reader = BufReader::new(reader);
         let line = read_peer_line(
             &mut reader,
-            CARRIER_PEER_LINE_MAX_BYTES,
+            CARRIER_PEER_REQUEST_MAX_BYTES,
             CARRIER_PEER_LINE_WAIT,
         )
         .await
         .unwrap();
         assert_eq!(line, "{\"op\":\"ping\"}\n");
+    }
+
+    #[tokio::test]
+    async fn relay_closes_when_both_directions_go_quiet() {
+        let (_peer, relay_side) = tokio::io::duplex(64);
+        let activity = RelayActivity::new();
+        let mut reader = activity.reader(relay_side);
+        let started = std::time::Instant::now();
+        let err = relay_until_idle(&activity, async {
+            let mut sink = tokio::io::sink();
+            io::copy(&mut reader, &mut sink).await
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("idle"), "{err}");
+        assert!(started.elapsed() >= CARRIER_RELAY_IDLE);
+    }
+
+    #[tokio::test]
+    async fn relay_stays_open_while_one_direction_streams() {
+        let (mut peer, relay_side) = tokio::io::duplex(64);
+        let activity = RelayActivity::new();
+        let mut reader = activity.reader(relay_side);
+        let streaming = tokio::spawn(async move {
+            // Media flowing one way for longer than the idle window.
+            for _ in 0..30 {
+                peer.write_all(b"frame").await.unwrap();
+                tokio::time::sleep(CARRIER_RELAY_IDLE / 10).await;
+            }
+        });
+        let copied = relay_until_idle(&activity, async {
+            let mut sink = tokio::io::sink();
+            io::copy(&mut reader, &mut sink).await
+        })
+        .await
+        .unwrap();
+        assert_eq!(copied, 150);
+        streaming.await.unwrap();
     }
 
     fn overlong_did(did: &str) -> String {
@@ -12326,6 +12504,46 @@ pub(crate) mod tests {
             cut_after >= std::time::Duration::from_secs(1)
                 && cut_after < std::time::Duration::from_millis(2_400),
             "bounded fetch is cut at its budget, before the slow answer: {cut_after:?}"
+        );
+
+        // A peer-DID route keeps the same rule: effects wait, bounded reads are cut.
+        let by_did = |op: &str, request: serde_json::Value, transfer: ProviderTransfer| {
+            let mut invocation = route(op, request, transfer);
+            invocation.transport =
+                ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
+                    peer_did: slow.did.clone(),
+                    timeout_ms: Some(1_000),
+                });
+            invocation
+        };
+        let response = local_registry
+            .invoke_provider(by_did(
+                "import_object",
+                serde_json::json!({"op":"import_object","cid":"bafyfixture"}),
+                ProviderTransfer::Json,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response["data"]["receipt"], "effect-completed",
+            "{response}"
+        );
+        let started = std::time::Instant::now();
+        local_registry
+            .invoke_provider(by_did(
+                "fetch",
+                serde_json::json!({"op":"fetch","cid":"bafyfixture","path":"weights.gguf",
+                    "local_only":true,"bounded_read":true,"range":{"start":0,"end":3},
+                    "transfer":"bytes"}),
+                ProviderTransfer::Bytes,
+            ))
+            .await
+            .unwrap_err();
+        let cut_after = started.elapsed();
+        assert!(
+            cut_after >= std::time::Duration::from_secs(1)
+                && cut_after < std::time::Duration::from_millis(2_400),
+            "peer-DID bounded fetch is cut at its budget: {cut_after:?}"
         );
 
         shutdown_test_carrier_node(slow.node).await;
@@ -17479,6 +17697,52 @@ pub(crate) mod tests {
                 .any(|message| message["content"].as_str() == Some("remote-pushed-message")),
             "Carrier gossip push must insert into the source runtime room buffer"
         );
+
+        shutdown_test_carrier_node(node).await;
+    }
+
+    #[tokio::test]
+    async fn carrier_gossip_largest_push_and_pull_fit_peer_line_caps() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sk, did) = elastos_identity::derive_did(&[34u8; 32]);
+        let node = start_carrier_node(&sk, &did, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let provider = CarrierGossipProvider::new(node.gossip_state.clone());
+        let topic = "__test/largest-push-pull";
+        provider
+            .send_raw(&serde_json::json!({"op": "gossip_join", "topic": topic, "mode": "direct"}))
+            .await
+            .unwrap();
+        let node_addr = wait_for_direct_endpoint_addr(&node.endpoint).await;
+        let client = CarrierClient::connect_endpoint_addr(node_addr, 5)
+            .await
+            .unwrap();
+
+        let largest = gossip_test_message_with_encoded_len(1, GOSSIP_WIRE_MESSAGE_MAX_BYTES);
+        client.push_gossip_message(topic, &largest).await.unwrap();
+
+        // Fill the topic to its byte cap; a pull may return all of it.
+        let retained = {
+            let state = node.gossip_state.lock().await;
+            let mut buffers = state.buffers.lock().await;
+            let buffer = buffers.get_mut(topic).unwrap();
+            let mut index = 2;
+            while buffer.retained_bytes + GOSSIP_WIRE_MESSAGE_MAX_BYTES
+                <= GOSSIP_TOPIC_BUFFER_MAX_BYTES
+            {
+                let next =
+                    gossip_test_message_with_encoded_len(index, GOSSIP_WIRE_MESSAGE_MAX_BYTES);
+                assert!(push_gossip_buffer_message(buffer, next));
+                index += 1;
+            }
+            buffer.messages.len()
+        };
+        let pulled = client.pull_gossip_messages(topic, 512, None).await.unwrap();
+        assert_eq!(pulled.len(), retained);
+        assert!(pulled
+            .iter()
+            .any(|message| message.nonce == largest.nonce && message.content == largest.content));
 
         shutdown_test_carrier_node(node).await;
     }
