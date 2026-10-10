@@ -371,6 +371,7 @@ async fn run_with_data_dir(
         &components,
         &ipfs_gateways,
         media_tools_dir.as_deref(),
+        signed_setup.is_some(),
     )
     .await?;
     if prerequisites_only {
@@ -3109,66 +3110,133 @@ async fn prepare_selected_component_prerequisites(
     components: &[String],
     ipfs_gateways: &[ElastosFetchPath],
     supplied_tools: Option<&Path>,
+    signed_release: bool,
 ) -> anyhow::Result<()> {
+    use crate::protected_content_runtime::{
+        prepare_runtime_media_provider_prerequisite, runtime_media_import_differs, MediaToolsTrust,
+    };
+
     if components.iter().any(|name| name == "media-provider") {
-        let managed_tools;
-        let tools = if let Some(tools) = supplied_tools {
-            tools
-        } else {
-            let name = "media-tools";
-            let component = manifest.external.get(name).ok_or_else(|| {
-                anyhow::anyhow!("Home media-tools component is missing; run the installer again")
-            })?;
-            let info = resolve_platform_info(component, platform).ok_or_else(|| {
-                anyhow::anyhow!("Home media-tools are unavailable for {platform}")
-            })?;
-            if resolve_install_path(component, Some(info)) != Some("tools/media-tools")
-                || info.extract_path.as_deref() != Some("media-tools")
-                || info.strategy.is_some()
-                || info.release_path.as_deref().is_none_or(str::is_empty)
-            {
-                anyhow::bail!("Home media-tools require a managed release archive");
-            }
-            required_release_artifact_checksum(name, info)?;
-            #[cfg(unix)]
-            crate::protected_content_runtime::ensure_media_provider_directory(
+        if let Some(tools) = supplied_tools {
+            // Operator-supplied tools have no signed provenance.
+            return prepare_runtime_media_provider_prerequisite(
                 data_dir,
-                "Runtime data root",
-            )?;
-            #[cfg(unix)]
-            crate::protected_content_runtime::ensure_media_provider_directory(
-                &data_dir.join("tools"),
-                "Runtime managed tools parent",
-            )?;
-            let dest = data_dir.join("tools/media-tools");
-            if !matches!(
-                component_install_state(data_dir, component, Some(info)),
-                InstallState::Installed
-            ) {
-                let url = resolve_component_download_url(info)
-                    .ok_or_else(|| anyhow::anyhow!("Home media-tools release path is missing"))?;
-                download_component(
-                    data_dir,
-                    name,
-                    &url,
-                    info,
-                    &dest,
-                    ipfs_gateways,
-                    FirstPartyCarrierContext::Setup,
-                )
-                .await?;
-                write_cache_metadata(manifest, Some(info), platform, name, &dest)?;
-            }
-            managed_tools = dest.join("bin");
-            &managed_tools
-        };
-        crate::protected_content_runtime::prepare_runtime_media_provider_prerequisite(
-            data_dir, tools,
+                tools,
+                MediaToolsTrust::MustMatch,
+            );
+        }
+        let name = "media-tools";
+        let component = manifest.external.get(name).ok_or_else(|| {
+            anyhow::anyhow!("Home media-tools component is missing; run the installer again")
+        })?;
+        let info = resolve_platform_info(component, platform)
+            .ok_or_else(|| anyhow::anyhow!("Home media-tools are unavailable for {platform}"))?;
+        if resolve_install_path(component, Some(info)) != Some("tools/media-tools")
+            || info.extract_path.as_deref() != Some("media-tools")
+            || info.strategy.is_some()
+            || info.release_path.as_deref().is_none_or(str::is_empty)
+        {
+            anyhow::bail!("Home media-tools require a managed release archive");
+        }
+        required_release_artifact_checksum(name, info)?;
+        #[cfg(unix)]
+        crate::protected_content_runtime::ensure_media_provider_directory(
+            data_dir,
+            "Runtime data root",
         )?;
+        #[cfg(unix)]
+        crate::protected_content_runtime::ensure_media_provider_directory(
+            &data_dir.join("tools"),
+            "Runtime managed tools parent",
+        )?;
+        let dest = data_dir.join("tools/media-tools");
+        if !matches!(
+            component_install_state(data_dir, component, Some(info)),
+            InstallState::Installed
+        ) {
+            let url = resolve_component_download_url(info)
+                .ok_or_else(|| anyhow::anyhow!("Home media-tools release path is missing"))?;
+            download_component(
+                data_dir,
+                name,
+                &url,
+                info,
+                &dest,
+                ipfs_gateways,
+                FirstPartyCarrierContext::Setup,
+            )
+            .await?;
+            write_cache_metadata(manifest, Some(info), platform, name, &dest)?;
+        }
+        // The data root is canonicalized once so a system link in its own prefix
+        // (macOS /var) is allowed; the tools are then opened without following links.
+        let managed_tools = fs::canonicalize(data_dir)?.join("tools/media-tools/bin");
+        // Only the installed signed release may replace a differing private
+        // pair, and only with bytes hashed from an archive verified just now.
+        let trust = if signed_release && runtime_media_import_differs(data_dir, &managed_tools)? {
+            let release_path = info.release_path.as_deref().unwrap_or_default();
+            let cid = info.cid.as_deref().filter(|cid| !cid.is_empty());
+            let archive = fetch_first_party_component_via_carrier(
+                data_dir,
+                cid,
+                release_path,
+                FirstPartyCarrierContext::Setup,
+            )
+            .await?;
+            verify_checksum(name, &archive, info)?;
+            MediaToolsTrust::SignedRelease(signed_media_tool_digests(&archive, "media-tools")?)
+        } else {
+            MediaToolsTrust::MustMatch
+        };
+        prepare_runtime_media_provider_prerequisite(data_dir, &managed_tools, trust)?;
     } else if supplied_tools.is_some() {
         anyhow::bail!("--media-tools-dir requires media-provider selection");
     }
     Ok(())
+}
+
+/// SHA-256 of `bin/ffmpeg` and `bin/ffprobe` under `extract_path` in a verified
+/// media-tools archive. Each must appear exactly once as a regular file.
+fn signed_media_tool_digests(
+    archive: &[u8],
+    extract_path: &str,
+) -> anyhow::Result<crate::protected_content_runtime::SignedMediaToolDigests> {
+    use sha2::Digest as _;
+
+    const MAX_TOOL_BYTES: u64 = 512 << 20;
+    let mut ffmpeg = None;
+    let mut ffprobe = None;
+    let mut entries = tar::Archive::new(flate2::read::GzDecoder::new(archive));
+    for entry in entries.entries()? {
+        let entry = entry?;
+        let path = entry.path()?.into_owned();
+        let path = path.strip_prefix(".").unwrap_or(&path);
+        let slot = if path == Path::new(extract_path).join("bin/ffmpeg") {
+            &mut ffmpeg
+        } else if path == Path::new(extract_path).join("bin/ffprobe") {
+            &mut ffprobe
+        } else {
+            continue;
+        };
+        anyhow::ensure!(
+            entry.header().entry_type().is_file() && slot.is_none(),
+            "signed media-tools archive has an unexpected {}",
+            path.display()
+        );
+        let mut hasher = sha2::Sha256::new();
+        let copied = std::io::copy(&mut entry.take(MAX_TOOL_BYTES + 1), &mut hasher)?;
+        anyhow::ensure!(
+            copied <= MAX_TOOL_BYTES,
+            "signed media-tools archive entry is too large"
+        );
+        *slot = Some(<[u8; 32]>::from(hasher.finalize()));
+    }
+    match (ffmpeg, ffprobe) {
+        (Some(ffmpeg), Some(ffprobe)) => {
+            Ok(crate::protected_content_runtime::SignedMediaToolDigests { ffmpeg, ffprobe })
+        }
+        _ => anyhow::bail!("signed media-tools archive lacks ffmpeg or ffprobe"),
+    }
 }
 
 // ── Elastos fetch-path resolution ──────────────────────────────────
@@ -4976,6 +5044,7 @@ pub(crate) mod tests {
             &["shell".to_string()],
             &[],
             None,
+            false,
         )
         .await
         .unwrap();
@@ -5099,6 +5168,7 @@ pub(crate) mod tests {
             &selected,
             &[],
             None,
+            false,
         )
         .await
         .unwrap_err();
@@ -5123,6 +5193,7 @@ pub(crate) mod tests {
             &selected,
             &[],
             None,
+            false,
         )
         .await
         .unwrap_err();
@@ -5145,6 +5216,7 @@ pub(crate) mod tests {
             &selected,
             &[],
             None,
+            false,
         )
         .await
         .is_err());
@@ -5204,6 +5276,7 @@ pub(crate) mod tests {
             &selected,
             &[],
             None,
+            false,
         )
         .await
         .unwrap_err();
@@ -5283,6 +5356,42 @@ pub(crate) mod tests {
         assert_eq!(
             fs::read(data.join("bin/effect")).unwrap(),
             b"other component"
+        );
+
+        // The verified archive yields the digests a signed upgrade must match.
+        let digests = signed_media_tool_digests(&archive_bytes, "media-tools").unwrap();
+        assert_eq!(
+            digests.ffmpeg,
+            <[u8; 32]>::from(sha2::Sha256::digest(b"ffmpeg"))
+        );
+        assert_eq!(
+            digests.ffprobe,
+            <[u8; 32]>::from(sha2::Sha256::digest(b"ffprobe"))
+        );
+
+        // Without an installed signed release, differing managed tools stay strict.
+        fs::set_permissions(dest.join("bin/ffprobe"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(dest.join("bin/ffprobe"), b"altered ffprobe").unwrap();
+        let error = prepare_selected_component_prerequisites(
+            &data,
+            &manifest,
+            &platform,
+            &selected,
+            &[],
+            None,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("differ from the private imported pair"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(data.join("protected-content/media-provider/tools/ffprobe")).unwrap(),
+            b"ffprobe"
         );
     }
 
