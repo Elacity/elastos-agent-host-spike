@@ -480,18 +480,18 @@ enum Commands {
         publish: Option<PathBuf>,
     },
 
-    /// Install the default runtime profile or an explicit setup profile
+    /// Install Home
     Setup {
-        /// Profile name. Default is `home`. Use `demo` for extras, `chat` for full-screen chat, or `blockchain` for chain/wallet provider development.
-        #[arg(long)]
+        /// Developer: install a named components.json profile instead of `home`
+        #[arg(long, hide = true)]
         profile: Option<String>,
 
-        /// Additional components to install (comma-separated)
-        #[arg(long, value_delimiter = ',')]
+        /// Developer: additional components to install (comma-separated)
+        #[arg(long, hide = true, value_delimiter = ',')]
         with: Vec<String>,
 
-        /// Components to exclude (comma-separated)
-        #[arg(long, value_delimiter = ',')]
+        /// Developer: components to exclude (comma-separated)
+        #[arg(long, hide = true, value_delimiter = ',')]
         without: Vec<String>,
 
         /// List available components and profiles

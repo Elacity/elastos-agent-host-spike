@@ -312,12 +312,6 @@ fn action_state_label(action: Option<&ActionInfo>) -> String {
     }
 }
 
-fn next_step_command(reason: &str) -> Option<&str> {
-    reason
-        .split_once("run: ")
-        .map(|(_, command)| command.trim())
-}
-
 fn render_home_actions(
     snapshot: &HomeSnapshot,
     indices: &[usize],
@@ -327,7 +321,7 @@ fn render_home_actions(
     let mut lines = Vec::new();
     for (slot, action_idx) in indices.iter().take(5).enumerate() {
         let action = &snapshot.actions[*action_idx];
-        let state = home_action_state(action, snapshot);
+        let state = home_action_state(action);
         let summary = home_action_summary(action);
         let label = action_display_label(action);
         lines.push(format!(
@@ -348,28 +342,11 @@ fn render_home_actions(
     lines
 }
 
-fn home_action_state<'a>(action: &'a ActionInfo, snapshot: &HomeSnapshot) -> &'a str {
-    match action.id.as_str() {
-        "site-local" => {
-            if snapshot.site.local_url.is_some() {
-                "preview"
-            } else if snapshot.site.staged && !action.ready {
-                "staged"
-            } else if !snapshot.site.staged {
-                "empty"
-            } else if action.ready {
-                "ready"
-            } else {
-                "setup"
-            }
-        }
-        _ => {
-            if action.ready {
-                "ready"
-            } else {
-                "setup"
-            }
-        }
+fn home_action_state(action: &ActionInfo) -> &'static str {
+    if action.ready {
+        "ready"
+    } else {
+        "setup"
     }
 }
 
@@ -379,10 +356,6 @@ fn home_action_summary(action: &ActionInfo) -> &str {
         "room-approve" => "Approve the next pending Chat web guest request",
         "room-deny" => "Deny the next pending Chat web guest request",
         "room-revoke-all" => "Disconnect active Chat web guest sessions",
-        "site-local" => "Start or reuse the local MyWebSite preview",
-        "site-ephemeral" => "Publish a temporary public HTTPS URL for MyWebSite",
-        "site-open" => "Open the MyWebSite preview in a browser",
-        "shares-list" => "Review shared channels, open links, and next steps",
         _ => action.description.as_str(),
     }
 }
@@ -393,10 +366,6 @@ fn action_display_label(action: &ActionInfo) -> &str {
         "room-approve" => "Approve access",
         "room-deny" => "Deny access",
         "room-revoke-all" => "Disconnect browsers",
-        "site-local" => "Preview",
-        "site-ephemeral" => "Publish",
-        "site-open" => "Open",
-        "shares-list" => "Shared",
         _ => action.label.as_str(),
     }
 }
@@ -414,12 +383,6 @@ fn alerts_lines(snapshot: &HomeSnapshot, width: usize, notice: Option<&str>) -> 
     if snapshot.did.is_none() {
         alerts.push(
             "Identity is not initialized yet. Run elastos setup to create the local DID."
-                .to_string(),
-        );
-    }
-    if site_workflow_started(snapshot) && !snapshot.site.staged {
-        alerts.push(
-            "MyWebSite is empty. Stage a local directory with `elastos site stage <dir>`."
                 .to_string(),
         );
     }
@@ -473,11 +436,6 @@ fn home_next_step(snapshot: &HomeSnapshot, notice: Option<&str>) -> Option<Strin
             "Use Disconnect browsers when the shared Chat session should end.".to_string(),
         );
     }
-    if site_workflow_started(snapshot) && !snapshot.site.staged {
-        return Some(
-            "Run `mywebsite stage <dir>` when you are ready to publish a site.".to_string(),
-        );
-    }
     if quick_launch_action_indices(snapshot).is_empty() {
         return Some("Use Tab to choose Inbox, People, Apps, or System.".to_string());
     }
@@ -493,15 +451,6 @@ fn first_blocked_home_action(snapshot: &HomeSnapshot) -> Option<&ActionInfo> {
     })
 }
 
-fn site_workflow_started(snapshot: &HomeSnapshot) -> bool {
-    snapshot.site.staged
-        || snapshot.site.local_url.is_some()
-        || snapshot.site.active_release.is_some()
-        || snapshot.site.active_channel.is_some()
-        || snapshot.site.active_bundle_cid.is_some()
-        || snapshot.site.release_count > 0
-}
-
 fn notice_covers_alert(notice: &str, alert: &str) -> bool {
     if notice.is_empty() {
         return false;
@@ -510,10 +459,7 @@ fn notice_covers_alert(notice: &str, alert: &str) -> bool {
     let notice = notice.trim();
     let alert = alert.trim();
 
-    notice == alert
-        || notice.starts_with(alert)
-        || alert.starts_with(notice)
-        || (notice.contains("MyWebSite is empty.") && alert.contains("MyWebSite is empty."))
+    notice == alert || notice.starts_with(alert) || alert.starts_with(notice)
 }
 
 fn format_room_participants(participants: &[RoomParticipantStatus]) -> String {
@@ -560,7 +506,7 @@ fn should_render_notice(notice: &str) -> bool {
         && !trimmed.starts_with("Returned home from ")
 }
 
-fn space_detail_lines(root: &RootStatus, snapshot: &HomeSnapshot, width: usize) -> Vec<String> {
+fn space_detail_lines(root: &RootStatus, width: usize) -> Vec<String> {
     let mut details = vec![
         format!("Group      {}", root_group_name(&root.name)),
         format!("Kind       {}", root.kind),
@@ -573,79 +519,6 @@ fn space_detail_lines(root: &RootStatus, snapshot: &HomeSnapshot, width: usize) 
     details.extend(wrap_with_label("Meaning", &root.description, width));
     details.extend(wrap_with_label("Example", &root.example, width));
     match root.name.as_str() {
-        "MyWebSite" => {
-            details.push(format!("State      {}", website_summary(snapshot)));
-            if let Some(url) = snapshot.site.local_url.as_deref() {
-                details.push(format!("Preview    {}", url.trim_end_matches('/')));
-            } else if let Some(action) = action_by_id(snapshot, "site-local") {
-                if action.ready {
-                    details.push("Preview    mywebsite preview".to_string());
-                } else if let Some(reason) = action.reason.as_deref() {
-                    if let Some(command) = next_step_command(reason) {
-                        details.push(format!("Next       {}", command));
-                    } else {
-                        details.extend(wrap_with_label("Setup", reason, width));
-                    }
-                }
-            } else {
-                details.push("Next       elastos site stage <dir>".to_string());
-            }
-            if let Some(release) = snapshot.site.active_release.as_deref() {
-                let live = snapshot
-                    .site
-                    .active_channel
-                    .as_deref()
-                    .map(|channel| format!("{} on {}", release, channel))
-                    .unwrap_or_else(|| release.to_string());
-                details.push(format!("Live       {}", live));
-            } else if snapshot.site.release_count > 0 {
-                details.push(format!("Releases   {}", snapshot.site.release_count));
-            }
-            if let Some(cid) = snapshot.site.active_bundle_cid.as_deref() {
-                details.push(format!("Bundle     elastos://{}", cid));
-            }
-            details.push("Public     mywebsite publish gives a temporary HTTPS URL".to_string());
-            details.extend(wrap_with_label(
-                "Commands",
-                "mywebsite stage <dir> - mywebsite preview - mywebsite publish - mywebsite open - elastos site publish --release <name> - elastos site activate --channel live - elastos site rollback --target publisher",
-                width,
-            ));
-        }
-        "Public" => {
-            details.push(format!(
-                "Channels   {} total - {} active",
-                snapshot.shares.channel_count, snapshot.shares.active_count
-            ));
-            if let Some(author_did) = snapshot.shares.author_did.as_deref() {
-                details.push(format!(
-                    "Signer     {}",
-                    truncate(author_did, width.saturating_sub(13).max(16))
-                ));
-            }
-            if let Some(channel) = snapshot.shares.channels.first() {
-                details.push(format!(
-                    "Latest     {} v{} {}",
-                    channel.name, channel.latest_version, channel.status
-                ));
-                details.push(format!(
-                    "Open       elastos://{}",
-                    truncate(&channel.latest_cid, width.saturating_sub(16).max(16))
-                ));
-                if let Some(head_cid) = channel.head_cid.as_deref() {
-                    details.push(format!(
-                        "Head       elastos://{}",
-                        truncate(head_cid, width.saturating_sub(16).max(16))
-                    ));
-                }
-            } else {
-                details.push("Latest     none yet".to_string());
-            }
-            details.extend(wrap_with_label(
-                "Commands",
-                "elastos share <path> - elastos shares list - elastos attest <cid> - elastos open elastos://<cid>",
-                width,
-            ));
-        }
         "Local" => {
             details.extend(wrap_with_label(
                 "Commands",

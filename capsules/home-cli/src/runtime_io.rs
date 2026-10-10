@@ -419,20 +419,6 @@ fn dashboard_line_loop(
             }
         }
 
-        match mywebsite_line_action(trimmed) {
-            Ok(Some(action_id)) => {
-                write_intent(write_token, intent_path, &action_id)?;
-                return Ok(());
-            }
-            Ok(None) => {}
-            Err(error) => {
-                println!();
-                println!("mywebsite: {}", error);
-                wait_for_enter()?;
-                continue;
-            }
-        }
-
         match system_line_action(trimmed, &snapshot) {
             Ok(Some(action_id)) => {
                 write_intent(write_token, intent_path, &action_id)?;

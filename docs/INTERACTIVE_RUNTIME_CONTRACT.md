@@ -66,7 +66,7 @@ The direct native chat story is:
 
 `elastos chat` first tries to reuse a healthy managed Home runtime. If no healthy managed Home runtime exists, it starts or reuses the managed `chat` runtime.
 
-The browser `Chat Room` surface is separate from the native chat shortcut. It is shipped with the demo profile and hosted through the explicit operator lane when exposed outside Home.
+The browser `Chat Room` surface is separate from the native chat shortcut. It is installed with Home and hosted through the explicit operator lane when exposed outside Home.
 
 ### 3. Packaged interactive capsules are not automatically first-class
 

@@ -651,18 +651,9 @@ fn people_debug_lines(snapshot: &HomeSnapshot) -> Vec<String> {
     lines
 }
 
-fn spaces_summary_lines(snapshot: &HomeSnapshot) -> Vec<String> {
+fn spaces_summary_lines() -> Vec<String> {
     vec![
-        format!("MyWebSite  {}", website_summary(snapshot)),
-        format!(
-            "Public     {} shared channel{} ready to open",
-            snapshot.shares.channel_count,
-            if snapshot.shares.channel_count == 1 {
-                ""
-            } else {
-                "s"
-            }
-        ),
+        "Public     shared files root for things you want to open or pass around".to_string(),
         "Local      scratch space for temporary work and session state".to_string(),
         "WebSpaces  named handles into content, peers, identity, and AI".to_string(),
     ]
@@ -830,7 +821,7 @@ fn active_shell_candidate_launchable(snapshot: &HomeSnapshot, name: &str) -> boo
 fn root_group_name(root: &str) -> &'static str {
     match root {
         "Users" | "UsersAI" => "People",
-        "Local" | "Public" | "MyWebSite" | "WebSpaces" => "Spaces",
+        "Local" | "Public" | "WebSpaces" => "Spaces",
         "AppCapsules" => "Apps",
         "ElastOS" => "System",
         _ => "World",
@@ -875,41 +866,6 @@ fn display_name(snapshot: &HomeSnapshot) -> String {
         .filter(|nick| !nick.is_empty())
         .unwrap_or(&snapshot.user)
         .to_string()
-}
-
-fn website_summary(snapshot: &HomeSnapshot) -> String {
-    let mut parts = Vec::new();
-    if let Some(url) = snapshot.site.local_url.as_deref() {
-        parts.push(format!("preview at {}", url.trim_end_matches('/')));
-    } else if snapshot.site.staged {
-        parts.push("staged at localhost://MyWebSite".to_string());
-    } else {
-        parts.push("not staged locally".to_string());
-    }
-
-    if let Some(release) = snapshot.site.active_release.as_deref() {
-        if let Some(channel) = snapshot.site.active_channel.as_deref() {
-            parts.push(format!("live {} on {}", release, channel));
-        } else {
-            parts.push(format!("release {}", release));
-        }
-    } else if snapshot.site.release_count > 0 {
-        let suffix = if snapshot.site.release_count == 1 {
-            ""
-        } else {
-            "s"
-        };
-        parts.push(format!(
-            "{} saved release{}",
-            snapshot.site.release_count, suffix
-        ));
-    }
-
-    if let Some(cid) = snapshot.site.active_bundle_cid.as_deref() {
-        parts.push(format!("elastos://{}", truncate(cid, 18)));
-    }
-
-    parts.join(" - ")
 }
 
 fn source_label(snapshot: &HomeSnapshot) -> String {

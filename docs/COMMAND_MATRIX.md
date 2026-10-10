@@ -45,7 +45,7 @@ target.
 | Command family | Included commands | Notes |
 | --- | --- | --- |
 | CLI information | `elastos --help`, `elastos --version`, `elastos version` | Reads no runtime coordinates. |
-| Setup | `elastos setup`, including `--list`, profiles, `--with`, and `--without` | Installs or lists components and external dependencies. |
+| Setup | `elastos setup`, `elastos setup --list`; hidden developer flags `--profile`, `--with`, and `--without` | Installs Home or lists components and external dependencies. |
 | Project creation | `elastos init <name>`, `elastos init <name> --type content` | Creates files in the current directory. |
 | Configuration | `elastos config show`, `elastos config set` | Reads or writes local configuration. |
 | Identity | `elastos identity show`, `elastos identity nickname get`, `elastos identity nickname set` | Reads or updates the local DID-backed profile. `nickname set` prompts only when no value is supplied and a TTY is available. |

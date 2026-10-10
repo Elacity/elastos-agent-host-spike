@@ -540,29 +540,6 @@ def run_navigation_case() -> None:
     finally:
         shutdown(master, proc)
 
-def run_down_navigation_case() -> None:
-    master, proc = launch_pty()
-    try:
-        initial = read_until(
-            "nav-down",
-            master,
-            lambda text: "> 1 Chat [ready]" in text,
-            10.0,
-        )
-        if "> 1 Chat [ready]" not in initial:
-            raise SystemExit(f"nav-down: Home did not highlight Chat first:\n{initial}")
-        send(master, b"\x1b[B", 0.4)
-        after_down = read_until(
-            "nav-down",
-            master,
-            lambda text: "> 2 MyWebSite [" in text,
-            4.0,
-        )
-        if "> 2 MyWebSite [" not in after_down:
-            raise SystemExit(f"nav-down: down arrow did not move selection:\n{after_down}")
-    finally:
-        shutdown(master, proc)
-
 def run_home_case(label: str, payload: bytes, expected_fragments: tuple[str, ...]) -> None:
     proc = subprocess.run(
         cmd + ["home"],
@@ -580,22 +557,12 @@ def run_home_case(label: str, payload: bytes, expected_fragments: tuple[str, ...
         raise SystemExit(f"{label}: expected one of:\n{joined}\n\nactual output:\n{output}")
 
 run_navigation_case()
-run_down_navigation_case()
 run_chat_case("esc", b"\x1b")
 run_chat_case("home", b"/home\r")
 run_chat_case("quit", b"/quit\r")
 run_home_case(
-    "mywebsite",
-    b"2\n\nq\n",
-    (
-        "MyWebSite is empty.",
-        "MyWebSite is staged at localhost://MyWebSite.",
-        "MyWebSite is not ready: missing site-provider",
-    ),
-)
-run_home_case(
     "updates",
-    b"3\nq\n",
+    b"2\nq\n",
     (
         "Returned home from Updates.",
         "Updates:",

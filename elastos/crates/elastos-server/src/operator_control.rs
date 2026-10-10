@@ -1547,9 +1547,7 @@ async fn deny_local_room_request(
 
 pub async fn start_local_room_gateway(data_dir: &Path, addr: &str) -> Result<OperatorRoomOpen> {
     if !room_capsule_installed(data_dir) {
-        anyhow::bail!(
-            "Room browser capsule is not installed. Run `elastos setup --profile demo` first."
-        );
+        anyhow::bail!("Room browser capsule is not installed. Run `elastos setup` first.");
     }
 
     let coords = read_runtime_coords(data_dir).await.ok_or_else(|| {

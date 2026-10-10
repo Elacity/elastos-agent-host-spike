@@ -41,7 +41,6 @@ const HOME_PUBLISH_CAPSULES: &[&str] = &[
     "elacity-player",
     "model-provider",
 ];
-const DEMO_PUBLISH_CAPSULES: &[&str] = &["gba-emulator", "gba-ucity", "tunnel-provider"];
 const RETIRED_PRODUCT_CAPSULES: &[&str] = &["agent", "chat", "home-agent"];
 const ALLOWED_RELEASE_CHANNELS: &[&str] = &["stable", "canary", "jetson-test"];
 
@@ -1144,11 +1143,6 @@ fn publish_profile_capsules(profile: &str, available: &[String]) -> anyhow::Resu
             .iter()
             .map(|name| name.to_string())
             .collect::<Vec<_>>(),
-        "demo" => HOME_PUBLISH_CAPSULES
-            .iter()
-            .chain(DEMO_PUBLISH_CAPSULES.iter())
-            .map(|name| name.to_string())
-            .collect::<Vec<_>>(),
         "providers" => vec![
             "availability-provider".to_string(),
             "chain-provider".to_string(),
@@ -1174,7 +1168,7 @@ fn publish_profile_capsules(profile: &str, available: &[String]) -> anyhow::Resu
             .collect(),
         other => {
             anyhow::bail!(
-                "Unknown publish profile '{}'. Available profiles: home, demo, providers, full",
+                "Unknown publish profile '{}'. Available profiles: home, providers, full",
                 other
             );
         }
@@ -2012,7 +2006,7 @@ mod tests {
         resolve_platform_input_paths, save_publish_state, select_capsules,
         validate_platform_input_options, validate_prepare_options, validate_publish_inputs,
         validate_publishable_manifest, PublishReleaseOptions, PublishState, ReleaseLedgerPlatform,
-        DEMO_PUBLISH_CAPSULES, HOME_PUBLISH_CAPSULES, RETIRED_PRODUCT_CAPSULES,
+        HOME_PUBLISH_CAPSULES, RETIRED_PRODUCT_CAPSULES,
     };
     use elastos_common::{
         CapsuleManifest, CapsuleType, MicroVmConfig, Permissions, RequirementKind, ResourceLimits,
@@ -2084,7 +2078,7 @@ mod tests {
                 "skip-rootfs" => options.skip_rootfs = true,
                 "cross" => options.cross = Some("aarch64".to_string()),
                 "capsules" => options.capsules = vec!["home".to_string()],
-                "profile" => options.profile = "demo".to_string(),
+                "profile" => options.profile = "full".to_string(),
                 _ => unreachable!(),
             }
             assert!(validate_platform_input_options(&options).is_err(), "{flag}");
@@ -2179,7 +2173,7 @@ mod tests {
                 "skip-rootfs" => invalid.skip_rootfs = true,
                 "cross" => invalid.cross = Some("aarch64".to_string()),
                 "capsules" => invalid.capsules = vec!["home".to_string()],
-                "profile" => invalid.profile = "demo".to_string(),
+                "profile" => invalid.profile = "full".to_string(),
                 _ => unreachable!(),
             }
             assert!(validate_platform_input_options(&invalid).is_err(), "{case}");
@@ -2359,28 +2353,9 @@ mod tests {
     }
 
     #[test]
-    fn test_publish_profile_demo_extends_home_with_demo_capsules() {
-        let mut entries = HOME_PUBLISH_CAPSULES
-            .iter()
-            .chain(DEMO_PUBLISH_CAPSULES.iter())
-            .map(|name| (*name, &[][..]))
-            .collect::<Vec<(&str, &[&str])>>();
-        entries.sort_by_key(|(name, _)| *name);
-        entries.dedup_by_key(|(name, _)| *name);
-        let manifests = test_manifests(&entries);
-        let selected = select_capsules("demo", &[], &manifests).unwrap();
-
-        assert!(selected.contains(&"services".to_string()));
-        assert!(selected.contains(&"content-block-graph-provider".to_string()));
-        assert!(selected.contains(&"chat-room".to_string()));
-        assert!(selected.contains(&"gba-emulator".to_string()));
-        assert!(selected.contains(&"ipfs-provider".to_string()));
-    }
-
-    #[test]
     fn test_select_capsules_rejects_unknown_name() {
         let manifests = test_manifests(&[("sample-app", &[])]);
-        let err = select_capsules("demo", &["missing".to_string()], &manifests).unwrap_err();
+        let err = select_capsules("home", &["missing".to_string()], &manifests).unwrap_err();
         assert!(err.to_string().contains("Unknown capsule"));
     }
 
@@ -2392,7 +2367,7 @@ mod tests {
             ("shell", &[]),
         ]);
         let selected = select_capsules(
-            "demo",
+            "home",
             &["shell".to_string(), "sample-app".to_string()],
             &manifests,
         )
@@ -2410,7 +2385,7 @@ mod tests {
     #[test]
     fn test_select_capsules_rejects_missing_transitive_dependency() {
         let manifests = test_manifests(&[("sample-app", &["ipfs-provider"])]);
-        let err = select_capsules("demo", &["sample-app".to_string()], &manifests).unwrap_err();
+        let err = select_capsules("home", &["sample-app".to_string()], &manifests).unwrap_err();
         assert!(err.to_string().contains("requires capsule 'ipfs-provider'"));
     }
 
@@ -2418,7 +2393,7 @@ mod tests {
     fn test_select_capsules_rejects_retired_product_capsules() {
         let manifests = test_manifests(&[("chat", &[]), ("agent", &[])]);
         for retired in RETIRED_PRODUCT_CAPSULES {
-            let err = select_capsules("demo", &[retired.to_string()], &manifests).unwrap_err();
+            let err = select_capsules("home", &[retired.to_string()], &manifests).unwrap_err();
             assert!(err
                 .to_string()
                 .contains("is retired and cannot be published"));
@@ -3222,7 +3197,7 @@ finally:
         let options = PublishReleaseOptions {
             version: "0.11.0".to_string(),
             channel: "stable".to_string(),
-            profile: "demo".to_string(),
+            profile: "home".to_string(),
             skip_build: false,
             skip_rootfs: true,
             cross: None,
@@ -3257,7 +3232,7 @@ finally:
         let options = PublishReleaseOptions {
             version: "0.11.0".to_string(),
             channel: "stable".to_string(),
-            profile: "demo".to_string(),
+            profile: "home".to_string(),
             skip_build: true,
             skip_rootfs: false,
             cross: Some("aarch64".to_string()),
@@ -3314,7 +3289,7 @@ finally:
         let options = PublishReleaseOptions {
             version: "0.11.0".to_string(),
             channel: "stable".to_string(),
-            profile: "demo".to_string(),
+            profile: "home".to_string(),
             skip_build: false,
             skip_rootfs: true,
             cross: Some("aarch64".to_string()),
@@ -3348,7 +3323,7 @@ finally:
         let options = PublishReleaseOptions {
             version: "0.11.0".to_string(),
             channel: "nightly".to_string(),
-            profile: "demo".to_string(),
+            profile: "home".to_string(),
             skip_build: false,
             skip_rootfs: false,
             cross: None,

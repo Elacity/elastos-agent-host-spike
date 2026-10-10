@@ -6,6 +6,26 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Changed
+
+- Setup installs one Home; it no longer prints options for other setups.
+
+### Developer detail
+
+- `components.json` keeps only the `home` profile; `demo`, `operator`,
+  `blockchain`, `agent-local-ai`, `public-gateway`, `minimal` and `full` are
+  removed. Developer components (GBA, site, tunnel, cloudflared, availability
+  and the DRM, rights, key, decrypt and custody providers) still publish with
+  each release and install with `elastos setup --with <name>`.
+- `--profile`, `--with` and `--without` are hidden from `elastos setup --help`
+  but still accepted; the help no longer names a nonexistent `chat` profile.
+- MyWebSite and Shared leave the home-cli for 0.8.0; `elastos site`, `share`
+  and `shares` stay operator commands. The Rust `demo` publish profile is gone;
+  `scripts/home-demo-local.sh` runs plain `setup`, and the operator smoke and
+  pinned-model proof use `--with`.
+- `elastos update` and System Update stage this profile change normally; only
+  the standalone frozen offline path refuses a `profiles` difference.
+
 ## [0.8.0-alpha.13]
 
 Test-channel release. Signed releases show these notes in System before you update.
