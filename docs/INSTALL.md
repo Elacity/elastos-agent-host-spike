@@ -34,11 +34,14 @@ command:
 curl -fsSL https://elastos.elacitylabs.com/install.sh | bash
 ```
 
-That complete flow becomes available at this URL when the candidate installer
-and signed release are published. Developers can use the [Mac source
-guide](MAC.md) for source-home staging and Browser VM work.
+Developers can use the [Mac source guide](MAC.md) for source-home staging and
+Browser VM work.
 
-The candidate installer detects the platform (Linux `x86_64`/`aarch64` or
+The installer needs `curl` and a working `python3`; on a Mac without the
+Command Line Tools it stops first and asks you to run `xcode-select --install`.
+Setup and updates need outgoing UDP to port 4433 for Carrier.
+
+The installer detects the platform (Linux `x86_64`/`aarch64` or
 macOS Apple silicon), verifies the signed release, installs Runtime, and
 fetches the Home profile from the trusted publisher. It
 starts Home at `http://localhost:8090/home/` and opens your browser. Keep the
@@ -72,7 +75,7 @@ release-head CID or gateway on the normal path.
 `elastos setup` installs Home: the Runtime, its providers and the Home Apps.
 Components that only some people need, such as the local model engine, arrive
 on demand from the same signed release. The same install also provides the
-separate operator runtime used by `serve`, remote node control, agents, WASM or
+separate operator runtime used by `serve`, remote node control, WASM or
 microVM `run`, and non-interactive capsule work.
 
 Data `run` needs no Runtime, and interactive packaged capsules use managed Home.
@@ -191,7 +194,7 @@ source saved in `sources.json` during install. It asks for the latest signed
 release head, fetches the head and the release by CID (a source that gives no
 separate head CID sends the head file by name), and checks both signatures, the
 release hash, the channel and the version order. An older
-release is refused. The `gateways`, `discovery_uri` and `ipns_name` fields in
+release is refused. The `discovery_uri` and `ipns_name` fields in
 `sources.json` are shown but not used to find updates. If the Carrier
 connection fails, the check fails.
 
@@ -213,7 +216,10 @@ elastos update --check
 elastos update
 ```
 
-Only the first download in `install.sh` uses the web; updates come over Carrier.
+After install, the web is used only to look up the publisher's current Carrier
+address from the `gateways` in `sources.json`; that answer is accepted only when
+it matches the trusted source. Releases and components come over Carrier and are
+verified by signature and hash.
 
 Runtime keeps the verified signed pair in `installation/release-head.json`
 and `installation/release.json` within its data directory. Publisher owns its
@@ -290,13 +296,8 @@ unavailable.
 Free disk space before updating. An interrupted update or uncertain controller
 ownership keeps its recovery step.
 
-This override is for operators:
-
-```bash
-elastos update --head-cid CID
-```
-
-Replace `CID` with the source value.
+Operators can install one known signed release head with
+`elastos update --head-cid CID`.
 
 ## Compare and change the release signer
 
@@ -437,9 +438,10 @@ The installer verifies:
 
 1. the `release-head.json` signature against the maintainer DID
 2. the `release.json` signature against the same DID
-3. the binary and `components.json` SHA-256 checksums
+3. the binary's SHA-256 checksum
 
-Gateways transport bytes. Signatures, hashes, and the maintainer DID establish
+Runtime setup then verifies `components.json` and each component. The web and
+Carrier only carry bytes; signatures, hashes and the maintainer DID establish
 trust.
 
 For release and target handoff commands, see the

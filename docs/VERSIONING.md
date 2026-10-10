@@ -54,12 +54,14 @@ MAJOR.MINOR.PATCH[-prerelease]
 Preferred examples:
 
 - `1.0.0`
+- `1.2.3-alpha.1`
 - `1.2.3-rc.1`
 - `1.2.3-beta.3`
 
 Rejected examples:
 
-- `1.2.3-rc31`
+- `1.2.3-alpha.1`
+- `1.2.3-rc.1`
 - `1.2.3-beta3`
 
 Use dotted prerelease identifiers such as `-rc.31`, not `-rc31`.
@@ -92,7 +94,9 @@ Use dotted prerelease identifiers such as `-rc.31`, not `-rc31`.
 
 ## Pre-release Policy
 
-Use `-rc.N` for a signed candidate that is published before its final version.
+Use `-alpha.N` for a signed test release published while a version is still
+being built; the 0.8.0 train ships `0.8.0-alpha.N`. Use `-rc.N` for a signed
+candidate that is published before its final version.
 A monthly source release (a repository tag; signed releases over Carrier are
 the only binary distribution) uses plain `X.Y.Z`; its notes state what is not
 ready for users.
@@ -100,6 +104,7 @@ The release issue on GitHub records the active release and its evidence.
 
 Current rule:
 
+- test release: `X.Y.Z-alpha.N`
 - unstable public candidate: `X.Y.Z-rc.N`
 - stable release: `X.Y.Z`
 
@@ -365,6 +370,7 @@ Use annotated repo tags for runtime releases:
 ```text
 vX.Y.Z
 vX.Y.Z-rc.N
+vX.Y.Z-alpha.N
 ```
 
 This repo is a coordinated release train, so package-style per-component tags are less useful than one signed repo-level release tag per publish.
