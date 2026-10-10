@@ -44,6 +44,13 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   `ci-release-policy-test.py`. Documentation-only changes keep fmt and git
   checks without rebuilding unrelated workspaces (#319). The installed Home
   journey waits the model-preparation window for the first engine refusal.
+- The `custody-harness-smoke` path filter and the Linux holder canary's paths
+  now include every input their jobs build or call (setup and restart scripts,
+  `chain-provider`, `elastos-runtime`, the workspace manifest and lock,
+  `rust-toolchain.toml`, `components.json`, the workflow, and the canary's
+  hop observer and Kubo seed scripts). `ci-release-policy-test.py` follows each
+  job's shell scripts and Dockerfiles and fails when a called input is outside
+  the filter (#317).
 
 ## [0.8.0-alpha.15]
 

@@ -230,6 +230,88 @@ def custody_should_run(source, context, paths):
         return output.read_text() == "run=true\n"
 
 
+REPO = WORKFLOW.parents[2]
+CANARY = WORKFLOW.with_name("canary-holder-linux.yml")
+TRACKED = frozenset(subprocess.check_output(["git", "ls-files"], cwd=REPO, text=True).splitlines())
+CALLED_PATH = re.compile(r"\$\{?(?:ROOT|REPO_ROOT)\}?/([\w./-]+)|\$\{?SCRIPT_DIR\}?/([\w./-]+)"
+                         r"|(?<![\w./$}-])((?:scripts|deploy|capsules|elastos)/[\w./-]+|components\.json)")
+CARGO_WORKSPACE = re.compile(r"--manifest-path ([\w./-]+)/Cargo\.toml|\bcd ([\w./-]+) && cargo\b")
+# The custody proof driver calls setup-source-home.sh with a mismatched
+# ELASTOS_DATA_DIR on purpose; it refuses before it reads any other input.
+FILTER_LEAVES = {"custody-harness-smoke": {"scripts/setup-source-home.sh"}}
+
+
+def tracked_under(path):
+    return {path} if path in TRACKED else {name for name in TRACKED if name.startswith(path.rstrip("/") + "/")}
+
+
+def called_inputs(text, directory):
+    """Tracked repository files a script or step names outside comments.
+
+    A Cargo workspace brings its manifest and lock; a capsule workspace is
+    wholly an input. Elastos crates stay scoped to the modules a filter names."""
+    found = set()
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        for rooted, local, bare in CALLED_PATH.findall(line):
+            path = os.path.normpath(rooted or bare or f"{directory}/{local}")
+            if path != ".":
+                found |= tracked_under(path)
+        for manifest, directory_change in CARGO_WORKSPACE.findall(line):
+            workspace = manifest or directory_change
+            found |= tracked_under(workspace + "/Cargo.toml") | tracked_under(workspace + "/Cargo.lock")
+            if workspace.startswith("capsules/"):
+                found |= tracked_under(workspace)
+        if re.search(r"\bcargo (?:build|test|clippy|run)\b", line):
+            found.add("rust-toolchain.toml")
+    return found
+
+
+def job_inputs(workflow, source, job, leaves=frozenset()):
+    """The workflow file plus every input the job's run steps call, following
+    shell scripts and Dockerfiles; Python and Node callees are leaf inputs."""
+    texts = []
+    for step in steps(job, jobs(source)):
+        if "        run: |\n" in step:
+            texts.append(textwrap.dedent(step.split("        run: |\n", 1)[1]))
+        else:
+            texts += re.findall(r"(?m)^        run: (.+)$", step)
+    inputs = {workflow.relative_to(REPO).as_posix()}
+    queue = [(text, ".") for text in texts]
+    while queue:
+        text, directory = queue.pop()
+        for path in sorted(called_inputs(text, directory) - inputs):
+            inputs.add(path)
+            if (path.endswith(".sh") or Path(path).name.startswith("Dockerfile")) and path not in leaves:
+                queue.append(((REPO / path).read_text(), Path(path).parent.as_posix()))
+    return inputs
+
+
+def glob_regex(pattern):
+    return re.compile("".join(".*" if part == "**" else "[^/]*" if part == "*" else re.escape(part)
+                              for part in re.split(r"(\*\*|\*)", pattern)) + r"\Z")
+
+
+def custody_filter(source):
+    step, = [step for step in steps("custody-harness-smoke", jobs(source)) if "id: filter" in step]
+    return re.findall(r"(?m)^              - '([^']+)'$", step.split("            custody:\n", 1)[1])
+
+
+def canary_filter(source):
+    block = source.split("\n  pull_request:\n    ", 1)[1].split("\n  workflow_dispatch:", 1)[0]
+    return re.findall(r"(?m)^      - (\S+)$", block.split("paths:\n", 1)[1])
+
+
+def validate_filter_inputs(workflow, source, job, patterns):
+    """A path filter skips a required check only when none of its inputs changed."""
+    matchers = [glob_regex(pattern) for pattern in patterns]
+    missing = sorted(path for path in job_inputs(workflow, source, job, FILTER_LEAVES.get(job, frozenset()))
+                     if not any(matcher.match(path) for matcher in matchers))
+    if missing:
+        raise AssertionError(f"{job} filter misses inputs: {', '.join(missing)}")
+
+
 def validate_cache_guards(source):
     workflow_jobs = jobs(source)
     for job in workflow_jobs:
@@ -983,6 +1065,34 @@ class ReleasePolicyTests(unittest.TestCase):
         # A filter error fails the required job; the decision step has the default success guard.
         self.assertNotIn("continue-on-error", filter_step)
         self.assertNotIn("if:", decision)
+
+    def test_path_filters_cover_every_input_their_jobs_call(self):
+        validate_filter_inputs(WORKFLOW, SOURCE, "custody-harness-smoke", custody_filter(SOURCE))
+        canary = CANARY.read_text()
+        validate_filter_inputs(CANARY, canary, "holder", canary_filter(canary))
+        for entry in ("'scripts/setup-source-home.sh'", "'capsules/chain-provider/**'", "'elastos/Cargo.lock'",
+                      "'rust-toolchain.toml'", "'.github/workflows/ci.yml'"):
+            with self.subTest(removed=entry):
+                trimmed = SOURCE.replace(f"              - {entry}\n", "", 1)
+                self.assertNotEqual(trimmed, SOURCE)
+                with self.assertRaisesRegex(AssertionError, "custody-harness-smoke filter misses inputs: .*"
+                                            + re.escape(entry.strip("'").rstrip("*/"))):
+                    validate_filter_inputs(WORKFLOW, trimmed, "custody-harness-smoke", custody_filter(trimmed))
+        for entry in ("scripts/update-hop-compare.py", "scripts/seed-kubo-cache.sh", "components.json",
+                      "elastos/Cargo.lock", "scripts/release-upstream-input.py"):
+            with self.subTest(removed=entry):
+                trimmed = canary.replace(f"      - {entry}\n", "", 1)
+                self.assertNotEqual(trimmed, canary)
+                with self.assertRaisesRegex(AssertionError, "holder filter misses inputs: .*" + re.escape(entry)):
+                    validate_filter_inputs(CANARY, trimmed, "holder", canary_filter(trimmed))
+        # A new script call joins the job's inputs; one level of `*` stays in its folder.
+        called = canary.replace("          python3 -I -S scripts/holder-idle-ci.py\n",
+                                "          python3 -I -S scripts/holder-idle-ci.py\n          scripts/ci-apt-prerequisites.sh\n", 1)
+        self.assertNotEqual(called, canary)
+        with self.assertRaisesRegex(AssertionError, "scripts/ci-apt-prerequisites.sh"):
+            validate_filter_inputs(CANARY, called, "holder", canary_filter(called))
+        self.assertTrue(glob_regex("capsules/chain-provider/**").match("capsules/chain-provider/src/main.rs"))
+        self.assertFalse(glob_regex("elastos/crates/elastos-protected-content-*/**").match("elastos/crates/x/elastos-protected-content-a/b"))
 
     def test_only_pr_runs_share_a_cancellable_concurrency_group(self):
         concurrency = SOURCE.split("\nconcurrency:\n", 1)[1].split("\nenv:\n", 1)[0]

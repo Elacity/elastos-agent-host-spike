@@ -354,9 +354,8 @@ jobs:
   # owns all the logic (throwaway client identity, throwaway compose
   # project, receipt assertions, full teardown); this job is thin glue over
   # it. Trusted develop/main pushes warm the shared image cache. Runs also for
-  # every merge group, workflow_dispatch, and PRs that touch the harness
-  # image, the proof driver, or the protected-content/carrier crates it
-  # exercises.
+  # every merge group, workflow_dispatch, and PRs that change an input the
+  # smoke builds or calls.
   custody-harness-smoke:
     name: custody-harness-smoke
     runs-on: ubuntu-24.04
@@ -381,15 +380,26 @@ jobs:
         if: github.event_name == 'pull_request'
         uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
         with:
+          # scripts/ci-release-policy-test.py requires every repository input
+          # the smoke's scripts call to match this filter.
           filters: |
             custody:
+              - '.github/workflows/ci.yml'
+              - 'rust-toolchain.toml'
+              - 'components.json'
               - 'deploy/custody-host/**'
               - 'scripts/protected-content-installed-e2e-proof.sh'
               - 'scripts/protected-content-installed-static-audit.py'
               - 'scripts/custody-harness-ci-smoke.sh'
+              - 'scripts/setup-source-home.sh'
+              - 'scripts/mac-source-home-restart.sh'
               - 'capsules/custody-provider/**'
               - 'capsules/availability-provider/**'
               - 'capsules/ipfs-provider/**'
+              - 'capsules/chain-provider/**'
+              - 'elastos/Cargo.toml'
+              - 'elastos/Cargo.lock'
+              - 'elastos/crates/elastos-runtime/**'
               - 'elastos/crates/elastos-protected-content-*/**'
               # Targeted, not the whole elastos-server crate (which would
               # fire this 60-minute job on most PRs): exactly the modules
