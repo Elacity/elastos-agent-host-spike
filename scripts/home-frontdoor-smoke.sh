@@ -532,11 +532,11 @@ def run_navigation_case() -> None:
         after_tab_again = read_until(
             "nav",
             master,
-            lambda text: "\x1b[30;46;1m Spaces \x1b[0m" in text,
+            lambda text: "\x1b[30;46;1m Apps \x1b[0m" in text,
             4.0,
         )
-        if "\x1b[30;46;1m Spaces \x1b[0m" not in after_tab_again:
-            raise SystemExit(f"nav: second tab did not switch from People to Spaces:\n{after_tab_again}")
+        if "\x1b[30;46;1m Apps \x1b[0m" not in after_tab_again:
+            raise SystemExit(f"nav: second tab did not switch from People to Apps:\n{after_tab_again}")
     finally:
         shutdown(master, proc)
 
