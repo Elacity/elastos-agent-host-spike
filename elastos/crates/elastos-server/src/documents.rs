@@ -684,7 +684,7 @@ fn documents_operation_error_message(err: anyhow::Error) -> String {
 
 fn documents_viewer_dir(data_dir: &Path) -> anyhow::Result<PathBuf> {
     let viewer_dir = data_dir.join("capsules").join("documents");
-    if crate::shares::viewer_entrypoint(&viewer_dir).is_ok() {
+    if crate::shares::check_viewer_entrypoint(&viewer_dir).is_ok() {
         return Ok(viewer_dir);
     }
 

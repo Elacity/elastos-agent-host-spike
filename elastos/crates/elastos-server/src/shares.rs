@@ -152,10 +152,25 @@ pub fn compute_content_digest(files: &[(String, Vec<u8>)]) -> anyhow::Result<Str
 const MAX_VIEWER_FILES: usize = 256;
 const MAX_VIEWER_BYTES: u64 = 16 * 1024 * 1024;
 
-/// The installed viewer's web entrypoint file, from its `capsule.json`
-/// (`browser/index.html` for Documents). The entrypoint must be a relative
-/// path inside the viewer directory with no symlinked component.
-pub fn viewer_entrypoint(viewer_dir: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+/// The viewer's web entrypoint, opened through directory file descriptors.
+struct ViewerEntrypoint {
+    /// The entrypoint's directory: the web root copied into the bundle.
+    web_root: std::fs::File,
+    file: std::fs::File,
+    name: std::ffi::OsString,
+}
+
+/// Checks that the installed viewer has a usable web entrypoint in its
+/// `capsule.json` (`browser/index.html` for Documents).
+pub fn check_viewer_entrypoint(viewer_dir: &std::path::Path) -> anyhow::Result<()> {
+    open_viewer_entrypoint(viewer_dir).map(|_| ())
+}
+
+/// Opens the manifest entrypoint one component at a time with `openat` and
+/// `O_NOFOLLOW` from the viewer directory, so it must be a relative path inside
+/// the capsule and no symlink on the way is followed, even one swapped in late.
+fn open_viewer_entrypoint(viewer_dir: &std::path::Path) -> anyhow::Result<ViewerEntrypoint> {
+    use std::os::unix::fs::OpenOptionsExt as _;
     let manifest_path = viewer_dir.join("capsule.json");
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&manifest_path).map_err(|err| {
@@ -166,26 +181,178 @@ pub fn viewer_entrypoint(viewer_dir: &std::path::Path) -> anyhow::Result<std::pa
         .and_then(|value| value.as_str())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("{} has no entrypoint", manifest_path.display()))?;
-    let relative = std::path::Path::new(entrypoint);
-    if !relative
-        .components()
-        .all(|part| matches!(part, std::path::Component::Normal(_)))
-    {
-        anyhow::bail!("viewer entrypoint must stay inside the capsule: {entrypoint}");
+    let mut parts = Vec::new();
+    for part in std::path::Path::new(entrypoint).components() {
+        let std::path::Component::Normal(part) = part else {
+            anyhow::bail!("viewer entrypoint must stay inside the capsule: {entrypoint}");
+        };
+        parts.push(part.to_os_string());
     }
-    let mut entry = viewer_dir.to_path_buf();
-    for part in relative.components() {
-        entry.push(part);
-        let metadata = std::fs::symlink_metadata(&entry)
-            .map_err(|_| anyhow::anyhow!("viewer entrypoint missing: {}", entry.display()))?;
-        if metadata.file_type().is_symlink() {
-            anyhow::bail!("viewer entrypoint is a symlink: {}", entry.display());
+    let name = parts
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("viewer entrypoint is empty"))?;
+    let mut web_root = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(viewer_dir)
+        .map_err(|err| anyhow::anyhow!("viewer {}: {err}", viewer_dir.display()))?;
+    let mut shown = std::path::PathBuf::new();
+    for part in &parts {
+        shown.push(part);
+        web_root = viewer_open_at(&web_root, part, libc::O_DIRECTORY, &shown)?;
+    }
+    shown.push(&name);
+    let file = viewer_open_at(&web_root, &name, 0, &shown)?;
+    if !file.metadata()?.is_file() {
+        anyhow::bail!("viewer entrypoint is not a file: {}", shown.display());
+    }
+    Ok(ViewerEntrypoint {
+        web_root,
+        file,
+        name,
+    })
+}
+
+fn viewer_open_at(
+    dir: &std::fs::File,
+    name: &std::ffi::OsStr,
+    flags: libc::c_int,
+    shown: &std::path::Path,
+) -> anyhow::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::ffi::OsStrExt as _;
+    let c_name = std::ffi::CString::new(name.as_bytes())?;
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            c_name.as_ptr(),
+            flags | libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::NotFound {
+            anyhow::bail!("viewer file missing: {}", shown.display());
+        }
+        anyhow::bail!(
+            "viewer path is a symlink or not the expected kind: {} ({err})",
+            shown.display()
+        );
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+/// Names in an open directory, read through a duplicate of its descriptor.
+fn viewer_dir_names(dir: &std::fs::File) -> anyhow::Result<Vec<std::ffi::OsString>> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    let raw = unsafe { libc::dup(dir.as_raw_fd()) };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let stream = unsafe { libc::fdopendir(raw) };
+    if stream.is_null() {
+        unsafe { libc::close(raw) };
+        return Err(std::io::Error::last_os_error().into());
+    }
+    unsafe { libc::rewinddir(stream) };
+    let mut names = Vec::new();
+    loop {
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        let name = std::ffi::OsStr::from_bytes(name.to_bytes());
+        if name != "." && name != ".." {
+            names.push(name.to_os_string());
         }
     }
-    if !std::fs::symlink_metadata(&entry)?.is_file() {
-        anyhow::bail!("viewer entrypoint missing: {}", entry.display());
+    unsafe { libc::closedir(stream) };
+    Ok(names)
+}
+
+/// Lists the regular files under `dir` (relative paths), refusing symlinks.
+fn list_viewer_files(
+    dir: &std::fs::File,
+    rel: &std::path::Path,
+    out: &mut Vec<std::path::PathBuf>,
+) -> anyhow::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    for name in viewer_dir_names(dir)? {
+        let text = name.to_string_lossy();
+        if text.starts_with('.') || text == "target" || text == "node_modules" {
+            continue;
+        }
+        let child = rel.join(&name);
+        let c_name = std::ffi::CString::new(name.as_bytes())?;
+        let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        if unsafe {
+            libc::fstatat(
+                dir.as_raw_fd(),
+                c_name.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        match stat.st_mode & libc::S_IFMT {
+            libc::S_IFLNK => anyhow::bail!("viewer file is a symlink: {}", child.display()),
+            libc::S_IFDIR => {
+                let sub = viewer_open_at(dir, &name, libc::O_DIRECTORY, &child)?;
+                list_viewer_files(&sub, &child, out)?;
+            }
+            libc::S_IFREG => {
+                if out.len() >= MAX_VIEWER_FILES {
+                    anyhow::bail!("viewer has more than {MAX_VIEWER_FILES} files");
+                }
+                out.push(child);
+            }
+            _ => {}
+        }
     }
-    Ok(entry)
+    Ok(())
+}
+
+/// Copies listed files from `web_root` to the bundle, reopening every path
+/// component through `openat(O_NOFOLLOW)` so a symlink swapped in after the
+/// listing is refused. Skips the entrypoint and the viewer's own Markdown.
+fn copy_listed_viewer_files(
+    web_root: &std::fs::File,
+    files: &[std::path::PathBuf],
+    entry_name: &std::ffi::OsStr,
+    bundle_dir: &std::path::Path,
+) -> anyhow::Result<u64> {
+    let mut total = 0u64;
+    for rel in files {
+        let is_markdown = rel
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("md"));
+        if rel.as_os_str() == entry_name || is_markdown {
+            continue;
+        }
+        let mut dir = None;
+        let mut shown = std::path::PathBuf::new();
+        let mut parts = rel.components().peekable();
+        while let Some(std::path::Component::Normal(part)) = parts.next() {
+            shown.push(part);
+            let parent = dir.as_ref().unwrap_or(web_root);
+            if parts.peek().is_some() {
+                dir = Some(viewer_open_at(parent, part, libc::O_DIRECTORY, &shown)?);
+            } else {
+                let file = viewer_open_at(parent, part, 0, &shown)?;
+                total += copy_viewer_file(file, &bundle_dir.join(rel), &shown)?;
+            }
+        }
+        if total > MAX_VIEWER_BYTES {
+            anyhow::bail!("viewer files exceed {MAX_VIEWER_BYTES} bytes");
+        }
+    }
+    Ok(total)
 }
 
 /// Copies the viewer's web files (the entrypoint's directory, without its own
@@ -195,79 +362,35 @@ fn copy_viewer_entrypoint(
     viewer_dir: &std::path::Path,
     bundle_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let entry = viewer_entrypoint(viewer_dir)?;
-    let web_root = entry.parent().unwrap_or(viewer_dir);
+    let entry = open_viewer_entrypoint(viewer_dir)?;
     let mut files = Vec::new();
-    collect_viewer_files(web_root, std::path::Path::new(""), &mut files)?;
-    let mut total = 0u64;
-    for rel in files {
-        let src = web_root.join(&rel);
-        let is_markdown = rel
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("md"));
-        if src == entry || is_markdown {
-            continue;
-        }
-        total += copy_viewer_file(&src, &bundle_dir.join(&rel))?;
-        if total > MAX_VIEWER_BYTES {
-            anyhow::bail!("viewer files exceed {MAX_VIEWER_BYTES} bytes");
-        }
-    }
-    total += copy_viewer_file(&entry, &bundle_dir.join("index.html"))?;
+    list_viewer_files(&entry.web_root, std::path::Path::new(""), &mut files)?;
+    let mut total = copy_listed_viewer_files(&entry.web_root, &files, &entry.name, bundle_dir)?;
+    total += copy_viewer_file(
+        entry.file,
+        &bundle_dir.join("index.html"),
+        std::path::Path::new(&entry.name),
+    )?;
     if total > MAX_VIEWER_BYTES {
         anyhow::bail!("viewer files exceed {MAX_VIEWER_BYTES} bytes");
     }
     Ok(())
 }
 
-fn collect_viewer_files(
-    root: &std::path::Path,
-    rel: &std::path::Path,
-    out: &mut Vec<std::path::PathBuf>,
-) -> anyhow::Result<()> {
-    for item in std::fs::read_dir(root.join(rel))? {
-        let item = item?;
-        let name = item.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str.starts_with('.') || name_str == "target" || name_str == "node_modules" {
-            continue;
-        }
-        let child = rel.join(&name);
-        let file_type = item.file_type()?;
-        if file_type.is_symlink() {
-            anyhow::bail!("viewer file is a symlink: {}", root.join(&child).display());
-        }
-        if file_type.is_dir() {
-            collect_viewer_files(root, &child, out)?;
-        } else if file_type.is_file() {
-            if out.len() >= MAX_VIEWER_FILES {
-                anyhow::bail!("viewer has more than {MAX_VIEWER_FILES} files");
-            }
-            out.push(child);
-        }
-    }
-    Ok(())
-}
-
-/// Copies one regular file without following a symlink at `src`.
-fn copy_viewer_file(src: &std::path::Path, dest: &std::path::Path) -> anyhow::Result<u64> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
-    let mut file = options
-        .open(src)
-        .map_err(|err| anyhow::anyhow!("viewer file {}: {err}", src.display()))?;
+fn copy_viewer_file(
+    file: std::fs::File,
+    dest: &std::path::Path,
+    shown: &std::path::Path,
+) -> anyhow::Result<u64> {
     if !file.metadata()?.is_file() {
-        anyhow::bail!("viewer file is not a regular file: {}", src.display());
+        anyhow::bail!("viewer file is not a regular file: {}", shown.display());
     }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let mut out = std::fs::File::create(dest)?;
     Ok(std::io::copy(
-        &mut std::io::Read::take(&mut file, MAX_VIEWER_BYTES + 1),
+        &mut std::io::Read::take(file, MAX_VIEWER_BYTES + 1),
         &mut out,
     )?)
 }
@@ -921,6 +1044,30 @@ mod tests {
             build_share_bundle_with_viewer_dir(input.path(), "n", 1, None, None, entry_link.path())
                 .unwrap_err();
         assert!(err.to_string().contains("symlink"), "{err}");
+    }
+
+    #[test]
+    fn share_bundle_refuses_directory_swapped_for_symlink_after_listing() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("leak.js"), "private").unwrap();
+        let viewer = viewer_with_entrypoint("browser/index.html");
+        std::fs::create_dir_all(viewer.path().join("browser/assets")).unwrap();
+        std::fs::write(viewer.path().join("browser/assets/leak.js"), "ok").unwrap();
+
+        let entry = open_viewer_entrypoint(viewer.path()).unwrap();
+        let mut files = Vec::new();
+        list_viewer_files(&entry.web_root, std::path::Path::new(""), &mut files).unwrap();
+        assert!(files.contains(&std::path::PathBuf::from("assets/leak.js")));
+
+        // A writer replaces the listed directory with a symlink before the copy.
+        std::fs::remove_dir_all(viewer.path().join("browser/assets")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), viewer.path().join("browser/assets")).unwrap();
+
+        let bundle = tempfile::tempdir().unwrap();
+        let err = copy_listed_viewer_files(&entry.web_root, &files, &entry.name, bundle.path())
+            .unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert!(!bundle.path().join("assets/leak.js").exists());
     }
 
     #[test]

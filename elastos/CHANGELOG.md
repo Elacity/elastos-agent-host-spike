@@ -59,8 +59,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   subcommands; GETTING_STARTED no longer suggests `elastos chat`.
 - Share bundles copy the viewer from its manifest `entrypoint`
   (`browser/index.html` plus its assets) to the bundle root. The entrypoint
-  must be a relative path inside the viewer; symlinks anywhere in the copied
-  tree are refused, and the copy is capped at 256 files and 16 MiB. The Documents
+  must be a relative path inside the viewer. Every path component is opened
+  with `openat(O_NOFOLLOW)` from the viewer directory's descriptor, so a
+  symlink anywhere in the copied tree, even one swapped in after listing, is
+  refused; the copy is capped at 256 files and 16 MiB. The Documents
   publish test installs the real `capsules/documents` layout and checks the
   published file list.
 
