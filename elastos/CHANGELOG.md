@@ -71,6 +71,18 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - When setup or an update cannot reach the trusted source, ElastOS now says
   so in plain words: it needs outgoing UDP to port 4433, so check the firewall
   or network, then run `elastos setup` again.
+- With no model yet, Assistant now says "Get a model to start. Models run on
+  this Home." and shows a Get a model button that opens Models in Apps. Send
+  says the same when you point at it.
+- Assistant's other no-model message now names the real app: Apps
+  (Marketplace) → Models.
+- Pressing Stop in Assistant now shows "Stopped." instead of "Settlement
+  unknown".
+- If there is not enough free disk space to get a model, Apps now says so and
+  how much space the model needs, instead of "Model action could not be
+  confirmed". While a model waits for space, it shows how much it needs.
+- Assistant's description in Apps now reads "Chat with an AI model that runs
+  on this Home."
 
 ### Removed
 
@@ -127,21 +139,6 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   refusal leaves auth state and the credential store unchanged. The credential
   is written just before the auth write; a crash between them leaves an orphan
   credential that a retry with the same passkey reconciles. (#88)
-- With no model yet, Assistant now says "Get a model to start. Models run on
-  this Home." and shows a Get a model button that opens Models in Apps. Send
-  says the same when you point at it.
-- Assistant's other no-model message now names the real app: Apps
-  (Marketplace) → Models.
-- Pressing Stop in Assistant now shows "Stopped." instead of "Settlement
-  unknown".
-- If there is not enough free disk space to get a model, Apps now says so and
-  how much space the model needs, instead of "Model action could not be
-  confirmed". While a model waits for space, it shows how much it needs.
-- Assistant's description in Apps now reads "Chat with an AI model that runs
-  on this Home."
-
-### Developer detail
-
 - Assistant empty state: `showEmptyState()` builds its lines with DOM nodes;
   `paintEmptyModelHint()` shows the no-model line and a `data-agent-get-model`
   button (`openModelsFromAgent()`, Marketplace `category: models`) only after a
