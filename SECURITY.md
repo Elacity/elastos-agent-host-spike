@@ -106,7 +106,9 @@ request or one gossip message plus envelope, within 10 seconds. Operator
 requests, read before their signature is checked, allow 64 KiB within 10
 seconds. Replies are capped by what the request can return: a full gossip
 topic for a pull, one importable object for a provider call, update metadata
-for an operator answer. Relays close after five minutes without bytes in
+for an operator answer. Provider replies share a 256 MiB in-flight budget.
+Whole-object content fetch replies still arrive as one unbounded line; only
+two run at once and one per peer. Relays close after five minutes without bytes in
 either direction, and stream acknowledgements have deadlines.
 
 ## Architecture

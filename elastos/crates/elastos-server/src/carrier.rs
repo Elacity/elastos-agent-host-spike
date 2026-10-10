@@ -256,6 +256,92 @@ where
     }
 }
 
+/// Bytes all open-ended provider replies may hold at once. A reply that
+/// would go past it is refused rather than queued.
+static CARRIER_REPLY_BUDGET: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(256 * 1024 * 1024);
+/// Whole-object content replies running at once, across all peers.
+static CARRIER_CONTENT_REPLY_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+/// One whole-object content reply per peer at a time.
+static CARRIER_CONTENT_REPLY_PEERS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<iroh::PublicKey, Arc<tokio::sync::Semaphore>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+async fn acquire_content_reply_slots(
+    peer: iroh::PublicKey,
+) -> Result<(
+    tokio::sync::OwnedSemaphorePermit,
+    tokio::sync::SemaphorePermit<'static>,
+)> {
+    let peer_slot = {
+        let mut peers = CARRIER_CONTENT_REPLY_PEERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        peers.retain(|_, slot| Arc::strong_count(slot) > 1);
+        peers
+            .entry(peer)
+            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(1)))
+            .clone()
+    };
+    let peer_permit = peer_slot.acquire_owned().await?;
+    let global = CARRIER_CONTENT_REPLY_SLOTS.acquire().await?;
+    Ok((peer_permit, global))
+}
+
+/// Like [`read_peer_line`], but every byte also takes a permit from `budget`;
+/// the permits are held until the caller drops them.
+async fn read_budgeted_reply<R>(
+    reader: &mut R,
+    max: u64,
+    wait: Duration,
+    budget: &'static tokio::sync::Semaphore,
+) -> std::io::Result<(String, Option<tokio::sync::SemaphorePermit<'static>>)>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let read = async {
+        let mut line = Vec::new();
+        let mut held: Option<tokio::sync::SemaphorePermit<'static>> = None;
+        loop {
+            let available = reader.fill_buf().await?;
+            if available.is_empty() {
+                break;
+            }
+            let (take, done) = match available.iter().position(|byte| *byte == b'\n') {
+                Some(end) => (end + 1, true),
+                None => (available.len(), false),
+            };
+            if (line.len() + take) as u64 > max {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Carrier peer line exceeds {max} bytes"),
+                ));
+            }
+            let permit = budget.try_acquire_many(take as u32).map_err(|_| {
+                std::io::Error::other("Carrier reply memory budget is in use; try again later")
+            })?;
+            match held.as_mut() {
+                Some(held) => held.merge(permit),
+                None => held = Some(permit),
+            }
+            line.extend_from_slice(&available[..take]);
+            reader.consume(take);
+            if done {
+                break;
+            }
+        }
+        let line = String::from_utf8(line)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+        Ok((line, held))
+    };
+    tokio::time::timeout(wait, read).await.map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("Carrier peer did not send a complete line within {wait:?}"),
+        )
+    })?
+}
+
 const fn max_u64(a: u64, b: u64) -> u64 {
     if a > b {
         a
@@ -8640,6 +8726,14 @@ impl CarrierClient {
         request: serde_json::Value,
     ) -> Result<serde_json::Value> {
         let bounded = request.get("bounded_read") == Some(&serde_json::Value::Bool(true));
+        // A whole-object content reply has no size limit of its own (the
+        // object arrives as one line), so only two run at once and one per peer.
+        let whole_content = !bounded && invocation.target == "content" && invocation.op == "fetch";
+        let _content_slots = if whole_content {
+            Some(acquire_content_reply_slots(self.conn.remote_id()).await?)
+        } else {
+            None
+        };
         let (mut send, recv) = self.conn.open_bi().await.context(CarrierTransportFailure)?;
         let msg = carrier_provider_invoke_message(invocation, request);
         let mut bytes = serde_json::to_vec(&msg)?;
@@ -8649,16 +8743,36 @@ impl CarrierClient {
             .context(CarrierTransportFailure)?;
         send.finish().context(CarrierTransportFailure)?;
 
+        let mut reader = BufReader::new(recv);
         // A bounded read holds at most 64 KiB of base64 plus its envelope;
         // a holder that sends more is refused before it is buffered.
-        let max = if bounded {
-            CARRIER_BOUNDED_INVOKE_MAX_RESPONSE_BYTES
+        let (line, _budget) = if bounded {
+            let line = read_peer_line(
+                &mut reader,
+                CARRIER_BOUNDED_INVOKE_MAX_RESPONSE_BYTES,
+                CARRIER_PROVIDER_REPLY_WAIT,
+            )
+            .await;
+            (line, None)
+        } else if whole_content {
+            (
+                read_peer_line(&mut reader, u64::MAX - 1, CARRIER_PROVIDER_REPLY_WAIT).await,
+                None,
+            )
         } else {
-            CARRIER_PROVIDER_REPLY_MAX_BYTES
-        };
-        let line = read_peer_line(&mut BufReader::new(recv), max, CARRIER_PROVIDER_REPLY_WAIT)
+            match read_budgeted_reply(
+                &mut reader,
+                CARRIER_PROVIDER_REPLY_MAX_BYTES,
+                CARRIER_PROVIDER_REPLY_WAIT,
+                &CARRIER_REPLY_BUDGET,
+            )
             .await
-            .map_err(carrier_answer_read_error)?;
+            {
+                Ok((line, permit)) => (Ok(line), permit),
+                Err(err) => (Err(err), None),
+            }
+        };
+        let line = line.map_err(carrier_answer_read_error)?;
         let response: serde_json::Value = serde_json::from_str(line.trim())?;
         carrier_provider_invoke_result(response)
     }
@@ -8928,6 +9042,55 @@ pub(crate) mod tests {
         .await
         .unwrap();
         assert_eq!(line, "{\"op\":\"ping\"}\n");
+    }
+
+    #[tokio::test]
+    async fn budgeted_reply_holds_bytes_until_dropped_and_refuses_past_budget() {
+        static BUDGET: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(100);
+        let (mut writer, reader) = tokio::io::duplex(256);
+        writer.write_all(&[b'a'; 59]).await.unwrap();
+        writer.write_all(b"\n").await.unwrap();
+        let mut reader = BufReader::new(reader);
+        let (line, held) = read_budgeted_reply(&mut reader, 1024, Duration::from_secs(1), &BUDGET)
+            .await
+            .unwrap();
+        assert_eq!(line.len(), 60);
+        assert_eq!(BUDGET.available_permits(), 40);
+
+        // A second reply that would pass the shared budget is refused.
+        let (mut writer, reader) = tokio::io::duplex(256);
+        writer.write_all(&[b'b'; 60]).await.unwrap();
+        writer.write_all(b"\n").await.unwrap();
+        let mut reader = BufReader::new(reader);
+        let err = read_budgeted_reply(&mut reader, 1024, Duration::from_secs(1), &BUDGET)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("budget"), "{err}");
+        assert_eq!(BUDGET.available_permits(), 40);
+
+        drop(held);
+        assert_eq!(BUDGET.available_permits(), 100);
+    }
+
+    #[tokio::test]
+    async fn whole_content_replies_run_one_per_peer() {
+        let peer = iroh::SecretKey::from_bytes(&[77u8; 32]).public();
+        let first = acquire_content_reply_slots(peer).await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                acquire_content_reply_slots(peer)
+            )
+            .await
+            .is_err(),
+            "a second whole-object reply from the same peer waits"
+        );
+        drop(first);
+        let again = tokio::time::timeout(Duration::from_secs(1), acquire_content_reply_slots(peer))
+            .await
+            .unwrap()
+            .unwrap();
+        drop(again);
     }
 
     #[tokio::test]

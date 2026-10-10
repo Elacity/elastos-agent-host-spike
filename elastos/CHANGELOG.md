@@ -54,7 +54,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   takes the I/O bridge line limit or one `GOSSIP_WIRE_MESSAGE_MAX_BYTES`
   message plus 64 KiB of envelope, within 10 s; `gossip_pull` replies take
   `GOSSIP_TOPIC_BUFFER_MAX_BYTES` plus envelope; open-ended provider replies
-  take one `MAX_CARRIER_OBJECT_IMPORT_BYTES` object as base64 within an hour;
+  take one `MAX_CARRIER_OBJECT_IMPORT_BYTES` object as base64 within an hour
+  and share a 256 MiB in-flight budget (`CARRIER_REPLY_BUDGET`; refused past
+  it); whole-object content fetch replies keep no size cap (the object is one
+  JSON line) but run two at once and one per peer;
   bounded reads keep 128 KiB and now also get the route deadline on peer-DID
   routes. `operator_control.rs` reads requests (before signature checks) at
   64 KiB / 10 s and replies at 1 MiB / 1 h. Relays in `carrier.rs`,
