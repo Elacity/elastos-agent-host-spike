@@ -6,6 +6,14 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Added
+
+- You can remove ElastOS with the installer:
+  `curl -fsSL https://elastos.elacitylabs.com/install.sh | bash -s -- --uninstall`.
+  It stops ElastOS and removes the program and its apps but keeps your identity
+  and files, so installing again continues where you were. Add `--remove-data`
+  to delete those too; keep your Recovery Kit first.
+
 ### Fixed
 
 - A model download that stopped with "Model content could not be read" now
@@ -36,6 +44,19 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   it. Every probe result is published as `assistant:live-models`; the harness
   updates the chip and an open menu from it, keeping keyboard focus on a row or
   menu action. Before, an open menu kept the earlier read while the chip changed.
+- `install.sh --uninstall [--remove-data]` (#315) first refuses, before
+  stopping anything, a data directory that is a link, belongs to another user,
+  is not named `elastos` or is `$HOME` or one of its parents (compared by device
+  and inode, so aliases and case variants count), and a release entry that is a
+  link. It then stops the installation with the installer's identity-checked
+  `installer_runtime_control`, takes the Runtime writer's
+  `.elastos.install.lock` and refuses while it is held or an update journal
+  exists. It removes the binary and the release-owned data entries (`bin`,
+  `capsules`, `libexec`, `tools`, `model-catalog.json`, `components.json`,
+  `sources.json`, `installation`, `update-controller`); with `--remove-data` it
+  removes the whole data directory instead, without following links. It
+  downloads nothing and needs no trust anchors. `docs/INSTALL.md` now lists the
+  macOS and Linux paths and documents removal.
 
 ## [0.8.0-alpha.15]
 
