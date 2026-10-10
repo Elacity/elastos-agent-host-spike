@@ -117,6 +117,8 @@ show_help() {
     echo "  --publisher-gateway URL  Bootstrap publisher URL (stamped for normal installs)"
     echo "  --install-dir PATH    Binary install directory (default: ~/.local/bin)"
     echo "  --install-only        Install Runtime without setup or opening Home"
+    echo "  --uninstall           Remove the Runtime and its components; keep your data"
+    echo "  --remove-data         With --uninstall, also delete the data directory"
     echo "  --help                Show this help"
     echo ""
     echo -e "${BOLD}What gets installed:${NC}"
@@ -921,6 +923,139 @@ finish_install() {
     fi
 }
 
+# ── Uninstall ─────────────────────────────────────────────────────────
+
+# Checks, then removes, the Runtime binary and every file a release installs.
+# Refuses a data directory that is a link, belongs to someone else or holds
+# HOME, and a release entry that is a link, so nothing outside is touched.
+uninstall_files() {
+    python3 - "$HOME" "$@" <<'PY_UNINSTALL'
+import fcntl
+import os
+from pathlib import Path
+import shutil
+import stat
+import sys
+
+# What a release installs in the data directory: the Runtime writer's
+# destinations, its support roots, and the Home update controller.
+RELEASE_FILES = ("bin", "capsules", "libexec", "tools", "model-catalog.json", "components.json",
+                 "sources.json", "installation", "update-controller")
+
+
+def lstat(path):
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
+def data_root(home, data_dir):
+    metadata = lstat(data_dir)
+    if metadata is None:
+        return False
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise OSError(f"{data_dir} is a link or a file, not the data directory; remove it by hand")
+    if metadata.st_uid != os.geteuid():
+        raise OSError(f"{data_dir} belongs to another user")
+    if os.path.basename(os.path.realpath(data_dir)) != "elastos":
+        raise OSError(f"{data_dir} is not an ElastOS data directory")
+    # Compare device and inode, not path text: aliases and case-insensitive
+    # volumes can name HOME or one of its parents differently.
+    identity = (metadata.st_dev, metadata.st_ino)
+    home, real_home = Path(home), Path(os.path.realpath(home))
+    for path in (home, *home.parents, real_home, *real_home.parents):
+        found = os.stat(path)
+        if (found.st_dev, found.st_ino) == identity:
+            raise OSError(f"{data_dir} is or contains your home directory")
+    return True
+
+
+def release_entries(data_dir):
+    entries = []
+    for name in RELEASE_FILES:
+        metadata = lstat(data_dir / name)
+        if metadata is None:
+            continue
+        if stat.S_ISLNK(metadata.st_mode):
+            raise OSError(f"{data_dir / name} is a link; remove it by hand")
+        entries.append((data_dir / name, stat.S_ISDIR(metadata.st_mode)))
+    return entries
+
+
+def uninstall(home, mode, install_dir, data_dir, remove_data):
+    binary = install_dir / "elastos"
+    metadata = lstat(binary)
+    if metadata is not None and stat.S_ISDIR(metadata.st_mode):
+        raise OSError(f"{binary} is a directory, not the Runtime")
+    has_data = data_root(home, data_dir)
+    entries = release_entries(data_dir) if has_data else []
+    if mode == "check":
+        return
+    lock = install_dir / ".elastos.install.lock"
+    if install_dir.is_dir():
+        # The same lock as the Runtime's installation writer.
+        descriptor = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise OSError("an install or update is running; retry after it finishes")
+        if lstat(install_dir / ".elastos.update-journal.json") is not None:
+            raise OSError("an install or update was interrupted; run install.sh again to restore it")
+    binary.unlink(missing_ok=True)
+    # rmtree removes links inside a tree without following them.
+    if has_data and remove_data:
+        shutil.rmtree(data_dir)
+        entries = []
+    for path, is_dir in entries:
+        if is_dir:
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    lock.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    try:
+        uninstall(sys.argv[1], sys.argv[2], Path(sys.argv[3]), Path(sys.argv[4]), sys.argv[5] == "true")
+    except OSError as error:
+        print("Uninstall stopped: " + str(error), file=sys.stderr)
+        sys.exit(1)
+PY_UNINSTALL
+}
+
+# The data directory (identity, wallets, recovery material, user files) stays
+# unless removal is requested, so a later install continues with the same identity.
+uninstall_installation() {
+    local install_dir="$1" remove_data="$2" data_dir binary
+    [[ "$install_dir" == /* ]] || install_dir="${PWD}/${install_dir}"
+    data_dir="$(installer_data_dir "$HOME" "${XDG_DATA_HOME:-}")"
+    binary="${install_dir}/elastos"
+    if [[ ! -e "$binary" && ! -L "$binary" && ! -e "$data_dir" && ! -L "$data_dir" ]]; then
+        ok "No ElastOS installation found"
+        return 0
+    fi
+    command -v python3 &>/dev/null || die "Required tool not found: python3"
+    uninstall_files check "$install_dir" "$data_dir" "$remove_data" \
+        || die "Nothing was stopped or removed"
+    info "Stopping this installation's verified Runtime processes..."
+    installer_runtime_control "$data_dir" "$binary" true \
+        || die "Close this installation's Runtime and retry; nothing was removed"
+    if [[ "$remove_data" == true ]]; then
+        warn "Deleting $(display_path "$data_dir"): your identity, wallets, recovery material and files"
+        warn "Only your Recovery Kit can restore this identity afterwards"
+    fi
+    uninstall_files remove "$install_dir" "$data_dir" "$remove_data" \
+        || die "Uninstall did not finish; run it again after fixing the reason above"
+    ok "Removed the Runtime and its components"
+    if [[ "$remove_data" == true ]]; then
+        ok "Deleted the data directory"
+    else
+        ok "Kept your data in $(display_path "$data_dir")"
+        info "Installing again continues with the same identity. To delete the data too, run the uninstall again with --remove-data."
+    fi
+}
+
 # ── Main ──────────────────────────────────────────────────────────────
 
 # Every action runs inside main, called on the last line, so `curl | bash`
@@ -929,6 +1064,8 @@ finish_install() {
 main() {
 INSTALL_DIR="${HOME}/.local/bin"
 INSTALL_ONLY="${ELASTOS_INSTALL_ONLY:-false}"
+UNINSTALL=false
+REMOVE_DATA=false
 INSTALL_STARTED_AT=$SECONDS
 installer_select_output
 
@@ -942,12 +1079,22 @@ while [[ $# -gt 0 ]]; do
             [[ -z "${2:-}" ]] && die "Usage: --publisher-gateway https://<url>"
             PUBLISHER_GATEWAY="${2%/}"; shift 2 ;;
         --install-only) INSTALL_ONLY=true; shift ;;
+        --uninstall) UNINSTALL=true; shift ;;
+        --remove-data) REMOVE_DATA=true; shift ;;
         --install-dir)
             [[ -z "${2:-}" ]] && die "Usage: --install-dir PATH"
             INSTALL_DIR="$2"; shift 2 ;;
         *) die "Unknown option: $1. Run --help for usage." ;;
     esac
 done
+
+if [[ "$REMOVE_DATA" == true && "$UNINSTALL" != true ]]; then
+    die "--remove-data deletes your data and works only with --uninstall"
+fi
+if [[ "$UNINSTALL" == true ]]; then
+    uninstall_installation "$INSTALL_DIR" "$REMOVE_DATA"
+    exit 0
+fi
 
 if [[ "$INSTALL_ONLY" == true || "$INSTALL_ONLY" == 1 ]]; then
     INSTALLER_STEPS=4

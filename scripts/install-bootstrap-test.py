@@ -9,6 +9,7 @@ bytes. Capture those separately with a request/hash receipt; this test never fet
 import argparse
 import base64
 import copy
+import fcntl
 import hashlib
 import http.server
 import json
@@ -37,6 +38,7 @@ exec(compile(PYTHON, str(INSTALLER) + ":embedded-verifier", "exec"), CRYPTO)
 PROCESS_SOURCE = SOURCE.split("<<'PY_RUNTIME_CONTROL'\n", 1)[1].split("\nPY_RUNTIME_CONTROL", 1)[0]
 PROCESSES = {"__name__": "installer_test"}
 exec(compile(PROCESS_SOURCE, str(INSTALLER) + ":runtime-control", "exec"), PROCESSES)
+UNINSTALL_SOURCE = SOURCE.split("<<'PY_UNINSTALL'\n", 1)[1].split("\nPY_UNINSTALL", 1)[0]
 # Published maintainer constant, checked by test_pinned_publisher_did_conversion.
 PUBLISHER_DID = "did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe"
 
@@ -1225,6 +1227,143 @@ class InstallationTests(unittest.TestCase):
                 self.assert_no_installation_effects(sandbox, before, result)
 
 
+class UninstallTests(unittest.TestCase):
+    """The complete installer's --uninstall in the same disposable sandbox."""
+
+    RELEASE = {"bin/shell": b"provider\n", "capsules/home/index.html": b"home\n",
+               "tools/media-tools/ffmpeg": b"tool\n", "libexec/llama.cpp/b1/llama-server": b"engine\n",
+               "model-catalog.json": b"{}\n", "components.json": b"{}\n", "sources.json": b"{}\n",
+               "installation/release-head.json": b"head\n", "installation/release.json": b"release\n",
+               "update-controller/runtime": b"controller\n"}
+    DATA = {"identity/device.key": b"device identity\n", "Users/alice/notes.txt": b"user data\n",
+            "managed-runtimes/home/state.json": b"managed Home state\n"}
+
+    def installed(self, sandbox):
+        # The files an install plus setup leave; one test also installs for real.
+        sandbox.binary.parent.mkdir(parents=True)
+        sandbox.binary.write_bytes(RUNTIME_STUB)
+        sandbox.binary.chmod(0o755)
+        for name, data in {**self.RELEASE, **self.DATA}.items():
+            (sandbox.data / name).parent.mkdir(parents=True, exist_ok=True)
+            (sandbox.data / name).write_bytes(data)
+
+    def files(self, sandbox):
+        return {key: value[2] for key, value in sandbox.home_state().items() if value[0] == "file"}
+
+    def test_uninstall_keeps_data_for_the_next_install_and_remove_data_deletes_it(self):
+        did, head, release = installable_fixture()
+        with InstallerSandbox(head, release, did) as sandbox:
+            self.installed(sandbox)
+            kept = {"xdg-data/elastos/" + name: data for name, data in self.DATA.items()}
+            calls = sandbox.runtime_calls()
+            result, requests = sandbox.run("--uninstall")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((requests, sandbox.runtime_calls()), ([], calls))
+            self.assertIn("Stopping this installation's verified Runtime processes", result.stdout)
+            self.assertNotIn("Recovery Kit", result.stdout + result.stderr)
+            # Binary, components, sources and the writer lock are gone; data is byte-identical.
+            self.assertEqual(self.files(sandbox), kept)
+
+            sandbox.respond("binary", RUNTIME_STUB)
+            result, _ = sandbox.run("--install-only")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(sandbox.binary.read_bytes(), RUNTIME_STUB)
+            self.assertEqual({key: data for key, data in self.files(sandbox).items()
+                              if key.startswith("xdg-data/")}, kept)
+
+            result, requests = sandbox.run("--uninstall", "--remove-data")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(requests, [])
+            self.assertIn("Only your Recovery Kit can restore this identity", result.stdout + result.stderr)
+            self.assertEqual(self.files(sandbox), {})
+            self.assertFalse(sandbox.data.exists())
+            self.assertFalse(sandbox.binary.exists())
+
+    def test_remove_data_needs_uninstall_and_a_busy_or_interrupted_writer_removes_nothing(self):
+        did, head, release = installable_fixture()
+        with InstallerSandbox(head, release, did) as sandbox:
+            self.installed(sandbox)
+            lock = sandbox.binary.parent / ".elastos.install.lock"
+            with open(lock, "w") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                before = sandbox.home_state()
+                result, _ = sandbox.run("--uninstall", "--remove-data")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("an install or update is running", result.stderr)
+                self.assertEqual(sandbox.home_state(), before)
+            journal = sandbox.binary.parent / ".elastos.update-journal.json"
+            journal.write_text("{}")
+            before = sandbox.home_state()
+            for options, reason in [(["--uninstall", "--remove-data"], "run install.sh again to restore it"),
+                                    (["--remove-data"], "works only with --uninstall")]:
+                with self.subTest(options=options):
+                    result, requests = sandbox.run(*options)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(reason, result.stderr)
+                    self.assertEqual((requests, sandbox.home_state()), ([], before))
+
+    def test_linked_data_root_or_release_entry_refuses_before_stopping_anything(self):
+        did, head, release = installable_fixture()
+        for linked in ("data root", "release entry"):
+            with self.subTest(linked=linked), InstallerSandbox(head, release, did) as sandbox:
+                self.installed(sandbox)
+                outside = sandbox.root / "outside" / ("elastos" if linked == "data root" else "bin")
+                outside.parent.mkdir()
+                moved = sandbox.data if linked == "data root" else sandbox.data / "bin"
+                moved.rename(outside)
+                moved.symlink_to(outside)
+                outside_files = sorted((path, path.read_bytes()) for path in outside.rglob("*") if path.is_file())
+                before = sandbox.home_state()
+                for options in (["--uninstall"], ["--uninstall", "--remove-data"]):
+                    result, _ = sandbox.run(*options)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("remove it by hand", result.stderr)
+                    self.assertNotIn("Stopping", result.stdout)
+                    self.assertEqual(sandbox.home_state(), before)
+                    self.assertEqual(sorted((path, path.read_bytes()) for path in outside.rglob("*")
+                                            if path.is_file()), outside_files)
+
+    def test_data_directory_that_is_or_holds_home_is_refused(self):
+        # On Linux, XDG_DATA_HOME can place DATA_DIR at HOME or above it. On a
+        # case-insensitive volume (macOS default), .../Elastos is .../elastos.
+        with tempfile.TemporaryDirectory(prefix="installer-uninstall-home-") as directory:
+            probe = Path(directory) / "Probe"
+            probe.mkdir()
+            case_insensitive = (Path(directory) / "probe").exists()
+            for index, home in enumerate(("base/elastos", "base/elastos/user")
+                                         + (("base/Elastos",) if case_insensitive else ())):
+                with self.subTest(home=home):
+                    root = Path(directory) / str(index)
+                    home_dir = root / home
+                    (home_dir / ".local/bin").mkdir(parents=True)
+                    (home_dir / ".local/bin/elastos").write_bytes(RUNTIME_STUB)
+                    (home_dir / "notes.txt").write_bytes(b"home stays\n")
+                    result = shell('uname() { echo Linux; }\nHOME="$1" XDG_DATA_HOME="$2"\n'
+                                   'uninstall_installation "$1/.local/bin" true\n', home_dir, root / "base")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("is or contains your home directory", result.stderr)
+                    self.assertNotIn("Stopping", result.stdout)
+                    self.assertEqual((home_dir / "notes.txt").read_bytes(), b"home stays\n")
+                    self.assertTrue((home_dir / ".local/bin/elastos").is_file())
+
+    def test_home_guard_compares_identity_not_path_text(self):
+        # A path alias that realpath does not canonicalise, as a case variant on
+        # a case-insensitive volume, still names HOME's directory.
+        guard = {"__name__": "installer_test"}
+        exec(compile(UNINSTALL_SOURCE, str(INSTALLER) + ":uninstall", "exec"), guard)
+        with tempfile.TemporaryDirectory(prefix="installer-uninstall-alias-") as directory:
+            root = Path(directory)
+            (root / "base/elastos/user").mkdir(parents=True)
+            (root / "alias").symlink_to(root / "base")
+            for home in ("base/elastos", "base/elastos/user"):
+                with self.subTest(home=home), mock.patch.object(os.path, "realpath", lambda path: str(path)):
+                    with self.assertRaisesRegex(OSError, "is or contains your home directory"):
+                        guard["data_root"](str(root / home), root / "alias/elastos")
+            # A data directory inside HOME stays acceptable.
+            (root / "base/elastos/user/elastos").mkdir()
+            self.assertTrue(guard["data_root"](str(root / "base/elastos/user"), root / "base/elastos/user/elastos"))
+
+
 class DataPathTests(unittest.TestCase):
     def test_three_platform_release_keys(self):
         for system, machine, expected in [("Linux", "x86_64", "x86_64-linux"),
@@ -1439,6 +1578,36 @@ class NativeProcessTests(unittest.TestCase):
         self.assertEqual(controller.wait(timeout=5), 0)
         self.assertIsNone(PROCESSES["process_snapshot"](host))
         self.assertFalse(gateway.exists())
+
+    def uninstall(self, remove_data):
+        (self.data / "components.json").write_bytes(b"{}\n")
+        (self.data / "identity").mkdir()
+        (self.data / "identity/device.key").write_bytes(b"device identity\n")
+        return shell('HOME="$1"\nXDG_DATA_HOME="$1/xdg-data"\nuninstall_installation "$1/.local/bin" "$2"\n',
+                     self.home, remove_data)
+
+    def test_uninstall_stops_the_recorded_runtime_before_removing_it(self):
+        result = self.uninstall("false")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.child.wait(timeout=5)
+        self.assertIsNone(PROCESSES["process_snapshot"](self.child.pid))
+        self.assertFalse(self.coords.exists())
+        self.assertFalse(self.binary.is_symlink())
+        self.assertFalse((self.data / "components.json").exists())
+        self.assertEqual((self.data / "identity/device.key").read_bytes(), b"device identity\n")
+
+    def test_uninstall_with_a_foreign_record_stops_and_removes_nothing(self):
+        foreign = subprocess.Popen(["/bin/sleep", "20"])
+        self.extra_children.append(foreign)
+        self.write_coords(self.data / "home-runtime-coords.json", foreign.pid)
+        result = self.uninstall("true")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("nothing was removed", result.stderr)
+        self.assertIsNone(self.child.poll())
+        self.assertIsNone(foreign.poll())
+        self.assertTrue(self.binary.is_symlink())
+        self.assertEqual(sorted(path.name for path in self.data.iterdir()),
+                         ["components.json", "home-runtime-coords.json", "identity", "runtime-coords.json"])
 
     def test_shared_wrapper_cleanup_finishes_before_home_removal(self):
         descendant, _ = self.start_descendant_fixture(stops_child=True)

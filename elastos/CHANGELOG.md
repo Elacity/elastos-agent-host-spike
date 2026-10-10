@@ -12,6 +12,13 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   signed release or is signed by the release publisher. Before, it also ran
   unsigned capsules from any folder. Homes built from source keep running
   unsigned capsules. This needs no action after the update.
+### Added
+
+- You can remove ElastOS with the installer:
+  `curl -fsSL https://elastos.elacitylabs.com/install.sh | bash -s -- --uninstall`.
+  It stops ElastOS and removes the program and its apps but keeps your identity
+  and files, so installing again continues where you were. Add `--remove-data`
+  to delete those too; keep your Recovery Kit first.
 
 ### Fixed
 
@@ -148,6 +155,23 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - `CarrierClient::connect_trusted_source` wraps a failed connection in that
   plain message; the per-route ticket and fallback errors stay in the cause
   chain (`{:#}`). Test: `unreachable_trusted_source_names_the_network_fix`.
+- `install.sh --uninstall [--remove-data]` (#315) first refuses, before
+  stopping anything, a data directory that is a link, belongs to another user,
+  is not named `elastos` or is `$HOME` or one of its parents (compared by device
+  and inode, so aliases and case variants count), and a release entry that is a
+  link. It then stops the installation with the installer's identity-checked
+  `installer_runtime_control`, takes the Runtime writer's
+  `.elastos.install.lock` and refuses while it is held or an update journal
+  exists. It removes the binary and the release-owned data entries (`bin`,
+  `capsules`, `libexec`, `tools`, `model-catalog.json`, `components.json`,
+  `sources.json`, `installation`, `update-controller`); with `--remove-data` it
+  removes the whole data directory instead, without following links. It
+  downloads nothing and needs no trust anchors. `docs/INSTALL.md` now lists the
+  macOS and Linux paths and documents removal.
+- `docs/VERSIONING.md` "Withdraw a bad release" (#321): publish N+2 from the
+  last good source, announce on #93, point affected Homes to Undo; the seed
+  keeps N pinned. Decision: no withdrawn-versions list in the signed head for
+  0.8.0; revisit with #157 and #213.
 
 ## [0.8.0-alpha.15]
 

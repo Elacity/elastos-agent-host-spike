@@ -312,6 +312,40 @@ Seed details come from `RELEASE_SEED`, `RELEASE_SEED_DATA`,
 accepted on a real install, prepare N+1 from the same run before its artifacts
 expire (14 days).
 
+## Withdraw a bad release
+
+A published release cannot be taken back: Homes refuse a lower version unless
+the user runs Undo. Withdrawing a bad release therefore means publishing a
+newer good one.
+
+1. **Announce.** Post one comment on the release issue (#93) naming the bad
+   version, its head CID, what goes wrong, and the last good version with its
+   head CID. Tell affected users to stay on or return to the last good version
+   until the replacement arrives.
+2. **Publish N+2 from the last good source.** If version N is bad, its paired
+   N+1 was built in the same run from the same source, so it is bad too. Run the
+   [publishing steps](#publishing-a-release) with N+2 as the install version and
+   the last good source commit, or a `develop` commit that reverts the bad change,
+   as the source. Its changelog says it replaces N and why. In step 5, pin N+2.
+3. **Effect.** The seed's head now names N+2. Homes on N update to it normally,
+   because N+2 is newer. Homes that never installed N go straight to N+2, and new
+   installs get N+2: nothing offers N any more.
+4. **Undo for affected users.** A Home whose update to N failed to start has
+   already restored its previous release. A Home that runs N but works badly can
+   return to the last good release before N+2 is out with
+   `elastos update --rollback-to <last good head CID>` (see
+   [Undo an update](INSTALL.md#undo-an-update)). It then updates to N+2 normally.
+   Add a comment on #93 when N+2 is published.
+
+The seed keeps N pinned, like every published release; nothing is unpinned.
+Only the head moves, so no Home is offered N again. N stays fetchable by its
+CID, so an explicit `--head-cid` or `--rollback-to` that names it still works.
+
+Decision (October 2026): for 0.8.0 the signed head carries no list of withdrawn
+versions. Moving the head already stops every offer of N; a refusal list would
+change the head schema and depends on who may sign it. Revisit with the head
+freshness design (#157) and the publisher-keys statement (#213).
+
 ## Tagging Recommendation
 
 Use annotated repo tags for runtime releases:

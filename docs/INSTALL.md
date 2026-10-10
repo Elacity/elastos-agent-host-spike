@@ -321,13 +321,16 @@ of that key exists.
 
 ## Installed files
 
-When XDG variables are unset, the default paths are:
+| What | macOS | Linux |
+| --- | --- | --- |
+| Runtime binary | `~/.local/bin/elastos` | `~/.local/bin/elastos` |
+| Data directory | `~/Library/Application Support/elastos` | `~/.local/share/elastos`, or `$XDG_DATA_HOME/elastos` when set |
+| Components | `bin/`, `capsules/`, `tools/`, `libexec/`, `components.json`, `model-catalog.json` and `update-controller/` in the data directory | same |
+| Trusted sources and verified release | `sources.json` and `installation/` in the data directory | same |
 
-| Path | Purpose |
-| --- | --- |
-| `~/.local/bin/elastos` | Runtime binary |
-| `~/.local/share/elastos/components.json` | Installed component registry |
-| `~/.local/share/elastos/sources.json` | Trusted update sources |
+`--install-dir` moves only the binary. Everything else in the data directory is
+yours: identity keys, wallets, recovery material and user files. ElastOS adds
+no login items, launch agents, desktop entries or shell profile changes.
 
 The publisher's signed manifest controls what `elastos setup` installs. Run
 `elastos setup --list` to inspect the selected manifest's current profiles and
@@ -335,6 +338,29 @@ components before installation. The installed `components.json` records what
 the selected profile installed. Do not infer parity with this development tree
 from the version label or a successful setup. [Install/update acceptance](https://github.com/Elacity/elastos-runtime/issues/89)
 owns exact public-manifest parity evidence.
+
+## Remove ElastOS
+
+```bash
+curl -fsSL https://elastos.elacitylabs.com/install.sh | bash -s -- --uninstall
+```
+
+The installer stops this installation's Runtime the same way an install does:
+it stops only processes whose ownership records and command match this
+installation, and removes nothing if another process holds them. It then
+removes the binary, the components, the trusted sources and the verified
+release. Your data directory stays, so installing again continues with the same
+identity. Pass the same `--install-dir` you installed with. An install or update
+that is running or was interrupted stops the removal; finish it first.
+
+To delete your data as well, add `--remove-data`:
+
+```bash
+curl -fsSL https://elastos.elacitylabs.com/install.sh | bash -s -- --uninstall --remove-data
+```
+
+This deletes your identity, wallets and recovery material on this computer.
+Keep your Recovery Kit first: it is the only way to restore that identity.
 
 ## Data, keys and backups
 
