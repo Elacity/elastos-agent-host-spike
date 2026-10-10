@@ -6,7 +6,7 @@
    Tip: home-20260814a */
 
 import { getHomeGuiLaunchToken } from "./harness-host.js";
-import { catalogModels, selectedModelOffer, readyModelChoices } from "./model-selection.js";
+import { catalogModels, selectedModelOffer, readyModelChoices, downloadingModel } from "./model-selection.js";
 import { yieldToBrowser, YIELD_EVENT_SLICE, YIELD_MS } from "./agent-stream-qos.js";
 import {
   eligibleTextOffers,
@@ -205,6 +205,10 @@ export async function selectLiveOfferForUse(offerId, modelCid = null) {
 export function liveContentChoice() { return selectedContentCid; }
 export function liveContentModels() {
   return readyModelChoices(liveState.catalogModels || [], liveState.models.map(m => ({ ...m, id: m.offerId })));
+}
+/** The catalog model a running preparation is downloading, or null. */
+export function liveDownloadingModel() {
+  return downloadingModel(liveState.catalogModels || []);
 }
 function currentChoice(models, content) {
   // Initial empty workspace may use the first offer. An existing choice stays exact.

@@ -6787,8 +6787,70 @@ async fn test_window_policy_survives_discovery_catalog_and_home_launch() {
 }
 
 #[tokio::test]
+async fn test_home_active_shell_without_developer_mode_resets_terminal_to_desktop() {
+    let dir = tempfile::tempdir().unwrap();
+    write_test_browser_capsule(
+        dir.path(),
+        "home-cli",
+        "shell",
+        "Home CLI",
+        Some("<!doctype html><title>Home CLI</title>"),
+    );
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    let localhost_root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let state_uri = format!("{localhost_root}/.AppData/ElastOS/Home/active-shell.json");
+    let state_path =
+        elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &state_uri).unwrap();
+    write_home_principal_object_json_for_authority(
+        dir.path(),
+        &authority,
+        "active-shell.json",
+        json!({
+            "schema": "elastos.home.active-shell/v1",
+            "principal_id": authority.principal_id.clone(),
+            "localhost_root": localhost_root.clone(),
+            "active": "home-cli"
+        }),
+    );
+
+    let (status, payload) = home_test_get_json(
+        &app,
+        "/api/apps/home/summary",
+        &authority.home_token,
+        "http://localhost:61180",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(payload["active_shell"]["active"], HOME_GUI_SHELL_ID);
+    assert!(!payload["active_shell"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate["name"] == "home-cli"));
+    let saved = std::fs::read_to_string(&state_path).unwrap();
+    assert!(saved.contains(r#""active": "home-gui""#), "{saved}");
+
+    let selected = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .method("POST")
+                .uri("/api/apps/home/active-shell")
+                .header("x-elastos-home-token", authority.home_token.as_str())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"active":"home-cli"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn test_home_active_shell_uses_catalog_shell_candidates() {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.toml"), "developer_mode = true\n").unwrap();
     write_test_browser_capsule(
         dir.path(),
         "home-cli",
@@ -7311,6 +7373,7 @@ async fn test_home_active_shell_uses_catalog_shell_candidates() {
 #[tokio::test]
 async fn test_home_shell_switch_preserves_runtime_facts_and_recovers_after_launch_failure() {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.toml"), "developer_mode = true\n").unwrap();
     let state = test_state(dir.path());
     std::fs::remove_file(dir.path().join("capsules/home-cli").join("home-cli.wasm")).unwrap();
     let app = gateway_router(state);

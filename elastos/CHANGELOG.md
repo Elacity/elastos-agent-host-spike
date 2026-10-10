@@ -14,6 +14,47 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   only if status stays unavailable for about a minute. Home also answers status
   checks without waiting for the download, and saves download progress less
   often.
+- System > Shell and Marketplace > Home views no longer offer Terminal unless
+  developer mode is on, because the browser terminal cannot start without it.
+  If Terminal was chosen and can no longer start, Home opens the Desktop and
+  remembers that choice, instead of showing an error after every reload and
+  sign-in.
+- While a model is being set up after its download, Marketplace and System show
+  "Finishing setup…" instead of "Model service unavailable." with a Retry button.
+- When no model is ready yet and one is downloading, Assistant shows, for
+  example, "SmolLM2 is downloading (42%)" instead of "No model".
+- Assistant no longer shows a microphone button that cannot work inside Home.
+- A new Home no longer asks in Inbox for market-price access before you open
+  Wallet. Wallet asks the first time you open it.
+- The Home welcome sheet no longer talks about an "updated" Recovery Kit when
+  you have not saved one yet.
+- The lock screen shows the first letter of your name instead of "e".
+
+### Removed
+
+- Protected content is not part of 0.8.0. Elacity Player is no longer listed in
+  Apps or search, Library no longer offers "Protect and List…", and Marketplace
+  no longer has a Media tab. They return in a later release.
+
+### Developer detail
+
+- The capsule catalogue marks `home-cli` not launchable unless the host
+  terminal policy allows it (`developer_mode = true` and closed guest
+  registration), so Home view candidates, System and Marketplace follow the same
+  rule; the active-shell summary already repairs a saved shell that is no longer
+  a candidate. Home host also resets a non-launchable saved shell to `home-gui`
+  through `POST /api/apps/home/active-shell`
+  (`scripts/home-shell-unavailable-shell-fallback-smoke.mjs`).
+- `protected_content_runtime::PROTECTED_CONTENT_RELEASED` (false) is the one
+  switch for protected content: it drops `elacity-player` from the catalogue,
+  sets catalogue `policy.protected_content` (Marketplace Media tab) and adds the
+  Library `protect` object capability that "Protect and List…" now requires.
+- `GET /api/wallet/prices` raises the CoinGecko Inbox request only with
+  `request_access=true`. Wallet sends it unless it was preloaded by the rail
+  (`preload=1`); opening the rail sends `elastos:wallet-refresh`, which asks.
+- `model-management.js` adds the `finishing` phase (admitted, activation
+  pending, no dispatch-unavailable reason). `model-selection.js` adds
+  `downloadPercent` and `downloadingModel`.
 
 ## [0.8.0-alpha.13]
 

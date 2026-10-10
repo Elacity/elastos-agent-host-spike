@@ -76,6 +76,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Digest as _;
 
+/// Protected content (Elacity Player, Protect and List, Marketplace Media)
+/// ships after 0.8.0 (#91). Home hides those surfaces while this is false;
+/// the runtime paths stay in place for the release that turns it on.
+pub(crate) const PROTECTED_CONTENT_RELEASED: bool = false;
+pub(crate) const ELACITY_PLAYER_CAPSULE_ID: &str = "elacity-player";
+
 pub(crate) const CUSTODY_PROVIDER_ID: &str = "custody";
 pub(crate) const PROTECT_PROVIDER_ID: &str = "protect";
 pub(crate) const MEDIA_PROVIDER_ID: &str = "media";
@@ -96,7 +102,6 @@ const MEDIA_PROVIDER_MAX_SOURCE_HEIGHT_V1: u32 = 2_160;
 const MEDIA_PROVIDER_MAX_SOURCE_FPS_V1: u32 = 60;
 const MEDIA_PROVIDER_MAX_SEGMENT_COUNT_V1: usize = MAX_PROTECT_MEDIA_SEGMENTS_V1 as usize;
 const MEDIA_PROVIDER_MAX_TOTAL_OUTPUT_BYTES_V1: u64 = 2 << 30;
-const ELACITY_PLAYER_CAPSULE_ID: &str = "elacity-player";
 const CONTENT_PROVIDER_ID: &str = "content";
 const PROTECTED_CONTENT_REPLICATION_POLICY: &str = "protected-content-replication/v1";
 const PROTECTED_CONTENT_MIN_REPLICAS: u32 = 3;

@@ -156,3 +156,43 @@ fn test_wallet_qr_svg_rejects_invalid_address_and_encodes_valid_address() {
     assert!(svg.contains("<path d=\"M"));
     assert!(wallet_qr_svg("bad address with spaces").is_err());
 }
+
+#[tokio::test]
+async fn test_wallet_prices_raise_inbox_request_only_when_wallet_asks() {
+    let dir = tempfile::tempdir().unwrap();
+    let authority = passkey_authority(dir.path());
+    let token = app_token_for_authority(dir.path(), WALLET_CAPSULE_ID, &authority);
+    let app = gateway_router(test_state(dir.path()));
+    let price_requests = || {
+        crate::notifications::load_summary(dir.path())
+            .unwrap()
+            .entries
+            .into_iter()
+            .filter(|entry| entry.source_app == WALLET_CAPSULE_ID)
+            .count()
+    };
+
+    for (uri, expected_requests) in [
+        ("/api/wallet/prices", 0),
+        ("/api/wallet/prices?request_access=true", 1),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                test_browser_request("localhost:61180", "null")
+                    .uri(uri)
+                    .header("x-elastos-home-token", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["unavailable"], true, "{uri}: {payload}");
+        assert_eq!(price_requests(), expected_requests, "{uri}");
+    }
+}

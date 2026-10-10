@@ -3477,6 +3477,9 @@ fn library_object(data_dir: &Path, principal_id: &str, uri: &str) -> anyhow::Res
         if is_extractable_archive_name(&name) {
             capabilities.push("extract_archive");
         }
+        if crate::protected_content_runtime::PROTECTED_CONTENT_RELEASED && active_record.is_none() {
+            capabilities.push("protect");
+        }
         capabilities
     };
     if is_trash_root {

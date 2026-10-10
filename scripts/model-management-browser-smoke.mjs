@@ -215,7 +215,13 @@ try {
     await frame.getByRole("button", { name: "Retry", exact: true }).click();
     await frame.getByRole("button", { name: "Cancel preparation" }).waitFor();
     phase = "admitted"; activationPending = app === "marketplace"; dispatchPending = true;
-    await frame.getByText("Available on this device. Model service unavailable.", { exact: true }).waitFor();
+    if (app === "marketplace") {
+      // Activation still running: the engine is being set up, so no Retry is offered.
+      await frame.getByText("Finishing setup…", { exact: true }).waitFor();
+      assert.equal(await frame.getByRole("button", { name: "Retry", exact: true }).count(), 0, "finishing setup offers no Retry");
+    } else {
+      await frame.getByText("Available on this device. Model service unavailable.", { exact: true }).waitFor();
+    }
     for (const [reason, explanation] of [
       ["unsupported_host", "Local AI is not supported on this device."],
       ["source_engine_required", "This source Home needs its local model engine. Install the engine through source setup, then Retry."],

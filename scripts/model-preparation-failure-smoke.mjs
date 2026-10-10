@@ -79,6 +79,7 @@ const projection = (state, extra = {}) => ({ admitted: false, dispatch_ready: fa
 const phases = {
   absent: [projection(null), null], ready: [{ ...projection("admitted"), admitted: true, dispatch_ready: true, offer_id: `model:${"b".repeat(64)}` }, null],
   service_unavailable: [{ ...projection("admitted"), admitted: true }, null],
+  finishing: [{ ...projection("admitted", { activation_pending: true }), admitted: true }, null],
   cancelling: [projection("preparing", { cancel_requested: true }), null], capacity: [projection("capacity_pending"), null],
   settling: [projection("uncertain"), null], verifying: [projection("verifying"), null], preparing: [projection("preparing"), null],
   failed: [projection("failed", { failure_class: "verification_failed" }), null], reclaimed: [projection("reclaimed"), null],
@@ -96,6 +97,7 @@ const plain = table => Object.fromEntries(Object.entries(table));
 assert.deepEqual(plain(PHASE_TEXT), {
   unavailable: "Current status unavailable", ready: "Available on this device",
   service_unavailable: "Available on this device. Model service unavailable.",
+  finishing: "Finishing setup…",
   cancelling: "Cancelling preparation…", capacity: "Waiting for local capacity…", settling: "Waiting for preparation to settle…",
   verifying: "Checking model files…", preparing: "Preparing local files…", absent: "Ready to prepare",
   reclaimed: "Model removed from local cache.", cancelled: "Preparation cancelled.", expired: "Preparation expired.",

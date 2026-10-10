@@ -23,7 +23,9 @@
   function phaseOf(r, p, message) {
     if (message) return "unavailable";
     if (r.dispatch_ready) return "ready";
-    if (r.admitted) return "service_unavailable";
+    // Admitted content whose engine is still being activated is finishing,
+    // not broken: Runtime clears activation_pending once dispatch can start.
+    if (r.admitted) return p?.activation_pending && !r.dispatch_unavailable_reason ? "finishing" : "service_unavailable";
     if (active(p)) return p.cancel_requested ? "cancelling" : p.state === "capacity_pending" ? "capacity" : p.state === "uncertain" ? "settling" : p.state === "verifying" ? "verifying" : "preparing";
     if (!p) return "absent";
     return p.state;
@@ -31,6 +33,7 @@
   const PHASE_TEXT = Object.freeze({
     unavailable: "Current status unavailable", ready: "Available on this device",
     service_unavailable: "Available on this device. Model service unavailable.",
+    finishing: "Finishing setup…",
     cancelling: "Cancelling preparation…", capacity: "Waiting for local capacity…", settling: "Waiting for preparation to settle…",
     verifying: "Checking model files…", preparing: "Preparing local files…", absent: "Ready to prepare",
     reclaimed: "Model removed from local cache.", cancelled: "Preparation cancelled.", expired: "Preparation expired.",
@@ -343,7 +346,7 @@
           : (p && p.state !== "reclaimed") || unresolvedUse ? "Retry" : compact ? "Get" : "Download";
         const use = button(useLabel, () => void act("use"), active(p) || reconcileRequired);
         use.dataset.modelControl = "use";
-        if (!active(p) && !r.dispatch_ready) controls.append(use);
+        if (!active(p) && !r.dispatch_ready && phase !== "finishing") controls.append(use);
         if (r.dispatch_ready && typeof onReadyOpen === "function") {
           const open = button("Open in Assistant", () => void act("open"), reconcileRequired);
           open.dataset.modelControl = "open-assistant";

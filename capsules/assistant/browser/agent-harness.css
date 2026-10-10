@@ -3337,6 +3337,10 @@ html[data-agent-reasoning="off"] .agent-thinking {
   font-weight: 300;
 }
 
+.agent-tool-btn[hidden] {
+  display: none;
+}
+
 .agent-tool-btn:hover,
 .agent-model-btn:hover {
   background: color-mix(in srgb, var(--text) 8%, transparent);

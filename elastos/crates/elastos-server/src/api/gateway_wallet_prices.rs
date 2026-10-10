@@ -1,7 +1,16 @@
 use super::*;
 
+#[derive(Debug, Default, Deserialize)]
+pub(in crate::api::gateway) struct WalletPricesQuery {
+    /// Set by Wallet only while the user is looking at prices. Background
+    /// reads (for example the idle rail preload) never raise an Inbox request.
+    #[serde(default)]
+    request_access: bool,
+}
+
 pub(in crate::api::gateway) async fn wallet_prices(
     State(state): State<GatewayState>,
+    Query(query): Query<WalletPricesQuery>,
     headers: HeaderMap,
 ) -> Response {
     let context = match require_home_launch_token_for_any_context(
@@ -14,7 +23,8 @@ pub(in crate::api::gateway) async fn wallet_prices(
     };
     match wallet_prices_response(&state.data_dir, Some(&context)).await {
         Ok(response) => {
-            if response.unavailable
+            if query.request_access
+                && response.unavailable
                 && response
                     .note
                     .as_deref()
