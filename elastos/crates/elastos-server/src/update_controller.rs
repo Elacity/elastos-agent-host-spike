@@ -2148,10 +2148,14 @@ async fn prove_ready(
         &data_dir.join("host-process.lock"),
         4096,
     )?)?;
+    // Local and public Home gateways hold the host lock under their own roles.
     anyhow::ensure!(
         metadata["pid"].as_u64() == Some(u64::from(pid))
             && metadata["generation"].as_str() == Some(generation)
-            && metadata["role"] == "gateway",
+            && matches!(
+                metadata["role"].as_str(),
+                Some("gateway" | "gateway-public")
+            ),
         "Home host lock differs from the claimed generation"
     );
     let home_url = approved_home_url(&coords.home_url, home_port)?;

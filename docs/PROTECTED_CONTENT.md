@@ -205,9 +205,9 @@ owner-only restart receipt.
 Principal-root migration writes encrypted rollback objects bound to the
 principal, root, object URI and recovery data key. Runtime can restore the
 original plaintext during migration recovery. It keeps the rollback payload
-through release recovery and Home acceptance. Every Home start, whether the
-installed Home controller, the installer or the owner started it, then removes
-verified payload files and keeps the migration receipts.
+through release recovery and Home acceptance. Every Home start, local or public
+and whether the installed Home controller, the installer or the owner started
+it, then removes verified payload files and keeps the migration receipts.
 
 Cleanup holds the installation writer lock and verifies the signed installed
 release, exact Home process and generation, host ownership, health response,
