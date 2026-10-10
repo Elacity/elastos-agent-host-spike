@@ -4277,21 +4277,20 @@ impl ContentProvider {
     ) -> Result<bool, ProviderError> {
         for dir in complete_local_object_dirs(&self.data_dir) {
             match self.import_local_object_dir(registry, &dir).await {
-                Ok(imported_cid) if imported_cid == cid => return Ok(true),
-                Ok(imported_cid) => {
-                    let _ = self
+                // The import is unpinned; only the requested CID is pinned.
+                Ok(imported_cid) if imported_cid == cid => {
+                    let pinned = self
                         .invoke_provider(
                             registry,
                             "ipfs",
-                            "unpin",
-                            json!({
-                                "op": "unpin",
-                                "cid": imported_cid,
-                            }),
+                            "pin",
+                            json!({ "op": "pin", "cid": cid }),
                             ProviderTransfer::Json,
                         )
-                        .await;
+                        .await?;
+                    return Ok(pinned["status"] == "ok");
                 }
+                Ok(_) => {}
                 Err(err) => {
                     tracing::debug!(
                         dir = %dir.display(),
@@ -4316,12 +4315,31 @@ impl ContentProvider {
             .await
     }
 
+    /// Restores the replicas this Content plane recorded: a complete local
+    /// object is pinned and announced only when its imported CID has a Content
+    /// receipt that was not withdrawn by unpublish.
     pub async fn restore_complete_local_objects(&self) {
         let Ok(registry) = self.registry() else {
             return;
         };
+        let held: BTreeSet<String> = match self.latest_receipts() {
+            Ok(receipts) => receipts
+                .into_iter()
+                .filter(|receipt| receipt.payload.status != "local_unpinned")
+                .map(|receipt| receipt.payload.cid)
+                .collect(),
+            Err(err) => {
+                tracing::warn!(error = %err, "content: local object restore skipped");
+                return;
+            }
+        };
         for dir in complete_local_object_dirs(&self.data_dir) {
             match self.import_local_object_dir(&registry, &dir).await {
+                Ok(cid) if !held.contains(&cid) => tracing::warn!(
+                    dir = %dir.display(),
+                    cid = %cid,
+                    "content: local object CID has no Content receipt; not restored"
+                ),
                 Ok(cid) => match self
                     .ensure(&json!({
                         "cid": cid,
@@ -9428,6 +9446,8 @@ mod tests {
                     let files = if op == "add_directory" {
                         &request["files"]
                     } else {
+                        // The blocks are now local, so a later pin succeeds.
+                        *self.pin_error.lock().await = None;
                         &request["object"]["files"]
                     };
                     self.added_directories
@@ -11865,7 +11885,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_restore_imports_complete_local_objects() {
+    async fn content_restore_pins_only_local_objects_with_a_content_receipt() {
         let (data_dir, _registry, ipfs, content) = registry_with_content_and_ipfs().await;
         let body = b"hello object";
         let digest = format!("{:x}", sha2::Sha256::digest(body));
@@ -11888,10 +11908,24 @@ mod tests {
         )
         .unwrap();
 
+        // No Content receipt names the imported CID: it is never pinned.
         content.restore_complete_local_objects().await;
-
         assert_eq!(ipfs.added_directories.lock().await.len(), 1);
+        assert!(ipfs.pinned.lock().await.is_empty());
+
+        // A recorded replica is pinned again on restore.
+        let ensure = json!({"op": "ensure", "cid": TEST_CID});
+        assert_eq!(content.send_raw(&ensure).await.unwrap()["status"], "ok");
+        ipfs.pinned.lock().await.clear();
+        content.restore_complete_local_objects().await;
         assert_eq!(ipfs.pinned.lock().await.as_slice(), [TEST_CID.to_string()]);
+
+        // Unpublish withdraws the replica; restore does not pin it again.
+        let unpublish = json!({"op": "unpublish", "cid": TEST_CID});
+        assert_eq!(content.send_raw(&unpublish).await.unwrap()["status"], "ok");
+        ipfs.pinned.lock().await.clear();
+        content.restore_complete_local_objects().await;
+        assert!(ipfs.pinned.lock().await.is_empty());
     }
 
     #[tokio::test]

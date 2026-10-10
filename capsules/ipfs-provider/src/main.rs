@@ -106,11 +106,60 @@ impl Read for AddPathReader {
     }
 }
 
+/// Opens a local object root below this provider's own data root. Every
+/// component below the data root is opened O_NOFOLLOW|O_DIRECTORY, so no link
+/// can lead the import outside it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_local_object_root(data_root: &Path, root: &Path) -> io::Result<fs::File> {
+    let outside = || {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Local object is outside the data root",
+        )
+    };
+    let relative = root.strip_prefix(data_root).map_err(|_| outside())?;
+    let mut dir = fs::File::open(data_root)?;
+    if !dir.metadata()?.is_dir() {
+        return Err(outside());
+    }
+    for part in relative.components() {
+        let std::path::Component::Normal(name) = part else {
+            return Err(outside());
+        };
+        dir = directory_hash::open_at(&dir, name.to_str().ok_or_else(outside)?, true)?;
+    }
+    Ok(dir)
+}
+
+/// Opens one declared file below an object root fd, following no link: it must
+/// be a regular file of the recorded size owned by this user.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_local_object_file(root: &fs::File, path: &str, size: u64) -> io::Result<fs::File> {
+    use std::os::unix::fs::MetadataExt;
+
+    let (parents, name) = path.rsplit_once('/').unwrap_or(("", path));
+    let mut dir = root.try_clone()?;
+    for part in parents.split('/').filter(|part| !part.is_empty()) {
+        dir = directory_hash::open_at(&dir, part, true)?;
+    }
+    let file = directory_hash::open_at(&dir, name, false)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } || metadata.len() != size
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Local object file is not the recorded regular file",
+        ));
+    }
+    Ok(file)
+}
+
 /// Multipart body of one local object directory for Kubo `add`. Files open one
 /// at a time when their part starts and stream through `AddPathReader`, so the
 /// provider holds one bounded chunk whatever the object's size.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 struct LocalObjectBody<'a> {
-    root: &'a Path,
+    root: fs::File,
     files: std::slice::Iter<'a, StagedFile>,
     boundary: String,
     pending: io::Cursor<Vec<u8>>,
@@ -118,6 +167,7 @@ struct LocalObjectBody<'a> {
     finished: bool,
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Read for LocalObjectBody<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         if buffer.is_empty() {
@@ -138,15 +188,9 @@ impl Read for LocalObjectBody<'_> {
                 continue;
             }
             if let Some(file) = self.files.next() {
-                let reader = AddPathReader::new(fs::File::open(self.root.join(&file.path))?)?;
-                if reader.length != file.size {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Local object file differs from its manifest",
-                    ));
-                }
+                let source = open_local_object_file(&self.root, &file.path, file.size)?;
+                self.current = Some(AddPathReader::new(source)?);
                 self.pending = io::Cursor::new(directory_part_header(&self.boundary, &file.path));
-                self.current = Some(reader);
             } else if !self.finished {
                 self.finished = true;
                 self.pending = io::Cursor::new(format!("--{}--\r\n", self.boundary).into_bytes());
@@ -707,16 +751,23 @@ impl IpfsProvider {
                 if !object.valid_shape() {
                     return private_preparation_error();
                 }
-                if let Err(error) = self.ensure_kubo() {
-                    eprintln!("ipfs-provider: local object backend unavailable: {error}");
-                    return private_preparation_error();
-                }
-                match self.kubo_add_local_object(&object) {
-                    Ok(cid) => Response::ok(serde_json::json!({"cid":cid})),
-                    Err(error) => {
-                        eprintln!("ipfs-provider: local object import failed: {error}");
-                        private_preparation_error()
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                {
+                    if let Err(error) = self.ensure_kubo() {
+                        eprintln!("ipfs-provider: local object backend unavailable: {error}");
+                        return private_preparation_error();
                     }
+                    match self.kubo_add_local_object(&object) {
+                        Ok(cid) => Response::ok(serde_json::json!({"cid":cid})),
+                        Err(error) => {
+                            eprintln!("ipfs-provider: local object import failed: {error}");
+                            private_preparation_error()
+                        }
+                    }
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                {
+                    private_preparation_error()
                 }
             }
             Request::Init { config } => self.init(config),
@@ -1683,32 +1734,33 @@ impl IpfsProvider {
         directory_root(resp)
     }
 
-    /// Pins one complete local object directory with the same parts and add
-    /// options as `add_directory`, so its CID equals the original import. The
-    /// body streams from disk; no file is held in memory.
+    /// Adds one complete local object directory to Kubo unpinned, with the same
+    /// parts and add options as `add_directory`, so its CID equals the original
+    /// import; Runtime pins it only after comparing that CID. Files stream from
+    /// disk through fds opened below the data root without following links.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn kubo_add_local_object(&self, object: &LocalObject) -> Result<String, String> {
+        let root = open_local_object_root(&self.data_dir, &object.root)
+            .map_err(|e| format!("Local object root refused: {}", e))?;
         let boundary = format!("----elastos{}", now_unix_secs());
         let mut length = format!("--{boundary}--\r\n").len() as u64;
         for file in &object.files {
-            let metadata = fs::metadata(object.root.join(&file.path))
-                .map_err(|e| format!("Local object file unavailable: {}", e))?;
-            if !metadata.is_file() || metadata.len() != file.size {
-                return Err("Local object file differs from its manifest".into());
-            }
+            open_local_object_file(&root, &file.path, file.size)
+                .map_err(|e| format!("Local object file refused: {}", e))?;
             length = length
                 .checked_add(directory_part_header(&boundary, &file.path).len() as u64 + 2)
                 .and_then(|n| n.checked_add(file.size))
                 .ok_or("Local object length exceeds its bound")?;
         }
         let body = LocalObjectBody {
-            root: &object.root,
+            root,
             files: object.files.iter(),
             boundary: boundary.clone(),
             pending: io::Cursor::new(Vec::new()),
             current: None,
             finished: false,
         };
-        let resp = ureq::post(&self.add_directory_url(true))
+        let resp = ureq::post(&self.add_directory_url(false))
             .set(
                 "Content-Type",
                 &format!("multipart/form-data; boundary={}", boundary),
@@ -2538,6 +2590,7 @@ mod tests {
         kept
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn local_object_add_streams_the_parts_and_options_of_directory_add() {
         let root = tempfile::tempdir().unwrap();
@@ -2566,7 +2619,7 @@ mod tests {
             })
             .collect();
         assert_eq!(
-            provider.kubo_add_directory(encoded, true).unwrap(),
+            provider.kubo_add_directory(encoded, false).unwrap(),
             "bafyroot"
         );
         let (json_headers, json_body) = server.join().unwrap();
@@ -2588,8 +2641,9 @@ mod tests {
         let (headers, body) = server.join().unwrap();
         // The same add options and parts, apart from the random boundary, give
         // Kubo the same directory, so the CID equals the original JSON import.
+        // Runtime pins only after comparing it.
         assert_eq!(headers.lines().next(), json_headers.lines().next());
-        assert!(headers.lines().next().unwrap().contains("&pin=true&"));
+        assert!(headers.lines().next().unwrap().contains("&pin=false&"));
         assert!(!headers.to_ascii_lowercase().contains("transfer-encoding:"));
         assert_eq!(
             without_boundary(&body, &multipart_boundary(&headers)),
@@ -2597,8 +2651,9 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn local_object_add_refuses_unsafe_descriptors_and_changed_files() {
+    fn local_object_add_refuses_unsafe_descriptors_links_and_changed_files() {
         let root = tempfile::tempdir().unwrap();
         let object = root.path().join("object");
         fs::create_dir(&object).unwrap();
@@ -2638,24 +2693,48 @@ mod tests {
                 "{request}"
             );
         }
-        // A file that no longer has its recorded size is refused before upload.
-        let changed = LocalObject {
-            root: object,
-            files: vec![
-                StagedFile {
-                    path: "a.txt".into(),
-                    size: 4,
-                },
-                StagedFile {
-                    path: "_elastos_object.json".into(),
-                    size: 2,
-                },
-            ],
-        };
-        assert!(provider
-            .kubo_add_local_object(&changed)
-            .unwrap_err()
-            .contains("differs from its manifest"));
+        // Roots and files the import cannot trust are refused before anything
+        // reaches Kubo: this fixture has no backend, so a sent request would
+        // fail differently.
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret"), b"abc").unwrap();
+        fs::write(outside.path().join("_elastos_object.json"), b"{}").unwrap();
+        fs::create_dir(outside.path().join("dir")).unwrap();
+        fs::write(outside.path().join("dir/a.txt"), b"abc").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret"), object.join("linked.txt"))
+            .unwrap();
+        std::os::unix::fs::symlink(outside.path().join("dir"), object.join("linked")).unwrap();
+        let linked_root = root.path().join("linked-root");
+        std::os::unix::fs::symlink(outside.path(), &linked_root).unwrap();
+        for (object_root, path, size, refusal) in [
+            (&object, "a.txt", 4, "Local object file refused"),
+            (&object, "linked.txt", 3, "Local object file refused"),
+            (&object, "linked/a.txt", 3, "Local object file refused"),
+            (
+                &outside.path().to_path_buf(),
+                "secret",
+                3,
+                "Local object root refused",
+            ),
+            (&linked_root, "secret", 3, "Local object root refused"),
+        ] {
+            let candidate = LocalObject {
+                root: object_root.clone(),
+                files: vec![
+                    StagedFile {
+                        path: path.into(),
+                        size,
+                    },
+                    StagedFile {
+                        path: "_elastos_object.json".into(),
+                        size: 2,
+                    },
+                ],
+            };
+            assert!(candidate.valid_shape());
+            let error = provider.kubo_add_local_object(&candidate).unwrap_err();
+            assert!(error.starts_with(refusal), "{path}: {error}");
+        }
     }
 
     fn private_hash_fixture_request() -> serde_json::Value {

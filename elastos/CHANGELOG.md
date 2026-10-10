@@ -22,12 +22,16 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   peers is the holder role (#324). Before this, restore read each admitted
   model file whole, then base64-encoded it and copied it through the provider
   bridge, using about 8 times the file size.
-- Restore and repair now stream every local object from disk into Kubo, pinned,
-  through a new Runtime-private ipfs-provider operation
+- Restore and repair now stream every local object from disk into Kubo,
+  unpinned, through a new Runtime-private ipfs-provider operation
   (`runtime_add_local_object`). It uses the same parts and add options as
-  `add_directory`, so the CID matches the original import and Content still
-  compares it. Runtime hashes the files with a streamed reader and sends only
-  their paths and sizes, so memory stays the same whatever the object's size.
+  `add_directory`, so the CID matches the original import. The provider opens
+  the object below its data root and each file without following links
+  (regular files owned by this user only). Content pins only a matching CID:
+  repair pins the requested CID, and restore pins a CID with a Content receipt
+  that was not withdrawn by unpublish. Runtime hashes the files with a streamed
+  reader and sends only their paths and sizes, so memory stays the same
+  whatever the object's size.
 - model-provider's cgroup v2 memory check subtracts reclaimable file cache
   (`active_file + inactive_file - file_dirty - file_writeback` in
   `memory.stat`, never below zero) from `memory.current`.

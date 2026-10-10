@@ -5,9 +5,10 @@
 //! owns its global allocator to measure that.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::sync::Arc;
 
 use elastos_runtime::provider::{
@@ -127,12 +128,13 @@ fn write_object(dir: &Path, files: &[(&str, Body<'_>)]) -> Descriptor {
 }
 
 /// Local Kubo stand-in. A streamed import names a directory and its file
-/// sizes, never bytes; each object has its own root CID.
+/// sizes, never bytes, and stores the object unpinned under its own root CID;
+/// a pin succeeds only for a stored CID.
 #[derive(Default)]
 struct Ipfs {
     imported: Mutex<Vec<(String, Descriptor)>>,
-    unpinned: Mutex<Vec<String>>,
-    pin_fails: AtomicBool,
+    stored: Mutex<BTreeSet<String>>,
+    pinned: Mutex<Vec<String>>,
 }
 
 #[async_trait::async_trait]
@@ -169,17 +171,20 @@ impl Provider for Ipfs {
                     HELD_CID
                 };
                 self.imported.lock().await.push((name, files));
+                self.stored.lock().await.insert(cid.to_owned());
                 Ok(json!({"status": "ok", "data": {"cid": cid}}))
             }
-            "pin" if self.pin_fails.load(Relaxed) => {
-                Ok(json!({"status": "error", "code": "pin_failed", "message": "not held"}))
-            }
-            "unpin" => {
+            "pin" => {
                 let cid = request["cid"].as_str().unwrap().to_owned();
-                self.unpinned.lock().await.push(cid);
+                if !self.stored.lock().await.contains(&cid) {
+                    return Ok(
+                        json!({"status": "error", "code": "pin_failed", "message": "not held"}),
+                    );
+                }
+                self.pinned.lock().await.push(cid);
                 Ok(json!({"status": "ok", "data": {}}))
             }
-            _ => Ok(json!({"status": "ok", "data": {"cid": HELD_CID}})),
+            _ => Ok(json!({"status": "ok", "data": {}})),
         }
     }
 }
@@ -248,10 +253,13 @@ async fn restore_and_repair_stream_large_objects_and_skip_model_packages() {
             ("media-object".to_owned(), media.clone())
         ]
     );
+    // No Content receipt names these CIDs, so restore pins neither.
+    assert!(ipfs.pinned.lock().await.is_empty());
 
-    // Repair after a failed pin imports complete objects until one has the
-    // requested CID; any other import is unpinned again.
-    ipfs.pin_fails.store(true, Relaxed);
+    // Repair after the local Kubo lost the object: the pin fails, so Content
+    // imports complete objects unpinned until one has the requested CID, and
+    // pins only that one.
+    ipfs.stored.lock().await.clear();
     let (response, growth) =
         heap_growth(content.send_raw(&json!({"op": "ensure", "cid": MEDIA_CID}))).await;
     assert!(growth <= HEAP_BOUND, "repair heap grew {growth} bytes");
@@ -267,5 +275,5 @@ async fn restore_and_repair_stream_large_objects_and_skip_model_packages() {
         .lock()
         .await
         .contains(&("media-object".to_owned(), media)));
-    assert!(ipfs.unpinned.lock().await.iter().all(|cid| cid == HELD_CID));
+    assert_eq!(*ipfs.pinned.lock().await, [MEDIA_CID]);
 }

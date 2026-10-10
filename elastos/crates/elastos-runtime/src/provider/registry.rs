@@ -1491,8 +1491,9 @@ impl ProviderRegistry {
     }
 
     /// Stream one complete local Content object directory into the local Kubo,
-    /// pinned, without loading its files. Content compares the returned CID;
-    /// capsules and Carrier cannot reach this operation.
+    /// unpinned, without loading its files. The provider opens the root below
+    /// its data root and every file without following links. Content compares
+    /// the returned CID before it pins; capsules and Carrier cannot reach this.
     pub async fn add_local_ipfs_object(
         &self,
         root: &std::path::Path,
