@@ -75,6 +75,18 @@ impl PreparationFailurePhase {
             Self::Preparation => "preparation_unavailable",
         }
     }
+
+    /// The failure is about reaching the content or room for it, never about
+    /// the bytes already staged: a read answer is refused before it is
+    /// written, whether it failed in transit, was refused by the holder or
+    /// came back malformed. The next Use re-hashes the kept bytes and
+    /// continues after the last whole part.
+    fn keeps_stage(self) -> bool {
+        matches!(
+            self,
+            Self::MetadataRead | Self::WeightsRead | Self::Capacity
+        )
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -1239,12 +1251,13 @@ impl PreparationOwner {
                 // The serialized local barrier is required even after transport
                 // failure. Failed drain preserves all staged bytes and charges.
                 let drained = registry.prepare_local_ipfs_backend().await.is_ok();
-                // A read that failed in transit, a stopping Home or a passed
-                // deadline says nothing against the bytes already staged, so
-                // the next Use continues from them. Cancel, holder refusals,
-                // malformed answers, integrity, authority, policy and storage
+                // A read or capacity failure, a read that failed in transit, a
+                // stopping Home or a passed deadline says nothing against the
+                // bytes already staged, so the next Use continues from them.
+                // Cancel, integrity, local storage, authority, policy and other
                 // failures remove them.
-                let keep_stage = transient_part_read_error(&error)
+                let keep_stage = phase.keeps_stage()
+                    || transient_part_read_error(&error)
                     || error.downcast_ref::<PreparationStopped>().is_some();
                 let settled = settle_failure(&data, &operation, drained, keep_stage).is_ok();
                 use elastos_runtime::provider::ProviderError;
@@ -8191,18 +8204,30 @@ server.serve_forever()
         };
         use elastos_runtime::auth::AuthSessionGrantV1;
 
-        for (fault, phase) in [
+        // `staged`: the stage stays after the failure. A read failure keeps the
+        // verified bytes for the next Use; an undrained one keeps everything.
+        for (fault, phase, staged) in [
             (
                 "metadata_tamper",
                 PreparationFailurePhase::MetadataIntegrity,
+                false,
             ),
-            ("file_unavailable", PreparationFailurePhase::WeightsRead),
+            (
+                "file_unavailable",
+                PreparationFailurePhase::WeightsRead,
+                true,
+            ),
             (
                 "file_unavailable_undrained",
                 PreparationFailurePhase::WeightsRead,
+                true,
             ),
-            ("header", PreparationFailurePhase::WeightsHeader),
-            ("authority_revoked", PreparationFailurePhase::Authority),
+            ("header", PreparationFailurePhase::WeightsHeader, false),
+            (
+                "authority_revoked",
+                PreparationFailurePhase::Authority,
+                false,
+            ),
         ] {
             let root = tempfile::tempdir().unwrap();
             let (payload, files) = package_fixture(b"GGUF\x03\0\0\0fixture".to_vec());
@@ -8307,7 +8332,8 @@ server.serve_forever()
             );
             assert_eq!(
                 root.path().join("model-preparation/stage").exists(),
-                undrained
+                staged,
+                "{fault}"
             );
             assert_eq!(record.projection()["failure_class"], phase.public_class());
             assert_eq!(
@@ -8335,11 +8361,14 @@ server.serve_forever()
 
     #[tokio::test]
     async fn model_preparation_actual_fetch_rejects_tampered_and_truncated_bytes() {
-        for fault in [
-            "index_tamper",
-            "index_truncate",
-            "file_tamper",
-            "file_truncate",
+        // A truncated weights answer is refused before it is written, so the
+        // parts already staged stay for the next Use; tampered bytes and a
+        // bad index remove the stage.
+        for (fault, staged) in [
+            ("index_tamper", false),
+            ("index_truncate", false),
+            ("file_tamper", false),
+            ("file_truncate", true),
         ] {
             let root = tempfile::tempdir().unwrap();
             let (payload, files) = package_fixture(b"GGUF\x03\0\0\0fixture".to_vec());
@@ -8369,7 +8398,11 @@ server.serve_forever()
                 load_operation(root.path(), result["operation_id"].as_str().unwrap()).unwrap();
             assert_eq!(record.state, PreparationState::Failed, "{fault}");
             assert_eq!(record.reserved_bytes, 0);
-            assert!(!root.path().join("model-preparation/stage").exists());
+            assert_eq!(
+                root.path().join("model-preparation/stage").exists(),
+                staged,
+                "{fault}"
+            );
             assert!(storage::missing(
                 &Inventory::open(root.path(), false)
                     .unwrap()
@@ -11129,7 +11162,9 @@ server.serve_forever()
     }
 
     /// A part read the holder refuses or answers badly is read once and stops
-    /// the preparation: only failures in transit are repeated.
+    /// the preparation: only failures in transit are repeated. The answer was
+    /// refused before it was written, so it says nothing against the parts
+    /// already on disk: they stay for the next Use.
     #[tokio::test]
     async fn model_preparation_never_repeats_a_refused_or_malformed_part_read() {
         let failing = 4 * 65536;
@@ -11151,12 +11186,50 @@ server.serve_forever()
                 Some(PreparationFailurePhase::WeightsRead)
             );
             assert_eq!(fixture.reads_at(failing), 1, "refused={refused}");
-            assert!(
-                !fixture.root.path().join("model-preparation/stage").exists(),
-                "a refused or malformed answer removes the stage (refused={refused})"
+            assert_eq!(
+                std::fs::metadata(fixture.stage().join("weights.gguf"))
+                    .unwrap()
+                    .len(),
+                failing,
+                "refused={refused}"
             );
+            assert_eq!(fixture.kept_stage(), Some(record.operation_id.clone()));
             fixture.shutdown().await;
         }
+    }
+
+    /// Alpha.14 on a Jetson: a holder read that was refused (not lost in
+    /// transit) at 78.7% sent the next Retry back to 0%. The Retry continues
+    /// from the last whole part on disk instead.
+    #[tokio::test]
+    async fn model_preparation_resumes_after_a_refused_part_read() {
+        let failing = 20 * 65536;
+        let fixture = SlowHolderPreparation::start(
+            125,
+            crate::carrier::tests::HolderBehavior {
+                refuse_once: [failing].into(),
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .await;
+        let (failed, _) = fixture.prepare("refused-use").await;
+        assert_eq!(failed.state, PreparationState::Failed, "{failed:?}");
+        assert_eq!(
+            failed.failure_phase,
+            Some(PreparationFailurePhase::WeightsRead)
+        );
+        assert_eq!(fixture.kept_stage(), Some(failed.operation_id.clone()));
+        let (parts, index) = (fixture.part_reads(), fixture.index_reads());
+        let (record, _) = fixture.prepare("retry").await;
+        fixture.assert_admitted(&record);
+        assert_eq!(
+            fixture.part_reads() - parts,
+            fixture.parts_after(failing),
+            "the Retry reads only the parts not yet on disk"
+        );
+        assert_eq!(fixture.index_reads(), index, "the kept index is reused");
+        fixture.shutdown().await;
     }
 
     #[tokio::test]

@@ -11366,6 +11366,8 @@ pub(crate) mod tests {
         /// While it holds a value below `u64::MAX`, every read of a range
         /// starting at or after that offset stalls past the answer budget.
         pub(crate) stall_from: Option<Arc<std::sync::atomic::AtomicU64>>,
+        /// Range starts whose first read the holder refuses.
+        pub(crate) refuse_once: std::collections::BTreeSet<u64>,
         /// Range starts whose every read the holder refuses.
         pub(crate) refuse_always: std::collections::BTreeSet<u64>,
         /// Range starts answered with one byte more than asked.
@@ -11382,6 +11384,7 @@ pub(crate) mod tests {
         pub(crate) stall_once: StdMutex<std::collections::BTreeSet<u64>>,
         pub(crate) stall_always: std::collections::BTreeSet<u64>,
         pub(crate) stall_from: Option<Arc<std::sync::atomic::AtomicU64>>,
+        pub(crate) refuse_once: StdMutex<std::collections::BTreeSet<u64>>,
         pub(crate) refuse_always: std::collections::BTreeSet<u64>,
         pub(crate) oversize: std::collections::BTreeSet<u64>,
     }
@@ -11427,7 +11430,10 @@ pub(crate) mod tests {
             if stalls {
                 tokio::time::sleep(Duration::from_secs(7)).await;
             }
-            if start.is_some_and(|start| self.refuse_always.contains(&start)) {
+            if start.is_some_and(|start| {
+                self.refuse_always.contains(&start)
+                    || self.refuse_once.lock().unwrap().remove(&start)
+            }) {
                 return Err(ProviderError::Provider("fixture holder read failed".into()));
             }
             if request["op"] != "cat" || request["bounded_read"] != true {
@@ -11622,6 +11628,7 @@ pub(crate) mod tests {
                     stall_once: StdMutex::new(behavior.stall_once),
                     stall_always: behavior.stall_always,
                     stall_from: behavior.stall_from,
+                    refuse_once: StdMutex::new(behavior.refuse_once),
                     refuse_always: behavior.refuse_always,
                     oversize: behavior.oversize,
                 }),

@@ -6,6 +6,22 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Fixed
+
+- A model download that stopped with "Model content could not be read" now
+  continues from where it stopped when you press Retry. Before, Retry started
+  the download again from 0%.
+
+### Developer detail
+
+- Model preparation keeps its stage after any `MetadataRead`, `WeightsRead` or
+  `Capacity` failure, not only after a read typed as in transit (`Io`). A part
+  that a holder refuses or answers malformed is rejected before it is written,
+  so the staged prefix stays valid; the next Use re-hashes it and continues
+  after the last whole part. Integrity, local storage, authority, policy and
+  Cancel still remove the stage. Seen on a Jetson running alpha.14: a read that
+  ended as a `Provider` error at 78.7% sent the next Retry back to 0%.
+
 ## [0.8.0-alpha.15]
 
 Test-channel release. Signed releases show these notes in System before you update.
