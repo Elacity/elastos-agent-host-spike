@@ -426,9 +426,8 @@ jobs:
   # owns all the logic (throwaway client identity, throwaway compose
   # project, receipt assertions, full teardown); this job is thin glue over
   # it. Trusted develop/main pushes warm the shared image cache. Runs also for
-  # every merge group, workflow_dispatch, and PRs that touch the harness
-  # image, the proof driver, or the protected-content/carrier crates it
-  # exercises.
+  # every merge group, workflow_dispatch, and PRs that change an input the
+  # smoke builds or calls.
   custody-harness-smoke:
     name: custody-harness-smoke
     runs-on: ubuntu-24.04
@@ -453,16 +452,33 @@ jobs:
         if: github.event_name == 'pull_request'
         uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
         with:
+          # scripts/ci-release-policy-test.py requires every repository input
+          # the smoke's scripts call to match this filter.
           filters: |
             custody:
+              - '.github/workflows/ci.yml'
+              - 'rust-toolchain.toml'
+              - '.cargo/config.toml'
+              - 'elastos/.cargo/config.toml'
+              - 'components.json'
               - 'deploy/custody-host/**'
               - 'scripts/protected-content-installed-e2e-proof.sh'
               - 'scripts/protected-content-installed-static-audit.py'
               - 'scripts/custody-harness-ci-smoke.sh'
+              - 'scripts/setup-source-home.sh'
+              - 'scripts/mac-source-home-restart.sh'
               - 'capsules/custody-provider/**'
               - 'capsules/availability-provider/**'
               - 'capsules/ipfs-provider/**'
+              - 'capsules/chain-provider/**'
+              - 'elastos/Cargo.toml'
+              - 'elastos/Cargo.lock'
+              - 'elastos/crates/elastos-runtime/**'
               - 'elastos/crates/elastos-protected-content-*/**'
+              # Path dependencies of the capsules above.
+              - 'elastos/crates/elastos-auth/**'
+              - 'elastos/crates/elastos-guest/**'
+              - 'elastos/crates/elastos-identity/**'
               # Targeted, not the whole elastos-server crate (which would
               # fire this 60-minute job on most PRs): exactly the modules
               # this smoke actually exercises -- Carrier transport/dial,
@@ -522,10 +538,10 @@ jobs:
           if-no-files-found: ignore
 
   # The source-home jobs run after the cheap source gate, in parallel
-  # with tests across the three architectures. They are the de-facto release builders:
-  # setup-source-home compiles the runtime, shell, home-cli and every provider
-  # in --release. Tags, main and dispatch runs package those builds;
-  # ARM also packages every candidate for the Jetson compatibility gate.
+  # with tests across the three architectures. setup-source-home compiles the
+  # runtime, shell, home-cli and every provider in --release; ARM also
+  # packages every candidate for the Jetson compatibility gate. Signed
+  # releases come from release-package.yml and reach users over Carrier.
   source-home-linux:
     name: source-home-linux (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -714,9 +730,9 @@ jobs:
             ${{ runner.temp }}/source-home-journeys/**/*.png
           retention-days: 7
           if-no-files-found: error
-      # ARM needs the package for the Jetson compatibility gate on every event.
+      # ARM packages every candidate for the Jetson compatibility gate.
       - name: build and package release binaries
-        if: matrix.os == 'ubuntu-22.04-arm' || github.ref_type == 'tag' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        if: matrix.os == 'ubuntu-22.04-arm'
         run: |
           set -euo pipefail
           # Incremental on top of setup-source-home's release builds.
@@ -729,15 +745,6 @@ jobs:
             --source-commit "$(git rev-parse HEAD)" \
             --source-tree "$(git rev-parse HEAD^{tree})" \
             --receipt elastos-runtime-linux-arm64.receipt.json
-      - name: upload release binaries
-        if: github.ref_type == 'tag' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
-        with:
-          name: elastos-runtime-${{ matrix.os }}
-          path: |
-            elastos-runtime-*.tar.gz
-            elastos-runtime-*.tar.gz.sha256
-            elastos-runtime-*.receipt.json
       - name: Rust compile cache statistics
         if: always() && env.RUSTC_WRAPPER == 'sccache'
         run: |
@@ -1063,22 +1070,6 @@ jobs:
               raise SystemExit('hop builder cleanup is incomplete; disposable runner retains files until teardown')
           shutil.rmtree(root)
           PY
-      # Packages follow their upload policy after the source-home journey passes.
-      - name: build and package release binaries
-        if: github.ref_type == 'tag' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
-        run: |
-          set -euo pipefail
-          # Incremental on top of setup-source-home's release builds.
-          cargo build --manifest-path elastos/Cargo.toml --workspace --release
-          scripts/package-release-binaries.sh
-      - name: upload release binaries
-        if: github.ref_type == 'tag' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
-        with:
-          name: elastos-runtime-macos-14
-          path: |
-            elastos-runtime-*.tar.gz
-            elastos-runtime-*.tar.gz.sha256
       - name: Rust compile cache statistics
         if: always() && env.RUSTC_WRAPPER == 'sccache'
         run: |
@@ -1122,6 +1113,228 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # The macOS hop on Linux x86-64: the pinned published release installs with its
+  # own install.sh, updates to this source (new) and the release after it (next),
+  # refuses wrong signers, platform and version and a tampered offer, and is undone.
+  update-hop-linux:
+    name: update-hop-linux
+    runs-on: ubuntu-24.04
+    # Source-home with the hop builds may take 45 minutes and the update journey 75.
+    timeout-minutes: 150
+    needs: source-gate
+    env:
+      CI_APT_PACKAGES: coturn e2fsprogs ffmpeg musl-tools nasm pkg-config
+    steps:
+      - name: set job build directories
+        run: |
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/update-hop-linux-target" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_BUILD_DIR=$RUNNER_TEMP/update-hop-linux-build" >> "$GITHUB_ENV"
+      # Published tarballs keep the shipped Cargo release profile.
+      - name: use CI journey release profile
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/develop')
+        run: |
+          echo "CARGO_PROFILE_RELEASE_LTO=false" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16" >> "$GITHUB_ENV"
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '26'
+      - uses: dtolnay/rust-toolchain@72504271e02fb719eb4eb3eaece3a8e3d06f57c0 # 1.91.0
+        with:
+          targets: wasm32-unknown-unknown
+      - name: configure Rust compile cache
+        if: env.CI_USE_CACHE == 'true'
+        uses: ./.github/actions/rust-compile-cache
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        if: env.CI_USE_CACHE == 'true'
+        with:
+          workspaces: elastos
+          prefix-key: ubuntu-24.04-${{ runner.arch }}-update-hop-source-home-registry-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          # Cache Cargo inputs; journey artifacts start fresh.
+          cache-targets: false
+          cache-directories: ${{ env.SCCACHE_DIR }}
+          save-if: ${{ env.CI_SAVE_CACHE == 'true' }}
+      # Two Runtime builds, both releases' support and eight installed Homes need
+      # more than the runner image leaves free; these preinstalled SDKs are unused.
+      - name: free hosted runner disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -Pk .
+      - name: require fresh Linux build artifacts
+        run: |
+          set -euo pipefail
+          for directory in "$CARGO_TARGET_DIR" "$CARGO_BUILD_BUILD_DIR"; do
+            test ! -e "$directory"
+            test ! -L "$directory"
+            mkdir -m 700 "$directory"
+          done
+      - name: prepare apt archive cache permissions
+        run: |
+          sudo install -d -o "$(id -u)" -g "$(id -g)" -m 755 /var/cache/apt/archives
+          sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+      - name: restore Ubuntu prerequisite archives
+        if: env.CI_USE_CACHE == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /var/cache/apt/archives/*.deb
+          key: apt-ubuntu-24.04-${{ runner.arch }}-${{ hashFiles('scripts/ci-apt-prerequisites.sh') }}-${{ env.CI_APT_PACKAGES }}-${{ github.run_id }}
+          restore-keys: apt-ubuntu-24.04-${{ runner.arch }}-${{ hashFiles('scripts/ci-apt-prerequisites.sh') }}-${{ env.CI_APT_PACKAGES }}-
+      - name: install host prerequisites
+        timeout-minutes: 13
+        run: bash scripts/ci-apt-prerequisites.sh
+      - name: bind Kubo cache to its pin
+        id: kubo-pin
+        run: |
+          echo "KUBO_CACHE_DIR=$RUNNER_TEMP/kubo-cache" >> "$GITHUB_ENV"
+          python3 scripts/ci-kubo-cache.py key linux-amd64 "$RUNNER_TEMP/kubo-cache"
+      - name: restore verified Kubo inputs
+        if: env.CI_USE_CACHE == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ steps.kubo-pin.outputs.paths }}
+          key: ${{ steps.kubo-pin.outputs.key }}
+      - name: verify or download Kubo inputs
+        timeout-minutes: 10
+        run: python3 scripts/ci-kubo-cache.py fetch linux-amd64 "$KUBO_CACHE_DIR"
+      - name: source-home into isolated HOME
+        env:
+          ELASTOS_COLLABORATION_STARTUP_MODE: isolated
+          SETUP_SOURCE_HOME_INSTALL_KUBO: '1'
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/source-home-logs"
+          USER_HOME="${HOME}"
+          SOURCE_HOME="${RUNNER_TEMP}/elastos-source-home"
+          mkdir -p "${SOURCE_HOME}"
+          export CARGO_HOME="${CARGO_HOME:-${USER_HOME}/.cargo}"
+          export RUSTUP_HOME="${RUSTUP_HOME:-${USER_HOME}/.rustup}"
+          export HOME="${SOURCE_HOME}"
+          export XDG_DATA_HOME="${SOURCE_HOME}/.local/share"
+          export PATH="${CARGO_HOME}/bin:${PATH}"
+          MEDIA_TOOLS_DIR="${RUNNER_TEMP}/source-home-media-tools"
+          install -d -m 700 "${MEDIA_TOOLS_DIR}"
+          for tool in ffmpeg ffprobe; do
+            install -m 700 "$(command -v "${tool}")" "${MEDIA_TOOLS_DIR}/${tool}"
+          done
+          export SETUP_SOURCE_HOME_MEDIA_TOOLS_DIR="${MEDIA_TOOLS_DIR}"
+          # The hop signs this build as the installed release: X.Y.Z or X.Y.Z-{alpha|beta|rc}.N.
+          export ELASTOS_RELEASE_VERSION="$(cargo metadata --no-deps --format-version 1 --manifest-path elastos/Cargo.toml \
+            | python3 -I -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "elastos-server"))')"
+          scripts/setup-source-home.sh 2>&1 | tee "${RUNNER_TEMP}/source-home-logs/setup-source-home.log"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: prepare installed Home browser
+        timeout-minutes: 10
+        run: |
+          npm ci --ignore-scripts --prefix elastos/tools/browser-playwright-engine
+          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/installed-home-browser"
+          npx --prefix elastos/tools/browser-playwright-engine playwright install chromium --with-deps --only-shell
+          echo "PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '26'
+      # The seed's HTTP route does not serve every Linux artifact: after the published
+      # install.sh's HTTPS download, a disposable Home rolls back to the pinned head over Carrier.
+      - name: install the pinned published release
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          python3 scripts/update-hop-compare.py install-previous-release \
+            "$RUNNER_TEMP/previous-release-home" "$RUNNER_TEMP/previous-release"
+      - name: build two actual Runtime versions
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          CI_HOP_ROOT="$HOME/.local/share/elastos-ci-update-hop"
+          test ! -e "$CI_HOP_ROOT"
+          mkdir -p "$CI_HOP_ROOT"
+          echo "CI_HOP_ROOT=$CI_HOP_ROOT" >> "$GITHUB_ENV"
+          df -Pk "$CI_HOP_ROOT"
+          python3 scripts/update-hop-compare.py build-ci-hop "$CI_HOP_ROOT/build-inputs" \
+            --runtime "$CARGO_TARGET_DIR/release/elastos" --previous "$RUNNER_TEMP/previous-release"
+      - name: generate disposable signed install and update fixture
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          python3 scripts/update-hop-compare.py generate-ci-hop "$CI_HOP_ROOT/package" \
+            --runtime "$CI_HOP_ROOT/build-inputs/elastos-old" \
+            --next-runtime "$CI_HOP_ROOT/build-inputs/elastos-new" \
+            --system-runtime "$CI_HOP_ROOT/build-inputs/elastos-system" \
+            --build-receipt "$CI_HOP_ROOT/build-inputs/build.json" \
+            --support-home "$RUNNER_TEMP/elastos-source-home/.local/share/elastos" \
+            --previous "$RUNNER_TEMP/previous-release" \
+            > "$CI_HOP_ROOT/generation.json"
+      - name: prove installed Home account and System update with Carrier hop and refusals
+        # The same bounded waits as the macOS hop: 47 minutes in the worst case.
+        timeout-minutes: 75
+        env:
+          ELASTOS_CI_FIXTURE_SCOPE: ci-rehearsal
+          ELASTOS_CI_REQUIRE_REAL_RUNTIME: "1"
+        run: |
+          set -euo pipefail
+          export ELASTOS_CI_FIXTURE_MANIFEST_SHA256="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["manifest_sha256"])' "$CI_HOP_ROOT/generation.json")"
+          python3 scripts/update-hop-compare.py inspect "$CI_HOP_ROOT/package/fixture.json"
+          python3 scripts/update-hop-compare.py run "$CI_HOP_ROOT/package/fixture.json" "$CI_HOP_ROOT/package/results"
+      - name: require the update from the published release, no new provider warnings and Undo
+        run: python3 scripts/update-hop-compare.py check-result "$CI_HOP_ROOT/package/results/result.json" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: retain the safe CI hop receipt
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: linux-cli-update-hop-receipt
+          path: |
+            ${{ env.CI_HOP_ROOT }}/package/results/result.json
+            ${{ env.CI_HOP_ROOT }}/package/results/home-system/*.png
+            ${{ env.CI_HOP_ROOT }}/package/results/diagnostics/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Rust compile cache statistics
+        if: always() && env.RUSTC_WRAPPER == 'sccache'
+        run: |
+          sccache --show-stats
+          sccache --show-stats --stats-format=json > "$RUNNER_TEMP/source-home-sccache.json"
+          {
+            echo '### Rust compiler cache'
+            echo '```text'
+            sccache --show-stats
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Rust compile cache holds no Actions credential
+        if: always() && env.RUSTC_WRAPPER == 'sccache'
+        run: |
+          test -z "${ACTIONS_RUNTIME_TOKEN:-}"
+          # The daemon that the cache action started compiled every step above.
+          seen=0
+          for pid in $(pgrep -x sccache || true); do
+            if [ "$RUNNER_OS" = Linux ]; then
+              environ=$(tr '\0' '\n' 2>/dev/null < "/proc/$pid/environ" || true)
+            else
+              environ=$(ps -wwE -o command= -p "$pid" || true)
+            fi
+            if grep -qF ACTIONS_RUNTIME_TOKEN= <<< "$environ"; then
+              echo "::error::sccache daemon $pid holds ACTIONS_RUNTIME_TOKEN"
+              exit 1
+            fi
+            if grep -qF SCCACHE_DIR= <<< "$environ"; then seen=$((seen + 1)); fi
+          done
+          # Both runners show a same-user daemon's environment; reading none proves nothing.
+          if [ "$seen" = 0 ]; then
+            echo "::error::no readable sccache daemon environment"
+            exit 1
+          fi
+      - name: upload source-home logs
+        if: failure()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: update-hop-linux-logs
+          path: ${{ runner.temp }}/source-home-logs/
+          retention-days: 7
+          if-no-files-found: ignore
+
   # A pull request run stops at its first failed job, so the macOS and Linux
   # journeys do not run on for 30+ minutes after a decisive failure. Pushes,
   # merge queues and dispatches keep running every job to the end. This job
@@ -1154,35 +1367,3 @@ jobs:
             fi
             if (( pending == 0 )); then done_polls=$((done_polls + 1)); else done_polls=0; fi
           done
-
-  # Publish a GitHub Release for v* tags, attaching the per-architecture
-  # binary packages built by the source-home jobs. Only runs when every
-  # lint/test/source-home job is green.
-  release:
-    name: publish-github-release
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs:
-      - lint
-      - test-elastos
-      - test-behaviour
-      - test-capsules
-      - source-home-linux
-      - source-home-linux-arm64
-      - source-home-macos
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          pattern: elastos-runtime-*
-          merge-multiple: true
-      - name: publish release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          name: ElastOS Runtime ${{ github.ref_name }}
-          generate_release_notes: true
-          files: |
-            elastos-runtime-*.tar.gz
-            elastos-runtime-*.tar.gz.sha256

@@ -93,8 +93,9 @@ Use dotted prerelease identifiers such as `-rc.31`, not `-rc31`.
 ## Pre-release Policy
 
 Use `-rc.N` for a signed candidate that is published before its final version.
-A monthly source release (a repository tag with GitHub-built, unstamped
-binaries) uses plain `X.Y.Z`; its notes state what is not ready for users.
+A monthly source release (a repository tag; signed releases over Carrier are
+the only binary distribution) uses plain `X.Y.Z`; its notes state what is not
+ready for users.
 The release issue on GitHub records the active release and its evidence.
 
 Current rule:

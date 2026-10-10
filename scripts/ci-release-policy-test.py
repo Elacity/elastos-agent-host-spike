@@ -23,7 +23,7 @@ SOURCE = WORKFLOW.read_text()
 CACHE_ACTION = WORKFLOW.parents[1] / "actions/rust-compile-cache/action.yml"
 LOCAL_CACHE_ACTION = "./.github/actions/rust-compile-cache"
 UNIT_CACHE_JOBS = {"lint", "test-elastos", "test-capsules"}
-SOURCE_HOME_CACHE_JOBS = {"source-home-linux", "source-home-linux-arm64", "source-home-macos"}
+SOURCE_HOME_CACHE_JOBS = {"source-home-linux", "source-home-linux-arm64", "source-home-macos", "update-hop-linux"}
 # Read the fixed job/step indentation used here; actionlint checks YAML syntax.
 def jobs(source):
     return dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)",
@@ -140,22 +140,22 @@ def run_compile_cache_fixture(source, download_status=0, server_status=0,
         return result.returncode, exports, daemon
 
 
-# event, workflow ref, ref type, checkout override, caches, publication
+# event, workflow ref, ref type, checkout override, caches
 CASES = [
-    ("push", "refs/heads/main", "branch", "", True, False),
-    ("push", "refs/heads/develop", "branch", "", True, False),
-    ("push", "refs/heads/v-work", "branch", "", True, False),
-    ("push", "refs/tags/v0.7.1", "tag", "", False, True),
-    ("push", "refs/tags/candidate", "tag", "", False, False),
-    ("pull_request", "refs/pull/1/merge", "branch", "", True, False),
-    ("merge_group", "refs/heads/gh-readonly-queue/develop/pr-1", "branch", "", True, False),
-    ("workflow_dispatch", "refs/heads/main", "branch", "", True, False),
-    ("workflow_dispatch", "refs/tags/v0.7.1", "tag", "", False, False),
-    ("workflow_dispatch", "refs/heads/main", "branch", "v0.7.1", False, False),
-    ("workflow_dispatch", "refs/heads/main", "branch", "refs/tags/v0.7.1", False, False),
-    ("workflow_dispatch", "refs/heads/main", "branch", "refs/heads/work", False, False),
-    ("workflow_dispatch", "refs/heads/main", "branch", "a" * 40, False, False),
-    ("workflow_dispatch", "refs/tags/v0.7.1", "tag", "main", False, False),
+    ("push", "refs/heads/main", "branch", "", True),
+    ("push", "refs/heads/develop", "branch", "", True),
+    ("push", "refs/heads/v-work", "branch", "", True),
+    ("push", "refs/tags/v0.7.1", "tag", "", False),
+    ("push", "refs/tags/candidate", "tag", "", False),
+    ("pull_request", "refs/pull/1/merge", "branch", "", True),
+    ("merge_group", "refs/heads/gh-readonly-queue/develop/pr-1", "branch", "", True),
+    ("workflow_dispatch", "refs/heads/main", "branch", "", True),
+    ("workflow_dispatch", "refs/tags/v0.7.1", "tag", "", False),
+    ("workflow_dispatch", "refs/heads/main", "branch", "v0.7.1", False),
+    ("workflow_dispatch", "refs/heads/main", "branch", "refs/tags/v0.7.1", False),
+    ("workflow_dispatch", "refs/heads/main", "branch", "refs/heads/work", False),
+    ("workflow_dispatch", "refs/heads/main", "branch", "a" * 40, False),
+    ("workflow_dispatch", "refs/tags/v0.7.1", "tag", "main", False),
 ]
 # Pushes to these branches run every trusted proof; only develop writes caches.
 SAVING_REFS = {"refs/heads/develop", "refs/heads/main"}
@@ -195,6 +195,125 @@ def custody_should_run(source, context, paths):
         return output.read_text() == "run=true\n"
 
 
+REPO = WORKFLOW.parents[2]
+CANARY = WORKFLOW.with_name("canary-holder-linux.yml")
+TRACKED = frozenset(subprocess.check_output(["git", "ls-files"], cwd=REPO, text=True).splitlines())
+CALLED_PATH = re.compile(r"\$\{?(?:ROOT|REPO_ROOT)\}?/([\w./-]+)|\$\{?SCRIPT_DIR\}?/([\w./-]+)"
+                         r"|(?<![\w./$}-])((?:scripts|deploy|capsules|elastos)/[\w./-]+|components\.json)")
+CARGO_WORKSPACE = re.compile(r"--manifest-path ([\w./-]+)/Cargo\.toml|\bcd ([\w./-]+) && cargo\b")
+CARGO_PACKAGE = re.compile(r"(?:\s-p|\s--package)[ =]([\w-]+)")
+PATH_DEPENDENCY = re.compile(r'(?m)^[\w-]+\s*=\s*\{[^}\n]*\bpath\s*=\s*"([^"]+)"')
+# The custody proof driver calls setup-source-home.sh with a mismatched
+# ELASTOS_DATA_DIR on purpose; it refuses before it reads any other input.
+FILTER_LEAVES = {"custody-harness-smoke": {"scripts/setup-source-home.sh"}}
+
+
+def tracked_under(path):
+    return {path} if path in TRACKED else {name for name in TRACKED if name.startswith(path.rstrip("/") + "/")}
+
+
+def cargo_configs(directory):
+    """Cargo reads .cargo/config.toml (or .cargo/config) in its directory and every ancestor."""
+    parts = Path(directory).parts
+    return {name for depth in range(len(parts) + 1) for config in (".cargo/config.toml", ".cargo/config")
+            for name in [Path(*parts[:depth], config).as_posix()] if name in TRACKED}
+
+
+def capsule_inputs(crate):
+    """A capsule crate is wholly an input, with every crate it names by path, transitively."""
+    found, queue, seen = set(), [crate], set()
+    while queue:
+        crate = queue.pop()
+        if crate in seen:
+            continue
+        seen.add(crate)
+        found |= tracked_under(crate)
+        queue += [os.path.normpath(f"{crate}/{dependency}")
+                  for dependency in PATH_DEPENDENCY.findall((REPO / crate / "Cargo.toml").read_text())]
+    return found
+
+
+def workspace_member(workspace, package):
+    manifest = (REPO / workspace / "Cargo.toml").read_text()
+    members = re.findall(r'"([^"]+)"', manifest.split("members", 1)[1].split("]", 1)[0])
+    return next(f"{workspace}/{member}" for member in members if re.search(
+        r'(?m)^name\s*=\s*"' + re.escape(package) + '"', (REPO / workspace / member / "Cargo.toml").read_text()))
+
+
+def called_inputs(text, directory):
+    """Tracked repository files a script or step names outside comments.
+
+    A Cargo build brings its toolchain pin, the Cargo configuration it reads and
+    its workspace manifest and lock; a capsule workspace or a capsule package
+    selected with -p is wholly an input, with its path dependencies. Elastos
+    crates stay scoped to the modules a filter names."""
+    found = set()
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        for rooted, local, bare in CALLED_PATH.findall(line):
+            path = os.path.normpath(rooted or bare or f"{directory}/{local}")
+            if path != ".":
+                found |= tracked_under(path)
+        for manifest, directory_change in CARGO_WORKSPACE.findall(line):
+            workspace = manifest or directory_change
+            found |= tracked_under(workspace + "/Cargo.toml") | tracked_under(workspace + "/Cargo.lock")
+            found |= cargo_configs(workspace if directory_change else ".")
+            if workspace.startswith("capsules/"):
+                found |= capsule_inputs(workspace)
+            for package in CARGO_PACKAGE.findall(line):
+                member = workspace_member(workspace, package)
+                if "/capsules/" in "/" + member:
+                    found |= capsule_inputs(member)
+        if re.search(r"\bcargo (?:build|test|clippy|run)\b", line):
+            found |= {"rust-toolchain.toml"} | cargo_configs(".")
+    return found
+
+
+def job_inputs(workflow, source, job, leaves=frozenset()):
+    """The workflow file plus every input the job's run steps call, following
+    shell scripts and Dockerfiles; Python and Node callees are leaf inputs."""
+    texts = []
+    for step in steps(job, jobs(source)):
+        if "        run: |\n" in step:
+            texts.append(textwrap.dedent(step.split("        run: |\n", 1)[1]))
+        else:
+            texts += re.findall(r"(?m)^        run: (.+)$", step)
+    inputs = {workflow.relative_to(REPO).as_posix()}
+    queue = [(text, ".") for text in texts]
+    while queue:
+        text, directory = queue.pop()
+        for path in sorted(called_inputs(text, directory) - inputs):
+            inputs.add(path)
+            if (path.endswith(".sh") or Path(path).name.startswith("Dockerfile")) and path not in leaves:
+                queue.append(((REPO / path).read_text(), Path(path).parent.as_posix()))
+    return inputs
+
+
+def glob_regex(pattern):
+    return re.compile("".join(".*" if part == "**" else "[^/]*" if part == "*" else re.escape(part)
+                              for part in re.split(r"(\*\*|\*)", pattern)) + r"\Z")
+
+
+def custody_filter(source):
+    step, = [step for step in steps("custody-harness-smoke", jobs(source)) if "id: filter" in step]
+    return re.findall(r"(?m)^              - '([^']+)'$", step.split("            custody:\n", 1)[1])
+
+
+def canary_filter(source):
+    block = source.split("\n  pull_request:\n    ", 1)[1].split("\n  workflow_dispatch:", 1)[0]
+    return re.findall(r"(?m)^      - (\S+)$", block.split("paths:\n", 1)[1])
+
+
+def validate_filter_inputs(workflow, source, job, patterns):
+    """A path filter skips a required check only when none of its inputs changed."""
+    matchers = [glob_regex(pattern) for pattern in patterns]
+    missing = sorted(path for path in job_inputs(workflow, source, job, FILTER_LEAVES.get(job, frozenset()))
+                     if not any(matcher.match(path) for matcher in matchers))
+    if missing:
+        raise AssertionError(f"{job} filter misses inputs: {', '.join(missing)}")
+
+
 def validate_cache_guards(source):
     workflow_jobs = jobs(source)
     for job in workflow_jobs:
@@ -204,7 +323,7 @@ def validate_cache_guards(source):
             guard = field(step, "if")
             if "env.CI_USE_CACHE == 'true'" not in guard:
                 raise AssertionError(f"unguarded cache in {job}")
-            for event, ref, ref_type, override, cached, _ in CASES:
+            for event, ref, ref_type, override, cached in CASES:
                 if cached:
                     continue
                 context = {"github.event_name": event, "github.ref": ref,
@@ -262,7 +381,7 @@ def validate_cache_writers(source):
                if "actions/cache/save@" in step or "Swatinem/rust-cache@" in step]
     if not writers:
         raise AssertionError("missing cache writers")
-    for event, ref, ref_type, override, _, _ in [*CASES, ("push", "refs/heads/feature", "branch", "", True, False)]:
+    for event, ref, ref_type, override, _ in [*CASES, ("push", "refs/heads/feature", "branch", "", True)]:
         context = {"github.event_name": event, "github.ref": ref,
                    "github.ref_type": ref_type, "inputs.ref": override,
                    "env.CI_USE_CACHE": "true", "steps.should-run.outputs.run": "true",
@@ -329,7 +448,7 @@ def validate_jetson_package_lifecycle(source):
         raise AssertionError("Jetson verification requires an earlier package step")
     if "scripts/package-release-binaries.sh" not in package:
         raise AssertionError("Jetson verification requires the package producer")
-    for event, ref, ref_type, override, _, _ in CASES:
+    for event, ref, ref_type, override, _ in CASES:
         for runner in ("ubuntu-24.04", "ubuntu-22.04-arm"):
             context = {"github.event_name": event, "github.ref": ref,
                        "github.ref_type": ref_type, "inputs.ref": override, "matrix.os": runner}
@@ -366,7 +485,7 @@ def validate_journey_builds(source, release_source):
         for key, value in overrides.items():
             if f'echo "{key}={value}" >> "$GITHUB_ENV"' not in profile or step_source.count(key) != 1:
                 raise AssertionError(f"missing journey profile setting: {job} {key}")
-        for event, ref, ref_type, override, _, _ in CASES:
+        for event, ref, ref_type, override, _ in CASES:
             context = {"github.event_name": event, "github.ref": ref,
                        "github.ref_type": ref_type, "inputs.ref": override}
             expected = event in ("pull_request", "merge_group") or (event == "push" and ref == "refs/heads/develop")
@@ -426,7 +545,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertIn("branches: [main, develop]", triggers)
         context = {"github.event_name": "merge_group", "github.ref": "refs/heads/gh-readonly-queue/develop/pr-1"}
         for job in JOBS:
-            if job in ("release", "cancel-on-failure"):
+            if job == "cancel-on-failure":
                 continue
             guard = re.search(r"(?m)^    if: (.*)$", JOBS[job])
             if guard:
@@ -434,7 +553,7 @@ class ReleasePolicyTests(unittest.TestCase):
             checkout, = [step for step in steps(job) if "uses: actions/checkout@" in step]
             self.assertEqual(field(checkout, "ref"),
                              "${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}")
-        for event, ref, ref_type, override, _, _ in CASES:
+        for event, ref, ref_type, override, _ in CASES:
             context = {"github.event_name": event, "github.ref": ref,
                        "github.ref_type": ref_type, "inputs.ref": override}
             context["env.CI_SAVE_CACHE"] = str(evaluate(field(SOURCE, "CI_SAVE_CACHE"), context)).lower()
@@ -918,18 +1037,17 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertEqual({call['target'] for call in calls}, {str(target)})
             self.assertEqual((capsule / "fixture.component.wasm").read_bytes(), b'fixture wasm')
 
-    def test_event_ref_matrix_controls_publication_and_every_cache_action(self):
+    def test_event_ref_matrix_controls_every_cache_action(self):
         validate_cache_guards(SOURCE)
         caches = [(job, step) for job in JOBS for step in steps(job)
                   if CACHE_RE.search(step)]
-        self.assertEqual(len(caches), 27)
-        for event, ref, ref_type, override, cached, publish in CASES:
+        self.assertEqual(len(caches), 31)
+        for event, ref, ref_type, override, cached in CASES:
             with self.subTest(event=event, ref=ref, override=override):
                 context = {"github.event_name": event, "github.ref": ref,
                            "github.ref_type": ref_type, "inputs.ref": override}
                 use_cache = evaluate(field(SOURCE, "CI_USE_CACHE"), context)
                 self.assertEqual(use_cache, cached)
-                self.assertEqual(evaluate(field(JOBS["release"], "if"), context), publish)
                 context["env.CI_USE_CACHE"] = str(use_cache).lower()
                 save = evaluate(field(SOURCE, "CI_SAVE_CACHE"), context)
                 self.assertEqual(save, event == "push" and ref == CACHE_SAVING_REF)
@@ -963,7 +1081,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertEqual(field(filter_step, "uses"), "dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3")
         decision, = [step for step in steps("custody-harness-smoke") if "id: should-run" in step]
         script = textwrap.dedent(decision.split("        run: |\n", 1)[1])
-        for event, ref, _, _, _, _ in CASES:
+        for event, ref, _, _, _ in CASES:
             context = {"github.event_name": event, "github.ref": ref}
             eligible = event in ("pull_request", "merge_group", "workflow_dispatch") or (event == "push" and ref in SAVING_REFS)
             self.assertEqual(evaluate(field(JOBS["custody-harness-smoke"], "if"), context), eligible)
@@ -984,10 +1102,40 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", filter_step)
         self.assertNotIn("if:", decision)
 
+    def test_path_filters_cover_every_input_their_jobs_call(self):
+        validate_filter_inputs(WORKFLOW, SOURCE, "custody-harness-smoke", custody_filter(SOURCE))
+        canary = CANARY.read_text()
+        validate_filter_inputs(CANARY, canary, "holder", canary_filter(canary))
+        for entry in ("'scripts/setup-source-home.sh'", "'capsules/chain-provider/**'", "'elastos/Cargo.lock'",
+                      "'rust-toolchain.toml'", "'.github/workflows/ci.yml'", "'.cargo/config.toml'",
+                      "'elastos/.cargo/config.toml'", "'elastos/crates/elastos-auth/**'"):
+            with self.subTest(removed=entry):
+                trimmed = SOURCE.replace(f"              - {entry}\n", "", 1)
+                self.assertNotEqual(trimmed, SOURCE)
+                with self.assertRaisesRegex(AssertionError, "custody-harness-smoke filter misses inputs: .*"
+                                            + re.escape(entry.strip("'").rstrip("*/"))):
+                    validate_filter_inputs(WORKFLOW, trimmed, "custody-harness-smoke", custody_filter(trimmed))
+        for entry in ("scripts/update-hop-compare.py", "scripts/seed-kubo-cache.sh", "components.json",
+                      "elastos/Cargo.lock", "scripts/release-upstream-input.py", ".cargo/config.toml",
+                      "elastos/capsules/localhost-provider/**", "elastos/crates/elastos-guest/**"):
+            with self.subTest(removed=entry):
+                trimmed = canary.replace(f"      - {entry}\n", "", 1)
+                self.assertNotEqual(trimmed, canary)
+                with self.assertRaisesRegex(AssertionError, "holder filter misses inputs: .*" + re.escape(entry.rstrip("*/"))):
+                    validate_filter_inputs(CANARY, trimmed, "holder", canary_filter(trimmed))
+        # A new script call joins the job's inputs; one level of `*` stays in its folder.
+        called = canary.replace("          python3 -I -S scripts/holder-idle-ci.py\n",
+                                "          python3 -I -S scripts/holder-idle-ci.py\n          scripts/ci-apt-prerequisites.sh\n", 1)
+        self.assertNotEqual(called, canary)
+        with self.assertRaisesRegex(AssertionError, "scripts/ci-apt-prerequisites.sh"):
+            validate_filter_inputs(CANARY, called, "holder", canary_filter(called))
+        self.assertTrue(glob_regex("capsules/chain-provider/**").match("capsules/chain-provider/src/main.rs"))
+        self.assertFalse(glob_regex("elastos/crates/elastos-protected-content-*/**").match("elastos/crates/x/elastos-protected-content-a/b"))
+
     def test_only_pr_runs_share_a_cancellable_concurrency_group(self):
         concurrency = SOURCE.split("\nconcurrency:\n", 1)[1].split("\nenv:\n", 1)[0]
         group = field(concurrency, "group")
-        for event, ref, _, _, _, _ in CASES:
+        for event, ref, _, _, _ in CASES:
             groups = []
             for run_id in ("101", "102", "103"):
                 context = {"github.workflow": "CI", "github.event_name": event,
@@ -998,29 +1146,28 @@ class ReleasePolicyTests(unittest.TestCase):
 
     def test_jetson_package_exists_before_verification_on_every_event(self):
         validate_jetson_package_lifecycle(SOURCE)
-        guard = "if: matrix.os == 'ubuntu-22.04-arm' || github.ref_type == 'tag' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'"
+        guard = "name: build and package release binaries\n        if: matrix.os == 'ubuntu-22.04-arm'"
         self.assertIn(guard, JOBS["source-home-linux"])
-        regressed = SOURCE.replace(guard, "if: github.event_name != 'pull_request'", 1)
+        regressed = SOURCE.replace(guard, "name: build and package release binaries\n        if: github.event_name != 'pull_request'", 1)
         with self.assertRaisesRegex(AssertionError, "lacks its package on pull_request ubuntu-22.04-arm"):
             validate_jetson_package_lifecycle(regressed)
         omitted = SOURCE.replace("scripts/package-release-binaries.sh", "echo package omitted", 1)
         with self.assertRaisesRegex(AssertionError, "requires the package producer"):
             validate_jetson_package_lifecycle(omitted)
 
-    def test_package_runs_follow_uploads_except_the_arm_compatibility_gate(self):
+    def test_only_the_arm_compatibility_gate_packages_and_nothing_publishes_binaries(self):
+        # Signed releases over Carrier are the only distribution; CI uploads no release packages.
+        self.assertNotRegex(SOURCE, r"action-gh-release|elastos-runtime-\*|contents: write")
         for job, runner in (("source-home-linux", "ubuntu-24.04"),
                             ("source-home-linux-arm64", "ubuntu-22.04-arm"),
                             ("source-home-macos", "macos-14")):
-            package, = [step for step in steps(job) if step.startswith("name: build and package release binaries\n")]
-            upload, = [step for step in steps(job) if step.startswith("name: upload release binaries\n")]
-            for event, ref, ref_type, override, _, _ in CASES:
+            packages = [step for step in steps(job) if step.startswith("name: build and package release binaries\n")]
+            for event, ref, ref_type, override, _ in CASES:
                 context = {"github.event_name": event, "github.ref": ref,
                            "github.ref_type": ref_type, "inputs.ref": override, "matrix.os": runner}
-                expected_upload = ref_type == "tag" or ref == "refs/heads/main" or event == "workflow_dispatch"
                 with self.subTest(job=job, event=event, ref=ref, override=override):
-                    self.assertEqual(evaluate(field(upload, "if"), context), expected_upload)
-                    self.assertEqual(evaluate(field(package, "if"), context),
-                                     expected_upload or job == "source-home-linux-arm64")
+                    self.assertEqual(any(evaluate(field(step, "if"), context) for step in packages),
+                                     job == "source-home-linux-arm64")
 
     def test_linux_steps_alias_is_exact_and_rejects_other_bindings(self):
         self.assertEqual(steps("source-home-linux-arm64"), steps("source-home-linux"))
@@ -1068,7 +1215,7 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertEqual(field(statistics, "if"), "always() && env.RUSTC_WRAPPER == 'sccache'")
             self.assertIn("sccache --show-stats", statistics)
             self.assertIn("sccache --show-stats --stats-format=json", statistics)
-        for event, ref, ref_type, override, cached, _ in CASES:
+        for event, ref, ref_type, override, cached in CASES:
             context = {"github.event_name": event, "github.ref": ref,
                        "github.ref_type": ref_type, "inputs.ref": override}
             context["env.CI_USE_CACHE"] = str(evaluate(field(SOURCE, "CI_USE_CACHE"), context)).lower()
@@ -1210,7 +1357,7 @@ class ReleasePolicyTests(unittest.TestCase):
             with self.subTest(mutation=name), self.assertRaises(AssertionError):
                 validate_restores_are_verified(changed)
 
-    def test_github_runners_check_names_and_release_dependencies_stay_fixed(self):
+    def test_github_runners_and_check_names_stay_fixed(self):
         expected = {
             "source-gate": ("source-gate", "ubuntu-24.04"),
             "engine-llama-arm64": ("engine-llama-arm64", "ubuntu-24.04-arm"),
@@ -1223,7 +1370,8 @@ class ReleasePolicyTests(unittest.TestCase):
             "source-home-linux-arm64": ("source-home-linux (${{ matrix.check_name || matrix.os }})", "${{ matrix.os }}"),
             "source-home-macos": ("source-home-macos", "macos-14"),
             "cancel-on-failure": ("cancel-on-failure", "ubuntu-24.04"),
-            "release": ("publish-github-release", "ubuntu-24.04"),
+            # Anders decides whether this becomes a required check (#320).
+            "update-hop-linux": ("update-hop-linux", "ubuntu-24.04"),
         }
         self.assertEqual(set(JOBS), set(expected))
         for job, (name, runner) in expected.items():
@@ -1234,9 +1382,6 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertEqual(field(JOBS["source-home-linux-arm64"], "os"), "[ubuntu-22.04-arm]")
         self.assertIn("- os: ubuntu-22.04-arm\n            check_name: ubuntu-24.04-arm",
                       JOBS["source-home-linux-arm64"])
-        needs = JOBS["release"].split("    needs:\n", 1)[1].split("    permissions:\n", 1)[0]
-        self.assertEqual(re.findall(r"- ([\w-]+)", needs),
-                         ["lint", "test-elastos", "test-behaviour", "test-capsules", "source-home-linux", "source-home-linux-arm64", "source-home-macos"])
         self.assertIn("python3 scripts/ci-release-policy-test.py", JOBS["source-gate"])
 
     def run_cancel_watcher(self, polls):
@@ -1274,7 +1419,7 @@ class ReleasePolicyTests(unittest.TestCase):
         watcher = JOBS["cancel-on-failure"]
         self.assertNotIn("actions/checkout@", watcher)
         self.assertEqual(watcher.split("    permissions:\n", 1)[1].split("    steps:\n", 1)[0], "      actions: write\n")
-        for event, ref, ref_type, override, _, _ in CASES:
+        for event, ref, ref_type, override, _ in CASES:
             for head in ("Elacity/elastos-runtime", "someone/fork"):
                 context = {"github.event_name": event, "github.ref": ref, "github.repository": "Elacity/elastos-runtime",
                            "github.event.pull_request.head.repo.full_name": head}
@@ -1353,13 +1498,40 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertIn("get('cleanup', {}).get('passed')", cleanup)
         self.assertIn("shutil.rmtree(root)", cleanup)
 
+    def test_linux_hop_installs_the_pinned_release_and_proves_update_refusals_and_undo(self):
+        linux_steps = steps("update-hop-linux")
+        names = [step.splitlines()[0] for step in linux_steps]
+        order = [names.index("name: " + name) for name in (
+            "source-home into isolated HOME", "prepare installed Home browser", "install the pinned published release",
+            "build two actual Runtime versions", "generate disposable signed install and update fixture",
+            "prove installed Home account and System update with Carrier hop and refusals",
+            "require the update from the published release, no new provider warnings and Undo")]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(order[2:], list(range(order[2], order[2] + 5)))
+        source_home, _, install, build, generate, prove, verdict = (linux_steps[index] for index in order)
+        # The seed's HTTP route does not serve the Linux Runtime; a Home installs the pin over Carrier.
+        self.assertIn('install-previous-release \\\n            "$RUNNER_TEMP/previous-release-home" "$RUNNER_TEMP/previous-release"', install)
+        self.assertIn('export XDG_DATA_HOME="${SOURCE_HOME}/.local/share"', source_home)
+        self.assertIn('export ELASTOS_RELEASE_VERSION=', source_home)
+        self.assertIn('--runtime "$CARGO_TARGET_DIR/release/elastos" --previous "$RUNNER_TEMP/previous-release"', build)
+        self.assertIn('--support-home "$RUNNER_TEMP/elastos-source-home/.local/share/elastos"', generate)
+        self.assertIn("ELASTOS_CI_FIXTURE_SCOPE: ci-rehearsal", prove)
+        self.assertIn('ELASTOS_CI_REQUIRE_REAL_RUNTIME: "1"', prove)
+        self.assertIn('update-hop-compare.py check-result "$CI_HOP_ROOT/package/results/result.json"', verdict)
+        for step in (install, build, generate, prove, verdict):
+            self.assertNotIn("if:", step)
+            self.assertNotRegex(step, r"FIXTURE_ARTIFACT_ID|GH_TOKEN|inputs\.")
+        upload = linux_steps[names.index("name: retain the safe CI hop receipt")]
+        self.assertIn("if: always()", upload)
+        self.assertIn("name: linux-cli-update-hop-receipt", upload)
+
     def test_engine_cache_has_exact_recipe_key_and_develop_only_writers(self):
         restore, = [step for step in steps("engine-llama-arm64") if "actions/cache/restore@" in step]
         save, = [step for step in steps("engine-llama-arm64") if "actions/cache/save@" in step]
         self.assertEqual(field(restore, "key"), "${{ steps.engine-recipe.outputs.cache-key }}")
         self.assertEqual(field(save, "key"), "${{ steps.engine-cache.outputs.cache-primary-key }}")
         self.assertNotIn("restore-keys:", restore)
-        for event, ref, ref_type, override, cached, _ in CASES:
+        for event, ref, ref_type, override, cached in CASES:
             for hit in ("true", "false"):
                 context = {"github.event_name": event, "github.ref": ref,
                            "env.CI_USE_CACHE": str(cached).lower(),

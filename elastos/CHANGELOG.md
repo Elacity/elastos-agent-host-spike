@@ -91,6 +91,8 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   only from your trusted source over Carrier; the installer downloads only
   from its publisher address. `elastos update --head-cid` and `--rollback-to`
   stay.
+- ElastOS no longer attaches downloads to GitHub Releases. Install with
+  `install.sh`; it and System fetch the signed release over Carrier.
 
 ### Developer detail
 
@@ -243,6 +245,43 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   last good source, announce on #93, point affected Homes to Undo; the seed
   keeps N pinned. Decision: no withdrawn-versions list in the signed head for
   0.8.0; revisit with #157 and #213.
+- The local pre-push gate refuses what CI refuses: its Cargo calls use
+  `RUSTFLAGS=-D warnings` and drop `CARGO_ENCODED_RUSTFLAGS`, clippy covers
+  the touched packages and their reverse dependencies in each workspace, and a
+  change to `scripts/release-*`, `scripts/install.sh` or
+  `scripts/publish-release.sh` runs `release-platform-input-test.py` and
+  `ci-release-policy-test.py`. Documentation-only changes keep fmt and git
+  checks without rebuilding unrelated workspaces (#319). The installed Home
+  journey waits the model-preparation window for the first engine refusal.
+- The `custody-harness-smoke` path filter and the Linux holder canary's paths
+  now include every input their jobs build or call (setup and restart scripts,
+  `chain-provider`, `elastos-runtime`, the workspace manifest and lock,
+  `rust-toolchain.toml`, the Cargo configuration it reads, `components.json`,
+  the workflow, the canary's `localhost-provider` capsule, hop observer and
+  Kubo seed scripts, and the crates each capsule names by path).
+  `ci-release-policy-test.py` follows each job's shell scripts, Dockerfiles,
+  Cargo configuration, `-p` capsule packages and path dependencies, and fails
+  when a called input is outside the filter (#317).
+- `ci.yml` no longer publishes a GitHub Release or uploads `elastos-runtime-*`
+  packages on tags, `main` or dispatch: those unsigned assets were a second
+  channel beside the signed Carrier release. CI still packages ARM64 for the
+  Jetson compatibility gate. The nine required checks are unchanged.
+- New `update-hop-linux` CI job (not yet required) proves install and update on
+  Linux x86-64 as `source-home-macos` does on Mac: the pinned published release
+  (0.8.0-alpha.8, which carries x86_64-linux artifacts) installs with its own
+  `install.sh`, its System installs this source and Home reconnects, this
+  source's System refuses a tampered offer and applies the next release, the
+  CLI refusals (wrong signers, platform, version, tampered binary) leave Homes
+  unchanged, and `update --rollback-to` undoes the hop. `update-hop-compare.py`
+  runs CLI fixtures natively on Linux (`HOME/.local/share/elastos`, ELF
+  admission, `xdg-open` fixture opener, Runtime's platform aliases). The seed's
+  HTTP route does not serve every Linux artifact, so its new
+  `install-previous-release` installs a disposable Home with the published
+  `install.sh`, rolls it back over Carrier to the pinned head (`head_cid`, new
+  in `update-hop-previous-release.json`) and copies the release out under its
+  signed hashes, rebuilding capsule archives as releases build them. On Linux
+  and Mac, the `check-result` verdict in the job summary also requires and
+  names the next release, the refused tampered offer and each CLI refusal (#320).
 
 ## [0.8.0-alpha.15]
 
