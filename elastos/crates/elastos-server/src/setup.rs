@@ -576,17 +576,10 @@ async fn admit_installed_setup_metadata(
     data_dir: &Path,
     guard: Option<&crate::install_transaction::InstallationGuard>,
 ) -> anyhow::Result<Option<(ComponentsManifest, SignedSetupMetadata)>> {
-    let sources = crate::sources::load_trusted_sources(data_dir)?;
-    let source = sources.default_source();
-    let has_consumed = match fs::symlink_metadata(data_dir.join("installation")) {
-        Ok(_) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error.into()),
-    };
-    if !has_consumed && source.is_none_or(|source| source.install_path.is_empty()) {
+    let Some(source) = installed_release_source(data_dir)? else {
         return Ok(None);
-    }
-    let source = source.ok_or_else(missing_trusted_source_error)?;
+    };
+    let source = &source;
     let guard =
         guard.ok_or_else(|| anyhow::anyhow!("installed setup requires its installation writer"))?;
     let binary = fs::canonicalize(&source.install_path)?;
@@ -746,6 +739,27 @@ fn missing_trusted_source_error() -> anyhow::Error {
          For a published install, run the stamped installer first.\n\
          For a source checkout, create your own trusted source or add one with `elastos source add ...`."
     )
+}
+
+/// The trusted source of this Home's installed signed release; `None` for a Home
+/// without one, such as a source or CI Home.
+pub(crate) fn installed_release_source(
+    data_dir: &Path,
+) -> anyhow::Result<Option<crate::sources::TrustedSource>> {
+    let sources = crate::sources::load_trusted_sources(data_dir)?;
+    let source = sources.default_source();
+    let has_consumed = match fs::symlink_metadata(data_dir.join("installation")) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if !has_consumed && source.is_none_or(|source| source.install_path.is_empty()) {
+        return Ok(None);
+    }
+    source
+        .cloned()
+        .map(Some)
+        .ok_or_else(missing_trusted_source_error)
 }
 
 fn set_local_copy_permissions(source: &Path, dest: &Path) {
@@ -1335,6 +1349,40 @@ pub(crate) fn capsule_component_has_release_identity(data_dir: &Path, name: &str
         return false;
     };
     package_identity_is_present(manifest.capsules.get(name), platform_info)
+}
+
+/// Admit an unsigned capsule at `dir` only when setup installed it there from
+/// this Home's signed release: `components.json` matches the publisher-signed
+/// release, and the capsule's CID and archive receipts match its entry.
+pub(crate) fn verify_installed_release_capsule(
+    data_dir: &Path,
+    name: &str,
+    dir: &Path,
+) -> anyhow::Result<()> {
+    let source = installed_release_source(data_dir)?.ok_or_else(missing_trusted_source_error)?;
+    let binary = fs::canonicalize(&source.install_path)?;
+    let components =
+        crate::installed_release::read_signed_components(data_dir, &binary, &source, false)?;
+    let manifest: ComponentsManifest = serde_json::from_slice(&components)?;
+    let (Some(component), Some(entry)) = (manifest.external.get(name), manifest.capsules.get(name))
+    else {
+        anyhow::bail!("'{name}' is not a capsule of the installed signed release");
+    };
+    let platform_info = resolve_platform_info(component, &detect_platform());
+    let install_path = resolve_install_path(component, platform_info)
+        .ok_or_else(|| anyhow::anyhow!("capsule '{name}' has no install path"))?;
+    anyhow::ensure!(
+        !entry.cid.trim().is_empty()
+            && fs::canonicalize(data_dir.join(install_path))? == fs::canonicalize(dir)?,
+        "capsule '{name}' is not at its signed release install path"
+    );
+    match component_install_state_for_name(&manifest, data_dir, name, component, platform_info) {
+        InstallState::Installed => Ok(()),
+        InstallState::Missing => anyhow::bail!("capsule '{name}' is not installed"),
+        InstallState::Stale(reason) => {
+            anyhow::bail!("capsule '{name}' differs from the signed release: {reason}")
+        }
+    }
 }
 
 fn package_identity_is_present(entry: Option<&CapsuleEntry>, platform_info: &PlatformInfo) -> bool {
@@ -2160,20 +2208,12 @@ pub(crate) async fn ensure_local_model_engine(
         Err(error) => return Err(error.into()),
     }
     let writer = crate::install_transaction::acquire_installed_writer(data_dir)?;
-    let sources = crate::sources::load_trusted_sources(data_dir)?;
-    let source = sources.default_source();
-    let has_consumed = match fs::symlink_metadata(data_dir.join("installation")) {
-        Ok(_) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error.into()),
-    };
-    let installed = if has_consumed || source.is_some_and(|s| !s.install_path.is_empty()) {
-        let source = source.ok_or_else(missing_trusted_source_error)?;
+    let installed = if let Some(source) = installed_release_source(data_dir)? {
         let guard = writer.as_ref().ok_or_else(|| {
             anyhow::anyhow!("engine acquisition requires its installation writer")
         })?;
         let binary = fs::canonicalize(&source.install_path)?;
-        let admitted = crate::installed_release::read_for_setup(data_dir, &binary, source, guard)?;
+        let admitted = crate::installed_release::read_for_setup(data_dir, &binary, &source, guard)?;
         let release: serde_json::Value = serde_json::from_slice(&admitted.release)?;
         crate::installed_release::admit_descriptor(
             &release["payload"]["platforms"][crate::update::detect_release_platform()]
@@ -2224,7 +2264,7 @@ pub(crate) async fn ensure_local_model_engine(
             "llama-server bundle size differs"
         );
     }
-    let current = crate::installed_release::read_for_setup(data_dir, &binary, source, guard)?;
+    let current = crate::installed_release::read_for_setup(data_dir, &binary, &source, guard)?;
     anyhow::ensure!(
         current.head == admitted.head
             && current.release == admitted.release
