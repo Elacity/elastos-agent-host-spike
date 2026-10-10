@@ -930,6 +930,23 @@ class InstallationTests(unittest.TestCase):
                               result.stderr)
                 self.assert_no_installation_effects(sandbox, before, result)
 
+    def test_python3_that_cannot_run_stops_before_any_download_with_one_next_step(self):
+        did, head, release = installable_fixture()
+        for system, machine, message in [
+            ("Darwin", "arm64", "This Mac needs Apple's Command Line Tools for python3. "
+                                "Run: xcode-select --install, then run the installer again."),
+            ("Linux", "x86_64", "python3 is installed but does not run. Repair python3, then run the installer again."),
+        ]:
+            with self.subTest(system=system), InstallerSandbox(head, release, did, system, machine) as sandbox:
+                stub = sandbox.root / "mocks/python3"
+                stub.write_text("#!/bin/sh\necho 'xcode-select: note: No developer tools were found' >&2\nexit 1\n")
+                stub.chmod(0o755)
+                result, requests = sandbox.run("--install-only")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(requests, [])
+                self.assertIn(message, result.stderr)
+                self.assertNotIn("xcode-select: note", result.stderr)
+
     def test_existing_installation_is_reported_before_download(self):
         did, head, release = installable_fixture()
         with InstallerSandbox(head, release, did) as sandbox:

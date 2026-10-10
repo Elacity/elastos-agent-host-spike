@@ -978,6 +978,13 @@ fi
 for cmd in curl python3; do
     command -v "$cmd" &>/dev/null || die "Required tool not found: $cmd"
 done
+# A Mac without Command Line Tools has only a python3 stub that cannot run.
+if ! python3 -c '' </dev/null &>/dev/null; then
+    if [[ "$PLATFORM" == *-darwin ]]; then
+        die "This Mac needs Apple's Command Line Tools for python3. Run: xcode-select --install, then run the installer again."
+    fi
+    die "python3 is installed but does not run. Repair python3, then run the installer again."
+fi
 
 if ! command -v sha256sum &>/dev/null && ! command -v shasum &>/dev/null; then
     die "Neither sha256sum nor shasum found"

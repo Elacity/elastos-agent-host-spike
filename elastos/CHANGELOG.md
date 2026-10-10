@@ -26,6 +26,9 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - Running the installer again while Home is open now works: it closes Home,
   installs, and opens Home again. Before, it stopped with "Recorded Runtime is
   foreign or ambiguous".
+- On a Mac without Apple's Command Line Tools, the installer now stops before
+  downloading anything and says: run `xcode-select --install`, then run the
+  installer again. Before, it failed with "Invalid release-head.json format".
 
 ### Removed
 
@@ -80,6 +83,11 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   root's `update-controller/runtime __update-controller --receipt …`, the
   controller is stopped first so it does not restart Home. Real-process fixture
   test: `test_open_home_stops_through_its_update_controller`.
+- `install.sh` still needs python3 to check the Ed25519 signature: stock macOS
+  `openssl` (LibreSSL 3.3.6) has no Ed25519. Its preflight now runs
+  `python3 -c ''` and, if the macOS stub (or any broken python3) cannot run,
+  stops with one next step before the first request. Test:
+  `test_python3_that_cannot_run_stops_before_any_download_with_one_next_step`.
 
 ## [0.8.0-alpha.15]
 
