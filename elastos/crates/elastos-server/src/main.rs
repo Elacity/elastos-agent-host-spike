@@ -497,7 +497,7 @@ enum Commands {
         /// Owner-only secret-free plan with hash-bound object selections
         #[arg(long)]
         plan: PathBuf,
-        /// Fresh directory for owner-only plaintext backups
+        /// Fresh directory for owner-only encrypted rollback copies
         #[arg(long)]
         backup_dir: PathBuf,
     },
@@ -511,6 +511,21 @@ enum Commands {
         /// Fresh owner-only rollback backup under data-dir/backups
         #[arg(long)]
         backup_dir: PathBuf,
+    },
+
+    /// Remove verified migration rollback payload after exact installed Home acceptance
+    #[command(name = "principal-root-cleanup", hide = true)]
+    PrincipalRootCleanup {
+        #[arg(long)]
+        data_dir: PathBuf,
+        #[arg(long)]
+        binary: PathBuf,
+        /// Original owner-only plan for a legacy manual backup
+        #[arg(long, requires = "backup_dir")]
+        plan: Option<PathBuf>,
+        /// Exact legacy manual backup directory to reconcile
+        #[arg(long, requires = "plan")]
+        backup_dir: Option<PathBuf>,
     },
 
     /// Admit and install the installer's verified release through the shared writer
@@ -1580,6 +1595,23 @@ async fn run() -> anyhow::Result<()> {
                 &backup_dir,
             )?;
             println!("{}", serde_json::to_string_pretty(&receipt)?);
+        }
+
+        Commands::PrincipalRootCleanup {
+            data_dir,
+            binary,
+            plan,
+            backup_dir,
+        } => {
+            let removed = elastos_server::update_controller::finalize_principal_root_backups(
+                &data_dir,
+                &binary,
+                plan.as_deref().zip(backup_dir.as_deref()),
+            )
+            .await?;
+            println!(
+                "Removed {removed} verified migration backup payload file(s). Receipts retained."
+            );
         }
 
         Commands::InstallRelease {

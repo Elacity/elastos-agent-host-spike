@@ -1090,6 +1090,168 @@ async fn desktop_and_wallet_bindings_reach_captured_and_retained_child_commands(
 }
 
 #[tokio::test]
+async fn migration_cleanup_requires_a_fresh_installed_home_proof() {
+    use axum::{
+        routing::{get, post},
+        Json, Router,
+    };
+    use std::io::{Seek, SeekFrom};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let fixture = PrivateFixture::new();
+    let capsule = fixture.data.join("capsules/home");
+    fs::create_dir_all(capsule.join("browser")).unwrap();
+    let document = b"accepted Home document";
+    fixture.file(
+        &capsule.join("capsule.json"),
+        &serde_json::to_vec(&json!({
+            "schema":"elastos.capsule/v1", "name":"home", "version":"0.1.0",
+            "description":"Cleanup readiness fixture", "author":"fixture",
+            "role":"app", "type":"data", "entrypoint":"browser/index.html"
+        }))
+        .unwrap(),
+        0o600,
+    );
+    fixture.file(&capsule.join("browser/index.html"), document, 0o600);
+    fixture.publish_installed_release_with_components(
+        &serde_json::to_vec(&json!({
+            "schema":"elastos.components/v1",
+            "external":{"home":{"install_path":"capsules/home","platforms":{}}},
+            "capsules":{}, "profiles":{}
+        }))
+        .unwrap(),
+    );
+    let principal = "person:local:cleanup-ready";
+    let protection = crate::auth::store_test_principal_root_protection(&fixture.data, principal);
+    let uri = format!(
+        "{}/.AppData/LocalHost/GBA/ucity/ready.sav",
+        protection.localhost_root
+    );
+    let object = elastos_common::localhost::rooted_localhost_fs_path(&fixture.data, &uri).unwrap();
+    fs::create_dir_all(object.parent().unwrap()).unwrap();
+    fixture.file(&object, b"private legacy save", 0o600);
+    let plan_path = fixture.data.join("migration-plan.json");
+    fixture.file(
+        &plan_path,
+        &serde_json::to_vec_pretty(&crate::auth::PrincipalRootMigrationPlanV1 {
+            schema: crate::auth::PRINCIPAL_ROOT_MIGRATION_PLAN_SCHEMA.into(),
+            principal_id: principal.into(),
+            localhost_root: protection.localhost_root,
+            objects: vec![crate::auth::PrincipalRootMigrationSelectionV1 {
+                object_uri: uri,
+                plaintext_sha256: format!("sha256:{}", digest(b"private legacy save")),
+            }],
+        })
+        .unwrap(),
+        0o600,
+    );
+    let backup = fixture.data.join("manual-migration-backup");
+    crate::auth::migrate_principal_root_objects_offline(&fixture.data, &plan_path, &backup)
+        .unwrap();
+    let payload = fs::read_dir(&backup)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.to_string_lossy().ends_with(".encrypted.backup"))
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let generation = "c".repeat(32);
+    write_private(&crate::runtime_control::gateway_runtime_coord_path(&fixture.data), &json!({
+        "api_url":format!("http://127.0.0.1:{port}"), "home_url":format!("http://127.0.0.1:{port}/home/"),
+        "attach_secret":"fixture-attach", "runtime_kind":"gateway", "pid":std::process::id(),
+        "generation":generation, "binary_sha256":digest(&fs::read(&fixture.binary).unwrap())
+    })).unwrap();
+    let host_guard = crate::host_lock::acquire_host_process_lock(
+        &fixture.data,
+        "gateway",
+        &format!("127.0.0.1:{port}"),
+    )
+    .unwrap();
+    // Migration leaves the real host lock in place. Update its held inode,
+    // just as the host does, instead of replacing it as private controller JSON.
+    let mut host_file: &File = &host_guard;
+    host_file.set_len(0).unwrap();
+    host_file.seek(SeekFrom::Start(0)).unwrap();
+    serde_json::to_writer(
+        &mut host_file,
+        &json!({
+            "pid":std::process::id(), "generation":generation, "role":"gateway",
+            "addr":format!("127.0.0.1:{port}")
+        }),
+    )
+    .unwrap();
+    host_file.sync_data().unwrap();
+    let accepted = Arc::new(AtomicBool::new(false));
+    let served = accepted.clone();
+    let home_requests = Arc::new(AtomicUsize::new(0));
+    let fetched = home_requests.clone();
+    let router = Router::new()
+        .route(
+            "/api/health",
+            get(|| async { Json(json!({"version":"0.7.0"})) }),
+        )
+        .route(
+            "/api/auth/attach",
+            post(|Json(input): Json<Value>| async move {
+                assert_eq!(input["secret"], "fixture-attach");
+                assert_eq!(input["scope"], "client");
+                Json(json!({"token":"fixture-token"}))
+            }),
+        )
+        .route(
+            "/home/",
+            get(move || {
+                let served = served.clone();
+                fetched.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if served.load(Ordering::SeqCst) {
+                        document.as_slice()
+                    } else {
+                        b"stale Home document".as_slice()
+                    }
+                }
+            }),
+        );
+    let (shutdown, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+            .unwrap();
+    });
+    let stale = finalize_principal_root_backups(&fixture.data, &fixture.binary, None).await;
+    let retained_after_stale = payload.is_file();
+    let fetched_after_stale = home_requests.load(Ordering::SeqCst);
+    accepted.store(true, Ordering::SeqCst);
+    let finalized = finalize_principal_root_backups(&fixture.data, &fixture.binary, None).await;
+    let payload_removed = !payload.exists();
+    let receipt_retained = backup.join("receipt.json").is_file();
+    let _ = shutdown.send(());
+    server.await.unwrap();
+    drop(host_guard);
+    let stale_error = stale.expect_err("stale served Home refuses migration cleanup");
+    assert!(
+        stale_error
+            .to_string()
+            .contains("Served Home differs from the installed capsule"),
+        "{stale_error:#}"
+    );
+    assert!(
+        retained_after_stale,
+        "stale served Home retains the encrypted rollback"
+    );
+    assert_eq!(fetched_after_stale, 1);
+    assert_eq!(finalized.unwrap(), 1);
+    assert!(payload_removed);
+    assert!(receipt_retained);
+    assert_eq!(home_requests.load(Ordering::SeqCst), 2);
+    assert!(crate::host_lock::active_host_process(&fixture.data)
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
 async fn readiness_uses_the_reported_ipv6_home_listener_and_checks_its_served_bytes() {
     use axum::{
         routing::{get, post},
@@ -3319,7 +3481,7 @@ async fn stopped_home_with_unreconciled_child_record_reports_failure_and_retains
     assert!(child::generation_gone(pid, &birth).unwrap());
     assert_eq!(fs::read(&record).unwrap(), record_bytes);
     assert_eq!(fs::read(&active).unwrap(), active_bytes);
-    assert!(controller.publish_ready_result().is_err());
+    assert!(controller.publish_ready_result().await.is_err());
     // Exercise the same status selector used by serve after a failed apply.
     controller.publish_apply_result(&stopped).unwrap();
     let projected = status(&fixture.data).unwrap().unwrap();

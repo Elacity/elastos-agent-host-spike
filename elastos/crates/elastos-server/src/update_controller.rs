@@ -891,11 +891,11 @@ impl Controller {
         if self.child.is_none() {
             self.start_initial().await
         } else {
-            self.publish_ready_result()
+            self.publish_ready_result().await
         }
     }
 
-    fn publish_ready_result(&mut self) -> Result<()> {
+    async fn publish_ready_result(&mut self) -> Result<()> {
         anyhow::ensure!(
             self.child.is_some() && self.host_ready,
             "Recovered Home is not ready."
@@ -903,8 +903,30 @@ impl Controller {
         let source = installed_source(&self.receipt.data_dir)?;
         let (phase, message) =
             initial_ready_result(self.request.as_ref(), &source.installed_version)?;
+        if !InstallTransaction::has_pending_recovery(&self.receipt.binary) {
+            self.finalize_migration_backups().await;
+        }
         self.previous_version = source.installed_version;
         self.publish(phase, message)
+    }
+
+    async fn finalize_migration_backups(&self) {
+        // wait_ready bound HTTP, capsule, binary, host-lock and process proof to
+        // this generation. A release journal keeps its rollback until retirement.
+        if let Err(error) = finalize_principal_root_migrations_after_ready(
+            &self.receipt.data_dir,
+            &self.receipt.binary,
+            None,
+            Some((
+                self.child.as_ref().map(|child| child.pid()),
+                &self.generation,
+            )),
+        )
+        .await
+        {
+            tracing::warn!(error = %error,
+                "Migration backup retained. Its owner must reconcile cleanup before claiming it complete.");
+        }
     }
 
     async fn start_initial(&mut self) -> Result<()> {
@@ -942,7 +964,7 @@ impl Controller {
                 self.directory.join("runtime.log").display()
             )
         })?;
-        self.publish_ready_result()?;
+        self.publish_ready_result().await?;
         println!("Home: http://localhost:{BROWSER_HOME_PORT}/home/");
         println!("Keep this terminal open. Press Ctrl+C to stop Home.");
         Ok(())
@@ -1207,6 +1229,9 @@ impl Controller {
             crate::update::run_restarting_update(&data_dir, &fetch, request.head_cid, self).await
         }
         .await;
+        if self.host_ready && !InstallTransaction::has_pending_recovery(&self.receipt.binary) {
+            self.finalize_migration_backups().await;
+        }
         let closed = self.close_carrier().await;
         // A refusal before activation still needs exactly the unchanged Home.
         if self.child.is_none() && !InstallTransaction::has_pending_recovery(&self.receipt.binary) {
@@ -1941,6 +1966,86 @@ fn home_digest(data_dir: &Path) -> Result<String> {
     let path = crate::api::browser_capsules::installed_home_document(data_dir)
         .context("Installed Home document is unavailable")?;
     Ok(digest(&read_regular_bounded(&path, 2 * 1024 * 1024)?))
+}
+
+/// The explicit operator route uses the same fresh installed Home proof as the
+/// controller. Legacy manual backup paths need their original hash-bound plan.
+pub async fn finalize_principal_root_backups(
+    data_dir: &Path,
+    binary: &Path,
+    legacy: Option<(&Path, &Path)>,
+) -> Result<usize> {
+    finalize_principal_root_migrations_after_ready(data_dir, binary, legacy, None).await
+}
+
+async fn finalize_principal_root_migrations_after_ready(
+    data_dir: &Path,
+    binary: &Path,
+    legacy: Option<(&Path, &Path)>,
+    expected: Option<(Option<u32>, &str)>,
+) -> Result<usize> {
+    anyhow::ensure!(
+        data_dir.is_absolute() && binary.is_absolute(),
+        "Migration cleanup data and installed Runtime paths must be absolute."
+    );
+    if let Some((plan, backup)) = legacy {
+        anyhow::ensure!(
+            plan.is_absolute() && backup.is_absolute(),
+            "Legacy migration plan and backup paths must be absolute."
+        );
+    }
+    let writer = crate::install_transaction::InstallationGuard::acquire(
+        binary
+            .parent()
+            .context("installed Runtime parent is missing")?,
+    )?;
+    anyhow::ensure!(
+        !InstallTransaction::has_pending_recovery(binary),
+        "Retain migration backups until release recovery and Home acceptance finish."
+    );
+    let source = installed_source(data_dir)?;
+    let installed = crate::installed_release::read_without_migration(data_dir, binary, &source)?;
+    let coords: crate::runtime_control::RuntimeCoords = read_private_json(
+        &crate::runtime_control::gateway_runtime_coord_path(data_dir),
+    )?;
+    if let Some((pid, generation)) = expected {
+        anyhow::ensure!(
+            pid == Some(coords.pid) && generation == coords.generation,
+            "Migration cleanup belongs to a different Home generation."
+        );
+    }
+    let start = process_start(coords.pid).context("accepted Home has exited")?;
+    let port = url::Url::parse(&coords.home_url)?
+        .port()
+        .context("accepted Home listener port is missing")?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .timeout(Duration::from_secs(2))
+        .build()?;
+    prove_ready(
+        &client,
+        data_dir,
+        port,
+        coords.pid,
+        &coords.generation,
+        &source.installed_version,
+        &installed.binary_sha256,
+        &home_digest(data_dir)?,
+    )
+    .await?;
+    anyhow::ensure!(
+        process_start(coords.pid).as_deref() == Some(start.as_str()),
+        "Home process changed during migration cleanup acceptance."
+    );
+    if let Some((plan, backup)) = legacy {
+        crate::auth::reconcile_legacy_principal_root_migration(
+            data_dir, plan, backup, binary, &writer,
+        )?;
+    }
+    crate::api::auth_gateway::finalize_configured_principal_root_migrations_with_writer(
+        data_dir, binary, &writer,
+    )
 }
 
 async fn response_bytes(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {

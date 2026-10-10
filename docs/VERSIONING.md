@@ -169,32 +169,92 @@ writes `model-catalog.json` and prints its CID.
 `publisher_dids` (the signing DID) and `local_use` (`max_cache_bytes` 8 GiB, `max_model_memory_bytes` 4 GiB).
 Keep that head stable across releases: a new head means every admitted model needs Use again.
 
-1. **Build.** Run the `Release package` workflow
+Before preparing a release, the operator creates an approval file in a protected
+directory outside the candidate inputs and `RELEASE_WORK`. Set `RELEASE_APPROVAL`
+to its canonical absolute path. The directory and file belong to the operator
+or root and permit writes only by their owner. This file is an independent
+approval: preparation reads it and never creates it from downloaded inputs,
+the package run or the publisher's current HTTP response.
+
+The approval has these fields:
+
+```json
+{
+  "schema": "elastos.release.approval/v1",
+  "repository": "Elacity/elastos-runtime",
+  "source": {"commit": "APPROVED_SOURCE_COMMIT", "tree": "APPROVED_SOURCE_TREE"},
+  "workflow": {
+    "commit": "APPROVED_BUILDER_COMMIT",
+    "tree": "APPROVED_BUILDER_TREE",
+    "ref": "refs/heads/develop"
+  },
+  "delivery": {
+    "MAINTAINER_DID": "APPROVED_SIGNING_DID",
+    "PUBLISHER_GATEWAY": "https://APPROVED_PUBLISHER_ORIGIN",
+    "PUBLISHER_NODE_ID": "APPROVED_CARRIER_NODE_ID",
+    "SOURCE_CONNECT_TICKET": "APPROVED_CARRIER_TICKET",
+    "IPNS_NAME": "APPROVED_IPNS_NAME"
+  },
+  "gh": {"path": "/ABSOLUTE/PATH/TO/INSTALLED/GH", "sha256": "APPROVED_GH_SHA256"}
+}
+```
+
+Replace the descriptive values with independently verified identities. Source H
+and builder W are full Git commit/tree IDs and may differ. Approve W's complete
+workflow source, its helper code and pinned actions, rather than just its YAML
+filename. The producer ref is `refs/heads/develop` or `refs/heads/main`. Approve
+H through the ordinary exact-source CI acceptance flow before preparation.
+The independent source approval is deliberate key-owner trust; direct signer
+calls retain this operator boundary. Prepare and seed-upgrade enforce the CI gate.
+Approve the publisher tuple from the existing operator trust record. The Carrier node is
+its 64-character lower-case transport ID; every endpoint in the base32 JSON ticket
+has that same ID. A new ticket or delivery identity requires a new approval.
+The IPNS field can be empty when the approved delivery uses Carrier alone.
+The installed `gh` executable has a canonical path outside candidate inputs and
+a SHA-256 pin. It supports the attestation verification flags used by the signer.
+
+1. **Build.** Run the `Release package` workflow from the approved builder ref
    ([`.github/workflows/release-package.yml`](../.github/workflows/release-package.yml))
    with the source commit, the install version N and the update version N+1.
-   The source is a commit on `develop`, or the head of an open pull request into
-   `develop` that already contains `develop`. The run builds native pairs for
+   The source is the approved commit on `develop`. The run builds native pairs for
    `aarch64-darwin`, `x86_64-linux` and `aarch64-linux` (Jetson). N+1 reuses
    N's support bytes. Each pair uses fresh Cargo directories and checks versions,
    source and support parity; ARM64 also passes the Jetson compatibility gate.
-   Each job summary records its artifact ID and digest.
+   Build jobs have read-only permissions. Fresh hosted attester jobs execute W's
+   helpers, read the downloaded payloads as inert data, and seal source H/tree and
+   version from the original workflow inputs and admission output. The attesters
+   hash every payload and publish small `release-proof-*` artifacts with receipts
+   and bundles. Candidate scripts and executables stay in the build jobs.
+   The job summary records each native artifact's ID and digest.
 2. **Prepare.** On the operator Mac, from a clone of this repository, run
    `scripts/release-publish.sh prepare RUN_ID VERSION`. It checks that the run
-   succeeded and that its source is on `develop` (merge an open pull request
-   first), downloads and verifies all three platform artifacts, and passes one
+   succeeded from approved W/ref/event and that source H is on `develop`, downloads
+   and verifies all three platform artifacts with their native name suffixes
+   and certificate-authenticated proof attempts. A retained native artifact from an earlier attempt can use its original
+   proof or a fresh proof from a later attempt in the same approved run. All selected
+   artifacts bind the same H/tree; the latest overall run must succeed. This permits
+   a Linux-only retry to preserve good Mac build bytes. The native name suffix
+   is a selection label; GitHub's certificate authenticates the proof attempt.
+   Each proof binds the selected artifact's immutable ID and ZIP digest.
+   Prepare passes one
    `--platform-input PLATFORM=DIR` per platform. Prepare also requires successful
    CI at that exact source commit, from a `develop` push or `develop` merge group,
    with every required job completed successfully. For a Mac-only preview, run
    `scripts/release-publish.sh prepare RUN_ID VERSION aarch64-darwin`. The Mac
    coordinator requires `aarch64-darwin` in every selection; only a single
    platform uses `--preview-platform`. Prepare checks out the exact source as
-   a worktree, takes Kubo from the Mac build, reads the publisher bootstrap and signer DID from the public origin, copies the seed's
+   a worktree, takes Kubo from the Mac build, checks the public bootstrap against
+   the independent delivery approval, copies the seed's
    current `publish-state.json` and runs `scripts/publish-release.sh
    --prepare-only` in an isolated data directory.
 3. **Sign.** `scripts/release-publish.sh policy VERSION SIGNER KEY OPENSSL`
-   writes the exact signer policy (with the current `develop` head) and prints
-   the `release-signer.py` command. The operator runs it and types the DID.
-   The signer refuses a commit that is not on `develop`.
+   writes the exact signer policy (with the current `develop` head and the
+   independent approval file's path and SHA-256) and prints the `release-signer.py`
+   command. The installed signer verifies W/tree/ref, the GitHub-hosted certificate
+   identity, event, run and exact proof attempt, then binds each receipt to its
+   selected native artifact ID, digest and name suffix and the frozen
+   native bytes. It shows source, builder, publisher tuple and approval digest
+   before the operator types the DID. The source admission gate still applies.
 4. **Import.** `scripts/release-publish.sh seed VERSION SIGNED_DIR` prints the
    seed sequence for the seed's installed Runtime: copy the signed installer
    and manifests, rebuild the rest from the selected CI artifacts, verify every
@@ -214,9 +274,10 @@ every published release pinned, so Undo and older Homes keep working. It does
 not push or notify anything. How Homes check and install is in
 [INSTALL.md](INSTALL.md#how-updates-reach-your-home).
 
-Upgrading the seed Runtime itself is rare. Run the workflow with
+Upgrading the seed Runtime itself is rare. Use the same independent approval and run the workflow with
 `seed_package` set, then `scripts/release-publish.sh seed-upgrade RUN_ID` prints
-the steps: create `/opt/elastos` for the service user, check and install the
+the steps only after the operator Mac verifies the approved producer, attested seed
+payloads and successful exact-source CI. Those steps create `/opt/elastos` for the service user, check and install the
 exact source at `/opt/elastos/release-source` (the seed Runtime runs its
 release helpers from the path it was built in), install the Runtime and IPFS
 provider, update the provider's pin in the installed `components.json`, verify
@@ -224,8 +285,19 @@ the provider and start the service. The seed needs glibc 2.39 or newer.
 
 Both seed sequences check sudo and every path they write before stopping the
 service, and once it is stopped an `EXIT` trap starts it again if any later
-step fails, so the seed is never left down. `seed-upgrade` checks the run the
-same way `prepare` does.
+step fails, so the seed is never left down. `seed-upgrade` checks the producer and
+exact-source CI through the same acceptance boundary as `prepare`. The printed
+commands retain the approved payload hashes and source tree before installation.
+
+Historical artifacts that lack fresh-job receipt attestations need a new run from
+an approved builder containing this workflow and its complete helper closure.
+Activate the workflow on the approved canonical ref and record its exact W/tree
+before dispatch. Exercise receipt verification with an isolated disposable-key
+fixture before production signing; local parser fixtures alone do not prove the
+GitHub OIDC certificate and CLI integration. Install the updated signer and verifier before using
+the new preparation flow; retain independent tool pins and the operator approval
+under their existing access controls. Changing the workflow ref, source, ticket or
+tools is an explicit new approval, rather than preparation-time discovery.
 
 Seed details come from `RELEASE_SEED`, `RELEASE_SEED_DATA`,
 `RELEASE_SEED_UNIT`, `RELEASE_SEED_STAGE`, `RELEASE_SEED_RUNTIME` and

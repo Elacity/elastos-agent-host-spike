@@ -1046,7 +1046,8 @@ pub fn source_carrier_addrs(source: &TrustedSource) -> Vec<String> {
 }
 
 fn source_transport_endpoint_id(source: &TrustedSource) -> Result<Option<String>> {
-    if !source.publisher_node_id.is_empty() {
+    let endpoints = decode_ticket_endpoints(&source.connect_ticket);
+    let node_id = if !source.publisher_node_id.is_empty() {
         let public_key: iroh::PublicKey = source
             .publisher_node_id
             .parse()
@@ -1057,13 +1058,19 @@ fn source_transport_endpoint_id(source: &TrustedSource) -> Result<Option<String>
                 "trusted source publisher_node_id must be one canonical raw Iroh endpoint ID"
             );
         }
-        return Ok(Some(canonical));
+        Some(canonical)
+    } else {
+        endpoints.first().map(|endpoint| endpoint.id.to_string())
+    };
+    if let Some(expected) = &node_id {
+        anyhow::ensure!(
+            endpoints
+                .iter()
+                .all(|endpoint| endpoint.id.to_string() == *expected),
+            "trusted source ticket routes do not match the configured Carrier identity"
+        );
     }
-
-    Ok(decode_ticket_endpoints(&source.connect_ticket)
-        .into_iter()
-        .next()
-        .map(|endpoint| endpoint.id.to_string()))
+    Ok(node_id)
 }
 
 /// Start the Carrier node (endpoint + gossip + file serving).
@@ -16765,6 +16772,64 @@ pub(crate) mod tests {
             err.to_string()
                 .contains("trusted source publisher_node_id must be one raw Iroh endpoint ID"),
             "unexpected configured transport-id error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_trusted_source_routes_stay_bound_to_one_carrier_identity() {
+        let expected = iroh::SecretKey::from_bytes(&[110u8; 32]).public();
+        let foreign = iroh::SecretKey::from_bytes(&[111u8; 32]).public();
+        let mut source = TrustedSource {
+            name: "fixture".to_string(),
+            publisher_dids: Vec::new(),
+            channel: "stable".to_string(),
+            discovery_uri: String::new(),
+            connect_ticket: encode_ticket_for(iroh::EndpointAddr::from(expected)),
+            gateways: Vec::new(),
+            install_path: String::new(),
+            installed_version: String::new(),
+            head_cid: String::new(),
+            publisher_node_id: expected.to_string(),
+            ipns_name: String::new(),
+        };
+        assert_eq!(
+            source_transport_endpoint_id(&source).unwrap(),
+            Some(expected.to_string())
+        );
+
+        source.connect_ticket = encode_ticket_for(iroh::EndpointAddr::from(foreign));
+        let error = CarrierClient::connect_trusted_source(&source, 1)
+            .await
+            .err()
+            .expect("a foreign ticket must fail before a connection starts");
+        assert!(error.to_string().contains("ticket routes do not match"));
+        let error = fetch_file_from_trusted_source_bound(
+            &source,
+            None,
+            "fixture",
+            1,
+            None,
+            MAX_DOWNLOAD_BYTES,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("ticket routes do not match"));
+
+        let mixed = serde_json::json!({"endpoints": [
+            iroh::EndpointAddr::from(expected), iroh::EndpointAddr::from(foreign)
+        ]});
+        source.connect_ticket = data_encoding::BASE32_NOPAD
+            .encode(&serde_json::to_vec(&mixed).unwrap())
+            .to_ascii_lowercase();
+        assert!(source_transport_endpoint_id(&source).is_err());
+        source.publisher_node_id.clear();
+        assert!(source_transport_endpoint_id(&source).is_err());
+
+        source.connect_ticket = encode_ticket_for(iroh::EndpointAddr::from(expected));
+        assert_eq!(
+            source_transport_endpoint_id(&source).unwrap(),
+            Some(expected.to_string()),
+            "a legacy ticket still identifies one peer"
         );
     }
 

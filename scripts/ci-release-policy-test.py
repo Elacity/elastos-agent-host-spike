@@ -92,8 +92,9 @@ def validate_action_pins(source, cache_action):
 
 def run_compile_cache_fixture(source, mode, download_status=0, server_status=0,
                               platform=("Linux", "X64"), compiler="fixture rustc",
-                              lockfile="fixture lock", archive=None, checksum=None):
-    """Execute action shell control flow with local transport/server fixtures."""
+                              lockfile="fixture lock", archive=None, checksum=None,
+                              runtime=None, observed=None):
+    """Execute the action with runtime credentials present only in Node steps."""
     action_steps = re.split(r"(?m)^    - ", source.split("  steps:\n", 1)[1])[1:]
     install = textwrap.dedent(action_steps[0].split("      run: |\n", 1)[1])
     with tempfile.TemporaryDirectory() as directory:
@@ -105,7 +106,11 @@ def run_compile_cache_fixture(source, mode, download_status=0, server_status=0,
             "curl": 'printf "%s\\n" "$@" > "$DOWNLOAD_LOG"\nwhile [ "$1" != -o ]; do shift; done\nprintf fixture > "$2"\nexit "$DOWNLOAD_STATUS"\n',
             "rustc": '[ "$*" = -vV ] || exit 99\nprintf "%s\\n" "$COMPILER_ID"\n',
             "tar": 'exit 0\n',
-            "sccache": '[ "$*" = --start-server ] || exit 99\necho started >> "$SERVER_LOG"\nexit "$SERVER_STATUS"\n',
+            "sccache": ('[ "$*" = --start-server ] || exit 99\n'
+                        'printf "%s\\n" "$ACTIONS_RUNTIME_TOKEN" "$ACTIONS_CACHE_SERVICE_V2" '
+                        '"$ACTIONS_RESULTS_URL" "$SCCACHE_IDLE_TIMEOUT" > "$SERVER_LOG"\n'
+                        'if [ "$SERVER_STATUS" != 0 ]; then echo "$ACTIONS_RUNTIME_TOKEN" >&2; fi\n'
+                        'exit "$SERVER_STATUS"\n'),
         }.items():
             path = shims / name
             path.write_text("#!/bin/bash\n" + body)
@@ -129,7 +134,9 @@ def run_compile_cache_fixture(source, mode, download_status=0, server_status=0,
                "SERVER_LOG": str(root / "server"), "COMPILER_ID": compiler,
                "DOWNLOAD_LOG": str(root / "download"),
                "CHECKSUM_LOG": str(root / "checksum")}
-        env.pop("RUSTC_WRAPPER", None)
+        for name in list(env):
+            if name.startswith("ACTIONS_") or name == "RUSTC_WRAPPER":
+                del env[name]
         result = subprocess.run(["bash", "-e", "-c", install], env=env,
                                 capture_output=True, text=True, cwd=root, timeout=10)
         if archive is not None:
@@ -141,15 +148,39 @@ def run_compile_cache_fixture(source, mode, download_status=0, server_status=0,
                 if (root / "env").exists() else {}
         installed_exports = exports()
         env.update(installed_exports)
-        # Execute the action's activation guard and shell, including skipped installs.
+        # The runner adds the runtime to Node actions; ordinary shell steps do
+        # not receive it unless an action exports it through GITHUB_ENV.
+        runtime = {"ACTIONS_RUNTIME_TOKEN": "fixture-runtime-token",
+                   "ACTIONS_RESULTS_URL": "https://fixture.invalid/",
+                   "ACTIONS_CACHE_SERVICE_V2": "True"} if runtime is None else runtime
+        messages = []
         for step in action_steps[1:]:
-            if "      run: |\n" not in step:
+            if "        script: |\n" not in step:
                 continue
             if evaluate(field(step, "if"), {"steps.install.outcome":
                                             "success" if result.returncode == 0 else "failure"}):
-                script = textwrap.dedent(step.split("      run: |\n", 1)[1])
-                subprocess.run(["bash", "-e", "-c", script], env=env, check=True,
-                               capture_output=True, text=True, timeout=10)
+                script = textwrap.dedent(re.split(r"(?m)^\S", step.split("        script: |\n", 1)[1], 1)[0])
+                launcher = """
+                    const fs = require('node:fs');
+                    const core = {
+                      exportVariable: (name, value) => {
+                        process.env[name] = value;
+                        fs.appendFileSync(process.env.GITHUB_ENV, `${name}=${value}\\n`);
+                      },
+                      warning: message => console.log(`warning: ${message}`),
+                      info: message => console.log(message)
+                    };
+                    new Function('core', 'require', process.argv[1])(core, require);
+                """
+                activation = subprocess.run(["node", "-e", launcher, script],
+                                            env={**env, **runtime}, check=True,
+                                            capture_output=True, text=True, timeout=15)
+                messages.append(activation.stdout + activation.stderr)
+        if observed is not None:
+            observed["messages"] = "".join(messages)
+            names = ("ACTIONS_RUNTIME_TOKEN", "ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "SCCACHE_IDLE_TIMEOUT")
+            observed["daemon_runtime"] = dict(zip(names, (root / "server").read_text().splitlines())) \
+                if (root / "server").exists() else {}
         return result.returncode, installed_exports, exports(), (root / "server").exists()
 
 
@@ -369,12 +400,13 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertIn("run: sccache --show-stats", JOBS[job])
         setup_source = (WORKFLOW.parents[1] / "actions/rust-compile-cache/action.yml").read_text()
         self.assertIn("SCCACHE_GHA_ENABLED=on", setup_source)
-        self.assertIn("RUSTC_WRAPPER=sccache", setup_source)
-        self.assertIn("CARGO_INCREMENTAL=0", setup_source)
+        self.assertIn("core.exportVariable('RUSTC_WRAPPER', 'sccache')", setup_source)
+        self.assertIn("core.exportVariable('CARGO_INCREMENTAL', '0')", setup_source)
         self.assertNotIn("hashFiles", setup_source)
         self.assertIn("SCCACHE_GHA_RW_MODE=", setup_source)
-        for name in ("ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN"):
-            self.assertIn(f"core.exportVariable('{name}', process.env.{name}", setup_source)
+        for name in ("ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_CACHE_SERVICE_V2"):
+            self.assertIn(f"process.env.{name}", setup_source)
+            self.assertNotIn(f"core.exportVariable('{name}'", setup_source)
         uncached = SOURCE.split("\njobs:\n", 1)[0] + "\n".join(
             JOBS[job] for job in JOBS if job not in expected)
         self.assertNotRegex(uncached, r"(?i)sccache|RUSTC_WRAPPER|rust-compile-cache")
@@ -399,7 +431,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertIn("sccache-v0.18.0-x86_64-unknown-linux-musl", setup_source)
         self.assertIn("45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89", setup_source)
         self.assertLess(setup_source.index('"${checksum[@]}" -c'), setup_source.index("tar -xzf"))
-        self.assertLess(setup_source.index("tar -xzf"), setup_source.index("RUSTC_WRAPPER=sccache"))
+        self.assertLess(setup_source.index("tar -xzf"), setup_source.index("core.exportVariable('RUSTC_WRAPPER'"))
 
     def test_release_builds_are_hermetic_with_fresh_outputs(self):
         source = (WORKFLOW.parent / "release-package.yml").read_text()
@@ -575,6 +607,55 @@ class ReleasePolicyTests(unittest.TestCase):
                 self.assertEqual(started, download == 0)
                 self.assertEqual(final.get("RUSTC_WRAPPER"), "sccache" if expected else None)
         self.assertEqual(field(install, "continue-on-error"), "true")
+
+    def test_sccache_runtime_stays_with_daemon_and_requires_v2(self):
+        source = CACHE_ACTION.read_text()
+        runtime = {"ACTIONS_RUNTIME_TOKEN": "fixture-runtime-token",
+                   "ACTIONS_RESULTS_URL": "https://fixture.invalid/",
+                   "ACTIONS_CACHE_SERVICE_V2": "True"}
+
+        def verify(source):
+            observed = {}
+            _, _, exported, started = run_compile_cache_fixture(
+                source, "READ_WRITE", runtime=runtime, observed=observed)
+            self.assertTrue(started)
+            self.assertEqual(exported.get("RUSTC_WRAPPER"), "sccache")
+            self.assertEqual(observed["daemon_runtime"], {**runtime, "SCCACHE_IDLE_TIMEOUT": "0"})
+            self.assertFalse(any(name.startswith("ACTIONS_") for name in exported))
+            self.assertNotIn(runtime["ACTIONS_RUNTIME_TOKEN"], observed["messages"])
+
+        verify(source)
+        # Execute a regression instead of accepting a commented-out safe pattern.
+        leaking = source.replace("core.exportVariable('RUSTC_WRAPPER', 'sccache');",
+                                 "core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN);\n"
+                                 "              core.exportVariable('RUSTC_WRAPPER', 'sccache');", 1)
+        with self.assertRaises(AssertionError):
+            verify(leaking)
+        for missing in runtime:
+            with self.subTest(missing=missing):
+                incomplete = {name: value for name, value in runtime.items() if name != missing}
+                observed = {}
+                _, _, exported, started = run_compile_cache_fixture(
+                    source, "READ_ONLY", runtime=incomplete, observed=observed)
+                self.assertFalse(started)
+                self.assertNotIn("RUSTC_WRAPPER", exported)
+                self.assertIn("GHA v2 runtime is unavailable", observed["messages"])
+        observed = {}
+        _, _, exported, _ = run_compile_cache_fixture(
+            source, "READ_ONLY", server_status=1, observed=observed)
+        self.assertNotIn("RUSTC_WRAPPER", exported)
+        self.assertIn("server startup failed", observed["messages"])
+        self.assertNotIn(runtime["ACTIONS_RUNTIME_TOKEN"], observed["messages"])
+
+    def test_sccache_smoke_clients_discard_inherited_runtime(self):
+        smoke = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-rust-cache-smoke.py"))
+        inherited = {"ACTIONS_RUNTIME_TOKEN": "real-job-token-fixture",
+                     "ACTIONS_RESULTS_URL": "https://real-job.invalid/",
+                     "ACTIONS_CACHE_SERVICE_V2": "True", "SCCACHE_GHA_RW_MODE": "READ_WRITE",
+                     "CARGO_TARGET_DIR": "/real-job-target", "OPENDAL_TEST": "ghac"}
+        with mock.patch.dict(os.environ, inherited):
+            clients = smoke["client_environment"]()
+        self.assertFalse(set(inherited) & clients.keys())
 
     def test_sccache_read_only_mode_is_enforced_for_every_event(self):
         def verify(source):
