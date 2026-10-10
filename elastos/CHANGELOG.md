@@ -24,6 +24,14 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - The installer downloads release data over HTTPS only and stops with a clear
   message if a server redirects it to plain HTTP.
 
+### Removed
+
+- `elastos update --gateway` and `--no-p2p`, and the installer's IPFS-gateway
+  options (`--gateway`, `--head-cid`, `--publisher-node-id`). Updates come
+  only from your trusted source over Carrier; the installer downloads only
+  from its publisher address. `elastos update --head-cid` and `--rollback-to`
+  stay.
+
 ### Developer detail
 
 - Model preparation keeps its stage after any `MetadataRead`, `WeightsRead` or
@@ -57,6 +65,11 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   and `localhost` (test fixtures) may use HTTP. curl's exit 1 (protocol refused)
   names the URL. The bootstrap fixture's curl stand-in requires these flags on
   every request; a real-curl test covers refusal and the loopback exemption.
+- Removed the web transport override from the Runtime update flow (gateway
+  head discovery, `/ipfs/<cid>` fetches, the gateway release-manifest path and
+  the third-party IPFS host list) and the installer's CID-gateway bootstrap
+  (`ipfs_fetch`, `ELASTOS_IPFS_GATEWAYS`) with its docs and fixture transport.
+  Dead installer values (`PUBLISHER_HASH`, `LAST_SUCCESS_GATEWAY`) are gone.
 
 ## [0.8.0-alpha.15]
 

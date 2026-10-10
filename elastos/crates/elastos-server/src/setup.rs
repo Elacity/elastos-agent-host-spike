@@ -2761,7 +2761,7 @@ async fn fetch_pinned_model_catalog(
     trust: &ModelCatalogConfig,
     fetch: &crate::update::FetchFn,
 ) -> anyhow::Result<Vec<u8>> {
-    let bytes = fetch(trust.head_cid.clone(), Vec::new())
+    let bytes = fetch(trust.head_cid.clone())
         .await
         .map_err(|error| error.context(MODEL_CATALOG_UNAVAILABLE))?;
     verify_pinned_model_catalog(trust, &bytes)?;
@@ -3566,7 +3566,7 @@ pub(crate) async fn stage_update_support(
                 format!("release-path:{path}")
             };
             owner.progress("downloading", &crate::update::download_message(asset.size))?;
-            let bytes = fetch(key, Vec::new()).await?;
+            let bytes = fetch(key).await?;
             owner.progress(
                 "verifying",
                 "Verifying the update. Home restarts when the update is ready.",
@@ -3662,7 +3662,7 @@ pub(crate) async fn stage_update_support(
             "downloading",
             &crate::update::download_message(Some(entry.size)),
         )?;
-        let bytes = fetch(entry.cid.clone(), Vec::new()).await?;
+        let bytes = fetch(entry.cid.clone()).await?;
         owner.progress(
             "verifying",
             "Verifying the update. Home restarts when the update is ready.",
@@ -7506,7 +7506,7 @@ pub(crate) mod tests {
                 "release-path:kubo.tar.gz".to_string()
             };
             let components = serde_json::to_vec(&components).unwrap();
-            let fetch: crate::update::FetchFn = Box::new(move |key, _| {
+            let fetch: crate::update::FetchFn = Box::new(move |key| {
                 let bytes = if key == expected_key {
                     bytes.clone()
                 } else {

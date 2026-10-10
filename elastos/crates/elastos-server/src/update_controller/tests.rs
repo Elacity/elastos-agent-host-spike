@@ -3079,7 +3079,7 @@ async fn real_controller_restart_failure(failure: &str) {
         (raw_cid(&candidate_components), candidate_components),
         (raw_cid(b"new support"), b"new support".to_vec()),
     ]);
-    let fetch: crate::update::FetchFn = Box::new(move |cid, _| {
+    let fetch: crate::update::FetchFn = Box::new(move |cid| {
         let bytes = items
             .get(&cid)
             .unwrap_or_else(|| panic!("unexpected fetch: {cid}"))
@@ -3633,7 +3633,7 @@ async fn staged_support_skips_linux_only_home_component_on_darwin() {
         }}
     }))
     .unwrap();
-    let fetch: crate::update::FetchFn = Box::new(|_, _| panic!("unavailable support fetched"));
+    let fetch: crate::update::FetchFn = Box::new(|_| panic!("unavailable support fetched"));
     let (_, paths) = crate::setup::stage_update_support(
         &fixture.data,
         &fs::read(fixture.data.join("components.json")).unwrap(),
@@ -3681,7 +3681,7 @@ async fn staged_support_replaces_a_component_left_by_an_interrupted_undo() {
         }}}
     }))
     .unwrap();
-    let fetch: crate::update::FetchFn = Box::new(move |key, _| {
+    let fetch: crate::update::FetchFn = Box::new(move |key| {
         assert_eq!(key, cid);
         Box::pin(async move { Ok(signed.to_vec()) })
     });
@@ -3751,7 +3751,7 @@ async fn system_update_and_undo_repair_the_installed_release_before_admission() 
         }
         let served = (catalogue_cid.clone(), catalogue.clone());
         let offline = case == "catalogue offline";
-        let fetch: crate::update::FetchFn = Box::new(move |cid, _| {
+        let fetch: crate::update::FetchFn = Box::new(move |cid| {
             let bytes = if offline {
                 Err(anyhow::Error::from(crate::update::UpdateSourceUnavailable))
             } else {
@@ -4084,7 +4084,7 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
             (app_cid.clone(), app),
             (catalogue_cid.clone(), catalogue.1.clone()),
         ]);
-        let fetch: crate::update::FetchFn = Box::new(move |cid, _| {
+        let fetch: crate::update::FetchFn = Box::new(move |cid| {
             if [
                 "missing checksum",
                 "development strategy",

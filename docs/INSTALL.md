@@ -137,27 +137,6 @@ setup-only model downloads remain operator provisioning details. They must not
 be projected as remotely installable Home catalog items. See
 [Content capsule distribution](CONTENT_CAPSULE_DISTRIBUTION.md).
 
-## Manual bootstrap
-
-Use an explicit gateway only when the publisher URL is unavailable or when
-testing release infrastructure:
-
-```bash
-EXPLICIT_GATEWAY=https://publisher.example.com
-
-# Use the installer's published trust anchors.
-curl -fsSL "${EXPLICIT_GATEWAY}/ipfs/INSTALLER_CID/install.sh" | bash
-
-# Or supply the trust anchors explicitly.
-curl -fsSL "${EXPLICIT_GATEWAY}/ipfs/INSTALLER_CID/install.sh" | bash \
-  -s -- --head-cid HEAD_CID --maintainer-did MAINTAINER_DID
-
-```
-
-Replace the uppercase placeholders with the publisher's values. Use one gateway
-and explicit trust anchors. Do not fall back to unrelated transports or
-gateways.
-
 ## Jetson
 
 The installer detects Linux `aarch64`:
@@ -220,8 +199,8 @@ elastos update --check
 elastos update
 ```
 
-`elastos upgrade` does the same as `elastos update`. HTTP is used only when you
-pass `--gateway` or `--no-p2p`, and by the first download in `install.sh`.
+`elastos upgrade` does the same as `elastos update`. Only the first download in
+`install.sh` uses the web; updates come over Carrier.
 
 Runtime keeps the verified signed pair in `installation/release-head.json`
 and `installation/release.json` within its data directory. Publisher owns its
@@ -298,14 +277,13 @@ unavailable.
 Free disk space before updating. An interrupted update or uncertain controller
 ownership keeps its recovery step.
 
-These overrides are for operators:
+This override is for operators:
 
 ```bash
 elastos update --head-cid CID
-elastos update --no-p2p --gateway GATEWAY_URL
 ```
 
-Replace `CID` and `GATEWAY_URL` with the source values.
+Replace `CID` with the source value.
 
 ## Compare and change the release signer
 
