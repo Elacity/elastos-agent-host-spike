@@ -55,8 +55,8 @@ jobs:
           set -euo pipefail
           [[ "$GITHUB_REPOSITORY" == Elacity/elastos-runtime ]] \
             || { echo 'The canonical builder repository is required' >&2; exit 1; }
-          [[ "$GITHUB_REF" == refs/heads/develop || "$GITHUB_REF" == refs/heads/main ]] \
-            || { echo 'A canonical builder ref is required' >&2; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/develop ]] \
+            || { echo 'The develop builder ref is required' >&2; exit 1; }
           version='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo 'source_commit must be a full SHA' >&2; exit 1; }
           [[ "$INSTALL_VERSION" =~ $version && "$UPDATE_VERSION" =~ $version && "$INSTALL_VERSION" != "$UPDATE_VERSION" ]] \
@@ -230,8 +230,7 @@ jobs:
           echo "cache-key=develop-llama-arm64-${recipe_hash}" >> "$GITHUB_OUTPUT"
       - name: restore pinned ARM64 engine
         id: engine-cache
-        # Caches belong to the workflow ref. A main dispatch can miss the
-        # develop cache and take the same verified cold build below.
+        # A miss takes the same verified cold build below.
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ runner.temp }}/llama-arm64-bundle

@@ -30,6 +30,7 @@ DID = S.public_did(PUBLIC)
 COMMIT, TREE, MAIN, SCRIPTS, TAG = (digit * 40 for digit in "abcde")
 DEVELOP = "1" * 40
 WORKFLOW, WORKFLOW_TREE = "9" * 40, "8" * 40
+DEVELOP_TREE, WORKFLOW_BLOB = "f" * 40, "7" * 40
 
 
 class FakeBackend:
@@ -69,8 +70,9 @@ class SignerTests(unittest.TestCase):
         self.binary = f"#!/bin/sh\ncat /custodian/unopened-signing.pem > {self.marker}\n".encode()
         (self.root / "elastos-x86_64-linux").write_bytes(self.binary)
         (self.root / "elastos-x86_64-linux").chmod(0o755)
-        self.components = S.json_bytes({"schema": "elastos.components/v1", "external": {}})
-        (self.root / "components-x86_64-linux.json").write_bytes(self.components)
+        self.source_components = S.json_bytes({"external": {"localhost-provider": {}}, "profiles": {}})
+        self.source_components_oid = hashlib.sha1(b"blob " + str(len(self.source_components)).encode() + b"\0" + self.source_components).hexdigest()
+        self.platform_components, self.unattested = {}, set()
         self.template = ("#!/bin/sh\n" + "\n".join(f'{name}="__{name}__"' for name in sorted(S.STAMPS | {"HEAD_CID"})) + f"\ncat /custodian/unopened-signing.pem > {self.marker}\n").encode()
         self.blob_oid = hashlib.sha1(b"blob " + str(len(self.template)).encode() + b"\0" + self.template).hexdigest()
         node = "4" * 64
@@ -81,12 +83,11 @@ class SignerTests(unittest.TestCase):
         def record(data):
             return {"sha256": S.sha256(data), "size": len(data), "cid": S.raw_cid(data)}
         self.manifest = {"source": {"commit": COMMIT, "tree": TREE}, "version": "1.2.3", "channel": "stable",
-                         "files": {"elastos-x86_64-linux": record(self.binary), "components-x86_64-linux.json": record(self.components)},
+                         "files": {"elastos-x86_64-linux": record(self.binary)},
                          "installer": {"blob_oid": self.blob_oid, "stamps": self.stamps},
                          "release": {"schema": "elastos.release/v1", "source": {"commit": COMMIT, "tree": TREE},
                                      "version": "1.2.3", "channel": "stable", "released_at": 1, "prev_release_cid": None,
-                                     "platforms": {"x86_64-linux": {"binary": {k: record(self.binary)[k] for k in ("cid", "sha256")},
-                                                                    "components": {k: record(self.components)[k] for k in ("cid", "sha256")}}},
+                                     "platforms": {"x86_64-linux": {"binary": {k: record(self.binary)[k] for k in ("cid", "sha256")}}},
                                      "installer_sha256": S.sha256(rendered)},
                          "head": {"updated_at": 2, "prev_head_cid": None}}
         self.policy = {"repository": S.REPOSITORY, "tag": "v1.2.3", "tag_oid": COMMIT, "commit": COMMIT,
@@ -114,13 +115,20 @@ class SignerTests(unittest.TestCase):
             f"{prefix}/git/commits/{WORKFLOW}": {"sha": WORKFLOW, "tree": {"sha": WORKFLOW_TREE}},
             f"{prefix}/actions/runs/123": self.package_run,
             f"{prefix}/git/ref/heads/main": {"ref": "refs/heads/main", "object": {"type": "commit", "sha": MAIN}},
-            f"{prefix}/git/commits/{MAIN}": {"sha": MAIN, "tree": {"sha": "f" * 40}},
+            f"{prefix}/git/commits/{MAIN}": {"sha": MAIN, "tree": {"sha": DEVELOP_TREE}},
+            f"{prefix}/git/ref/heads/develop": {"ref": "refs/heads/develop", "object": {"type": "commit", "sha": DEVELOP}},
+            f"{prefix}/git/commits/{DEVELOP}": {"sha": DEVELOP, "tree": {"sha": DEVELOP_TREE}},
             f"{prefix}/compare/{COMMIT}...{MAIN}?per_page=1": {"status": "ahead", "behind_by": 0, "ahead_by": 1,
                 "base_commit": {"sha": COMMIT}, "merge_base_commit": {"sha": COMMIT}},
-            f"{prefix}/git/trees/{TREE}": {"sha": TREE, "truncated": False, "tree": [{"path": "scripts", "type": "tree", "mode": "040000", "sha": SCRIPTS}]},
+            f"{prefix}/git/trees/{TREE}": {"sha": TREE, "truncated": False, "tree": [{"path": "scripts", "type": "tree", "mode": "040000", "sha": SCRIPTS},
+                {"path": "components.json", "type": "blob", "mode": "100644", "sha": self.source_components_oid}]},
             f"{prefix}/git/trees/{SCRIPTS}": {"sha": SCRIPTS, "truncated": False, "tree": [{"path": "install.sh", "type": "blob", "mode": "100755", "sha": self.blob_oid}]},
             f"{prefix}/git/blobs/{self.blob_oid}": {"sha": self.blob_oid, "encoding": "base64", "size": len(self.template), "content": base64.b64encode(self.template).decode()},
+            f"{prefix}/git/blobs/{self.source_components_oid}": {"sha": self.source_components_oid, "encoding": "base64",
+                "size": len(self.source_components), "content": base64.b64encode(self.source_components).decode()},
         }
+        for tree in (TREE, WORKFLOW_TREE, DEVELOP_TREE):
+            self.workflow_blob(tree, WORKFLOW_BLOB)
         self.requests = []
         self.no_process = mock.patch.object(S.subprocess, "run", side_effect=AssertionError("real subprocess refused in tests"))
         self.no_process.start()
@@ -135,19 +143,46 @@ class SignerTests(unittest.TestCase):
         disk.start()
         self.addCleanup(disk.stop)
 
+    def workflow_blob(self, tree, blob):
+        prefix = f"/repos/{S.REPOSITORY}/git/trees/"
+        github, workflows = (hashlib.sha1((tree + part).encode()).hexdigest() for part in (".github", "workflows"))
+        listing = self.api.setdefault(prefix + tree, {"sha": tree, "truncated": False, "tree": []})["tree"]
+        listing[:] = [entry for entry in listing if entry["path"] != ".github"]
+        listing.append({"path": ".github", "type": "tree", "mode": "040000", "sha": github})
+        self.api[prefix + github] = {"sha": github, "truncated": False,
+                                     "tree": [{"path": "workflows", "type": "tree", "mode": "040000", "sha": workflows}]}
+        self.api[prefix + workflows] = {"sha": workflows, "truncated": False,
+                                        "tree": [{"path": "release-package.yml", "type": "blob", "mode": "100644", "sha": blob}]}
+
     def approve_manifest(self):
         directory = self.root / "provenance"
         directory.mkdir(exist_ok=True)
+        platforms = list(self.manifest["release"]["platforms"])
+        attested = {platform: S.json_bytes(self.platform_components.get(platform, {"schema": "elastos.components/v1", "external": {}}))
+                    for platform in platforms}
+        cids = {name: record["cid"] for name, record in self.manifest["files"].items()}
+        generated = S.json_bytes(S.bind_component_cids(S.merge_components(
+            S.parse_json(self.source_components), {p: S.parse_json(data) for p, data in attested.items()}), cids))
+        for platform in platforms:
+            name = f"components-{platform}.json"
+            (self.root / name).write_bytes(generated)
+            self.manifest["files"][name] = {"sha256": S.sha256(generated), "size": len(generated), "cid": S.raw_cid(generated)}
+            self.manifest["release"]["platforms"][platform]["components"] = {
+                key: self.manifest["files"][name][key] for key in ("cid", "sha256", "size")}
         entries = []
-        for index, platform in enumerate(self.manifest["release"]["platforms"]):
+        for index, platform in enumerate(platforms):
             receipt = {"schema": "elastos.release-platform-input/v1", "platform": platform, "version": self.manifest["version"],
                        "source": {**self.manifest["source"], "clean": True},
                        "files": {"artifacts/" + name: {"sha256": record["sha256"], "size": record["size"], "executable": True}
-                                 for name, record in self.manifest["files"].items()}}
+                                 for name, record in self.manifest["files"].items()
+                                 if not name.startswith("components-") and name not in self.unattested}}
             native = self.manifest["files"].get("elastos-" + platform, self.manifest["files"]["elastos-x86_64-linux"])
             receipt["files"]["artifacts/elastos-" + platform] = {"sha256": native["sha256"], "size": native["size"], "executable": True}
+            for name, data in (("components.json", attested[platform]), ("components-template.json", self.source_components)):
+                receipt["files"][name] = {"sha256": S.sha256(data), "size": len(data), "executable": False}
             receipt_name = f"provenance/{platform}.receipt.json"
             bundle_name = f"provenance/{platform}.bundle.jsonl"
+            components_name = f"provenance/{platform}.components.json"
             prefix = "release-mac" if platform == "aarch64-darwin" else "release-" + platform
             artifact = {"id": index + 1, "digest": "sha256:" + "6" * 64, "name": f"{prefix}-{COMMIT}-2", "attempt": 2}
             proof_artifact = {"id": index + 101, "digest": "sha256:" + "7" * 64,
@@ -155,7 +190,8 @@ class SignerTests(unittest.TestCase):
             receipt["producer"] = {"artifact": artifact, "run_id": 123, "workflow_commit": WORKFLOW, "attestation_attempt": 2}
             (self.root / receipt_name).write_bytes(S.json_bytes(receipt))
             (self.root / bundle_name).write_bytes(b"{}")
-            entries.append({"platform": platform, "receipt": receipt_name, "bundle": bundle_name,
+            (self.root / components_name).write_bytes(attested[platform])
+            entries.append({"platform": platform, "receipt": receipt_name, "bundle": bundle_name, "components": components_name,
                             "artifact": artifact, "proof_artifact": proof_artifact})
         self.manifest["provenance"] = {"schema": S.PROVENANCE_SCHEMA, "run_id": 123, "run_attempt": 2,
                                        "approval_sha256": self.policy["approval"]["sha256"], "receipts": entries}
@@ -257,6 +293,24 @@ class SignerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "producer/source tree"):
             self.prepare()
 
+    def test_package_workflow_must_match_develop(self):
+        self.workflow_blob(WORKFLOW_TREE, "6" * 40)
+        with self.assertRaisesRegex(ValueError, "package workflow differs from develop"):
+            self.prepare()
+        self.workflow_blob(WORKFLOW_TREE, WORKFLOW_BLOB)
+        self.workflow_blob(DEVELOP_TREE, "6" * 40)
+        with self.assertRaisesRegex(ValueError, "package workflow differs from develop"):
+            S.checked_package_run(self.approval, 123, self.fetch)
+
+    def test_only_develop_producers_are_approved(self):
+        self.approval["workflow"]["ref"] = "refs/heads/main"
+        self.package_run["head_branch"] = "main"
+        self.approval_path.write_bytes(S.json_bytes(self.approval))
+        with self.assertRaisesRegex(ValueError, "approved develop producer ref required"):
+            S.approved_release(self.approval_path)
+        with self.assertRaisesRegex(ValueError, "package run differs"):
+            S.checked_package_run({**self.approval, "workflow": {**self.approval["workflow"], "ref": "refs/heads/develop"}}, 123, self.fetch)
+
     def test_independent_approval_and_tool_pins_are_required(self):
         pin = self.policy.pop("approval")
         with self.assertRaisesRegex(ValueError, "approval pin"):
@@ -351,6 +405,40 @@ class SignerTests(unittest.TestCase):
                                ("--cert-identity", f"https://github.com/{S.REPOSITORY}/{S.PACKAGE_WORKFLOW}@refs/heads/develop")):
             self.assertEqual(command[command.index(flag) + 1], expected)
         self.assertEqual(set(process.call_args.kwargs["env"]), {"PATH", "HOME", "GH_CONFIG_DIR", "GH_HOST", "GH_PROMPT_DISABLED", "GH_NO_UPDATE_NOTIFIER"})
+
+    def test_availability_failures_ask_for_retry_and_differ_from_provenance_refusals(self):
+        path = f"/repos/{S.REPOSITORY}/git/commits/{COMMIT}"
+        def response(status, **headers):
+            reply = mock.Mock(status=status)
+            reply.getheader.side_effect = lambda name, default=None: headers.get(name.replace("-", "_"), default)
+            return reply
+        for outcome, retry in ((OSError("Network is unreachable"), True), (response(429), True), (response(503), True),
+                               (response(403, X_RateLimit_Remaining="0"), True), (response(404), False), (response(403), False)):
+            connection = mock.Mock()
+            if isinstance(outcome, Exception):
+                connection.request.side_effect = outcome
+            else:
+                connection.getresponse.return_value = outcome
+            with self.subTest(outcome=outcome), mock.patch.object(S.http.client, "HTTPSConnection", return_value=connection), \
+                    mock.patch.dict(S.os.environ, {"GH_TOKEN": "operator-token"}):
+                with self.assertRaisesRegex(ValueError, "retry later. This is not a provenance refusal" if retry
+                                            else "GitHub source verification failed"):
+                    S.github_json(path)
+                self.assertEqual(connection.request.call_args.kwargs["headers"]["Authorization"], "Bearer operator-token")
+        receipt = self.root / "provenance/x86_64-linux.receipt.json"
+        bundle = self.root / "provenance/x86_64-linux.bundle.jsonl"
+        for outcome, expected in ((subprocess.TimeoutExpired("gh", 120), S.UNAVAILABLE),
+                                  (SimpleNamespace(returncode=1, stdout=b"", stderr=b"dial tcp: lookup tuf-repo-cdn.sigstore.dev: no such host"),
+                                   S.UNAVAILABLE),
+                                  (SimpleNamespace(returncode=1, stdout=b"", stderr=b"unsupported media type"),
+                                   "approved build attestation verification failed")):
+            self.proof.stop()
+            with self.subTest(outcome=outcome), mock.patch.object(S.subprocess, "run", side_effect=[outcome] if isinstance(outcome, Exception) else None,
+                                                                  return_value=outcome):
+                with self.assertRaises(ValueError) as caught:
+                    S.attestation_result(self.approval, self.package_run, receipt, bundle, self.snapshot)
+                self.assertIn(expected, str(caught.exception))
+            self.proof.start()
 
     def test_installed_gh_accepts_production_flags_and_refuses_the_inert_bundle(self):
         # Exercise the real CLI parser with an empty test-only trust-root set.
@@ -920,12 +1008,7 @@ class SignerTests(unittest.TestCase):
             "platforms": {"linux-amd64": external_ref(provider_record, "localhost-provider-linux-amd64")},
             "capsule_metadata": {"platforms": {"*": external_ref(metadata_record, "localhost-provider-capsule-metadata.tar.gz")}}}},
             "model_catalog": {"head_cid": catalog_record["cid"]}}
-        data = S.json_bytes(components)
-        components_record = add("components-x86_64-linux.json", data)
-        platform = self.manifest["release"]["platforms"]["x86_64-linux"]
-        platform["components"] = copy.deepcopy(components_record)
-        platform["binary"] = copy.deepcopy(self.manifest["files"]["elastos-x86_64-linux"])
-        self.approve_manifest()
+        self.reapprove_components(components)
         return components
 
     def test_current_release_sizes_external_checksum_paths_and_catalog_are_bound(self):
@@ -960,12 +1043,46 @@ class SignerTests(unittest.TestCase):
             self.prepare()
 
     def reapprove_components(self, components):
-        data = S.json_bytes(components)
-        (self.root / "components-x86_64-linux.json").write_bytes(data)
-        record = {"cid": S.raw_cid(data), "sha256": S.sha256(data), "size": len(data)}
-        self.manifest["files"]["components-x86_64-linux.json"] = record
-        self.manifest["release"]["platforms"]["x86_64-linux"]["components"] = copy.deepcopy(record)
+        self.platform_components["x86_64-linux"] = components
+        self.manifest["release"]["platforms"]["x86_64-linux"]["binary"] = copy.deepcopy(self.manifest["files"]["elastos-x86_64-linux"])
         self.approve_manifest()
+
+    def rewrite_signing_input(self):
+        data = S.json_bytes(self.manifest)
+        (self.root / "signing-input.json").write_bytes(data)
+        self.policy["manifest_sha256"] = S.sha256(data)
+
+    def test_generated_components_must_be_derived_from_attested_inputs(self):
+        self.current_shape()
+        name = "components-x86_64-linux.json"
+        derived = S.parse_json((self.root / name).read_bytes())
+        for change in ({"schema": "invalid-component-schema"}, {"profiles": {"extra": {}}},
+                       {"external": {**derived["external"], "unlisted": {"platforms": {}}}}):
+            data = S.json_bytes({**derived, **change})
+            (self.root / name).write_bytes(data)
+            record = {"sha256": S.sha256(data), "size": len(data), "cid": S.raw_cid(data)}
+            self.manifest["files"][name] = record
+            self.manifest["release"]["platforms"]["x86_64-linux"]["components"] = copy.deepcopy(record)
+            self.rewrite_signing_input()
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "release components differ from attested inputs"):
+                self.prepare()
+
+    def test_platform_components_and_template_must_match_attested_receipt(self):
+        (self.root / "provenance/x86_64-linux.components.json").write_bytes(
+            S.json_bytes({"schema": "elastos.components/v1", "external": {"localhost-provider": {"platforms": {"*": {"url": "x"}}}}}))
+        with self.assertRaisesRegex(ValueError, "platform components differ from attested receipt"):
+            self.prepare()
+        self.source_components = S.json_bytes({"external": {"localhost-provider": {}}, "profiles": {"other": {}}})
+        self.approve_manifest()
+        with self.assertRaisesRegex(ValueError, "attested components template differs from approved source"):
+            self.prepare()
+
+    def test_model_catalog_needs_attested_bytes(self):
+        self.current_shape()
+        self.unattested.add("model-catalog.json")
+        self.approve_manifest()
+        with self.assertRaisesRegex(ValueError, "lack approved producer proof: model-catalog.json"):
+            self.prepare()
 
     def test_single_chunk_unixfs_metadata_matches_existing_public_runtime_vector(self):
         data = b'{"payload":{"version":"0.7.1-rc.2"}}\n'

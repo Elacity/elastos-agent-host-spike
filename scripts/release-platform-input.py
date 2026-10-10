@@ -34,6 +34,10 @@ spec = importlib.util.spec_from_file_location(
     "component_integrity", SCRIPT_ROOT / "components-release-integrity-check.py")
 integrity = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(integrity)
+spec = importlib.util.spec_from_file_location("release_signer", SCRIPT_ROOT / "release-signer.py")
+signer = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = signer
+spec.loader.exec_module(signer)
 
 
 def run(*args):
@@ -895,10 +899,7 @@ def validate_inputs(values, version=None, preview_platform=None):
 
 
 def merged_input_components(values, receipts):
-    merged = json.loads((SOURCE_ROOT / "components.json").read_text())
-    merged["schema"], merged["capsules"] = "elastos.components/v1", {}
-    selected = {}
-    model_contract = None
+    manifests = {}
     for value in values:
         platform, _, path = value.partition("=")
         manifest_path = regular_file(Path(path), "components.json")
@@ -908,45 +909,9 @@ def merged_input_components(values, receipts):
                   "executable": bool(manifest_path.stat().st_mode & 0o111)}
         if actual != expected:
             raise ValueError(f"input manifest changed after admission: {platform}")
-        manifest = json.loads(manifest_bytes)
-        contract = {"model_catalog": manifest.get("model_catalog")}
-        if model_contract is not None and contract != model_contract:
-            raise ValueError("platform model catalogue pins differ")
-        model_contract = contract
-        for name, value in contract.items():
-            if value is None:
-                merged.pop(name, None)
-            else:
-                merged[name] = copy.deepcopy(value)
-        for name, component in manifest["external"].items():
-            for metadata in (False, True):
-                entry = component.get("capsule_metadata") if metadata else component
-                if entry is None:
-                    continue
-                key, info = integrity.resolve_platform_info(entry, PLATFORMS[platform][0])
-                if info is None:
-                    continue
-                identity = (name, metadata, key)
-                if identity in selected and selected[identity] != info:
-                    raise ValueError(f"conflicting universal descriptor: {name} ({key})")
-                selected[identity] = info
-                target = merged["external"][name]
-                if metadata:
-                    contract = {k: v for k, v in entry.items() if k != "platforms"}
-                    target = target.setdefault("capsule_metadata", {**contract, "platforms": {}})
-                    if {k: v for k, v in target.items() if k != "platforms"} != contract:
-                        raise ValueError(f"conflicting provider metadata contract: {name}")
-                target.setdefault("platforms", {})[key] = copy.deepcopy(info)
-    # A publication advertises only the platforms it admitted. Template
-    # descriptors for the other release platforms would name artifacts this
-    # publication never stages, so they leave the merged manifest here.
-    unselected = {PLATFORMS[platform][0] for platform in PLATFORMS if platform not in receipts}
-    for component in merged["external"].values():
-        for entry in (component, component.get("capsule_metadata")):
-            if isinstance(entry, dict):
-                for setup in unselected:
-                    entry.get("platforms", {}).pop(setup, None)
-    return merged
+        manifests[platform] = json.loads(manifest_bytes)
+    # The signer re-derives the same manifest from the attested inputs.
+    return signer.merge_components(json.loads((SOURCE_ROOT / "components.json").read_text()), manifests)
 
 
 def stage_inputs(values, version, output, preview_platform=None):
@@ -1040,12 +1005,7 @@ def prepared_components_bytes(stage, record, cids):
     if set(cids) != set(record["files"]) or any(
             not isinstance(cid, str) or not re.fullmatch(r"[A-Za-z0-9]+", cid) for cid in cids.values()):
         raise ValueError("upload results must bind every admitted artifact to a nonempty CID")
-    manifest = json.loads((stage / "components.json").read_text())
-    for component in manifest["external"].values():
-        for entry in (component, component.get("capsule_metadata", {})):
-            for info in entry.get("platforms", {}).values():
-                if info.get("release_path"):
-                    info["cid"] = cids[info["release_path"]]
+    manifest = signer.bind_component_cids(json.loads((stage / "components.json").read_text()), cids)
     # Each selected platform gets the same complete manifest. Descriptors were
     # replaced as units during staging; each release descriptor names admitted bytes.
     output_bytes = (json.dumps(manifest, indent=2) + "\n").encode()
@@ -1134,10 +1094,6 @@ def changelog_changes(version):
 def signing_input(stage, cids_path, stamps_path, channel, output,
                   preview_platform=None, prev_release_cid=None, prev_head_cid=None):
     """Prepare data for the separately installed custodian signer; no key input."""
-    spec = importlib.util.spec_from_file_location("release_signer", SCRIPT_ROOT / "release-signer.py")
-    signer = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = signer
-    spec.loader.exec_module(signer)
     record = verify_staged_inputs(stage, allow_generated=True, preview_platform=preview_platform)
     signer.require(channel in signer.CHANNELS, "release channel refused")
     signer.require(preview_platform is None or channel == "canary", "preview requires canary")

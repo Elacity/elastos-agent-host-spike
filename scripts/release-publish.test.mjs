@@ -50,7 +50,14 @@ function fixture(t, changes = {}) {
   cpSync(join(source, 'release-provenance-seal.py'), join(repo, 'scripts/release-provenance-seal.py'));
   const config = { root, repo, commit, tree, artifacts: {}, ciRuns: [ciRun], requiredJobs,
     ciJobs: requiredJobs.map(name => ({ name, status: 'completed', conclusion: 'success' })),
-    packageRun, workflowCommit, workflowTree, delivery, ...changes };
+    packageRun, workflowCommit, workflowTree, delivery, trees: {}, ...changes };
+  for (const [root, blob] of [[tree, '7'.repeat(40)], [config.workflowTree, changes.workflowBlob || '7'.repeat(40)]]) {
+    const github = sha(root + '.github').slice(0, 40), workflows = sha(root + 'workflows').slice(0, 40);
+    const entry = (path, type, sha) => ({ path, type, mode: type === 'tree' ? '040000' : '100644', sha });
+    config.trees[root] = { sha: root, truncated: false, tree: [entry('.github', 'tree', github)] };
+    config.trees[github] = { sha: github, truncated: false, tree: [entry('workflows', 'tree', workflows)] };
+    config.trees[workflows] = { sha: workflows, truncated: false, tree: [entry('release-package.yml', 'blob', blob)] };
+  }
   for (const [index, platform] of (changes.ciOnly ? [] : platforms.entries())) {
     const input = join(root, platform, 'inputs');
     mkdirSync(input, { recursive: true });
@@ -60,6 +67,7 @@ function fixture(t, changes = {}) {
       const receipt = { schema: 'elastos.release-platform-input/v1', platform, version, source: { commit, tree, clean: true }, ...changes[platform] };
       writeFileSync(join(dir, 'platform-input.json'), JSON.stringify(receipt));
       writeFileSync(join(dir, 'artifacts', `elastos-${platform}`), `${platform}-${version}`);
+      writeFileSync(join(dir, 'components.json'), JSON.stringify({ schema: 'elastos.components/v1', external: {} }));
       writeFileSync(join(dir, 'artifacts', 'shared.tar.gz'), 'shared bytes');
       if (platform === 'aarch64-darwin') {
         const kubo = join(root, 'kubo');
@@ -151,6 +159,8 @@ if (command === 'gh') {
   } else if (endpoint.endsWith('/branches/develop/protection')) payload = { required_status_checks: { contexts: c.requiredJobs } };
   else if (endpoint.includes('/runs/456/jobs?')) payload = { jobs: c.ciJobs };
   else if (endpoint.endsWith('/actions/runs/123')) payload = c.packageRun;
+  else if (endpoint.endsWith('/git/ref/heads/develop')) payload = { ref: 'refs/heads/develop', object: { type: 'commit', sha: c.commit } };
+  else if (endpoint.includes('/git/trees/')) payload = c.trees[endpoint.split('/').at(-1)];
   else if (endpoint.includes('/git/commits/')) {
     const oid = endpoint.split('/').at(-1);
     payload = { sha: oid, tree: { sha: oid === c.workflowCommit ? c.workflowTree : c.tree } };
@@ -170,7 +180,6 @@ if (command === 'gh') {
     const a = c.artifacts[prefix];
     console.log(a.id + ' ' + a.digest + ' ' + prefix + '-' + c.commit + '-1');
   } else if (endpoint.includes('/compare/')) console.log(c.compareStatus || 'ahead');
-  else if (endpoint.endsWith('/git/ref/heads/develop')) console.log(c.commit);
   else console.log('.github/workflows/release-package.yml success');
 } else if (command === 'git') {
   if (args.includes('add')) fs.cpSync(c.repo, args[args.indexOf('add') + 3], { recursive: true });
@@ -299,6 +308,10 @@ for (const [label, changes, error] of [
   ['unapproved workflow commit', { packageRun: { ...packageRun, head_sha: 'd'.repeat(40) } }, /approved producer/],
   ['fork producer', { packageRun: { ...packageRun, head_repository: { id: 999, full_name: 'attacker/fork' } } }, /approved producer/],
   ['pull request target event', { packageRun: { ...packageRun, event: 'pull_request_target' } }, /approved producer/],
+  ['main dispatch', { packageRun: { ...packageRun, head_branch: 'main' } }, /approved producer/],
+  ['main producer approval', { approval: { workflow: { commit: workflowCommit, tree: workflowTree, ref: 'refs/heads/main' } } },
+    /approved develop producer ref required/],
+  ['workflow differs from develop', { workflowBlob: '6'.repeat(40) }, /package workflow differs from develop/],
   ['wrong workflow tree', { workflowTree: 'd'.repeat(40) }, /producer\/source tree/],
   ['missing attestation', { failAttestation: true }, /attestation verification failed/],
   ['self-hosted attestation', { certificate: { runnerEnvironment: 'self-hosted' } }, /certificate/],

@@ -26,10 +26,15 @@ spec.loader.exec_module(S)
 
 def cli_fetch(approval, path):
     S.require(path.startswith(f"/repos/{S.REPOSITORY}/"), "GitHub repository refused")
-    result = subprocess.run([approval["gh"]["path"], "api", "--hostname", "github.com", path],
-                            capture_output=True, timeout=30,
-                            env={**os.environ, "GH_HOST": "github.com", "GH_PROMPT_DISABLED": "1"})
-    S.require(result.returncode == 0 and len(result.stdout) <= 8 * S.MAX_JSON, "GitHub package authority unavailable")
+    try:
+        result = subprocess.run([approval["gh"]["path"], "api", "--hostname", "github.com", path],
+                                capture_output=True, timeout=30,
+                                env={**os.environ, "GH_HOST": "github.com", "GH_PROMPT_DISABLED": "1"})
+    except subprocess.TimeoutExpired as error:
+        raise S.unavailable("GitHub API timed out") from error
+    if result.returncode != 0 and S.UNAVAILABLE_OUTPUT.search(result.stderr):
+        raise S.unavailable(result.stderr.decode(errors="replace").strip()[:200])
+    S.require(result.returncode == 0 and len(result.stdout) <= 8 * S.MAX_JSON, "GitHub package authority refused " + path)
     return S.parse_json(result.stdout)
 
 
@@ -102,9 +107,13 @@ def main():
             S.require(platform in record["platforms"], "prepared platform refused")
             receipt = f"provenance/{platform}.receipt.json"
             bundle = f"provenance/{platform}.bundle.jsonl"
-            shutil.copyfile(args.work / "inputs" / platform / record["input"] / "platform-input.json", unsigned / receipt)
+            components = f"provenance/{platform}.components.json"
+            platform_input = args.work / "inputs" / platform / record["input"]
+            shutil.copyfile(platform_input / "platform-input.json", unsigned / receipt)
             shutil.copyfile(args.work / "inputs" / platform / "provenance.jsonl", unsigned / bundle)
-            entries.append({"platform": platform, "receipt": receipt, "bundle": bundle, "artifact": entry["artifact"], "proof_artifact": entry["proof_artifact"]})
+            shutil.copyfile(platform_input / "components.json", unsigned / components)
+            entries.append({"platform": platform, "receipt": receipt, "bundle": bundle, "components": components,
+                            "artifact": entry["artifact"], "proof_artifact": entry["proof_artifact"]})
         manifest["provenance"] = {"schema": S.PROVENANCE_SCHEMA, "run_id": int(record["run"]), "run_attempt": record["run_attempt"],
                                   "approval_sha256": digest, "receipts": entries}
         manifest_path.write_bytes(S.json_bytes(manifest))

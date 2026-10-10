@@ -265,7 +265,7 @@ def main():
                       (args.source_commit, args.source_tree, args.workflow_commit)), 'full source/tree/workflow SHAs required')
         source = {'commit': args.source_commit, 'tree': args.source_tree}
         workflow = args.workflow_commit
-        S.require(args.workflow_ref in ('refs/heads/main', 'refs/heads/develop') and args.run > 0 and args.attempt > 0,
+        S.require(args.workflow_ref == S.PACKAGE_REF and args.run > 0 and args.attempt > 0,
                   'trusted workflow invocation required')
         run = api(f'/repos/{S.REPOSITORY}/actions/runs/{args.run}')
         S.require(run.get('id') == args.run and run.get('run_attempt') == args.attempt and run.get('head_sha') == workflow
