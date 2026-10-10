@@ -6,12 +6,20 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Removed
+
+- The sign-in screen no longer shows "Use an older security key". To replace a
+  passkey, restore your Recovery Kit and create a new one.
+
 ### Developer detail
 
 - The local pre-push gate now runs the CI behaviour suite before Cargo work.
   CI, `just test-behaviour` and the gate share `scripts/test-behaviour.sh`,
   so a failing Node test stops the push locally and names the test. Run
   `just test-behaviour-inputs` once to install the pinned Playwright inputs.
+- Removed `elastos identity passkey-hint` and the private credential-hint
+  sign-in path. Anonymous sign-in options still never list an account's
+  credentials.
 
 ## [0.8.0-alpha.14]
 
