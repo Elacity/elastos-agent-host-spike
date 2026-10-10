@@ -6,6 +6,15 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Fixed
+
+- `elastos setup` on a Home that imported media tools before 0.8.0-alpha.9
+  stopped with "supplied media tools differ from the private imported pair".
+  On an installed signed release, setup now fetches and verifies the release's
+  media tools again and replaces the private copy, keeping your media limits.
+  Tools that do not match the signed release, tools given with
+  `--media-tools-dir`, and tools reached through a link are still refused.
+
 ## [0.8.0-alpha.13]
 
 Test-channel release. Signed releases show these notes in System before you update.
