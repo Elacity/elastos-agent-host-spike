@@ -6,6 +6,38 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+## [0.8.0-alpha.15]
+
+Test-channel release. Signed releases show these notes in System before you update.
+
+### Fixed
+
+- Home no longer runs out of memory when it starts with Qwen2.5 1.5B on the
+  device. On an 8 GB Linux computer, Home used more than 7 GB within seconds of
+  starting, and the system stopped it.
+- On Linux, a reply right after Get no longer fails with "Not enough free
+  memory" when most of the memory in use is only cached files.
+- `elastos setup` on a Home that imported media tools before 0.8.0-alpha.9
+  stopped with "supplied media tools differ from the private imported pair".
+  On an installed signed release, setup now fetches and verifies the release's
+  media tools again and replaces the private copy, keeping your media limits.
+- While a model downloads, Marketplace and System no longer stop at "Status is
+  unavailable. Refresh to check before trying again." after one missed status
+  check. They show "Checking status…" and keep checking.
+- While a model is being set up after its download, Marketplace and System show
+  "Finishing setup…" instead of "Model service unavailable." with a Retry button.
+  If setup takes more than two minutes, Retry comes back.
+- When no model is ready yet and one is downloading, Assistant shows, for
+  example, "SmolLM2 is downloading (42%)" instead of "No model".
+- System > Shell and Marketplace > Home views no longer offer Terminal unless
+  developer mode is on. If Terminal was chosen and can no longer start, Home
+  opens the Desktop instead of showing an error after every reload.
+- A new Home no longer asks in Inbox for market-price access before you open
+  Wallet.
+- Assistant no longer shows a microphone button that cannot work inside Home.
+- The welcome sheet no longer talks about an "updated" Recovery Kit on a new
+  Home, and the lock screen shows the first letter of your name.
+
 ### Changed
 
 - Setup installs one Home; it no longer prints options for other setups.
@@ -99,6 +131,25 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   refused; the copy is capped at 256 files and 16 MiB. The Documents
   publish test installs the real `capsules/documents` layout and checks the
   published file list.
+- Startup restore and repair of complete local Content objects skip
+  Runtime-private `model-preparation`. Admitted models are verified at
+  admission, and this Home's Kubo does not hold them in 0.8.0; serving them to
+  peers is the holder role (#324). Before this, restore read each admitted
+  model file whole, then base64-encoded it and copied it through the provider
+  bridge, using about 8 times the file size.
+- Restore and repair now stream every local object from disk into Kubo,
+  unpinned, through a new Runtime-private ipfs-provider operation
+  (`runtime_add_local_object`). It uses the same parts and add options as
+  `add_directory`, so the CID matches the original import. The provider opens
+  the object below its data root and each file without following links
+  (regular files owned by this user only). Content pins only a matching CID:
+  repair pins the requested CID, and restore pins a CID with a Content receipt
+  that was not withdrawn by unpublish. Runtime hashes the files with a streamed
+  reader and sends only their paths and sizes, so memory stays the same
+  whatever the object's size.
+- model-provider's cgroup v2 memory check subtracts reclaimable file cache
+  (`active_file + inactive_file - file_dirty - file_writeback` in
+  `memory.stat`, never below zero) from `memory.current`.
 
 ## [0.8.0-alpha.14]
 
