@@ -76,9 +76,10 @@ export function syncAgentSendButton(input = composerInput()) {
   }
   const hasText = hasMeaningfulComposerContent(input);
   btn.dataset.mode = "send";
-  btn.disabled = !hasText || !selectedLiveOffer();
+  const hasModel = Boolean(selectedLiveOffer());
+  btn.disabled = !hasText || !hasModel;
   btn.setAttribute("aria-label", "Send");
-  btn.title = hasText ? "Send" : "Enter a message to send";
+  btn.title = !hasModel ? "Get a model to start" : hasText ? "Send" : "Enter a message to send";
 }
 
 export function setAgentComposerProcessing(isProcessing) {

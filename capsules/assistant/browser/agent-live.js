@@ -649,6 +649,7 @@ export async function streamChatViaContract(
       usage: null,
       latencyMs: Date.now() - startedAt,
       aborted: false,
+      stopRequested: run.cancelRequested,
       seq,
       reasoning,
       contextHash: manifest.semanticContextHash || manifest.contextHash,

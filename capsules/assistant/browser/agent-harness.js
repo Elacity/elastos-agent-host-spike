@@ -74,6 +74,7 @@ import {
   ensureJumpToLatest,
   setStreamStatus,
   openCodeArtifact,
+  refreshEmptyModelHint,
 } from "./agent-stream.js";
 import {
   getLiveInferenceState,
@@ -721,6 +722,7 @@ function closeModelMenu() {
 window.addEventListener("assistant:live-models", () => {
   if (!active) return;
   syncModelTrigger();
+  refreshEmptyModelHint();
   if (modelMenuOpen()) renderModelMenu();
 });
 

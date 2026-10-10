@@ -127,6 +127,39 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   refusal leaves auth state and the credential store unchanged. The credential
   is written just before the auth write; a crash between them leaves an orphan
   credential that a retry with the same passkey reconciles. (#88)
+- With no model yet, Assistant now says "Get a model to start. Models run on
+  this Home." and shows a Get a model button that opens Models in Apps. Send
+  says the same when you point at it.
+- Assistant's other no-model message now names the real app: Apps
+  (Marketplace) → Models.
+- Pressing Stop in Assistant now shows "Stopped." instead of "Settlement
+  unknown".
+- If there is not enough free disk space to get a model, Apps now says so and
+  how much space the model needs, instead of "Model action could not be
+  confirmed". While a model waits for space, it shows how much it needs.
+- Assistant's description in Apps now reads "Chat with an AI model that runs
+  on this Home."
+
+### Developer detail
+
+- Assistant empty state: `showEmptyState()` builds its lines with DOM nodes;
+  `paintEmptyModelHint()` shows the no-model line and a `data-agent-get-model`
+  button (`openModelsFromAgent()`, Marketplace `category: models`) only after a
+  successful offers read returned none (`endpointState: "no-model-offers"`) and
+  no model is downloading. A failed read or an unavailable chosen model beside
+  others keeps the usual hero and model menu. The harness refreshes it on
+  `assistant:live-models` via `refreshEmptyModelHint()`. `syncAgentSendButton`
+  titles a disabled Send "Get a model to start".
+- `streamChatViaContract` results carry `stopRequested`. A user Stop that the
+  engine settles as `settlement_unknown` shows `STOPPED_STATUS`; the turn
+  manifest keeps `settlement_unknown`.
+- Preparation `use` refused by `require_space` now reports the model's whole
+  unwritten size (`NotEnoughFreeSpace { needed: unwritten }`), not the zero-byte
+  probe. The capsule invoke gateway maps it to HTTP 507
+  `not_enough_free_space` with a plain message; `_shared/model-management.js`
+  shows that message, leaves Get available and skips reconcile. The
+  `capacity_pending` phase text is built by `capacityText()` with the remaining
+  bytes.
 
 - Model preparation keeps its stage after any `MetadataRead`, `WeightsRead` or
   `Capacity` failure, not only after a read typed as in transit (`Io`). A part

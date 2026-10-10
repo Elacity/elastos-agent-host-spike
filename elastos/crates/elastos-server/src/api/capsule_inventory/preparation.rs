@@ -713,7 +713,19 @@ fn reserve_at(
         reserved_bytes > grant.max_cache_bytes || !inventory.space_fits(unwritten)?;
     // Existing admissions already occupy disk. Charge only this new reservation
     // again against observed free space, while quota above counts every artifact.
-    inventory.require_space(if capacity_pending { 0 } else { unwritten })?;
+    // A refusal names this model's whole unwritten size, not the zero-byte probe.
+    inventory
+        .require_space(if capacity_pending { 0 } else { unwritten })
+        .map_err(|error| {
+            if error.is::<elastos_common::NotEnoughFreeSpace>() {
+                elastos_common::NotEnoughFreeSpace {
+                    needed: u128::from(unwritten),
+                }
+                .into()
+            } else {
+                error
+            }
+        })?;
     let mut record = PreparationRecord {
         activation_pending: true,
         operation_id: String::new(),

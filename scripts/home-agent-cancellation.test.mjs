@@ -1317,3 +1317,93 @@ test("the open model menu follows each read, keeps focus on its action, and clos
   t.mock.timers.tick(60000);
   assert.equal(catalogReads, reads, "closing Assistant stops the catalog re-reads");
 });
+
+test("with no model the empty Assistant names the one step and opens Marketplace models", async t => {
+  const prior = { href: window.location.href, top: window.top };
+  t.after(() => { window.location.href = prior.href; window.top = prior.top; live.selectLiveOffer(""); });
+  globalThis.fetch = async url => ({ ok: true, json: async () => new URL(url).pathname === "/api/capsules/catalog"
+    ? { schema: "elastos.capsules.catalog/v1", model_catalog_state: "verified", capsules: [] } : { offers: [] } });
+  const { ctx } = streamControllerFixture();
+  live.selectLiveOffer("");
+  await live.probeLiveInference({ force: true });
+  assert.equal(live.selectedLiveOffer(), null);
+  const viewport = createDomNode("div");
+  controller.bindAgentStream(ctx, { streamEl: () => createDomNode("div"), streamViewportEl: () => viewport,
+    clearEmptyState() {}, signedInFirstName: () => "" });
+  const hint = () => {
+    viewport.children = [];
+    controller.showEmptyState();
+    return viewport.children[0].querySelector(".agent-harness-empty-sub").textContent;
+  };
+  const offer = { id: "other", title: "Other", operation: "text", input_modalities: ["text/plain"], output_modalities: ["text/plain"] };
+  let offers = { offers: [offer] };
+  globalThis.fetch = async url => {
+    if (new URL(url).pathname === "/api/capsules/catalog") return { ok: true, json: async () => ({ schema: "elastos.capsules.catalog/v1", model_catalog_state: "verified", capsules: [] }) };
+    if (!offers) throw new Error("offline");
+    return { ok: true, json: async () => offers };
+  };
+  offers = null;
+  await live.probeLiveInference({ force: true });
+  assert.equal(live.getLiveInferenceState().endpointState, "unreachable");
+  assert.equal(hint(), "Private on this Home", "a failed model read never claims there is no model");
+  offers = { offers: [offer] };
+  live.selectLiveOffer("missing");
+  await live.probeLiveInference({ force: true });
+  assert.equal(live.selectedLiveOffer(), null);
+  assert.equal(hint(), "Private on this Home", "a chosen model gone beside others keeps the model menu path");
+  live.selectLiveOffer("");
+  offers = { offers: [] };
+  await live.probeLiveInference({ force: true });
+  controller.showEmptyState();
+  const empty = viewport.children.at(-1);
+  assert.equal(empty.querySelector(".agent-harness-empty-sub").textContent, "Get a model to start. Models run on this Home.");
+  const get = empty.children.find(node => node.dataset?.agentGetModel === "");
+  assert.equal(get?.textContent, "Get a model");
+  const messages = [];
+  window.top = { postMessage: (message) => messages.push(message) };
+  window.location.href = "https://home.example/apps/assistant/?home_origin=https%3A%2F%2Fhome.example";
+  let click;
+  // The fixture node drops listeners; rebuild with a capturing createElement.
+  document.createElement = tag => Object.assign(createDomNode(tag), { addEventListener(type, fn) { if (type === "click") click = fn; } });
+  controller.showEmptyState();
+  click();
+  assert.deepEqual(messages.at(-1), { type: "home:open-target", homeToken: "fixture", target: "marketplace", query: { category: "models" } });
+  const send = { dataset: {}, setAttribute() {} };
+  const priorQuery = document.querySelector;
+  document.querySelector = selector => selector === "#agent-composer-send" ? send
+    : selector === "#agent-composer-input" ? { value: "hello" } : priorQuery(selector);
+  const shelf = await import("../capsules/assistant/browser/agent-shelf.js");
+  shelf.syncAgentSendButton();
+  assert.equal(send.disabled, true);
+  assert.equal(send.title, "Get a model to start");
+  assert.match(controller.NO_MODEL_OFFER_STATUS, /Apps \(Marketplace\) → Models/);
+  assert.doesNotMatch(controller.NO_MODEL_OFFER_STATUS, /Store|Services/);
+});
+
+test("a Stop the local engine cannot confirm reads as Stopped and keeps its unknown state", async t => {
+  t.after(() => { live.detachLiveChatStream(); live.selectLiveOffer(""); });
+  const events = defer();
+  globalThis.fetch = async (url, init) => {
+    const op = new URL(url).pathname.split("/").pop();
+    let data;
+    if (op === "offers_list") data = { offers: [{ id: "fixture", title: "Fixture", operation: "text", input_modalities: ["text/plain"], output_modalities: ["text/plain"], context: fixtureContext }] };
+    else if (op === "runs_create") data = { run_id: "run-stop", sequence_cursor: 0 };
+    else if (op === "runs_get") data = { run_id: "run-stop", status: "running" };
+    else if (op === "runs_events") data = await events.promise;
+    else if (op === "runs_cancel") { data = { run_id: "run-stop", status: "running" }; events.resolve(terminal("settlement_unknown")); }
+    else if (new URL(url).pathname === "/api/capsules/catalog") data = { schema: "elastos.capsules.catalog/v1", model_catalog_state: "verified", capsules: [] };
+    else throw new Error(`unexpected operation ${op}`);
+    return { ok: true, json: async () => data };
+  };
+  await live.probeLiveInference({ force: true });
+  live.selectLiveOffer("fixture");
+  const { ctx, status } = streamControllerFixture();
+  controller.startTurnForPrompt("fixture");
+  const started = Date.now();
+  while (Date.now() - started < 2000 && !ctx.sessions[0].lastTurn?.providerRunId) await new Promise(r => setTimeout(r, 10));
+  await controller.stopAgentStream();
+  while (Date.now() - started < 4000 && ctx.sessions[0].lastTurn?.state !== "settlement_unknown") await new Promise(r => setTimeout(r, 10));
+  await new Promise(setImmediate);
+  assert.equal(status.textContent, "Stopped.");
+  assert.equal(ctx.sessions[0].lastTurn.state, "settlement_unknown", "the turn keeps the engine's unknown state");
+});
