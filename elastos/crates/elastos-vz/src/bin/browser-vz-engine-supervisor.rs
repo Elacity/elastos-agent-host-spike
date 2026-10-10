@@ -945,9 +945,11 @@ async fn run() -> Result<(), String> {
         owner.paths.runtime_stream_path.clone(),
         Arc::clone(&shutdown),
         egress_max_sessions as usize,
+        None,
     ));
     owner.ordinary_stream_bridge = true;
     checkpoint!();
+    let media_peers = post_effect_try!(TurnPeerScope::from_transport(&owner.transport));
     owner.media_bridge = Some(spawn_egress_bridge(
         Arc::clone(&provider),
         handle.clone(),
@@ -968,6 +970,7 @@ async fn run() -> Result<(), String> {
         ),
         Arc::clone(&shutdown),
         egress_max_sessions as usize,
+        Some(media_peers),
     ));
     owner.media_stream_bridge = true;
     trace_stage("spawn_control_proxy", "");
@@ -1815,6 +1818,26 @@ fn start_turn_log_reader<R: Read + Send + 'static>(
     })
 }
 
+/// Media peers are this TURN server's own relay addresses: the viewer and the
+/// guest meet there. Every other peer, including loopback and private ranges,
+/// is denied. A loopback relay host needs loopback peers; the guest bridge then
+/// limits peer ports to the session relay range.
+fn turn_peer_policy(relay_host: &str) -> Result<String, String> {
+    let relay: std::net::IpAddr = relay_host
+        .parse()
+        .map_err(|_| "Browser VZ TURN relay host is invalid".to_string())?;
+    Ok(format!(
+        "{}allowed-peer-ip={relay}\n\
+         denied-peer-ip=0.0.0.0-255.255.255.255\n\
+         denied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff\n",
+        if relay.is_loopback() {
+            "allow-loopback-peers\n"
+        } else {
+            ""
+        }
+    ))
+}
+
 impl LaunchTurn {
     fn start(
         paths: &LaunchPaths,
@@ -1887,6 +1910,7 @@ impl LaunchTurn {
             .chars()
             .take(16)
             .collect::<String>();
+        let peer_policy = turn_peer_policy(relay_host)?;
         let config = format!(
             "listening-ip={listen_host}\n\
              relay-ip={relay_host}\n\
@@ -1896,7 +1920,7 @@ impl LaunchTurn {
              max-port={relay_max}\n\
              realm=elastos-browser-{realm_suffix}\n\
              fingerprint\n\
-             allow-loopback-peers\n\
+             {peer_policy}\
              use-auth-secret\n\
              static-auth-secret={secret}\n\
              no-udp\n\
@@ -2398,6 +2422,128 @@ fn turn_port_bindings(transport: &VzTransportLaunch) -> Result<TurnPortBindings,
         relay_min,
         relay_max,
     })
+}
+
+#[derive(Clone, Copy)]
+struct TurnPeerScope {
+    relay: std::net::IpAddr,
+    ports: (u16, u16),
+}
+
+impl TurnPeerScope {
+    fn from_transport(transport: &VzTransportLaunch) -> Result<Self, String> {
+        let bindings = turn_port_bindings(transport)?;
+        Ok(Self {
+            relay: bindings
+                .relay_host
+                .parse()
+                .map_err(|_| "Browser VZ TURN relay host is invalid".to_string())?,
+            ports: (bindings.relay_min, bindings.relay_max),
+        })
+    }
+}
+
+const STUN_MAGIC_COOKIE: [u8; 4] = [0x21, 0x12, 0xa4, 0x42];
+
+/// TURN permissions name only an IP, so the guest's TURN stream is checked
+/// here: every peer address must be a session relay port, and TCP relays are
+/// refused. Frames follow coturn's TCP framing; anything else closes the stream.
+struct TurnPeerGuard {
+    scope: TurnPeerScope,
+    pending: Vec<u8>,
+    forwarded: usize,
+}
+
+impl TurnPeerGuard {
+    fn new(scope: TurnPeerScope) -> Self {
+        Self {
+            scope,
+            pending: Vec::new(),
+            forwarded: 0,
+        }
+    }
+
+    /// Returns the complete, admitted frames; a partial frame waits for more.
+    fn admit(&mut self, bytes: &[u8]) -> Result<&[u8], String> {
+        self.pending.drain(..self.forwarded);
+        self.pending.extend_from_slice(bytes);
+        let mut end = 0;
+        while let Some(len) = turn_frame_len(&self.pending[end..])? {
+            self.check(&self.pending[end..end + len])?;
+            end += len;
+        }
+        self.forwarded = end;
+        Ok(&self.pending[..end])
+    }
+
+    fn check(&self, frame: &[u8]) -> Result<(), String> {
+        if frame[0] & 0xc0 != 0 {
+            return Ok(()); // ChannelData uses a channel bound by a checked request.
+        }
+        let kind = u16::from_be_bytes([frame[0], frame[1]]);
+        let method = ((kind & 0x3e00) >> 2) | ((kind & 0x00e0) >> 1) | (kind & 0x000f);
+        if matches!(method, 0x000a | 0x000b) {
+            return Err("Browser VZ guest TURN TCP relays are not permitted".to_string());
+        }
+        let mut offset = 20;
+        while offset < frame.len() {
+            let header = frame
+                .get(offset..offset + 4)
+                .ok_or_else(|| "Browser VZ guest TURN attribute is malformed".to_string())?;
+            let len = usize::from(u16::from_be_bytes([header[2], header[3]]));
+            let value = frame
+                .get(offset + 4..offset + 4 + len)
+                .ok_or_else(|| "Browser VZ guest TURN attribute is malformed".to_string())?;
+            if header[..2] == [0x00, 0x12] {
+                self.check_peer(value, &frame[4..20])?;
+            }
+            offset += 4 + len.next_multiple_of(4);
+        }
+        Ok(())
+    }
+
+    fn check_peer(&self, value: &[u8], cookie_and_id: &[u8]) -> Result<(), String> {
+        let port = match value.get(2..4) {
+            Some(port) => u16::from_be_bytes([port[0] ^ 0x21, port[1] ^ 0x12]),
+            None => return Err("Browser VZ guest TURN peer address is malformed".to_string()),
+        };
+        let ip = match (value[1], value.len()) {
+            (0x01, 8) => std::net::IpAddr::from(std::array::from_fn::<u8, 4, _>(|index| {
+                value[4 + index] ^ cookie_and_id[index]
+            })),
+            (0x02, 20) => std::net::IpAddr::from(std::array::from_fn::<u8, 16, _>(|index| {
+                value[4 + index] ^ cookie_and_id[index]
+            })),
+            _ => return Err("Browser VZ guest TURN peer address is malformed".to_string()),
+        };
+        if ip != self.scope.relay || port < self.scope.ports.0 || port > self.scope.ports.1 {
+            return Err(format!(
+                "Browser VZ guest TURN peer {ip}:{port} is outside the session relay"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Length of the first complete TURN-over-TCP frame, or None while incomplete.
+fn turn_frame_len(bytes: &[u8]) -> Result<Option<usize>, String> {
+    if bytes.len() < 4 {
+        return Ok(None);
+    }
+    // coturn reads these prefixes as HTTP before ChannelData; media frames are
+    // never this long, so refusing them keeps both parsers on one boundary.
+    if matches!(&bytes[..4], b"GET " | b"PUT " | b"POST" | b"DELE") {
+        return Err("Browser VZ guest TURN stream is not STUN or ChannelData".to_string());
+    }
+    let declared = usize::from(u16::from_be_bytes([bytes[2], bytes[3]]));
+    let len = match bytes[0] & 0xc0 {
+        // ChannelData is padded to four bytes on TCP.
+        0x40 => (4 + declared).next_multiple_of(4),
+        0x00 if bytes.len() < 8 => return Ok(None),
+        0x00 if bytes[4..8] == STUN_MAGIC_COOKIE && declared % 4 == 0 => 20 + declared,
+        _ => return Err("Browser VZ guest TURN stream is not STUN or ChannelData".to_string()),
+    };
+    Ok((bytes.len() >= len).then_some(len))
 }
 
 fn preflight_turn_ports(transport: &VzTransportLaunch) -> Result<(), String> {
@@ -4197,6 +4343,7 @@ fn spawn_egress_bridge(
     runtime_stream_path: PathBuf,
     shutdown: Arc<AtomicBool>,
     max_sessions: usize,
+    turn_peers: Option<TurnPeerScope>,
 ) -> tokio::task::JoinHandle<bool> {
     tokio::spawn(async move {
         let mut session_id = 0_u64;
@@ -4258,6 +4405,7 @@ fn spawn_egress_bridge(
                                 DuplexStream::File(guest_stream),
                                 DuplexStream::Unix(runtime_stream),
                                 worker_shutdown,
+                                turn_peers.map(TurnPeerGuard::new),
                             )?;
                             if trace_egress {
                                 emit_stderr_line(&format!(
@@ -4414,10 +4562,12 @@ impl Write for DuplexStream {
     }
 }
 
+/// Copies both directions; `guard` checks the left-to-right (guest) stream.
 fn forward_pair(
     left: DuplexStream,
     right: DuplexStream,
     shutdown: Arc<AtomicBool>,
+    mut guard: Option<TurnPeerGuard>,
 ) -> Result<(u64, u64), String> {
     let mut left_to_right_in = left.try_clone()?;
     let mut right_to_left_out = left;
@@ -4436,9 +4586,11 @@ fn forward_pair(
             &mut left_to_right_out,
             &done_to_right,
             &shutdown_to_right,
+            guard.as_mut(),
         );
         done_to_right.store(true, Ordering::Relaxed);
-        if shutdown_to_right.load(Ordering::Relaxed) {
+        // A refused guest frame closes the whole stream.
+        if shutdown_to_right.load(Ordering::Relaxed) || result.is_err() {
             left_to_right_in.shutdown_both();
             left_to_right_out.shutdown_both();
         } else {
@@ -4451,6 +4603,7 @@ fn forward_pair(
         &mut right_to_left_out,
         &done,
         &shutdown,
+        None,
     );
     if shutdown.load(Ordering::Relaxed) {
         right_to_left_in.shutdown_both();
@@ -4468,6 +4621,7 @@ fn copy_stream_until_done<R: Read, W: Write>(
     writer: &mut W,
     done: &AtomicBool,
     shutdown: &AtomicBool,
+    mut guard: Option<&mut TurnPeerGuard>,
 ) -> Result<u64, String> {
     let mut copied = 0_u64;
     let mut buffer = [0_u8; EGRESS_COPY_BUFFER_BYTES];
@@ -4478,12 +4632,16 @@ fn copy_stream_until_done<R: Read, W: Write>(
         match reader.read(&mut buffer) {
             Ok(0) => return Ok(copied),
             Ok(read) => {
+                let forward = match guard.as_deref_mut() {
+                    Some(guard) => guard.admit(&buffer[..read])?,
+                    None => &buffer[..read],
+                };
                 let mut offset = 0;
-                while offset < read {
+                while offset < forward.len() {
                     if shutdown.load(Ordering::Relaxed) {
                         return Ok(copied);
                     }
-                    match writer.write(&buffer[offset..read]) {
+                    match writer.write(&forward[offset..]) {
                         Ok(0) => return Err("Browser VM bridge writer closed".to_string()),
                         Ok(written) => {
                             offset += written;
@@ -5956,7 +6114,9 @@ mod tests {
         assert!(error.child_absent);
         assert!(!session_dir.join("turnserver.conf").exists());
         let captured = fs::read_to_string(capture).unwrap();
-        assert!(captured.lines().any(|line| line == "allow-loopback-peers"));
+        // The fixture's relay host is not loopback, so loopback peers stay denied.
+        assert!(captured.contains(&turn_peer_policy("192.0.2.10").unwrap()));
+        assert!(!captured.contains("allow-loopback-peers"));
         assert!(captured.lines().any(|line| line == "log-file=stdout"));
         assert!(captured.lines().any(|line| line == "simple-log"));
     }
@@ -6426,7 +6586,7 @@ mod tests {
                 errno,
                 accepted: Vec::new(),
             };
-            let result = copy_stream_until_done(&mut reader, &mut writer, &done, &shutdown);
+            let result = copy_stream_until_done(&mut reader, &mut writer, &done, &shutdown, None);
             assert_eq!(writer.accepted, b"pa");
             if errno == libc::EPIPE && shutdown_during_write {
                 assert_eq!(result, Ok(2), "cancelled in-flight write: {result:?}");
@@ -6455,6 +6615,7 @@ mod tests {
                 DuplexStream::Unix(guest_bridge),
                 DuplexStream::Unix(runtime_bridge),
                 worker_shutdown,
+                None,
             );
             finished_tx.send(()).unwrap();
             result
@@ -6494,6 +6655,7 @@ mod tests {
                 DuplexStream::Unix(guest_bridge),
                 DuplexStream::Unix(runtime_bridge),
                 worker_shutdown,
+                None,
             );
             finished_tx.send(()).unwrap();
             result
@@ -6552,6 +6714,7 @@ mod tests {
                 DuplexStream::Unix(guest_bridge),
                 DuplexStream::Unix(runtime_bridge),
                 Arc::new(AtomicBool::new(false)),
+                None,
             );
             done_tx.send(()).unwrap();
             result
@@ -6572,6 +6735,116 @@ mod tests {
         let (guest_to_runtime, runtime_to_guest) = bridge.join().unwrap().unwrap();
         assert_eq!(guest_to_runtime, 0);
         assert_eq!(runtime_to_guest, 4);
+    }
+
+    #[test]
+    fn turn_peer_policy_admits_only_the_relay_address() {
+        let remote = turn_peer_policy("192.0.2.10").unwrap();
+        assert_eq!(
+            remote,
+            "allowed-peer-ip=192.0.2.10\n\
+             denied-peer-ip=0.0.0.0-255.255.255.255\n\
+             denied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff\n"
+        );
+        // Loopback peers exist only for a loopback relay, where the guest
+        // bridge also limits peer ports to the session relay range.
+        let local = turn_peer_policy("127.0.0.1").unwrap();
+        assert!(local.starts_with("allow-loopback-peers\nallowed-peer-ip=127.0.0.1\n"));
+        assert!(turn_peer_policy("relay.invalid").is_err());
+    }
+
+    fn turn_message(kind: u16, peer: std::net::SocketAddr) -> Vec<u8> {
+        let mut cookie_and_id = STUN_MAGIC_COOKIE.to_vec();
+        cookie_and_id.extend([7_u8; 12]);
+        let (family, address) = match peer.ip() {
+            std::net::IpAddr::V4(ip) => (1, ip.octets().to_vec()),
+            std::net::IpAddr::V6(ip) => (2, ip.octets().to_vec()),
+        };
+        let mut value = vec![0, family];
+        value.extend((peer.port() ^ 0x2112).to_be_bytes());
+        value.extend(address.iter().zip(&cookie_and_id).map(|(a, b)| a ^ b));
+        // CHANNEL-NUMBER precedes the peer, so attribute walking is exercised.
+        let mut attributes = vec![0x00, 0x0c, 0x00, 0x04, 0x40, 0x00, 0x00, 0x00, 0x00, 0x12];
+        attributes.extend((value.len() as u16).to_be_bytes());
+        attributes.extend(value);
+        let mut message = kind.to_be_bytes().to_vec();
+        message.extend((attributes.len() as u16).to_be_bytes());
+        message.extend(cookie_and_id);
+        message.extend(attributes);
+        message
+    }
+
+    fn session_relay() -> TurnPeerScope {
+        TurnPeerScope {
+            relay: "127.0.0.1".parse().unwrap(),
+            ports: (55000, 55003),
+        }
+    }
+
+    #[test]
+    fn guest_turn_guard_admits_only_session_relay_peers() {
+        let relay_peer = "127.0.0.1:55003".parse().unwrap();
+        let mut guard = TurnPeerGuard::new(session_relay());
+        let bind = turn_message(0x0009, relay_peer);
+        let channel_data = [0x40, 0x00, 0x00, 0x05, 1, 2, 3, 4, 5, 0, 0, 0];
+        let mut stream = bind.clone();
+        stream.extend(channel_data);
+        // Frames split across reads are forwarded only once complete.
+        assert_eq!(guard.admit(&stream[..bind.len() - 3]).unwrap(), b"");
+        assert_eq!(
+            guard
+                .admit(&stream[bind.len() - 3..bind.len() + 6])
+                .unwrap(),
+            bind.as_slice()
+        );
+        assert_eq!(
+            guard.admit(&stream[bind.len() + 6..]).unwrap(),
+            channel_data
+        );
+        for refused in [
+            turn_message(0x0008, "127.0.0.1:22".parse().unwrap()),
+            turn_message(0x0008, "127.0.0.1:55004".parse().unwrap()),
+            turn_message(0x0008, "10.0.0.1:55001".parse().unwrap()),
+            turn_message(0x0016, "8.8.8.8:53".parse().unwrap()),
+            turn_message(0x0009, "[::1]:55001".parse().unwrap()),
+            turn_message(0x000a, relay_peer),
+            b"GET / HTTP/1.1\r\n\r\n".to_vec(),
+        ] {
+            assert!(
+                TurnPeerGuard::new(session_relay()).admit(&refused).is_err(),
+                "{refused:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn guest_turn_bridge_closes_on_a_foreign_peer_without_forwarding_it() {
+        let (mut guest_client, guest_bridge) = UnixStream::pair().unwrap();
+        let (runtime_bridge, mut runtime_client) = UnixStream::pair().unwrap();
+        runtime_client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let bridge = thread::spawn(move || {
+            forward_pair(
+                DuplexStream::Unix(guest_bridge),
+                DuplexStream::Unix(runtime_bridge),
+                Arc::new(AtomicBool::new(false)),
+                Some(TurnPeerGuard::new(session_relay())),
+            )
+        });
+        let allowed = turn_message(0x0008, "127.0.0.1:55000".parse().unwrap());
+        guest_client.write_all(&allowed).unwrap();
+        let mut forwarded = vec![0; allowed.len()];
+        runtime_client.read_exact(&mut forwarded).unwrap();
+        assert_eq!(forwarded, allowed);
+        guest_client
+            .write_all(&turn_message(0x0008, "127.0.0.1:631".parse().unwrap()))
+            .unwrap();
+        let mut rest = Vec::new();
+        runtime_client.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty(), "a foreign peer frame reached TURN");
+        let error = bridge.join().unwrap().unwrap_err();
+        assert!(error.contains("outside the session relay"), "{error}");
     }
 
     #[test]

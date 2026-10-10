@@ -455,8 +455,11 @@ filter rules. Runtime keeps its Unix relay and session-local TURN processes;
 launch creates the VM, bridges, media process, sockets and disposable rootfs.
 Guest control stays on TCP `19092` reached from the host. Guest DHCP, host
 forwarding, NAT and host default-route changes are unnecessary.
-`elastos setup` writes the Home's TURN credential to the owner-only
-`$DATA_DIR/runtime-turn/turn-credentials.env` and keeps an existing one.
+Session TURN relays only to its own relay address (the slot host IP), where the
+guest and viewer allocations meet; loopback, private ranges and every other
+peer are denied. `elastos setup` writes the Home's TURN credential to the
+owner-only `$DATA_DIR/runtime-turn/turn-credentials.env` and keeps an
+existing one.
 
 For removal, use the same root shell and helper:
 
@@ -641,6 +644,10 @@ use their fixed vsock-to-Runtime bridges. VZ NAT, a media NIC, a default guest
 route, legacy ICE boot configuration, and VZ hibernation are not available.
 Missing, stale, disabled, partial, or mixed legacy/VZ configuration fails before
 VM dispatch.
+The VZ TURN server relays only to its relay host and allows loopback peers only
+when that host is loopback. The media bridge then refuses any guest TURN peer
+outside the session relay port range, and TURN TCP relays, by closing the
+stream.
 
 Source-home config also loads Runtime-owned TURN credentials from
 `$HOME/runtime-turn/turn-credentials.env` or

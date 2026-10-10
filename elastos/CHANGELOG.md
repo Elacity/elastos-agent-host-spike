@@ -21,6 +21,11 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   `runtime-turn/turn-credentials.env` (kept on later runs), so a fresh
   Linux/Jetson Home gets the session-local TURN configuration the crosvm
   launcher requires (#307).
+- Browser TURN relays only to its own relay address on both hosts: coturn
+  denies loopback, private ranges and every other peer. On Mac, a loopback relay
+  keeps loopback peers, and the media bridge closes any guest TURN stream that
+  addresses a peer outside the session relay ports or asks for a TCP relay
+  (#307).
 
 ## [0.8.0-alpha.14]
 

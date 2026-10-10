@@ -81,6 +81,28 @@ test("crosvm command consumes the prepared TAP and addresses", () => {
   assert.match(args[args.indexOf("-p") + 1], /elastos.browser_guest_ip=192\.168\.200\.2/);
 });
 
+test("session TURN relays only to its own relay address on the leased slot", async () => {
+  const calls = [];
+  const child = { once() {} };
+  const context = vm.createContext({ path, fs: { openSync: () => 10, closeSync() {} }, logPhase() {},
+    turnserverBin: () => "/fixture/turnserver", waitForTcpListener: async () => {},
+    spawnTracked(command, args) { calls.push(args); return child; } });
+  const start = source.indexOf("async function startSessionTurnServer(");
+  const end = source.indexOf("\nfunction spawnTracked(", start);
+  const startSessionTurnServer = vm.runInContext(`${source.slice(start, end)}\nstartSessionTurnServer`, context);
+  await startSessionTurnServer({ network: { hostIp: "192.168.200.1" }, sessionDir: "/fixture/session",
+    turn: { port: 41000, relay: { min: 49152, max: 49215 }, username: "u", credential: "c" } });
+  const args = Array.from(calls[0]);
+  // coturn admits an allowed peer before its denied ranges; loopback stays denied.
+  assert.deepEqual(args.filter((arg) => /peer/.test(arg)), [
+    "--no-multicast-peers",
+    "--allowed-peer-ip=192.168.200.1",
+    "--denied-peer-ip=0.0.0.0-255.255.255.255",
+    "--denied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+  ]);
+  assert.equal(args[args.indexOf("--relay-ip") + 1], "192.168.200.1");
+});
+
 test("real launcher stops before VM commands when setup is absent", async t => {
   const root = fs.mkdtempSync("/tmp/ebv165-");
   const socket = path.join(root, "relay.sock");

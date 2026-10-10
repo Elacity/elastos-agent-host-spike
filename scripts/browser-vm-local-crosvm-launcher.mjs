@@ -576,6 +576,11 @@ async function startSessionTurnServer({ network, sessionDir, turn }) {
     "--no-tls",
     "--no-dtls",
     "--no-multicast-peers",
+    // The guest and viewer meet at this server's relay address. Every other
+    // peer, including loopback (denied by default) and private ranges, is not.
+    `--allowed-peer-ip=${network.hostIp}`,
+    "--denied-peer-ip=0.0.0.0-255.255.255.255",
+    "--denied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
     "--no-software-attribute",
     `--pidfile=${pidPath}`,
     `--log-file=${logPath}`,
