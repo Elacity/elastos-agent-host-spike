@@ -196,7 +196,13 @@ fn render_inbox_tab(buf: &mut String, snapshot: &HomeSnapshot, state: &TuiState,
             format!("State      {}", if entry.read { "read" } else { "unread" }),
         ];
         details.extend(wrap_with_label("Body", &entry.body, column_width));
-        if let Some(action) = selected_notification_action(snapshot, state.inbox_index) {
+        let action = selected_notification_action(snapshot, state.inbox_index);
+        let desktop_only = action.as_ref().is_some_and(|action| {
+            !action.ready && action.id.starts_with(INBOX_NOTIFICATION_HANDOFF_ACTION_PREFIX)
+        });
+        if desktop_only {
+            details.push("Action     Open Inbox on the Desktop to answer this.".to_string());
+        } else if let Some(action) = action {
             details.push(format!("Action     {}", action.label));
             details.push(format!(
                 "ActionUse  {}",
@@ -602,10 +608,6 @@ fn people_debug_lines(snapshot: &HomeSnapshot) -> Vec<String> {
         format!(
             "Profile    {}",
             action_state_label(action_by_id(snapshot, "identity-nickname-set"))
-        ),
-        format!(
-            "Chat       {}",
-            action_state_label(action_by_id(snapshot, "chat"))
         ),
         format!(
             "Peers      {}",

@@ -148,6 +148,56 @@ pub fn compute_content_digest(files: &[(String, Vec<u8>)]) -> anyhow::Result<Str
     Ok(format!("sha256:{}", digest))
 }
 
+/// The installed viewer's web entrypoint file, from its `capsule.json`
+/// (`browser/index.html` for Documents). Errors when the viewer is not installed.
+pub fn viewer_entrypoint(viewer_dir: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    let manifest_path = viewer_dir.join("capsule.json");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).map_err(|err| {
+            anyhow::anyhow!("viewer manifest {}: {err}", manifest_path.display())
+        })?)?;
+    let entrypoint = manifest
+        .get("entrypoint")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("{} has no entrypoint", manifest_path.display()))?;
+    let entry = viewer_dir.join(entrypoint);
+    if !entry.is_file() {
+        anyhow::bail!("viewer entrypoint missing: {}", entry.display());
+    }
+    Ok(entry)
+}
+
+/// Copies the viewer's web files (the entrypoint's directory, without its own
+/// Markdown) to the bundle root, with the entrypoint as `index.html`.
+fn copy_viewer_entrypoint(
+    viewer_dir: &std::path::Path,
+    bundle_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    let entry = viewer_entrypoint(viewer_dir)?;
+    let web_root = entry.parent().unwrap_or(viewer_dir);
+    let mut files = Vec::new();
+    collect_files_for_ipfs(web_root, web_root, &mut files)?;
+    for rel in files {
+        let src = web_root.join(&rel);
+        if src == entry
+            || rel
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+        {
+            continue;
+        }
+        let dest = bundle_dir.join(&rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&src, dest)?;
+    }
+    std::fs::copy(&entry, bundle_dir.join("index.html"))?;
+    Ok(())
+}
+
 pub fn build_share_bundle(
     input_path: &std::path::Path,
     share_id: &str,
@@ -182,10 +232,7 @@ pub fn build_share_bundle_with_viewer_dir(
         .prefix("elastos-share-")
         .tempdir()?;
 
-    std::fs::copy(
-        viewer_dir.join("index.html"),
-        bundle_dir.path().join("index.html"),
-    )?;
+    copy_viewer_entrypoint(viewer_dir, bundle_dir.path())?;
 
     let mut markdown_paths = Vec::new();
     if input_path.is_file() {

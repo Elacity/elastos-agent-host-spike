@@ -1,6 +1,5 @@
 //! ElastOS Runtime CLI
 
-mod agent_cmd;
 mod capsule_cmd;
 mod capsule_publish_cmd;
 mod chat_cmd;
@@ -45,7 +44,7 @@ pub(crate) use elastos_server::binaries::{
     resolve_verified_provider_binary, verify_component_binary,
 };
 use elastos_server::{api, runtime, setup};
-pub(crate) use elastos_server::{runtime_control, shell_cmd, sources};
+pub(crate) use elastos_server::{runtime_control, sources};
 
 use runtime::Runtime;
 
@@ -303,7 +302,8 @@ enum Commands {
     #[command(subcommand)]
     Tls(TlsCommand),
 
-    /// Launch native P2P chat
+    /// Legacy native P2P chat (#general gossip topic); developer smoke tests only
+    #[command(hide = true)]
     Chat {
         /// Nickname to use
         #[arg(long)]
@@ -333,29 +333,6 @@ enum Commands {
     UpdateController {
         #[arg(long)]
         receipt: std::path::PathBuf,
-    },
-
-    /// Launch an AI agent that joins P2P chat and responds via LLM
-    Agent {
-        /// Agent persona name (defaults to a backend-specific persona like `codex`)
-        #[arg(long)]
-        nick: Option<String>,
-
-        /// Gossip channel to join
-        #[arg(long, default_value = "#general")]
-        channel: String,
-
-        /// AI backend to use (local, venice, codex)
-        #[arg(long, default_value = "local")]
-        backend: String,
-
-        /// Respond to all messages, not just @mentions
-        #[arg(long)]
-        respond_all: bool,
-
-        /// Connect to a peer via ticket (deterministic bootstrap)
-        #[arg(long, short = 'c')]
-        connect: Option<String>,
     },
 
     /// Manage runtime configuration
@@ -402,10 +379,11 @@ enum Commands {
 
     /// Launch a packaged capsule by name
     Capsule {
-        /// Capsule name from components registry (for example: chat, agent, did-provider)
+        /// Name of an installed elastos.component/v1 WASM or microVM capsule. Home apps
+        /// open through Home and native providers start on demand; neither runs here.
         name: String,
 
-        /// JSON config payload passed to the capsule (for example: '{"nick":"alice"}')
+        /// JSON object passed to the capsule as its config (for example: '{"key":"value"}')
         #[arg(long)]
         config: Option<String>,
 
@@ -1429,16 +1407,6 @@ async fn run() -> anyhow::Result<()> {
             return elastos_server::update_controller::run(receipt).await;
         }
 
-        Commands::Agent {
-            nick,
-            channel,
-            backend,
-            respond_all,
-            connect,
-        } => {
-            return agent_cmd::run_agent(nick, channel, backend, respond_all, connect).await;
-        }
-
         Commands::Tls(tls_cmd) => {
             security_cmd::run_tls(tls_cmd)?;
         }
@@ -1698,8 +1666,8 @@ fn print_first_run_welcome(data_dir: &std::path::Path) {
     );
     println!();
     println!("  Shell policy:    cli (interactive) with TTY, agent (rules) without");
-    println!("  User path:       elastos chat auto-starts after setup");
-    println!("  Operator path:   elastos serve, then elastos run / agent / capsule");
+    println!("  User path:       elastos (opens Home)");
+    println!("  Operator path:   elastos serve, then elastos run / capsule");
     println!();
 }
 

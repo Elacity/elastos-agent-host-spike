@@ -296,7 +296,8 @@ fn dashboard_tui_loop(
                 needs_render = true;
             }
             UiKey::Enter => {
-                state.notice = None;
+                state.notice = state.desktop_only_notice(&snapshot);
+                needs_render = true;
                 if let Some(action_id) = state.activate(&snapshot) {
                     write_intent(write_token, intent_path, &action_id)?;
                     return Ok(());

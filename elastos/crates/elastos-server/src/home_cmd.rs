@@ -22,15 +22,12 @@ const HOME_TERMINAL_HOST_INTENT_OSC_PREFIX: &str = "\x1b]777;elastos-home-intent
 const HOME_TERMINAL_HOST_INTENT_OSC_SUFFIX: &str = "\x07";
 const HOME_SESSION_ROOT: &str = "Local/SharedByLocalUsersAndBots/Home/sessions";
 const COMMAND_GROUPS: &[(&str, &[&str])] = &[
-    ("Home", &["home", "chat"]),
+    ("Home", &["home"]),
     (
         "Spaces",
         &["share", "open", "shares", "attest", "site", "webspace"],
     ),
-    (
-        "Operators",
-        &["serve", "gateway", "agent", "capsule", "run"],
-    ),
+    ("Operators", &["serve", "gateway", "capsule", "run"]),
     (
         "Trust",
         &[
@@ -122,13 +119,6 @@ const CORE_ACTIONS: &[ActionSpec] = &[
         label: "Set nickname",
         description: "Set the DID-backed local nickname used by Chat and shown in Home.",
         args: &["identity", "nickname", "set"],
-        core: true,
-    },
-    ActionSpec {
-        id: "chat",
-        label: "Chat",
-        description: "Open native chat, send a message, and return here when you exit.",
-        args: &["chat"],
         core: true,
     },
     ActionSpec {
@@ -1613,12 +1603,14 @@ async fn write_snapshot(
     Ok(())
 }
 
+/// Consumes the renderer's intent by overwriting it with an empty file. The
+/// session only holds read and write authority, so deleting would be refused.
 async fn clear_intent(access: &SessionAccess, session: &HomeSession) -> anyhow::Result<()> {
     let path = format!("{}/intent.json", session.uri_root.trim_end_matches('/'));
     if !localhost_exists(access, &path).await? {
         return Ok(());
     }
-    delete_localhost_file(access, &path).await
+    write_localhost_file(access, &path, Vec::new()).await
 }
 
 async fn read_intent(
@@ -1630,6 +1622,9 @@ async fn read_intent(
         return Ok(None);
     }
     let data = read_localhost_file(access, &path).await?;
+    if data.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
     let intent: HomeIntent = serde_json::from_slice(&data)?;
     Ok(Some(intent))
 }
@@ -1855,7 +1850,7 @@ async fn dispatch_action(
     };
 
     match action_readiness(action_id, snapshot) {
-        ActionReadiness::Ready => run_action(action, snapshot, coords).await,
+        ActionReadiness::Ready => run_action(action, snapshot).await,
         ActionReadiness::Blocked(reason) => Ok(format!("{} unavailable: {}", action.label, reason)),
     }
 }
@@ -1883,10 +1878,8 @@ async fn dispatch_people_action(
         if people_contact_message_target(contact).is_none() {
             anyhow::bail!("People contact has no message route in the current Runtime facts");
         }
-        let Some(action) = action_spec("chat") else {
-            anyhow::bail!("Chat action is not available");
-        };
-        run_action(action, snapshot, coords).await?;
+        let _parent_surface = ScopedEnvVar::set("ELASTOS_PARENT_SURFACE", "home");
+        crate::chat_cmd::run_chat_from_home(None, None, coords.clone()).await?;
         let label = people_contact_display_name(contact, "contact");
         return Ok(format!("Returned home from Chat with {label}."));
     }
@@ -1994,17 +1987,12 @@ fn action_spec(action_id: &str) -> Option<ActionSpec> {
 enum ActionLaunch {
     External(&'static [&'static str]),
     ManagedIdentityNicknameSet,
-    ManagedChat,
     ManagedRoomApprove,
     ManagedRoomDeny,
     ManagedRoomRevokeAll,
 }
 
-async fn run_action(
-    action: ActionSpec,
-    snapshot: &HomeSnapshot,
-    coords: &runtime_control::RuntimeCoords,
-) -> anyhow::Result<String> {
+async fn run_action(action: ActionSpec, snapshot: &HomeSnapshot) -> anyhow::Result<String> {
     match action_launch(action, snapshot) {
         ActionLaunch::ManagedIdentityNicknameSet => {
             let nickname =
@@ -2013,11 +2001,6 @@ async fn run_action(
                 "Saved DID nickname as '{}'. You are back at Home.",
                 nickname
             ))
-        }
-        ActionLaunch::ManagedChat => {
-            let _parent_surface = ScopedEnvVar::set("ELASTOS_PARENT_SURFACE", "home");
-            crate::chat_cmd::run_chat_from_home(None, None, coords.clone()).await?;
-            Ok(format!("Returned home from {}.", action.label))
         }
         ActionLaunch::ManagedRoomApprove => {
             match elastos_server::room_service::approve_next_request(&default_data_dir())? {
@@ -2145,9 +2128,6 @@ fn action_launch_with_kvm(
 ) -> ActionLaunch {
     if action.id == "identity-nickname-set" {
         ActionLaunch::ManagedIdentityNicknameSet
-    } else if action.id == "chat" {
-        let _ = (snapshot, kvm_supported);
-        ActionLaunch::ManagedChat
     } else if action.id == "room-approve" {
         let _ = (snapshot, kvm_supported);
         ActionLaunch::ManagedRoomApprove
@@ -2183,9 +2163,6 @@ fn action_command_with_kvm(
     if action.id == "identity-nickname-set" {
         return "home: set the local DID profile nickname used across chat and people surfaces"
             .to_string();
-    }
-    if action.id == "chat" {
-        return "home: open Chat".to_string();
     }
     if action.id == "room-approve" {
         return "home: approve the next pending Chat web guest request".to_string();
@@ -2845,23 +2822,6 @@ async fn write_localhost_file(
     Ok(())
 }
 
-async fn delete_localhost_file(access: &SessionAccess, path: &str) -> anyhow::Result<()> {
-    let _ = provider_call(
-        &access.client,
-        &access.api_url,
-        &access.client_token,
-        &access.write_cap,
-        "localhost",
-        "delete",
-        &serde_json::json!({
-            "path": path,
-            "recursive": false,
-        }),
-    )
-    .await?;
-    Ok(())
-}
-
 fn print_home_state_probe(snapshot: &HomeSnapshot) -> anyhow::Result<()> {
     let mut out = std::io::stdout().lock();
     writeln!(out, "ElastOS Home State Probe")?;
@@ -2957,16 +2917,6 @@ fn print_home_state_probe(snapshot: &HomeSnapshot) -> anyhow::Result<()> {
         out,
         "  Nick:      {}",
         snapshot.nickname.as_deref().unwrap_or("(not set)")
-    )?;
-    writeln!(
-        out,
-        "  Chat:      {}",
-        snapshot
-            .actions
-            .iter()
-            .find(|action| action.id == "chat")
-            .map(|action| if action.ready { "ready" } else { "needs setup" })
-            .unwrap_or("not available")
     )?;
     writeln!(
         out,
@@ -3142,11 +3092,6 @@ fn action_readiness(action_id: &str, snapshot: &HomeSnapshot) -> ActionReadiness
             snapshot,
             &["did-provider"],
             "run: elastos setup --with did-provider",
-        ),
-        "chat" => require_components(
-            snapshot,
-            &["shell", "localhost-provider", "did-provider"],
-            "run: elastos setup",
         ),
         "room-approve" | "room-deny" => {
             if snapshot.room.pending_count == 0 {
@@ -4527,86 +4472,6 @@ mod tests {
     }
 
     #[test]
-    fn chat_action_stays_native_when_fullscreen_chat_is_not_packaged() {
-        let snapshot = sample_snapshot_with_components(&[
-            "shell",
-            "localhost-provider",
-            "did-provider",
-            "crosvm",
-            "vmlinux",
-        ]);
-        let action = action_spec("chat").unwrap();
-
-        assert_eq!(
-            action_command_with_kvm(action, &snapshot, true),
-            "home: open Chat"
-        );
-    }
-
-    #[test]
-    fn chat_action_stays_native_even_when_fullscreen_chat_prereqs_are_present() {
-        let snapshot = sample_snapshot_with_components(&[
-            "shell",
-            "localhost-provider",
-            "did-provider",
-            "chat",
-            "crosvm",
-            "vmlinux",
-        ]);
-        let action = action_spec("chat").unwrap();
-
-        assert_eq!(
-            action_launch_with_kvm(action, &snapshot, true),
-            ActionLaunch::ManagedChat
-        );
-        assert_eq!(
-            action_command_with_kvm(action, &snapshot, true),
-            "home: open Chat"
-        );
-    }
-
-    #[test]
-    fn chat_action_stays_native_when_focus_chat_missing() {
-        let snapshot =
-            sample_snapshot_with_components(&["shell", "localhost-provider", "did-provider"]);
-        let action = action_spec("chat").unwrap();
-
-        assert_eq!(
-            action_command_with_kvm(action, &snapshot, false),
-            "home: open Chat"
-        );
-    }
-
-    #[test]
-    fn chat_action_launch_uses_managed_native_when_fullscreen_chat_is_not_packaged() {
-        let snapshot = sample_snapshot_with_components(&[
-            "shell",
-            "localhost-provider",
-            "did-provider",
-            "crosvm",
-            "vmlinux",
-        ]);
-        let action = action_spec("chat").unwrap();
-
-        assert_eq!(
-            action_launch_with_kvm(action, &snapshot, true),
-            ActionLaunch::ManagedChat
-        );
-    }
-
-    #[test]
-    fn chat_action_launch_uses_managed_native_when_focus_chat_missing() {
-        let snapshot =
-            sample_snapshot_with_components(&["shell", "localhost-provider", "did-provider"]);
-        let action = action_spec("chat").unwrap();
-
-        assert_eq!(
-            action_launch_with_kvm(action, &snapshot, false),
-            ActionLaunch::ManagedChat
-        );
-    }
-
-    #[test]
     fn core_actions_are_always_visible() {
         let core_ids: Vec<&str> = CORE_ACTIONS
             .iter()
@@ -4614,7 +4479,7 @@ mod tests {
             .map(|a| a.id)
             .collect();
         assert!(core_ids.contains(&"identity-nickname-set"));
-        assert!(core_ids.contains(&"chat"));
+        assert!(!core_ids.contains(&"chat"));
         assert!(!core_ids.contains(&"update-check"));
     }
 
@@ -4767,5 +4632,92 @@ mod tests {
                 ActionReadiness::Blocked(reason) if reason == "unknown action"
             ));
         }
+    }
+
+    /// The Home session only holds read and write authority, so consuming an
+    /// intent must never need delete (it used to quit Home with 403 Forbidden
+    /// after the first action).
+    #[tokio::test]
+    async fn home_session_consumes_two_consecutive_intents_without_delete_authority() {
+        use axum::extract::{Path as AxumPath, State};
+        use axum::http::StatusCode;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        type Files = Arc<Mutex<HashMap<String, Vec<u8>>>>;
+        async fn localhost(
+            State(files): State<Files>,
+            AxumPath(op): AxumPath<String>,
+            axum::Json(body): axum::Json<serde_json::Value>,
+        ) -> (StatusCode, axum::Json<serde_json::Value>) {
+            let path = body["path"].as_str().unwrap_or_default().to_string();
+            let mut files = files.lock().await;
+            match op.as_str() {
+                "exists" => (
+                    StatusCode::OK,
+                    axum::Json(serde_json::json!({"data": {"exists": files.contains_key(&path)}})),
+                ),
+                "read" => (
+                    StatusCode::OK,
+                    axum::Json(serde_json::json!({"data": {"content": files.get(&path).cloned()}})),
+                ),
+                "write" => {
+                    let bytes = body["content"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|byte| byte.as_u64().unwrap() as u8)
+                        .collect();
+                    files.insert(path, bytes);
+                    (
+                        StatusCode::OK,
+                        axum::Json(serde_json::json!({"status": "ok"})),
+                    )
+                }
+                _ => (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({}))),
+            }
+        }
+
+        let files: Files = Arc::default();
+        let app = axum::Router::new()
+            .route(
+                "/api/provider/localhost/:op",
+                axum::routing::post(localhost),
+            )
+            .with_state(files.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let temp = tempfile::tempdir().unwrap();
+        let session = HomeSession {
+            uri_root: "localhost://Local/Shared/Home/sessions/test".to_string(),
+            path: temp.path().to_path_buf(),
+        };
+        let access = SessionAccess {
+            client: reqwest::Client::new(),
+            api_url: format!("http://{addr}"),
+            client_token: "client".to_string(),
+            read_cap: "read".to_string(),
+            write_cap: "write".to_string(),
+        };
+        let intent_path = format!("{}/intent.json", session.uri_root);
+
+        clear_intent(&access, &session).await.unwrap();
+        for action in ["refresh", "open-settings"] {
+            write_localhost_file(
+                &access,
+                &intent_path,
+                serde_json::to_vec(&serde_json::json!({ "action": action })).unwrap(),
+            )
+            .await
+            .unwrap();
+            let intent = read_intent(&access, &session).await.unwrap().unwrap();
+            assert_eq!(intent.action, action);
+            clear_intent(&access, &session).await.unwrap();
+            assert!(read_intent(&access, &session).await.unwrap().is_none());
+        }
+        server.abort();
     }
 }

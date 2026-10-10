@@ -25,8 +25,6 @@ it when it starts. A command must not silently start a competing host.
 | --- | --- | --- |
 | `elastos`, `elastos home` | Managed user lane | Opens Home. `elastos home` starts or reuses the managed Home runtime. It does not attach to an operator runtime that already owns the same home. |
 | `elastos home --status`, `elastos home --json` | Self-contained | Reads and prints a Home-state probe. It does not start Home. |
-| `elastos chat` | Managed user lane | Reuses a healthy, version-matched managed Home runtime. Otherwise it starts a separate managed chat runtime with its narrower policy, or reuses that runtime when it is already active. It does not attach to an operator runtime. |
-| `elastos agent` | Operator lane | Attaches to the operator runtime. This applies to local, Venice, and Codex backends. |
 | `elastos run <path>` or `elastos run --cid <cid>`, `type=data` | Self-contained | Materializes the capsule, creates an in-process Runtime and preview server, opens the browser, and remains active until stopped. It does not attach to `elastos serve`. |
 | `elastos run <path>` or `elastos run --cid <cid>`, Component | Operator lane | Accepts only `type=wasm` with `runtime_abi="elastos.component/v1"`. It attaches to the operator runtime for Bus authorization, then executes the Component locally. |
 | `elastos run <path>` or `elastos run --cid <cid>`, microVM | Operator lane | Uses the operator runtime supervisor to launch and stop the microVM. |
@@ -113,7 +111,7 @@ local result.
 
 | Command family | Class | Included behavior |
 | --- | --- | --- |
-| Local room state | Self-contained | `elastos room show`, `elastos room pending`, `elastos room seed`, `elastos room invite`, `elastos room invite-export`, `elastos room invite-import`, `elastos room accept`, `elastos room accept-export`, `elastos room accept-import`, `elastos room approve`, `elastos room deny`, `elastos room reset` |
+| Local room state | Self-contained | `elastos room show`, `elastos room pending`, `elastos room approve`, `elastos room deny`, `elastos room reset` |
 | Local room gateway | Operator lane | `elastos room open` requires the room capsule and a live operator runtime. It asks that runtime to start the room gateway. |
 | Local node state | Self-contained | `elastos node info`, `elastos node peer add`, `elastos node peer list`, `elastos node peer remove` |
 | Remote node reads | Self-contained locally | `elastos node status`, `elastos node room show`, `elastos node room pending`. The target peer needs a reachable operator runtime and the matching allowlisted action. |

@@ -271,9 +271,7 @@ fn inbox_review_handoff_action(
         description: "Open Inbox on the Home Desktop to review this pending request.".to_string(),
         command: "home: open Inbox".to_string(),
         ready,
-        reason: (!ready).then(|| {
-            "Open Inbox from the Home Desktop to review this pending request.".to_string()
-        }),
+        reason: (!ready).then(|| "Open Inbox on the Desktop to answer this.".to_string()),
     })
 }
 
@@ -285,6 +283,9 @@ fn notification_action_uses_inbox_review(action_id: &str) -> bool {
         "capability-approve-request:",
         "inspect-approve-request:",
         "wallet-price-http-approve:",
+        "chat-open-direct:",
+        "service-approve-request:",
+        "service-deny-request:",
     ]
     .iter()
     .any(|prefix| action_id.starts_with(prefix))
@@ -352,7 +353,6 @@ fn home_action_state(action: &ActionInfo) -> &'static str {
 
 fn home_action_summary(action: &ActionInfo) -> &str {
     match action.id.as_str() {
-        "chat" => "Send a message and return home",
         "room-approve" => "Approve the next pending Chat web guest request",
         "room-deny" => "Deny the next pending Chat web guest request",
         "room-revoke-all" => "Disconnect active Chat web guest sessions",
@@ -362,7 +362,6 @@ fn home_action_summary(action: &ActionInfo) -> &str {
 
 fn action_display_label(action: &ActionInfo) -> &str {
     match action.id.as_str() {
-        "chat" => "Chat",
         "room-approve" => "Approve access",
         "room-deny" => "Deny access",
         "room-revoke-all" => "Disconnect browsers",
@@ -595,9 +594,6 @@ fn canonical_target_title(target: &str, title: &str) -> String {
 
 fn app_target_action_id(snapshot: &HomeSnapshot, target: &HomeTargetStatus) -> Option<String> {
     let target_id = target.target.as_str();
-    if target_id == "chat" && action_by_id(snapshot, "chat").is_some() {
-        return Some("chat".to_string());
-    }
     let explicit_open = format!("open-gui:{target_id}");
     action_by_id(snapshot, &explicit_open).map(|_| explicit_open)
 }

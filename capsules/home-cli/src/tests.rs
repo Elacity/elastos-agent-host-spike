@@ -873,14 +873,6 @@ fn sample_snapshot() -> HomeSnapshot {
         ],
         actions: vec![
             ActionInfo {
-                id: "chat".to_string(),
-                label: "Chat".to_string(),
-                description: String::new(),
-                command: "home: open Chat".to_string(),
-                ready: true,
-                reason: None,
-            },
-            ActionInfo {
                 id: "capsule-gba-ucity".to_string(),
                 label: "gba-ucity".to_string(),
                 description: "Bundled uCity demo cartridge".to_string(),
@@ -1424,7 +1416,7 @@ fn home_actions_stay_task_focused() {
         .into_iter()
         .map(|idx| snapshot.actions[idx].id.as_str())
         .collect();
-    assert_eq!(ids, vec!["chat"]);
+    assert!(ids.is_empty(), "{ids:?}");
 }
 
 #[test]
@@ -1434,12 +1426,6 @@ fn quit_action_switches_browser_pty_back_to_home_gui_only() {
 
     snapshot.session.mode = "native_terminal".to_string();
     assert_eq!(quit_action(&snapshot), "quit");
-}
-
-#[test]
-fn default_home_selection_activates_chat_on_first_enter() {
-    let state = TuiState::default();
-    assert_eq!(state.activate(&sample_snapshot()), Some("chat".to_string()));
 }
 
 #[test]
@@ -1476,26 +1462,24 @@ fn apps_use_runtime_targets_but_only_cli_native_or_explicit_open_entries_are_act
     assert!(!labels.contains(&"Full-screen Chat"));
     assert!(!labels.contains(&"Shared Conversation"));
 
-    let chat_index = labels.iter().position(|label| *label == "Chat").unwrap();
-    assert_eq!(
-        selected_app_action(&snapshot, chat_index).map(|action| action.id.as_str()),
-        Some("chat")
-    );
-    for read_only in ["Browser", "uCity", "GBA Emulator"] {
+    for read_only in ["Browser", "Chat", "uCity", "GBA Emulator"] {
         let index = labels.iter().position(|label| *label == read_only).unwrap();
         let entry = &entries[index];
         assert_eq!(entry.action_id, None);
         assert!(selected_app_action(&snapshot, index).is_none());
         assert!(entry.command.contains("Desktop"));
-        assert_eq!(
-            TuiState {
-                tab: Tab::Apps,
-                app_index: index,
-                ..TuiState::default()
-            }
-            .activate(&snapshot),
-            None
-        );
+        let state = TuiState {
+            tab: Tab::Apps,
+            app_index: index,
+            ..TuiState::default()
+        };
+        assert_eq!(state.activate(&snapshot), None);
+        if entry.category == "Apps" {
+            assert_eq!(
+                state.desktop_only_notice(&snapshot),
+                Some(format!("Open {read_only} on the Desktop"))
+            );
+        }
     }
     let gba_index = labels
         .iter()
@@ -1558,7 +1542,7 @@ fn quick_launch_only_includes_working_home_actions() {
         .into_iter()
         .map(|idx| snapshot.actions[idx].id.as_str())
         .collect();
-    assert_eq!(ids, vec!["chat"]);
+    assert!(ids.is_empty(), "{ids:?}");
 }
 
 #[test]
@@ -1602,7 +1586,10 @@ fn every_visible_default_menu_item_is_actionable_or_has_next_step() {
             );
         } else {
             assert!(
-                matches!(entry.state.as_str(), "gui-only" | "read-only" | "setup"),
+                matches!(
+                    entry.state.as_str(),
+                    "gui-only" | "read-only" | "setup" | "active"
+                ),
                 "read-only app must say why Enter will not launch it: {} [{}]",
                 entry.label,
                 entry.state
@@ -1618,7 +1605,7 @@ fn every_visible_default_menu_item_is_actionable_or_has_next_step() {
     }
 
     let screen = build_tui_screen(&snapshot, &TuiState::default(), 120, 40);
-    assert!(screen.contains("1 Chat [ready]"));
+    assert!(!screen.contains("Chat [ready]"));
     assert!(!screen.contains("Approve access [setup]"));
     assert!(screen.contains("Approve access: open Inbox and review the request first"));
     for hidden in [
@@ -1681,7 +1668,7 @@ fn pending_browser_access_surfaces_approval_actions_on_home() {
         .into_iter()
         .map(|idx| snapshot.actions[idx].id.as_str())
         .collect();
-    assert_eq!(ids, vec!["chat", "room-approve", "room-deny"]);
+    assert_eq!(ids, vec!["room-approve", "room-deny"]);
     let alerts = alerts_lines(&snapshot, 120, None);
     assert!(alerts
         .iter()
@@ -1718,7 +1705,7 @@ fn active_browser_sessions_surface_disconnect_action_on_home() {
         .into_iter()
         .map(|idx| snapshot.actions[idx].id.as_str())
         .collect();
-    assert_eq!(ids, vec!["chat", "room-revoke-all"]);
+    assert_eq!(ids, vec!["room-revoke-all"]);
 
     let alerts = alerts_lines(&snapshot, 120, None);
     assert!(alerts
@@ -2216,6 +2203,43 @@ fn stale_direct_request_stays_unavailable_in_inbox() {
 }
 
 #[test]
+fn live_direct_message_and_service_requests_hand_off_to_desktop_in_native_terminal() {
+    for action_id in [
+        "chat-open-direct:direct:sha256:abc",
+        "service-approve-request:req-1",
+        "service-deny-request:req-1",
+    ] {
+        let mut snapshot = sample_snapshot();
+        snapshot.session.mode = "native".to_string();
+        snapshot.notifications.entries = vec![NotificationEntryStatus {
+            id: "notice-1".to_string(),
+            source_app: "inbox".to_string(),
+            kind: "request".to_string(),
+            title: "Pending".to_string(),
+            body: "Someone is waiting.".to_string(),
+            action_ref: Some(NotificationActionRefStatus {
+                app: "inbox".to_string(),
+                action_id: action_id.to_string(),
+            }),
+            read: false,
+            severity: "attention".to_string(),
+        }];
+        let state = TuiState {
+            tab: Tab::Inbox,
+            ..TuiState::default()
+        };
+
+        let mut buf = String::new();
+        render_inbox_tab(&mut buf, &snapshot, &state, 120);
+        assert!(
+            buf.contains("Open Inbox on the Desktop to answer this."),
+            "{action_id}"
+        );
+        assert!(!buf.contains("no longer available"), "{action_id}");
+    }
+}
+
+#[test]
 fn tabs_keep_people_between_inbox_and_apps() {
     let mut state = TuiState::default();
     state.next_tab();
@@ -2249,8 +2273,8 @@ fn blocked_home_action_becomes_next_step_not_primary_action() {
         ..TuiState::default()
     };
 
-    assert_eq!(home_action_indices(&snapshot).len(), 1);
-    assert_eq!(state.activate(&snapshot), Some("chat".to_string()));
+    assert!(home_action_indices(&snapshot).is_empty());
+    assert_eq!(state.activate(&snapshot), None);
     assert!(
         !render_home_actions(&snapshot, &home_action_indices(&snapshot), 1, 120)
             .join("\n")
@@ -2407,7 +2431,7 @@ fn home_screen_stays_compact() {
     assert!(!screen.contains("-- Status --"));
     assert!(screen.starts_with("\x1b[H\x1b[J"));
     assert!(!screen.ends_with("\r\n"));
-    assert!(screen.contains("1 Chat [ready]"));
+    assert!(!screen.contains("Chat [ready]"));
     assert!(screen.contains("Next"));
     assert!(!screen.contains("Updates [ready]"));
     assert!(screen.contains("Up/Down select"));

@@ -474,28 +474,17 @@ def shutdown(master: int, proc: subprocess.Popen) -> None:
     finally:
         os.close(master)
 
-def run_chat_case(label: str, payload: bytes) -> None:
+def run_repeated_action_case() -> None:
+    # Two actions in a row must keep Home open (the second one used to quit
+    # with "provider localhost/delete failed [403 Forbidden]").
     master, proc = launch_pty()
     try:
-        read_until(label, master, lambda text: "ElastOS Home" in text, 10.0)
-        send(master, b"\r\n")
-        chat = read_until(
-            label,
-            master,
-            lambda text: "Chat #general as " in text,
-            20.0,
-        )
-        if "Press Enter again" in chat:
-            raise SystemExit(f"{label}: Chat still requires a second launch confirmation:\n{chat}")
-        send(master, payload, 0.5)
-        after_exit = read_until(
-            label,
-            master,
-            lambda text: "ElastOS Home" in text,
-            8.0,
-        )
-        if "ElastOS Home" not in after_exit:
-            raise SystemExit(f"{label}: exit input did not return Home:\n{after_exit}")
+        read_until("repeat", master, lambda text: "ElastOS Home" in text, 10.0)
+        for attempt in (1, 2):
+            send(master, b"r", 0.5)
+            screen = read_until("repeat", master, lambda text: "ElastOS Home" in text, 8.0)
+            if proc.poll() is not None or "ElastOS Home" not in screen or "Error:" in screen:
+                raise SystemExit(f"repeat: Home did not stay open after action {attempt}:\n{screen}")
     finally:
         shutdown(master, proc)
 
@@ -505,7 +494,7 @@ def run_navigation_case() -> None:
         initial = read_until(
             "nav",
             master,
-            lambda text: "\x1b[30;46;1m Home \x1b[0m" in text and "> 1 Chat [ready]" in text,
+            lambda text: "\x1b[30;46;1m Home \x1b[0m" in text,
             10.0,
         )
         if "\x1b[30;46;1m Home \x1b[0m" not in initial:
@@ -541,9 +530,7 @@ def run_navigation_case() -> None:
         shutdown(master, proc)
 
 run_navigation_case()
-run_chat_case("esc", b"\x1b")
-run_chat_case("home", b"/home\r")
-run_chat_case("quit", b"/quit\r")
+run_repeated_action_case()
 PY
 test -x "$INSTALLED_HOME_CLI_DIR/bin/home-cli"
 cmp "$HOME_CLI_RENDERER" "$INSTALLED_HOME_CLI_DIR/bin/home-cli"

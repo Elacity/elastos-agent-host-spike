@@ -9,6 +9,20 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 ### Changed
 
 - Setup installs one Home; it no longer prints options for other setups.
+- The terminal Home no longer quits with "403 Forbidden" after the first
+  action; you can run actions one after another.
+- The terminal Home no longer offers the old native Chat, which used a
+  different network from the Chat on the Desktop.
+- In the terminal Inbox, direct messages and service requests say "Open Inbox
+  on the Desktop to answer this" instead of "no longer available".
+- In the terminal Apps tab, Enter on an app that only opens on the Desktop
+  says "Open <App> on the Desktop" instead of doing nothing.
+- Publishing a document (Documents Publish and `elastos share`) works again:
+  it copied a viewer file from a place the Documents app does not ship (#128).
+
+### Removed
+
+- `elastos agent`. Its app was retired earlier and the command could not work.
 
 ### Developer detail
 
@@ -25,6 +39,21 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   pinned-model proof use `--with`.
 - `elastos update` and System Update stage this profile change normally; only
   the standalone frozen offline path refuses a `profiles` difference.
+- Home consumes `intent.json` by overwriting it with empty content instead of
+  deleting it; the session holds only read and write capabilities. A
+  regression test runs two intents against a provider that refuses delete.
+- The `chat` core action and `ManagedChat` launch are removed from Home.
+  `elastos chat` is hidden from help and kept only for the native chat smoke
+  scripts; People "Message" in the terminal still uses it.
+- `elastos agent`, `agent_cmd.rs` and the shell's `agent` command request are
+  removed. The `capsule` help, the serve banner, the first-run welcome and the
+  microVM publish hint (no `serve --forward` flag) name commands that exist.
+  `docs/COMMAND_MATRIX.md` drops `chat`, `agent` and seven nonexistent `room`
+  subcommands; GETTING_STARTED no longer suggests `elastos chat`.
+- Share bundles copy the viewer from its manifest `entrypoint`
+  (`browser/index.html` plus its assets) to the bundle root. The Documents
+  publish test installs the real `capsules/documents` layout and checks the
+  published file list.
 
 ## [0.8.0-alpha.13]
 

@@ -309,7 +309,7 @@ enum Tab {
 }
 
 const DEFAULT_TABS: &[Tab] = &[Tab::Home, Tab::Inbox, Tab::People, Tab::Apps, Tab::System];
-const HOME_ACTION_IDS: &[&str] = &["chat", "room-approve", "room-deny", "room-revoke-all"];
+const HOME_ACTION_IDS: &[&str] = &["room-approve", "room-deny", "room-revoke-all"];
 
 #[derive(Debug, Clone)]
 struct TuiState {
