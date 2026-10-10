@@ -41,8 +41,9 @@ test("Browser paints a status before scripts, through preparation and actionable
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
-  const browser = await chromium.launch({ headless: true });
+  let browser;
   try {
+    browser = await chromium.launch({ headless: true });
     for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
       const context = await browser.newContext({ viewport, javaScriptEnabled: false });
       const page = await context.newPage();
@@ -86,7 +87,7 @@ test("Browser paints a status before scripts, through preparation and actionable
     }
   } finally {
     releaseSummary();
-    await browser.close();
+    await browser?.close();
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
   }
