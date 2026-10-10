@@ -2555,6 +2555,7 @@ fn resolve_component_capsule_metadata_platform_info<'a>(
     resolve_platform_info_from_map(&component.platforms, platform)
 }
 
+// Mirrors RELEASE_PLATFORMS in scripts/components-release-integrity-check.py.
 fn platform_aliases(platform: &str) -> impl Iterator<Item = &'static str> {
     let aliases: &'static [&'static str] = match platform {
         "x86_64-linux" => &["linux-amd64"],
@@ -2563,6 +2564,8 @@ fn platform_aliases(platform: &str) -> impl Iterator<Item = &'static str> {
         "linux-arm64" => &["aarch64-linux"],
         "aarch64-darwin" => &["darwin-arm64"],
         "darwin-arm64" => &["aarch64-darwin"],
+        "x86_64-darwin" => &["darwin-amd64"],
+        "darwin-amd64" => &["x86_64-darwin"],
         _ => &[],
     };
     aliases.iter().copied()
@@ -7684,15 +7687,22 @@ pub(crate) mod tests {
             (serde_json::json!({}), false),
             (serde_json::json!({"strategy":"unknown"}), false),
         ] {
-            let manifest = serde_json::from_value(serde_json::json!({
-                "external":{"fixture":{"platforms":{"aarch64-linux":info}}}, "profiles":{}
-            }))
-            .unwrap();
-            assert_eq!(
-                admit_release_components(&manifest, "linux-arm64").is_ok(),
-                accepted
-            );
-            assert!(admit_release_components(&manifest, "darwin-arm64").is_ok());
+            for (key, platform) in [
+                ("aarch64-linux", "linux-arm64"),
+                ("aarch64-darwin", "darwin-arm64"),
+                ("x86_64-darwin", "darwin-amd64"),
+            ] {
+                let manifest = serde_json::from_value(serde_json::json!({
+                    "external":{"fixture":{"platforms":{key:info.clone()}}}, "profiles":{}
+                }))
+                .unwrap();
+                assert_eq!(
+                    admit_release_components(&manifest, platform).is_ok(),
+                    accepted,
+                    "{platform}"
+                );
+                assert!(admit_release_components(&manifest, "linux-amd64").is_ok());
+            }
         }
     }
 
