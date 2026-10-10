@@ -27,12 +27,15 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   ended as a `Provider` error at 78.7% sent the next Retry back to 0%.
 - Assistant lists a Runtime-admitted model offer (`model:<sha256>`) only through
   its catalogue row (title and CID); `liveMenuOffers()` leaves it out of the raw
-  offer rows, which could not be chosen anyway. While such an offer is listed
-  but its catalogue row is not yet bound to it (`dispatch_ready: false`, for
-  example the first read after activation), `agent-live.js` reads the catalogue
-  again every 3 s, at most 10 times. Every probe result is published as
-  `assistant:live-models`, and the harness updates the chip and an open menu
-  from it; before, an open menu kept the earlier read while the chip changed.
+  offer rows, which could not be chosen anyway. While Assistant is open
+  (`watchLiveModels`), `agent-live.js` reads the catalogue again every 3 s when
+  such an offer is listed but its catalogue row is not yet bound to it
+  (`dispatch_ready: false`, for example the first read after activation), at
+  most 10 times, and while a model downloads with nothing selectable. One timer
+  serves both, it skips while a read is in flight, and closing Assistant stops
+  it. Every probe result is published as `assistant:live-models`; the harness
+  updates the chip and an open menu from it, keeping keyboard focus on a row or
+  menu action. Before, an open menu kept the earlier read while the chip changed.
 
 ## [0.8.0-alpha.15]
 

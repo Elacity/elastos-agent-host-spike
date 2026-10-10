@@ -42,10 +42,11 @@ const PROBE_TTL_MS = 15000;
    binding; such an offer is a choice only through its catalog row. */
 const ADMITTED_OFFER_ID = /^model:[0-9a-f]{64}$/;
 
-/** An admitted model can be advertised before its catalog row is bound to its
-   offer (just after Get, or when a catalog read fails). The catalog is read
-   again this often, a bounded number of times, so its row and title appear. */
-const CATALOG_JOIN_RETRY_MS = 3000;
+/** While Assistant is open, the catalog is read again this often when a model
+   downloads and nothing is selectable yet (progress), or when an admitted
+   model is advertised before its catalog row is bound to its offer (just after
+   Get, or after a failed catalog read). The second case is bounded. */
+const LIVE_REFRESH_MS = 3000;
 const CATALOG_JOIN_RETRIES = 10;
 
 /** PRINCIPLES-safe default — no tools, no capsule authority (UI ≠ authority). */
@@ -100,24 +101,39 @@ let liveState = {
 
 let probePromise = null;
 let probeEpoch = 0;
-let catalogJoinTimer = null;
+let watchingLiveModels = false;
+let liveRefreshTimer = null;
 let catalogJoinRetries = 0;
 
-/** Every probe result is published: the chip and an open menu follow it, and an
-   admitted offer still missing its catalog row schedules the next read. */
+/** Assistant open: re-read as described at LIVE_REFRESH_MS. Closed: no timer
+   runs and a probe still in flight schedules none when it lands. */
+export function watchLiveModels(on) {
+  watchingLiveModels = Boolean(on);
+  catalogJoinRetries = 0;
+  scheduleLiveRefresh();
+}
+
+/** One timer for both re-reads, and none while a probe is already in flight. */
+function scheduleLiveRefresh() {
+  clearTimeout(liveRefreshTimer);
+  liveRefreshTimer = null;
+  const pending = liveCatalogPending();
+  if (!pending) catalogJoinRetries = 0;
+  if (!watchingLiveModels) return;
+  const downloading = !selectedLiveOffer() && liveDownloadingModel();
+  const joining = pending && catalogJoinRetries < CATALOG_JOIN_RETRIES;
+  if (!downloading && !joining) return;
+  if (pending) catalogJoinRetries += 1;
+  liveRefreshTimer = setTimeout(() => {
+    liveRefreshTimer = null;
+    if (watchingLiveModels && !liveState.checking) void probeLiveInference({ force: true });
+  }, LIVE_REFRESH_MS);
+}
+
+/** Every probe result is published: the chip and an open menu follow it. */
 function publishLiveState(next) {
   liveState = next;
-  clearTimeout(catalogJoinTimer);
-  catalogJoinTimer = null;
-  if (!liveCatalogPending()) {
-    catalogJoinRetries = 0;
-  } else if (catalogJoinRetries < CATALOG_JOIN_RETRIES) {
-    catalogJoinRetries += 1;
-    catalogJoinTimer = setTimeout(() => {
-      catalogJoinTimer = null;
-      void probeLiveInference({ force: true });
-    }, CATALOG_JOIN_RETRY_MS);
-  }
+  scheduleLiveRefresh();
   window.dispatchEvent(new CustomEvent("assistant:live-models"));
 }
 

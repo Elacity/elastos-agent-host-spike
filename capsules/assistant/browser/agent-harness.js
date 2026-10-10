@@ -85,6 +85,7 @@ import {
   liveDownloadingModel,
   liveMenuOffers,
   liveCatalogPending,
+  watchLiveModels,
 } from "./agent-live.js";
 import {
   bindAgentSessions,
@@ -715,17 +716,13 @@ function closeModelMenu() {
   if (returnFocus) anchor?.focus({ preventScroll: true });
 }
 
-// While a model downloads, re-read the catalog so the progress stays current.
-// The published result updates the chip and an open menu.
-const DOWNLOAD_REFRESH_MS = 3000;
-let downloadRefreshTimer = 0;
-function scheduleDownloadRefresh(downloading) {
-  if (!downloading || downloadRefreshTimer) return;
-  downloadRefreshTimer = setTimeout(() => {
-    downloadRefreshTimer = 0;
-    void probeLiveInference({ force: true });
-  }, DOWNLOAD_REFRESH_MS);
-}
+// Every published probe (boot, open, Refresh, a re-read, a send) updates the
+// chip and an open menu, so neither keeps an older read.
+window.addEventListener("assistant:live-models", () => {
+  if (!active) return;
+  syncModelTrigger();
+  if (modelMenuOpen()) renderModelMenu();
+});
 
 function syncModelTrigger() {
   syncAgentSendButton();
@@ -744,7 +741,6 @@ function syncModelTrigger() {
   if (name) {
     name.textContent = label;
   }
-  scheduleDownloadRefresh(Boolean(downloading));
   if (tier) {
     tier.textContent = "";
     tier.hidden = true;
@@ -848,6 +844,7 @@ function buildInstalledModelRows(host, emptyText) {
   ]) {
     const button = document.createElement("button");
     button.type = "button"; button.className = "agent-model-option";
+    button.id = `agent-model-action-${action}`;
     button.dataset.modelAction = action; button.textContent = label;
     host.append(button);
   }
@@ -859,7 +856,8 @@ function renderModelMenu() {
   if (!listHost) {
     return;
   }
-  // A published probe can re-render an open menu; keyboard focus stays on its row.
+  // A published probe can re-render an open menu; keyboard focus stays on its
+  // row or action, which keep their ids.
   const focused = modelMenuEl()?.contains(document.activeElement) ? document.activeElement.id : "";
   buildInstalledModelRows(listHost, "No model offer on this Home yet.");
   if (focused) document.getElementById(focused)?.focus({ preventScroll: true });
@@ -1004,6 +1002,7 @@ export function showAgentHarness({
 
   /* Already open (e.g. Agent button while harness visible) — keep room, optional send. */
   if (active && !prompt) {
+    watchLiveModels(true);
     harness.classList.add("is-visible");
     if (syncStage && !isAgentSpace(getActiveStageId())) {
       setActiveStage(agentStageId(), {
@@ -1044,6 +1043,7 @@ export function showAgentHarness({
 
   const motionGen = (harnessMotionGen += 1);
   active = true;
+  watchLiveModels(true);
   closeHarnessDrawer();
   document.body.classList.add("agent-harness-active");
   if (!prefersReducedMotion()) {
@@ -1164,6 +1164,7 @@ export function hideAgentHarness({ syncStage = true } = {}) {
   stopAgentStream({ keepPartial: true, cancelRun: false });
   stopParticles();
   active = false;
+  watchLiveModels(false);
   closeHarnessDrawer();
   closeSessionSearch();
   closeModelMenu();
@@ -1318,13 +1319,6 @@ export function bindAgentHarness() {
   ensureAgentWorkspaceHydrated();
   window.addEventListener("online", () => {
     void probeLiveInference({ force: true });
-  });
-  // Every published probe (boot, open, Refresh, a catalog re-read, a send)
-  // updates the chip and an open menu, so neither keeps an older read.
-  window.addEventListener("assistant:live-models", () => {
-    if (!active) return;
-    syncModelTrigger();
-    if (modelMenuOpen()) renderModelMenu();
   });
 
   /* Contract era: real probe — live flips only on offers_list truth (§AL.3). */
