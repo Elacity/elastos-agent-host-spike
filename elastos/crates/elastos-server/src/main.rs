@@ -1168,6 +1168,17 @@ pub(crate) enum IdentityCommand {
         #[arg(long, default_value_t = 300)]
         expires_in: u64,
     },
+    /// Let the owner of this Home, who lost every passkey, recover it with
+    /// their Recovery Kit and a new passkey (shows a one-time code)
+    ArmOwnerRecovery {
+        /// Exact Home address, e.g. https://home.example or http://localhost:61965
+        #[arg(long)]
+        origin: String,
+        #[arg(long)]
+        rp_id: String,
+        #[arg(long, default_value_t = 600)]
+        expires_in: u64,
+    },
     /// Manage the profile nickname
     #[command(subcommand)]
     Nickname(IdentityNicknameCommand),

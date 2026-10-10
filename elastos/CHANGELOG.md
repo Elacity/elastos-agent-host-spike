@@ -22,6 +22,19 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Fixed
 
+- Importing your Recovery Kit with a new passkey now keeps your admin role.
+  Before, an owner who added a guest passkey and imported their Kit stayed a
+  guest, and the Home was left with no admin. Recovery now also refuses any
+  import that would leave the Home without an admin passkey, and any Kit that
+  was not made on this Home for that person: knowing someone's account id is
+  no longer enough to take over their account with a home-made Kit.
+
+- An owner who lost every passkey can now recover their Home with their
+  Recovery Kit, even when guest accounts are off. Before, the sign-in screen
+  offered no way back. Run `elastos identity arm-owner-recovery` on the computer
+  that runs Home, then choose "Recover this Home with your Recovery Kit" on the
+  sign-in screen and enter the code it shows.
+
 - A model download that stopped with "Model content could not be read" now
   continues from where it stopped when you press Retry. Before, Retry started
   the download again from 0%.
@@ -87,6 +100,34 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   trusted key to start. The updater is the earlier release's code, so the new
   Runtime applies this on its first start and leaves `config.toml` unchanged;
   an Undo to an earlier Runtime still finds the setting it started with.
+- `commit_recovered_root_reassignment` sets the importer's role inside the
+  same auth-state mutation: Admin if the importer or any replaced record of the
+  recovered principal or root was Admin, otherwise Guest. The commit fails, with
+  auth state unchanged, if no active admin passkey would remain. (#88)
+  Reassignment also requires that, when this Home already knows the recovered
+  principal or root, a stored `principal_root_protections` entry for that exact
+  principal/root has the Kit's `data_key_id` (the Kit unwraps the same data
+  key). The import route checks this before deriving keys, activating
+  protection or creating the recovery archive key, so a refusal writes only
+  the denial audit event. The Kit's archive is sealed inside the commit's auth
+  lock; if this commit created the recovery archive key and the auth file on
+  disk does not reference the new archive after a failure, the key is removed.
+- New `elastos identity arm-owner-recovery --origin --rp-id [--expires-in ≤900]`
+  stores the digest of a one-time code (`AuthState.owner_recovery`); the Home
+  must already have an admin. `POST /api/auth/owner-recovery/begin` and
+  `/complete` (header `x-elastos-owner-recovery`) register a passkey only when,
+  in one auth write, the code matches (constant-time), has not expired, and the
+  presented Kit belongs to an existing Admin record whose stored root protection
+  has the Kit's `data_key_id`. That write replaces the admin's records, revokes
+  their sessions, binds the new passkey as Admin, consumes the code and audits
+  `auth.owner.recovered`. Both routes share the passkey-registration rate
+  limit, and each checks the code (armed, unexpired, constant-time match)
+  before any password derivation or Kit work; an unarmed or expired Home
+  refuses without writing, and the fifth wrong code burns the armed code. A Kit
+  refusal leaves auth state and the credential store unchanged. The credential
+  is written just before the auth write; a crash between them leaves an orphan
+  credential that a retry with the same passkey reconciles. (#88)
+
 - Model preparation keeps its stage after any `MetadataRead`, `WeightsRead` or
   `Capacity` failure, not only after a read typed as in transit (`Io`). A part
   that a holder refuses or answers malformed is rejected before it is written,

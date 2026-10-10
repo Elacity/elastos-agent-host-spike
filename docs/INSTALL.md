@@ -380,8 +380,22 @@ Passkeys control sign-in. Locking Home stops UI use; the Runtime account and roo
 retain access to stored data and keys. The protection target covers hosted
 operators and root, and other software or OS users while a self-hosted Home is
 locked. An unlocked self-hosted Home trusts its owner and their host software.
-Recovery can restore lost access with valid recovery material. A stolen device
-or profile key requires a new identity.
+A stolen device or profile key requires a new identity.
+
+Lost every passkey? Your Recovery Kit brings your account back on the same
+Home, even when guest accounts are off:
+
+1. On the computer that runs Home, as the user who installed it, run
+   `elastos identity arm-owner-recovery --origin <Home address> --rp-id <host>`,
+   for example `--origin http://localhost:61965 --rp-id localhost`. It prints a
+   code that works once and expires in 10 minutes.
+2. On the Home sign-in screen, choose **Recover this Home with your Recovery
+   Kit**. Enter the code, choose your Recovery Kit (and its password, if it has
+   one), then create a new passkey.
+3. Home accepts only the Recovery Kit this Home saved for its admin. The new
+   passkey becomes the admin and the old passkey stops working. Any other Kit,
+   an expired code or a used code changes nothing. After five wrong codes the
+   code stops working; run the command again for a new one.
 
 ## Capability policy
 

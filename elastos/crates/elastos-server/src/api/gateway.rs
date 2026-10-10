@@ -638,6 +638,14 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
                 .layer(DefaultBodyLimit::max(96 * 1024)),
         )
         .route(
+            "/api/auth/owner-recovery/begin",
+            post(super::auth_gateway::owner_recovery_begin),
+        )
+        .route(
+            "/api/auth/owner-recovery/complete",
+            post(super::auth_gateway::owner_recovery_complete),
+        )
+        .route(
             "/api/auth/passkey/authenticate/begin",
             post(super::auth_gateway::passkey_authenticate_begin),
         )
