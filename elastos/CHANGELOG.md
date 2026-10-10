@@ -6,6 +6,12 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Security
+
+- Another computer connecting to yours can no longer tie it up by sending an
+  endless or very slow request. Requests longer than 64 KiB are refused and a
+  request that is not complete within 10 seconds is dropped.
+
 ### Fixed
 
 - A model download that stopped with "Model content could not be read" now
@@ -18,6 +24,11 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Developer detail
 
+- `carrier.rs` reads peer lines through `read_peer_line`, which reads through
+  `take(max + 1)` under a timeout: `handle_file_stream` uses 64 KiB / 10 s;
+  `release_head` and the two control-reply reads use 1 MiB /
+  `DOWNLOAD_HEADER_WAIT`. Closes the Carrier half of the SECURITY.md framing
+  item; the I/O bridge half stays open.
 - Model preparation keeps its stage after any `MetadataRead`, `WeightsRead` or
   `Capacity` failure, not only after a read typed as in transit (`Io`). A part
   that a holder refuses or answers malformed is rejected before it is written,

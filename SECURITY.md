@@ -71,17 +71,15 @@ a capsule capability-token field. Runtime owns admission for this trusted
 provider class. Its trust boundary must remain explicit in manifests and audit
 output; the envelope is not an independent grant of capsule authority.
 
-### Request framing remains incompletely bounded
+### I/O bridge line reads are not bounded while reading
 
-**Files:** `elastos/crates/elastos-server/src/carrier.rs`, `elastos/crates/elastos-runtime/src/handler/io_bridge.rs`
+**Files:** `elastos/crates/elastos-runtime/src/handler/io_bridge.rs`
 **Status:** Open
 
-The incoming Carrier request handler reads a line before parsing without a
-request-size cap or read deadline at that boundary. The I/O bridge rejects
-complete lines above 1 MiB, but its line readers allocate before that check.
-Size checks after reading do not bound memory use or an incomplete frame's
-lifetime. Add bounds while reading, with oversized and slow-frame tests;
-the Carrier integration task is tracked in [deferred work](docs/DEFERRED_WORK.md#retained-source-integration).
+The I/O bridge rejects complete lines above 1 MiB, but its line readers
+allocate before that check. Size checks after reading do not bound memory use
+or an incomplete frame's lifetime. Add bounds while reading, with oversized
+and slow-frame tests.
 
 ## Resolved Findings
 
@@ -96,6 +94,16 @@ These findings are resolved in source but remain listed as security history beca
 The I/O bridge rejects complete request lines above 1 MiB before parsing. The
 old `carrier_bridge.rs` has been removed. This resolved parse-size check does
 not close the read-time framing gap above.
+
+### Carrier peer line reads
+
+**Files:** `elastos/crates/elastos-server/src/carrier.rs`
+**Status:** Fixed
+
+Incoming Carrier requests are read with a 64 KiB line cap and a 10 second
+deadline; longer lines are refused before they are buffered and stalled peers
+are dropped. Peer replies to release-head and control requests are capped at
+1 MiB and the download header wait.
 
 ## Architecture
 

@@ -142,6 +142,29 @@ const GOSSIP_CARRIER_PUSH_MAX_TOPIC_LEN: usize = 256;
 // Maximum complete JSON GossipMessage admitted to the iroh-gossip wire.
 const GOSSIP_WIRE_MESSAGE_MAX_BYTES: usize = 192 * 1024;
 const CARRIER_BOUNDED_INVOKE_MAX_RESPONSE_BYTES: u64 = 128 * 1024;
+/// Largest request line a peer may send to the file-stream handler.
+const CARRIER_PEER_LINE_MAX_BYTES: u64 = 64 * 1024;
+/// Largest reply line read back from a peer on control requests.
+const CARRIER_PEER_REPLY_MAX_BYTES: u64 = 1024 * 1024;
+/// How long a peer may take to send one complete line.
+const CARRIER_PEER_LINE_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 10 });
+
+/// Read one newline-terminated line from a peer, refusing lines longer than
+/// `max` bytes before they are buffered and peers that stall past `wait`.
+async fn read_peer_line<R>(reader: &mut R, max: u64, wait: Duration) -> Result<String>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut line = String::new();
+    let mut limited = reader.take(max + 1);
+    let read = tokio::time::timeout(wait, limited.read_line(&mut line))
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("Carrier peer did not send a complete line within {wait:?}")
+        })??;
+    anyhow::ensure!(read as u64 <= max, "Carrier peer line exceeds {max} bytes");
+    Ok(line)
+}
 const GOSSIP_TOPIC_BUFFER_MAX_BYTES: usize = 12 * 1024 * 1024;
 const GOSSIP_CURSOR_MAX_CONSUMER_ID_BYTES: usize = 128;
 const GOSSIP_PEEK_MAX_MESSAGES: usize = 256;
@@ -1672,8 +1695,12 @@ async fn handle_file_stream(
     source_endpoint_id: iroh::PublicKey,
 ) -> Result<()> {
     let mut reader = BufReader::new(recv);
-    let mut line = String::new();
-    reader.read_line(&mut line).await?;
+    let line = read_peer_line(
+        &mut reader,
+        CARRIER_PEER_LINE_MAX_BYTES,
+        CARRIER_PEER_LINE_WAIT,
+    )
+    .await?;
 
     let msg: CarrierMessage = serde_json::from_str(line.trim())?;
 
@@ -8344,8 +8371,12 @@ impl CarrierClient {
         send.write_all(&bytes).await?;
         send.finish()?;
         let mut reader = BufReader::new(recv);
-        let mut line = String::new();
-        reader.read_line(&mut line).await?;
+        let line = read_peer_line(
+            &mut reader,
+            CARRIER_PEER_REPLY_MAX_BYTES,
+            DOWNLOAD_HEADER_WAIT,
+        )
+        .await?;
         let resp: serde_json::Value = serde_json::from_str(line.trim())?;
         if resp["ok"].as_bool() == Some(true) {
             Ok(Some(resp["release"].clone()))
@@ -8525,8 +8556,12 @@ impl CarrierClient {
         send.finish()?;
 
         let mut reader = BufReader::new(recv);
-        let mut line = String::new();
-        reader.read_line(&mut line).await?;
+        let line = read_peer_line(
+            &mut reader,
+            CARRIER_PEER_REPLY_MAX_BYTES,
+            DOWNLOAD_HEADER_WAIT,
+        )
+        .await?;
         let response: serde_json::Value = serde_json::from_str(line.trim())?;
         if response.get("ok").and_then(|value| value.as_bool()) == Some(true) {
             return Ok(());
@@ -8559,8 +8594,12 @@ impl CarrierClient {
         send.finish()?;
 
         let mut reader = BufReader::new(recv);
-        let mut line = String::new();
-        reader.read_line(&mut line).await?;
+        let line = read_peer_line(
+            &mut reader,
+            CARRIER_PEER_REPLY_MAX_BYTES,
+            DOWNLOAD_HEADER_WAIT,
+        )
+        .await?;
         let response: serde_json::Value = serde_json::from_str(line.trim())?;
         if response.get("ok").and_then(|value| value.as_bool()) != Some(true) {
             let message = response
@@ -8695,6 +8734,60 @@ pub(crate) mod tests {
 
     fn authenticated_test_source_endpoint() -> iroh::PublicKey {
         iroh::SecretKey::from_bytes(&[42u8; 32]).public()
+    }
+
+    #[tokio::test]
+    async fn peer_line_reader_refuses_oversized_line_without_buffering_it() {
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            // Far more than the cap and never terminated.
+            let chunk = vec![b'a'; 4096];
+            for _ in 0..1024 {
+                if writer.write_all(&chunk).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let mut reader = BufReader::new(reader);
+        let err = read_peer_line(
+            &mut reader,
+            CARRIER_PEER_LINE_MAX_BYTES,
+            CARRIER_PEER_LINE_WAIT,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("exceeds"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn peer_line_reader_times_out_stalled_peer() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        writer.write_all(b"{\"op\":").await.unwrap();
+        let mut reader = BufReader::new(reader);
+        let err = read_peer_line(
+            &mut reader,
+            CARRIER_PEER_LINE_MAX_BYTES,
+            CARRIER_PEER_LINE_WAIT,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("did not send"), "{err}");
+        drop(writer);
+    }
+
+    #[tokio::test]
+    async fn peer_line_reader_accepts_line_within_cap() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        writer.write_all(b"{\"op\":\"ping\"}\n").await.unwrap();
+        let mut reader = BufReader::new(reader);
+        let line = read_peer_line(
+            &mut reader,
+            CARRIER_PEER_LINE_MAX_BYTES,
+            CARRIER_PEER_LINE_WAIT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(line, "{\"op\":\"ping\"}\n");
     }
 
     fn overlong_did(did: &str) -> String {
