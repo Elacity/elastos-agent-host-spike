@@ -656,6 +656,118 @@ pub async fn passkey_authenticate_complete(
     }
 }
 
+const OWNER_RECOVERY_HEADER: &str = "x-elastos-owner-recovery";
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerRecoveryCompleteRequest {
+    pub ceremony_id: String,
+    pub response: RegistrationResponse,
+    #[serde(default)]
+    pub bundle: Option<Value>,
+    #[serde(default)]
+    pub package: Option<Value>,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+fn owner_recovery_code(headers: &HeaderMap) -> anyhow::Result<zeroize::Zeroizing<String>> {
+    let code = headers
+        .get(OWNER_RECOVERY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .ok_or(crate::auth::OwnerEnrollmentDenied)?;
+    Ok(zeroize::Zeroizing::new(code.to_string()))
+}
+
+/// Sign-in screen: start a passkey for an operator-armed owner recovery.
+pub async fn owner_recovery_begin(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+) -> Response {
+    match owner_recovery_begin_inner(&state, &headers).await {
+        Ok(response) => Json(response).into_response(),
+        Err(err) => auth_error_response(err),
+    }
+}
+
+async fn owner_recovery_begin_inner(
+    state: &GatewayState,
+    headers: &HeaderMap,
+) -> anyhow::Result<PasskeyBeginResponse<CreationOptions>> {
+    let ceremony_id = format!("passkey:owner-recovery:{}", random_hex(16));
+    let rp = super::handlers::identity::derive_rp(headers)?;
+    let code = owner_recovery_code(headers)?;
+    let manager = state.identity_manager()?;
+    let mut manager = manager.lock().await;
+    let options = crate::auth::begin_owner_recovery(
+        &state.data_dir,
+        &mut manager,
+        &crate::auth::OwnerRecoveryClient {
+            origin: &rp.origin,
+            rp_id: &rp.id,
+            code: &code,
+        },
+        &ceremony_id,
+    )?;
+    Ok(PasskeyBeginResponse {
+        schema: "elastos.auth.passkey.register.begin/v1".into(),
+        ceremony_id,
+        options,
+        guest_client_cookie: None,
+    })
+}
+
+/// Sign-in screen: bind the new passkey to the admin's Recovery Kit.
+pub async fn owner_recovery_complete(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Json(input): Json<OwnerRecoveryCompleteRequest>,
+) -> Response {
+    match owner_recovery_complete_inner(&state, &headers, input).await {
+        Ok(response) => passkey_verified_response(&headers, response),
+        Err(err) => auth_error_response(err),
+    }
+}
+
+async fn owner_recovery_complete_inner(
+    state: &GatewayState,
+    headers: &HeaderMap,
+    input: OwnerRecoveryCompleteRequest,
+) -> anyhow::Result<PasskeyVerifyResponse> {
+    let rp = super::handlers::identity::derive_rp(headers)?;
+    let code = owner_recovery_code(headers)?;
+    let bundle = full_recovery_bundle_from_parts(
+        input.bundle.as_ref(),
+        input.package.as_ref(),
+        input.password.as_deref(),
+    )
+    .map_err(|_| crate::auth::OwnerEnrollmentDenied)?;
+    let kit: RecoveryKitV1 = serde_json::from_value(
+        bundle
+            .get("data_kit")
+            .cloned()
+            .ok_or(crate::auth::OwnerEnrollmentDenied)?,
+    )?;
+    let manager = state.identity_manager()?;
+    let mut manager = manager.lock().await;
+    let grant = crate::auth::complete_owner_recovery(
+        &state.data_dir,
+        &mut manager,
+        &crate::auth::OwnerRecoveryClient {
+            origin: &rp.origin,
+            rp_id: &rp.id,
+            code: &code,
+        },
+        &input.ceremony_id,
+        &input.response,
+        &kit,
+    )?;
+    drop(manager);
+    passkey_response_for_grant(state, grant)
+}
+
 pub async fn revoke_session(
     State(state): State<GatewayState>,
     Path(session_id): Path<String>,
@@ -1725,19 +1837,26 @@ async fn full_recovery_bundle_import_inner(
 fn full_recovery_bundle_from_import_request(
     input: &FullRecoveryBundleImportRequest,
 ) -> anyhow::Result<Value> {
-    if input.bundle.is_some() == input.package.is_some() {
+    full_recovery_bundle_from_parts(
+        input.bundle.as_ref(),
+        input.package.as_ref(),
+        input.password.as_deref(),
+    )
+}
+
+fn full_recovery_bundle_from_parts(
+    bundle: Option<&Value>,
+    package: Option<&Value>,
+    password: Option<&str>,
+) -> anyhow::Result<Value> {
+    if bundle.is_some() == package.is_some() {
         anyhow::bail!("import exactly one full recovery bundle or package");
     }
-    if let Some(bundle) = input.bundle.as_ref() {
+    if let Some(bundle) = bundle {
         return Ok(bundle.clone());
     }
-    let package = input
-        .package
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("missing full recovery bundle package"))?;
-    let password = input
-        .password
-        .as_deref()
+    let package = package.ok_or_else(|| anyhow::anyhow!("missing full recovery bundle package"))?;
+    let password = password
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("full recovery bundle password is required"))?;
@@ -2555,15 +2674,6 @@ async fn recovery_kit_import_inner(
             &candidate_data_key,
             &protected_object_inventory,
         )?;
-    let archive = crate::auth::recovery_archive_from_kit(&state.data_dir, &kit)?;
-    let recovery_protector = protection
-        .protectors
-        .iter_mut()
-        .find(|protector| {
-            protector.kind == elastos_runtime::auth::PrincipalRootProtectorKind::RecoveryKit
-        })
-        .ok_or_else(|| anyhow::anyhow!("candidate protection has no Recovery Kit protector"))?;
-    recovery_protector.archive = Some(archive);
     if let Some(protector) = verified_did_recovery_protector {
         protection.protectors.push(protector);
     }
@@ -2614,6 +2724,7 @@ async fn recovery_kit_import_inner(
                 recovered_principal_id: kit.principal_id.clone(),
                 recovered_localhost_root: kit.localhost_root.clone(),
                 protection,
+                kit: kit.clone(),
                 replacement_grant: grant,
                 signed_audit_event,
                 updated_at: now,
@@ -2642,6 +2753,7 @@ async fn recovery_kit_import_inner(
         });
     }
 
+    crate::auth::attach_recovery_archive(&state.data_dir, &mut protection, &kit)?;
     crate::auth::store_principal_root_protection(&state.data_dir, protection)?;
     crate::auth::append_audit_event(
         &state.data_dir,

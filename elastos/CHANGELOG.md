@@ -15,6 +15,12 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   was not made on this Home for that person: knowing someone's account id is
   no longer enough to take over their account with a home-made Kit.
 
+- An owner who lost every passkey can now recover their Home with their
+  Recovery Kit, even when guest accounts are off. Before, the sign-in screen
+  offered no way back. Run `elastos identity arm-owner-recovery` on the computer
+  that runs Home, then choose "Recover this Home with your Recovery Kit" on the
+  sign-in screen and enter the code it shows.
+
 - A model download that stopped with "Model content could not be read" now
   continues from where it stopped when you press Retry. Before, Retry started
   the download again from 0%.
@@ -34,7 +40,19 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   principal/root has the Kit's `data_key_id` (the Kit unwraps the same data
   key). The import route checks this before deriving keys, activating
   protection or creating the recovery archive key, so a refusal writes only
-  the denial audit event.
+  the denial audit event. The Kit's archive is sealed inside the commit's auth
+  lock; if this commit created the recovery archive key and then fails, the key
+  is removed.
+- New `elastos identity arm-owner-recovery --origin --rp-id [--expires-in ≤900]`
+  stores the digest of a one-time code (`AuthState.owner_recovery`); the Home
+  must already have an admin. `POST /api/auth/owner-recovery/begin` and
+  `/complete` (header `x-elastos-owner-recovery`) register a passkey only when,
+  in one auth write, the code matches (constant-time), has not expired, and the
+  presented Kit belongs to an existing Admin record whose stored root protection
+  has the Kit's `data_key_id`. That write replaces the admin's records, revokes
+  their sessions, binds the new passkey as Admin, consumes the code and audits
+  `auth.owner.recovered`. Any refusal leaves auth state and the credential store
+  unchanged. (#88)
 
 - Model preparation keeps its stage after any `MetadataRead`, `WeightsRead` or
   `Capacity` failure, not only after a read typed as in transit (`Io`). A part

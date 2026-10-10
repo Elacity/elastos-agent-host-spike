@@ -779,6 +779,8 @@ pub struct AuthState {
     owner_enrollment: Option<OwnerEnrollment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     guest_registrations: Vec<GuestRegistration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_recovery: Option<OwnerRecovery>,
     #[serde(default)]
     pub challenges: Vec<StoredAuthChallenge>,
     #[serde(default)]
@@ -805,6 +807,7 @@ impl Default for AuthState {
             schema: AUTH_STATE_SCHEMA.to_string(),
             owner_enrollment: None,
             guest_registrations: Vec::new(),
+            owner_recovery: None,
             challenges: Vec::new(),
             principals: Vec::new(),
             sessions: Vec::new(),
@@ -832,6 +835,16 @@ struct OwnerEnrollment {
     expires_at: u64,
     public: bool,
     phase: OwnerEnrollmentPhase,
+}
+
+/// One operator-armed owner recovery code; only its digest is stored.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnerRecovery {
+    origin: String,
+    rp_id: String,
+    secret_digest: [u8; 32],
+    expires_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1313,6 +1326,257 @@ pub fn arm_owner_enrollment(
         Ok(())
     })?;
     Ok(secret)
+}
+
+/// Local operator command for a Home whose owner lost every passkey. The
+/// returned code is shown once on the operator's terminal; only its digest is
+/// stored. The code lets one new passkey register, and that passkey only
+/// exists if the same commit imports the Recovery Kit of this Home's admin.
+pub fn arm_owner_recovery(
+    data_dir: &Path,
+    origin: &str,
+    rp_id: &str,
+    ttl_secs: u64,
+) -> anyhow::Result<zeroize::Zeroizing<String>> {
+    let origin_url = url::Url::parse(origin).map_err(|_| OwnerEnrollmentDenied)?;
+    let loopback = matches!(origin_url.host_str(), Some("localhost" | "127.0.0.1"));
+    if origin.len() > 512
+        || rp_id.len() > 253
+        || !(origin_url.scheme() == "https" || origin_url.scheme() == "http" && loopback)
+        || origin_url.origin().ascii_serialization() != origin
+        || origin_url.host_str() != Some(rp_id)
+        || ttl_secs == 0
+        || ttl_secs > 900
+    {
+        anyhow::bail!("use the exact Home address, for example --origin https://home.example --rp-id home.example, and --expires-in up to 900 seconds");
+    }
+    require_secure_owner_persistence(data_dir)?;
+    let secret = zeroize::Zeroizing::new(random_secret_hex());
+    let digest = claimant_digest(&secret)?;
+    let now = now_ts();
+    mutate_auth_state(data_dir, |state| {
+        if !state
+            .principals
+            .iter()
+            .any(|principal| principal.role == RuntimePrincipalRole::Admin)
+        {
+            anyhow::bail!(
+                "this Home has no owner yet; use `elastos identity arm-owner` to set it up"
+            );
+        }
+        state.owner_recovery = Some(OwnerRecovery {
+            origin: origin.into(),
+            rp_id: rp_id.into(),
+            secret_digest: digest,
+            expires_at: now + ttl_secs,
+        });
+        Ok(())
+    })?;
+    Ok(secret)
+}
+
+pub(crate) struct OwnerRecoveryClient<'a> {
+    pub origin: &'a str,
+    pub rp_id: &'a str,
+    pub code: &'a str,
+}
+
+fn owner_recovery_binding(client: &OwnerRecoveryClient<'_>) -> anyhow::Result<[u8; 32]> {
+    let claimant = claimant_digest(client.code)?;
+    Ok(Sha256::digest(serde_json::to_vec(&(
+        "owner-recovery",
+        client.origin,
+        client.rp_id,
+        claimant,
+    ))?)
+    .into())
+}
+
+fn require_owner_recovery(
+    state: &AuthState,
+    client: &OwnerRecoveryClient<'_>,
+    now: u64,
+) -> anyhow::Result<()> {
+    let armed = state.owner_recovery.as_ref().ok_or(OwnerEnrollmentDenied)?;
+    let claimant = claimant_digest(client.code)?;
+    if armed.expires_at <= now
+        || armed.origin != client.origin
+        || armed.rp_id != client.rp_id
+        || !same_claimant(&armed.secret_digest, &claimant)
+    {
+        return enrollment_denied();
+    }
+    Ok(())
+}
+
+pub(crate) fn begin_owner_recovery(
+    data_dir: &Path,
+    identity: &mut elastos_identity::IdentityManager,
+    client: &OwnerRecoveryClient<'_>,
+    ceremony_id: &str,
+) -> anyhow::Result<elastos_identity::CreationOptions> {
+    let binding = owner_recovery_binding(client)?;
+    // Read-only: an armed code changes nothing until the Kit commit.
+    require_owner_recovery(&load_auth_state(data_dir)?, client, now_ts())?;
+    identity.begin_bound_principal_registration(ceremony_id, client.rp_id, client.origin, binding)
+}
+
+/// Registers the new passkey and moves the admin's root to it in one auth
+/// write. Nothing is written unless the code is valid and the Kit is the
+/// Recovery Kit this Home stored for one of its admins.
+pub(crate) fn complete_owner_recovery(
+    data_dir: &Path,
+    identity: &mut elastos_identity::IdentityManager,
+    client: &OwnerRecoveryClient<'_>,
+    ceremony_id: &str,
+    response: &elastos_identity::RegistrationResponse,
+    kit: &RecoveryKitV1,
+) -> anyhow::Result<AuthSessionGrantV1> {
+    if ceremony_id.len() > 128
+        || response._id.len() > 8192
+        || response._raw_id.len() > 8192
+        || response._type != "public-key"
+        || response.response.client_data_json.len() > 4096
+        || response.response.attestation_object.len() > 32768
+    {
+        return enrollment_denied();
+    }
+    let binding = owner_recovery_binding(client)?;
+    verify_recovery_kit_material(kit)?;
+    if kit.localhost_root != principal_localhost_root(&kit.principal_id) {
+        anyhow::bail!("recovery kit root does not match its principal");
+    }
+    mutate_auth_state(data_dir, |state| {
+        let now = now_ts();
+        require_owner_recovery(state, client, now)?;
+        normalize_principal_records(state);
+        let replaced = state
+            .principals
+            .iter()
+            .filter(|principal| {
+                principal.principal_id == kit.principal_id
+                    || principal.localhost_root == kit.localhost_root
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !replaced
+            .iter()
+            .any(|principal| principal.role == RuntimePrincipalRole::Admin)
+        {
+            anyhow::bail!("recovery kit does not match an admin of this Home");
+        }
+        if !state.principal_root_protections.iter().any(|stored| {
+            stored.principal_id == kit.principal_id
+                && stored.localhost_root == kit.localhost_root
+                && stored.data_key_id == kit.data_key_id
+        }) {
+            anyhow::bail!("recovery kit does not match this Home's root key for the admin");
+        }
+        identity.reload_credentials()?;
+        let candidate = identity.verify_bound_registration(
+            ceremony_id,
+            response,
+            client.rp_id,
+            client.origin,
+            binding,
+        )?;
+        if !candidate.user_verified
+            || identity
+                .credentials()
+                .iter()
+                .any(|item| item.credential_id == candidate.credential.credential_id)
+            || state.principals.iter().any(|principal| {
+                principal
+                    .proof_binding
+                    .passkey
+                    .as_ref()
+                    .is_some_and(|key| key.credential_id == candidate.credential.credential_id)
+            })
+        {
+            return enrollment_denied();
+        }
+        let previous_history = identity.guest_credential_history()?;
+        let proof_binding =
+            ProofBinding::passkey_webauthn(elastos_runtime::auth::PasskeyWebAuthnBinding {
+                credential_id: candidate.credential.credential_id.clone(),
+                public_key: candidate.credential.public_key.clone(),
+                sign_count: candidate.credential.sign_count,
+                user_verified: true,
+                origin: candidate.origin.clone(),
+                rp_id: candidate.credential.rp_id.clone(),
+                created_at: now,
+                last_used_at: now,
+                revoked_at: None,
+            });
+        let grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.into(),
+            grant_id: format!("grant:{}", random_secret_hex()),
+            session_id: format!("auth:{}", random_secret_hex()),
+            principal_id: kit.principal_id.clone(),
+            proof_binding_id: proof_binding.id(),
+            issued_at: now,
+            expires_at: now.saturating_add(AUTH_SESSION_TTL_SECS),
+            apps: vec!["home".into(), "system".into()],
+        };
+        let event = sign_audit_event(
+            data_dir,
+            RuntimeAuditEventV1 {
+                schema: RuntimeAuditEventV1::SCHEMA.into(),
+                event_id: format!("audit:{}", random_secret_hex()),
+                event_type: "auth.owner.recovered".into(),
+                principal_id: Some(kit.principal_id.clone()),
+                proof_binding_id: Some(proof_binding.id()),
+                session_id: Some(grant.session_id.clone()),
+                challenge_id: None,
+                capsule_id: None,
+                result: "ok".into(),
+                reason:
+                    "operator-armed owner recovery: new passkey bound to the admin's Recovery Kit"
+                        .into(),
+                occurred_at: now,
+                signer_did: None,
+                signature: None,
+            },
+        )?;
+        let display_name = replaced
+            .iter()
+            .find(|principal| principal.role == RuntimePrincipalRole::Admin)
+            .map(|principal| principal.display_name.clone())
+            .unwrap_or_default();
+        state.principals.retain(|principal| {
+            principal.principal_id != kit.principal_id
+                && principal.localhost_root != kit.localhost_root
+        });
+        for stored in &mut state.sessions {
+            if replaced
+                .iter()
+                .any(|principal| principal.proof_binding_id == stored.grant.proof_binding_id)
+            {
+                stored.revoked_at.get_or_insert(now);
+            }
+        }
+        state.principals.push(PrincipalRecord {
+            principal_id: kit.principal_id.clone(),
+            localhost_root: kit.localhost_root.clone(),
+            proof_binding_id: proof_binding.id(),
+            proof_binding,
+            display_name,
+            initial_profile_display_name: None,
+            role: RuntimePrincipalRole::Admin,
+            created_at: now,
+            updated_at: now,
+        });
+        state.sessions.push(StoredAuthSession {
+            grant: grant.clone(),
+            revoked_at: None,
+        });
+        state.owner_recovery = None;
+        push_audit_event(data_dir, state, event)?;
+        // Last effect before the single auth write: the credential file.
+        identity.persist_guest_candidate(&candidate, &previous_history)?;
+        identity.cancel_challenge(ceremony_id);
+        Ok(grant)
+    })
 }
 
 pub(crate) fn random_secret_hex() -> String {
@@ -2088,6 +2352,209 @@ mod guest_registration_tests {
                 before
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod owner_recovery_tests {
+    use super::*;
+
+    const ORIGIN: &str = "http://localhost:61180";
+
+    struct Home {
+        root: tempfile::TempDir,
+        identity: elastos_identity::IdentityManager,
+        admin: PrincipalRecord,
+        kit: RecoveryKitV1,
+    }
+
+    /// An owned Home whose admin made a Recovery Kit, with guest registration off.
+    fn home() -> Home {
+        let root = tempfile::tempdir().unwrap();
+        let mut identity = elastos_identity::IdentityManager::new(root.path().into()).unwrap();
+        let secret = random_secret_hex();
+        let owner = OwnerAdmission {
+            origin: ORIGIN,
+            rp_id: "localhost",
+            claimant: &secret,
+            loopback: true,
+        };
+        let (_, options) =
+            begin_owner_enrollment(root.path(), &mut identity, &owner, "owner", now_ts())
+                .unwrap()
+                .unwrap();
+        let response =
+            owner_attestation_for_test(&options.unwrap().public_key.challenge, "localhost", ORIGIN);
+        let grant = complete_owner_enrollment(
+            root.path(),
+            &mut identity,
+            &owner,
+            "owner",
+            Some(&response),
+            None,
+            now_ts(),
+        )
+        .unwrap()
+        .unwrap();
+        let admin = load_principal_for_proof_binding(root.path(), &grant.proof_binding_id).unwrap();
+        let kit = stored_kit(root.path(), &admin.principal_id);
+        Home {
+            root,
+            identity,
+            admin,
+            kit,
+        }
+    }
+
+    fn stored_kit(data_dir: &Path, principal_id: &str) -> RecoveryKitV1 {
+        let protection = store_test_principal_root_protection(data_dir, principal_id);
+        recovery_kit_from_archive(data_dir, protection.protectors[0].archive.as_ref().unwrap())
+            .unwrap()
+    }
+
+    fn arm(home: &Home) -> String {
+        arm_owner_recovery(home.root.path(), ORIGIN, "localhost", 300)
+            .unwrap()
+            .to_string()
+    }
+
+    fn begin(
+        home: &mut Home,
+        code: &str,
+    ) -> anyhow::Result<elastos_identity::RegistrationResponse> {
+        let client = OwnerRecoveryClient {
+            origin: ORIGIN,
+            rp_id: "localhost",
+            code,
+        };
+        let options =
+            begin_owner_recovery(home.root.path(), &mut home.identity, &client, "recovery")?;
+        Ok(passkey_attestation_with_id_for_test(
+            &options.public_key.challenge,
+            "localhost",
+            ORIGIN,
+            b"replacement-passkey",
+        ))
+    }
+
+    fn complete(
+        home: &mut Home,
+        code: &str,
+        response: &elastos_identity::RegistrationResponse,
+        kit: &RecoveryKitV1,
+    ) -> anyhow::Result<AuthSessionGrantV1> {
+        let client = OwnerRecoveryClient {
+            origin: ORIGIN,
+            rp_id: "localhost",
+            code,
+        };
+        complete_owner_recovery(
+            home.root.path(),
+            &mut home.identity,
+            &client,
+            "recovery",
+            response,
+            kit,
+        )
+    }
+
+    fn auth_bytes(home: &Home) -> Vec<u8> {
+        std::fs::read(auth_state_path(home.root.path()).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn owner_recovery_binds_new_passkey_to_admin_kit_once() {
+        let mut home = home();
+        assert!(!guest_registration_enabled(home.root.path()).unwrap());
+        let code = arm(&home);
+        let response = begin(&mut home, &code).unwrap();
+        let kit = home.kit.clone();
+
+        let grant = complete(&mut home, &code, &response, &kit).unwrap();
+
+        let recovered =
+            load_principal_for_proof_binding(home.root.path(), &grant.proof_binding_id).unwrap();
+        assert_eq!(recovered.principal_id, home.admin.principal_id);
+        assert_eq!(recovered.localhost_root, home.admin.localhost_root);
+        assert_eq!(recovered.role, RuntimePrincipalRole::Admin);
+        assert!(
+            load_principal_for_proof_binding(home.root.path(), &home.admin.proof_binding_id)
+                .is_err()
+        );
+        assert_eq!(
+            active_admin_passkey_principal_count(home.root.path()).unwrap(),
+            1
+        );
+        assert!(is_auth_session_active(home.root.path(), &grant.session_id, now_ts()).unwrap());
+
+        // The code is single-use: a second attempt changes nothing.
+        let before = auth_bytes(&home);
+        assert!(begin(&mut home, &code).is_err());
+        assert!(complete(&mut home, &code, &response, &kit).is_err());
+        assert_eq!(auth_bytes(&home), before);
+    }
+
+    #[test]
+    fn owner_recovery_refusals_leave_auth_state_byte_identical() {
+        for case in ["expired", "wrong-code", "guest-kit", "other-home-kit"] {
+            let mut home = home();
+            let code = arm(&home);
+            let response = begin(&mut home, &code).unwrap();
+            let mut kit = home.kit.clone();
+            let mut presented = code.clone();
+            let _other_home;
+            match case {
+                "expired" => mutate_auth_state(home.root.path(), |state| {
+                    state.owner_recovery.as_mut().unwrap().expires_at = now_ts() - 1;
+                    Ok(())
+                })
+                .unwrap(),
+                "wrong-code" => presented = random_secret_hex(),
+                "guest-kit" => {
+                    let mut guest = home.admin.clone();
+                    guest.principal_id = "person:local:guest".into();
+                    guest.localhost_root = principal_localhost_root(&guest.principal_id);
+                    guest.proof_binding_id = "proof:passkey:guest".into();
+                    guest.role = RuntimePrincipalRole::Guest;
+                    mutate_auth_state(home.root.path(), |state| {
+                        state.principals.push(guest.clone());
+                        Ok(())
+                    })
+                    .unwrap();
+                    kit = stored_kit(home.root.path(), &guest.principal_id);
+                }
+                "other-home-kit" => {
+                    let other = tempfile::tempdir().unwrap();
+                    kit = stored_kit(other.path(), "person:local:elsewhere");
+                    _other_home = other;
+                }
+                _ => unreachable!(),
+            }
+            let before = auth_bytes(&home);
+            let credentials = home.identity.credentials().len();
+
+            let error = complete(&mut home, &presented, &response, &kit).unwrap_err();
+
+            assert_eq!(auth_bytes(&home), before, "{case}: {error}");
+            home.identity.reload_credentials().unwrap();
+            assert_eq!(home.identity.credentials().len(), credentials, "{case}");
+            assert_eq!(
+                load_principal_for_proof_binding(home.root.path(), &home.admin.proof_binding_id)
+                    .unwrap()
+                    .role,
+                RuntimePrincipalRole::Admin,
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn owner_recovery_needs_an_owned_home() {
+        let root = tempfile::tempdir().unwrap();
+        let error = arm_owner_recovery(root.path(), ORIGIN, "localhost", 300)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("arm-owner"), "{error}");
     }
 }
 
@@ -3237,10 +3704,14 @@ fn mutate_auth_state<T>(
     Ok(value)
 }
 
-pub fn load_or_create_recovery_archive_key(data_dir: &Path) -> anyhow::Result<[u8; 32]> {
-    let path = rooted_localhost_fs_path(data_dir, AUTH_STATE_ROOT)
+fn recovery_archive_key_path(data_dir: &Path) -> anyhow::Result<PathBuf> {
+    Ok(rooted_localhost_fs_path(data_dir, AUTH_STATE_ROOT)
         .ok_or_else(|| anyhow!("invalid auth state root"))?
-        .join(RECOVERY_ARCHIVE_KEY_FILE);
+        .join(RECOVERY_ARCHIVE_KEY_FILE))
+}
+
+pub fn load_or_create_recovery_archive_key(data_dir: &Path) -> anyhow::Result<[u8; 32]> {
+    let path = recovery_archive_key_path(data_dir)?;
     if path.is_file() {
         let bytes = std::fs::read(&path).with_context(|| format!("failed to read {path:?}"))?;
         if bytes.len() != 32 {
@@ -4996,6 +5467,9 @@ pub struct RecoveredRootReassignment {
     pub recovered_principal_id: String,
     pub recovered_localhost_root: String,
     pub protection: PrincipalRootProtectionV1,
+    /// Verified Kit; its archive is sealed inside the commit so a refusal
+    /// leaves no new key material behind.
+    pub kit: RecoveryKitV1,
     pub replacement_grant: AuthSessionGrantV1,
     pub signed_audit_event: RuntimeAuditEventV1,
     pub updated_at: u64,
@@ -5009,7 +5483,8 @@ pub fn commit_recovered_root_reassignment(
         proof_binding_id,
         recovered_principal_id,
         recovered_localhost_root,
-        protection,
+        mut protection,
+        kit,
         replacement_grant,
         signed_audit_event,
         updated_at,
@@ -5017,6 +5492,7 @@ pub fn commit_recovered_root_reassignment(
     validate_principal_root_protection(&protection).map_err(anyhow::Error::msg)?;
     if protection.principal_id != recovered_principal_id
         || protection.localhost_root != recovered_localhost_root
+        || protection.data_key_id != kit.data_key_id
     {
         anyhow::bail!("recovery protection does not match the recovered root");
     }
@@ -5036,7 +5512,8 @@ pub fn commit_recovered_root_reassignment(
     let (_, runtime_did) = elastos_identity::load_or_create_did(data_dir)?;
     verify_audit_event_signature(&signed_audit_event, &runtime_did)?;
 
-    mutate_auth_state(data_dir, |state| {
+    let created_archive_key = std::cell::Cell::new(false);
+    let result = mutate_auth_state(data_dir, |state| {
         normalize_principal_records(state);
         ensure_recovered_root_reassignable_in_state(
             state,
@@ -5102,6 +5579,7 @@ pub fn commit_recovered_root_reassignment(
             stored.principal_id != protection.principal_id
                 || stored.localhost_root != protection.localhost_root
         });
+        created_archive_key.set(attach_recovery_archive(data_dir, &mut protection, &kit)?);
         state.principal_root_protections.push(protection);
         state.sessions.push(StoredAuthSession {
             grant: replacement_grant,
@@ -5114,7 +5592,30 @@ pub fn commit_recovered_root_reassignment(
         )?;
         push_audit_event(data_dir, state, signed_audit_event)?;
         Ok(record)
-    })
+    });
+    if result.is_err() && created_archive_key.get() {
+        // This commit created the archive key and then failed: remove it.
+        let _ = std::fs::remove_file(recovery_archive_key_path(data_dir)?);
+    }
+    result
+}
+
+/// Seal the Kit into the protection's Recovery Kit protector. Returns whether
+/// this call created the Home's recovery archive key.
+pub(crate) fn attach_recovery_archive(
+    data_dir: &Path,
+    protection: &mut PrincipalRootProtectionV1,
+    kit: &RecoveryKitV1,
+) -> anyhow::Result<bool> {
+    let created = !recovery_archive_key_path(data_dir)?.is_file();
+    let archive = recovery_archive_from_kit(data_dir, kit)?;
+    protection
+        .protectors
+        .iter_mut()
+        .find(|protector| protector.kind == PrincipalRootProtectorKind::RecoveryKit)
+        .ok_or_else(|| anyhow!("candidate protection has no Recovery Kit protector"))?
+        .archive = Some(archive);
+    Ok(created)
 }
 
 fn validate_recovery_replacement_grant(
@@ -8987,6 +9488,11 @@ mod tests {
                 proof_binding_id: current.proof_binding_id.clone(),
                 recovered_principal_id,
                 recovered_localhost_root: protection.localhost_root.clone(),
+                kit: recovery_kit_from_archive(
+                    data_dir,
+                    protection.protectors[0].archive.as_ref().unwrap(),
+                )
+                .unwrap(),
                 protection,
                 replacement_grant,
                 signed_audit_event,
@@ -9028,6 +9534,7 @@ mod tests {
             10,
         )
         .unwrap();
+        let kit = serde_json::to_value(&reassignment.kit).unwrap();
         let before = load_auth_state(data_dir.path()).unwrap();
         let device_key_path = elastos_identity::device_key_path(data_dir.path());
         let device_key = std::fs::read(&device_key_path).unwrap();
@@ -9049,18 +9556,35 @@ mod tests {
             serde_json::to_value(&current.proof_binding).unwrap()
         );
         assert_eq!(std::fs::read(&device_key_path).unwrap(), device_key);
+        // The commit seals a fresh archive of the same Kit; the rest is as given.
+        let stored = load_principal_root_protection(
+            data_dir.path(),
+            &recovered.principal_id,
+            &recovered.localhost_root,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             serde_json::to_value(
-                load_principal_root_protection(
+                recovery_kit_from_archive(
                     data_dir.path(),
-                    &recovered.principal_id,
-                    &recovered.localhost_root
+                    stored.protectors[0].archive.as_ref().unwrap()
                 )
-                .unwrap()
                 .unwrap()
             )
             .unwrap(),
-            protection
+            kit
+        );
+        let without_archive = |mut value: Value| {
+            value["protectors"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("archive");
+            value
+        };
+        assert_eq!(
+            without_archive(serde_json::to_value(&stored).unwrap()),
+            without_archive(protection)
         );
         let after = load_auth_state(data_dir.path()).unwrap();
         assert_eq!(after.principals.len(), before.principals.len());
@@ -9116,7 +9640,7 @@ mod tests {
     fn recovered_root_reassignment_refuses_kit_without_this_homes_root_key() {
         for case in ["wrong-data-key", "no-stored-binding"] {
             let data_dir = tempfile::tempdir().unwrap();
-            let (mut reassignment, _, _) = recovered_root_reassignment_fixture(data_dir.path());
+            let (reassignment, _, _) = recovered_root_reassignment_fixture(data_dir.path());
             upsert_principal_for_binding_as_role(
                 data_dir.path(),
                 passkey_binding_with_credential("credential-owner", 1, 10, 10),
@@ -9126,9 +9650,13 @@ mod tests {
             )
             .unwrap();
             match case {
-                // A self-consistent Kit for the admin's id, made with another secret.
+                // A self-consistent Kit for the admin's id whose key is not
+                // the one this Home stored for the admin.
                 "wrong-data-key" => {
-                    reassignment.protection.data_key_id = "pdek:fabricated".to_string();
+                    store_test_principal_root_protection(
+                        data_dir.path(),
+                        &reassignment.recovered_principal_id,
+                    );
                 }
                 // The admin never made a Kit here: nothing to prove against.
                 "no-stored-binding" => mutate_auth_state(data_dir.path(), |state| {
@@ -9147,6 +9675,44 @@ mod tests {
 
             assert!(error.contains("root key"), "{case}: {error}");
             assert_eq!(std::fs::read(&path).unwrap(), before, "{case}");
+        }
+    }
+
+    #[test]
+    fn recovered_root_reassignment_refused_at_commit_leaves_no_archive_key() {
+        for case in ["importer-revoked", "audit-rejected"] {
+            let data_dir = tempfile::tempdir().unwrap();
+            let (reassignment, current, _) = recovered_root_reassignment_fixture(data_dir.path());
+            upsert_principal_for_binding_as_role(
+                data_dir.path(),
+                passkey_binding_with_credential("credential-home-admin", 1, 10, 10),
+                "person:local:home-admin".to_string(),
+                RuntimePrincipalRole::Admin,
+                10,
+            )
+            .unwrap();
+            match case {
+                // Revoked after the route's pre-check, before the commit.
+                "importer-revoked" => {
+                    revoke_passkey_binding(data_dir.path(), &current.proof_binding_id, now_ts())
+                        .unwrap();
+                }
+                // Refused after the archive was sealed inside the commit.
+                "audit-rejected" => inject_recovery_reassignment_test_fault(
+                    data_dir.path(),
+                    RecoveryReassignmentTestFault::AuditChainRejection,
+                ),
+                _ => unreachable!(),
+            }
+            let key_path = recovery_archive_key_path(data_dir.path()).unwrap();
+            std::fs::remove_file(&key_path).unwrap();
+            let auth_path = auth_state_path(data_dir.path()).unwrap();
+            let before = std::fs::read(&auth_path).unwrap();
+
+            commit_recovered_root_reassignment(data_dir.path(), reassignment).unwrap_err();
+
+            assert!(!key_path.exists(), "{case}");
+            assert_eq!(std::fs::read(&auth_path).unwrap(), before, "{case}");
         }
     }
 
