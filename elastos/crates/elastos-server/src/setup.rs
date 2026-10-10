@@ -304,7 +304,7 @@ async fn run_with_data_dir(
     }
     remove_replacement_leftovers(&data_dir, &manifest, &platform)?;
 
-    let selected_profile = profile.as_deref().map(normalize_profile_name).or({
+    let selected_profile = profile.as_deref().or({
         if with.is_empty() {
             Some(DEFAULT_SETUP_PROFILE)
         } else {
@@ -3026,10 +3026,7 @@ fn resolve_components(
     with: &[String],
     without: &[String],
 ) -> anyhow::Result<Vec<String>> {
-    let profile_name = profile
-        .map(normalize_profile_name)
-        .unwrap_or_default()
-        .to_string();
+    let profile_name = profile.unwrap_or_default().to_string();
 
     let mut components: Vec<String> = if profile_name.is_empty() {
         Vec::new()
@@ -3064,10 +3061,6 @@ fn resolve_components(
     components.retain(|c| !without.contains(c));
 
     Ok(components)
-}
-
-fn normalize_profile_name(name: &str) -> &str {
-    name
 }
 
 async fn prepare_selected_component_prerequisites(
@@ -3285,12 +3278,10 @@ pub(crate) fn admit_release_components(
     manifest: &ComponentsManifest,
     platform: &str,
 ) -> anyhow::Result<()> {
-    let platform = match platform {
-        "aarch64-darwin" => "darwin-arm64",
-        "aarch64-linux" => "linux-arm64",
-        "x86_64-linux" => "linux-amd64",
-        other => other,
-    };
+    let platform = RELEASE_PLATFORM_PAIRS
+        .iter()
+        .find_map(|(release, setup)| (setup == platform).then_some(release.as_str()))
+        .unwrap_or(platform);
     refuse_reserved_install_targets(manifest, platform)?;
     for (name, component) in &manifest.external {
         let assets = [
@@ -5574,11 +5565,6 @@ pub(crate) mod tests {
                 .any(|value| value == "elacity-player"),
             "home must include the Elacity Player capsule"
         );
-    }
-
-    #[test]
-    fn test_normalize_profile_name_preserves_home_profile() {
-        assert_eq!(normalize_profile_name("home"), "home");
     }
 
     #[test]

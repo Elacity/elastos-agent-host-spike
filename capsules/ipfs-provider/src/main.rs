@@ -854,7 +854,7 @@ impl IpfsProvider {
         self.data_dir = selected_root;
         self.repo_dir = self.data_dir.join("ipfs-repo");
 
-        if extra.get("gateways").is_some() || std::env::var("ELASTOS_IPFS_GATEWAYS").is_ok() {
+        if extra.get("gateways").is_some() {
             eprintln!("ipfs-provider: ignoring gateway override; provider is local-IPFS only");
         }
 

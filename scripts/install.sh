@@ -18,7 +18,7 @@
 # Runtime setup fetches component metadata over Carrier.
 #
 # After bootstrap, setup installs the Home profile and opens browser Home.
-# Use --install-only for automated provisioning or other profiles.
+# Use --install-only for automated provisioning.
 #
 # Trust model:
 #   1. Bootstrap over the stamped publisher URL

@@ -1475,7 +1475,7 @@ fn summarize_runtime_start_failure_contents(contents: &str) -> Option<String> {
         && last_line.contains("components.json")
     {
         return Some(format!(
-            "Installed core components are out of sync with the stamped manifest.\nRun `elastos setup --profile home` (or `elastos setup`) to reconcile installed support assets, then retry.\nLast runtime error: {}",
+            "Installed core components are out of sync with the stamped manifest.\nRun `elastos setup` to reconcile installed support assets, then retry.\nLast runtime error: {}",
             last_line
         ));
     }
@@ -1501,7 +1501,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(summary.contains("Run `elastos setup --profile home`"));
+        assert!(summary.contains("Run `elastos setup` to reconcile"));
         assert!(
             summary.contains("Last runtime error: Error: installed component 'localhost-provider'")
         );

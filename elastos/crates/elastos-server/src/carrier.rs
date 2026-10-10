@@ -1605,7 +1605,7 @@ pub const DEFAULT_CARRIER_BIND_ADDR: &str = "0.0.0.0:4433";
 
 /// Shown when no route to the trusted release source answers; the cause chain
 /// keeps the per-route errors.
-const TRUSTED_SOURCE_UNREACHABLE: &str = "Could not reach the trusted release source over Carrier. ElastOS needs outgoing UDP to port 4433 for setup and updates; check the firewall or network, then run `elastos setup` again.";
+pub(crate) const TRUSTED_SOURCE_UNREACHABLE: &str = "Could not reach the trusted release source over Carrier. ElastOS needs outgoing UDP to port 4433 for setup and updates; check the firewall or network, then run `elastos setup` again.";
 
 pub async fn start_carrier_node_with_registry(
     signing_key: &ed25519_dalek::SigningKey,

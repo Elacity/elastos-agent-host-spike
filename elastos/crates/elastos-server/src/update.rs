@@ -1,5 +1,4 @@
-//! Update/upgrade logic: Carrier-first release fetch, explicit transport
-//! overrides, platform detection, cache management, and the main update flow.
+//! Update logic: signed release fetch over Carrier, platform detection, cache management, and the main update flow.
 //!
 //! CLI and operator entry points share signed head discovery and admission.
 
@@ -899,15 +898,7 @@ async fn run_update_with_restart(
             };
         }
 
-        resolved.ok_or_else(|| {
-            let mut msg = String::from("Could not discover updates.");
-            msg.push_str("\n  Carrier discovery did not find a live trusted source.");
-            if source.head_cid.is_empty() {
-                msg.push_str("\n  No cached head CID in sources.json.");
-            }
-            msg.push_str("\n  Manual override: elastos update --head-cid <cid>");
-            anyhow::anyhow!("{}", msg)
-        })?
+        resolved.ok_or_else(|| anyhow::anyhow!(crate::carrier::TRUSTED_SOURCE_UNREACHABLE))?
     };
 
     // 3. Fetch or reuse release-head.json
