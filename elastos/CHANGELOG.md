@@ -11,6 +11,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - A model download that stopped with "Model content could not be read" now
   continues from where it stopped when you press Retry. Before, Retry started
   the download again from 0%.
+- Right after Get, Assistant's model menu no longer lists the new model by its
+  file name, such as "qwen2.5-1.5b-instruct-q4-k-m-local". It shows the model's
+  name from the model list, such as "Qwen2.5 1.5B Instruct", as soon as Home
+  has finished setting it up, without pressing Refresh models.
 
 ### Developer detail
 
@@ -21,6 +25,14 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   after the last whole part. Integrity, local storage, authority, policy and
   Cancel still remove the stage. Seen on a Jetson running alpha.14: a read that
   ended as a `Provider` error at 78.7% sent the next Retry back to 0%.
+- Assistant lists a Runtime-admitted model offer (`model:<sha256>`) only through
+  its catalogue row (title and CID); `liveMenuOffers()` leaves it out of the raw
+  offer rows, which could not be chosen anyway. While such an offer is listed
+  but its catalogue row is not yet bound to it (`dispatch_ready: false`, for
+  example the first read after activation), `agent-live.js` reads the catalogue
+  again every 3 s, at most 10 times. Every probe result is published as
+  `assistant:live-models`, and the harness updates the chip and an open menu
+  from it; before, an open menu kept the earlier read while the chip changed.
 
 ## [0.8.0-alpha.15]
 

@@ -195,6 +195,44 @@ test("explicit admitted model selection requires its catalog mapping after refre
   assert.equal(live.liveContentChoice(), cid);
 });
 
+test("a ready local model is listed by its catalog title, never by its raw offer name", async t => {
+  t.after(() => live.selectLiveOffer(""));
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const cid = `bafybei${"c".repeat(51)}a`;
+  const localId = `model:${"c".repeat(64)}`;
+  const text = { operation: "text", input_modalities: ["text/plain"], output_modalities: ["text/plain"] };
+  const offers = [{ id: localId, title: "qwen2.5-1.5b-instruct-q4-k-m-local", ...text }, { id: "hosted", title: "Hosted", ...text }];
+  // Alpha.14: the first catalog read after Get listed the admitted row before it was bound to its offer.
+  let runtime = { admitted: true, dispatch_ready: false, offer_id: null };
+  let catalogReads = 0;
+  globalThis.fetch = async url => ({ ok: true, json: async () => {
+    if (new URL(url).pathname !== "/api/capsules/catalog") return { offers };
+    catalogReads += 1;
+    return { schema: "elastos.capsules.catalog/v1", model_catalog_state: "verified", capsules: [{
+      source: "signed-model-catalog", role: "content", installed: false, launchable: false, cid,
+      title: "Qwen2.5 1.5B Instruct", signature_state: "catalog-signature-verified", model_runtime: runtime }] };
+  } });
+  let published = 0;
+  const onPublished = () => { published += 1; };
+  window.addEventListener("assistant:live-models", onPublished);
+  t.after(() => window.removeEventListener("assistant:live-models", onPublished));
+  await live.probeLiveInference({ force: true });
+  assert.deepEqual(live.liveMenuOffers().map(m => m.offerId), ["hosted"], "the admitted offer is not listed by its raw name");
+  assert.equal(live.liveContentModels().length, 0);
+  assert.equal(live.liveCatalogPending(), true);
+  assert.equal(published, 1);
+  runtime = { admitted: true, dispatch_ready: true, offer_id: localId };
+  t.mock.timers.tick(3000);
+  await live.probeLiveInference();
+  assert.equal(catalogReads, 2, "the catalog is read again without Refresh models");
+  assert.deepEqual(live.liveContentModels().map(m => [m.title, m.cid]), [["Qwen2.5 1.5B Instruct", cid]]);
+  assert.deepEqual(live.liveMenuOffers().map(m => m.offerId), ["hosted"]);
+  assert.equal(live.liveCatalogPending(), false);
+  assert.equal(published, 2, "the joined result reaches an open menu");
+  t.mock.timers.tick(60000);
+  assert.equal(catalogReads, 2, "a joined catalog is not read again");
+});
+
 test("an in-flight offers refresh keeps the current offer selectable", async t => {
   t.after(() => live.selectLiveOffer(""));
   const chosen = {

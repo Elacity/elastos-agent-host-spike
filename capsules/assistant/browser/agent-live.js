@@ -38,6 +38,16 @@ import {
 /** Re-probe at most this often unless forced (online event, harness open). */
 const PROBE_TTL_MS = 15000;
 
+/** Runtime derives an admitted local model's offer ID from its verified content
+   binding; such an offer is a choice only through its catalog row. */
+const ADMITTED_OFFER_ID = /^model:[0-9a-f]{64}$/;
+
+/** An admitted model can be advertised before its catalog row is bound to its
+   offer (just after Get, or when a catalog read fails). The catalog is read
+   again this often, a bounded number of times, so its row and title appear. */
+const CATALOG_JOIN_RETRY_MS = 3000;
+const CATALOG_JOIN_RETRIES = 10;
+
 /** PRINCIPLES-safe default — no tools, no capsule authority (UI ≠ authority). */
 export const DEFAULT_LIVE_SYSTEM_PROMPT =
   "You are the ElastOS Home Agent, running privately on this machine. " +
@@ -90,6 +100,26 @@ let liveState = {
 
 let probePromise = null;
 let probeEpoch = 0;
+let catalogJoinTimer = null;
+let catalogJoinRetries = 0;
+
+/** Every probe result is published: the chip and an open menu follow it, and an
+   admitted offer still missing its catalog row schedules the next read. */
+function publishLiveState(next) {
+  liveState = next;
+  clearTimeout(catalogJoinTimer);
+  catalogJoinTimer = null;
+  if (!liveCatalogPending()) {
+    catalogJoinRetries = 0;
+  } else if (catalogJoinRetries < CATALOG_JOIN_RETRIES) {
+    catalogJoinRetries += 1;
+    catalogJoinTimer = setTimeout(() => {
+      catalogJoinTimer = null;
+      void probeLiveInference({ force: true });
+    }, CATALOG_JOIN_RETRY_MS);
+  }
+  window.dispatchEvent(new CustomEvent("assistant:live-models"));
+}
 
 export function getLiveInferenceState() {
   return { ...liveState, models: liveState.models.slice() };
@@ -169,9 +199,8 @@ export function selectLiveOffer(offerId, modelCid = null) {
 // launch hydration continue to use selectLiveOffer without changing retention.
 export async function selectLiveOfferForUse(offerId, modelCid = null) {
   const local = liveContentModels().find(model => model.offerId === offerId && (modelCid == null || model.cid === modelCid));
-  // Runtime derives admitted local offer IDs from the verified content binding.
-  // A missing catalog mapping cannot turn that offer into an operator choice.
-  if (modelCid == null && !local && !/^model:[0-9a-f]{64}$/.test(offerId)) {
+  // A missing catalog mapping cannot turn an admitted offer into an operator choice.
+  if (modelCid == null && !local && !ADMITTED_OFFER_ID.test(offerId)) {
     selectLiveOffer(offerId);
     return true;
   }
@@ -205,6 +234,17 @@ export async function selectLiveOfferForUse(offerId, modelCid = null) {
 export function liveContentChoice() { return selectedContentCid; }
 export function liveContentModels() {
   return readyModelChoices(liveState.catalogModels || [], liveState.models.map(m => ({ ...m, id: m.offerId })));
+}
+/** Offers the menu lists by their offer title. An admitted model is listed only
+   through its catalog row (title and CID), never by its raw offer name. */
+export function liveMenuOffers() {
+  const content = liveContentModels();
+  return liveState.models.filter(m => !ADMITTED_OFFER_ID.test(m.offerId) && !content.some(c => c.offerId === m.offerId));
+}
+/** An admitted model is advertised but its catalog row is not bound to it yet. */
+export function liveCatalogPending() {
+  const content = liveContentModels();
+  return liveState.models.some(m => ADMITTED_OFFER_ID.test(m.offerId) && !content.some(c => c.offerId === m.offerId));
 }
 /** The catalog model a running preparation is downloading, or null. */
 export function liveDownloadingModel() {
@@ -275,7 +315,7 @@ export async function probeLiveInference({ force = false } = {}) {
       if (epoch !== probeEpoch) return;
       const models = chatOfferRows(offers);
       if (!models.length) {
-        liveState = {
+        publishLiveState({
           live: false,
           checking: false,
           model: "",
@@ -284,10 +324,10 @@ export async function probeLiveInference({ force = false } = {}) {
           checkedAt: Date.now(),
           models: [],
           catalogModels: content,
-        };
+        });
         return;
       }
-      liveState = {
+      publishLiveState({
         live: Boolean(currentChoice(models, content)),
         checking: false,
         model: currentChoice(models, content)?.label || "Chosen model unavailable",
@@ -296,10 +336,10 @@ export async function probeLiveInference({ force = false } = {}) {
         checkedAt: Date.now(),
         models,
         catalogModels: content,
-      };
+      });
     } catch (error) {
       if (epoch !== probeEpoch) return;
-      liveState = {
+      publishLiveState({
         live: false,
         checking: false,
         model: "",
@@ -308,7 +348,7 @@ export async function probeLiveInference({ force = false } = {}) {
         checkedAt: Date.now(),
         models: [],
         catalogModels: [],
-      };
+      });
     } finally {
       if (epoch === probeEpoch) probePromise = null;
     }

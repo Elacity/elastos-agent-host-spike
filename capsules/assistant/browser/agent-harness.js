@@ -83,6 +83,8 @@ import {
   liveContentChoice,
   liveContentModels,
   liveDownloadingModel,
+  liveMenuOffers,
+  liveCatalogPending,
 } from "./agent-live.js";
 import {
   bindAgentSessions,
@@ -714,15 +716,14 @@ function closeModelMenu() {
 }
 
 // While a model downloads, re-read the catalog so the progress stays current.
+// The published result updates the chip and an open menu.
 const DOWNLOAD_REFRESH_MS = 3000;
 let downloadRefreshTimer = 0;
 function scheduleDownloadRefresh(downloading) {
   if (!downloading || downloadRefreshTimer) return;
   downloadRefreshTimer = setTimeout(() => {
     downloadRefreshTimer = 0;
-    void probeLiveInference({ force: true }).then(() => {
-      if (active) syncModelTrigger();
-    });
+    void probeLiveInference({ force: true });
   }, DOWNLOAD_REFRESH_MS);
 }
 
@@ -781,11 +782,10 @@ function buildInstalledModelRows(host, emptyText) {
     status.textContent = modelSelectionMessage || "Keeping this model on this device…";
     host.append(status);
   }
-  /* Rows are the advertised model offers — nothing else is inference. */
-  const liveInference = getLiveInferenceState();
+  /* Rows are the advertised model offers — nothing else is inference. An
+     admitted model appears only as its catalog row below, with its title. */
   const activeOffer = selectedLiveOffer();
-  for (const model of liveInference.models) {
-    if (liveContentModels().some(content => content.offerId === model.offerId)) continue;
+  for (const model of liveMenuOffers()) {
     const row = document.createElement("button");
     row.type = "button";
     row.disabled = modelSelectionPending;
@@ -838,7 +838,7 @@ function buildInstalledModelRows(host, emptyText) {
   if (!host.children.length) {
     const empty = document.createElement("p");
     empty.className = "agent-model-menu-empty";
-    empty.textContent = emptyText;
+    empty.textContent = liveCatalogPending() ? "Checking models on this Home…" : emptyText;
     host.append(empty);
   }
   for (const [action, label] of [
@@ -859,7 +859,10 @@ function renderModelMenu() {
   if (!listHost) {
     return;
   }
+  // A published probe can re-render an open menu; keyboard focus stays on its row.
+  const focused = modelMenuEl()?.contains(document.activeElement) ? document.activeElement.id : "";
   buildInstalledModelRows(listHost, "No model offer on this Home yet.");
+  if (focused) document.getElementById(focused)?.focus({ preventScroll: true });
   if (modelMenuOpen()) {
     const anchor = modelMenuAnchor || modelBtnEl();
     positionFloatingMenu(modelMenuEl(), anchor, {
@@ -1070,11 +1073,7 @@ export function showAgentHarness({
   harness.setAttribute("aria-hidden", "false");
   syncTruthStrip();
   syncSessionModeUi();
-  void probeLiveInference({ force: true }).then(() => {
-    if (active) {
-      syncModelTrigger();
-    }
-  });
+  void probeLiveInference({ force: true });
   renderSessions();
   renderActiveSession();
 
@@ -1318,19 +1317,18 @@ export function bindAgentHarness() {
   bindAgentWorkspaceSnapshot(getAgentWorkspaceSnapshot);
   ensureAgentWorkspaceHydrated();
   window.addEventListener("online", () => {
-    void probeLiveInference({ force: true }).then(() => {
-      if (active) {
-        syncModelTrigger();
-      }
-    });
+    void probeLiveInference({ force: true });
+  });
+  // Every published probe (boot, open, Refresh, a catalog re-read, a send)
+  // updates the chip and an open menu, so neither keeps an older read.
+  window.addEventListener("assistant:live-models", () => {
+    if (!active) return;
+    syncModelTrigger();
+    if (modelMenuOpen()) renderModelMenu();
   });
 
   /* Contract era: real probe — live flips only on offers_list truth (§AL.3). */
-  void probeLiveInference().then(() => {
-    if (active) {
-      syncModelTrigger();
-    }
-  });
+  void probeLiveInference();
 
   /* Esc: search (90) → drawer (85) → Shelf reverse dance (75). */
   registerEscapeHandler("agent-session-search", {
