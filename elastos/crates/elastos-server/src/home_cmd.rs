@@ -878,6 +878,27 @@ fn home_terminal_host_intent_for_action(
         }));
     }
 
+    if let Some(contact_id) = action_id.strip_prefix("people-message:").map(str::trim) {
+        if snapshot.session.mode != "browser_pty" {
+            return None;
+        }
+        let contact = snapshot
+            .people
+            .contacts
+            .iter()
+            .find(|contact| contact.contact_id == contact_id)?;
+        let target = people_contact_message_target(contact)?;
+        return Some(serde_json::json!({
+            "schema": "elastos.home.terminal-host-intent/v1",
+            "action": "open-target",
+            "action_id": action_id,
+            "target": target,
+            "source": "people-contact",
+            "contact_id": contact.contact_id,
+            "route": contact.route,
+        }));
+    }
+
     let target = action_id.strip_prefix("shell-switch:")?.trim();
     if target != "home-gui" {
         return None;
@@ -1878,10 +1899,8 @@ async fn dispatch_people_action(
         if people_contact_message_target(contact).is_none() {
             anyhow::bail!("People contact has no message route in the current Runtime facts");
         }
-        let _parent_surface = ScopedEnvVar::set("ELASTOS_PARENT_SURFACE", "home");
-        crate::chat_cmd::run_chat_from_home(None, None, coords.clone()).await?;
         let label = people_contact_display_name(contact, "contact");
-        return Ok(format!("Returned home from Chat with {label}."));
+        return Ok(format!("Open Chat on the Desktop to message {label}."));
     }
     anyhow::bail!("Unknown People action: {}", action_id)
 }
@@ -4162,8 +4181,9 @@ mod tests {
     }
 
     #[test]
-    fn home_terminal_people_message_stays_in_the_cli_runtime_path() {
+    fn home_terminal_people_message_hands_off_to_desktop_chat() {
         let mut snapshot = sample_snapshot_with_components(&[]);
+        snapshot.session.mode = "browser_pty".to_string();
         snapshot.people.contacts.push(PeopleContactStatus {
             contact_id: "contact-alice".to_string(),
             display_name: "Alice".to_string(),
@@ -4173,9 +4193,18 @@ mod tests {
             ..PeopleContactStatus::default()
         });
 
-        assert!(
+        assert_eq!(
             home_terminal_host_intent_for_action("people-message:contact-alice", &snapshot)
-                .is_none()
+                .unwrap(),
+            serde_json::json!({
+                "schema": "elastos.home.terminal-host-intent/v1",
+                "action": "open-target",
+                "action_id": "people-message:contact-alice",
+                "target": "chat-room",
+                "source": "people-contact",
+                "contact_id": "contact-alice",
+                "route": "/apps/chat-room/",
+            })
         );
 
         snapshot.people.contacts[0].route = "elastos://peer/peer-alice".to_string();
@@ -4189,6 +4218,43 @@ mod tests {
             home_terminal_host_intent_for_action("people-message:contact-alice", &snapshot)
                 .is_none()
         );
+        snapshot.people.contacts[0].can_message = true;
+        snapshot.session.mode = "native_terminal".to_string();
+        assert!(
+            home_terminal_host_intent_for_action("people-message:contact-alice", &snapshot)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_terminal_people_message_points_to_desktop_chat_without_native_chat() {
+        let mut snapshot = sample_snapshot_with_components(&[]);
+        snapshot.session.mode = "native_terminal".to_string();
+        snapshot.people.contacts.push(PeopleContactStatus {
+            contact_id: "contact-alice".to_string(),
+            display_name: "Alice".to_string(),
+            relationship: "conversation".to_string(),
+            route: "/apps/chat-room/".to_string(),
+            can_message: true,
+            ..PeopleContactStatus::default()
+        });
+        // Unreachable coords: the hand-off must not touch the Runtime.
+        let coords = runtime_control::RuntimeCoords {
+            api_url: "http://127.0.0.1:9".to_string(),
+            attach_secret: String::new(),
+            pid: 0,
+            runtime_kind: String::new(),
+            binary_sha256: String::new(),
+            policy_sha256: String::new(),
+            dependency_sha256: String::new(),
+            generation: String::new(),
+            home_url: String::new(),
+        };
+
+        let notice = dispatch_people_action("people-message:contact-alice", &snapshot, &coords)
+            .await
+            .unwrap();
+        assert_eq!(notice, "Open Chat on the Desktop to message Alice.");
     }
 
     #[test]

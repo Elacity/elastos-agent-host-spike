@@ -13,6 +13,9 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   action; you can run actions one after another.
 - The terminal Home no longer offers the old native Chat, which used a
   different network from the Chat on the Desktop.
+- People "Message" in the terminal Home no longer opens that old Chat. In the
+  browser terminal it opens Chat on the Desktop; in a native terminal it says
+  "Open Chat on the Desktop to message <name>."
 - In the terminal Inbox, direct messages and service requests say "Open Inbox
   on the Desktop to answer this" instead of "no longer available".
 - In the terminal Apps tab, Enter on an app that only opens on the Desktop
@@ -44,7 +47,9 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   regression test runs two intents against a provider that refuses delete.
 - The `chat` core action and `ManagedChat` launch are removed from Home.
   `elastos chat` is hidden from help and kept only for the native chat smoke
-  scripts; People "Message" in the terminal still uses it.
+  scripts. `people-message:` emits the `open-target` terminal host intent the
+  gateway already authorizes (browser terminal) or returns a Desktop notice;
+  `run_chat_from_home` is removed.
 - `elastos agent`, `agent_cmd.rs` and the shell's `agent` command request are
   removed. The `capsule` help, the serve banner, the first-run welcome and the
   microVM publish hint (no `serve --forward` flag) name commands that exist.
