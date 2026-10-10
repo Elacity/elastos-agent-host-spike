@@ -181,7 +181,7 @@ try {
     }
     phase = "capacity_pending";
     await frame.getByRole("button", { name: "Refresh models" }).click();
-    await frame.getByText("Waiting for local capacity…", { exact: true }).waitFor();
+    await frame.getByText("Waiting for free space. This model needs 1.02 KB on this Home, plus 2 GB kept free. Free some space and it continues.", { exact: true }).waitFor();
     assert.equal(await frame.getByRole("button", { name: "Cancel preparation" }).count(), 1);
     assert.equal(calls.filter(c => c.method === "content.use").length, 0, "pending status never starts another Use");
     phase = "reclaimed";

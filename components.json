@@ -1013,7 +1013,7 @@
     },
     "assistant": {
       "install_path": "capsules/assistant",
-      "description": "Assistant capsule for typed model access through Runtime authorization",
+      "description": "Chat with an AI model that runs on this Home",
       "platforms": {
         "*": {
           "cid": "",

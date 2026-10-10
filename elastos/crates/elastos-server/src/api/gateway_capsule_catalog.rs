@@ -609,14 +609,7 @@ async fn dispatch_capsule_affordance(
                         revalidate,
                     )
                 };
-                let mut output = invoke().map_err(|error| {
-                    tracing::debug!(error = ?error, "private model preparation invocation failed");
-                    (
-                        StatusCode::CONFLICT,
-                        "preparation_unavailable",
-                        "Model preparation is unavailable.".into(),
-                    )
-                })?;
+                let mut output = invoke().map_err(preparation_invoke_error)?;
                 let cid = output["cid"].as_str().unwrap_or("");
                 let operation = output["operation_id"].as_str();
                 let projection =
@@ -653,6 +646,27 @@ async fn dispatch_capsule_affordance(
             }
         }
     }
+}
+
+/// A disk-space refusal keeps its reason and size; other failures stay generic.
+fn preparation_invoke_error(error: anyhow::Error) -> (StatusCode, &'static str, String) {
+    if let Some(space) = error.downcast_ref::<elastos_common::NotEnoughFreeSpace>() {
+        let reason = space.to_string();
+        let reason = reason
+            .strip_prefix("not enough free space: ")
+            .unwrap_or(&reason);
+        return (
+            StatusCode::INSUFFICIENT_STORAGE,
+            "not_enough_free_space",
+            format!("Not enough free disk space on this Home: {reason}. Free some space, then select Get again."),
+        );
+    }
+    tracing::debug!(error = ?error, "private model preparation invocation failed");
+    (
+        StatusCode::CONFLICT,
+        "preparation_unavailable",
+        "Model preparation is unavailable.".into(),
+    )
 }
 
 async fn dispatch_capsule_launch_affordance(
@@ -834,6 +848,21 @@ mod tests {
     use elastos_common::CapsuleExecution;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn model_get_disk_refusal_keeps_the_reason_and_size() {
+        let refused = anyhow::Error::new(elastos_common::NotEnoughFreeSpace { needed: 3 << 30 })
+            .context("model preparation reservation");
+        let (status, code, message) = preparation_invoke_error(refused);
+        assert_eq!(status, StatusCode::INSUFFICIENT_STORAGE);
+        assert_eq!(code, "not_enough_free_space");
+        assert_eq!(
+            message,
+            "Not enough free disk space on this Home: this needs 3 GB plus 2 GB kept free. Free some space, then select Get again."
+        );
+        let (_, code, _) = preparation_invoke_error(anyhow::anyhow!("other failure"));
+        assert_eq!(code, "preparation_unavailable");
+    }
 
     #[tokio::test]
     #[ignore = "requires Playwright and Chromium; CI uses the content_sandbox_browser filter"]

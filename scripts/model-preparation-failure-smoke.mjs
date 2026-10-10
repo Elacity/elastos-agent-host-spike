@@ -9,8 +9,8 @@ for (const capsule of ["system", "marketplace"]) {
 }
 const context = { window: {} };
 vm.runInNewContext(source.replace("window.ElastosModelManagement = {",
-  "window.testFailure = { parseRuntime, operationRuntime, failureText, catalogEntries, selectCatalogEntry, phaseOf, PHASE_TEXT, COMPACT_PHASE_TEXT, DISPATCH_UNAVAILABLE_TEXT }; window.ElastosModelManagement = {"), context);
-const { parseRuntime, operationRuntime, failureText, catalogEntries, selectCatalogEntry, phaseOf, PHASE_TEXT, COMPACT_PHASE_TEXT, DISPATCH_UNAVAILABLE_TEXT } = context.window.testFailure;
+  "window.testFailure = { capacityText, parseRuntime, operationRuntime, failureText, catalogEntries, selectCatalogEntry, phaseOf, PHASE_TEXT, COMPACT_PHASE_TEXT, DISPATCH_UNAVAILABLE_TEXT }; window.ElastosModelManagement = {"), context);
+const { capacityText, parseRuntime, operationRuntime, failureText, catalogEntries, selectCatalogEntry, phaseOf, PHASE_TEXT, COMPACT_PHASE_TEXT, DISPATCH_UNAVAILABLE_TEXT } = context.window.testFailure;
 const cid = `bafybei${"a".repeat(52)}`;
 const preparation = { operation_id: "fixture", cid, state: "failed", total_bytes: 1024,
   completed_bytes: 512, cancel_requested: false, admitted: false, activation_pending: false };
@@ -98,13 +98,15 @@ assert.deepEqual(plain(PHASE_TEXT), {
   unavailable: "Current status unavailable", ready: "Available on this device",
   service_unavailable: "Available on this device. Model service unavailable.",
   finishing: "Finishing setup…",
-  cancelling: "Cancelling preparation…", capacity: "Waiting for local capacity…", settling: "Waiting for preparation to settle…",
+  cancelling: "Cancelling preparation…", settling: "Waiting for preparation to settle…",
   verifying: "Checking model files…", preparing: "Preparing local files…", absent: "Ready to prepare",
   reclaimed: "Model removed from local cache.", cancelled: "Preparation cancelled.", expired: "Preparation expired.",
 });
 assert.deepEqual(plain(COMPACT_PHASE_TEXT), { ...plain(PHASE_TEXT), absent: "Not on this device yet", preparing: "Getting the model…",
   reclaimed: "Removed from this device", cancelled: "Stopped before finishing", expired: "Not finished in time" });
-assert.deepEqual(Object.keys(PHASE_TEXT).sort(), Object.keys(phases).filter(name => name !== "failed").sort(), "every phase except failed reads its copy from the table");
+assert.deepEqual(Object.keys(PHASE_TEXT).sort(), Object.keys(phases).filter(name => !["failed", "capacity"].includes(name)).sort(), "every phase except failed and capacity reads its copy from the table");
+assert.equal(capacityText({ total_bytes: 3e9, completed_bytes: 1e9 }),
+  "Waiting for free space. This model needs 2 GB on this Home, plus 2 GB kept free. Free some space and it continues.");
 console.log("PASS model preparation failure: safe classes, operation/catalog parity, unknown history, strict rejection, shared copies, explicit two-entry selection, phase copy tables");
 
 // Advance a pending operation beyond the former three-minute polling ceiling.
@@ -114,18 +116,18 @@ class FixtureNode {
   append(...nodes) { this.children.push(...nodes); }
   replaceChildren(...nodes) { this.children = nodes; }
   setAttribute() {}
-  addEventListener() {}
+  addEventListener(type, listener) { this[`on${type}`] = listener; }
   contains() { return false; }
   focus() {}
 }
-let nextTimer = 0, statusCalls = 0, settled = false, catalogUpdated = false, activating = false, statusFails = false, clock = 0;
+let nextTimer = 0, statusCalls = 0, absent = false, settled = false, catalogUpdated = false, activating = false, statusFails = false, clock = 0;
 const timers = new Map();
 const fixtureRoot = new FixtureNode("section");
 const fixtureRuntime = () => ({
   admitted: settled, kept: false, dispatch_ready: settled && !catalogUpdated && !activating,
   dispatch_unavailable_reason: catalogUpdated ? "catalog_updated" : null,
   offer_id: settled && !catalogUpdated && !activating ? `model:${"b".repeat(64)}` : null,
-  preparation: { operation_id: "long-preparation", cid, state: settled ? "admitted" : "preparing",
+  preparation: absent ? null : { operation_id: "long-preparation", cid, state: settled ? "admitted" : "preparing",
     total_bytes: 1024, completed_bytes: settled ? 1024 : statusCalls,
     cancel_requested: false, admitted: settled, activation_pending: settled && activating },
 });
@@ -146,6 +148,8 @@ const fixtureContext = {
       })) }, bindings: ["use", "status", "cancel", "retention", "reclaim"].map(operation => ({ method: `content.${operation}`, executable: true })) }] };
     else {
       const request = JSON.parse(options.body);
+      if (request.method === "content.use") return { ok: false, json: async () => ({ status: "error", code: "not_enough_free_space",
+        message: "Not enough free disk space on this Home: this needs 3 GB plus 2 GB kept free. Free some space, then select Get again." }) };
       assert.equal(request.method, "content.status");
       assert.equal(request.input.operation_id, "long-preparation");
       if (statusFails) return { ok: false, text: async () => "{}" };
@@ -245,14 +249,23 @@ assert.doesNotMatch(visibleText(fixtureRoot), /Model service unavailable/);
 // next action is the Use button, not as a broken model service.
 settled = true; catalogUpdated = true;
 await control.refresh();
-const useButton = (function find(node) {
+const useButtonNode = () => (function find(node) {
   if (node.dataset?.modelControl === "use") return node;
   for (const child of node.children || []) { const hit = find(child); if (hit) return hit; }
   return null;
 })(fixtureRoot);
+const useButton = useButtonNode();
 assert.equal(useButton?.textContent, "Use");
 assert.match(visibleText(fixtureRoot), /Model list updated\. Press Use to keep using this model\./);
 assert.doesNotMatch(visibleText(fixtureRoot), /Model service unavailable/);
+// A Get refused for disk space shows the Runtime's plain reason and size, and Get stays available.
+absent = true; settled = false; catalogUpdated = false;
+await control.refresh();
+useButtonNode().onclick();
+await new Promise(setImmediate);
+assert.match(visibleText(fixtureRoot), /Not enough free disk space on this Home: this needs 3 GB plus 2 GB kept free\. Free some space, then select Get again\./);
+assert.doesNotMatch(visibleText(fixtureRoot), /could not be confirmed|Current status unavailable/);
+assert.equal(useButtonNode().disabled, false, "a final refusal leaves Get available");
 control.destroy();
 assert.equal(timers.size, 0, "destroyed controller releases timers");
 console.log("PASS long model preparation: 131 bounded status reads, quiet retry after failed reads, bounded give-up, terminal render, hide and destroy cleanup");
