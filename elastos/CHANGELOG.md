@@ -61,10 +61,12 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   launch environment see the caller's `TMPDIR`. Tests: a policy check, and the
   fixture's `setup` stub records the `TMPDIR` it receives.
 - `install.sh` fetches through `fetch_url`, which runs curl with
-  `--proto '=https' --proto-redir '=https' --tlsv1.2`; only `127.0.0.1`, `[::1]`
-  and `localhost` (test fixtures) may use HTTP. curl's exit 1 (protocol refused)
-  names the URL. The bootstrap fixture's curl stand-in requires these flags on
-  every request; a real-curl test covers refusal and the loopback exemption.
+  `--proto '=https' --proto-redir '=https' --tlsv1.2`. Only an exact
+  `http://127.0.0.1`, `http://[::1]` or `http://localhost` origin (optional
+  port, no userinfo) may use HTTP, and such a fetch follows no redirect
+  (`--max-redirs 0`). curl's exit 1 (protocol refused) names the URL. The
+  bootstrap fixture's curl stand-in requires these flags on every request;
+  real-curl tests cover userinfo tricks and HTTP and HTTPS redirects to plain HTTP.
 - Removed the web transport override from the Runtime update flow (gateway
   head discovery, `/ipfs/<cid>` fetches, the gateway release-manifest path and
   the third-party IPFS host list) and the installer's CID-gateway bootstrap

@@ -10,6 +10,7 @@ import argparse
 import base64
 import copy
 import hashlib
+import http.server
 import json
 import os
 from pathlib import Path
@@ -17,8 +18,10 @@ import platform
 import re
 import shlex
 import signal
+import ssl
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -317,16 +320,53 @@ class ShellTests(unittest.TestCase):
         self.assertIn("not enough free space: this needs 0.3 GB plus 2 GB kept free",
                       refused.stderr)
 
-    def test_real_curl_refuses_plain_http_except_loopback(self):
+    def test_real_curl_refuses_plain_http_except_exact_loopback(self):
         # Real curl, no network: a refused protocol fails before connecting,
         # and the closed loopback port fails to connect (7), not on protocol (1).
-        refused = shell('fetch_url -fsS http://example.invalid/release.json\n')
-        self.assertEqual(refused.returncode, 1, refused.stderr)
-        self.assertIn("http://example.invalid/release.json or a redirect from it is not HTTPS", refused.stderr)
+        for url in ("http://example.invalid/release.json", "http://127.0.0.1:80@example.invalid/x",
+                    "http://localhost@example.invalid/x", "http://[::1]@example.invalid/x",
+                    "http://127.0.0.1\\@example.invalid/x", "http://127.0.0.1.example.invalid/x"):
+            with self.subTest(url=url):
+                refused = shell('fetch_url -fsS "$1"\n', url)
+                self.assertEqual(refused.returncode, 1, refused.stderr)
+                self.assertIn(url + " or a redirect from it is not HTTPS", refused.stderr)
         for url in ("http://127.0.0.1:1/x", "http://[::1]:1/x", "http://localhost:1/x"):
             with self.subTest(url=url):
-                loopback = shell(f'fetch_url -fsS --max-time 5 {url}\n')
+                loopback = shell('fetch_url -fsS --max-time 5 "$1"\n', url)
                 self.assertEqual(loopback.returncode, 7, loopback.stderr)
+
+    def test_real_curl_never_follows_a_redirect_to_plain_http(self):
+        class Redirect(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", "http://example.invalid/release.json")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        with tempfile.TemporaryDirectory(prefix="installer-tls-") as directory:
+            cert, key = Path(directory, "cert.pem"), Path(directory, "key.pem")
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                            "-subj", "/CN=127.0.0.1", "-keyout", key, "-out", cert],
+                           check=True, capture_output=True)
+            tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            tls.load_cert_chain(cert, key)
+            servers = [http.server.ThreadingHTTPServer(("127.0.0.1", 0), Redirect) for _ in range(2)]
+            servers[1].socket = tls.wrap_socket(servers[1].socket, server_side=True)
+            for server in servers:
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                # Loopback HTTP follows no redirect (47); HTTPS refuses one to HTTP (1).
+                for url, status in [(f"http://127.0.0.1:{servers[0].server_port}/release.json", 47),
+                                    (f"https://127.0.0.1:{servers[1].server_port}/release.json", 1)]:
+                    with self.subTest(url=url):
+                        result = shell('fetch_url -fsSL -k --max-time 5 "$1"\n', url)
+                        self.assertEqual(result.returncode, status, result.stderr)
+            finally:
+                for server in servers:
+                    server.shutdown()
+                    server.server_close()
 
     def test_output_mode_is_plain_off_a_terminal_and_rich_on_request(self):
         script = 'show_banner\nstep 1 Title\ninfo note\nok done\nwarn careful\n'

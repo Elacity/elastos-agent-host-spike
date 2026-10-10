@@ -602,18 +602,16 @@ PY_RUNTIME_CONTROL
 }
 
 # curl for release data: HTTPS only, redirects included. Plain HTTP is
-# accepted only for a loopback host, which test fixtures use. The URL is
-# the last argument.
+# accepted only for an exact loopback origin, which test fixtures use, and
+# never follows a redirect. The URL is the last argument.
+FETCH_LOOPBACK_URL='^http://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?(/[^@\\]*)?$'
 fetch_url() {
-    local url="${!#}" host status=0
-    host="${url#*://}"
-    host="${host%%[/?#]*}"
-    case "$host" in
-        127.0.0.1|127.0.0.1:*|localhost|localhost:*|\[::1\]|\[::1\]:*)
-            curl --proto '=http,https' --proto-redir '=http,https' "$@" || status=$? ;;
-        *)
-            curl --proto '=https' --proto-redir '=https' --tlsv1.2 "$@" || status=$? ;;
-    esac
+    local url="${!#}" status=0
+    if [[ "$url" =~ $FETCH_LOOPBACK_URL ]]; then
+        curl --proto '=http' --max-redirs 0 "$@" || status=$?
+    else
+        curl --proto '=https' --proto-redir '=https' --tlsv1.2 "$@" || status=$?
+    fi
     # curl exits 1 only for a refused protocol.
     if (( status == 1 )); then
         echo -e "${RED:-}Error:${NC:-} ${url} or a redirect from it is not HTTPS; release data is fetched over HTTPS only" >&2
