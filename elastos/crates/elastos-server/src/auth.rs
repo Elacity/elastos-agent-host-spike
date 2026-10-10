@@ -143,6 +143,7 @@ pub(crate) enum RecoveryReassignmentTestFault {
     TokenPreparation,
     AuditChainRejection,
     AuthStateSave,
+    AfterAuthStateWrite,
     PostCommitOutcomeAudit,
 }
 
@@ -845,6 +846,8 @@ struct OwnerRecovery {
     rp_id: String,
     secret_digest: [u8; 32],
     expires_at: u64,
+    #[serde(default)]
+    failed_attempts: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1369,6 +1372,7 @@ pub fn arm_owner_recovery(
             rp_id: rp_id.into(),
             secret_digest: digest,
             expires_at: now + ttl_secs,
+            failed_attempts: 0,
         });
         Ok(())
     })?;
@@ -1409,6 +1413,42 @@ fn require_owner_recovery(
     Ok(())
 }
 
+/// Wrong codes allowed before the armed code is burned.
+const MAX_OWNER_RECOVERY_FAILURES: u8 = 5;
+
+/// Cheap gate run before any passkey or Kit work. An unarmed or expired Home
+/// refuses without writing; a wrong code is counted, and the fifth wrong code
+/// burns the armed code so the operator must arm a new one.
+pub(crate) fn check_owner_recovery_code(
+    data_dir: &Path,
+    client: &OwnerRecoveryClient<'_>,
+) -> anyhow::Result<()> {
+    let now = now_ts();
+    let state = load_auth_state(data_dir)?;
+    let armed = state.owner_recovery.as_ref().ok_or(OwnerEnrollmentDenied)?;
+    if armed.expires_at <= now {
+        return enrollment_denied();
+    }
+    if require_owner_recovery(&state, client, now).is_ok() {
+        return Ok(());
+    }
+    let refused_digest = armed.secret_digest;
+    mutate_auth_state(data_dir, |state| {
+        if let Some(armed) = state
+            .owner_recovery
+            .as_mut()
+            .filter(|armed| armed.secret_digest == refused_digest)
+        {
+            armed.failed_attempts = armed.failed_attempts.saturating_add(1);
+            if armed.failed_attempts >= MAX_OWNER_RECOVERY_FAILURES {
+                state.owner_recovery = None;
+            }
+        }
+        Ok(())
+    })?;
+    enrollment_denied()
+}
+
 pub(crate) fn begin_owner_recovery(
     data_dir: &Path,
     identity: &mut elastos_identity::IdentityManager,
@@ -1416,8 +1456,7 @@ pub(crate) fn begin_owner_recovery(
     ceremony_id: &str,
 ) -> anyhow::Result<elastos_identity::CreationOptions> {
     let binding = owner_recovery_binding(client)?;
-    // Read-only: an armed code changes nothing until the Kit commit.
-    require_owner_recovery(&load_auth_state(data_dir)?, client, now_ts())?;
+    check_owner_recovery_code(data_dir, client)?;
     identity.begin_bound_principal_registration(ceremony_id, client.rp_id, client.origin, binding)
 }
 
@@ -1480,11 +1519,10 @@ pub(crate) fn complete_owner_recovery(
             client.origin,
             binding,
         )?;
+        // A credential saved by an interrupted earlier attempt has no principal
+        // record; persist_guest_candidate below reconciles the same key and
+        // refuses a different one, so only principal records block a retry.
         if !candidate.user_verified
-            || identity
-                .credentials()
-                .iter()
-                .any(|item| item.credential_id == candidate.credential.credential_id)
             || state.principals.iter().any(|principal| {
                 principal
                     .proof_binding
@@ -1572,8 +1610,12 @@ pub(crate) fn complete_owner_recovery(
         });
         state.owner_recovery = None;
         push_audit_event(data_dir, state, event)?;
-        // Last effect before the single auth write: the credential file.
+        // Last effect before the single auth write: the credential file. A
+        // crash between the two leaves only an orphan credential, which a
+        // retry with the same passkey reconciles.
         identity.persist_guest_candidate(&candidate, &previous_history)?;
+        #[cfg(test)]
+        owner_enrollment_test_fault(data_dir, OwnerEnrollmentTestFault::AfterCredential)?;
         identity.cancel_challenge(ceremony_id);
         Ok(grant)
     })
@@ -2546,6 +2588,81 @@ mod owner_recovery_tests {
                 "{case}"
             );
         }
+    }
+
+    fn check(home: &Home, code: &str) -> anyhow::Result<()> {
+        check_owner_recovery_code(
+            home.root.path(),
+            &OwnerRecoveryClient {
+                origin: ORIGIN,
+                rp_id: "localhost",
+                code,
+            },
+        )
+    }
+
+    #[test]
+    fn owner_recovery_code_is_burned_after_five_wrong_codes() {
+        let mut home = home();
+        let code = arm(&home);
+        for _ in 0..4 {
+            assert!(check(&home, &random_secret_hex()).is_err());
+        }
+        check(&home, &code).unwrap();
+        assert!(check(&home, &random_secret_hex()).is_err());
+
+        assert!(
+            check(&home, &code).is_err(),
+            "fifth wrong code burns the code"
+        );
+        assert!(begin(&mut home, &code).is_err());
+    }
+
+    #[test]
+    fn owner_recovery_unarmed_or_expired_refuses_without_writing() {
+        let home = home();
+        let before = auth_bytes(&home);
+        assert!(check(&home, &random_secret_hex()).is_err());
+        assert_eq!(auth_bytes(&home), before, "unarmed");
+
+        let code = arm(&home);
+        mutate_auth_state(home.root.path(), |state| {
+            state.owner_recovery.as_mut().unwrap().expires_at = now_ts() - 1;
+            Ok(())
+        })
+        .unwrap();
+        let before = auth_bytes(&home);
+        assert!(check(&home, &code).is_err());
+        assert!(check(&home, &random_secret_hex()).is_err());
+        assert_eq!(auth_bytes(&home), before, "expired");
+    }
+
+    #[test]
+    fn owner_recovery_retry_reconciles_credential_saved_before_a_crash() {
+        let mut home = home();
+        let code = arm(&home);
+        let response = begin(&mut home, &code).unwrap();
+        let kit = home.kit.clone();
+        let before = auth_bytes(&home);
+        let credentials = home.identity.credentials().len();
+        // The credential file is written, then the auth write never happens.
+        fail_owner_enrollment_once_for_test(
+            home.root.path(),
+            OwnerEnrollmentTestFault::AfterCredential,
+        );
+        assert!(complete(&mut home, &code, &response, &kit).is_err());
+        assert_eq!(auth_bytes(&home), before);
+        home.identity.reload_credentials().unwrap();
+        assert_eq!(home.identity.credentials().len(), credentials + 1);
+
+        let grant = complete(&mut home, &code, &response, &kit).unwrap();
+
+        let recovered =
+            load_principal_for_proof_binding(home.root.path(), &grant.proof_binding_id).unwrap();
+        assert_eq!(recovered.principal_id, home.admin.principal_id);
+        assert_eq!(recovered.role, RuntimePrincipalRole::Admin);
+        home.identity.reload_credentials().unwrap();
+        assert_eq!(home.identity.credentials().len(), credentials + 1);
     }
 
     #[test]
@@ -4109,6 +4226,11 @@ pub(crate) fn save_auth_state(data_dir: &Path, state: &AuthState) -> anyhow::Res
             _ => {}
         }
         write_secret_json_atomic(&path, state)?;
+        #[cfg(test)]
+        consume_recovery_reassignment_test_fault(
+            data_dir,
+            RecoveryReassignmentTestFault::AfterAuthStateWrite,
+        )?;
         if let (Some(chain_state), Some(checkpoint)) =
             (state.audit_chain_state.as_ref(), checkpoint.as_ref())
         {
@@ -5512,7 +5634,8 @@ pub fn commit_recovered_root_reassignment(
     let (_, runtime_did) = elastos_identity::load_or_create_did(data_dir)?;
     verify_audit_event_signature(&signed_audit_event, &runtime_did)?;
 
-    let created_archive_key = std::cell::Cell::new(false);
+    // Set only when this commit created the archive key: the archive it sealed.
+    let created_archive_key = std::cell::Cell::new(None::<String>);
     let result = mutate_auth_state(data_dir, |state| {
         normalize_principal_records(state);
         ensure_recovered_root_reassignable_in_state(
@@ -5579,7 +5702,16 @@ pub fn commit_recovered_root_reassignment(
             stored.principal_id != protection.principal_id
                 || stored.localhost_root != protection.localhost_root
         });
-        created_archive_key.set(attach_recovery_archive(data_dir, &mut protection, &kit)?);
+        if attach_recovery_archive(data_dir, &mut protection, &kit)? {
+            created_archive_key.set(
+                protection
+                    .protectors
+                    .iter()
+                    .find(|protector| protector.kind == PrincipalRootProtectorKind::RecoveryKit)
+                    .and_then(|protector| protector.archive.as_ref())
+                    .map(|archive| archive.encrypted_recovery_kit.clone()),
+            );
+        }
         state.principal_root_protections.push(protection);
         state.sessions.push(StoredAuthSession {
             grant: replacement_grant,
@@ -5593,9 +5725,28 @@ pub fn commit_recovered_root_reassignment(
         push_audit_event(data_dir, state, signed_audit_event)?;
         Ok(record)
     });
-    if result.is_err() && created_archive_key.get() {
-        // This commit created the archive key and then failed: remove it.
-        let _ = std::fs::remove_file(recovery_archive_key_path(data_dir)?);
+    if let (Err(_), Some(sealed)) = (&result, created_archive_key.take()) {
+        // This commit created the archive key and then failed. Remove the key
+        // only if the auth file on disk does not reference its archive: a
+        // failure after the auth write (for example the checkpoint) has
+        // already committed it. An unreadable file keeps the key.
+        let durable = load_auth_state_unverified(data_dir)
+            .map(|raw| {
+                raw.into_iter().any(|state| {
+                    state.principal_root_protections.iter().any(|protection| {
+                        protection.protectors.iter().any(|protector| {
+                            protector
+                                .archive
+                                .as_ref()
+                                .is_some_and(|archive| archive.encrypted_recovery_kit == sealed)
+                        })
+                    })
+                })
+            })
+            .unwrap_or(true);
+        if !durable {
+            let _ = std::fs::remove_file(recovery_archive_key_path(data_dir)?);
+        }
     }
     result
 }
@@ -9714,6 +9865,48 @@ mod tests {
             assert!(!key_path.exists(), "{case}");
             assert_eq!(std::fs::read(&auth_path).unwrap(), before, "{case}");
         }
+    }
+
+    #[test]
+    fn recovered_root_reassignment_keeps_archive_key_once_auth_state_is_written() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (reassignment, _, _) = recovered_root_reassignment_fixture(data_dir.path());
+        upsert_principal_for_binding_as_role(
+            data_dir.path(),
+            passkey_binding_with_credential("credential-home-admin", 1, 10, 10),
+            "person:local:home-admin".to_string(),
+            RuntimePrincipalRole::Admin,
+            10,
+        )
+        .unwrap();
+        let principal_id = reassignment.recovered_principal_id.clone();
+        let localhost_root = reassignment.recovered_localhost_root.clone();
+        let key_path = recovery_archive_key_path(data_dir.path()).unwrap();
+        std::fs::remove_file(&key_path).unwrap();
+        // The auth file is written, then a later step (the checkpoint) fails.
+        inject_recovery_reassignment_test_fault(
+            data_dir.path(),
+            RecoveryReassignmentTestFault::AfterAuthStateWrite,
+        );
+
+        commit_recovered_root_reassignment(data_dir.path(), reassignment).unwrap_err();
+
+        let written = load_auth_state_unverified(data_dir.path())
+            .unwrap()
+            .unwrap();
+        let protection = written
+            .principal_root_protections
+            .iter()
+            .find(|stored| {
+                stored.principal_id == principal_id && stored.localhost_root == localhost_root
+            })
+            .unwrap();
+        assert!(key_path.exists(), "the written archive must stay readable");
+        recovery_kit_from_archive(
+            data_dir.path(),
+            protection.protectors[0].archive.as_ref().unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]

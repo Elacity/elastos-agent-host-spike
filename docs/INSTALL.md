@@ -390,7 +390,8 @@ Home, even when guest accounts are off:
    one), then create a new passkey.
 3. Home accepts only the Recovery Kit this Home saved for its admin. The new
    passkey becomes the admin and the old passkey stops working. Any other Kit,
-   an expired code or a used code changes nothing.
+   an expired code or a used code changes nothing. After five wrong codes the
+   code stops working; run the command again for a new one.
 
 ## Capability policy
 

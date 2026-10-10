@@ -738,6 +738,13 @@ async fn owner_recovery_complete_inner(
 ) -> anyhow::Result<PasskeyVerifyResponse> {
     let rp = super::handlers::identity::derive_rp(headers)?;
     let code = owner_recovery_code(headers)?;
+    let client = crate::auth::OwnerRecoveryClient {
+        origin: &rp.origin,
+        rp_id: &rp.id,
+        code: &code,
+    };
+    // Armed, unexpired and the right code before any password or Kit work.
+    crate::auth::check_owner_recovery_code(&state.data_dir, &client)?;
     let bundle = full_recovery_bundle_from_parts(
         input.bundle.as_ref(),
         input.package.as_ref(),
@@ -755,11 +762,7 @@ async fn owner_recovery_complete_inner(
     let grant = crate::auth::complete_owner_recovery(
         &state.data_dir,
         &mut manager,
-        &crate::auth::OwnerRecoveryClient {
-            origin: &rp.origin,
-            rp_id: &rp.id,
-            code: &code,
-        },
+        &client,
         &input.ceremony_id,
         &input.response,
         &kit,

@@ -41,8 +41,8 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   key). The import route checks this before deriving keys, activating
   protection or creating the recovery archive key, so a refusal writes only
   the denial audit event. The Kit's archive is sealed inside the commit's auth
-  lock; if this commit created the recovery archive key and then fails, the key
-  is removed.
+  lock; if this commit created the recovery archive key and the auth file on
+  disk does not reference the new archive after a failure, the key is removed.
 - New `elastos identity arm-owner-recovery --origin --rp-id [--expires-in ≤900]`
   stores the digest of a one-time code (`AuthState.owner_recovery`); the Home
   must already have an admin. `POST /api/auth/owner-recovery/begin` and
@@ -51,8 +51,13 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   presented Kit belongs to an existing Admin record whose stored root protection
   has the Kit's `data_key_id`. That write replaces the admin's records, revokes
   their sessions, binds the new passkey as Admin, consumes the code and audits
-  `auth.owner.recovered`. Any refusal leaves auth state and the credential store
-  unchanged. (#88)
+  `auth.owner.recovered`. Both routes share the passkey-registration rate
+  limit, and each checks the code (armed, unexpired, constant-time match)
+  before any password derivation or Kit work; an unarmed or expired Home
+  refuses without writing, and the fifth wrong code burns the armed code. A Kit
+  refusal leaves auth state and the credential store unchanged. The credential
+  is written just before the auth write; a crash between them leaves an orphan
+  credential that a retry with the same passkey reconciles. (#88)
 
 - Model preparation keeps its stage after any `MetadataRead`, `WeightsRead` or
   `Capacity` failure, not only after a read typed as in transit (`Io`). A part
