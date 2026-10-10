@@ -617,6 +617,26 @@ if __name__ == "__main__":
 PY_RUNTIME_CONTROL
 }
 
+# curl for release data: HTTPS only, redirects included. Plain HTTP is
+# accepted only for a loopback host, which test fixtures use. The URL is
+# the last argument.
+fetch_url() {
+    local url="${!#}" host status=0
+    host="${url#*://}"
+    host="${host%%[/?#]*}"
+    case "$host" in
+        127.0.0.1|127.0.0.1:*|localhost|localhost:*|\[::1\]|\[::1\]:*)
+            curl --proto '=http,https' --proto-redir '=http,https' "$@" || status=$? ;;
+        *)
+            curl --proto '=https' --proto-redir '=https' --tlsv1.2 "$@" || status=$? ;;
+    esac
+    # curl exits 1 only for a refused protocol.
+    if (( status == 1 )); then
+        echo -e "${RED:-}Error:${NC:-} ${url} or a redirect from it is not HTTPS; release data is fetched over HTTPS only" >&2
+    fi
+    return "$status"
+}
+
 # Fetch a CID from IPFS gateways (tries each in order)
 ipfs_fetch() {
     local cid="$1"
@@ -624,10 +644,10 @@ ipfs_fetch() {
     local url
     for gw in ${GATEWAYS[@]+"${GATEWAYS[@]}"}; do
         url="${gw}/ipfs/${cid}"
-        if curl -fsSL --connect-timeout "${BINARY_DOWNLOAD_CONNECT_TIMEOUT}" \
+        if fetch_url -fsL --connect-timeout "${BINARY_DOWNLOAD_CONNECT_TIMEOUT}" \
             --speed-limit "${BINARY_DOWNLOAD_SPEED_LIMIT}" \
             --speed-time "${BINARY_DOWNLOAD_SPEED_TIME}" \
-            -o "$output" "$url" 2>/dev/null; then
+            -o "$output" "$url"; then
             LAST_SUCCESS_GATEWAY="$gw"
             return 0
         fi
@@ -1095,7 +1115,7 @@ trap 'rm -rf "$INSTALL_SCRATCH"' EXIT
 if [[ -n "$PUBLISHER_GATEWAY" ]]; then
     PG="${PUBLISHER_GATEWAY%/}"
     info "Fetching release head from ${PG}"
-    curl -fsSL --max-time 30 -o "${INSTALL_SCRATCH}/release-head.json" "${PG}/release-head.json" \
+    fetch_url -fsSL --max-time 30 -o "${INSTALL_SCRATCH}/release-head.json" "${PG}/release-head.json" \
         || die "Publisher gateway unreachable: ${PG}/release-head.json"
 else
     # No bootstrap publisher URL — use CID-based fetch (operator/debug bootstrap only)
@@ -1129,7 +1149,7 @@ fi
 
 if [[ -n "$PUBLISHER_GATEWAY" ]]; then
     info "Fetching release bootstrap metadata from publisher URL"
-    curl -fsSL --max-time 30 -o "${INSTALL_SCRATCH}/release.json" "${PG}/release.json" \
+    fetch_url -fsSL --max-time 30 -o "${INSTALL_SCRATCH}/release.json" "${PG}/release.json" \
         || die "Publisher gateway unreachable: ${PG}/release.json"
 else
     info "Fetching release by CID: ${RELEASE_CID} (bootstrap mode)"
@@ -1173,7 +1193,7 @@ if [[ -n "$PUBLISHER_GATEWAY" ]]; then
     else
         CURL_BINARY_FLAGS+=(-sS)
     fi
-    curl "${CURL_BINARY_FLAGS[@]}" \
+    fetch_url "${CURL_BINARY_FLAGS[@]}" \
         --retry "${BINARY_DOWNLOAD_RETRY_COUNT}" \
         --retry-all-errors \
         --retry-delay "${BINARY_DOWNLOAD_RETRY_DELAY}" \

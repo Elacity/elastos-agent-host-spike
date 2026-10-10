@@ -317,6 +317,17 @@ class ShellTests(unittest.TestCase):
         self.assertIn("not enough free space: this needs 0.3 GB plus 2 GB kept free",
                       refused.stderr)
 
+    def test_real_curl_refuses_plain_http_except_loopback(self):
+        # Real curl, no network: a refused protocol fails before connecting,
+        # and the closed loopback port fails to connect (7), not on protocol (1).
+        refused = shell('fetch_url -fsS http://example.invalid/release.json\n')
+        self.assertEqual(refused.returncode, 1, refused.stderr)
+        self.assertIn("http://example.invalid/release.json or a redirect from it is not HTTPS", refused.stderr)
+        for url in ("http://127.0.0.1:1/x", "http://[::1]:1/x", "http://localhost:1/x"):
+            with self.subTest(url=url):
+                loopback = shell(f'fetch_url -fsS --max-time 5 {url}\n')
+                self.assertEqual(loopback.returncode, 7, loopback.stderr)
+
     def test_empty_gateway_array_fails_with_installer_message(self):
         result = shell('GATEWAYS=()\nipfs_fetch test-cid /unused\n')
         self.assertNotEqual(result.returncode, 0)
@@ -470,17 +481,28 @@ class InstallerSandbox:
         self.respond("release.json", release)
         mocks = self.root / "mocks"
         (mocks / "uname").write_text('#!/bin/sh\ncase "$1" in -s) echo "$MOCK_SYSTEM";; -m) echo "$MOCK_MACHINE";; esac\n')
+        # Fixture URLs are https://test.invalid, so every request must carry the
+        # HTTPS-only flags; a responses/<name>.redirect file names a redirect target.
         (mocks / "curl").write_text('''#!/bin/sh
-destination=""
+destination="" flags=""
 while [ "$#" -gt 0 ]; do
-    case "$1" in -o) destination="$2"; shift 2;; *) url="$1"; shift;; esac
+    case "$1" in
+        -o) destination="$2"; shift 2;;
+        --proto|--proto-redir) flags="$flags $1 $2"; shift 2;;
+        --tlsv1.2) flags="$flags $1"; shift;;
+        *) url="$1"; shift;;
+    esac
 done
 printf '%s\\n' "$url" >> "$FIXTURES/requests"
+[ "$flags" = " --proto =https --proto-redir =https --tlsv1.2" ] || { echo "insecure-curl:$flags" >&2; exit 94; }
 case "$url" in
   */release-head.json|*/ipfs/"$FIXTURE_HEAD_CID") response=release-head.json;;
   */release.json|*/ipfs/"$FIXTURE_RELEASE_CID") response=release.json;;
   */artifacts/elastos-*|*/ipfs/"$FIXTURE_BINARY_CID") response=binary;;
   *) echo unexpected-request-blocked >&2; exit 93;;
+esac
+case "$(cat "$FIXTURES/responses/$response.redirect" 2>/dev/null)" in
+  http://*) echo 'curl: (1) Protocol "http" not supported' >&2; exit 1;;
 esac
 [ -f "$FIXTURES/responses/$response" ] || { echo artifact-request-blocked >&2; exit 93; }
 if [ -n "$destination" ]; then cp "$FIXTURES/responses/$response" "$destination"; else cat "$FIXTURES/responses/$response"; fi
@@ -875,6 +897,23 @@ class InstallationTests(unittest.TestCase):
                     self.assertLess(ready, result.stdout.index("Home is installed"))
                     self.assertIn("update", result.stdout[ready:])
                     self.assertIn("export PATH=", result.stdout[ready:])
+
+    def test_redirect_to_plain_http_fails_with_clear_message(self):
+        did, head, release = installable_fixture()
+        cases = [("publisher", "release-head.json", 1), ("publisher", "binary", 3),
+                 ("cid", "release.json", 2), ("cid", "binary", 3)]
+        for transport, response, requests_made in cases:
+            with self.subTest(transport=transport, response=response), \
+                    InstallerSandbox(head, release, did) as sandbox:
+                self.existing_installation(sandbox)
+                sandbox.respond("binary", RUNTIME_STUB)
+                sandbox.respond(response + ".redirect", b"http://test.invalid/plain")
+                before = sandbox.home_state()
+                result, requests = sandbox.run(transport=transport)
+                self.assertEqual(requests, self.REQUESTS[transport][:requests_made])
+                self.assertIn("or a redirect from it is not HTTPS; release data is fetched over HTTPS only",
+                              result.stderr)
+                self.assert_no_installation_effects(sandbox, before, result)
 
     def test_existing_installation_is_reported_before_download(self):
         did, head, release = installable_fixture()

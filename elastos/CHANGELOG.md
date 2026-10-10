@@ -21,6 +21,8 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - Runtime setup and the first Home started by the installer keep your own
   temporary folder. Before, they got the installer's temporary folder, which it
   deleted when it finished.
+- The installer downloads release data over HTTPS only and stops with a clear
+  message if a server redirects it to plain HTTP.
 
 ### Developer detail
 
@@ -50,6 +52,11 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   assigns `TMPDIR`, so `elastos setup`, Home and the update controller's saved
   launch environment see the caller's `TMPDIR`. Tests: a policy check, and the
   fixture's `setup` stub records the `TMPDIR` it receives.
+- `install.sh` fetches through `fetch_url`, which runs curl with
+  `--proto '=https' --proto-redir '=https' --tlsv1.2`; only `127.0.0.1`, `[::1]`
+  and `localhost` (test fixtures) may use HTTP. curl's exit 1 (protocol refused)
+  names the URL. The bootstrap fixture's curl stand-in requires these flags on
+  every request; a real-curl test covers refusal and the loopback exemption.
 
 ## [0.8.0-alpha.15]
 
