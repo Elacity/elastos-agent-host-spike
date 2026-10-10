@@ -290,6 +290,20 @@ function sessionTurnServer(config, network) {
   };
 }
 
+// Linux Browser media uses one session TURN server on the leased network slot.
+function linuxSessionTurn(network) {
+  const iceConfig = vmIceEnv(network);
+  const turn = sessionTurnServer(iceConfig, network);
+  if (!turn) {
+    throw new Error("Linux Browser requires session-local TURN at turn:{host_ip}:{turn_port} with ICE username and credential.");
+  }
+  if (turnServerPorts(iceConfig, network).some((port) => port !== network.turnPort) ||
+      turn.relay.min !== 49152 || turn.relay.max !== 49215) {
+    throw new Error("Linux Browser setup permits local TURN on {turn_port} and relay ports 49152-49215. Use these ports in the Browser ICE configuration.");
+  }
+  return { iceConfig, turn };
+}
+
 function sessionSuffix(value) {
   const hash = crypto.createHash("sha256").update(String(value || "stream")).digest("hex");
   return `bvm-${hash.slice(0, 16)}-${crypto.randomBytes(4).toString("hex")}`;
@@ -1236,17 +1250,7 @@ async function main() {
   const profile = prepareProfileDisk(request.profile, dataDir);
   cleanupFns.push(() => fs.closeSync(profile.lockFd));
   const network = await acquireLinuxNetwork(scriptPath);
-  const iceConfig = vmIceEnv(network);
-  const mediaPorts = turnServerPorts(iceConfig, network);
-  const turn = sessionTurnServer(iceConfig, network);
-  if (!turn) {
-    throw new Error("Linux Browser requires session-local TURN at turn:{host_ip}:{turn_port} with ICE username and credential.");
-  }
-  const mediaPortRanges = turn ? [turn.relay] : [];
-  if (mediaPorts.some((port) => port !== network.turnPort) ||
-      (turn && (turn.relay.min !== 49152 || turn.relay.max !== 49215))) {
-    throw new Error("Linux Browser setup permits local TURN on {turn_port} and relay ports 49152-49215. Use these ports in the Browser ICE configuration.");
-  }
+  const { iceConfig, turn } = linuxSessionTurn(network);
   const controlSocketPath = path.join(sessionDir, "control.sock");
   validateAbsolutePath(controlSocketPath, "control socket path");
   const launchRootfs = path.join(sessionDir, "rootfs.ext4");
@@ -1254,12 +1258,7 @@ async function main() {
   logPhase(`session dir ${sessionDir}`);
   logPhase(`preparing launch rootfs from ${rootfs} to ${launchRootfs}`);
   await startSessionTurnServer({ network, sessionDir, turn });
-  if (mediaPorts.length > 0) {
-    logPhase(`allowed guest access to host media relay ports ${mediaPorts.join(",")}`);
-  }
-  if (mediaPortRanges.length > 0) {
-    logPhase(`allowed guest access to host media relay port ranges ${mediaPortRanges.map((range) => `${range.min}-${range.max}`).join(",")}`);
-  }
+  logPhase(`allowed guest access to host media relay port ${turn.port} and range ${turn.relay.min}-${turn.relay.max}`);
   await startTcpToUnixBridge(network.hostIp, 19091, launch.relay_ipc.path);
   await startUnixToTcpBridge(controlSocketPath, network.guestIp, 19092);
   const rootfsPrep = prepareLaunchRootfs({ rootfs, launchRootfs, dataDir, sessionDir, scriptPath });

@@ -455,6 +455,8 @@ filter rules. Runtime keeps its Unix relay and session-local TURN processes;
 launch creates the VM, bridges, media process, sockets and disposable rootfs.
 Guest control stays on TCP `19092` reached from the host. Guest DHCP, host
 forwarding, NAT and host default-route changes are unnecessary.
+`elastos setup` writes the Home's TURN credential to the owner-only
+`$DATA_DIR/runtime-turn/turn-credentials.env` and keeps an existing one.
 
 For removal, use the same root shell and helper:
 

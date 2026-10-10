@@ -17,6 +17,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   and removes the rest, so an image update or Undo never boots the previous
   rootfs with the new kernel; a refill that sees the image change discards its
   copy (#307).
+- `elastos setup` on Linux writes a per-Home TURN credential to the owner-only
+  `runtime-turn/turn-credentials.env` (kept on later runs), so a fresh
+  Linux/Jetson Home gets the session-local TURN configuration the crosvm
+  launcher requires (#307).
 
 ## [0.8.0-alpha.14]
 

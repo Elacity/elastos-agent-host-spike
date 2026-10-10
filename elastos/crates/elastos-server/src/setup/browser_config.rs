@@ -343,6 +343,9 @@ fn generate(
     turn: &Path,
 ) -> anyhow::Result<()> {
     fs::create_dir_all(data.join("config"))?;
+    if platform.starts_with("linux-") {
+        ensure_linux_turn_credentials(data)?;
+    }
     let staged = tempfile::tempdir_in(data.join("config"))?;
     let mut command = Command::new(node);
     command
@@ -383,6 +386,44 @@ fn generate(
     }
     println!("Browser local Engine and Exit configuration is ready. Runtime owns the selected Browser profile and its verified image.");
     Ok(())
+}
+
+/// Linux Browser media uses a session TURN server on the leased host slot. Its
+/// per-Home credential stays in an owner-only file that the generator copies
+/// into the owner-only Engine configuration; an existing file is kept.
+fn ensure_linux_turn_credentials(data: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = data.join("runtime-turn");
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)?;
+    let path = dir.join("turn-credentials.env");
+    if path.exists() {
+        return Ok(());
+    }
+    let mut credential = [0_u8; 24];
+    getrandom::getrandom(&mut credential)?;
+    let servers = serde_json::json!([{
+        "urls": [
+            "turn:{host_ip}:{turn_port}?transport=udp",
+            "turn:{host_ip}:{turn_port}?transport=tcp",
+        ],
+        "username": "elastos-browser",
+        "credential": hex::encode(credential),
+    }]);
+    // A new temporary file is owner-only; persisting it never replaces a file.
+    let mut file = tempfile::NamedTempFile::new_in(&dir)?;
+    write!(
+        file,
+        "ELASTOS_BROWSER_VM_ICE_SERVERS_JSON={servers}\nELASTOS_BROWSER_VM_ICE_TRANSPORT_POLICY=relay\n"
+    )?;
+    file.as_file().sync_all()?;
+    match file.persist_noclobber(&path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error.error.into()),
+    }
 }
 
 #[cfg(test)]
@@ -690,6 +731,102 @@ mod tests {
                 assert_eq!(env["ELASTOS_BROWSER_VM_TURN_PROGRAM"], "/host/turnserver");
             }
         }
+    }
+
+    #[test]
+    fn fresh_linux_setup_supplies_turn_the_launcher_accepts() {
+        use std::os::unix::fs::PermissionsExt;
+        const LAUNCHER: &str =
+            include_str!("../../../../../scripts/browser-vm-local-crosvm-launcher.mjs");
+        // Runs the launcher's own TURN gate against the generated Engine env.
+        const HARNESS: &str = r#"
+            const vm = require("node:vm");
+            const source = require("node:fs").readFileSync(0, "utf8");
+            const slice = (from, to) => source.slice(source.indexOf(from), source.indexOf(to, source.indexOf(from)));
+            const context = vm.createContext({ Buffer, process: { env: JSON.parse(process.argv[1]) } });
+            const { turn } = vm.runInContext(`${slice("const OPEN_REQUEST_ENV", "\nconst children")}
+                ${slice("function isIpv4(", "\nfunction sessionSuffix(")}
+                linuxSessionTurn({ hostIp: "192.168.200.1", guestIp: "192.168.200.2", turnPort: 41000 })`, context);
+            process.stdout.write(JSON.stringify(turn));
+        "#;
+        let node = fixture_node();
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path();
+        generate(
+            data,
+            "linux-arm64",
+            true,
+            &node,
+            Path::new("/host/turnserver"),
+        )
+        .unwrap();
+        let credentials = data.join("runtime-turn/turn-credentials.env");
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&credentials), 0o600);
+        assert_eq!(mode(&data.join("runtime-turn")), 0o700);
+        let adapter: Value = serde_json::from_slice(
+            &fs::read(data.join("config/browser-engine-adapter.json")).unwrap(),
+        )
+        .unwrap();
+        let env = &adapter["adapters"][0]["supervisor"]["env"];
+        let run = |env: &Value| {
+            let mut child = Command::new(&node)
+                .args(["-e", HARNESS, &env.to_string()])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(LAUNCHER.as_bytes())
+                .unwrap();
+            child.wait_with_output().unwrap()
+        };
+        let output = run(env);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let turn: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(turn["host"], "192.168.200.1");
+        assert_eq!(turn["port"], 41000);
+        assert_eq!(turn["username"], "elastos-browser");
+        assert_eq!(turn["credential"].as_str().unwrap().len(), 48);
+        // The credential belongs to this Home and survives a repeated setup.
+        let issued = fs::read(&credentials).unwrap();
+        fs::remove_file(data.join("config/browser-engine-adapter.json")).unwrap();
+        generate(
+            data,
+            "linux-arm64",
+            true,
+            &node,
+            Path::new("/host/turnserver"),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&credentials).unwrap(), issued);
+        let other = tempfile::tempdir().unwrap();
+        generate(
+            other.path(),
+            "linux-arm64",
+            true,
+            &node,
+            Path::new("/host/turnserver"),
+        )
+        .unwrap();
+        assert_ne!(
+            fs::read(other.path().join("runtime-turn/turn-credentials.env")).unwrap(),
+            issued
+        );
+        // Without credentials the launcher refuses, as a fresh Home did before.
+        let mut bare = env.clone();
+        bare.as_object_mut()
+            .unwrap()
+            .retain(|key, _| !key.starts_with("ELASTOS_BROWSER_VM_ICE_"));
+        assert!(String::from_utf8_lossy(&run(&bare).stderr).contains("requires session-local TURN"));
     }
 
     #[test]
