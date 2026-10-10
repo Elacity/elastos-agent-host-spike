@@ -57,6 +57,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   removes the whole data directory instead, without following links. It
   downloads nothing and needs no trust anchors. `docs/INSTALL.md` now lists the
   macOS and Linux paths and documents removal.
+- `docs/VERSIONING.md` "Withdraw a bad release" (#321): publish N+2 from the
+  last good source, announce on #93, point affected Homes to Undo; the seed
+  keeps N pinned. Decision: no withdrawn-versions list in the signed head for
+  0.8.0; revisit with #157 and #213.
 
 ## [0.8.0-alpha.15]
 
