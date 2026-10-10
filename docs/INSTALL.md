@@ -213,8 +213,7 @@ elastos update --check
 elastos update
 ```
 
-`elastos upgrade` does the same as `elastos update`. Only the first download in
-`install.sh` uses the web; updates come over Carrier.
+Only the first download in `install.sh` uses the web; updates come over Carrier.
 
 Runtime keeps the verified signed pair in `installation/release-head.json`
 and `installation/release.json` within its data directory. Publisher owns its

@@ -1363,7 +1363,7 @@ if [[ "${STAGED_VERSION_OUTPUT}" != "elastos ${RELEASE_VERSION}" || -s "${STAGED
 fi
 ok "Checksum and version match the signed release"
 
-# ── Carrier contact + release metadata for `elastos upgrade` ─────────
+# ── Carrier contact + release metadata for `elastos update` ─────────
 
 SIGNER_DID=$(json_get "${INSTALL_SCRATCH}/release-head.json" 'd["signer_did"]')
 

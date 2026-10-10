@@ -300,18 +300,6 @@ rootfs-all:
     done
     echo "All rootfs builds complete."
 
-# Full publish: build + rootfs + sign + upload
-publish version key:
-    ./scripts/publish-release.sh --version {{version}} --key {{key}}
-
-# Quick re-publish: skip build + rootfs (re-sign and re-upload only)
-publish-quick version key:
-    ./scripts/publish-release.sh --version {{version}} --key {{key}} --skip-build --skip-rootfs
-
-# Local publish: skip build + rootfs + no public URL (fastest)
-publish-local version key:
-    ./scripts/publish-release.sh --version {{version}} --key {{key}} --skip-build --skip-rootfs --no-public-url
-
 # Run GBA emulator demo
 gba *args:
     ./scripts/gba.sh {{args}}

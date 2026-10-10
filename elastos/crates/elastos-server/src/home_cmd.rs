@@ -33,7 +33,6 @@ const COMMAND_GROUPS: &[(&str, &[&str])] = &[
         &[
             "source",
             "update",
-            "upgrade",
             "publish-release",
             "verify",
             "sign-payload",

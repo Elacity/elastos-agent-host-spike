@@ -6,12 +6,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
-### Changed
+## [0.8.0-alpha.15]
 
-- An installed Home now runs a local capsule only when it comes from the
-  signed release or is signed by the release publisher. Before, it also ran
-  unsigned capsules from any folder. Homes built from source keep running
-  unsigned capsules. This needs no action after the update.
+Test-channel release. Signed releases show these notes in System before you update.
+
 ### Added
 
 - You can remove ElastOS with the installer:
@@ -20,21 +18,70 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   and files, so installing again continues where you were. Add `--remove-data`
   to delete those too; keep your Recovery Kit first.
 
+### Changed
+
+- Setup installs one Home; it no longer prints options for other setups.
+- The terminal Home no longer quits with "403 Forbidden" after the first
+  action; you can run actions one after another.
+- The terminal Home no longer offers the old native Chat, which used a
+  different network from the Chat on the Desktop.
+- People "Message" in the terminal Home no longer opens that old Chat. In the
+  browser terminal it opens Chat on the Desktop at that person's conversation;
+  in a native terminal it says "Open Chat on the Desktop to message <name>."
+- In the terminal Inbox, direct messages and service requests say "Open Inbox
+  on the Desktop to answer this" instead of "no longer available".
+- In the terminal Apps tab, Enter on an app that only opens on the Desktop
+  says "Open <App> on the Desktop" instead of doing nothing.
+- Publishing a document (Documents Publish and `elastos share`) works again:
+  it copied a viewer file from a place the Documents app does not ship (#128).
+- An installed Home now runs a local capsule only when it comes from the
+  signed release or is signed by the release publisher. Before, it also ran
+  unsigned capsules from any folder. Homes built from source keep running
+  unsigned capsules. This needs no action after the update.
+- `elastos --help` lists only the everyday commands. Commands for people who
+  run servers or publish releases (such as `serve`, `gateway`, `keys` and
+  `publish-release`) still work and still have their own `--help`.
+
 ### Fixed
 
+- Home no longer runs out of memory when it starts with Qwen2.5 1.5B on the
+  device. On an 8 GB Linux computer, Home used more than 7 GB within seconds of
+  starting, and the system stopped it.
+- On Linux, a reply right after Get no longer fails with "Not enough free
+  memory" when most of the memory in use is only cached files.
+- `elastos setup` on a Home that imported media tools before 0.8.0-alpha.9
+  stopped with "supplied media tools differ from the private imported pair".
+  On an installed signed release, setup now fetches and verifies the release's
+  media tools again and replaces the private copy, keeping your media limits.
+- While a model downloads, Marketplace and System no longer stop at "Status is
+  unavailable. Refresh to check before trying again." after one missed status
+  check. They show "Checking status…" and keep checking.
+- While a model is being set up after its download, Marketplace and System show
+  "Finishing setup…" instead of "Model service unavailable." with a Retry button.
+  If setup takes more than two minutes, Retry comes back.
+- When no model is ready yet and one is downloading, Assistant shows, for
+  example, "SmolLM2 is downloading (42%)" instead of "No model".
+- System > Shell and Marketplace > Home views no longer offer Terminal unless
+  developer mode is on. If Terminal was chosen and can no longer start, Home
+  opens the Desktop instead of showing an error after every reload.
+- A new Home no longer asks in Inbox for market-price access before you open
+  Wallet.
+- Assistant no longer shows a microphone button that cannot work inside Home.
+- The welcome sheet no longer talks about an "updated" Recovery Kit on a new
+  Home, and the lock screen shows the first letter of your name.
 - Importing your Recovery Kit with a new passkey now keeps your admin role.
   Before, an owner who added a guest passkey and imported their Kit stayed a
   guest, and the Home was left with no admin. Recovery now also refuses any
   import that would leave the Home without an admin passkey, and any Kit that
   was not made on this Home for that person: knowing someone's account id is
   no longer enough to take over their account with a home-made Kit.
-
 - An owner who lost every passkey can now recover their Home with their
   Recovery Kit, even when guest accounts are off. Before, the sign-in screen
   offered no way back. Run `elastos identity arm-owner-recovery` on the computer
   that runs Home, then choose "Recover this Home with your Recovery Kit" on the
   sign-in screen and enter the code it shows.
-
+- Apps that ask for the ElastOS version now get the same version that
+  `elastos --version` and System show.
 - A model download that stopped with "Model content could not be read" now
   continues from where it stopped when you press Retry. Before, Retry started
   the download again from 0%.
@@ -86,6 +133,14 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Removed
 
+- The sign-in screen no longer shows "Use an older security key". To replace a
+  passkey, restore your Recovery Kit and create a new one.
+- Protected content is not part of 0.8.0. Elacity Player is no longer listed in
+  Apps or search, Library no longer offers "Protect and List…", and Marketplace
+  no longer has a Media tab. They return in a later release.
+- `elastos agent`. Its app was retired earlier and the command could not work.
+- `elastos upgrade`; use `elastos update`. The `--no-confirm` spelling of
+  `--yes` on `elastos update` is gone too.
 - `elastos update --gateway` and `--no-p2p`, and the installer's IPFS-gateway
   options (`--gateway`, `--head-cid`, `--publisher-node-id`). Updates come
   only from your trusted source over Carrier; the installer downloads only
@@ -94,8 +149,100 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - ElastOS no longer attaches downloads to GitHub Releases. Install with
   `install.sh`; it and System fetch the signed release over Carrier.
 
+### Security
+
+- Another computer connecting to yours can no longer tie it up by sending an
+  endless or very slow request or reply. Oversized messages are refused,
+  requests that do not arrive within 10 seconds are dropped, and a connection
+  passing data through your computer is closed after five minutes with no data
+  in either direction.
+
 ### Developer detail
 
+- The local pre-push gate now runs the CI behaviour suite before Cargo work.
+  CI, `just test-behaviour` and the gate share `scripts/test-behaviour.sh`,
+  so a failing Node test stops the push locally and names the test. Run
+  `just test-behaviour-inputs` once to install the pinned Playwright inputs.
+- Removed `elastos identity passkey-hint` and the private credential-hint
+  sign-in path. Anonymous sign-in options still never list an account's
+  credentials.
+- The capsule catalogue marks `home-cli` not launchable unless the host
+  terminal policy allows it (`developer_mode = true` and closed guest
+  registration), so Home view candidates, System and Marketplace follow the same
+  rule; the active-shell summary already repairs a saved shell that is no longer
+  a candidate. Home host also resets a non-launchable saved shell to `home-gui`
+  through `POST /api/apps/home/active-shell`
+  (`scripts/home-shell-unavailable-shell-fallback-smoke.mjs`).
+- `protected_content = true` in the host `config.toml` (`elastos config set
+  protected_content true`; default off) is the one switch for protected content:
+  off, the catalogue drops `elacity-player` and reports
+  `policy.protected_content: false` (Marketplace hides Media), Library objects
+  lack the `protect` capability that "Protect and List…" requires, and
+  `object/publish` with `protection` is refused.
+- `GET /api/wallet/prices` raises the CoinGecko Inbox request only with
+  `request_access=true`, and not within 24 hours of a dismissal or rejection
+  (new `dismissed_at` on Inbox entries). Wallet sends it unless it was preloaded
+  by the rail (`preload=1`); opening the rail sends `elastos:wallet-refresh`,
+  which asks.
+- `model-management.js` adds the `finishing` phase (admitted, activation
+  pending, no dispatch-unavailable reason), which turns back into the
+  unavailable phase with Retry after 120 s. `model-selection.js` adds
+  `downloadPercent` and `downloadingModel`.
+- `components.json` keeps only the `home` profile; `demo`, `operator`,
+  `blockchain`, `agent-local-ai`, `public-gateway`, `minimal` and `full` are
+  removed. Developer components (GBA, site, tunnel, cloudflared, availability
+  and the DRM, rights, key, decrypt and custody providers) still publish with
+  each release and install with `elastos setup --with <name>`.
+- `--profile`, `--with` and `--without` are hidden from `elastos setup --help`
+  but still accepted; the help no longer names a nonexistent `chat` profile.
+- MyWebSite and Shared leave the home-cli for 0.8.0; `elastos site`, `share`
+  and `shares` stay operator commands. The Rust `demo` publish profile is gone;
+  `scripts/home-demo-local.sh` runs plain `setup`, and the operator smoke and
+  pinned-model proof use `--with`.
+- `elastos update` and System Update stage this profile change normally; only
+  the standalone frozen offline path refuses a `profiles` difference.
+- Home consumes `intent.json` by overwriting it with empty content instead of
+  deleting it; the session holds only read and write capabilities. A
+  regression test runs two intents against a provider that refuses delete.
+- The `chat` core action and `ManagedChat` launch are removed from Home.
+  `elastos chat` is hidden from help and kept only for the native chat smoke
+  scripts. `people-message:` emits a `switch-shell-open-target` host intent for
+  `chat-room` with `{conversation_id}` (the query People sends); the gateway
+  accepts only that bounded query for People hand-offs. Home and home-cli key
+  messaging on the contact's `conversation_id` (the People summary never had
+  `route`), and `run_chat_from_home` is removed.
+- `elastos agent`, `agent_cmd.rs` and the shell's `agent` command request are
+  removed. The `capsule` help, the serve banner, the first-run welcome and the
+  microVM publish hint (no `serve --forward` flag) name commands that exist.
+  `docs/COMMAND_MATRIX.md` drops `chat`, `agent` and seven nonexistent `room`
+  subcommands; GETTING_STARTED no longer suggests `elastos chat`.
+- Share bundles copy the viewer from its manifest `entrypoint`
+  (`browser/index.html` plus its assets) to the bundle root. The entrypoint
+  must be a relative path inside the viewer. Every path component is opened
+  with `openat(O_NOFOLLOW)` from the viewer directory's descriptor, so a
+  symlink anywhere in the copied tree, even one swapped in after listing, is
+  refused; the copy is capped at 256 files and 16 MiB. The Documents
+  publish test installs the real `capsules/documents` layout and checks the
+  published file list.
+- Startup restore and repair of complete local Content objects skip
+  Runtime-private `model-preparation`. Admitted models are verified at
+  admission, and this Home's Kubo does not hold them in 0.8.0; serving them to
+  peers is the holder role (#324). Before this, restore read each admitted
+  model file whole, then base64-encoded it and copied it through the provider
+  bridge, using about 8 times the file size.
+- Restore and repair now stream every local object from disk into Kubo,
+  unpinned, through a new Runtime-private ipfs-provider operation
+  (`runtime_add_local_object`). It uses the same parts and add options as
+  `add_directory`, so the CID matches the original import. The provider opens
+  the object below its data root and each file without following links
+  (regular files owned by this user only). Content pins only a matching CID:
+  repair pins the requested CID, and restore pins a CID with a Content receipt
+  that was not withdrawn by unpublish. Runtime hashes the files with a streamed
+  reader and sends only their paths and sizes, so memory stays the same
+  whatever the object's size.
+- model-provider's cgroup v2 memory check subtracts reclaimable file cache
+  (`active_file + inactive_file - file_dirty - file_writeback` in
+  `memory.stat`, never below zero) from `memory.current`.
 - `elastos update` checks the installed version before connecting to Carrier
   (#156). Runtime admission and the release integrity checker now read one
   platform table, `scripts/release-platforms.json` (`darwin-arm64` =
@@ -159,7 +306,31 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   shows that message, leaves Get available and skips reconcile. The
   `capacity_pending` phase text is built by `capacityText()` with the remaining
   bytes.
-
+- `Commands` in `main.rs` marks `serve`, `publish-release`, `content`,
+  `collaboration-config`, `protected-content-config`, `node`, `gateway`,
+  `sign-payload`, `keys`, `tls` and `emergency` with `hide = true`;
+  `docs/COMMAND_MATRIX.md` lists them. Removed the `Upgrade` variant, the
+  `no-confirm` alias, and the retired hidden `publish-release --key` /
+  `--allow-no-bootstrap` flags with their `PublishReleaseOptions` fields. The
+  `just publish*` recipes, which always failed on the retired `--key`, are gone.
+- `get_runtime_info` in `resource_bridge.rs` (both the local and the attached
+  bridge) returns `ELASTOS_VERSION` from `build.rs` instead of
+  `CARGO_PKG_VERSION`.
+- `carrier.rs` reads peer lines through `read_peer_line` (`take(max + 1)`
+  under a timeout). Caps come from the protocol limits: `handle_file_stream`
+  takes the I/O bridge line limit or one `GOSSIP_WIRE_MESSAGE_MAX_BYTES`
+  message plus 64 KiB of envelope, within 10 s; `gossip_pull` replies take
+  `GOSSIP_TOPIC_BUFFER_MAX_BYTES` plus envelope; open-ended provider replies
+  take one `MAX_CARRIER_OBJECT_IMPORT_BYTES` object as base64 within an hour
+  and share a 256 MiB in-flight budget (`CARRIER_REPLY_BUDGET`; refused past
+  it); whole-object content fetch replies keep no size cap (the object is one
+  JSON line) but run two at once and one per peer;
+  bounded reads keep 128 KiB and now also get the route deadline on peer-DID
+  routes. `operator_control.rs` reads requests (before signature checks) at
+  64 KiB / 10 s and replies at 1 MiB / 1 h. Relays in `carrier.rs`,
+  `carrier_engine_media.rs` and `carrier_engine_binding.rs` close after 5 min
+  with no bytes either way (`RelayActivity`), and stream acks have deadlines.
+  The SECURITY.md item for the I/O bridge is still open.
 - Model preparation keeps its stage after any `MetadataRead`, `WeightsRead` or
   `Capacity` failure, not only after a read typed as in transit (`Io`). A part
   that a holder refuses or answers malformed is rejected before it is written,
@@ -301,151 +472,6 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   reach other host services such as Carrier's UDP port. coturn's RFC 6062 TCP
   relays are off on both hosts. `check` refuses a setup receipt without the
   rule, so Browser asks to re-run the root setup once (#307).
-
-## [0.8.0-alpha.15]
-
-Test-channel release. Signed releases show these notes in System before you update.
-
-### Fixed
-
-- Home no longer runs out of memory when it starts with Qwen2.5 1.5B on the
-  device. On an 8 GB Linux computer, Home used more than 7 GB within seconds of
-  starting, and the system stopped it.
-- On Linux, a reply right after Get no longer fails with "Not enough free
-  memory" when most of the memory in use is only cached files.
-- `elastos setup` on a Home that imported media tools before 0.8.0-alpha.9
-  stopped with "supplied media tools differ from the private imported pair".
-  On an installed signed release, setup now fetches and verifies the release's
-  media tools again and replaces the private copy, keeping your media limits.
-- While a model downloads, Marketplace and System no longer stop at "Status is
-  unavailable. Refresh to check before trying again." after one missed status
-  check. They show "Checking status…" and keep checking.
-- While a model is being set up after its download, Marketplace and System show
-  "Finishing setup…" instead of "Model service unavailable." with a Retry button.
-  If setup takes more than two minutes, Retry comes back.
-- When no model is ready yet and one is downloading, Assistant shows, for
-  example, "SmolLM2 is downloading (42%)" instead of "No model".
-- System > Shell and Marketplace > Home views no longer offer Terminal unless
-  developer mode is on. If Terminal was chosen and can no longer start, Home
-  opens the Desktop instead of showing an error after every reload.
-- A new Home no longer asks in Inbox for market-price access before you open
-  Wallet.
-- Assistant no longer shows a microphone button that cannot work inside Home.
-- The welcome sheet no longer talks about an "updated" Recovery Kit on a new
-  Home, and the lock screen shows the first letter of your name.
-
-### Changed
-
-- Setup installs one Home; it no longer prints options for other setups.
-- The terminal Home no longer quits with "403 Forbidden" after the first
-  action; you can run actions one after another.
-- The terminal Home no longer offers the old native Chat, which used a
-  different network from the Chat on the Desktop.
-- People "Message" in the terminal Home no longer opens that old Chat. In the
-  browser terminal it opens Chat on the Desktop at that person's conversation;
-  in a native terminal it says "Open Chat on the Desktop to message <name>."
-- In the terminal Inbox, direct messages and service requests say "Open Inbox
-  on the Desktop to answer this" instead of "no longer available".
-- In the terminal Apps tab, Enter on an app that only opens on the Desktop
-  says "Open <App> on the Desktop" instead of doing nothing.
-- Publishing a document (Documents Publish and `elastos share`) works again:
-  it copied a viewer file from a place the Documents app does not ship (#128).
-
-### Removed
-
-- The sign-in screen no longer shows "Use an older security key". To replace a
-  passkey, restore your Recovery Kit and create a new one.
-- Protected content is not part of 0.8.0. Elacity Player is no longer listed in
-  Apps or search, Library no longer offers "Protect and List…", and Marketplace
-  no longer has a Media tab. They return in a later release.
-- `elastos agent`. Its app was retired earlier and the command could not work.
-
-### Developer detail
-
-- The local pre-push gate now runs the CI behaviour suite before Cargo work.
-  CI, `just test-behaviour` and the gate share `scripts/test-behaviour.sh`,
-  so a failing Node test stops the push locally and names the test. Run
-  `just test-behaviour-inputs` once to install the pinned Playwright inputs.
-- Removed `elastos identity passkey-hint` and the private credential-hint
-  sign-in path. Anonymous sign-in options still never list an account's
-  credentials.
-- The capsule catalogue marks `home-cli` not launchable unless the host
-  terminal policy allows it (`developer_mode = true` and closed guest
-  registration), so Home view candidates, System and Marketplace follow the same
-  rule; the active-shell summary already repairs a saved shell that is no longer
-  a candidate. Home host also resets a non-launchable saved shell to `home-gui`
-  through `POST /api/apps/home/active-shell`
-  (`scripts/home-shell-unavailable-shell-fallback-smoke.mjs`).
-- `protected_content = true` in the host `config.toml` (`elastos config set
-  protected_content true`; default off) is the one switch for protected content:
-  off, the catalogue drops `elacity-player` and reports
-  `policy.protected_content: false` (Marketplace hides Media), Library objects
-  lack the `protect` capability that "Protect and List…" requires, and
-  `object/publish` with `protection` is refused.
-- `GET /api/wallet/prices` raises the CoinGecko Inbox request only with
-  `request_access=true`, and not within 24 hours of a dismissal or rejection
-  (new `dismissed_at` on Inbox entries). Wallet sends it unless it was preloaded
-  by the rail (`preload=1`); opening the rail sends `elastos:wallet-refresh`,
-  which asks.
-- `model-management.js` adds the `finishing` phase (admitted, activation
-  pending, no dispatch-unavailable reason), which turns back into the
-  unavailable phase with Retry after 120 s. `model-selection.js` adds
-  `downloadPercent` and `downloadingModel`.
-- `components.json` keeps only the `home` profile; `demo`, `operator`,
-  `blockchain`, `agent-local-ai`, `public-gateway`, `minimal` and `full` are
-  removed. Developer components (GBA, site, tunnel, cloudflared, availability
-  and the DRM, rights, key, decrypt and custody providers) still publish with
-  each release and install with `elastos setup --with <name>`.
-- `--profile`, `--with` and `--without` are hidden from `elastos setup --help`
-  but still accepted; the help no longer names a nonexistent `chat` profile.
-- MyWebSite and Shared leave the home-cli for 0.8.0; `elastos site`, `share`
-  and `shares` stay operator commands. The Rust `demo` publish profile is gone;
-  `scripts/home-demo-local.sh` runs plain `setup`, and the operator smoke and
-  pinned-model proof use `--with`.
-- `elastos update` and System Update stage this profile change normally; only
-  the standalone frozen offline path refuses a `profiles` difference.
-- Home consumes `intent.json` by overwriting it with empty content instead of
-  deleting it; the session holds only read and write capabilities. A
-  regression test runs two intents against a provider that refuses delete.
-- The `chat` core action and `ManagedChat` launch are removed from Home.
-  `elastos chat` is hidden from help and kept only for the native chat smoke
-  scripts. `people-message:` emits a `switch-shell-open-target` host intent for
-  `chat-room` with `{conversation_id}` (the query People sends); the gateway
-  accepts only that bounded query for People hand-offs. Home and home-cli key
-  messaging on the contact's `conversation_id` (the People summary never had
-  `route`), and `run_chat_from_home` is removed.
-- `elastos agent`, `agent_cmd.rs` and the shell's `agent` command request are
-  removed. The `capsule` help, the serve banner, the first-run welcome and the
-  microVM publish hint (no `serve --forward` flag) name commands that exist.
-  `docs/COMMAND_MATRIX.md` drops `chat`, `agent` and seven nonexistent `room`
-  subcommands; GETTING_STARTED no longer suggests `elastos chat`.
-- Share bundles copy the viewer from its manifest `entrypoint`
-  (`browser/index.html` plus its assets) to the bundle root. The entrypoint
-  must be a relative path inside the viewer. Every path component is opened
-  with `openat(O_NOFOLLOW)` from the viewer directory's descriptor, so a
-  symlink anywhere in the copied tree, even one swapped in after listing, is
-  refused; the copy is capped at 256 files and 16 MiB. The Documents
-  publish test installs the real `capsules/documents` layout and checks the
-  published file list.
-- Startup restore and repair of complete local Content objects skip
-  Runtime-private `model-preparation`. Admitted models are verified at
-  admission, and this Home's Kubo does not hold them in 0.8.0; serving them to
-  peers is the holder role (#324). Before this, restore read each admitted
-  model file whole, then base64-encoded it and copied it through the provider
-  bridge, using about 8 times the file size.
-- Restore and repair now stream every local object from disk into Kubo,
-  unpinned, through a new Runtime-private ipfs-provider operation
-  (`runtime_add_local_object`). It uses the same parts and add options as
-  `add_directory`, so the CID matches the original import. The provider opens
-  the object below its data root and each file without following links
-  (regular files owned by this user only). Content pins only a matching CID:
-  repair pins the requested CID, and restore pins a CID with a Content receipt
-  that was not withdrawn by unpublish. Runtime hashes the files with a streamed
-  reader and sends only their paths and sizes, so memory stays the same
-  whatever the object's size.
-- model-provider's cgroup v2 memory check subtracts reclaimable file cache
-  (`active_file + inactive_file - file_dirty - file_writeback` in
-  `memory.stat`, never below zero) from `memory.current`.
 
 ## [0.8.0-alpha.14]
 
