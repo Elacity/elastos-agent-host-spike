@@ -30,9 +30,9 @@ env:
   CI_LLAMA_ARM64_SHA256: a92e404708feae91cbede43322e445971450de8a204f4ff51502a7f42f5df8b8
   # An explicit dispatch ref may select a tag independently of the workflow ref.
   CI_USE_CACHE: ${{ github.ref_type != 'tag' && !(github.event_name == 'workflow_dispatch' && inputs.ref != '') }}
-  # Only develop/main pushes write shared caches (Rust, apt, Kubo,
-  # BuildKit). PR and merge-queue runs only read them.
-  CI_SAVE_CACHE: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') }}
+  # Only develop pushes write shared caches (Rust, apt, Kubo, engine). PR,
+  # merge-queue and main runs only read them.
+  CI_SAVE_CACHE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/develop' }}
 
 jobs:
   # Fast, compile-free gate: formatting and script-based source proofs.
@@ -189,7 +189,7 @@ jobs:
         if: env.CI_USE_CACHE == 'true'
         with:
           workspaces: elastos
-          prefix-key: ${{ runner.os }}-elastos-bd
+          prefix-key: ${{ runner.os }}-elastos-bd-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           cache-targets: false
           cache-bin: false
           cache-directories: ${{ env.SCCACHE_DIR }}
@@ -243,7 +243,7 @@ jobs:
         if: env.CI_USE_CACHE == 'true'
         with:
           workspaces: elastos
-          prefix-key: ${{ runner.os }}-elastos-test-bd
+          prefix-key: ${{ runner.os }}-elastos-test-bd-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           cache-targets: false
           cache-bin: false
           cache-directories: ${{ env.SCCACHE_DIR }}
@@ -341,7 +341,7 @@ jobs:
         with:
           # Registry/index and sccache objects; sccache owns compilation reuse.
           workspaces: elastos
-          prefix-key: ${{ runner.os }}-capsules-bd
+          prefix-key: ${{ runner.os }}-capsules-bd-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           cache-targets: false
           cache-bin: false
           cache-directories: ${{ env.SCCACHE_DIR }}
@@ -477,7 +477,7 @@ jobs:
               - 'elastos/crates/elastos-server/src/protected_content_config.rs'
       - id: should-run
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "merge_group" ] || [ "${{ env.CI_SAVE_CACHE }}" = "true" ] || [ "${{ steps.filter.outputs.custody }}" = "true" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "merge_group" ] || [ "${{ github.event_name }}" = "push" ] || [ "${{ steps.filter.outputs.custody }}" = "true" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -492,31 +492,21 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: elastos
-          prefix-key: ${{ runner.os }}-custody-smoke-bd
+          prefix-key: ${{ runner.os }}-custody-smoke-bd-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           cache-directories: target-build
           save-if: ${{ env.CI_SAVE_CACHE == 'true' }}
       - if: steps.should-run.outputs.run == 'true'
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      # Pre-warms the custody-host image's BuildKit layer cache via the GHA
-      # cache backend, tagged/loaded exactly as deploy/custody-host/up.sh's
-      # own `docker compose up -d --build` expects it -- that later build
-      # then hits this same local layer cache instead of rebuilding cold.
-      # The verified Kubo layer precedes COPY, so source changes reuse it.
-      - name: pre-build custody-host image (GHA layer cache)
+      # Builds the custody-host image, tagged/loaded exactly as
+      # deploy/custody-host/up.sh's own `docker compose up -d --build` expects
+      # it, so that later build hits this local layer cache. Restored layers
+      # would skip the Dockerfile's pinned-hash checks, so none are restored.
+      - name: pre-build custody-host image
         if: steps.should-run.outputs.run == 'true'
         run: |
-          cache_args=()
-          if [[ "${CI_USE_CACHE}" == "true" ]]; then
-            cache_args+=(--cache-from type=gha)
-          fi
-          # Only trusted saving runs write; merge-queue and PR scopes are unreadable elsewhere.
-          if [[ "${CI_SAVE_CACHE}" == "true" ]]; then
-            cache_args+=(--cache-to type=gha,mode=max)
-          fi
           docker buildx build \
             -f deploy/custody-host/Dockerfile \
             -t elastos-custody-host:latest \
-            "${cache_args[@]}" \
             --load \
             .
       - name: custody harness smoke
@@ -577,7 +567,7 @@ jobs:
         if: env.CI_USE_CACHE == 'true'
         with:
           workspaces: elastos
-          prefix-key: ${{ matrix.os }}-${{ runner.arch }}-source-home-registry
+          prefix-key: ${{ matrix.os }}-${{ runner.arch }}-source-home-registry-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           # Cache Cargo inputs; journey artifacts start fresh.
           cache-targets: false
           cache-directories: ${{ env.SCCACHE_DIR }}
@@ -845,7 +835,7 @@ jobs:
         if: env.CI_USE_CACHE == 'true'
         with:
           workspaces: elastos
-          prefix-key: ${{ runner.os }}-source-home-registry
+          prefix-key: ${{ runner.os }}-source-home-registry-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           # Cache Cargo inputs; journey artifacts start fresh.
           cache-targets: false
           cache-directories: ${{ env.SCCACHE_DIR }}

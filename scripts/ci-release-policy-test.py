@@ -157,8 +157,17 @@ CASES = [
     ("workflow_dispatch", "refs/heads/main", "branch", "a" * 40, False, False),
     ("workflow_dispatch", "refs/tags/v0.7.1", "tag", "main", False, False),
 ]
-# Only these branch pushes may write shared caches.
+# Pushes to these branches run every trusted proof; only develop writes caches.
 SAVING_REFS = {"refs/heads/develop", "refs/heads/main"}
+CACHE_SAVING_REF = "refs/heads/develop"
+RUST_CACHE_KEY = "-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}"
+# A restored non-Rust input and the step that checks it against its pinned hash.
+RESTORE_VERIFIERS = {
+    "restore pinned ARM64 engine": 'build-llama-server-bundle.sh --verify-archive "$RUNNER_TEMP/llama-arm64-bundle"',
+    "restore Ubuntu prerequisite archives": "bash scripts/ci-apt-prerequisites.sh",
+    "restore verified Kubo inputs": "python3 scripts/ci-kubo-cache.py fetch ",
+    "restore the pinned published release": "python3 scripts/update-hop-compare.py fetch-previous-release",
+}
 NO_CACHE_HIT = {"steps.engine-cache.outputs.cache-hit": "false",
                 "steps.previous-release-cache.outputs.cache-hit": "false",
                 "steps.kubo-cache.outputs.cache-hit": "false",
@@ -190,20 +199,7 @@ def validate_cache_guards(source):
     workflow_jobs = jobs(source)
     for job in workflow_jobs:
         for step in steps(job, workflow_jobs):
-            matches = list(CACHE_RE.finditer(step))
-            if not matches:
-                continue
-            # Buildx shell cache arguments live inside this explicit cache-only branch.
-            shell_guards = list(re.finditer(
-                r'(?ms)^\s*if \[\[ "\$\{CI_(?:USE|SAVE)_CACHE\}" == "true" \]\]; then\n'
-                r'(.*?)^\s*fi\s*$', step))
-            shell_guards = [guard for guard in shell_guards
-                            if not re.search(r"(?m)^\s*(?:else|elif)\b", guard[1])]
-            remaining = [match for match in matches
-                         if not (match[0] == "type=gha" and any(
-                             guard.start(1) <= match.start() < guard.end(1)
-                             for guard in shell_guards))]
-            if not remaining:
+            if not CACHE_RE.search(step):
                 continue
             guard = field(step, "if")
             if "env.CI_USE_CACHE == 'true'" not in guard:
@@ -255,6 +251,74 @@ def validate_cache_credential_scope(source, action):
     if len(scripts) != 1:
         raise AssertionError("every cache job runs the same credential check")
     return scripts.pop()
+
+
+def validate_cache_writers(source):
+    """Only develop pushes write any shared cache; every other run restores only."""
+    if re.search(r"type=gha|cache-to", source):
+        raise AssertionError("BuildKit layers bypass pinned-hash checks; no remote layer cache")
+    workflow_jobs = jobs(source)
+    writers = [(job, step) for job in workflow_jobs for step in steps(job, workflow_jobs)
+               if "actions/cache/save@" in step or "Swatinem/rust-cache@" in step]
+    if not writers:
+        raise AssertionError("missing cache writers")
+    for event, ref, ref_type, override, _, _ in [*CASES, ("push", "refs/heads/feature", "branch", "", True, False)]:
+        context = {"github.event_name": event, "github.ref": ref,
+                   "github.ref_type": ref_type, "inputs.ref": override,
+                   "env.CI_USE_CACHE": "true", "steps.should-run.outputs.run": "true",
+                   "steps.engine-cache.outputs.cache-hit": "false", "steps.kubo-cache.outputs.cache-hit": "false",
+                   "steps.previous-release-cache.outputs.cache-hit": "false",
+                   "steps.apt-prerequisites.outputs.changed": "true"}
+        context["env.CI_SAVE_CACHE"] = str(evaluate(field(source, "CI_SAVE_CACHE"), context)).lower()
+        trusted = event == "push" and ref == CACHE_SAVING_REF
+        if (context["env.CI_SAVE_CACHE"] == "true") != trusted:
+            raise AssertionError(f"CI_SAVE_CACHE on {event} {ref}")
+        for job, step in writers:
+            guard = field(step, "save-if" if "Swatinem/rust-cache@" in step else "if")
+            if evaluate(guard, context) and not trusted:
+                raise AssertionError(f"{job} saves a cache on {event} {ref}")
+
+
+def validate_rust_cache_keys(source):
+    """A Rust cache restores only under the same lockfiles and toolchain, even by prefix."""
+    workflow_jobs = jobs(source)
+    caches = [(job, step) for job in workflow_jobs for step in steps(job, workflow_jobs)
+              if "Swatinem/rust-cache@" in step]
+    if not caches:
+        raise AssertionError("missing Rust caches")
+    for job, step in caches:
+        # rust-cache's fallback restore key is prefix-key, job, OS and the rustc
+        # environment hash; its lockfile hash covers only the named workspace.
+        if not field(step, "prefix-key").endswith(RUST_CACHE_KEY):
+            raise AssertionError(f"{job} Rust cache prefix lacks every lockfile and the toolchain")
+        if re.search(r"(?m)^\s+(?:add-rust-environment-hash-key|add-job-id-key|key|shared-key):", step):
+            raise AssertionError(f"{job} Rust cache key must keep its compiler and job parts")
+
+
+def validate_restores_are_verified(source):
+    """Every restored non-Rust input passes its pinned-hash check before any use."""
+    workflow_jobs = jobs(source)
+    for job in workflow_jobs:
+        job_steps = steps(job, workflow_jobs)
+        for index, step in enumerate(job_steps):
+            if "actions/cache/restore@" not in step:
+                continue
+            name = field(step, "name")
+            if name not in RESTORE_VERIFIERS:
+                raise AssertionError(f"{job} restores {name} without a known verifier")
+            step_id = field(step, "id") if re.search(r"(?m)^\s+id:", step) else None
+            for later in job_steps[index + 1:]:
+                if RESTORE_VERIFIERS[name] in later:
+                    if re.search(r"(?m)^        if:", later):
+                        raise AssertionError(f"{job} may skip verifying {name}")
+                    break
+                # Only a cache-miss build or a save may run before the check.
+                miss = step_id and field(later, "if").startswith(f"steps.{step_id}.outputs.cache-hit != 'true'") \
+                    if re.search(r"(?m)^        if:", later) else False
+                if not (miss or "actions/cache/save@" in later):
+                    raise AssertionError(f"{job} uses {name} before verifying it")
+            else:
+                raise AssertionError(f"{job} never verifies {name}")
 
 
 def validate_jetson_package_lifecycle(source):
@@ -857,7 +921,7 @@ class ReleasePolicyTests(unittest.TestCase):
     def test_event_ref_matrix_controls_publication_and_every_cache_action(self):
         validate_cache_guards(SOURCE)
         caches = [(job, step) for job in JOBS for step in steps(job)
-                  if CACHE_RE.search(step) and "type=gha" not in step]
+                  if CACHE_RE.search(step)]
         self.assertEqual(len(caches), 27)
         for event, ref, ref_type, override, cached, publish in CASES:
             with self.subTest(event=event, ref=ref, override=override):
@@ -868,7 +932,7 @@ class ReleasePolicyTests(unittest.TestCase):
                 self.assertEqual(evaluate(field(JOBS["release"], "if"), context), publish)
                 context["env.CI_USE_CACHE"] = str(use_cache).lower()
                 save = evaluate(field(SOURCE, "CI_SAVE_CACHE"), context)
-                self.assertEqual(save, event == "push" and ref in SAVING_REFS)
+                self.assertEqual(save, event == "push" and ref == CACHE_SAVING_REF)
                 context["env.CI_SAVE_CACHE"] = str(save).lower()
                 context.update(NO_CACHE_HIT)
                 for paths in ("true", "false"):
@@ -908,7 +972,7 @@ class ReleasePolicyTests(unittest.TestCase):
                 continue
             for changed in ("true", "false", ""):
                 values = {**context, "steps.filter.outputs.custody": changed,
-                          "env.CI_SAVE_CACHE": str(event == "push" and ref in SAVING_REFS).lower()}
+                          "env.CI_SAVE_CACHE": str(event == "push" and ref == CACHE_SAVING_REF).lower()}
                 command = re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda match: values[match[1]], script)
                 with tempfile.TemporaryDirectory() as root:
                     output = Path(root) / "output"
@@ -1088,37 +1152,63 @@ class ReleasePolicyTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     validate_cache_guards(injected)
 
-    def test_buildx_imports_and_exports_layers_only_when_cache_is_enabled(self):
-        step, = [step for step in steps("custody-harness-smoke")
-                 if "docker buildx build" in step]
-        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
-        # Execute the actual workflow shell with a recording function, not Docker.
-        stub = 'docker() { printf "%s\\0" "$@"; }\n'
-        base = ["buildx", "build", "-f", "deploy/custody-host/Dockerfile",
-                "-t", "elastos-custody-host:latest"]
-        # Derive cache settings from actual events, then apply the job and step guards.
-        for event, ref, ref_type, override, cached, _ in CASES:
-            context = {"github.event_name": event, "github.ref": ref,
-                       "github.ref_type": ref_type, "inputs.ref": override}
-            use = evaluate(field(SOURCE, "CI_USE_CACHE"), context)
-            save = evaluate(field(SOURCE, "CI_SAVE_CACHE"), context)
-            context.update({"env.CI_USE_CACHE": str(use).lower(), "env.CI_SAVE_CACHE": str(save).lower()})
-            for paths in ("true", "false"):
-                with self.subTest(event=event, ref=ref, override=override, paths=paths):
-                    context["steps.should-run.outputs.run"] = str(custody_should_run(SOURCE, context, paths)).lower()
-                    args = []
-                    if job_runs("custody-harness-smoke", context) and evaluate(field(step, "if"), context):
-                        result = subprocess.run(["bash", "-eo", "pipefail", "-c", stub + script],
-                                                env={**os.environ, "CI_USE_CACHE": str(use).lower(),
-                                                     "CI_SAVE_CACHE": str(save).lower()},
-                                                capture_output=True, check=True)
-                        args = result.stdout.decode().split("\0")[:-1]
-                    trusted_push = event == "push" and ref in SAVING_REFS
-                    expected_run = event in ("merge_group", "workflow_dispatch") or trusted_push or \
-                        (event == "pull_request" and paths == "true")
-                    cache = (["--cache-from", "type=gha"] if cached else []) + \
-                        (["--cache-to", "type=gha,mode=max"] if trusted_push else [])
-                    self.assertEqual(args, base + cache + ["--load", "."] if expected_run else [])
+    def test_only_develop_pushes_write_caches(self):
+        validate_cache_writers(SOURCE)
+        mutations = {
+            "main writes": SOURCE.replace("github.ref == 'refs/heads/develop' }}",
+                                          "(github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') }}", 1),
+            "every push writes": SOURCE.replace("github.event_name == 'push' && github.ref == 'refs/heads/develop' }}",
+                                                "github.event_name == 'push' }}", 1),
+            "a Rust cache saves on PRs": SOURCE.replace("save-if: ${{ env.CI_SAVE_CACHE == 'true' }}", "save-if: true", 1),
+            "a save ignores the writer guard": SOURCE.replace(
+                "if: env.CI_USE_CACHE == 'true' && env.CI_SAVE_CACHE == 'true' && steps.kubo-cache",
+                "if: env.CI_USE_CACHE == 'true' && steps.kubo-cache", 1),
+            "BuildKit restores remote layers": SOURCE.replace(
+                "            --load \\\n", "            --cache-from type=gha \\\n            --load \\\n", 1),
+        }
+        for name, changed in mutations.items():
+            self.assertNotEqual(changed, SOURCE, name)
+            with self.subTest(mutation=name), self.assertRaises(AssertionError):
+                validate_cache_writers(changed)
+
+    def test_rust_cache_keys_bind_every_lockfile_and_the_toolchain(self):
+        validate_rust_cache_keys(SOURCE)
+        mutations = {
+            "a prefix drops the lockfiles": SOURCE.replace("prefix-key: ${{ runner.os }}-capsules-bd" + RUST_CACHE_KEY,
+                                                           "prefix-key: ${{ runner.os }}-capsules-bd", 1),
+            "a prefix hashes one lockfile": SOURCE.replace("hashFiles('**/Cargo.lock', 'rust-toolchain.toml')",
+                                                           "hashFiles('elastos/Cargo.lock', 'rust-toolchain.toml')", 1),
+            "the compiler leaves the key": SOURCE.replace(
+                "          cache-bin: false\n", "          cache-bin: false\n          add-rust-environment-hash-key: false\n", 1),
+        }
+        for name, changed in mutations.items():
+            self.assertNotEqual(changed, SOURCE, name)
+            with self.subTest(mutation=name), self.assertRaises(AssertionError):
+                validate_rust_cache_keys(changed)
+
+    def test_restored_inputs_are_verified_before_use(self):
+        validate_restores_are_verified(SOURCE)
+        kubo = "      - name: verify or download Kubo inputs\n        timeout-minutes: 10\n"
+        mutations = {
+            "Kubo check removed": SOURCE.replace(
+                kubo + '        run: python3 scripts/ci-kubo-cache.py fetch "$KUBO_PLATFORM" "$KUBO_CACHE_DIR"\n', "", 1),
+            "Kubo check skipped on a hit": SOURCE.replace(
+                kubo, kubo + "        if: steps.kubo-cache.outputs.cache-hit != 'true'\n", 1),
+            "engine used before its check": SOURCE.replace(
+                "      - name: verify accepted ARM64 engine archive\n",
+                "      - name: use engine\n        run: tar -tf \"$RUNNER_TEMP/llama-arm64-bundle\"/*.tar.gz\n"
+                "      - name: verify accepted ARM64 engine archive\n", 1),
+            "unknown restore": SOURCE.replace(
+                "      - name: restore the pinned published release\n",
+                "      - name: restore browser bundle\n        if: env.CI_USE_CACHE == 'true'\n"
+                "        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4\n"
+                "        with:\n          path: x\n          key: x\n"
+                "      - name: restore the pinned published release\n", 1),
+        }
+        for name, changed in mutations.items():
+            self.assertNotEqual(changed, SOURCE, name)
+            with self.subTest(mutation=name), self.assertRaises(AssertionError):
+                validate_restores_are_verified(changed)
 
     def test_github_runners_check_names_and_release_dependencies_stay_fixed(self):
         expected = {
