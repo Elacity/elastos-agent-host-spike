@@ -250,18 +250,15 @@ Test-channel release. Signed releases show these notes in System before you upda
   `aarch64-darwin`, `darwin-amd64` = `x86_64-darwin`). The checker no longer
   uses `macos-arm64`, so it no longer skips the Mac entries Runtime admits.
 - Capsule admission (`Runtime::configure_capsule_admission`): a Home with an
-  installed signed release ignores `dev_mode` in `config.toml`, trusts the
-  default trusted source's publisher DID keys plus `trusted_keys`, and admits an
-  unsigned capsule only from its release install path when `components.json`
-  matches the signed release and the capsule's `.elastos-cid` and archive
-  receipts match its entry. Capsules carry no release signature, so the signed
-  release's CID admission is the trust root. Other Homes default to
-  `dev_mode = false`; `setup-source-home.sh` and `ci-installed-journeys.py`
-  set `dev_mode = true` explicitly. A first-run `config.toml` no longer writes
-  `dev_mode = true` and `trusted_keys = []`, and strict mode no longer needs a
-  trusted key to start. The updater is the earlier release's code, so the new
-  Runtime applies this on its first start and leaves `config.toml` unchanged;
-  an Undo to an earlier Runtime still finds the setting it started with.
+  installed signed release verifies each capsule against the signed release:
+  it trusts the default trusted source's publisher DID keys plus
+  `trusted_keys`, and admits a capsule without a publisher signature only from
+  its release install path when `components.json` matches the signed release
+  and the capsule's `.elastos-cid` and archive receipts match its entry.
+  Source Homes set `dev_mode = true` explicitly (`setup-source-home.sh`,
+  `ci-installed-journeys.py`); strict mode no longer needs a trusted key to
+  start. The new Runtime applies this on its first start and leaves
+  `config.toml` unchanged.
 - `commit_recovered_root_reassignment` sets the importer's role inside the
   same auth-state mutation: Admin if the importer or any replaced record of the
   recovered principal or root was Admin, otherwise Guest. The commit fails, with

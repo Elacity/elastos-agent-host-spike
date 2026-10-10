@@ -60,8 +60,8 @@ Preferred examples:
 
 Rejected examples:
 
-- `1.2.3-alpha.1`
-- `1.2.3-rc.1`
+- `1.2.3-alpha1`
+- `1.2.3-rc31`
 - `1.2.3-beta3`
 
 Use dotted prerelease identifiers such as `-rc.31`, not `-rc31`.
