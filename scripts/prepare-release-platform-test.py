@@ -152,7 +152,7 @@ class PrepareWorkerTest(unittest.TestCase):
         scripts.mkdir(parents=True)
         for name in (
             "publish-release.sh", "prepare-release-platform.sh", "release-platform-input.py",
-            "components-release-integrity-check.py", "check-versioning.sh", "build-media-tools.sh",
+            "components-release-integrity-check.py", "release-platforms.json", "release-signer.py", "check-versioning.sh", "build-media-tools.sh",
             "release-upstream-assets.py", "release-upstream-input.py", "browser-host-release.py",
             "browser-vm-image-inputs.py", "browser-image-cid-input.py",
         ):

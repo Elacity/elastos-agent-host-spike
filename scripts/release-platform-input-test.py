@@ -551,7 +551,7 @@ class PlatformInputTest(unittest.TestCase):
         (source / ".gitignore").write_text("__pycache__/\n")
         (source / "elastos/Cargo.lock").write_text("version = 4\n")
         self.write_json(source / "components.json", self.template)
-        for name in ("release-platform-input.py", "components-release-integrity-check.py", "release-signer.py",
+        for name in ("release-platform-input.py", "components-release-integrity-check.py", "release-platforms.json", "release-signer.py",
                      "publish-release.sh", "check-versioning.sh", "install.sh", "browser-host-release.py"):
             shutil.copyfile(Path(__file__).with_name(name), source / "scripts" / name)
         for args in (("init", "-q"), ("add", "."),
