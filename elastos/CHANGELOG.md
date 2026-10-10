@@ -77,8 +77,9 @@ Test-channel release. Signed releases show these notes in System before you upda
   no longer enough to take over their account with a home-made Kit.
 - An owner who lost every passkey can now recover their Home with their
   Recovery Kit, even when guest accounts are off. Before, the sign-in screen
-  offered no way back. Run `elastos identity arm-owner-recovery` on the computer
-  that runs Home, then choose "Recover this Home with your Recovery Kit" on the
+  offered no way back. On the computer that runs Home, run the command the
+  sign-in screen shows (`elastos identity arm-owner-recovery --origin … --rp-id …`
+  with that page's address filled in), then choose "Recover this Home with your Recovery Kit" on the
   sign-in screen and enter the code it shows.
 - Apps that ask for the ElastOS version now get the same version that
   `elastos --version` and System show.

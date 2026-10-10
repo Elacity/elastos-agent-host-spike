@@ -3,6 +3,7 @@ import {
   fetchJson,
   setHomeAuthorityToken,
 } from "./shell-core.js?v=home-update-20261003a";
+import { ownerRecoveryCommand } from "./owner-recovery-command.js?v=home-update-20261003a";
 
 const unlockPanel = document.querySelector("#home-unlock");
 const unlockFace = document.querySelector(".home-unlock-face");
@@ -367,7 +368,7 @@ function renderUnlockMode({ registered, guestRegistrationEnabled }) {
   }
   if (unlockCopy) {
     if (recoveringOwner) {
-      unlockCopy.textContent = "Lost your passkey? On the computer running this Home, run: elastos identity arm-owner-recovery. Enter the code it shows, choose your Recovery Kit, then create a new passkey.";
+      unlockCopy.textContent = `Lost your passkey? On the computer running this Home, run: ${ownerRecoveryCommand(location)}. Enter the code it shows, choose your Recovery Kit, then create a new passkey.`;
     } else if (resumingOwner) {
       unlockCopy.textContent = "Finish the passkey setup already verified by this Home.";
     } else if (creatingGuest) {

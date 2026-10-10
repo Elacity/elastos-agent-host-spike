@@ -1141,7 +1141,7 @@ pub(crate) enum IdentityCommand {
     /// Let the owner of this Home, who lost every passkey, recover it with
     /// their Recovery Kit and a new passkey (shows a one-time code)
     ArmOwnerRecovery {
-        /// Exact Home address, e.g. https://home.example or http://localhost:61965
+        /// Exact Home address, as shown on the sign-in screen, e.g. http://localhost:8090
         #[arg(long)]
         origin: String,
         #[arg(long)]

@@ -399,8 +399,9 @@ Lost every passkey? Your Recovery Kit brings your account back on the same
 Home, even when guest accounts are off:
 
 1. On the computer that runs Home, as the user who installed it, run
-   `elastos identity arm-owner-recovery --origin <Home address> --rp-id <host>`,
-   for example `--origin http://localhost:61965 --rp-id localhost`. It prints a
+   the command shown on the sign-in screen, for example
+   `elastos identity arm-owner-recovery --origin http://localhost:8090 --rp-id localhost`
+   for the installed Home. It prints a
    code that works once and expires in 10 minutes.
 2. On the Home sign-in screen, choose **Recover this Home with your Recovery
    Kit**. Enter the code, choose your Recovery Kit (and its password, if it has
