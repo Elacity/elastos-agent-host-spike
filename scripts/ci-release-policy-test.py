@@ -184,22 +184,22 @@ def run_compile_cache_fixture(source, mode, download_status=0, server_status=0,
         return result.returncode, installed_exports, exports(), (root / "server").exists()
 
 
-# event, workflow ref, ref type, checkout override, caches, publication
+# event, workflow ref, ref type, checkout override, caches
 CASES = [
-    ("push", "refs/heads/main", "branch", "", True, False),
-    ("push", "refs/heads/develop", "branch", "", True, False),
-    ("push", "refs/heads/v-work", "branch", "", True, False),
-    ("push", "refs/tags/v0.7.1", "tag", "", False, True),
-    ("push", "refs/tags/candidate", "tag", "", False, False),
-    ("pull_request", "refs/pull/1/merge", "branch", "", True, False),
-    ("merge_group", "refs/heads/gh-readonly-queue/develop/pr-1", "branch", "", True, False),
-    ("workflow_dispatch", "refs/heads/main", "branch", "", True, False),
-    ("workflow_dispatch", "refs/tags/v0.7.1", "tag", "", False, False),
-    ("workflow_dispatch", "refs/heads/main", "branch", "v0.7.1", False, False),
-    ("workflow_dispatch", "refs/heads/main", "branch", "refs/tags/v0.7.1", False, False),
-    ("workflow_dispatch", "refs/heads/main", "branch", "refs/heads/work", False, False),
-    ("workflow_dispatch", "refs/heads/main", "branch", "a" * 40, False, False),
-    ("workflow_dispatch", "refs/tags/v0.7.1", "tag", "main", False, False),
+    ("push", "refs/heads/main", "branch", "", True),
+    ("push", "refs/heads/develop", "branch", "", True),
+    ("push", "refs/heads/v-work", "branch", "", True),
+    ("push", "refs/tags/v0.7.1", "tag", "", False),
+    ("push", "refs/tags/candidate", "tag", "", False),
+    ("pull_request", "refs/pull/1/merge", "branch", "", True),
+    ("merge_group", "refs/heads/gh-readonly-queue/develop/pr-1", "branch", "", True),
+    ("workflow_dispatch", "refs/heads/main", "branch", "", True),
+    ("workflow_dispatch", "refs/tags/v0.7.1", "tag", "", False),
+    ("workflow_dispatch", "refs/heads/main", "branch", "v0.7.1", False),
+    ("workflow_dispatch", "refs/heads/main", "branch", "refs/tags/v0.7.1", False),
+    ("workflow_dispatch", "refs/heads/main", "branch", "refs/heads/work", False),
+    ("workflow_dispatch", "refs/heads/main", "branch", "a" * 40, False),
+    ("workflow_dispatch", "refs/tags/v0.7.1", "tag", "main", False),
 ]
 # Only these branch pushes may write shared caches.
 SAVING_REFS = {"refs/heads/develop", "refs/heads/main"}
@@ -334,7 +334,7 @@ def validate_cache_guards(source):
             guard = field(step, "if")
             if "env.CI_USE_CACHE == 'true'" not in guard:
                 raise AssertionError(f"unguarded cache in {job}")
-            for event, ref, ref_type, override, cached, _ in CASES:
+            for event, ref, ref_type, override, cached in CASES:
                 if cached:
                     continue
                 context = {"github.event_name": event, "github.ref": ref,
@@ -355,7 +355,7 @@ def validate_jetson_package_lifecycle(source):
         raise AssertionError("Jetson verification requires an earlier package step")
     if "scripts/package-release-binaries.sh" not in package:
         raise AssertionError("Jetson verification requires the package producer")
-    for event, ref, ref_type, override, _, _ in CASES:
+    for event, ref, ref_type, override, _ in CASES:
         for runner in ("ubuntu-24.04", "ubuntu-22.04-arm"):
             context = {"github.event_name": event, "github.ref": ref,
                        "github.ref_type": ref_type, "inputs.ref": override, "matrix.os": runner}
@@ -392,7 +392,7 @@ def validate_journey_builds(source, release_source):
         for key, value in overrides.items():
             if f'echo "{key}={value}" >> "$GITHUB_ENV"' not in profile or step_source.count(key) != 1:
                 raise AssertionError(f"missing journey profile setting: {job} {key}")
-        for event, ref, ref_type, override, _, _ in CASES:
+        for event, ref, ref_type, override, _ in CASES:
             context = {"github.event_name": event, "github.ref": ref,
                        "github.ref_type": ref_type, "inputs.ref": override}
             expected = event in ("pull_request", "merge_group") or (event == "push" and ref == "refs/heads/develop")
@@ -450,7 +450,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertIn("branches: [main, develop]", triggers)
         context = {"github.event_name": "merge_group", "github.ref": "refs/heads/gh-readonly-queue/develop/pr-1"}
         for job in JOBS:
-            if job in ("release", "cancel-on-failure"):
+            if job == "cancel-on-failure":
                 continue
             guard = re.search(r"(?m)^    if: (.*)$", JOBS[job])
             if guard:
@@ -458,7 +458,7 @@ class ReleasePolicyTests(unittest.TestCase):
             checkout, = [step for step in steps(job) if "uses: actions/checkout@" in step]
             self.assertEqual(field(checkout, "ref"),
                              "${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}")
-        for event, ref, ref_type, override, _, _ in CASES:
+        for event, ref, ref_type, override, _ in CASES:
             context = {"github.event_name": event, "github.ref": ref,
                        "github.ref_type": ref_type, "inputs.ref": override}
             context["env.CI_SAVE_CACHE"] = str(evaluate(field(SOURCE, "CI_SAVE_CACHE"), context)).lower()
@@ -742,7 +742,7 @@ class ReleasePolicyTests(unittest.TestCase):
     def test_sccache_read_only_mode_is_enforced_for_every_event(self):
         def verify(source):
             expression = field(source, "CACHE_RW_MODE")
-            for event, ref, ref_type, override, _, _ in CASES:
+            for event, ref, ref_type, override, _ in CASES:
                 context = {"github.event_name": event, "github.ref": ref,
                            "github.ref_type": ref_type, "inputs.ref": override}
                 context["env.CI_SAVE_CACHE"] = str(evaluate(field(SOURCE, "CI_SAVE_CACHE"), context)).lower()
@@ -1000,18 +1000,17 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertEqual({call['target'] for call in calls}, {str(target)})
             self.assertEqual((capsule / "fixture.component.wasm").read_bytes(), b'fixture wasm')
 
-    def test_event_ref_matrix_controls_publication_and_every_cache_action(self):
+    def test_event_ref_matrix_controls_every_cache_action(self):
         validate_cache_guards(SOURCE)
         caches = [(job, step) for job in JOBS for step in steps(job)
                   if CACHE_RE.search(step) and "type=gha" not in step]
         self.assertEqual(len(caches), 27)
-        for event, ref, ref_type, override, cached, publish in CASES:
+        for event, ref, ref_type, override, cached in CASES:
             with self.subTest(event=event, ref=ref, override=override):
                 context = {"github.event_name": event, "github.ref": ref,
                            "github.ref_type": ref_type, "inputs.ref": override}
                 use_cache = evaluate(field(SOURCE, "CI_USE_CACHE"), context)
                 self.assertEqual(use_cache, cached)
-                self.assertEqual(evaluate(field(JOBS["release"], "if"), context), publish)
                 context["env.CI_USE_CACHE"] = str(use_cache).lower()
                 save = evaluate(field(SOURCE, "CI_SAVE_CACHE"), context)
                 self.assertEqual(save, event == "push" and ref in SAVING_REFS)
@@ -1045,7 +1044,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertEqual(field(filter_step, "uses"), "dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3")
         decision, = [step for step in steps("custody-harness-smoke") if "id: should-run" in step]
         script = textwrap.dedent(decision.split("        run: |\n", 1)[1])
-        for event, ref, _, _, _, _ in CASES:
+        for event, ref, _, _, _ in CASES:
             context = {"github.event_name": event, "github.ref": ref}
             eligible = event in ("pull_request", "merge_group", "workflow_dispatch") or (event == "push" and ref in SAVING_REFS)
             self.assertEqual(evaluate(field(JOBS["custody-harness-smoke"], "if"), context), eligible)
@@ -1097,7 +1096,7 @@ class ReleasePolicyTests(unittest.TestCase):
     def test_only_pr_runs_share_a_cancellable_concurrency_group(self):
         concurrency = SOURCE.split("\nconcurrency:\n", 1)[1].split("\nenv:\n", 1)[0]
         group = field(concurrency, "group")
-        for event, ref, _, _, _, _ in CASES:
+        for event, ref, _, _, _ in CASES:
             groups = []
             for run_id in ("101", "102", "103"):
                 context = {"github.workflow": "CI", "github.event_name": event,
@@ -1108,29 +1107,28 @@ class ReleasePolicyTests(unittest.TestCase):
 
     def test_jetson_package_exists_before_verification_on_every_event(self):
         validate_jetson_package_lifecycle(SOURCE)
-        guard = "if: matrix.os == 'ubuntu-22.04-arm' || github.ref_type == 'tag' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'"
+        guard = "name: build and package release binaries\n        if: matrix.os == 'ubuntu-22.04-arm'"
         self.assertIn(guard, JOBS["source-home-linux"])
-        regressed = SOURCE.replace(guard, "if: github.event_name != 'pull_request'", 1)
+        regressed = SOURCE.replace(guard, "name: build and package release binaries\n        if: github.event_name != 'pull_request'", 1)
         with self.assertRaisesRegex(AssertionError, "lacks its package on pull_request ubuntu-22.04-arm"):
             validate_jetson_package_lifecycle(regressed)
         omitted = SOURCE.replace("scripts/package-release-binaries.sh", "echo package omitted", 1)
         with self.assertRaisesRegex(AssertionError, "requires the package producer"):
             validate_jetson_package_lifecycle(omitted)
 
-    def test_package_runs_follow_uploads_except_the_arm_compatibility_gate(self):
+    def test_only_the_arm_compatibility_gate_packages_and_nothing_publishes_binaries(self):
+        # Signed releases over Carrier are the only distribution; CI uploads no release packages.
+        self.assertNotRegex(SOURCE, r"action-gh-release|elastos-runtime-\*|contents: write")
         for job, runner in (("source-home-linux", "ubuntu-24.04"),
                             ("source-home-linux-arm64", "ubuntu-22.04-arm"),
                             ("source-home-macos", "macos-14")):
-            package, = [step for step in steps(job) if step.startswith("name: build and package release binaries\n")]
-            upload, = [step for step in steps(job) if step.startswith("name: upload release binaries\n")]
-            for event, ref, ref_type, override, _, _ in CASES:
+            packages = [step for step in steps(job) if step.startswith("name: build and package release binaries\n")]
+            for event, ref, ref_type, override, _ in CASES:
                 context = {"github.event_name": event, "github.ref": ref,
                            "github.ref_type": ref_type, "inputs.ref": override, "matrix.os": runner}
-                expected_upload = ref_type == "tag" or ref == "refs/heads/main" or event == "workflow_dispatch"
                 with self.subTest(job=job, event=event, ref=ref, override=override):
-                    self.assertEqual(evaluate(field(upload, "if"), context), expected_upload)
-                    self.assertEqual(evaluate(field(package, "if"), context),
-                                     expected_upload or job == "source-home-linux-arm64")
+                    self.assertEqual(any(evaluate(field(step, "if"), context) for step in packages),
+                                     job == "source-home-linux-arm64")
 
     def test_linux_steps_alias_is_exact_and_rejects_other_bindings(self):
         self.assertEqual(steps("source-home-linux-arm64"), steps("source-home-linux"))
@@ -1180,7 +1178,7 @@ class ReleasePolicyTests(unittest.TestCase):
 
         def verify(candidate):
             expression = field(candidate, "CACHE_RW_MODE")
-            for event, ref, ref_type, override, cached, _ in CASES:
+            for event, ref, ref_type, override, cached in CASES:
                 context = {"github.event_name": event, "github.ref": ref,
                            "github.ref_type": ref_type, "inputs.ref": override}
                 context["env.CI_USE_CACHE"] = str(evaluate(field(SOURCE, "CI_USE_CACHE"), context)).lower()
@@ -1289,7 +1287,7 @@ class ReleasePolicyTests(unittest.TestCase):
         base = ["buildx", "build", "-f", "deploy/custody-host/Dockerfile",
                 "-t", "elastos-custody-host:latest"]
         # Derive cache settings from actual events, then apply the job and step guards.
-        for event, ref, ref_type, override, cached, _ in CASES:
+        for event, ref, ref_type, override, cached in CASES:
             context = {"github.event_name": event, "github.ref": ref,
                        "github.ref_type": ref_type, "inputs.ref": override}
             use = evaluate(field(SOURCE, "CI_USE_CACHE"), context)
@@ -1312,7 +1310,7 @@ class ReleasePolicyTests(unittest.TestCase):
                         (["--cache-to", "type=gha,mode=max"] if trusted_push else [])
                     self.assertEqual(args, base + cache + ["--load", "."] if expected_run else [])
 
-    def test_github_runners_check_names_and_release_dependencies_stay_fixed(self):
+    def test_github_runners_and_check_names_stay_fixed(self):
         expected = {
             "source-gate": ("source-gate", "ubuntu-24.04"),
             "engine-llama-arm64": ("engine-llama-arm64", "ubuntu-24.04-arm"),
@@ -1325,7 +1323,6 @@ class ReleasePolicyTests(unittest.TestCase):
             "source-home-linux-arm64": ("source-home-linux (${{ matrix.check_name || matrix.os }})", "${{ matrix.os }}"),
             "source-home-macos": ("source-home-macos", "macos-14"),
             "cancel-on-failure": ("cancel-on-failure", "ubuntu-24.04"),
-            "release": ("publish-github-release", "ubuntu-24.04"),
         }
         self.assertEqual(set(JOBS), set(expected))
         for job, (name, runner) in expected.items():
@@ -1336,9 +1333,6 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertEqual(field(JOBS["source-home-linux-arm64"], "os"), "[ubuntu-22.04-arm]")
         self.assertIn("- os: ubuntu-22.04-arm\n            check_name: ubuntu-24.04-arm",
                       JOBS["source-home-linux-arm64"])
-        needs = JOBS["release"].split("    needs:\n", 1)[1].split("    permissions:\n", 1)[0]
-        self.assertEqual(re.findall(r"- ([\w-]+)", needs),
-                         ["lint", "test-elastos", "test-behaviour", "test-capsules", "source-home-linux", "source-home-linux-arm64", "source-home-macos"])
         self.assertIn("python3 scripts/ci-release-policy-test.py", JOBS["source-gate"])
 
     def run_cancel_watcher(self, polls):
@@ -1376,7 +1370,7 @@ class ReleasePolicyTests(unittest.TestCase):
         watcher = JOBS["cancel-on-failure"]
         self.assertNotIn("actions/checkout@", watcher)
         self.assertEqual(watcher.split("    permissions:\n", 1)[1].split("    steps:\n", 1)[0], "      actions: write\n")
-        for event, ref, ref_type, override, _, _ in CASES:
+        for event, ref, ref_type, override, _ in CASES:
             for head in ("Elacity/elastos-runtime", "someone/fork"):
                 context = {"github.event_name": event, "github.ref": ref, "github.repository": "Elacity/elastos-runtime",
                            "github.event.pull_request.head.repo.full_name": head}
@@ -1461,7 +1455,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertEqual(field(restore, "key"), "${{ steps.engine-recipe.outputs.cache-key }}")
         self.assertEqual(field(save, "key"), "${{ steps.engine-cache.outputs.cache-primary-key }}")
         self.assertNotIn("restore-keys:", restore)
-        for event, ref, ref_type, override, cached, _ in CASES:
+        for event, ref, ref_type, override, cached in CASES:
             for hit in ("true", "false"):
                 context = {"github.event_name": event, "github.ref": ref,
                            "env.CI_USE_CACHE": str(cached).lower(),

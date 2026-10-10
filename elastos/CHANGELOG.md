@@ -16,6 +16,11 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   name from the model list, such as "Qwen2.5 1.5B Instruct", as soon as Home
   has finished setting it up, without pressing Refresh models.
 
+### Removed
+
+- ElastOS no longer attaches downloads to GitHub Releases. Install with
+  `install.sh`; it and System fetch the signed release over Carrier.
+
 ### Developer detail
 
 - Model preparation keeps its stage after any `MetadataRead`, `WeightsRead` or
@@ -51,6 +56,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   hop observer and Kubo seed scripts). `ci-release-policy-test.py` follows each
   job's shell scripts and Dockerfiles and fails when a called input is outside
   the filter (#317).
+- `ci.yml` no longer publishes a GitHub Release or uploads `elastos-runtime-*`
+  packages on tags, `main` or dispatch: those unsigned assets were a second
+  channel beside the signed Carrier release. CI still packages ARM64 for the
+  Jetson compatibility gate. The nine required checks are unchanged.
 
 ## [0.8.0-alpha.15]
 
