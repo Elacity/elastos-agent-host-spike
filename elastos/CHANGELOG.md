@@ -16,13 +16,21 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Developer detail
 
-- Startup Content restore skips Runtime-private `model-preparation`. It
-  re-imports only objects within the 64 MiB JSON import bound, and it hashes
-  them with a streamed reader. Before this, it read each admitted model file
-  whole, then base64-encoded it and copied it through the provider bridge,
-  using about 8 times the file size.
-- model-provider's cgroup v2 memory check subtracts the reclaimable file cache
-  (`active_file + inactive_file` in `memory.stat`) from `memory.current`.
+- Startup restore and repair of complete local Content objects skip
+  Runtime-private `model-preparation`. Admitted models are verified at
+  admission, and this Home's Kubo does not hold them in 0.8.0; serving them to
+  peers is the holder role (#324). Before this, restore read each admitted
+  model file whole, then base64-encoded it and copied it through the provider
+  bridge, using about 8 times the file size.
+- Restore and repair now stream every local object from disk into Kubo, pinned,
+  through a new Runtime-private ipfs-provider operation
+  (`runtime_add_local_object`). It uses the same parts and add options as
+  `add_directory`, so the CID matches the original import and Content still
+  compares it. Runtime hashes the files with a streamed reader and sends only
+  their paths and sizes, so memory stays the same whatever the object's size.
+- model-provider's cgroup v2 memory check subtracts reclaimable file cache
+  (`active_file + inactive_file - file_dirty - file_writeback` in
+  `memory.stat`, never below zero) from `memory.current`.
 
 ## [0.8.0-alpha.14]
 

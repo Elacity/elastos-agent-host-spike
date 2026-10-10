@@ -1,11 +1,13 @@
-//! Startup Content restore walks the data directory for complete local
-//! objects. Its heap must stay bounded however large the files under it are:
-//! a Qwen-sized admitted model package once grew Home past 7 GB and the kernel
-//! OOM-killed an 8 GB host. This binary owns its global allocator to measure it.
+//! Startup restore and repair walk the data directory for complete local
+//! objects and import them into the local Kubo. Runtime's heap must stay
+//! bounded however large those objects are: a Qwen-sized admitted model once
+//! grew Home past 7 GB and the kernel OOM-killed an 8 GB host. This binary
+//! owns its global allocator to measure that.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::future::Future;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use std::sync::Arc;
 
 use elastos_runtime::provider::{
@@ -71,26 +73,29 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-/// Restore may hold small manifests and objects; never a large payload.
+/// Restore and repair may hold manifests and paths; never object content.
 const HEAP_BOUND: usize = 16 * 1024 * 1024;
-const CID: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
+const HELD_CID: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
+const MEDIA_CID: &str = "bafybeihgnsjhpoktqbyspaqv6moblyny3txs5nkjdxfx7wm346odxkhlrm";
 // Sparse fixture files read as zeros; these are SHA-256 digests of N zero bytes.
 const QWEN_WEIGHTS_BYTES: u64 = 1_117_320_736;
 const QWEN_ZEROS_SHA256: &str = "8de2df505f2c46dd3b893364749702df7863e3183de4f386e868373848a157e9";
-// One byte over Content's 64 MiB JSON import bound.
-const OVER_IMPORT_BOUND_BYTES: u64 = 64 * 1024 * 1024 + 1;
-const OVER_IMPORT_ZEROS_SHA256: &str =
-    "91990977345985aaf03af1358f4f989d7eaf985b58529efb72f613c588f6599a";
+const MEDIA_BYTES: u64 = 200 * 1024 * 1024;
+const MEDIA_ZEROS_SHA256: &str = "72abf2ca8f36943ebe2e49ca3a51d409ca5f0bfcffab6c9d25643c17c32889da";
 
 enum Body<'a> {
     Bytes(&'a [u8]),
     Zeros(u64, &'a str),
 }
 
-/// A complete local object: every file matches its manifest entry.
-fn write_object(dir: &Path, files: &[(&str, Body<'_>)]) {
+type Descriptor = Vec<(String, u64)>;
+
+/// Writes a complete local object (every file matches its manifest entry) and
+/// returns the paths and sizes a streamed import must name, manifest last.
+fn write_object(dir: &Path, files: &[(&str, Body<'_>)]) -> Descriptor {
     std::fs::create_dir_all(dir).unwrap();
     let mut entries = Vec::new();
+    let mut descriptor = Vec::new();
     for (path, body) in files {
         let (size, sha256) = match body {
             Body::Bytes(bytes) => {
@@ -107,23 +112,27 @@ fn write_object(dir: &Path, files: &[(&str, Body<'_>)]) {
             }
         };
         entries.push(json!({"path": path, "sha256": sha256, "size": size}));
+        descriptor.push((path.to_string(), size));
     }
-    let manifest = json!({
+    let manifest = serde_json::to_vec(&json!({
         "schema": "elastos.content.object.manifest/v1",
         "kind": "directory",
         "content_digest": format!("sha256:{}", "0".repeat(64)),
         "files": entries,
-    });
-    std::fs::write(
-        dir.join("_elastos_object.json"),
-        serde_json::to_vec(&manifest).unwrap(),
-    )
+    }))
     .unwrap();
+    std::fs::write(dir.join("_elastos_object.json"), &manifest).unwrap();
+    descriptor.push(("_elastos_object.json".into(), manifest.len() as u64));
+    descriptor
 }
 
+/// Local Kubo stand-in. A streamed import names a directory and its file
+/// sizes, never bytes; each object has its own root CID.
 #[derive(Default)]
 struct Ipfs {
-    imported: Mutex<Vec<Vec<String>>>,
+    imported: Mutex<Vec<(String, Descriptor)>>,
+    unpinned: Mutex<Vec<String>>,
+    pin_fails: AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -141,25 +150,60 @@ impl Provider for Ipfs {
     }
 
     async fn send_raw(&self, request: &Value) -> Result<Value, ProviderError> {
-        if request["op"] == "add_directory" {
-            let paths = request["files"].as_array().unwrap().iter();
-            self.imported.lock().await.push(
-                paths
-                    .map(|file| file["path"].as_str().unwrap().to_owned())
-                    .collect(),
-            );
+        match request["op"].as_str().unwrap() {
+            "runtime_add_local_object" => {
+                let root = Path::new(request["object"]["root"].as_str().unwrap());
+                let name = root.file_name().unwrap().to_str().unwrap().to_owned();
+                let files = request["object"]["files"].as_array().unwrap().iter();
+                let files = files
+                    .map(|f| {
+                        (
+                            f["path"].as_str().unwrap().into(),
+                            f["size"].as_u64().unwrap(),
+                        )
+                    })
+                    .collect();
+                let cid = if name == "media-object" {
+                    MEDIA_CID
+                } else {
+                    HELD_CID
+                };
+                self.imported.lock().await.push((name, files));
+                Ok(json!({"status": "ok", "data": {"cid": cid}}))
+            }
+            "pin" if self.pin_fails.load(Relaxed) => {
+                Ok(json!({"status": "error", "code": "pin_failed", "message": "not held"}))
+            }
+            "unpin" => {
+                let cid = request["cid"].as_str().unwrap().to_owned();
+                self.unpinned.lock().await.push(cid);
+                Ok(json!({"status": "ok", "data": {}}))
+            }
+            _ => Ok(json!({"status": "ok", "data": {"cid": HELD_CID}})),
         }
-        Ok(json!({"status": "ok", "data": {"cid": CID}}))
     }
 }
 
+async fn heap_growth<T>(work: impl Future<Output = T>) -> (T, usize) {
+    let baseline = LIVE.load(Relaxed);
+    PEAK.store(baseline, Relaxed);
+    LIMIT.store(baseline + 16 * HEAP_BOUND, Relaxed);
+    let output = work.await;
+    LIMIT.store(usize::MAX, Relaxed);
+    (output, PEAK.load(Relaxed) - baseline)
+}
+
 #[tokio::test]
-async fn startup_restore_skips_model_packages_with_bounded_heap() {
+async fn restore_and_repair_stream_large_objects_and_skip_model_packages() {
     let data = tempfile::tempdir().unwrap();
-    // A small held object proves the restore walk ran and still imports.
-    write_object(
+    let held = write_object(
         &data.path().join("held-object"),
         &[("index.md", Body::Bytes(b"hello object"))],
+    );
+    // Larger than the old 64 MiB JSON import; must still restore and repair.
+    let media = write_object(
+        &data.path().join("media-object"),
+        &[("media.bin", Body::Zeros(MEDIA_BYTES, MEDIA_ZEROS_SHA256))],
     );
     // Runtime-private admitted model packages, laid out as preparation admits
     // them. Neither the Qwen-sized nor a small one is a Content replica.
@@ -181,14 +225,6 @@ async fn startup_restore_skips_model_packages_with_bounded_heap() {
             ("weights.gguf", Body::Bytes(b"GGUF\x03\0\0\0")),
         ],
     );
-    // An ordinary object too large for the JSON provider import.
-    write_object(
-        &data.path().join("large-object"),
-        &[(
-            "media.bin",
-            Body::Zeros(OVER_IMPORT_BOUND_BYTES, OVER_IMPORT_ZEROS_SHA256),
-        )],
-    );
     let registry = Arc::new(ProviderRegistry::new());
     let ipfs = Arc::new(Ipfs::default());
     registry
@@ -200,19 +236,36 @@ async fn startup_restore_skips_model_packages_with_bounded_heap() {
         Arc::downgrade(&registry),
     ));
 
-    let baseline = LIVE.load(Relaxed);
-    PEAK.store(baseline, Relaxed);
-    LIMIT.store(baseline + 16 * HEAP_BOUND, Relaxed);
-    content.restore_complete_local_objects().await;
-    LIMIT.store(usize::MAX, Relaxed);
-
-    let growth = PEAK.load(Relaxed) - baseline;
-    assert!(
-        growth <= HEAP_BOUND,
-        "restore heap grew {growth} bytes, bound {HEAP_BOUND}"
-    );
+    // Startup restore imports both ordinary objects by path and size.
+    let ((), growth) = heap_growth(content.restore_complete_local_objects()).await;
+    assert!(growth <= HEAP_BOUND, "restore heap grew {growth} bytes");
+    let mut imported = std::mem::take(&mut *ipfs.imported.lock().await);
+    imported.sort();
     assert_eq!(
-        *ipfs.imported.lock().await,
-        [["index.md", "_elastos_object.json"]]
+        imported,
+        [
+            ("held-object".to_owned(), held),
+            ("media-object".to_owned(), media.clone())
+        ]
     );
+
+    // Repair after a failed pin imports complete objects until one has the
+    // requested CID; any other import is unpinned again.
+    ipfs.pin_fails.store(true, Relaxed);
+    let (response, growth) =
+        heap_growth(content.send_raw(&json!({"op": "ensure", "cid": MEDIA_CID}))).await;
+    assert!(growth <= HEAP_BOUND, "repair heap grew {growth} bytes");
+    let response = response.unwrap();
+    assert_eq!(response["status"], "ok", "{response}");
+    assert_eq!(
+        response["data"]["availability"]["policy"],
+        "local_object_import"
+    );
+    assert_eq!(response["data"]["availability"]["replicas"], 1);
+    assert!(ipfs
+        .imported
+        .lock()
+        .await
+        .contains(&("media-object".to_owned(), media)));
+    assert!(ipfs.unpinned.lock().await.iter().all(|cid| cid == HELD_CID));
 }

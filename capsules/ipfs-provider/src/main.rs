@@ -40,17 +40,17 @@ const BOUNDED_READ_KUBO_TIMEOUT: &str = "100ms";
 const MAX_BOUNDED_READ_BYTES: u64 = 64 * 1024;
 const MAX_CAPACITY_REQUIRED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
-// The upload borrows one opened file. A short read or changed file cannot
+// The upload reads one opened file. A short read or changed file cannot
 // silently replace missing payload bytes with the multipart footer.
-struct AddPathReader<'a> {
-    file: &'a mut fs::File,
+struct AddPathReader {
+    file: fs::File,
     length: u64,
     remaining: u64,
     modified: SystemTime,
 }
 
-impl<'a> AddPathReader<'a> {
-    fn new(file: &'a mut fs::File) -> io::Result<Self> {
+impl AddPathReader {
+    fn new(file: fs::File) -> io::Result<Self> {
         let metadata = file.metadata()?;
         if !metadata.is_file() {
             return Err(io::Error::new(
@@ -78,7 +78,7 @@ impl<'a> AddPathReader<'a> {
     }
 }
 
-impl Read for AddPathReader<'_> {
+impl Read for AddPathReader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         if buffer.is_empty() {
             return Ok(0);
@@ -106,6 +106,65 @@ impl Read for AddPathReader<'_> {
     }
 }
 
+/// Multipart body of one local object directory for Kubo `add`. Files open one
+/// at a time when their part starts and stream through `AddPathReader`, so the
+/// provider holds one bounded chunk whatever the object's size.
+struct LocalObjectBody<'a> {
+    root: &'a Path,
+    files: std::slice::Iter<'a, StagedFile>,
+    boundary: String,
+    pending: io::Cursor<Vec<u8>>,
+    current: Option<AddPathReader>,
+    finished: bool,
+}
+
+impl Read for LocalObjectBody<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let count = self.pending.read(buffer)?;
+            if count != 0 {
+                return Ok(count);
+            }
+            if let Some(reader) = self.current.as_mut() {
+                let count = reader.read(buffer)?;
+                if count != 0 {
+                    return Ok(count);
+                }
+                self.current = None;
+                self.pending = io::Cursor::new(b"\r\n".to_vec());
+                continue;
+            }
+            if let Some(file) = self.files.next() {
+                let reader = AddPathReader::new(fs::File::open(self.root.join(&file.path))?)?;
+                if reader.length != file.size {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Local object file differs from its manifest",
+                    ));
+                }
+                self.pending = io::Cursor::new(directory_part_header(&self.boundary, &file.path));
+                self.current = Some(reader);
+            } else if !self.finished {
+                self.finished = true;
+                self.pending = io::Cursor::new(format!("--{}--\r\n", self.boundary).into_bytes());
+            } else {
+                return Ok(0);
+            }
+        }
+    }
+}
+
+fn directory_part_header(boundary: &str, path: &str) -> Vec<u8> {
+    format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{path}\"\r\nContent-Type: {}\r\n\r\n",
+        guess_mime(path)
+    )
+    .into_bytes()
+}
+
 fn deserialize_metadata_max<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<u64>, D::Error> {
@@ -125,6 +184,9 @@ enum Request {
     },
     RuntimeHashStagedDirectory {
         directory: StagedDirectory,
+    },
+    RuntimeAddLocalObject {
+        object: LocalObject,
     },
     Init {
         #[serde(default)]
@@ -216,16 +278,19 @@ struct StagedDirectory {
     total_bytes: u64,
 }
 
+fn valid_root(root: &Path) -> bool {
+    root.to_str().is_some_and(|root| {
+        root.starts_with('/')
+            && root.len() <= 4096
+            && !root.contains('\0')
+            && root[1..].split('/').count() <= 64
+            && !root[1..].split('/').any(|p| matches!(p, "" | "." | ".."))
+    })
+}
+
 impl StagedDirectory {
     fn valid_shape(&self) -> bool {
-        let Some(root) = self.root.to_str() else {
-            return false;
-        };
-        if !root.starts_with('/')
-            || root.len() > 4096
-            || root.contains('\0')
-            || root[1..].split('/').count() > 64
-            || root[1..].split('/').any(|p| matches!(p, "" | "." | ".."))
+        if !valid_root(&self.root)
             || self.files.is_empty()
             || self.files.len() > 33
             || self.total_bytes == 0
@@ -270,6 +335,41 @@ impl StagedDirectory {
     }
 }
 
+const MAX_LOCAL_OBJECT_FILES: usize = 4096;
+
+/// Runtime's descriptor of one complete local Content object directory: the
+/// manifest's files plus `_elastos_object.json`, with their recorded sizes.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalObject {
+    root: PathBuf,
+    files: Vec<StagedFile>,
+}
+
+impl LocalObject {
+    fn valid_shape(&self) -> bool {
+        let mut paths = std::collections::BTreeSet::new();
+        // Paths become multipart filenames; quotes and controls cannot pass.
+        valid_root(&self.root)
+            && (1..=MAX_LOCAL_OBJECT_FILES).contains(&self.files.len())
+            && self.files.iter().all(|file| {
+                file.path.len() <= 4096
+                    && !file.path.split('/').any(|p| matches!(p, "" | "." | ".."))
+                    && !file
+                        .path
+                        .chars()
+                        .any(|c| c.is_control() || c == '"' || c == '\\')
+                    && paths.insert(file.path.as_str())
+            })
+            && paths.contains("_elastos_object.json")
+            && !self.files.iter().any(|f| {
+                f.path
+                    .match_indices('/')
+                    .any(|(i, _)| paths.contains(&f.path[..i]))
+            })
+    }
+}
+
 fn private_preparation_error() -> Response {
     Response::error(
         "preparation_unavailable",
@@ -290,6 +390,7 @@ fn parse_request(line: &str) -> Result<Request, Response> {
                         "runtime_prepare_backend"
                             | "runtime_hash_staged_directory"
                             | "runtime_check_capacity"
+                            | "runtime_add_local_object"
                     )
                 })
             })
@@ -600,6 +701,22 @@ impl IpfsProvider {
                 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
                 {
                     private_preparation_error()
+                }
+            }
+            Request::RuntimeAddLocalObject { object } => {
+                if !object.valid_shape() {
+                    return private_preparation_error();
+                }
+                if let Err(error) = self.ensure_kubo() {
+                    eprintln!("ipfs-provider: local object backend unavailable: {error}");
+                    return private_preparation_error();
+                }
+                match self.kubo_add_local_object(&object) {
+                    Ok(cid) => Response::ok(serde_json::json!({"cid":cid})),
+                    Err(error) => {
+                        eprintln!("ipfs-provider: local object import failed: {error}");
+                        private_preparation_error()
+                    }
                 }
             }
             Request::Init { config } => self.init(config),
@@ -1499,9 +1616,11 @@ impl IpfsProvider {
         {
             return Err("Upload source must be a regular file".into());
         }
-        let mut file = fs::File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
-        let reader =
-            AddPathReader::new(&mut file).map_err(|e| format!("Failed to read file: {}", e))?;
+        let file = fs::File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
+        let reader = file
+            .try_clone()
+            .and_then(AddPathReader::new)
+            .map_err(|e| format!("Failed to read file: {}", e))?;
         let length = reader.length;
         let modified = reader.modified;
         let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
@@ -1547,30 +1666,13 @@ impl IpfsProvider {
             let bytes = BASE64
                 .decode(&file.data)
                 .map_err(|e| format!("Invalid base64 for {}: {}", file.path, e))?;
-
-            write!(body, "--{}\r\n", boundary).unwrap();
-            write!(
-                body,
-                "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n",
-                file.path
-            )
-            .unwrap();
-
-            // Guess MIME type
-            let mime = guess_mime(&file.path);
-            write!(body, "Content-Type: {}\r\n\r\n", mime).unwrap();
+            body.extend_from_slice(&directory_part_header(&boundary, &file.path));
             body.extend_from_slice(&bytes);
             write!(body, "\r\n").unwrap();
         }
         write!(body, "--{}--\r\n", boundary).unwrap();
 
-        let url = format!(
-            "{}/api/v0/add?wrap-with-directory=true&pin={}&cid-version=1&hash=sha2-256&raw-leaves=true&chunker=size-262144&trickle=false&max-file-links=174&max-directory-links=0&max-hamt-fanout=256&inline=false&inline-limit=32&nocopy=false&fscache=false&preserve-mode=false&preserve-mtime=false&empty-dirs=false&progress=false&fast-provide-root=false&fast-provide-wait=false",
-            self.api_url(),
-            pin
-        );
-
-        let resp = ureq::post(&url)
+        let resp = ureq::post(&self.add_directory_url(pin))
             .set(
                 "Content-Type",
                 &format!("multipart/form-data; boundary={}", boundary),
@@ -1578,30 +1680,52 @@ impl IpfsProvider {
             .timeout(LARGE_HTTP_TIMEOUT)
             .send_bytes(&body)
             .map_err(|e| format!("IPFS add directory failed: {}", e))?;
+        directory_root(resp)
+    }
 
-        if resp.status() != 200 {
-            return Err(format!("IPFS add directory failed: HTTP {}", resp.status()));
-        }
-
-        // Parse NDJSON — the entry with empty Name is the root directory CID
-        let body_str = resp
-            .into_string()
-            .map_err(|e| format!("Failed to read response: {}", e))?;
-        let mut root_cid = None;
-        for line in body_str.lines() {
-            if line.is_empty() {
-                continue;
+    /// Pins one complete local object directory with the same parts and add
+    /// options as `add_directory`, so its CID equals the original import. The
+    /// body streams from disk; no file is held in memory.
+    fn kubo_add_local_object(&self, object: &LocalObject) -> Result<String, String> {
+        let boundary = format!("----elastos{}", now_unix_secs());
+        let mut length = format!("--{boundary}--\r\n").len() as u64;
+        for file in &object.files {
+            let metadata = fs::metadata(object.root.join(&file.path))
+                .map_err(|e| format!("Local object file unavailable: {}", e))?;
+            if !metadata.is_file() || metadata.len() != file.size {
+                return Err("Local object file differs from its manifest".into());
             }
-            if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) {
-                let name = entry["Name"].as_str().unwrap_or("");
-                let hash = entry["Hash"].as_str().unwrap_or("");
-                if name.is_empty() && !hash.is_empty() {
-                    root_cid = Some(hash.to_string());
-                }
-            }
+            length = length
+                .checked_add(directory_part_header(&boundary, &file.path).len() as u64 + 2)
+                .and_then(|n| n.checked_add(file.size))
+                .ok_or("Local object length exceeds its bound")?;
         }
+        let body = LocalObjectBody {
+            root: &object.root,
+            files: object.files.iter(),
+            boundary: boundary.clone(),
+            pending: io::Cursor::new(Vec::new()),
+            current: None,
+            finished: false,
+        };
+        let resp = ureq::post(&self.add_directory_url(true))
+            .set(
+                "Content-Type",
+                &format!("multipart/form-data; boundary={}", boundary),
+            )
+            .set("Content-Length", &length.to_string())
+            .timeout(LARGE_HTTP_TIMEOUT)
+            .send(body)
+            .map_err(|e| format!("IPFS add local object failed: {}", e))?;
+        directory_root(resp)
+    }
 
-        root_cid.ok_or_else(|| "No root CID in IPFS response".to_string())
+    fn add_directory_url(&self, pin: bool) -> String {
+        format!(
+            "{}/api/v0/add?wrap-with-directory=true&pin={}&cid-version=1&hash=sha2-256&raw-leaves=true&chunker=size-262144&trickle=false&max-file-links=174&max-directory-links=0&max-hamt-fanout=256&inline=false&inline-limit=32&nocopy=false&fscache=false&preserve-mode=false&preserve-mtime=false&empty-dirs=false&progress=false&fast-provide-root=false&fast-provide-wait=false",
+            self.api_url(),
+            pin
+        )
     }
 
     // ── Internal: local IPFS gateway only ──────────────────────────
@@ -1785,6 +1909,23 @@ fn guess_mime(path: &str) -> &'static str {
         Some("svg") => "image/svg+xml",
         _ => "application/octet-stream",
     }
+}
+
+/// Root CID of a wrapped directory add: the NDJSON entry with an empty Name.
+fn directory_root(resp: ureq::Response) -> Result<String, String> {
+    if resp.status() != 200 {
+        return Err(format!("IPFS add directory failed: HTTP {}", resp.status()));
+    }
+    let body = resp
+        .into_string()
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+    body.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|entry| entry["Name"].as_str().unwrap_or("").is_empty())
+        .filter_map(|entry| entry["Hash"].as_str().map(str::to_owned))
+        .filter(|hash| !hash.is_empty())
+        .next_back()
+        .ok_or_else(|| "No root CID in IPFS response".to_string())
 }
 
 fn parse_add_response(body: &str) -> Result<String, String> {
@@ -2235,7 +2376,13 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn add_path_http_fixture(status: u16) -> (u16, std::thread::JoinHandle<(String, Vec<u8>)>) {
+    const ADD_PATH_RESPONSE: &[u8] =
+        b"{\"Name\":\"release.tar.gz\",\"Hash\":\"QmStreamedFixture\",\"Size\":\"17\"}\n";
+
+    fn add_http_fixture(
+        status: u16,
+        response: &'static [u8],
+    ) -> (u16, std::thread::JoinHandle<(String, Vec<u8>)>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -2253,8 +2400,6 @@ mod tests {
             assert!(length < 4 * ADD_PATH_CHUNK);
             let mut body = vec![0; length];
             socket.read_exact(&mut body).unwrap();
-            let response =
-                b"{\"Name\":\"release.tar.gz\",\"Hash\":\"QmStreamedFixture\",\"Size\":\"17\"}\n";
             write!(
                 socket,
                 "HTTP/1.1 {} fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -2277,7 +2422,7 @@ mod tests {
             .collect();
         fs::write(&path, &payload).unwrap();
         for pin in [true, false] {
-            let (port, server) = add_path_http_fixture(200);
+            let (port, server) = add_http_fixture(200, ADD_PATH_RESPONSE);
             let provider = bounded_cat_fixture_provider(root.path(), port);
             assert_eq!(
                 provider.kubo_add_path(&path, pin).unwrap(),
@@ -2309,8 +2454,7 @@ mod tests {
         let path = root.path().join("payload");
         let payload = vec![b'x'; 2 * ADD_PATH_CHUNK + 17];
         fs::write(&path, &payload).unwrap();
-        let mut file = fs::File::open(&path).unwrap();
-        let mut reader = AddPathReader::new(&mut file).unwrap();
+        let mut reader = AddPathReader::new(fs::File::open(&path).unwrap()).unwrap();
         let mut buffer = vec![0; 3 * ADD_PATH_CHUNK];
         assert_eq!(reader.read(&mut []).unwrap(), 0);
         let mut total = 0;
@@ -2335,8 +2479,7 @@ mod tests {
             io::ErrorKind::InvalidData
         );
         fs::write(&path, &payload).unwrap();
-        let mut file = fs::File::open(&path).unwrap();
-        let mut reader = AddPathReader::new(&mut file).unwrap();
+        let mut reader = AddPathReader::new(fs::File::open(&path).unwrap()).unwrap();
         assert_eq!(reader.read(&mut buffer).unwrap(), ADD_PATH_CHUNK);
         fs::OpenOptions::new()
             .write(true)
@@ -2355,7 +2498,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("release.tar.gz");
         fs::write(&path, b"fixture payload").unwrap();
-        let (port, server) = add_path_http_fixture(500);
+        let (port, server) = add_http_fixture(500, ADD_PATH_RESPONSE);
         let provider = bounded_cat_fixture_provider(root.path(), port);
         let error = provider.kubo_add_path(&path, true).unwrap_err();
         assert!(error.contains("IPFS add failed") && error.contains("500"));
@@ -2367,6 +2510,152 @@ mod tests {
             .kubo_add_path(root.path(), true)
             .unwrap_err()
             .contains("regular file"));
+    }
+
+    const DIRECTORY_ROOT_RESPONSE: &[u8] =
+        b"{\"Name\":\"assets/data.bin\",\"Hash\":\"bafkfile\"}\n{\"Name\":\"\",\"Hash\":\"bafyroot\"}\n";
+
+    fn multipart_boundary(headers: &str) -> String {
+        headers
+            .lines()
+            .find_map(|line| line.split("boundary=").nth(1))
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+
+    fn without_boundary(body: &[u8], boundary: &str) -> Vec<u8> {
+        let mut kept = Vec::with_capacity(body.len());
+        let mut rest = body;
+        while let Some((&byte, tail)) = rest.split_first() {
+            if rest.starts_with(boundary.as_bytes()) {
+                rest = &rest[boundary.len()..];
+            } else {
+                kept.push(byte);
+                rest = tail;
+            }
+        }
+        kept
+    }
+
+    #[test]
+    fn local_object_add_streams_the_parts_and_options_of_directory_add() {
+        let root = tempfile::tempdir().unwrap();
+        let object = root.path().join("object");
+        fs::create_dir_all(object.join("assets")).unwrap();
+        let files: [(&str, Vec<u8>); 3] = [
+            ("index.html", b"<p>held</p>".to_vec()),
+            (
+                "assets/data.bin",
+                (0..2 * ADD_PATH_CHUNK + 17)
+                    .map(|n| (n % 251) as u8)
+                    .collect(),
+            ),
+            ("_elastos_object.json", b"{\"files\":[]}".to_vec()),
+        ];
+        for (path, bytes) in &files {
+            fs::write(object.join(path), bytes).unwrap();
+        }
+        let (port, server) = add_http_fixture(200, DIRECTORY_ROOT_RESPONSE);
+        let provider = bounded_cat_fixture_provider(root.path(), port);
+        let encoded = files
+            .iter()
+            .map(|(path, bytes)| DirFile {
+                path: path.to_string(),
+                data: BASE64.encode(bytes),
+            })
+            .collect();
+        assert_eq!(
+            provider.kubo_add_directory(encoded, true).unwrap(),
+            "bafyroot"
+        );
+        let (json_headers, json_body) = server.join().unwrap();
+
+        let (port, server) = add_http_fixture(200, DIRECTORY_ROOT_RESPONSE);
+        let provider = bounded_cat_fixture_provider(root.path(), port);
+        let local = LocalObject {
+            root: object,
+            files: files
+                .iter()
+                .map(|(path, bytes)| StagedFile {
+                    path: path.to_string(),
+                    size: bytes.len() as u64,
+                })
+                .collect(),
+        };
+        assert!(local.valid_shape());
+        assert_eq!(provider.kubo_add_local_object(&local).unwrap(), "bafyroot");
+        let (headers, body) = server.join().unwrap();
+        // The same add options and parts, apart from the random boundary, give
+        // Kubo the same directory, so the CID equals the original JSON import.
+        assert_eq!(headers.lines().next(), json_headers.lines().next());
+        assert!(headers.lines().next().unwrap().contains("&pin=true&"));
+        assert!(!headers.to_ascii_lowercase().contains("transfer-encoding:"));
+        assert_eq!(
+            without_boundary(&body, &multipart_boundary(&headers)),
+            without_boundary(&json_body, &multipart_boundary(&json_headers))
+        );
+    }
+
+    #[test]
+    fn local_object_add_refuses_unsafe_descriptors_and_changed_files() {
+        let root = tempfile::tempdir().unwrap();
+        let object = root.path().join("object");
+        fs::create_dir(&object).unwrap();
+        fs::write(object.join("a.txt"), b"abc").unwrap();
+        fs::write(object.join("_elastos_object.json"), b"{}").unwrap();
+        let mut provider = bounded_cat_fixture_provider(root.path(), 0);
+        let refused = serde_json::to_value(private_preparation_error()).unwrap();
+        let manifest = serde_json::json!({"path":"_elastos_object.json","size":2});
+        let request = |root: serde_json::Value, files: serde_json::Value| serde_json::json!({"op":"runtime_add_local_object","object":{"root":root,"files":files}});
+        let mut requests: Vec<_> = [
+            serde_json::json!([]),
+            serde_json::json!([{"path":"a.txt","size":3}]),
+            serde_json::json!([{"path":"../a.txt","size":3}, manifest]),
+            serde_json::json!([{"path":"a\"b","size":3}, manifest]),
+            serde_json::json!([{"path":"a\r\nb","size":3}, manifest]),
+            serde_json::json!([{"path":"a.txt","size":3}, {"path":"a.txt/b","size":1}, manifest]),
+            serde_json::json!([manifest, manifest]),
+        ]
+        .into_iter()
+        .map(|files| request(serde_json::json!(object), files))
+        .collect();
+        requests.push(request(
+            serde_json::json!("object"),
+            serde_json::json!([manifest]),
+        ));
+        let mut extra = request(serde_json::json!(object), serde_json::json!([manifest]));
+        extra["pin"] = serde_json::json!(false);
+        requests.push(extra);
+        for request in requests {
+            let response = match parse_request(&request.to_string()) {
+                Ok(parsed) => provider.handle(parsed),
+                Err(response) => response,
+            };
+            assert_eq!(
+                serde_json::to_value(response).unwrap(),
+                refused,
+                "{request}"
+            );
+        }
+        // A file that no longer has its recorded size is refused before upload.
+        let changed = LocalObject {
+            root: object,
+            files: vec![
+                StagedFile {
+                    path: "a.txt".into(),
+                    size: 4,
+                },
+                StagedFile {
+                    path: "_elastos_object.json".into(),
+                    size: 2,
+                },
+            ],
+        };
+        assert!(provider
+            .kubo_add_local_object(&changed)
+            .unwrap_err()
+            .contains("differs from its manifest"));
     }
 
     fn private_hash_fixture_request() -> serde_json::Value {

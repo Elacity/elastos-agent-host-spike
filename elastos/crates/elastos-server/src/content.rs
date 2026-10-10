@@ -102,13 +102,16 @@ const SEALED_OBJECT_PATH: &str = "sealed.json";
 pub const CONTENT_OBJECT_MANIFEST_PATH: &str = OBJECT_MANIFEST_PATH;
 const MAX_LOCAL_OBJECT_DIRS: usize = 16;
 const MAX_LOCAL_OBJECT_WALK_DEPTH: usize = 8;
+// Bounds the one local object file Runtime reads whole: 4096 manifest entries.
+const MAX_LOCAL_OBJECT_MANIFEST_BYTES: u64 = 1024 * 1024;
 const LOCAL_OBJECT_WALK_SKIP: &[&str] = &[
     "ipfs-repo",
     "logs",
     "bin",
     "managed-runtimes",
-    // Runtime-private model inventory. Model startup verifies admitted
-    // packages with a streamed digest; they are never Content replicas.
+    // Runtime-private model inventory. Admitted models are verified at
+    // admission and this Home's Kubo does not hold them in 0.8.0; serving
+    // them to peers is the holder role of #324.
     "model-preparation",
     "target",
     ".git",
@@ -4306,24 +4309,11 @@ impl ContentProvider {
         registry: &ProviderRegistry,
         dir: &Path,
     ) -> Result<String, ProviderError> {
-        let files = local_object_dir_files(dir)?;
-        let ipfs_response = self
-            .invoke_provider(
-                registry,
-                "ipfs",
-                "add_directory",
-                json!({
-                    "op": "add_directory",
-                    "files": files,
-                    "pin": true,
-                }),
-                ProviderTransfer::Json,
-            )
-            .await?;
-        provider_response_ok(&ipfs_response, "content local object import")?;
-        provider_response_cid(&ipfs_response).map_err(|err| {
-            ProviderError::Provider(format!("content local object import missing CID: {err}"))
-        })
+        // The provider streams the files from disk into Kubo; Runtime sends
+        // only their paths and recorded sizes, whatever the object's size.
+        registry
+            .add_local_ipfs_object(dir, &local_object_dir_files(dir)?)
+            .await
     }
 
     pub async fn restore_complete_local_objects(&self) {
@@ -8867,27 +8857,18 @@ fn local_object_dir_is_complete(dir: &Path) -> bool {
     })
 }
 
-/// Restore imports a local object as base64 JSON through the provider bridge,
-/// which holds several copies of it at once. The manifest plus its declared
-/// files must fit Content's JSON import bound; a larger object is skipped
-/// before any payload byte is read.
-fn local_object_manifest(dir: &Path) -> Option<(Vec<u8>, ContentObjectManifest)> {
-    let bound = IMPORT_EXACT_MAX_BYTES as u64;
+fn local_object_manifest(dir: &Path) -> Option<(u64, ContentObjectManifest)> {
     let mut bytes = Vec::new();
     std::fs::File::open(dir.join(OBJECT_MANIFEST_PATH))
         .ok()?
-        .take(bound + 1)
+        .take(MAX_LOCAL_OBJECT_MANIFEST_BYTES + 1)
         .read_to_end(&mut bytes)
         .ok()?;
     let manifest: ContentObjectManifest = serde_json::from_slice(&bytes).ok()?;
-    let total = manifest
-        .files
-        .iter()
-        .try_fold(bytes.len() as u64, |total, file| {
-            total.checked_add(file.size)
-        })?;
-    (manifest.schema == OBJECT_MANIFEST_SCHEMA && !manifest.files.is_empty() && total <= bound)
-        .then_some((bytes, manifest))
+    (bytes.len() as u64 <= MAX_LOCAL_OBJECT_MANIFEST_BYTES
+        && manifest.schema == OBJECT_MANIFEST_SCHEMA
+        && !manifest.files.is_empty())
+    .then_some((bytes.len() as u64, manifest))
 }
 
 /// Streams a file that must be exactly `size` bytes through SHA-256.
@@ -8898,39 +8879,23 @@ fn local_object_file_sha256(path: &Path, size: u64) -> Option<String> {
     (read == size).then(|| format!("{:x}", digest.finalize()))
 }
 
-fn local_object_dir_files(dir: &Path) -> Result<Vec<Value>, ProviderError> {
+/// Paths and recorded sizes of a local object, manifest last, as the original
+/// directory import sent them.
+fn local_object_dir_files(dir: &Path) -> Result<Vec<(String, u64)>, ProviderError> {
     let (manifest_bytes, manifest) = local_object_manifest(dir).ok_or_else(|| {
-        ProviderError::Provider(
-            "content local object manifest is invalid or exceeds the import bound".into(),
-        )
+        ProviderError::Provider("content local object manifest is invalid".into())
     })?;
     let mut files = Vec::with_capacity(manifest.files.len().saturating_add(1));
-    for file in &manifest.files {
+    for file in manifest.files {
         if validate_content_path(&file.path).is_err() {
             return Err(ProviderError::Provider(format!(
                 "content local object path {} is invalid",
                 file.path
             )));
         }
-        let mut bytes = Vec::with_capacity(file.size as usize);
-        std::fs::File::open(dir.join(&file.path))?
-            .take(file.size + 1)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() as u64 != file.size {
-            return Err(ProviderError::Provider(format!(
-                "content local object file {} changed size",
-                file.path
-            )));
-        }
-        files.push(json!({
-            "path": file.path,
-            "data": base64::engine::general_purpose::STANDARD.encode(bytes),
-        }));
+        files.push((file.path, file.size));
     }
-    files.push(json!({
-        "path": OBJECT_MANIFEST_PATH,
-        "data": base64::engine::general_purpose::STANDARD.encode(manifest_bytes),
-    }));
+    files.push((OBJECT_MANIFEST_PATH.to_string(), manifest_bytes));
     Ok(files)
 }
 
@@ -9458,12 +9423,17 @@ mod tests {
         async fn send_raw(&self, request: &Value) -> Result<Value, ProviderError> {
             self.requests.lock().await.push(request.clone());
             match request.get("op").and_then(|op| op.as_str()) {
-                Some("add_directory") => {
+                Some(op @ ("add_directory" | "runtime_add_local_object")) => {
                     *self.add_count.lock().await += 1;
+                    let files = if op == "add_directory" {
+                        &request["files"]
+                    } else {
+                        &request["object"]["files"]
+                    };
                     self.added_directories
                         .lock()
                         .await
-                        .push(request["files"].as_array().cloned().unwrap_or_default());
+                        .push(files.as_array().cloned().unwrap_or_default());
                     Ok(provider_ok(json!({ "cid": TEST_CID })))
                 }
                 Some("add_bytes") => {
