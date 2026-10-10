@@ -70,6 +70,10 @@ where
         collaboration_context,
         mut collaboration_service,
     } = setup_control_plane().await?;
+    // Every Home start, controller-managed or not, shares this successful path.
+    let cleanup = tokio::spawn(
+        crate::update_controller::finalize_principal_root_backups_after_start(data_dir.clone()),
+    );
     let server_result = api::gateway::start_gateway_server_with_ready(
         &addr,
         Some(provider_registry),
@@ -79,6 +83,7 @@ where
         on_ready,
     )
     .await;
+    cleanup.abort();
     finish_gateway_result(
         server_result,
         &mut collaboration_service,

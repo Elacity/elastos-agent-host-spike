@@ -891,11 +891,11 @@ impl Controller {
         if self.child.is_none() {
             self.start_initial().await
         } else {
-            self.publish_ready_result().await
+            self.publish_ready_result()
         }
     }
 
-    async fn publish_ready_result(&mut self) -> Result<()> {
+    fn publish_ready_result(&mut self) -> Result<()> {
         anyhow::ensure!(
             self.child.is_some() && self.host_ready,
             "Recovered Home is not ready."
@@ -903,30 +903,8 @@ impl Controller {
         let source = installed_source(&self.receipt.data_dir)?;
         let (phase, message) =
             initial_ready_result(self.request.as_ref(), &source.installed_version)?;
-        if !InstallTransaction::has_pending_recovery(&self.receipt.binary) {
-            self.finalize_migration_backups().await;
-        }
         self.previous_version = source.installed_version;
         self.publish(phase, message)
-    }
-
-    async fn finalize_migration_backups(&self) {
-        // wait_ready bound HTTP, capsule, binary, host-lock and process proof to
-        // this generation. A release journal keeps its rollback until retirement.
-        if let Err(error) = finalize_principal_root_migrations_after_ready(
-            &self.receipt.data_dir,
-            &self.receipt.binary,
-            None,
-            Some((
-                self.child.as_ref().map(|child| child.pid()),
-                &self.generation,
-            )),
-        )
-        .await
-        {
-            tracing::warn!(error = %error,
-                "Migration backup retained. Its owner must reconcile cleanup before claiming it complete.");
-        }
     }
 
     async fn start_initial(&mut self) -> Result<()> {
@@ -964,7 +942,7 @@ impl Controller {
                 self.directory.join("runtime.log").display()
             )
         })?;
-        self.publish_ready_result().await?;
+        self.publish_ready_result()?;
         println!("Home: http://localhost:{BROWSER_HOME_PORT}/home/");
         println!("Keep this terminal open. Press Ctrl+C to stop Home.");
         Ok(())
@@ -1229,9 +1207,6 @@ impl Controller {
             crate::update::run_restarting_update(&data_dir, &fetch, request.head_cid, self).await
         }
         .await;
-        if self.host_ready && !InstallTransaction::has_pending_recovery(&self.receipt.binary) {
-            self.finalize_migration_backups().await;
-        }
         let closed = self.close_carrier().await;
         // A refusal before activation still needs exactly the unchanged Home.
         if self.child.is_none() && !InstallTransaction::has_pending_recovery(&self.receipt.binary) {
@@ -1968,14 +1943,83 @@ fn home_digest(data_dir: &Path) -> Result<String> {
     Ok(digest(&read_regular_bounded(&path, 2 * 1024 * 1024)?))
 }
 
-/// The explicit operator route uses the same fresh installed Home proof as the
-/// controller. Legacy manual backup paths need their original hash-bound plan.
+/// The explicit operator route uses the same fresh installed Home proof as
+/// Home start. Legacy manual backup paths need their original hash-bound plan.
 pub async fn finalize_principal_root_backups(
     data_dir: &Path,
     binary: &Path,
     legacy: Option<(&Path, &Path)>,
 ) -> Result<usize> {
     finalize_principal_root_migrations_after_ready(data_dir, binary, legacy, None).await
+}
+
+const START_CLEANUP_ATTEMPTS: usize = 10;
+
+/// Every Home gateway runs this beside its server, whichever process started
+/// it. Release recovery keeps its rollback, so cleanup waits for it to settle
+/// and then proves this exact Home generation ready before removing payload.
+pub(crate) async fn finalize_principal_root_backups_after_start(data_dir: PathBuf) {
+    let mut failures = 0;
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        match finalize_after_start_attempt(&data_dir).await {
+            Ok(Some(removed)) => {
+                if removed > 0 {
+                    tracing::info!(removed, "Verified migration backup payload removed.");
+                }
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                failures += 1;
+                if failures == START_CLEANUP_ATTEMPTS {
+                    tracing::warn!(error = %error,
+                        "Migration backup retained. Its owner must reconcile cleanup before claiming it complete.");
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// `None` means this Home has not published its coordinates yet, or a release
+/// transaction still owns the rollback.
+async fn finalize_after_start_attempt(data_dir: &Path) -> Result<Option<usize>> {
+    let data_dir = &fs::canonicalize(data_dir)?;
+    if !crate::auth::principal_root_migration_cleanup_pending(data_dir).unwrap_or(true) {
+        return Ok(Some(0));
+    }
+    let binary =
+        crate::install_transaction::installed_binary(data_dir, installed_writer_binary(data_dir)?)?
+            .context("Migration backup cleanup needs an installed Runtime release.")?;
+    let binary = fs::canonicalize(
+        binary
+            .parent()
+            .context("installed Runtime parent is missing")?,
+    )?
+    .join(
+        binary
+            .file_name()
+            .context("installed Runtime name is missing")?,
+    );
+    if InstallTransaction::has_pending_recovery(&binary) {
+        return Ok(None);
+    }
+    let Some(coords) = read_private_json::<crate::runtime_control::RuntimeCoords>(
+        &crate::runtime_control::gateway_runtime_coord_path(data_dir),
+    )
+    .ok()
+    .filter(|coords| coords.pid == std::process::id()) else {
+        return Ok(None);
+    };
+    finalize_principal_root_migrations_after_ready(
+        data_dir,
+        &binary,
+        None,
+        Some((Some(coords.pid), &coords.generation)),
+    )
+    .await
+    .map(Some)
 }
 
 async fn finalize_principal_root_migrations_after_ready(

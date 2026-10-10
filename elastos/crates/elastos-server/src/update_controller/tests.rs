@@ -1089,8 +1089,20 @@ async fn desktop_and_wallet_bindings_reach_captured_and_retained_child_commands(
     }
 }
 
-#[tokio::test]
-async fn migration_cleanup_requires_a_fresh_installed_home_proof() {
+struct ReadyHomeCleanup {
+    fixture: PrivateFixture,
+    backup: PathBuf,
+    payload: PathBuf,
+    accepted: Arc<std::sync::atomic::AtomicBool>,
+    home_requests: Arc<std::sync::atomic::AtomicUsize>,
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    server: tokio::task::JoinHandle<()>,
+    host_guard: FileLock,
+}
+
+/// One migrated object, an installed release and a Home server owned by this
+/// process. The server serves the installed Home only once `accepted` is set.
+async fn ready_home_cleanup(backup: &str) -> ReadyHomeCleanup {
     use axum::{
         routing::{get, post},
         Json, Router,
@@ -1144,7 +1156,10 @@ async fn migration_cleanup_requires_a_fresh_installed_home_proof() {
         .unwrap(),
         0o600,
     );
-    let backup = fixture.data.join("manual-migration-backup");
+    let backup = fixture.data.join(backup);
+    if let Some(parent) = backup.parent().filter(|parent| !parent.exists()) {
+        fs::DirBuilder::new().mode(0o700).create(parent).unwrap();
+    }
     crate::auth::migrate_principal_root_objects_offline(&fixture.data, &plan_path, &backup)
         .unwrap();
     let payload = fs::read_dir(&backup)
@@ -1220,16 +1235,44 @@ async fn migration_cleanup_requires_a_fresh_installed_home_proof() {
             .await
             .unwrap();
     });
-    let stale = finalize_principal_root_backups(&fixture.data, &fixture.binary, None).await;
-    let retained_after_stale = payload.is_file();
-    let fetched_after_stale = home_requests.load(Ordering::SeqCst);
-    accepted.store(true, Ordering::SeqCst);
-    let finalized = finalize_principal_root_backups(&fixture.data, &fixture.binary, None).await;
-    let payload_removed = !payload.exists();
-    let receipt_retained = backup.join("receipt.json").is_file();
-    let _ = shutdown.send(());
-    server.await.unwrap();
-    drop(host_guard);
+    ReadyHomeCleanup {
+        fixture,
+        backup,
+        payload,
+        accepted,
+        home_requests,
+        shutdown,
+        server,
+        host_guard,
+    }
+}
+
+impl ReadyHomeCleanup {
+    async fn stop(self) -> PrivateFixture {
+        let _ = self.shutdown.send(());
+        self.server.await.unwrap();
+        drop(self.host_guard);
+        assert!(crate::host_lock::active_host_process(&self.fixture.data)
+            .unwrap()
+            .is_none());
+        self.fixture
+    }
+}
+
+#[tokio::test]
+async fn migration_cleanup_requires_a_fresh_installed_home_proof() {
+    use std::sync::atomic::Ordering;
+    let home = ready_home_cleanup("manual-migration-backup").await;
+    let (data, binary) = (home.fixture.data.clone(), home.fixture.binary.clone());
+    let stale = finalize_principal_root_backups(&data, &binary, None).await;
+    let retained_after_stale = home.payload.is_file();
+    let fetched_after_stale = home.home_requests.load(Ordering::SeqCst);
+    home.accepted.store(true, Ordering::SeqCst);
+    let finalized = finalize_principal_root_backups(&data, &binary, None).await;
+    let payload_removed = !home.payload.exists();
+    let receipt_retained = home.backup.join("receipt.json").is_file();
+    let home_requests = home.home_requests.clone();
+    home.stop().await;
     let stale_error = stale.expect_err("stale served Home refuses migration cleanup");
     assert!(
         stale_error
@@ -1246,9 +1289,65 @@ async fn migration_cleanup_requires_a_fresh_installed_home_proof() {
     assert!(payload_removed);
     assert!(receipt_retained);
     assert_eq!(home_requests.load(Ordering::SeqCst), 2);
-    assert!(crate::host_lock::active_host_process(&fixture.data)
+}
+
+#[tokio::test]
+async fn home_started_outside_the_controller_removes_legacy_plaintext_backups() {
+    use std::sync::atomic::Ordering;
+    let home = ready_home_cleanup("backups/principal-root-migration-legacy").await;
+    let data = home.fixture.data.clone();
+    // Model an older release: plaintext payload, a receipt binding its hash
+    // and no cleanup record.
+    let receipt_path = home.backup.join("receipt.json");
+    let mut receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    let plaintext_sha256 = receipt["objects"][0]["plaintext_sha256"].clone();
+    receipt["objects"][0]["backup_sha256"] = plaintext_sha256;
+    fs::remove_file(&receipt_path).unwrap();
+    home.fixture
+        .file(&receipt_path, &serde_json::to_vec(&receipt).unwrap(), 0o600);
+    let legacy = PathBuf::from(
+        home.payload
+            .to_string_lossy()
+            .replace(".encrypted.backup", ".plaintext.backup"),
+    );
+    fs::remove_file(&home.payload).unwrap();
+    home.fixture.file(&legacy, b"private legacy save", 0o600);
+    let records = crate::auth::auth_state_path(&data)
         .unwrap()
-        .is_none());
+        .with_file_name("principal-root-migration-cleanup");
+    for record in fs::read_dir(&records).unwrap() {
+        fs::remove_file(record.unwrap().path()).unwrap();
+    }
+    home.accepted.store(true, Ordering::SeqCst);
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        finalize_principal_root_backups_after_start(data.clone()),
+    )
+    .await
+    .unwrap();
+    fn plaintext_backups(directory: &Path) -> usize {
+        fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .map(|entry| {
+                if entry.file_type().unwrap().is_dir() {
+                    plaintext_backups(&entry.path())
+                } else {
+                    usize::from(
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .ends_with(".plaintext.backup"),
+                    )
+                }
+            })
+            .sum()
+    }
+    let plaintext_left = plaintext_backups(&data.join("backups"));
+    let receipt_retained = receipt_path.is_file();
+    home.stop().await;
+    assert_eq!(plaintext_left, 0);
+    assert!(receipt_retained);
 }
 
 #[tokio::test]
@@ -3481,7 +3580,7 @@ async fn stopped_home_with_unreconciled_child_record_reports_failure_and_retains
     assert!(child::generation_gone(pid, &birth).unwrap());
     assert_eq!(fs::read(&record).unwrap(), record_bytes);
     assert_eq!(fs::read(&active).unwrap(), active_bytes);
-    assert!(controller.publish_ready_result().await.is_err());
+    assert!(controller.publish_ready_result().is_err());
     // Exercise the same status selector used by serve after a failed apply.
     controller.publish_apply_result(&stopped).unwrap();
     let projected = status(&fixture.data).unwrap().unwrap();

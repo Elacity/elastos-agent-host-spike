@@ -7125,6 +7125,17 @@ fn migration_cleanup_record_name(journal: &PrincipalRootMigrationJournalV1) -> S
     format!("{}.json", &sha256_label(identity.as_bytes())[7..])
 }
 
+#[derive(Debug)]
+struct MigrationCleanupCapacityReached;
+
+impl std::fmt::Display for MigrationCleanupCapacityReached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("migration cleanup records need owner reconciliation before another migration")
+    }
+}
+
+impl std::error::Error for MigrationCleanupCapacityReached {}
+
 // The lifecycle lock keeps this admission valid until every admitted root has
 // committed. Recovery can always finish a previously committed journal, even
 // if an older writer exceeded this bound before recording its cleanup owner.
@@ -7147,9 +7158,7 @@ fn require_principal_root_migration_capacity(
         .checked_add(additional)
         .is_none_or(|count| count > MAX_MIGRATION_CLEANUP_RECORDS)
     {
-        anyhow::bail!(
-            "migration cleanup records need owner reconciliation before another migration"
-        );
+        return Err(MigrationCleanupCapacityReached.into());
     }
     Ok(())
 }
@@ -7317,39 +7326,44 @@ pub(crate) fn finalize_declared_principal_root_migrations(
     if !plans.is_empty() {
         anyhow::bail!("retain migration backups until all configured principal roots are ready");
     }
-    import_legacy_principal_root_migration_cleanups(data_dir, declarations)?;
     let path = principal_root_migration_cleanup_dir(data_dir)?;
-    if !path.exists() {
-        return Ok(0);
-    }
-    ensure_no_symlink_components(data_dir, &path)?;
-    let directory = open_migration_backup_directory(&path)?;
-    let mut names = std::fs::read_dir(&path)?
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .take(MAX_MIGRATION_CLEANUP_RECORDS + 1)
-        .collect::<Result<Vec<_>, _>>()?;
-    if names.len() > MAX_MIGRATION_CLEANUP_RECORDS {
-        names.truncate(MAX_MIGRATION_CLEANUP_RECORDS);
-        tracing::warn!("Migration cleanup retains more records. Run cleanup again to finish the next bounded batch.");
-    }
-    names.sort();
     let mut removed = 0;
-    for name in names {
-        let (record_file, bytes) = read_migration_cleanup_file(&directory, &name, 256 * 1024)?
-            .ok_or_else(|| anyhow!("migration cleanup record disappeared"))?;
-        let record: PrincipalRootMigrationCleanupV1 = serde_json::from_slice(&bytes)?;
-        if record.schema != PRINCIPAL_ROOT_MIGRATION_CLEANUP_SCHEMA
-            || record.journal.phase != PrincipalRootMigrationJournalPhaseV1::Committed
-            || name != std::ffi::OsStr::new(&migration_cleanup_record_name(&record.journal))
-        {
-            anyhow::bail!("migration cleanup record has an invalid binding");
+    // Each pass imports legacy backups up to record capacity, then drains one
+    // bounded record batch, so every discoverable backup is handled this call.
+    loop {
+        let legacy_pending =
+            import_legacy_principal_root_migration_cleanups(data_dir, declarations)?;
+        if !path.exists() {
+            return Ok(removed);
         }
-        validate_principal_root_migration_journal(&record.journal)?;
-        removed += finalize_principal_root_migration_cleanup(data_dir, &record)?;
-        unlink_migration_cleanup_file(&directory, &name, &record_file)?;
-        directory.sync_all()?;
+        ensure_no_symlink_components(data_dir, &path)?;
+        let directory = open_migration_backup_directory(&path)?;
+        let mut names = std::fs::read_dir(&path)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .take(MAX_MIGRATION_CLEANUP_RECORDS + 1)
+            .collect::<Result<Vec<_>, _>>()?;
+        let records_pending = names.len() > MAX_MIGRATION_CLEANUP_RECORDS;
+        names.truncate(MAX_MIGRATION_CLEANUP_RECORDS);
+        names.sort();
+        for name in names {
+            let (record_file, bytes) = read_migration_cleanup_file(&directory, &name, 256 * 1024)?
+                .ok_or_else(|| anyhow!("migration cleanup record disappeared"))?;
+            let record: PrincipalRootMigrationCleanupV1 = serde_json::from_slice(&bytes)?;
+            if record.schema != PRINCIPAL_ROOT_MIGRATION_CLEANUP_SCHEMA
+                || record.journal.phase != PrincipalRootMigrationJournalPhaseV1::Committed
+                || name != std::ffi::OsStr::new(&migration_cleanup_record_name(&record.journal))
+            {
+                anyhow::bail!("migration cleanup record has an invalid binding");
+            }
+            validate_principal_root_migration_journal(&record.journal)?;
+            removed += finalize_principal_root_migration_cleanup(data_dir, &record)?;
+            unlink_migration_cleanup_file(&directory, &name, &record_file)?;
+            directory.sync_all()?;
+        }
+        if !legacy_pending && !records_pending {
+            return Ok(removed);
+        }
     }
-    Ok(removed)
 }
 
 fn finalize_principal_root_migration_cleanup(
@@ -7418,16 +7432,59 @@ fn finalize_principal_root_migration_cleanup(
     Ok(removed)
 }
 
+/// Home start runs the full readiness proof only when a cleanup record or a
+/// backup payload in a discoverable Runtime backup directory remains.
+pub(crate) fn principal_root_migration_cleanup_pending(data_dir: &Path) -> anyhow::Result<bool> {
+    fn holds_payload(directory: &Path, depth: usize) -> std::io::Result<bool> {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.ends_with(".backup")
+                || (depth == 0
+                    && name.starts_with("root-")
+                    && entry.file_type()?.is_dir()
+                    && holds_payload(&entry.path(), 1)?)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    let records = principal_root_migration_cleanup_dir(data_dir)?;
+    if records.is_dir() && std::fs::read_dir(&records)?.next().is_some() {
+        return Ok(true);
+    }
+    let parent = data_dir.join("backups");
+    if !parent.is_dir() {
+        return Ok(false);
+    }
+    for entry in std::fs::read_dir(&parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if (name.starts_with("principal-root-migration-")
+            || name.starts_with("principal-root-upgrade-"))
+            && entry.file_type()?.is_dir()
+            && holds_payload(&entry.path(), 0)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Older releases left receipts but no cleanup record. Only the two Runtime
 /// directory layouts are discovered automatically. Manual, receipt-less and
 /// ambiguous copies remain with their owner for explicit reconciliation.
+/// Returns true when record capacity stopped the import before every candidate.
 fn import_legacy_principal_root_migration_cleanups(
     data_dir: &Path,
     declarations: &[PrincipalRootUpgradeDeclarationV1],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let parent = data_dir.join("backups");
     if !parent.exists() {
-        return Ok(());
+        return Ok(false);
     }
     ensure_no_symlink_components(data_dir, &parent)?;
     // Stream retained history with bounded per-receipt reads. Receipt-only
@@ -7509,11 +7566,15 @@ fn import_legacy_principal_root_migration_cleanups(
             }
             Ok::<_, anyhow::Error>(())
         })();
-        if let Err(error) = result {
-            tracing::warn!(error = %error, "Migration backup retained. Its owner must reconcile the legacy receipt and payload.");
+        match result {
+            Err(error) if error.is::<MigrationCleanupCapacityReached>() => return Ok(true),
+            Err(error) => {
+                tracing::warn!(error = %error, "Migration backup retained. Its owner must reconcile the legacy receipt and payload.")
+            }
+            Ok(()) => {}
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 fn import_legacy_migration_cleanup(
@@ -7755,6 +7816,15 @@ fn read_migration_cleanup_file(
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static MIGRATION_UNLINK_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+// POSIX unlinkat removes a name, not an inode. The owner-only directory limits
+// who can rename entries between the identity check and the unlink; the held
+// descriptor's link count then proves the verified file itself lost its name.
 fn unlink_migration_cleanup_file(
     directory: &File,
     name: &std::ffi::OsStr,
@@ -7790,8 +7860,17 @@ fn unlink_migration_cleanup_file(
         {
             anyhow::bail!("migration cleanup target changed; retain it for owner review");
         }
+        #[cfg(test)]
+        if let Some(hook) = MIGRATION_UNLINK_TEST_HOOK.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
         if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
             return Err(std::io::Error::last_os_error()).context("remove owned migration backup");
+        }
+        if std::os::unix::fs::MetadataExt::nlink(&verified_file.metadata()?) != 0 {
+            anyhow::bail!(
+                "migration cleanup removed a different entry; the verified file remains for owner review"
+            );
         }
         Ok(())
     }
@@ -11102,7 +11181,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_migration_recovers_at_capacity_and_cleanup_drains_bounded_batches() {
+    fn committed_migration_recovers_at_capacity_and_cleanup_drains_every_batch() {
         let fixture = OfflineMigrationFixture::new(1);
         inject_principal_root_migration_test_fault(
             fixture.data_dir.path(),
@@ -11163,10 +11242,7 @@ mod tests {
             std::fs::read_dir(&records).unwrap().count(),
             MAX_MIGRATION_CLEANUP_RECORDS + 1
         );
-        let first = fixture.cleanup().unwrap();
-        assert_eq!(std::fs::read_dir(&records).unwrap().count(), 1);
-        let second = fixture.cleanup().unwrap();
-        assert_eq!(first + second, 1);
+        assert_eq!(fixture.cleanup().unwrap(), 1);
         assert_eq!(std::fs::read_dir(&records).unwrap().count(), 0);
         assert!(!journal.objects[0].backup_path.exists());
         assert!(fixture
@@ -11521,6 +11597,79 @@ mod tests {
             .backup_dir
             .join(PRINCIPAL_ROOT_MIGRATION_RECEIPT_FILE)
             .is_file());
+    }
+
+    #[test]
+    fn legacy_plaintext_backups_beyond_record_capacity_are_all_cleaned() {
+        let mut fixture = OfflineMigrationFixture::new(1);
+        let parent = fixture.data_dir.path().join("backups");
+        create_owner_only_dir(&parent).unwrap();
+        fixture.backup_dir = parent.join("principal-root-migration-000");
+        fixture.migrate();
+        let (record_path, record) = fixture.cleanup_record();
+        let legacy = fixture.legacy_journal(record.journal);
+        let receipt =
+            serde_json::to_vec_pretty(&principal_root_migration_receipt_from_journal(&legacy))
+                .unwrap();
+        durable_atomic_replace(
+            &fixture
+                .backup_dir
+                .join(PRINCIPAL_ROOT_MIGRATION_RECEIPT_FILE),
+            &receipt,
+            0o600,
+        )
+        .unwrap();
+        std::fs::remove_file(record_path).unwrap();
+        let payload_name = legacy.objects[0].backup_path.file_name().unwrap();
+        let count = MAX_MIGRATION_CLEANUP_RECORDS + 2;
+        let directories = (0..count)
+            .map(|index| parent.join(format!("principal-root-migration-{index:03}")))
+            .collect::<Vec<_>>();
+        for directory in &directories[1..] {
+            create_owner_only_dir(directory).unwrap();
+            write_owner_only_new_file(
+                &directory.join(PRINCIPAL_ROOT_MIGRATION_RECEIPT_FILE),
+                &receipt,
+            )
+            .unwrap();
+            write_owner_only_new_file(&directory.join(payload_name), &fixture.plaintexts[0])
+                .unwrap();
+        }
+        assert_eq!(fixture.cleanup().unwrap(), count);
+        for directory in &directories {
+            assert!(!directory.join(payload_name).exists());
+            assert!(directory
+                .join(PRINCIPAL_ROOT_MIGRATION_RECEIPT_FILE)
+                .is_file());
+        }
+        let records = principal_root_migration_cleanup_dir(fixture.data_dir.path()).unwrap();
+        assert_eq!(std::fs::read_dir(records).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_cleanup_reports_a_name_swapped_after_its_identity_check() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("backup");
+        create_owner_only_dir(&path).unwrap();
+        write_owner_only_new_file(&path.join("payload"), b"verified").unwrap();
+        let directory = open_migration_backup_directory(&path).unwrap();
+        let (held, _) =
+            read_migration_cleanup_file(&directory, std::ffi::OsStr::new("payload"), 100)
+                .unwrap()
+                .unwrap();
+        let swap = path.clone();
+        MIGRATION_UNLINK_TEST_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(swap.join("payload"), swap.join("moved")).unwrap();
+                write_owner_only_new_file(&swap.join("payload"), b"other").unwrap();
+            }))
+        });
+        let error =
+            unlink_migration_cleanup_file(&directory, std::ffi::OsStr::new("payload"), &held)
+                .expect_err("a swapped name must not be reported as the verified file");
+        assert!(error.to_string().contains("different entry"), "{error:#}");
+        assert_eq!(std::fs::read(path.join("moved")).unwrap(), b"verified");
     }
 
     #[cfg(unix)]
