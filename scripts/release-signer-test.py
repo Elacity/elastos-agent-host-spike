@@ -430,6 +430,9 @@ class SignerTests(unittest.TestCase):
         for outcome, expected in ((subprocess.TimeoutExpired("gh", 120), S.UNAVAILABLE),
                                   (SimpleNamespace(returncode=1, stdout=b"", stderr=b"dial tcp: lookup tuf-repo-cdn.sigstore.dev: no such host"),
                                    S.UNAVAILABLE),
+                                  (SimpleNamespace(returncode=1, stdout=b"",
+                                                   stderr=b"error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com"),
+                                   S.UNAVAILABLE),
                                   (SimpleNamespace(returncode=1, stdout=b"", stderr=b"unsupported media type"),
                                    "approved build attestation verification failed")):
             self.proof.stop()
@@ -439,6 +442,17 @@ class SignerTests(unittest.TestCase):
                     S.attestation_result(self.approval, self.package_run, receipt, bundle, self.snapshot)
                 self.assertIn(expected, str(caught.exception))
             self.proof.start()
+        provenance_spec = importlib.util.spec_from_file_location("release_provenance", SOURCE.with_name("release-provenance.py"))
+        provenance = importlib.util.module_from_spec(provenance_spec)
+        provenance_spec.loader.exec_module(provenance)
+        for stderr, retry in ((b"error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com", True),
+                              (b"gh: Server Error (HTTP 502)", True), (b"gh: API rate limit exceeded (HTTP 403)", True),
+                              (b"", True), (b"gh: Not Found (HTTP 404)", False)):
+            with self.subTest(stderr=stderr), mock.patch.object(provenance.subprocess, "run",
+                                                                return_value=SimpleNamespace(returncode=1, stdout=b"", stderr=stderr)):
+                with self.assertRaises(ValueError) as caught:
+                    provenance.cli_fetch(self.approval, f"/repos/{S.REPOSITORY}/actions/runs/123")
+                self.assertEqual("not a provenance refusal" in str(caught.exception), retry)
 
     def test_installed_gh_accepts_production_flags_and_refuses_the_inert_bundle(self):
         # Exercise the real CLI parser with an empty test-only trust-root set.

@@ -32,7 +32,7 @@ def cli_fetch(approval, path):
                                 env={**os.environ, "GH_HOST": "github.com", "GH_PROMPT_DISABLED": "1"})
     except subprocess.TimeoutExpired as error:
         raise S.unavailable("GitHub API timed out") from error
-    if result.returncode != 0 and S.UNAVAILABLE_OUTPUT.search(result.stderr):
+    if result.returncode != 0 and (S.UNAVAILABLE_OUTPUT.search(result.stderr) or not S.HTTP_REFUSAL.search(result.stderr)):
         raise S.unavailable(result.stderr.decode(errors="replace").strip()[:200])
     S.require(result.returncode == 0 and len(result.stdout) <= 8 * S.MAX_JSON, "GitHub package authority refused " + path)
     return S.parse_json(result.stdout)

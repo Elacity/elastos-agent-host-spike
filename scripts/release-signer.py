@@ -293,8 +293,13 @@ def regular_bytes(path, limit, trusted=False, root_fd=None):
 
 
 UNAVAILABLE = "GitHub or Sigstore is unavailable (network, outage or rate limit); retry later. This is not a provenance refusal"
-UNAVAILABLE_OUTPUT = re.compile(rb"dial tcp|no such host|i/o timeout|timed? ?out|connection (?:refused|reset)|TLS handshake"
-                                rb"|network is unreachable|temporary failure|rate limit|HTTP (?:429|5[0-9][0-9])", re.I)
+# gh reports transport failures in these families (Go net/http, TLS, DNS) and
+# GitHub outages or limits as HTTP 429/5xx or "rate limit".
+UNAVAILABLE_OUTPUT = re.compile(rb"error connecting to|dial tcp|no such host|lookup [^ ]+ on|i/o timeout|timed? ?out|deadline exceeded"
+                                rb"|Client\.Timeout|connection (?:refused|reset)|broken pipe|unexpected EOF|TLS handshake"
+                                rb"|network is (?:unreachable|down)|temporary failure|rate limit|HTTP (?:429|5[0-9][0-9])", re.I)
+# A GitHub answer that refuses the request itself (HTTP 4xx other than 429).
+HTTP_REFUSAL = re.compile(rb"HTTP 4(?!29)[0-9][0-9]")
 
 
 def unavailable(detail):
