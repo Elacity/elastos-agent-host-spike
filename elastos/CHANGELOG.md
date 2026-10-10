@@ -6,6 +6,17 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Changed
+
+- `elastos --help` lists only the everyday commands. Commands for people who
+  run servers or publish releases (such as `serve`, `gateway`, `keys` and
+  `publish-release`) still work and still have their own `--help`.
+
+### Removed
+
+- `elastos upgrade`; use `elastos update`. The `--no-confirm` spelling of
+  `--yes` on `elastos update` is gone too.
+
 ### Security
 
 - Another computer connecting to yours can no longer tie it up by sending an
@@ -26,6 +37,13 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Developer detail
 
+- `Commands` in `main.rs` marks `serve`, `publish-release`, `content`,
+  `collaboration-config`, `protected-content-config`, `node`, `gateway`,
+  `sign-payload`, `keys`, `tls` and `emergency` with `hide = true`;
+  `docs/COMMAND_MATRIX.md` lists them. Removed the `Upgrade` variant, the
+  `no-confirm` alias, and the retired hidden `publish-release --key` /
+  `--allow-no-bootstrap` flags with their `PublishReleaseOptions` fields. The
+  `just publish*` recipes, which always failed on the retired `--key`, are gone.
 - `get_runtime_info` in `resource_bridge.rs` (both the local and the attached
   bridge) returns `ELASTOS_VERSION` from `build.rs` instead of
   `CARGO_PKG_VERSION`.

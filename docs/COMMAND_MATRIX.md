@@ -6,6 +6,11 @@ behavior. See
 input, exit, and return behavior. CLI help remains the source of truth for the
 complete command and flag inventory.
 
+Operator commands work but are hidden from `elastos --help`: `serve`,
+`publish-release`, `content`, `collaboration-config`,
+`protected-content-config`, `node`, `gateway`, `sign-payload`, `keys`, `tls`
+and `emergency`. `elastos <command> --help` still shows their help.
+
 ## Runtime classes
 
 | Class | Meaning |
@@ -50,7 +55,7 @@ target.
 | TLS | `elastos tls trust`, `elastos tls regen` | Prints trust instructions or regenerates the local leaf certificate. |
 | Emergency | `elastos emergency rotate` | Attempts to persist a new signing key. The active Runtime changes only after restart, and current persistence failure is not fail-closed. See the [security finding](../SECURITY.md#capability-state-and-key-rotation-are-not-restart-safe). |
 | Trusted sources | `elastos source add`, `elastos source list`, `elastos source show`, `elastos source switch-channel`, `elastos source verify` | Manages local trusted-release source state. |
-| Updates | `elastos update`, `elastos upgrade` | `upgrade` dispatches to the same update handler. Checks the trusted source over Carrier; HTTP only with `--gateway` or `--no-p2p`. No local runtime is required. See [INSTALL.md](INSTALL.md#how-updates-reach-your-home). |
+| Updates | `elastos update` | Checks the trusted source over Carrier; HTTP only with `--gateway` or `--no-p2p`. No local runtime is required. See [INSTALL.md](INSTALL.md#how-updates-reach-your-home). |
 | Offline principal-root maintenance | hidden `elastos principal-root-migrate`, hidden `elastos principal-root-upgrade` | Operates on an explicit data directory. The Runtime must be offline and the command requires explicit backup inputs. |
 
 The host operator controls web terminal access with

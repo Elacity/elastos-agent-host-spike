@@ -95,7 +95,6 @@ pub(crate) struct PublishReleaseOptions {
     pub(crate) signed_publication: Option<PathBuf>,
     pub(crate) publisher_did: Option<String>,
     pub(crate) allow_signer_rotation: bool,
-    pub(crate) key: Option<PathBuf>,
     pub(crate) dry_run: bool,
     pub(crate) preflight_only: bool,
     pub(crate) public_url: bool,
@@ -103,7 +102,6 @@ pub(crate) struct PublishReleaseOptions {
     pub(crate) gateway_addr: String,
     pub(crate) public_timeout: u64,
     pub(crate) ipfs_provider_bin: Option<PathBuf>,
-    pub(crate) allow_no_bootstrap: bool,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1384,12 +1382,6 @@ fn validate_publish_inputs(
 }
 
 fn validate_prepare_options(options: &PublishReleaseOptions) -> anyhow::Result<()> {
-    if options.key.is_some() {
-        anyhow::bail!("The separate custodian tool owns release keys; publish-release accepts public data only");
-    }
-    if options.allow_no_bootstrap {
-        anyhow::bail!("The approved signing input owns the frozen public bootstrap; omit --allow-no-bootstrap");
-    }
     if options.signed_publication.is_some() {
         if options.prepare_only.is_some()
             || !options.platform_inputs.is_empty()
@@ -1416,11 +1408,7 @@ fn validate_prepare_options(options: &PublishReleaseOptions) -> anyhow::Result<(
         anyhow::bail!("--allow-signer-rotation requires --signed-publication");
     }
     if options.prepare_only.is_some() {
-        if options.platform_inputs.is_empty()
-            || options.key.is_some()
-            || options.public_url
-            || options.public_with_sudo
-        {
+        if options.platform_inputs.is_empty() || options.public_url || options.public_with_sudo {
             anyhow::bail!("Unsigned preparation requires native inputs and public signer data; the custodian owns signing");
         }
         let did = options
@@ -2032,7 +2020,6 @@ mod tests {
             signed_publication: None,
             allow_signer_rotation: false,
             publisher_did: None,
-            key: None,
             dry_run: false,
             preflight_only: false,
             public_url: false,
@@ -2040,7 +2027,6 @@ mod tests {
             gateway_addr: "127.0.0.1:8090".to_string(),
             public_timeout: 60,
             ipfs_provider_bin: None,
-            allow_no_bootstrap: false,
         }
     }
 
@@ -2104,7 +2090,6 @@ mod tests {
         validate_prepare_options(&options).unwrap();
         validate_platform_input_options(&options).unwrap();
         for refusal in [
-            "key",
             "publisher",
             "invalid-did",
             "noncanonical-did",
@@ -2114,7 +2099,6 @@ mod tests {
         ] {
             let mut invalid = options.clone();
             match refusal {
-                "key" => invalid.key = Some("/custodian/unopened.pem".into()),
                 "publisher" => invalid.publisher_did = None,
                 "invalid-did" => {
                     invalid.publisher_did = Some("did:web:example.invalid".to_string())
@@ -2262,24 +2246,6 @@ mod tests {
                 "aarch64-darwin=/caller/session/prepared/mac",
             ]
         );
-    }
-
-    #[tokio::test]
-    async fn key_option_is_refused_before_platform_reads_or_key_creation() {
-        let temp = tempfile::tempdir().unwrap();
-        let key = temp.path().join("publisher/key");
-        for dry_run in [false, true] {
-            let mut options = platform_input_options();
-            options.dry_run = dry_run;
-            options.key = Some(key.clone());
-            options.platform_inputs = ["x86_64-linux", "aarch64-linux", "aarch64-darwin"]
-                .iter()
-                .map(|platform| format!("{platform}={}", temp.path().join(platform).display()))
-                .collect();
-            let error = super::run_publish_release(options).await.unwrap_err();
-            assert!(error.to_string().contains("custodian"), "{error}");
-            assert!(!key.parent().unwrap().exists());
-        }
     }
 
     fn test_manifest(name: &str, capsule_requires: &[&str]) -> CapsuleManifest {
@@ -3208,7 +3174,6 @@ finally:
             signed_publication: None,
             allow_signer_rotation: false,
             publisher_did: None,
-            key: None,
             dry_run: true,
             preflight_only: false,
             public_url: false,
@@ -3216,7 +3181,6 @@ finally:
             gateway_addr: "127.0.0.1:8090".to_string(),
             public_timeout: 60,
             ipfs_provider_bin: None,
-            allow_no_bootstrap: false,
         };
         let err =
             validate_publish_inputs(&options, temp.path(), &["chat".to_string()]).unwrap_err();
@@ -3243,7 +3207,6 @@ finally:
             signed_publication: None,
             allow_signer_rotation: false,
             publisher_did: None,
-            key: None,
             dry_run: true,
             preflight_only: false,
             public_url: false,
@@ -3251,7 +3214,6 @@ finally:
             gateway_addr: "127.0.0.1:8090".to_string(),
             public_timeout: 60,
             ipfs_provider_bin: None,
-            allow_no_bootstrap: false,
         };
         let err =
             validate_publish_inputs(&options, temp.path(), &["chat".to_string()]).unwrap_err();
@@ -3300,7 +3262,6 @@ finally:
             signed_publication: None,
             allow_signer_rotation: false,
             publisher_did: None,
-            key: None,
             dry_run: true,
             preflight_only: false,
             public_url: false,
@@ -3308,7 +3269,6 @@ finally:
             gateway_addr: "127.0.0.1:8090".to_string(),
             public_timeout: 60,
             ipfs_provider_bin: None,
-            allow_no_bootstrap: false,
         };
         let err =
             validate_publish_inputs(&options, temp.path(), &["chat".to_string()]).unwrap_err();
@@ -3334,7 +3294,6 @@ finally:
             signed_publication: None,
             allow_signer_rotation: false,
             publisher_did: None,
-            key: None,
             dry_run: false,
             preflight_only: false,
             public_url: false,
@@ -3342,7 +3301,6 @@ finally:
             gateway_addr: "127.0.0.1:8090".to_string(),
             public_timeout: 60,
             ipfs_provider_bin: None,
-            allow_no_bootstrap: false,
         };
         let err =
             validate_publish_inputs(&options, temp.path(), &["chat".to_string()]).unwrap_err();

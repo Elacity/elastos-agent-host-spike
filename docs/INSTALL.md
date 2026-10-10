@@ -220,8 +220,7 @@ elastos update --check
 elastos update
 ```
 
-`elastos upgrade` does the same as `elastos update`. HTTP is used only when you
-pass `--gateway` or `--no-p2p`, and by the first download in `install.sh`.
+HTTP is used only when you pass `--gateway` or `--no-p2p`, and by the first download in `install.sh`.
 
 Runtime keeps the verified signed pair in `installation/release-head.json`
 and `installation/release.json` within its data directory. Publisher owns its

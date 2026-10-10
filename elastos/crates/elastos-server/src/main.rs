@@ -114,6 +114,7 @@ enum Commands {
     },
 
     /// Start the runtime daemon with HTTP API
+    #[command(hide = true)]
     Serve {
         /// Address to bind to (use 0.0.0.0:3000 for LAN access)
         #[arg(short, long, default_value = "0.0.0.0:3000")]
@@ -133,7 +134,7 @@ enum Commands {
     },
 
     /// Key management commands
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Keys(KeysCommand),
 
     /// Sign a capsule with a private key
@@ -172,7 +173,7 @@ enum Commands {
     },
 
     /// Publish a signed runtime release
-    #[command(name = "publish-release")]
+    #[command(name = "publish-release", hide = true)]
     PublishRelease {
         /// Semantic version for this release
         #[arg(long)]
@@ -214,12 +215,12 @@ enum Commands {
 
         /// Prepare unsigned native inputs for the separately installed custodian signer
         #[arg(long, value_name = "DIR", requires_all = &["platform_inputs", "publisher_did"],
-              conflicts_with_all = &["key", "public_url", "public_with_sudo", "signed_publication", "allow_signer_rotation"])]
+              conflicts_with_all = &["public_url", "public_with_sudo", "signed_publication", "allow_signer_rotation"])]
         prepare_only: Option<PathBuf>,
 
         /// Frozen output from the separately installed custodian signer
         #[arg(long, value_name = "DIR", requires = "publisher_did",
-              conflicts_with_all = &["prepare_only", "key", "platform_inputs", "preview_platform", "skip_build", "skip_rootfs", "cross", "capsules", "public_url", "public_with_sudo"])]
+              conflicts_with_all = &["prepare_only", "platform_inputs", "preview_platform", "skip_build", "skip_rootfs", "cross", "capsules", "public_url", "public_with_sudo"])]
         signed_publication: Option<PathBuf>,
 
         /// Independently approved public signer DID
@@ -229,10 +230,6 @@ enum Commands {
         /// Confirm an operator-approved change to the saved public signer pin
         #[arg(long, requires = "signed_publication")]
         allow_signer_rotation: bool,
-
-        /// Retired: signing belongs to the separate custodian tool
-        #[arg(long, hide = true)]
-        key: Option<PathBuf>,
 
         /// Show the publish plan without building or uploading
         #[arg(long)]
@@ -261,10 +258,6 @@ enum Commands {
         /// Override ipfs-provider binary path
         #[arg(long)]
         ipfs_provider_bin: Option<PathBuf>,
-
-        /// Retired: the approved signing input owns its public bootstrap
-        #[arg(long, hide = true)]
-        allow_no_bootstrap: bool,
     },
 
     /// Share a file or directory through content availability
@@ -294,11 +287,11 @@ enum Commands {
     },
 
     /// Content availability operator commands
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Content(content_cmd::ContentCommand),
 
     /// TLS certificate management
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Tls(TlsCommand),
 
     /// Legacy native P2P chat (#general gossip topic); developer smoke tests only
@@ -339,11 +332,11 @@ enum Commands {
     Config(ConfigCommand),
 
     /// Offline signed collaboration-network configuration authority
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     CollaborationConfig(elastos_server::collaboration_config::CollaborationConfigCommand),
 
     /// Offline operator provisioning for protected-content custody and chain prerequisites
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     ProtectedContentConfig(elastos_server::protected_content_config::ProtectedContentConfigCommand),
 
     /// Show and manage the local DID-backed profile
@@ -351,7 +344,7 @@ enum Commands {
     Identity(IdentityCommand),
 
     /// Emergency operations (key compromise response)
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Emergency(EmergencyCommand),
 
     /// Initialize a new capsule project
@@ -426,11 +419,11 @@ enum Commands {
     Room(RoomCommand),
 
     /// Manage operator peers and safe remote node actions
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Node(NodeCommand),
 
     /// Sign a payload from stdin with domain-separated Ed25519
-    #[command(name = "sign-payload")]
+    #[command(name = "sign-payload", hide = true)]
     SignPayload {
         /// Domain separator (e.g. "elastos.release.v1")
         #[arg(long)]
@@ -442,6 +435,7 @@ enum Commands {
     },
 
     /// Start the public ElastOS edge for MyWebSite, publisher objects, and CID content
+    #[command(hide = true)]
     Gateway {
         /// Address to bind to (use 0.0.0.0 for public, or use --public)
         #[arg(short, long, default_value = "127.0.0.1:8090")]
@@ -567,38 +561,7 @@ enum Commands {
         gateways: Vec<String>,
 
         /// Skip confirmation prompt and install immediately
-        #[arg(long, alias = "no-confirm")]
-        yes: bool,
-
-        /// Rollback to a specific release head CID (forces install even if same version)
         #[arg(long)]
-        rollback_to: Option<String>,
-
-        /// Repair an invalid installed version with a verified same or newer release
-        #[arg(long)]
-        force: bool,
-    },
-
-    /// Check for and install runtime updates
-    Upgrade {
-        /// Only check for updates, don't install
-        #[arg(long)]
-        check: bool,
-
-        /// HEAD CID (bypasses discovery — operator override)
-        #[arg(long)]
-        head_cid: Option<String>,
-
-        /// Skip Carrier discovery and require an explicit transport override
-        #[arg(long)]
-        no_p2p: bool,
-
-        /// Explicit transport override URL for HEAD discovery (repeatable, tries in order)
-        #[arg(long = "gateway")]
-        gateways: Vec<String>,
-
-        /// Skip confirmation prompt and install immediately
-        #[arg(long, alias = "no-confirm")]
         yes: bool,
 
         /// Rollback to a specific release head CID (forces install even if same version)
@@ -1492,7 +1455,6 @@ async fn run() -> anyhow::Result<()> {
             signed_publication,
             publisher_did,
             allow_signer_rotation,
-            key,
             dry_run,
             preflight_only,
             public_url,
@@ -1500,7 +1462,6 @@ async fn run() -> anyhow::Result<()> {
             gateway_addr,
             public_timeout,
             ipfs_provider_bin,
-            allow_no_bootstrap,
         } => {
             release_cmd::run_publish_release(crate::publish::PublishReleaseOptions {
                 version,
@@ -1516,7 +1477,6 @@ async fn run() -> anyhow::Result<()> {
                 signed_publication,
                 publisher_did,
                 allow_signer_rotation,
-                key,
                 dry_run,
                 preflight_only,
                 public_url,
@@ -1524,7 +1484,6 @@ async fn run() -> anyhow::Result<()> {
                 gateway_addr,
                 public_timeout,
                 ipfs_provider_bin,
-                allow_no_bootstrap,
             })
             .await?;
         }
@@ -1636,15 +1595,6 @@ async fn run() -> anyhow::Result<()> {
         }
 
         Commands::Update {
-            check,
-            head_cid,
-            no_p2p,
-            gateways,
-            yes,
-            rollback_to,
-            force,
-        }
-        | Commands::Upgrade {
             check,
             head_cid,
             no_p2p,
@@ -2326,17 +2276,14 @@ mod tests {
 
     #[test]
     fn update_cli_accepts_force_only_when_requested() {
-        for command in ["update", "upgrade"] {
+        for command in ["update"] {
             for requested in [false, true] {
                 let mut args = vec!["elastos", command];
                 if requested {
                     args.push("--force");
                 }
                 let cli = super::Cli::try_parse_from(args).unwrap();
-                let Some(
-                    super::Commands::Update { force, .. } | super::Commands::Upgrade { force, .. },
-                ) = cli.command
-                else {
+                let Some(super::Commands::Update { force, .. }) = cli.command else {
                     panic!("expected update command");
                 };
                 assert_eq!(force, requested);
@@ -2508,7 +2455,6 @@ mod tests {
         let Some(super::Commands::PublishRelease {
             prepare_only,
             publisher_did,
-            key,
             ..
         }) = cli.command
         else {
@@ -2516,7 +2462,6 @@ mod tests {
         };
         assert_eq!(prepare_only.unwrap().to_str(), Some("/prepared/unsigned"));
         assert!(publisher_did.unwrap().starts_with("did:key:"));
-        assert!(key.is_none());
         for conflict in [
             vec!["--key", "/custodian/unopened.pem"],
             vec!["--public-url"],
@@ -2548,7 +2493,6 @@ mod tests {
             cli.command,
             Some(super::Commands::PublishRelease {
                 signed_publication: Some(_),
-                key: None,
                 ..
             })
         ));
