@@ -151,9 +151,7 @@ impl std::fmt::Display for InvalidInstalledVersion {
 }
 impl std::error::Error for InvalidInstalledVersion {}
 
-pub(crate) fn installed_release_version(
-    installed: &str,
-) -> anyhow::Result<Option<semver::Version>> {
+pub fn installed_release_version(installed: &str) -> anyhow::Result<Option<semver::Version>> {
     if installed.is_empty() {
         return Ok(None);
     }

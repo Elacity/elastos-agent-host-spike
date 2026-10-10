@@ -15,9 +15,17 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   file name, such as "qwen2.5-1.5b-instruct-q4-k-m-local". It shows the model's
   name from the model list, such as "Qwen2.5 1.5B Instruct", as soon as Home
   has finished setting it up, without pressing Refresh models.
+- When the installed version record is damaged, `elastos update` now tells you
+  to run `elastos update --force` even if it cannot reach the update source.
+  Before, a connection error hid that advice.
 
 ### Developer detail
 
+- `elastos update` checks the installed version before connecting to Carrier
+  (#156). Runtime admission and the release integrity checker now read one
+  platform table, `scripts/release-platforms.json` (`darwin-arm64` =
+  `aarch64-darwin`, `darwin-amd64` = `x86_64-darwin`). The checker no longer
+  uses `macos-arm64`, so it no longer skips the Mac entries Runtime admits.
 - Model preparation keeps its stage after any `MetadataRead`, `WeightsRead` or
   `Capacity` failure, not only after a read typed as in transit (`Io`). A part
   that a holder refuses or answers malformed is rejected before it is written,

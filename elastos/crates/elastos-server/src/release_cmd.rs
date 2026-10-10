@@ -62,6 +62,10 @@ async fn run_update_command_for_data_dir(
         .default_source()
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("No trusted source configured"))?;
+    // Show the repair hint before any network work can mask it.
+    if !force {
+        update::installed_release_version(&source_config.installed_version)?;
+    }
     let carrier_client = if !no_p2p {
         match elastos_server::carrier::CarrierClient::connect_trusted_source(&source_config, 10)
             .await
@@ -190,12 +194,13 @@ mod tests {
         let mut sources = TrustedSourcesConfig::empty();
         sources.upsert_source(source);
         save_trusted_sources(fixture.path(), &sources).unwrap();
-        for force in [false, true] {
+        // The fixture source has no reachable Carrier publisher.
+        for (force, no_p2p) in [(false, true), (false, false), (true, true)] {
             let error = run_update_command_for_data_dir(
                 fixture.path(),
                 true,
                 None,
-                true,
+                no_p2p,
                 Vec::new(),
                 true,
                 None,
