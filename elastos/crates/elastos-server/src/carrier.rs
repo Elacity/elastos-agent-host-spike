@@ -1367,6 +1367,10 @@ async fn bind_short_lived_carrier_dial_bound(
 /// The well-known Carrier bind address used when an operator names none.
 pub const DEFAULT_CARRIER_BIND_ADDR: &str = "0.0.0.0:4433";
 
+/// Shown when no route to the trusted release source answers; the cause chain
+/// keeps the per-route errors.
+const TRUSTED_SOURCE_UNREACHABLE: &str = "Could not reach the trusted release source over Carrier. ElastOS needs outgoing UDP to port 4433 for setup and updates; check the firewall or network, then run `elastos setup` again.";
+
 pub async fn start_carrier_node_with_registry(
     signing_key: &ed25519_dalek::SigningKey,
     did: &str,
@@ -8325,15 +8329,16 @@ impl CarrierClient {
         let node_id = node_id
             .ok_or_else(|| anyhow::anyhow!("trusted source has no usable Carrier node id"))?;
         let addrs = source_carrier_addrs(source);
-        match Self::connect(&node_id, &addrs, timeout_secs).await {
-            Ok(client) => Ok(client),
-            Err(err) if !ticket_errors.is_empty() => Err(anyhow::anyhow!(
+        let err = match Self::connect(&node_id, &addrs, timeout_secs).await {
+            Ok(client) => return Ok(client),
+            Err(err) if !ticket_errors.is_empty() => anyhow::anyhow!(
                 "trusted source Carrier connection failed (ticket errors: {}; fallback error: {})",
                 ticket_errors.join(" | "),
                 err
-            )),
-            Err(err) => Err(err),
-        }
+            ),
+            Err(err) => err,
+        };
+        Err(err.context(TRUSTED_SOURCE_UNREACHABLE))
     }
 
     pub async fn release_head(&self) -> Result<Option<serde_json::Value>> {
@@ -16831,6 +16836,39 @@ pub(crate) mod tests {
             Some(expected.to_string()),
             "a legacy ticket still identifies one peer"
         );
+    }
+
+    #[tokio::test]
+    async fn unreachable_trusted_source_names_the_network_fix() {
+        let publisher = iroh::SecretKey::from_bytes(&[112u8; 32]).public();
+        let closed = std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let route =
+            iroh::EndpointAddr::from(publisher).with_addrs([iroh::TransportAddr::Ip(closed)]);
+        let source = TrustedSource {
+            name: "fixture".to_string(),
+            publisher_dids: Vec::new(),
+            channel: "stable".to_string(),
+            discovery_uri: String::new(),
+            connect_ticket: encode_ticket_for(route),
+            gateways: Vec::new(),
+            install_path: String::new(),
+            installed_version: String::new(),
+            head_cid: String::new(),
+            publisher_node_id: publisher.to_string(),
+            ipns_name: String::new(),
+        };
+        let error = CarrierClient::connect_trusted_source(&source, 1)
+            .await
+            .err()
+            .expect("no Carrier listener answers on the closed loopback port");
+        assert_eq!(
+            error.to_string(),
+            "Could not reach the trusted release source over Carrier. ElastOS needs outgoing UDP to port 4433 for setup and updates; check the firewall or network, then run `elastos setup` again."
+        );
+        assert!(format!("{error:#}").contains("trusted source Carrier connection failed"));
     }
 
     #[tokio::test]

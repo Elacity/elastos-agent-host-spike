@@ -32,6 +32,9 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - The installer no longer prints a raw JSON receipt near the end; it prints
   "Protected roots are ready". A receipt for moved data stays in its backup
   folder.
+- When setup or an update cannot reach the trusted source, ElastOS now says
+  so in plain words: it needs outgoing UDP to port 4433, so check the firewall
+  or network, then run `elastos setup` again.
 
 ### Removed
 
@@ -101,6 +104,9 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   is removed. Admission refuses a component without a non-blank `release_path`
   (`component_without_signed_release_path_is_refused_before_fetch`). sources.json
   `gateways` now serves only Carrier ticket refresh.
+- `CarrierClient::connect_trusted_source` wraps a failed connection in that
+  plain message; the per-route ticket and fallback errors stay in the cause
+  chain (`{:#}`). Test: `unreachable_trusted_source_names_the_network_fix`.
 
 ## [0.8.0-alpha.15]
 
