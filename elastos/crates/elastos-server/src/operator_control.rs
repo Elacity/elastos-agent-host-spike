@@ -120,8 +120,6 @@ pub struct OperatorUpdateCheck {
     pub update_available: bool,
     pub discovery: String,
     #[serde(default)]
-    pub working_gateway: Option<String>,
-    #[serde(default)]
     pub head_cid: Option<String>,
     #[serde(default)]
     pub release_cid: Option<String>,
@@ -685,7 +683,6 @@ fn verified_update_check(
         latest_version: latest_version.to_owned(),
         update_available,
         discovery: "Carrier".to_string(),
-        working_gateway: None,
         head_cid: discovered.head_cid.clone(),
         release_cid: Some(release_cid.to_owned()),
         publisher_did: publisher_did.clone(),
@@ -721,14 +718,14 @@ pub async fn apply_local_update(data_dir: &Path) -> Result<OperatorUpdateApply> 
         .await
         .with_context(|| {
             format!(
-                "Carrier connection to trusted source '{}' failed. Remote operator apply stays Carrier-only; use a local explicit transport override if you intentionally need web transport.",
+                "Carrier connection to trusted source '{}' failed. Remote operator apply stays Carrier-only.",
                 source.name
             )
         })?,
     );
 
     let carrier_for_fetch = session.client.clone();
-    let fetch_fn: crate::update::FetchFn = Box::new(move |cid, _gateways| {
+    let fetch_fn: crate::update::FetchFn = Box::new(move |cid| {
         let client = carrier_for_fetch.clone();
         Box::pin(async move { client.fetch_content(&cid, None).await })
     });
@@ -745,8 +742,6 @@ pub async fn apply_local_update(data_dir: &Path) -> Result<OperatorUpdateApply> 
         Some(&try_p2p),
         false,
         None,
-        false,
-        Vec::new(),
         env!("ELASTOS_VERSION"),
         true,
         false,

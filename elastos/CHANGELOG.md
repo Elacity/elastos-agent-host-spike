@@ -31,6 +31,34 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   yours and nothing is running, it says "This approval is no longer valid.
   Check for the update again and approve it once more." Before, both said the
   release was refused or verification failed.
+- If the connection drops while `curl … | bash` is still sending the
+  installer, nothing happens: no Runtime is stopped and no file changes. Before,
+  bash ran the part that had arrived, which could leave the Runtime stopped.
+- Runtime setup and the first Home started by the installer keep your own
+  temporary folder. Before, they got the installer's temporary folder, which it
+  deleted when it finished.
+- The installer downloads release data over HTTPS only and stops with a clear
+  message if a server redirects it to plain HTTP.
+- Running the installer again while Home is open now works: it closes Home,
+  installs, and opens Home again. Before, it stopped with "Recorded Runtime is
+  foreign or ambiguous".
+- On a Mac without Apple's Command Line Tools, the installer now stops before
+  downloading anything and says: run `xcode-select --install`, then run the
+  installer again. Before, it failed with "Invalid release-head.json format".
+- The installer no longer prints a raw JSON receipt near the end; it prints
+  "Protected roots are ready". A receipt for moved data stays in its backup
+  folder.
+- When setup or an update cannot reach the trusted source, ElastOS now says
+  so in plain words: it needs outgoing UDP to port 4433, so check the firewall
+  or network, then run `elastos setup` again.
+
+### Removed
+
+- `elastos update --gateway` and `--no-p2p`, and the installer's IPFS-gateway
+  options (`--gateway`, `--head-cid`, `--publisher-node-id`). Updates come
+  only from your trusted source over Carrier; the installer downloads only
+  from its publisher address. `elastos update --head-cid` and `--rollback-to`
+  stay.
 
 ### Developer detail
 
@@ -77,6 +105,49 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   queued or active) with 410; `system.js` shows the plain messages above. Other
   lock I/O failures and refusals keep 409. Covered by
   `system_update_refuses_a_concurrent_tab_and_a_replaced_approval`.
+- `scripts/install.sh` runs every action inside `main`, called on its last
+  line, so bash parses the whole script before acting. `install-bootstrap-test.py`
+  feeds the installer truncated at each step and after the Runtime stop, and
+  asserts no request, output, Runtime call or HOME change.
+- `install.sh` keeps its scratch directory in `INSTALL_SCRATCH` and never
+  assigns `TMPDIR`, so `elastos setup`, Home and the update controller's saved
+  launch environment see the caller's `TMPDIR`. Tests: a policy check, and the
+  fixture's `setup` stub records the `TMPDIR` it receives.
+- `install.sh` fetches through `fetch_url`, which runs curl with
+  `--proto '=https' --proto-redir '=https' --tlsv1.2`. Only an exact
+  `http://127.0.0.1`, `http://[::1]` or `http://localhost` origin (optional
+  port, no userinfo) may use HTTP, and such a fetch follows no redirect
+  (`--max-redirs 0`). curl's exit 1 (protocol refused) names the URL. The
+  bootstrap fixture's curl stand-in requires these flags on every request;
+  real-curl tests cover userinfo tricks and HTTP and HTTPS redirects to plain HTTP.
+- Removed the web transport override from the Runtime update flow (gateway
+  head discovery, `/ipfs/<cid>` fetches, the gateway release-manifest path and
+  the third-party IPFS host list) and the installer's CID-gateway bootstrap
+  (`ipfs_fetch`, `ELASTOS_IPFS_GATEWAYS`) with its docs and fixture transport.
+  Dead installer values (`PUBLISHER_HASH`, `LAST_SUCCESS_GATEWAY`) are gone.
+- The installer's identity-checked stop recognises this installation's Home:
+  `<bin> home …` is a Runtime command, and when its parent is this data
+  root's `update-controller/runtime __update-controller --receipt …`, the
+  controller is stopped first so it does not restart Home. Real-process fixture
+  test: `test_open_home_stops_through_its_update_controller`.
+- `install.sh` still needs python3 to check the Ed25519 signature: stock macOS
+  `openssl` (LibreSSL 3.3.6) has no Ed25519. Its preflight now runs
+  `python3 -c ''` and, if the macOS stub (or any broken python3) cannot run,
+  stops with one next step before the first request. Test:
+  `test_python3_that_cannot_run_stops_before_any_download_with_one_next_step`.
+- `install.sh` discards `principal-root-upgrade`'s stdout receipt (written to
+  the backup directory when objects move) and prints one line. The command's
+  JSON output is unchanged for the source-restart scripts that parse it.
+- Setup, Home capsule launch, update refresh and the supervisor install every
+  component only over Carrier by its signed `release_path`; the HTTP
+  `{gateway}/ipfs/<cid>` content path (`download_streaming`,
+  `build_gateway_list`, `ElastosFetchPath`, the update HTTP download helpers)
+  is removed. Admission refuses a component without a non-blank `release_path`
+  (`component_without_signed_release_path_is_refused_before_fetch`). sources.json
+  `gateways` now serves only Carrier ticket refresh.
+- `CarrierClient::connect_trusted_source` wraps a failed connection in that
+  plain message; the per-route ticket and fallback errors stay in the cause
+  chain (`{:#}`). Test: `unreachable_trusted_source_names_the_network_fix`.
 
 ## [0.8.0-alpha.15]
 

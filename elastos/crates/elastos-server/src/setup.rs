@@ -79,9 +79,9 @@ where
 
 /// A setup-materialized component.
 ///
-/// Published artifacts use signed release paths over Carrier. CID-only operator
-/// entries require configured trusted-source gateways. Local development uses
-/// the explicit source-build and local-copy strategies.
+/// Published artifacts use signed release paths over Carrier; every installed
+/// platform entry needs one. Local development uses the explicit source-build
+/// and local-copy strategies.
 #[derive(Deserialize, Serialize, Clone)]
 pub struct Component {
     pub version: Option<String>,
@@ -303,9 +303,6 @@ async fn run_with_data_dir(
     }
     remove_replacement_leftovers(&data_dir, &manifest, &platform)?;
 
-    // Local Elastos pin path only. Trusted source fetch happens over Carrier.
-    let ipfs_gateways = build_gateway_list(&data_dir);
-
     let selected_profile = profile.as_deref().map(normalize_profile_name).or({
         if with.is_empty() {
             Some(DEFAULT_SETUP_PROFILE)
@@ -341,7 +338,6 @@ async fn run_with_data_dir(
         &manifest,
         &platform,
         &components,
-        &ipfs_gateways,
         media_tools_dir.as_deref(),
         signed_setup.is_some(),
     )
@@ -472,15 +468,6 @@ async fn run_with_data_dir(
             println!("  Installed: {}", dest.display());
             changed = true;
         } else if !matches!(binary_install_state, InstallState::Installed) {
-            let resolved_url = match resolve_component_download_url(platform_info) {
-                Some(url) => url,
-                None => {
-                    println!("[skip] {} — no download URL or CID for {}", name, platform);
-                    skipped_count += 1;
-                    continue;
-                }
-            };
-
             let install_path = match resolve_install_path(comp, Some(platform_info)) {
                 Some(p) => p,
                 None => {
@@ -494,10 +481,8 @@ async fn run_with_data_dir(
             download_component(
                 &data_dir,
                 name,
-                &resolved_url,
                 platform_info,
                 &dest,
-                &ipfs_gateways,
                 FirstPartyCarrierContext::Setup,
             )
             .await?;
@@ -514,7 +499,6 @@ async fn run_with_data_dir(
                 name,
                 comp,
                 &platform,
-                &ipfs_gateways,
                 FirstPartyCarrierContext::Setup,
             )
             .await?;
@@ -1106,10 +1090,8 @@ pub async fn ensure_browser_vm_image_for_local_engine(data_dir: &Path) -> anyhow
     download_component(
         data_dir,
         browser_vm_image::NAME,
-        &resolve_component_download_url(&info).expect("validated Browser image release path"),
         &info,
         &dest,
-        &build_gateway_list(data_dir),
         FirstPartyCarrierContext::Runtime,
     )
     .await
@@ -1176,18 +1158,12 @@ pub(crate) async fn ensure_capsule_component_for_home_launch(
         anyhow::bail!("capsule component '{name}' uses local-copy and cannot be JIT materialized");
     }
 
-    let resolved_url = resolve_component_download_url(platform_info).ok_or_else(|| {
-        anyhow::anyhow!("capsule component '{name}' has no Carrier/content release path")
-    })?;
     let dest = data_dir.join(install_path);
-    let gateways = build_gateway_list(data_dir);
     download_component(
         data_dir,
         name,
-        &resolved_url,
         platform_info,
         &dest,
-        &gateways,
         FirstPartyCarrierContext::Runtime,
     )
     .await?;
@@ -1228,7 +1204,6 @@ async fn ensure_component_capsule_metadata(
     name: &str,
     component: &Component,
     platform: &str,
-    ipfs_gateways: &[ElastosFetchPath],
     carrier_context: FirstPartyCarrierContext,
 ) -> anyhow::Result<()> {
     let Some(metadata) = component.capsule_metadata.as_ref() else {
@@ -1254,21 +1229,9 @@ async fn ensure_component_capsule_metadata(
         );
     }
 
-    let resolved_url = resolve_component_download_url(platform_info).ok_or_else(|| {
-        anyhow::anyhow!("provider capsule metadata '{name}' has no Carrier/content release path")
-    })?;
     let dest = data_dir.join(install_path);
     println!("[install] {} capsule metadata ...", name);
-    download_component(
-        data_dir,
-        name,
-        &resolved_url,
-        platform_info,
-        &dest,
-        ipfs_gateways,
-        carrier_context,
-    )
-    .await?;
+    download_component(data_dir, name, platform_info, &dest, carrier_context).await?;
     write_platform_cache_metadata(platform_info, &dest)?;
     write_archive_executable_receipt(component, platform, platform_info, &dest)?;
     if let Some(reason) = installed_component_capsule_metadata_stale_reason(name, component, &dest)
@@ -2810,7 +2773,7 @@ async fn fetch_pinned_model_catalog(
     trust: &ModelCatalogConfig,
     fetch: &crate::update::FetchFn,
 ) -> anyhow::Result<Vec<u8>> {
-    let bytes = fetch(trust.head_cid.clone(), Vec::new())
+    let bytes = fetch(trust.head_cid.clone())
         .await
         .map_err(|error| error.context(MODEL_CATALOG_UNAVAILABLE))?;
     verify_pinned_model_catalog(trust, &bytes)?;
@@ -3081,7 +3044,6 @@ async fn prepare_selected_component_prerequisites(
     manifest: &ComponentsManifest,
     platform: &str,
     components: &[String],
-    ipfs_gateways: &[ElastosFetchPath],
     supplied_tools: Option<&Path>,
     signed_release: bool,
 ) -> anyhow::Result<()> {
@@ -3127,18 +3089,8 @@ async fn prepare_selected_component_prerequisites(
             component_install_state(data_dir, component, Some(info)),
             InstallState::Installed
         ) {
-            let url = resolve_component_download_url(info)
-                .ok_or_else(|| anyhow::anyhow!("Home media-tools release path is missing"))?;
-            download_component(
-                data_dir,
-                name,
-                &url,
-                info,
-                &dest,
-                ipfs_gateways,
-                FirstPartyCarrierContext::Setup,
-            )
-            .await?;
+            download_component(data_dir, name, info, &dest, FirstPartyCarrierContext::Setup)
+                .await?;
             write_cache_metadata(manifest, Some(info), platform, name, &dest)?;
         }
         // The data root is canonicalized once so a system link in its own prefix
@@ -3212,57 +3164,25 @@ fn signed_media_tool_digests(
     }
 }
 
-// ── Elastos fetch-path resolution ──────────────────────────────────
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ElastosFetchPath {
-    transport_base: String,
-    description: String,
-}
-
-/// Build the explicit gateway list for CID-only operator entries.
-/// Release-path downloads use Carrier and never fall back to these gateways.
-fn build_gateway_list(data_dir: &Path) -> Vec<ElastosFetchPath> {
-    trusted_gateway_overrides(data_dir)
-}
-
-fn trusted_gateway_overrides(data_dir: &Path) -> Vec<ElastosFetchPath> {
-    let Ok(config) = crate::sources::load_trusted_sources(data_dir) else {
-        return Vec::new();
-    };
-    let Some(source) = config.default_source() else {
-        return Vec::new();
-    };
-
-    crate::sources::normalize_gateways(&source.gateways)
-        .into_iter()
-        .map(|gateway| ElastosFetchPath {
-            description: format!("trusted source fetch path ({})", gateway),
-            transport_base: gateway,
-        })
-        .collect()
-}
-
 fn resolve_cid_display_url(cid: &str) -> String {
     // Display-only identity string for content-addressed components.
-    // Actual downloads use the configured Elastos fetch paths above.
     format!("elastos://{}", cid)
 }
 
-fn resolve_component_download_url(platform_info: &PlatformInfo) -> Option<String> {
+/// Every installed component comes from the signed release over Carrier.
+pub(crate) fn required_release_path<'a>(
+    name: &str,
+    platform_info: &'a PlatformInfo,
+) -> anyhow::Result<&'a str> {
     platform_info
-        .cid
-        .as_ref()
-        .filter(|cid| !cid.is_empty())
-        .map(|cid| resolve_cid_display_url(cid))
-        .or_else(|| {
-            platform_info
-                .release_path
-                .as_ref()
-                .filter(|path| !path.is_empty())
-                .map(|path| format!("elastos://artifact/{}", path))
+        .release_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "component '{name}' must come from the signed release: release_path is required"
+            )
         })
-        .or_else(|| platform_info.url.clone())
 }
 
 fn requires_release_artifact_checksum(platform_info: &PlatformInfo) -> bool {
@@ -3347,6 +3267,7 @@ pub(crate) fn admit_release_components(
                 matches!(info.strategy.as_deref(), None | Some("prebuilt")),
                 "component '{name}' has a development or unsupported release strategy"
             );
+            required_release_path(name, info)?;
             valid_release_artifact_checksum(name, info.checksum.as_deref())?;
         }
     }
@@ -3471,7 +3392,6 @@ async fn refresh_support(
     home: bool,
     carrier_context: FirstPartyCarrierContext,
 ) -> anyhow::Result<Vec<String>> {
-    let gateways = build_gateway_list(data_dir);
     let mut refreshed = Vec::new();
     for item in plan_update_support(data_dir, old_manifest, new_manifest, platform, home) {
         let SupportUpdate {
@@ -3500,33 +3420,14 @@ async fn refresh_support(
                 atomic_copy_file(&source, &dest)?;
                 set_local_copy_permissions(&source, &dest);
             } else {
-                let Some(resolved_url) = resolve_component_download_url(info) else {
-                    continue;
-                };
-                download_component(
-                    data_dir,
-                    name,
-                    &resolved_url,
-                    info,
-                    &dest,
-                    &gateways,
-                    carrier_context,
-                )
-                .await?;
+                download_component(data_dir, name, info, &dest, carrier_context).await?;
                 write_cache_metadata(new_manifest, Some(info), platform, name, &dest)?;
             }
             refreshed.push(name.to_string());
         }
         if item.metadata {
-            ensure_component_capsule_metadata(
-                data_dir,
-                name,
-                component,
-                platform,
-                &gateways,
-                carrier_context,
-            )
-            .await?;
+            ensure_component_capsule_metadata(data_dir, name, component, platform, carrier_context)
+                .await?;
             refreshed.push(name.to_string());
         }
     }
@@ -3615,7 +3516,7 @@ pub(crate) async fn stage_update_support(
                 format!("release-path:{path}")
             };
             owner.progress("downloading", &crate::update::download_message(asset.size))?;
-            let bytes = fetch(key, Vec::new()).await?;
+            let bytes = fetch(key).await?;
             owner.progress(
                 "verifying",
                 "Verifying the update. Home restarts when the update is ready.",
@@ -3711,7 +3612,7 @@ pub(crate) async fn stage_update_support(
             "downloading",
             &crate::update::download_message(Some(entry.size)),
         )?;
-        let bytes = fetch(entry.cid.clone(), Vec::new()).await?;
+        let bytes = fetch(entry.cid.clone()).await?;
         owner.progress(
             "verifying",
             "Verifying the update. Home restarts when the update is ready.",
@@ -3816,27 +3717,6 @@ fn component_capsule_metadata_signature(
 
 // ── Download and install ────────────────────────────────────────────
 
-/// Public entry point for supervisor to download an external component.
-pub async fn run_download(
-    name: &str,
-    url: &str,
-    platform_info: &PlatformInfo,
-    dest: &Path,
-) -> anyhow::Result<()> {
-    let data_dir = data_dir().unwrap_or_else(|_| PathBuf::from("/tmp/elastos"));
-    let gateways = build_gateway_list(&data_dir);
-    download_component(
-        &data_dir,
-        name,
-        url,
-        platform_info,
-        dest,
-        &gateways,
-        FirstPartyCarrierContext::Runtime,
-    )
-    .await
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum FirstPartyCarrierContext {
     /// Standalone setup owns the operator's configured transport address.
@@ -3928,6 +3808,7 @@ pub(crate) async fn install_first_party_component_via_carrier(
     context: FirstPartyCarrierContext,
 ) -> anyhow::Result<()> {
     require_component_not_model(name, dest)?;
+    let release_path = required_release_path(name, platform_info)?;
     if name == browser_vm_image::NAME {
         return browser_vm_image::install_via_carrier(
             data_dir,
@@ -3938,9 +3819,6 @@ pub(crate) async fn install_first_party_component_via_carrier(
         )
         .await;
     }
-    let release_path = platform_info.release_path.as_deref().ok_or_else(|| {
-        anyhow::anyhow!("missing release_path for first-party component '{}'", name)
-    })?;
     let cid = platform_info.cid.as_deref().filter(|cid| !cid.is_empty());
     let bytes =
         fetch_first_party_component_via_carrier(data_dir, cid, release_path, context).await?;
@@ -3971,10 +3849,8 @@ pub(crate) async fn install_first_party_component_via_carrier(
 async fn download_component(
     data_dir: &Path,
     name: &str,
-    url: &str,
     platform_info: &PlatformInfo,
     dest: &Path,
-    ipfs_gateways: &[ElastosFetchPath],
     carrier_context: FirstPartyCarrierContext,
 ) -> anyhow::Result<()> {
     require_component_not_model(name, dest)?;
@@ -3982,234 +3858,33 @@ async fn download_component(
         browser_vm_image::validate_request(data_dir, platform_info, dest, &detect_platform())?;
     }
 
-    // Release artifacts come from the trusted source over Carrier.
-    // A failed Carrier fetch stays a failure, even when a URL is present.
-    if let Some(release_path) = platform_info.release_path.as_deref() {
-        if release_path.trim().is_empty() {
-            anyhow::bail!(
-                "component '{}' must come from the signed release: present release_path is blank",
-                name
-            );
-        }
-        required_release_artifact_checksum(name, platform_info)?;
-        let elastos_url = platform_info
-            .cid
-            .as_deref()
-            .filter(|cid| !cid.is_empty())
-            .map(resolve_cid_display_url)
-            .unwrap_or_else(|| format!("elastos://artifact/{}", release_path));
-        println!("  Resolving {} from {}...", name, elastos_url);
-        println!(
-            "  Trying {} via trusted source over Carrier...",
-            elastos_url
-        );
-        match install_first_party_component_via_carrier(
-            data_dir,
-            name,
-            platform_info,
-            dest,
-            carrier_context,
-        )
-        .await
-        {
-            Ok(()) => {
-                ensure_bundle_executable_link(data_dir, name, platform_info)?;
-                println!("  Installed: {}", dest.display());
-                return Ok(());
-            }
-            Err(err) => {
-                anyhow::bail!(
-                    "Trusted source Carrier fetch failed for {} ({}): {}",
-                    name,
-                    elastos_url,
-                    err
-                );
-            }
-        }
-    }
-
-    let cid = platform_info
+    // Every component comes from the trusted source over Carrier.
+    // A failed Carrier fetch stays a failure.
+    let release_path = required_release_path(name, platform_info)?;
+    required_release_artifact_checksum(name, platform_info)?;
+    let elastos_url = platform_info
         .cid
         .as_deref()
-        .filter(|cid| !cid.trim().is_empty())
-        .ok_or_else(|| {
+        .filter(|cid| !cid.is_empty())
+        .map(resolve_cid_display_url)
+        .unwrap_or_else(|| format!("elastos://artifact/{}", release_path));
+    println!("  Resolving {} from {}...", name, elastos_url);
+    println!(
+        "  Trying {} via trusted source over Carrier...",
+        elastos_url
+    );
+    install_first_party_component_via_carrier(data_dir, name, platform_info, dest, carrier_context)
+        .await
+        .map_err(|err| {
             anyhow::anyhow!(
-                "component '{}' must come from the signed release: release_path or cid is required; URL-only downloads are refused",
-                name
+                "Trusted source Carrier fetch failed for {} ({}): {}",
+                name,
+                elastos_url,
+                err
             )
         })?;
-    required_release_artifact_checksum(name, platform_info)?;
-    let elastos_url = resolve_cid_display_url(cid);
-    if ipfs_gateways.is_empty() {
-        anyhow::bail!(
-            "No configured fetch path for {} ({}). Configure a trusted source with a publisher gateway.",
-            name,
-            elastos_url
-        );
-    }
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let client = crate::update::download_http_client()?;
-    println!("  Resolving {} from {}...", name, elastos_url);
-    let mut last_err = String::new();
-    let mut response = None;
-    for gw in ipfs_gateways {
-        let gw_url = format!("{}/ipfs/{}", gw.transport_base.trim_end_matches('/'), cid);
-        println!("  Trying {} via {}...", elastos_url, gw.description);
-        match client.get(&gw_url).send().await {
-            Ok(r) if r.status().is_success() => {
-                response = Some(r);
-                break;
-            }
-            Ok(r) => {
-                last_err = format!("HTTP {}", r.status());
-            }
-            Err(e) => {
-                last_err = e.to_string();
-            }
-        }
-    }
-    let response = response.ok_or_else(|| {
-        anyhow::anyhow!(
-            "All configured Elastos fetch paths failed for {} ({}): {}",
-            name,
-            elastos_url,
-            last_err
-        )
-    })?;
-    // The signed size bounds the body; else the general download ceiling.
-    let max_bytes = platform_info
-        .size
-        .unwrap_or(crate::carrier::MAX_DOWNLOAD_BYTES as u64);
-    let is_model = dest.extension().map(|e| e == "gguf").unwrap_or(false);
-    let is_tarball =
-        url.ends_with(".tar.gz") || url.ends_with(".tgz") || platform_info.extract_path.is_some();
-
-    if is_model {
-        // Stream large model files to disk with progress
-        download_streaming(name, response, dest, platform_info, max_bytes).await?;
-    } else {
-        // Buffer smaller binaries in memory for checksum
-        let bytes = crate::update::read_download_body(response, name, max_bytes).await?;
-
-        verify_checksum(name, &bytes, platform_info)?;
-
-        require_component_space(dest, &bytes, is_tarball)?;
-        if is_tarball {
-            extract_from_tarball(&bytes, dest, platform_info)?;
-        } else {
-            atomic_write_file(dest, &bytes)?;
-        }
-    }
-
-    // chmod +x for binaries
-    #[cfg(unix)]
-    if !is_model && dest.is_file() {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(dest, fs::Permissions::from_mode(0o755));
-    }
-
     ensure_bundle_executable_link(data_dir, name, platform_info)?;
-
     println!("  Installed: {}", dest.display());
-    Ok(())
-}
-
-async fn download_streaming(
-    name: &str,
-    response: reqwest::Response,
-    dest: &Path,
-    platform_info: &PlatformInfo,
-    max_bytes: u64,
-) -> anyhow::Result<()> {
-    use tokio::io::AsyncWriteExt;
-
-    let expected_checksum = required_release_artifact_checksum(name, platform_info)?;
-    let tmp_path = dest.with_extension("tmp");
-    let mut file = tokio::fs::File::create(&tmp_path).await?;
-
-    // Set up the right hasher based on expected checksum format
-    let use_sha512 = expected_checksum
-        .map(|checksum| checksum.starts_with("sha512:"))
-        .unwrap_or(false);
-    let mut hasher_256 = sha2::Sha256::new();
-    let mut hasher_512 = sha2::Sha512::new();
-
-    let mut downloaded: u64 = 0;
-    let mut last_progress: u64 = 0;
-    let content_length = response.content_length();
-    crate::update::ensure_download_within(name, content_length.unwrap_or(0), max_bytes)?;
-
-    let mut response = response;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|err| crate::update::download_read_error(err, name))?
-    {
-        downloaded += chunk.len() as u64;
-        crate::update::ensure_download_within(name, downloaded, max_bytes)?;
-        if use_sha512 {
-            hasher_512.update(&chunk);
-        } else {
-            hasher_256.update(&chunk);
-        }
-        file.write_all(&chunk).await?;
-
-        // Print progress every 50 MB
-        if downloaded - last_progress >= 50 * 1024 * 1024 {
-            if let Some(total) = content_length {
-                let pct = (downloaded as f64 / total as f64 * 100.0) as u32;
-                eprint!(
-                    "\r  {} — {} / {} MB ({}%)",
-                    name,
-                    downloaded / 1024 / 1024,
-                    total / 1024 / 1024,
-                    pct
-                );
-            } else {
-                eprint!("\r  {} — {} MB downloaded", name, downloaded / 1024 / 1024);
-            }
-            last_progress = downloaded;
-        }
-    }
-    file.flush().await?;
-    drop(file);
-
-    if last_progress > 0 {
-        eprintln!(); // newline after progress
-    }
-
-    // Verify checksum
-    if let Some(expected) = expected_checksum {
-        let (actual, algo) = if expected.starts_with("sha512:") {
-            (
-                format!("sha512:{}", hex::encode(hasher_512.finalize())),
-                "sha512",
-            )
-        } else if expected.starts_with("sha256:") {
-            (
-                format!("sha256:{}", hex::encode(hasher_256.finalize())),
-                "sha256",
-            )
-        } else {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            anyhow::bail!("Unknown checksum format for {}: {}", name, expected);
-        };
-
-        if actual != *expected {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            anyhow::bail!(
-                "Checksum mismatch for {}! Expected: {}, Got: {}",
-                name,
-                expected,
-                actual
-            );
-        }
-        println!("  Checksum verified ({})", algo);
-    }
-
-    tokio::fs::rename(&tmp_path, dest).await?;
     Ok(())
 }
 
@@ -5015,7 +4690,6 @@ pub(crate) mod tests {
             &manifest,
             &detect_platform(),
             &["shell".to_string()],
-            &[],
             None,
             false,
         )
@@ -5135,13 +4809,7 @@ pub(crate) mod tests {
         let selected = vec!["media-provider".to_owned()];
         let data = temp.path().join("fresh-data");
         let error = prepare_selected_component_prerequisites(
-            &data,
-            &manifest,
-            &platform,
-            &selected,
-            &[],
-            None,
-            false,
+            &data, &manifest, &platform, &selected, None, false,
         )
         .await
         .unwrap_err();
@@ -5160,13 +4828,7 @@ pub(crate) mod tests {
         fs::set_permissions(&existing, fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(existing.join("retained"), "existing installation").unwrap();
         let error = prepare_selected_component_prerequisites(
-            &existing,
-            &manifest,
-            &platform,
-            &selected,
-            &[],
-            None,
-            false,
+            &existing, &manifest, &platform, &selected, None, false,
         )
         .await
         .unwrap_err();
@@ -5183,13 +4845,7 @@ pub(crate) mod tests {
         let linked = temp.path().join("linked-data");
         symlink(&existing, &linked).unwrap();
         assert!(prepare_selected_component_prerequisites(
-            &linked,
-            &manifest,
-            &platform,
-            &selected,
-            &[],
-            None,
-            false,
+            &linked, &manifest, &platform, &selected, None, false,
         )
         .await
         .is_err());
@@ -5243,13 +4899,7 @@ pub(crate) mod tests {
         let manifest = load_manifest_from_path(&manifest_path).unwrap();
         let selected = vec!["media-provider".to_owned()];
         let error = prepare_selected_component_prerequisites(
-            &data,
-            &manifest,
-            &platform,
-            &selected,
-            &[],
-            None,
-            false,
+            &data, &manifest, &platform, &selected, None, false,
         )
         .await
         .unwrap_err();
@@ -5346,13 +4996,7 @@ pub(crate) mod tests {
         fs::set_permissions(dest.join("bin/ffprobe"), fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(dest.join("bin/ffprobe"), b"altered ffprobe").unwrap();
         let error = prepare_selected_component_prerequisites(
-            &data,
-            &manifest,
-            &platform,
-            &selected,
-            &[],
-            None,
-            false,
+            &data, &manifest, &platform, &selected, None, false,
         )
         .await
         .unwrap_err();
@@ -6861,9 +6505,7 @@ pub(crate) mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("has no Carrier/content release path"));
+        assert!(err.to_string().contains("release_path is required"));
         assert_eq!(fs::read(binary_path).unwrap(), b"unchanged-provider-binary");
     }
 
@@ -7189,99 +6831,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_build_gateway_list_without_sources_is_empty() {
-        let tmp = tempfile::tempdir().unwrap();
-        let gateways = build_gateway_list(tmp.path());
-        assert!(gateways.is_empty());
-    }
-
-    #[test]
-    fn test_build_gateway_list_prefers_trusted_source_gateways() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = TrustedSourcesConfig {
-            schema: "elastos.trusted-sources/v1".to_string(),
-            default_source: "seed".to_string(),
-            sources: vec![TrustedSource {
-                name: "seed".to_string(),
-                publisher_dids: vec!["did:key:z6Mktest".to_string()],
-                channel: "jetson-test".to_string(),
-                discovery_uri: String::new(),
-                connect_ticket: String::new(),
-                gateways: vec![
-                    "https://elastos.elacitylabs.com".to_string(),
-                    "https://publisher-backup.example".to_string(),
-                ],
-                install_path: String::new(),
-                installed_version: String::new(),
-                head_cid: String::new(),
-                publisher_node_id: String::new(),
-                ipns_name: String::new(),
-            }],
-        };
-        save_trusted_sources(tmp.path(), &config).unwrap();
-
-        let gateways = build_gateway_list(tmp.path());
-        assert_eq!(
-            gateways,
-            vec![
-                ElastosFetchPath {
-                    description: "trusted source fetch path (https://elastos.elacitylabs.com)"
-                        .to_string(),
-                    transport_base: "https://elastos.elacitylabs.com".to_string(),
-                },
-                ElastosFetchPath {
-                    description: "trusted source fetch path (https://publisher-backup.example)"
-                        .to_string(),
-                    transport_base: "https://publisher-backup.example".to_string(),
-                }
-            ]
-        );
-    }
-
-    #[test]
-    fn test_trusted_gateway_overrides_reads_saved_source_gateways() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = TrustedSourcesConfig {
-            schema: "elastos.trusted-sources/v1".to_string(),
-            default_source: "seed".to_string(),
-            sources: vec![TrustedSource {
-                name: "seed".to_string(),
-                publisher_dids: vec!["did:key:z6Mktest".to_string()],
-                channel: "jetson-test".to_string(),
-                discovery_uri: String::new(),
-                connect_ticket: String::new(),
-                gateways: vec![
-                    "https://elastos.elacitylabs.com/".to_string(),
-                    " https://elastos.elacitylabs.com ".to_string(),
-                    "https://backup.example".to_string(),
-                ],
-                install_path: String::new(),
-                installed_version: String::new(),
-                head_cid: String::new(),
-                publisher_node_id: String::new(),
-                ipns_name: String::new(),
-            }],
-        };
-        save_trusted_sources(tmp.path(), &config).unwrap();
-
-        let gateways = trusted_gateway_overrides(tmp.path());
-        assert_eq!(
-            gateways,
-            vec![
-                ElastosFetchPath {
-                    description: "trusted source fetch path (https://elastos.elacitylabs.com)"
-                        .to_string(),
-                    transport_base: "https://elastos.elacitylabs.com".to_string(),
-                },
-                ElastosFetchPath {
-                    description: "trusted source fetch path (https://backup.example)".to_string(),
-                    transport_base: "https://backup.example".to_string(),
-                }
-            ]
-        );
-    }
-
-    #[test]
     fn test_verify_installed_component_binary_rejects_dev_path() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("dev-shell");
@@ -7555,7 +7104,7 @@ pub(crate) mod tests {
                 "release-path:kubo.tar.gz".to_string()
             };
             let components = serde_json::to_vec(&components).unwrap();
-            let fetch: crate::update::FetchFn = Box::new(move |key, _| {
+            let fetch: crate::update::FetchFn = Box::new(move |key| {
                 let bytes = if key == expected_key {
                     bytes.clone()
                 } else {
@@ -7688,31 +7237,44 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn test_resolve_component_download_url_prefers_cid_over_baked_url() {
-        let info = PlatformInfo {
-            url: Some("https://old.example/ipfs/QmOld".to_string()),
-            cid: Some("QmCanonical".to_string()),
-            release_path: Some("shell-linux-amd64".to_string()),
-            checksum: None,
-            extract_path: None,
-            install_path: None,
-            binary_path: None,
-            strategy: None,
-            source: None,
-            note: None,
-            size: None,
-        };
-
-        assert_eq!(
-            resolve_component_download_url(&info).as_deref(),
-            Some("elastos://QmCanonical")
-        );
+    #[tokio::test]
+    async fn component_without_signed_release_path_is_refused_before_fetch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let checksum = format!("sha256:{}", "a".repeat(64));
+        for release_path in [None, Some(""), Some("  ")] {
+            let mut info = serde_json::json!({"cid":"QmFixture", "checksum":checksum});
+            if let Some(path) = release_path {
+                info["release_path"] = path.into();
+            }
+            let manifest: ComponentsManifest = serde_json::from_value(serde_json::json!({
+                "external":{"fixture":{"platforms":{"linux-arm64":info}}}, "profiles":{}
+            }))
+            .unwrap();
+            let refusal =
+                "component 'fixture' must come from the signed release: release_path is required";
+            assert_eq!(
+                admit_release_components(&manifest, "linux-arm64")
+                    .unwrap_err()
+                    .to_string(),
+                refusal
+            );
+            let info = &manifest.external["fixture"].platforms["linux-arm64"];
+            let error = download_component(
+                tmp.path(),
+                "fixture",
+                info,
+                &tmp.path().join("bin/fixture"),
+                FirstPartyCarrierContext::Setup,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.to_string(), refusal);
+        }
     }
 
     #[test]
     fn release_component_admission_resolves_aliases_and_checks_complete_hash_syntax() {
-        for (info, accepted) in [
+        for (mut info, accepted) in [
             (
                 serde_json::json!({"checksum":format!("sha256:{}", "A".repeat(64))}),
                 true,
@@ -7733,6 +7295,7 @@ pub(crate) mod tests {
             (serde_json::json!({}), false),
             (serde_json::json!({"strategy":"unknown"}), false),
         ] {
+            info["release_path"] = "fixture".into();
             for (key, platform) in [
                 ("aarch64-linux", "linux-arm64"),
                 ("aarch64-darwin", "darwin-arm64"),
@@ -7873,10 +7436,8 @@ pub(crate) mod tests {
         let err = download_component(
             tmp.path(),
             "shell",
-            "elastos://artifact/shell-linux-amd64",
             &info,
             &tmp.path().join("bin/shell"),
-            &[],
             FirstPartyCarrierContext::Setup,
         )
         .await
@@ -7923,10 +7484,8 @@ pub(crate) mod tests {
             let result = download_component(
                 tmp.path(),
                 "kubo",
-                &url,
                 &info,
                 &dest,
-                &[],
                 FirstPartyCarrierContext::Setup,
             )
             .await;
@@ -8169,10 +7728,8 @@ pub(crate) mod tests {
             let result = download_component(
                 root.path(),
                 name,
-                "http://127.0.0.1:1/refused",
                 &info,
                 &dest,
-                &[],
                 FirstPartyCarrierContext::Runtime,
             )
             .await;
@@ -8664,10 +8221,8 @@ pub(crate) mod tests {
         let result = download_component(
             tmp.path(),
             "kubo",
-            info.url.as_deref().unwrap(),
             &info,
             &dest,
-            &[],
             FirstPartyCarrierContext::Setup,
         )
         .await;
@@ -8694,10 +8249,8 @@ pub(crate) mod tests {
         let result = download_component(
             tmp.path(),
             "kubo",
-            info.url.as_deref().unwrap(),
             &info,
             &dest,
-            &[],
             FirstPartyCarrierContext::Setup,
         )
         .await;
@@ -8707,254 +8260,6 @@ pub(crate) mod tests {
         let error = result.unwrap_err().to_string();
         assert!(error.contains("Checksum mismatch for kubo"), "{error}");
         assert_eq!(fs::read(dest).unwrap(), b"installed fixture");
-    }
-
-    /// Serves every HTTP request with a `declared` Content-Length, then each
-    /// chunk after `gap`; returns the base URL.
-    pub(crate) async fn serve_http_slowly(
-        declared: u64,
-        chunks: &'static [&'static [u8]],
-        gap: std::time::Duration,
-    ) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            while let Ok((mut socket, _)) = listener.accept().await {
-                tokio::spawn(async move {
-                    let mut request = [0u8; 4096];
-                    let _ = socket.read(&mut request).await;
-                    let head = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n"
-                    );
-                    if socket.write_all(head.as_bytes()).await.is_err() {
-                        return;
-                    }
-                    for chunk in chunks {
-                        tokio::time::sleep(gap).await;
-                        if socket.write_all(chunk).await.is_err() {
-                            return;
-                        }
-                    }
-                });
-            }
-        });
-        base
-    }
-
-    async fn download_component_over_slow_gateway(
-        size: u64,
-        gap: std::time::Duration,
-    ) -> (anyhow::Result<()>, std::path::PathBuf, tempfile::TempDir) {
-        const CHUNKS: &[&[u8]] = &[b"fi", b"xt", b"ur", b"e-", b"ok"];
-        let base = serve_http_slowly(10, CHUNKS, gap).await;
-        let tmp = tempfile::tempdir().unwrap();
-        let info: PlatformInfo = serde_json::from_value(serde_json::json!({
-            "cid": "bafy-slow-fixture",
-            "checksum": format!("sha256:{:x}", sha2::Sha256::digest(b"fixture-ok")),
-            "size": size,
-        }))
-        .unwrap();
-        let dest = tmp.path().join("bin/kubo");
-        let gateways = [ElastosFetchPath {
-            transport_base: base,
-            description: "slow fixture gateway".to_string(),
-        }];
-        let result = download_component(
-            tmp.path(),
-            "kubo",
-            "unused",
-            &info,
-            &dest,
-            &gateways,
-            FirstPartyCarrierContext::Setup,
-        )
-        .await;
-        (result, dest, tmp)
-    }
-
-    #[tokio::test]
-    async fn download_component_http_progress_outlives_idle_deadline_and_stall_fails() {
-        // 5 chunks 400 ms apart: 2 s in total, twice the 1 s test idle deadline.
-        let (result, dest, _tmp) =
-            download_component_over_slow_gateway(10, std::time::Duration::from_millis(400)).await;
-        result.unwrap();
-        assert_eq!(fs::read(dest).unwrap(), b"fixture-ok");
-
-        let (result, dest, _tmp) =
-            download_component_over_slow_gateway(10, std::time::Duration::from_secs(3)).await;
-        let error = format!("{:#}", result.unwrap_err());
-        assert!(
-            error.contains("no data for 1 s while downloading kubo"),
-            "{error}"
-        );
-        assert!(!dest.exists());
-    }
-
-    #[tokio::test]
-    async fn download_component_http_refuses_body_beyond_signed_size() {
-        let (result, dest, _tmp) =
-            download_component_over_slow_gateway(4, std::time::Duration::ZERO).await;
-        let error = format!("{:#}", result.unwrap_err());
-        assert!(
-            error.contains("kubo exceeds its 4-byte bound (10 bytes)"),
-            "{error}"
-        );
-        assert!(!dest.exists());
-    }
-
-    #[tokio::test]
-    async fn download_component_requires_explicit_cid_gateway_and_verifies_checksum() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let requests = Arc::new(AtomicUsize::new(0));
-        let observed = requests.clone();
-        let bytes = b"gateway fixture";
-        let digest = sha2::Sha256::digest(bytes);
-        let cid = cid::Cid::new_v1(
-            0x55,
-            cid::multihash::Multihash::<64>::wrap(0x12, &digest).unwrap(),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let gateway = format!("http://{}", listener.local_addr().unwrap());
-        let url = format!("{gateway}/unused");
-        let app = axum::Router::new().route(
-            &format!("/ipfs/{cid}"),
-            axum::routing::get(move || {
-                observed.fetch_add(1, Ordering::SeqCst);
-                async { "gateway fixture" }
-            }),
-        );
-        let serving = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let mut info: PlatformInfo = serde_json::from_value(serde_json::json!({
-            "url": url,
-            "cid": cid.to_string(),
-            "checksum": format!("sha256:{digest:x}")
-        }))
-        .unwrap();
-        let dest = tmp.path().join("bin/operator-tool");
-        let error = download_component(
-            tmp.path(),
-            "operator-tool",
-            &url,
-            &info,
-            &dest,
-            &build_gateway_list(tmp.path()),
-            FirstPartyCarrierContext::Setup,
-        )
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains("No configured fetch path"));
-        assert_eq!(requests.load(Ordering::SeqCst), 0);
-        assert!(!dest.parent().unwrap().exists());
-
-        let source: TrustedSource = serde_json::from_value(serde_json::json!({
-            "name": "fixture",
-            "publisher_dids": [elastos_identity::derive_did(&[217; 32]).1],
-            "gateways": [gateway]
-        }))
-        .unwrap();
-        let mut sources = TrustedSourcesConfig::empty();
-        sources.upsert_source(source);
-        save_trusted_sources(tmp.path(), &sources).unwrap();
-        let gateways = build_gateway_list(tmp.path());
-        fs::create_dir_all(dest.parent().unwrap()).unwrap();
-        fs::write(&dest, b"installed fixture").unwrap();
-        info.checksum = Some(format!(
-            "sha256:{:x}",
-            sha2::Sha256::digest(b"different component")
-        ));
-        let error = download_component(
-            tmp.path(),
-            "operator-tool",
-            &url,
-            &info,
-            &dest,
-            &gateways,
-            FirstPartyCarrierContext::Setup,
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("Checksum mismatch for operator-tool"),
-            "{error}"
-        );
-        assert_eq!(fs::read(&dest).unwrap(), b"installed fixture");
-
-        info.checksum = Some(format!("sha256:{digest:x}"));
-        let result = download_component(
-            tmp.path(),
-            "operator-tool",
-            &url,
-            &info,
-            &dest,
-            &gateways,
-            FirstPartyCarrierContext::Setup,
-        )
-        .await;
-        serving.abort();
-        let _ = serving.await;
-
-        result.unwrap();
-        assert_eq!(requests.load(Ordering::SeqCst), 2);
-        assert_eq!(fs::read(dest).unwrap(), bytes);
-    }
-
-    #[tokio::test]
-    async fn download_component_rejects_blank_release_path_with_cid_before_fetch() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let requests = Arc::new(AtomicUsize::new(0));
-        let observed = requests.clone();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let gateway = format!("http://{}", listener.local_addr().unwrap());
-        let app = axum::Router::new().fallback(move || {
-            observed.fetch_add(1, Ordering::SeqCst);
-            async { "gateway fixture" }
-        });
-        let serving = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let source: TrustedSource = serde_json::from_value(serde_json::json!({
-            "name": "fixture", "publisher_dids": [elastos_identity::derive_did(&[217; 32]).1],
-            "gateways": [gateway]
-        }))
-        .unwrap();
-        let mut sources = TrustedSourcesConfig::empty();
-        sources.upsert_source(source);
-        save_trusted_sources(tmp.path(), &sources).unwrap();
-        let dest = tmp.path().join("bin/kubo");
-        for blank in ["", " ", "\t\n"] {
-            let info: PlatformInfo = serde_json::from_value(serde_json::json!({
-                "release_path": blank,
-                "cid": catalog_head_cid(b"gateway fixture").unwrap(),
-                "checksum": format!("sha256:{:x}", sha2::Sha256::digest(b"gateway fixture"))
-            }))
-            .unwrap();
-            let error = download_component(
-                tmp.path(),
-                "kubo",
-                "unused",
-                &info,
-                &dest,
-                &build_gateway_list(tmp.path()),
-                FirstPartyCarrierContext::Setup,
-            )
-            .await
-            .unwrap_err();
-            assert!(
-                error.to_string().contains("release_path is blank"),
-                "{error}"
-            );
-            assert!(!dest.parent().unwrap().exists());
-        }
-        serving.abort();
-        let _ = serving.await;
-        assert_eq!(requests.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

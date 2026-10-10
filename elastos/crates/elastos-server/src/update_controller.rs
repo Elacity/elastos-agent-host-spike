@@ -1215,7 +1215,7 @@ impl Controller {
         let fetch_client = client.clone();
         let choice = request.clone();
         let trusted = source.clone();
-        let fetch: crate::update::FetchFn = Box::new(move |cid, _| {
+        let fetch: crate::update::FetchFn = Box::new(move |cid| {
             let client = fetch_client.clone();
             let choice = choice.clone();
             let trusted = trusted.clone();

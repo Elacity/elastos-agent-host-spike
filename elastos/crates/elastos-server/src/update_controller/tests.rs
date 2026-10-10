@@ -3128,7 +3128,7 @@ async fn real_controller_restart_failure(failure: &str) {
             "home":{"install_path":"capsules/home", "platforms":{}},
             "fixture-provider":{"install_path":"bin/fixture-provider", "platforms":{
                 (crate::setup::detect_platform()):{
-                    "cid":raw_cid(support), "checksum":format!("sha256:{}", digest(support)), "size":support.len()
+                    "release_path":"fixture-provider", "cid":raw_cid(support), "checksum":format!("sha256:{}", digest(support)), "size":support.len()
                 }
             }}
         }
@@ -3180,7 +3180,7 @@ async fn real_controller_restart_failure(failure: &str) {
         (raw_cid(&candidate_components), candidate_components),
         (raw_cid(b"new support"), b"new support".to_vec()),
     ]);
-    let fetch: crate::update::FetchFn = Box::new(move |cid, _| {
+    let fetch: crate::update::FetchFn = Box::new(move |cid| {
         let bytes = items
             .get(&cid)
             .unwrap_or_else(|| panic!("unexpected fetch: {cid}"))
@@ -3734,7 +3734,7 @@ async fn staged_support_skips_linux_only_home_component_on_darwin() {
         }}
     }))
     .unwrap();
-    let fetch: crate::update::FetchFn = Box::new(|_, _| panic!("unavailable support fetched"));
+    let fetch: crate::update::FetchFn = Box::new(|_| panic!("unavailable support fetched"));
     let (_, paths) = crate::setup::stage_update_support(
         &fixture.data,
         &fs::read(fixture.data.join("components.json")).unwrap(),
@@ -3782,7 +3782,7 @@ async fn staged_support_replaces_a_component_left_by_an_interrupted_undo() {
         }}}
     }))
     .unwrap();
-    let fetch: crate::update::FetchFn = Box::new(move |key, _| {
+    let fetch: crate::update::FetchFn = Box::new(move |key| {
         assert_eq!(key, cid);
         Box::pin(async move { Ok(signed.to_vec()) })
     });
@@ -3852,7 +3852,7 @@ async fn system_update_and_undo_repair_the_installed_release_before_admission() 
         }
         let served = (catalogue_cid.clone(), catalogue.clone());
         let offline = case == "catalogue offline";
-        let fetch: crate::update::FetchFn = Box::new(move |cid, _| {
+        let fetch: crate::update::FetchFn = Box::new(move |cid| {
             let bytes = if offline {
                 Err(anyhow::Error::from(crate::update::UpdateSourceUnavailable))
             } else {
@@ -3987,7 +3987,7 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
             serde_json::to_vec(&json!({
             "schema":"elastos.components/v1", "profiles":{}, "capsules":{},
             "external":{"fixture-provider":{"install_path":"bin/fixture-provider", "platforms":{
-                (crate::setup::detect_platform()): {"cid":raw_cid(bytes), "checksum":format!("sha256:{}", digest(bytes)), "size":bytes.len()}
+                (crate::setup::detect_platform()): {"release_path":"fixture-provider", "cid":raw_cid(bytes), "checksum":format!("sha256:{}", digest(bytes)), "size":bytes.len()}
             }}}
         })).unwrap()
         };
@@ -4025,7 +4025,7 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
             let optional = json!({
                 "install_path":"libexec/optional/v2/runner",
                 "platforms":{(crate::setup::detect_platform()):{
-                    "cid":raw_cid(b"optional support"), "checksum":format!("sha256:{}", digest(b"optional support"))
+                    "release_path":"optional", "cid":raw_cid(b"optional support"), "checksum":format!("sha256:{}", digest(b"optional support"))
                 }}
             });
             if outcome == "optional moved restored" {
@@ -4055,7 +4055,7 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
             let bytes = archive.into_inner().unwrap().finish().unwrap();
             value["external"]["fixture-provider"]["install_path"] = json!("tools/fixture-provider");
             value["external"]["fixture-provider"]["platforms"][crate::setup::detect_platform()] = json!({
-                "cid":raw_cid(&bytes), "checksum":format!("sha256:{}", digest(&bytes)), "size":bytes.len(),
+                "release_path":"fixture-provider.tar.gz", "cid":raw_cid(&bytes), "checksum":format!("sha256:{}", digest(&bytes)), "size":bytes.len(),
                 "install_path":"tools/fixture-provider", "extract_path":"fixture-provider", "binary_path":"runner"
             });
             bytes
@@ -4064,10 +4064,10 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
         };
         if outcome.starts_with("support path") {
             // Only a descriptor without a signed CID is fetched by release name.
-            let platform = &mut value["external"]["fixture-provider"]["platforms"]
-                [crate::setup::detect_platform()];
-            platform["release_path"] = json!("fixture-provider");
-            platform.as_object_mut().unwrap().remove("cid");
+            value["external"]["fixture-provider"]["platforms"][crate::setup::detect_platform()]
+                .as_object_mut()
+                .unwrap()
+                .remove("cid");
         }
         value["capsules"]["fixture-app"] = json!({
             "cid":raw_cid(&app), "sha256":digest(&app), "size":app.len()
@@ -4081,7 +4081,8 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
             value["external"]["fixture-provider"]["platforms"][crate::setup::detect_platform()]
                 ["strategy"] = json!("source-build");
         } else if outcome == "optional missing checksum" {
-            value["external"]["optional"] = json!({"platforms":{"*":{"cid":raw_cid(b"optional")}}});
+            value["external"]["optional"] =
+                json!({"platforms":{"*":{"release_path":"optional", "cid":raw_cid(b"optional")}}});
         } else if outcome == "metadata development strategy" {
             value["external"]["fixture-provider"]["capsule_metadata"] = json!({
                 "platforms":{"*":{"strategy":"local-copy", "checksum":format!("sha256:{}", digest(b"metadata"))}}
@@ -4185,7 +4186,7 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
             (app_cid.clone(), app),
             (catalogue_cid.clone(), catalogue.1.clone()),
         ]);
-        let fetch: crate::update::FetchFn = Box::new(move |cid, _| {
+        let fetch: crate::update::FetchFn = Box::new(move |cid| {
             if [
                 "missing checksum",
                 "development strategy",

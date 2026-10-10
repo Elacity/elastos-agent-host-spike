@@ -558,14 +558,6 @@ enum Commands {
         #[arg(long)]
         head_cid: Option<String>,
 
-        /// Skip Carrier discovery and require an explicit transport override
-        #[arg(long)]
-        no_p2p: bool,
-
-        /// Explicit transport override URL for HEAD discovery (repeatable, tries in order)
-        #[arg(long = "gateway")]
-        gateways: Vec<String>,
-
         /// Skip confirmation prompt and install immediately
         #[arg(long, alias = "no-confirm")]
         yes: bool,
@@ -588,14 +580,6 @@ enum Commands {
         /// HEAD CID (bypasses discovery — operator override)
         #[arg(long)]
         head_cid: Option<String>,
-
-        /// Skip Carrier discovery and require an explicit transport override
-        #[arg(long)]
-        no_p2p: bool,
-
-        /// Explicit transport override URL for HEAD discovery (repeatable, tries in order)
-        #[arg(long = "gateway")]
-        gateways: Vec<String>,
 
         /// Skip confirmation prompt and install immediately
         #[arg(long, alias = "no-confirm")]
@@ -1638,8 +1622,6 @@ async fn run() -> anyhow::Result<()> {
         Commands::Update {
             check,
             head_cid,
-            no_p2p,
-            gateways,
             yes,
             rollback_to,
             force,
@@ -1647,8 +1629,6 @@ async fn run() -> anyhow::Result<()> {
         | Commands::Upgrade {
             check,
             head_cid,
-            no_p2p,
-            gateways,
             yes,
             rollback_to,
             force,
@@ -1656,8 +1636,6 @@ async fn run() -> anyhow::Result<()> {
             release_cmd::run_update_command(
                 check,
                 head_cid,
-                no_p2p,
-                gateways,
                 yes,
                 rollback_to,
                 force,

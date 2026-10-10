@@ -10,6 +10,7 @@ import argparse
 import base64
 import copy
 import hashlib
+import http.server
 import json
 import os
 from pathlib import Path
@@ -17,8 +18,10 @@ import platform
 import re
 import shlex
 import signal
+import ssl
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -27,7 +30,7 @@ from unittest import mock
 INSTALLER = Path(__file__).with_name("install.sh")
 SANDBOX_BASE = Path(__file__).resolve().parent.parent / "target/installer-sandboxes"
 SOURCE = INSTALLER.read_text()
-HELPERS = SOURCE.split("# ── Parse args", 1)[0]
+HELPERS = SOURCE.split("# ── Main", 1)[0]
 PYTHON = SOURCE.split("<<'PY_ED25519'\n", 1)[1].split("\nPY_ED25519", 1)[0]
 CRYPTO = {"__name__": "installer_test"}
 exec(compile(PYTHON, str(INSTALLER) + ":embedded-verifier", "exec"), CRYPTO)
@@ -111,9 +114,10 @@ case "${1:-}" in
         cp "${@: -4:1}" "$candidate/runtime"; cp "${@: -3}" "$candidate/"; cp "${@: -4:1}" "$5"
         echo "  fixture writer installed"; exit 0 ;;
     setup)
-        printf '%s\\n' "Runtime setup handoff; Carrier transport is outside this fixture" > "${ELASTOS_TEST_SETUP_MARKER:?fixture marker}"
+        printf '%s\\n' "Runtime setup handoff; Carrier transport is outside this fixture" "TMPDIR=${TMPDIR:-}" > "${ELASTOS_TEST_SETUP_MARKER:?fixture marker}"
         exit 0 ;;
-    principal-root-upgrade|home) exit 0 ;;
+    principal-root-upgrade) echo '{"schema": "fixture-receipt"}'; exit 0 ;;
+    home) exit 0 ;;
     *) exit 97 ;;
 esac
 '''
@@ -317,11 +321,53 @@ class ShellTests(unittest.TestCase):
         self.assertIn("not enough free space: this needs 0.3 GB plus 2 GB kept free",
                       refused.stderr)
 
-    def test_empty_gateway_array_fails_with_installer_message(self):
-        result = shell('GATEWAYS=()\nipfs_fetch test-cid /unused\n')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Failed to fetch CID", result.stderr)
-        self.assertNotIn("unbound variable", result.stderr)
+    def test_real_curl_refuses_plain_http_except_exact_loopback(self):
+        # Real curl, no network: a refused protocol fails before connecting,
+        # and the closed loopback port fails to connect (7), not on protocol (1).
+        for url in ("http://example.invalid/release.json", "http://127.0.0.1:80@example.invalid/x",
+                    "http://localhost@example.invalid/x", "http://[::1]@example.invalid/x",
+                    "http://127.0.0.1\\@example.invalid/x", "http://127.0.0.1.example.invalid/x"):
+            with self.subTest(url=url):
+                refused = shell('fetch_url -fsS "$1"\n', url)
+                self.assertEqual(refused.returncode, 1, refused.stderr)
+                self.assertIn(url + " or a redirect from it is not HTTPS", refused.stderr)
+        for url in ("http://127.0.0.1:1/x", "http://[::1]:1/x", "http://localhost:1/x"):
+            with self.subTest(url=url):
+                loopback = shell('fetch_url -fsS --max-time 5 "$1"\n', url)
+                self.assertEqual(loopback.returncode, 7, loopback.stderr)
+
+    def test_real_curl_never_follows_a_redirect_to_plain_http(self):
+        class Redirect(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", "http://example.invalid/release.json")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        with tempfile.TemporaryDirectory(prefix="installer-tls-") as directory:
+            cert, key = Path(directory, "cert.pem"), Path(directory, "key.pem")
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                            "-subj", "/CN=127.0.0.1", "-keyout", key, "-out", cert],
+                           check=True, capture_output=True)
+            tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            tls.load_cert_chain(cert, key)
+            servers = [http.server.ThreadingHTTPServer(("127.0.0.1", 0), Redirect) for _ in range(2)]
+            servers[1].socket = tls.wrap_socket(servers[1].socket, server_side=True)
+            for server in servers:
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                # Loopback HTTP follows no redirect (47); HTTPS refuses one to HTTP (1).
+                for url, status in [(f"http://127.0.0.1:{servers[0].server_port}/release.json", 47),
+                                    (f"https://127.0.0.1:{servers[1].server_port}/release.json", 1)]:
+                    with self.subTest(url=url):
+                        result = shell('fetch_url -fsSL -k --max-time 5 "$1"\n', url)
+                        self.assertEqual(result.returncode, status, result.stderr)
+            finally:
+                for server in servers:
+                    server.shutdown()
+                    server.server_close()
 
     def test_output_mode_is_plain_off_a_terminal_and_rich_on_request(self):
         script = 'show_banner\nstep 1 Title\ninfo note\nok done\nwarn careful\n'
@@ -462,25 +508,32 @@ class InstallerSandbox:
         for path in (self.home, self.root / "tmp", self.responses, self.root / "mocks"):
             path.mkdir(parents=True)
         (self.root / "requests").write_text("")
-        self.head_cid = "head-a"
-        self.release_cid = json.loads(head)["payload"]["latest_release_cid"]
-        platform_entry = json.loads(release)["payload"].get("platforms", {}).get("x86_64-linux", {})
-        self.binary_cid = platform_entry.get("binary", {}).get("cid", "")
         self.respond("release-head.json", head)
         self.respond("release.json", release)
         mocks = self.root / "mocks"
         (mocks / "uname").write_text('#!/bin/sh\ncase "$1" in -s) echo "$MOCK_SYSTEM";; -m) echo "$MOCK_MACHINE";; esac\n')
+        # Fixture URLs are https://test.invalid, so every request must carry the
+        # HTTPS-only flags; a responses/<name>.redirect file names a redirect target.
         (mocks / "curl").write_text('''#!/bin/sh
-destination=""
+destination="" flags=""
 while [ "$#" -gt 0 ]; do
-    case "$1" in -o) destination="$2"; shift 2;; *) url="$1"; shift;; esac
+    case "$1" in
+        -o) destination="$2"; shift 2;;
+        --proto|--proto-redir) flags="$flags $1 $2"; shift 2;;
+        --tlsv1.2) flags="$flags $1"; shift;;
+        *) url="$1"; shift;;
+    esac
 done
 printf '%s\\n' "$url" >> "$FIXTURES/requests"
+[ "$flags" = " --proto =https --proto-redir =https --tlsv1.2" ] || { echo "insecure-curl:$flags" >&2; exit 94; }
 case "$url" in
-  */release-head.json|*/ipfs/"$FIXTURE_HEAD_CID") response=release-head.json;;
-  */release.json|*/ipfs/"$FIXTURE_RELEASE_CID") response=release.json;;
-  */artifacts/elastos-*|*/ipfs/"$FIXTURE_BINARY_CID") response=binary;;
+  */release-head.json) response=release-head.json;;
+  */release.json) response=release.json;;
+  */artifacts/elastos-*) response=binary;;
   *) echo unexpected-request-blocked >&2; exit 93;;
+esac
+case "$(cat "$FIXTURES/responses/$response.redirect" 2>/dev/null)" in
+  http://*) echo 'curl: (1) Protocol "http" not supported' >&2; exit 1;;
 esac
 [ -f "$FIXTURES/responses/$response" ] || { echo artifact-request-blocked >&2; exit 93; }
 if [ -n "$destination" ]; then cp "$FIXTURES/responses/$response" "$destination"; else cat "$FIXTURES/responses/$response"; fi
@@ -500,22 +553,19 @@ if [ -n "$destination" ]; then cp "$FIXTURES/responses/$response" "$destination"
     def requests(self):
         return (self.root / "requests").read_text().splitlines()
 
-    def run(self, *options, transport="publisher", umask="0022"):
+    def run(self, *options, umask="0022"):
         seen = len(self.requests())
-        options = list(options) + (["--publisher-gateway", "https://test.invalid"] if transport == "publisher"
-                                   else ["--gateway", "https://test.invalid", "--head-cid", self.head_cid])
-        result = shell('umask "$9"\n' + '''
+        result = shell('umask "$6"\n' + '''
 export HOME="$1/home" XDG_DATA_HOME="$1/home/xdg-data" TMPDIR="$1/tmp" FIXTURES="$1" PATH="$1/mocks:$PATH"
 # Apple Python otherwise adds bytecode caches to HOME during file-preservation checks.
 export PYTHONDONTWRITEBYTECODE=1
-export ELASTOS_PUBLISHER_GATEWAY="" ELASTOS_HEAD_CID="" ELASTOS_IPFS_GATEWAYS=""
+export ELASTOS_PUBLISHER_GATEWAY="" ELASTOS_HEAD_CID=""
 export ELASTOS_SOURCE_CONNECT_TICKET="" ELASTOS_PUBLISHER_NODE_ID="" ELASTOS_INSTALL_ONLY=""
 export ELASTOS_TEST_CALLS="$1/calls" ELASTOS_TEST_SETUP_MARKER="$1/setup-marker" MOCK_SYSTEM="$4" MOCK_MACHINE="$5"
-export FIXTURE_HEAD_CID="$6" FIXTURE_RELEASE_CID="$7" FIXTURE_BINARY_CID="$8"
 # Feed the complete stamped script through stdin, as curl | bash does.
-cat "$3" | "$2" --noprofile --norc -s -- "${@:10}"
-''', self.root, OPTIONS.bash, self.installer, self.system, self.machine, self.head_cid, self.release_cid,
-                       self.binary_cid, umask, "--maintainer-did", self.did, *options)
+cat "$3" | "$2" --noprofile --norc -s -- "${@:7}"
+''', self.root, OPTIONS.bash, self.installer, self.system, self.machine, umask,
+                       "--maintainer-did", self.did, "--publisher-gateway", "https://test.invalid", *options)
         return result, self.requests()[seen:]
 
     def runtime_calls(self):
@@ -535,11 +585,11 @@ cat "$3" | "$2" --noprofile --norc -s -- "${@:10}"
         return state
 
 
-def run_offline_installer(head, release, did, transport="publisher", system="Linux", machine="x86_64"):
+def run_offline_installer(head, release, did, system="Linux", machine="x86_64"):
     # Only transport and uname are replaced. The complete installer executes,
     # and every artifact request fails before installation or external access.
     with InstallerSandbox(head, release, did, system, machine) as sandbox:
-        result, requests = sandbox.run(transport=transport)
+        result, requests = sandbox.run()
         if sandbox.binary.exists():
             raise AssertionError("Offline fixture reached installation")
         return result, requests
@@ -665,24 +715,20 @@ validate_release_identity "$1" "$2"
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("Release identity check failed", result.stderr)
 
-    def test_binding_precedes_artifacts_on_publisher_and_cid_transports(self):
+    def test_binding_precedes_artifacts(self):
         did, head, first, second = binding_fixture()
         changed_byte = first.replace(b'"version":"0.7.1"', b'"version":"0.8.1"')
         self.assertNotEqual(first, changed_byte)
-        for transport in ["publisher", "cid"]:
-            for name, release, matching in [("matching", first, True), ("other signed release", second, False),
-                                            ("whitespace", first + b" ", False), ("one byte", changed_byte, False)]:
-                result, requests = run_offline_installer(head, release, did, transport)
-                with self.subTest(transport=transport, case=name):
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertEqual(len(requests), 3 if matching else 2, result.stdout + result.stderr)
-                    self.assertEqual(requests[0], "https://test.invalid/" + ("release-head.json" if transport == "publisher" else "ipfs/head-a"))
-                    self.assertEqual(requests[1], "https://test.invalid/" + ("release.json" if transport == "publisher" else "ipfs/release-a"))
-                    if matching:
-                        self.assertEqual(requests[2], "https://test.invalid/" + ("artifacts/elastos-x86_64-linux" if transport == "publisher" else "ipfs/binary-a"))
-                    else:
-                        self.assertIn("Signature verification FAILED" if name == "one byte" else
-                                      "Release envelope differs from the signed head", result.stderr)
+        for name, release, matching in [("matching", first, True), ("other signed release", second, False),
+                                        ("whitespace", first + b" ", False), ("one byte", changed_byte, False)]:
+            result, requests = run_offline_installer(head, release, did)
+            with self.subTest(case=name):
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(requests, InstallationTests.REQUESTS[:3 if matching else 2],
+                                 result.stdout + result.stderr)
+                if not matching:
+                    self.assertIn("Signature verification FAILED" if name == "one byte" else
+                                  "Release envelope differs from the signed head", result.stderr)
         result, requests = run_offline_installer(head, first, did, system="Darwin", machine="arm64")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("No release available for platform: aarch64-darwin", result.stderr)
@@ -716,12 +762,8 @@ validate_release_identity "$1" "$2"
 class InstallationTests(unittest.TestCase):
     """The complete installer against served artifact bytes inside one disposable sandbox."""
 
-    REQUESTS = {
-        "publisher": ["https://test.invalid/release-head.json", "https://test.invalid/release.json",
-                      "https://test.invalid/artifacts/elastos-x86_64-linux"],
-        "cid": ["https://test.invalid/ipfs/head-a", "https://test.invalid/ipfs/release-a",
-                "https://test.invalid/ipfs/binary-a"],
-    }
+    REQUESTS = ["https://test.invalid/release-head.json", "https://test.invalid/release.json",
+                "https://test.invalid/artifacts/elastos-x86_64-linux"]
 
     def test_installer_refuses_a_maintainer_did_with_control_text_before_printing_it(self):
         did, head, release = installable_fixture()
@@ -787,42 +829,63 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(sandbox.home_state(), before)
         self.assertEqual(list((sandbox.root / "tmp").iterdir()), [])
 
+    def test_truncated_script_acts_on_nothing(self):
+        # curl | bash runs whatever arrived before a dropped connection; main
+        # runs only from the last line, so no prefix may stop or change anything.
+        did, head, release = installable_fixture()
+        lines = SOURCE.splitlines(keepends=True)
+        stop = next(i for i, line in enumerate(lines) if line.startswith("installer_runtime_control "))
+        cuts = [i for i, line in enumerate(lines) if re.match(r"step \d ", line)] + [stop + 2, len(lines) - 1]
+        self.assertEqual(len(cuts), 6)
+        for cut in cuts:
+            with self.subTest(line=cut + 1), InstallerSandbox(head, release, did) as sandbox:
+                self.existing_installation(sandbox)
+                sandbox.respond("binary", RUNTIME_STUB)
+                sandbox.installer.write_text("".join(lines[:cut]))
+                before = sandbox.home_state()
+                result, requests = sandbox.run()
+                self.assertEqual(requests, [])
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(sandbox.runtime_calls(), [])
+                self.assertEqual(sandbox.home_state(), before)
+
     def test_runtime_owns_metadata_handoff_after_three_bootstrap_downloads(self):
         # The shell keeps both existing metadata files and cached capsules. The
         # Runtime stub proves its writer receives verified envelopes and source
         # config; it deliberately makes no Carrier claim and writes no files.
-        for transport in ("publisher", "cid"):
-            for catalogue in (False, True):
-                components = pinned_components() if catalogue else COMPONENTS
-                manifest = json.loads(components)
-                manifest["capsules"] = {"shell": {"cid": "new-shell"}}
-                components = json.dumps(manifest).encode()
-                did, head, release = installable_fixture(components=components)
-                for install_only in (False, True):
-                    with self.subTest(transport=transport, catalogue=catalogue, install_only=install_only), \
-                            InstallerSandbox(head, release, did) as sandbox:
-                        self.existing_installation(sandbox)
-                        before = sandbox.home_state()
-                        sandbox.respond("binary", RUNTIME_STUB)
-                        # Components/catalog/bootstrap endpoints remain blocked.
-                        result, requests = sandbox.run(*(["--install-only"] if install_only else []), transport=transport)
-                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                        self.assertEqual(requests, self.REQUESTS[transport])
-                        self.assertEqual(changed_paths(before, sandbox.home_state()), {".local/bin/elastos"})
-                        candidate = sandbox.root / "candidate"
-                        self.assertEqual((candidate / "release-head.json").read_bytes(), head)
-                        self.assertEqual((candidate / "release.json").read_bytes(), release)
-                        source = json.loads((candidate / "sources.json").read_text())["sources"][0]
-                        self.assertEqual((source["connect_ticket"], source["publisher_node_id"]),
-                                         ("fixture-ticket", "fixture-node"))
-                        marker = sandbox.root / "setup-marker"
-                        if install_only:
-                            self.assertFalse(marker.exists())
-                            self.assertNotIn("setup", sandbox.runtime_calls())
-                        else:
-                            self.assertIn("Carrier transport is outside this fixture", marker.read_text())
-                            self.assertEqual(sandbox.runtime_calls()[-1], "setup")
-                        self.assertEqual(list((sandbox.root / "tmp").iterdir()), [])
+        for catalogue in (False, True):
+            components = pinned_components() if catalogue else COMPONENTS
+            manifest = json.loads(components)
+            manifest["capsules"] = {"shell": {"cid": "new-shell"}}
+            components = json.dumps(manifest).encode()
+            did, head, release = installable_fixture(components=components)
+            for install_only in (False, True):
+                with self.subTest(catalogue=catalogue, install_only=install_only), \
+                        InstallerSandbox(head, release, did) as sandbox:
+                    self.existing_installation(sandbox)
+                    before = sandbox.home_state()
+                    sandbox.respond("binary", RUNTIME_STUB)
+                    # Components/catalog/bootstrap endpoints remain blocked.
+                    result, requests = sandbox.run(*(["--install-only"] if install_only else []))
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(requests, self.REQUESTS)
+                    self.assertEqual(changed_paths(before, sandbox.home_state()), {".local/bin/elastos"})
+                    candidate = sandbox.root / "candidate"
+                    self.assertEqual((candidate / "release-head.json").read_bytes(), head)
+                    self.assertEqual((candidate / "release.json").read_bytes(), release)
+                    source = json.loads((candidate / "sources.json").read_text())["sources"][0]
+                    self.assertEqual((source["connect_ticket"], source["publisher_node_id"]),
+                                     ("fixture-ticket", "fixture-node"))
+                    marker = sandbox.root / "setup-marker"
+                    if install_only:
+                        self.assertFalse(marker.exists())
+                        self.assertNotIn("setup", sandbox.runtime_calls())
+                    else:
+                        self.assertIn("Carrier transport is outside this fixture", marker.read_text())
+                        # Children see the caller's TMPDIR, not the installer's scratch directory.
+                        self.assertIn(f"\nTMPDIR={sandbox.root / 'tmp'}\n", marker.read_text())
+                        self.assertEqual(sandbox.runtime_calls()[-1], "setup")
+                    self.assertEqual(list((sandbox.root / "tmp").iterdir()), [])
 
     def test_piped_run_prints_plain_numbered_steps_and_ready_summary(self):
         # curl | bash with captured stdout is the CI and log case: no colour,
@@ -854,6 +917,37 @@ class InstallationTests(unittest.TestCase):
                     self.assertIn("update", result.stdout[ready:])
                     self.assertIn("export PATH=", result.stdout[ready:])
 
+    def test_redirect_to_plain_http_fails_with_clear_message(self):
+        did, head, release = installable_fixture()
+        for response, requests_made in [("release-head.json", 1), ("release.json", 2), ("binary", 3)]:
+            with self.subTest(response=response), InstallerSandbox(head, release, did) as sandbox:
+                self.existing_installation(sandbox)
+                sandbox.respond("binary", RUNTIME_STUB)
+                sandbox.respond(response + ".redirect", b"http://test.invalid/plain")
+                before = sandbox.home_state()
+                result, requests = sandbox.run()
+                self.assertEqual(requests, self.REQUESTS[:requests_made])
+                self.assertIn("or a redirect from it is not HTTPS; release data is fetched over HTTPS only",
+                              result.stderr)
+                self.assert_no_installation_effects(sandbox, before, result)
+
+    def test_python3_that_cannot_run_stops_before_any_download_with_one_next_step(self):
+        did, head, release = installable_fixture()
+        for system, machine, message in [
+            ("Darwin", "arm64", "This Mac needs Apple's Command Line Tools for python3. "
+                                "Run: xcode-select --install, then run the installer again."),
+            ("Linux", "x86_64", "python3 is installed but does not run. Repair python3, then run the installer again."),
+        ]:
+            with self.subTest(system=system), InstallerSandbox(head, release, did, system, machine) as sandbox:
+                stub = sandbox.root / "mocks/python3"
+                stub.write_text("#!/bin/sh\necho 'xcode-select: note: No developer tools were found' >&2\nexit 1\n")
+                stub.chmod(0o755)
+                result, requests = sandbox.run("--install-only")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(requests, [])
+                self.assertIn(message, result.stderr)
+                self.assertNotIn("xcode-select: note", result.stderr)
+
     def test_existing_installation_is_reported_before_download(self):
         did, head, release = installable_fixture()
         with InstallerSandbox(head, release, did) as sandbox:
@@ -871,29 +965,27 @@ class InstallationTests(unittest.TestCase):
             ("truncated binary", RUNTIME_STUB[:-9]),
             ("wrong binary bytes", RUNTIME_STUB.replace(b"0.7.1", b"0.7.2")),
         ]
-        for transport in ["publisher", "cid"]:
-            with InstallerSandbox(head, release, did) as sandbox:
-                self.existing_installation(sandbox)
-                before = sandbox.home_state()
-                expected = self.REQUESTS[transport]
-                for name, binary in cases:
-                    sandbox.respond("binary", binary)
-                    result, requests = sandbox.run("--install-only", transport=transport)
-                    with self.subTest(transport=transport, case=name):
-                        self.assertIn("SHA-256 mismatch", result.stderr)
-                        self.assertIn("Verifying binary SHA-256", result.stdout)
-                        self.assertEqual(requests, expected)
-                        self.assert_no_installation_effects(sandbox, before, result)
-                sandbox.respond("binary", RUNTIME_STUB)
-                with self.subTest(transport=transport, case="clean rerun"):
-                    self.assert_clean_install(sandbox, transport, did, head, release, before)
+        with InstallerSandbox(head, release, did) as sandbox:
+            self.existing_installation(sandbox)
+            before = sandbox.home_state()
+            for name, binary in cases:
+                sandbox.respond("binary", binary)
+                result, requests = sandbox.run("--install-only")
+                with self.subTest(case=name):
+                    self.assertIn("SHA-256 mismatch", result.stderr)
+                    self.assertIn("Verifying binary SHA-256", result.stdout)
+                    self.assertEqual(requests, self.REQUESTS)
+                    self.assert_no_installation_effects(sandbox, before, result)
+            sandbox.respond("binary", RUNTIME_STUB)
+            with self.subTest(case="clean rerun"):
+                self.assert_clean_install(sandbox, did, head, release, before)
 
-    def assert_clean_install(self, sandbox, transport, did, head, release, before, runtime=RUNTIME_STUB):
+    def assert_clean_install(self, sandbox, did, head, release, before, runtime=RUNTIME_STUB):
         """A valid --install-only run hands its whole verified candidate to Runtime's writer."""
         sandbox.calls.unlink(missing_ok=True)
-        result, requests = sandbox.run("--install-only", transport=transport)
+        result, requests = sandbox.run("--install-only")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(requests, self.REQUESTS[transport])
+        self.assertEqual(requests, self.REQUESTS)
         self.assertIn("Runtime installed:", result.stdout)
         self.assertNotIn("Setting up Home", result.stdout)
         calls = sandbox.runtime_calls()
@@ -906,8 +998,10 @@ class InstallationTests(unittest.TestCase):
         self.assertRegex(calls[1], writer + " --check$")
         self.assertRegex(calls[2], writer + "$")
         steps = ["fixture writer admitted", "Stopping verified Runtime processes",
-                 "Installing binary to", "fixture writer installed", "Verifying and upgrading configured protected roots"]
+                 "Installing binary to", "fixture writer installed", "Verifying and upgrading configured protected roots",
+                 "Protected roots are ready"]
         self.assertEqual(sorted(steps, key=result.stdout.index), steps)
+        self.assertNotIn("fixture-receipt", result.stdout)
         self.assertRegex(calls[3], "^principal-root-upgrade --data-dir %s --backup-dir %s/backups/principal-root-upgrade-[0-9]+-[0-9]+$"
                          % (re.escape(str(sandbox.data)), re.escape(str(sandbox.data))))
         self.assertEqual(len(calls), 4, "setup and Home launch stay out of --install-only")
@@ -925,8 +1019,7 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(source["discovery_uri"],
                          "elastos://source/stable/" + hashlib.sha256(did.encode()).hexdigest()[:32])
         registration = (source["gateways"], source["head_cid"], source["connect_ticket"], source["publisher_node_id"])
-        self.assertEqual(registration, (["https://test.invalid"], "", "fixture-ticket", "fixture-node")
-                         if transport == "publisher" else ([], "head-a", "fixture-ticket", "fixture-node"))
+        self.assertEqual(registration, (["https://test.invalid"], "", "fixture-ticket", "fixture-node"))
         # Apart from the stand-in's Runtime, the shell writes no installation file
         # itself and removes its staged copy.
         self.assertEqual(changed_paths(before, sandbox.home_state()), {".local/bin/elastos"})
@@ -936,29 +1029,24 @@ class InstallationTests(unittest.TestCase):
         for version in ["0.7.1", "0.7.10", "0.7.1-rc.1", "0.7.1+build.1", "0.7.1-rc.1+build.1"]:
             binary = RUNTIME_STUB.replace(b"elastos 0.7.1", ("elastos " + version).encode())
             did, head, release = installable_fixture(runtime=binary, version=version)
-            for transport in ["publisher", "cid"]:
-                with self.subTest(version=version, transport=transport):
-                    with InstallerSandbox(head, release, did) as sandbox:
-                        self.existing_installation(sandbox)
-                        sandbox.respond("binary", binary)
-                        self.assert_clean_install(sandbox, transport, did, head, release,
-                                                  sandbox.home_state(), runtime=binary)
+            with self.subTest(version=version), InstallerSandbox(head, release, did) as sandbox:
+                self.existing_installation(sandbox)
+                sandbox.respond("binary", binary)
+                self.assert_clean_install(sandbox, did, head, release, sandbox.home_state(), runtime=binary)
 
     def test_fresh_install_creates_only_private_roots_before_the_writer(self):
         did, head, release = installable_fixture()
-        for transport in ["publisher", "cid"]:
-            with self.subTest(transport=transport):
-                with InstallerSandbox(head, release, did) as sandbox:
-                    sandbox.respond("binary", RUNTIME_STUB)
-                    result, requests = sandbox.run("--install-only", transport=transport)
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                    self.assertEqual(requests, self.REQUESTS[transport])
-                    self.assertEqual((sandbox.root / "candidate/release-head.json").read_bytes(), head)
-                    self.assertEqual((sandbox.root / "candidate/release.json").read_bytes(), release)
-                    self.assertEqual(set(sandbox.home_state()), {
-                        ".local", ".local/bin", ".local/bin/elastos", "xdg-data", "xdg-data/elastos"})
-                    self.assertEqual(sandbox.data.stat().st_mode & 0o777, 0o700)
-                    self.assertEqual(list((sandbox.root / "tmp").iterdir()), [])
+        with InstallerSandbox(head, release, did) as sandbox:
+            sandbox.respond("binary", RUNTIME_STUB)
+            result, requests = sandbox.run("--install-only")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(requests, self.REQUESTS)
+            self.assertEqual((sandbox.root / "candidate/release-head.json").read_bytes(), head)
+            self.assertEqual((sandbox.root / "candidate/release.json").read_bytes(), release)
+            self.assertEqual(set(sandbox.home_state()), {
+                ".local", ".local/bin", ".local/bin/elastos", "xdg-data", "xdg-data/elastos"})
+            self.assertEqual(sandbox.data.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(list((sandbox.root / "tmp").iterdir()), [])
 
     def test_group_umask_still_creates_owner_only_writable_directories(self):
         did, head, release = installable_fixture()
@@ -1089,32 +1177,31 @@ class InstallationTests(unittest.TestCase):
             binary = RUNTIME_STUB.replace(b"elastos 0.7.1", output.encode())
             cases.append((name, version, binary, "version mismatch", ["--version"]))
         did, head, release = installable_fixture()
-        for transport in ["publisher", "cid"]:
-            with InstallerSandbox(head, release, did) as sandbox:
-                self.existing_installation(sandbox)
-                before = sandbox.home_state()
-                for name, version, binary, message, expected_calls in cases:
-                    _, served_head, served_release = installable_fixture(runtime=binary, version=version)
-                    sandbox.respond("release-head.json", served_head)
-                    sandbox.respond("release.json", served_release)
-                    sandbox.respond("binary", binary)
-                    sandbox.calls.unlink(missing_ok=True)
-                    result, requests = sandbox.run("--install-only", transport=transport)
-                    with self.subTest(transport=transport, case=name):
-                        self.assertNotEqual(result.returncode, 0)
-                        self.assertIn(message, result.stderr)
-                        self.assertIn("the current installation was preserved", result.stderr)
-                        self.assertEqual(requests, self.REQUESTS[transport])
-                        self.assertNotIn("Stopping verified Runtime processes", result.stdout)
-                        self.assertNotIn("Installing components.json", result.stdout)
-                        self.assertEqual(sandbox.runtime_calls(), expected_calls)
-                        self.assertEqual(sandbox.home_state(), before)
-                        self.assertEqual(list((sandbox.root / "tmp").iterdir()), [])
-                sandbox.respond("release-head.json", head)
-                sandbox.respond("release.json", release)
-                sandbox.respond("binary", RUNTIME_STUB)
-                with self.subTest(transport=transport, case="valid retry"):
-                    self.assert_clean_install(sandbox, transport, did, head, release, before)
+        with InstallerSandbox(head, release, did) as sandbox:
+            self.existing_installation(sandbox)
+            before = sandbox.home_state()
+            for name, version, binary, message, expected_calls in cases:
+                _, served_head, served_release = installable_fixture(runtime=binary, version=version)
+                sandbox.respond("release-head.json", served_head)
+                sandbox.respond("release.json", served_release)
+                sandbox.respond("binary", binary)
+                sandbox.calls.unlink(missing_ok=True)
+                result, requests = sandbox.run("--install-only")
+                with self.subTest(case=name):
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(message, result.stderr)
+                    self.assertIn("the current installation was preserved", result.stderr)
+                    self.assertEqual(requests, self.REQUESTS)
+                    self.assertNotIn("Stopping verified Runtime processes", result.stdout)
+                    self.assertNotIn("Installing components.json", result.stdout)
+                    self.assertEqual(sandbox.runtime_calls(), expected_calls)
+                    self.assertEqual(sandbox.home_state(), before)
+                    self.assertEqual(list((sandbox.root / "tmp").iterdir()), [])
+            sandbox.respond("release-head.json", head)
+            sandbox.respond("release.json", release)
+            sandbox.respond("binary", RUNTIME_STUB)
+            with self.subTest(case="valid retry"):
+                self.assert_clean_install(sandbox, did, head, release, before)
 
     def test_signature_and_binding_failures_reject_before_artifacts_in_populated_installation(self):
         did, head, release = installable_fixture()
@@ -1127,17 +1214,15 @@ class InstallationTests(unittest.TestCase):
             ("head bound to other release", unbound, release, did, "Release envelope differs from the signed head", 2),
             ("foreign trust anchor", head, release, "did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw", "Signature verification FAILED", 1),
         ]
-        for transport in ["publisher", "cid"]:
-            for name, served_head, served_release, anchor, message, request_count in cases:
-                with self.subTest(transport=transport, case=name), \
-                        InstallerSandbox(served_head, served_release, anchor) as sandbox:
-                    self.existing_installation(sandbox)
-                    sandbox.respond("binary", RUNTIME_STUB)
-                    before = sandbox.home_state()
-                    result, requests = sandbox.run("--install-only", transport=transport)
-                    self.assertIn(message, result.stderr)
-                    self.assertEqual(requests, self.REQUESTS[transport][:request_count])
-                    self.assert_no_installation_effects(sandbox, before, result)
+        for name, served_head, served_release, anchor, message, request_count in cases:
+            with self.subTest(case=name), InstallerSandbox(served_head, served_release, anchor) as sandbox:
+                self.existing_installation(sandbox)
+                sandbox.respond("binary", RUNTIME_STUB)
+                before = sandbox.home_state()
+                result, requests = sandbox.run("--install-only")
+                self.assertIn(message, result.stderr)
+                self.assertEqual(requests, self.REQUESTS[:request_count])
+                self.assert_no_installation_effects(sandbox, before, result)
 
 
 class DataPathTests(unittest.TestCase):
@@ -1226,6 +1311,9 @@ declare -F installer_runtime_control >/dev/null
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout, "")
 
+    def test_installer_never_assigns_tmpdir(self):
+        self.assertIsNone(re.search(r"^\s*(export\s+)?TMPDIR=", SOURCE, re.M))
+
     def test_stdin_entry_still_executes_help(self):
         result = subprocess.run([OPTIONS.bash, "--noprofile", "--norc", "-s", "--", "--help"],
                                 input=SOURCE, text=True, capture_output=True, timeout=10)
@@ -1312,6 +1400,45 @@ class NativeProcessTests(unittest.TestCase):
         self.assertIsNone(PROCESSES["process_snapshot"](self.child.pid))
         self.assertFalse(self.coords.exists())
         self.assertTrue(self.binary.is_file())
+
+    def test_open_home_stops_through_its_update_controller(self):
+        # Installed Home: the update controller (its own Runtime copy in the data
+        # root) owns the `home --browser` host named by gateway coordinates.
+        self.child.terminate()
+        self.child.wait(timeout=5)
+        self.coords.unlink()
+        self.binary.unlink()
+        self.binary.symlink_to("/bin/sh")
+        directory = Path(os.path.realpath(self.data)) / "update-controller"
+        directory.mkdir(mode=0o700)
+        (directory / "runtime").symlink_to("/bin/sh")
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        (scripts / "home").write_text('/bin/sleep 30 &\nchild=$!\ntrap \'kill "$child"; exit 0\' TERM\nwait "$child"\n')
+        (scripts / "__update-controller").write_text(
+            '"$HOST" home --browser &\nhost=$!\nprintf "%s\\n" "$host"\n'
+            'trap \'kill "$host"; wait "$host"; exit 0\' TERM\nwait "$host"\n')
+        controller = subprocess.Popen(
+            [str(directory / "runtime"), "__update-controller", "--receipt", str(directory / "receipt.json")],
+            cwd=scripts, env=dict(os.environ, HOST=str(self.binary)),
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        self.extra_children.append(controller)
+        host = int(controller.stdout.readline())
+        controller.stdout.close()
+        time.sleep(0.2)
+        host_snapshot = PROCESSES["process_snapshot"](host)
+        self.assertTrue(PROCESSES["matches_command"](host_snapshot, str(self.binary), ("home --browser",)))
+        self.fixture_descendants.append((host, host_snapshot))
+        gateway = self.data / "gateway-runtime-coords.json"
+        self.write_coords(gateway, host)
+        start = SOURCE.index('info "Stopping verified Runtime processes')
+        block = SOURCE[start:SOURCE.index('info "Installing binary', start)]
+        result = shell('HOME="$1"\nXDG_DATA_HOME="$1/xdg-data"\nINSTALL_DIR="$1/.local/bin"\n'
+                       'DATA_DIR="$(installer_data_dir "$HOME" "$XDG_DATA_HOME")"\n' + block, self.home)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(controller.wait(timeout=5), 0)
+        self.assertIsNone(PROCESSES["process_snapshot"](host))
+        self.assertFalse(gateway.exists())
 
     def test_shared_wrapper_cleanup_finishes_before_home_removal(self):
         descendant, _ = self.start_descendant_fixture(stops_child=True)
@@ -1548,15 +1675,13 @@ class PublisherFixtureTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
 
     def test_unbound_signed_legacy_publication_is_rejected_before_artifacts(self):
-        for transport in ["publisher", "cid"]:
-            result, requests = run_offline_installer(
-                (self.fixtures / "release-head.json").read_bytes(),
-                (self.fixtures / "release.json").read_bytes(), PUBLISHER_DID, transport)
-            with self.subTest(transport=transport):
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(result.stdout.count("Signature verified"), 2)
-                self.assertIn("requires a lowercase SHA-256 envelope binding", result.stderr)
-                self.assertEqual(len(requests), 2)
+        result, requests = run_offline_installer(
+            (self.fixtures / "release-head.json").read_bytes(),
+            (self.fixtures / "release.json").read_bytes(), PUBLISHER_DID)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.count("Signature verified"), 2)
+        self.assertIn("requires a lowercase SHA-256 envelope binding", result.stderr)
+        self.assertEqual(len(requests), 2)
 
 
 if __name__ == "__main__":
