@@ -12,6 +12,11 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   CI, `just test-behaviour` and the gate share `scripts/test-behaviour.sh`,
   so a failing Node test stops the push locally and names the test. Run
   `just test-behaviour-inputs` once to install the pinned Playwright inputs.
+- Linux Browser's prepared rootfs pool names each copy by the admitted rootfs
+  hash from the image manifest. Launch boots only copies of the current image
+  and removes the rest, so an image update or Undo never boots the previous
+  rootfs with the new kernel; a refill that sees the image change discards its
+  copy (#307).
 
 ## [0.8.0-alpha.14]
 

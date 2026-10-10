@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Copy cancellation reaps cp before removing its incomplete pool image."""
+import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -28,6 +30,9 @@ class RootfsPoolLifetime(unittest.TestCase):
                 directory = Path(directory)
                 rootfs = directory / "rootfs.ext4"
                 rootfs.write_bytes(b"fixture")
+                (directory / "browser-vm").mkdir()
+                (directory / "browser-vm/browser-vm-rootfs-manifest.json").write_text(
+                    json.dumps({"sha256": hashlib.sha256(b"fixture").hexdigest(), "size": 7}))
                 cp = directory / "cp"
                 cp.write_text(f"""#!{sys.executable}
 import os, pathlib, signal, sys, time

@@ -60,12 +60,38 @@ function parseArgs(argv) {
   return args;
 }
 
-function readyRootfsFiles(poolDir) {
+// Copies carry the admitted rootfs hash; the launcher boots only copies of the
+// current image. Copies of another image are removed to free their space.
+function admittedRootfsSha256(rootfs, dataDir) {
+  const manifestPath = process.env.ELASTOS_BROWSER_VM_ROOTFS_MANIFEST ||
+    path.join(dataDir, "browser-vm/browser-vm-rootfs-manifest.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  if (!/^[0-9a-f]{64}$/.test(manifest?.sha256 || "") || manifest.size !== fs.statSync(rootfs).size) {
+    throw new Error(`Browser VM rootfs manifest does not describe ${rootfs}`);
+  }
+  return manifest.sha256;
+}
+
+function imageIdentity(rootfs, dataDir) {
+  const stat = fs.statSync(rootfs);
+  return { sha256: admittedRootfsSha256(rootfs, dataDir), file: `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}` };
+}
+
+function readyRootfsFiles(poolDir, imageSha256) {
   try {
-    return fs.readdirSync(poolDir).filter((name) => /^rootfs-[A-Za-z0-9._-]+\.ext4$/.test(name));
+    return fs.readdirSync(poolDir).filter((name) =>
+      name.startsWith(`rootfs-${imageSha256}-`) && /^rootfs-[A-Za-z0-9._-]+\.ext4$/.test(name));
   } catch (error) {
     if (error?.code === "ENOENT") return [];
     throw error;
+  }
+}
+
+function discardOtherImages(poolDir, imageSha256) {
+  for (const name of fs.readdirSync(poolDir)) {
+    if (/^rootfs-[A-Za-z0-9._-]+\.ext4$/.test(name) && !name.startsWith(`rootfs-${imageSha256}-`)) {
+      fs.rmSync(path.join(poolDir, name), { force: true });
+    }
   }
 }
 
@@ -127,12 +153,14 @@ async function main() {
     fail(`Browser VM rootfs does not exist: ${rootfs}`);
   }
   fs.mkdirSync(poolDir, { recursive: true, mode: 0o700 });
-  const existing = readyRootfsFiles(poolDir).length;
+  const image = imageIdentity(rootfs, dataDir);
+  discardOtherImages(poolDir, image.sha256);
+  const existing = readyRootfsFiles(poolDir, image.sha256).length;
   const created = [];
   for (let index = existing; index < args.count; index += 1) {
     const id = `${Date.now().toString(36)}-${crypto.randomBytes(4).toString("hex")}`;
-    const partial = path.join(poolDir, `rootfs-${id}.ext4.partial`);
-    const ready = path.join(poolDir, `rootfs-${id}.ext4`);
+    const partial = path.join(poolDir, `rootfs-${image.sha256}-${id}.ext4.partial`);
+    const ready = path.join(poolDir, `rootfs-${image.sha256}-${id}.ext4`);
     const startedAt = Date.now();
     emit({
       schema: "elastos.browser.vm-rootfs-pool.event/v1",
@@ -142,12 +170,16 @@ async function main() {
     });
     try {
       await copyRootfs(rootfs, partial);
+      // An update or Undo during the copy discards it.
+      const after = imageIdentity(rootfs, dataDir);
+      if (after.sha256 !== image.sha256 || after.file !== image.file) {
+        throw new Error("Browser VM image changed during the rootfs pool copy");
+      }
       fs.chmodSync(partial, 0o600);
       fs.renameSync(partial, ready);
     } finally {
       fs.rmSync(partial, { force: true });
     }
-    created.push(ready);
     emit({
       schema: "elastos.browser.vm-rootfs-pool.event/v1",
       event: "copy_ready",
@@ -162,7 +194,7 @@ async function main() {
     data_dir: dataDir,
     pool_dir: poolDir,
     requested_count: args.count,
-    ready_count: readyRootfsFiles(poolDir).length,
+    ready_count: readyRootfsFiles(poolDir, image.sha256).length,
     created,
     script: fileURLToPath(import.meta.url),
   });

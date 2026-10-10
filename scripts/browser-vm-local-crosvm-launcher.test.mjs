@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -194,4 +195,58 @@ test("kernel profile lock follows an inherited writer descriptor after launcher 
   const reopened = f.prepare();
   assert.equal(reopened.initialize, false);
   fs.closeSync(reopened.lockFd);
+});
+
+test("prepared rootfs pool boots only copies of the admitted image across update and Undo", t => {
+  const root = fs.mkdtempSync("/tmp/ebv-pool-");
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const rootfs = path.join(root, "browser-vm/rootfs.ext4");
+  const poolDir = path.join(root, "browser-vm/rootfs-pool");
+  const bin = path.join(root, "fixture-bin");
+  fs.mkdirSync(poolDir, { recursive: true });
+  fs.mkdirSync(bin);
+  // The refill's GNU cp options are outside this test; the copy is real.
+  fs.writeFileSync(path.join(bin, "cp"), "#!/bin/sh\nexec /bin/cp \"$3\" \"$4\"\n", { mode: 0o755 });
+  const sha = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
+  const install = (bytes) => {
+    fs.writeFileSync(rootfs, bytes);
+    fs.writeFileSync(path.join(root, "browser-vm/browser-vm-rootfs-manifest.json"),
+      JSON.stringify({ sha256: sha(bytes), size: Buffer.byteLength(bytes) }));
+  };
+  const context = vm.createContext({ fs, path, process: { env: {} }, ROOTFS_POOL_DIR_ENV: "pool",
+    ROOTFS_MANIFEST_ENV: "ELASTOS_BROWSER_VM_ROOTFS_MANIFEST", logPhase() {},
+    validateAbsolutePath(file) { assert.ok(path.isAbsolute(file)); } });
+  const start = source.indexOf("// Pool copies carry the admitted rootfs hash");
+  const end = source.indexOf("\nfunction rootfsPoolRefillScript(", start);
+  const api = vm.runInContext(`${source.slice(start, end)}\n({ admittedRootfsSha256, acquirePreparedRootfs })`, context);
+  const refill = () => {
+    const result = spawnSync(process.execPath, [new URL("./browser-vm-prepare-rootfs-pool.mjs", import.meta.url).pathname,
+      "--data-dir", root, "--count", "1"], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  let launches = 0;
+  const boot = () => {
+    const launchRootfs = path.join(root, `session-${launches += 1}.ext4`);
+    const imageSha256 = api.admittedRootfsSha256(rootfs, root);
+    if (!api.acquirePreparedRootfs({ poolDir, launchRootfs, imageSha256 })) {
+      refill();
+      assert.ok(api.acquirePreparedRootfs({ poolDir, launchRootfs, imageSha256 }));
+    }
+    return fs.readFileSync(launchRootfs, "utf8");
+  };
+
+  install("image one");
+  fs.writeFileSync(path.join(poolDir, "rootfs-legacy-name.ext4"), "unlabelled copy");
+  refill();
+  refill();
+  assert.equal(boot(), "image one");
+  assert.equal(fs.readdirSync(poolDir).some((name) => name.includes("legacy")), false);
+  install("image two, updated");
+  assert.equal(boot(), "image two, updated");
+  refill();
+  install("image one");
+  assert.equal(boot(), "image one", "Undo must not boot the updated image's pooled copy");
+  assert.deepEqual(fs.readdirSync(poolDir).filter((name) => !name.startsWith(`rootfs-${sha("image one")}-`)), []);
+  fs.writeFileSync(path.join(root, "browser-vm/browser-vm-rootfs-manifest.json"), JSON.stringify({ sha256: sha("other"), size: 1 }));
+  assert.throws(() => api.admittedRootfsSha256(rootfs, root), /does not describe/);
 });

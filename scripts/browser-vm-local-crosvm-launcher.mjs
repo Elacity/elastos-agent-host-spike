@@ -13,6 +13,7 @@ const DATA_DIR_ENV = "ELASTOS_BROWSER_VM_DATA_DIR";
 const ROOT_ENV = "ELASTOS_BROWSER_VM_ROOT";
 const SESSION_KEEP_ENV = "ELASTOS_BROWSER_VM_KEEP_SESSIONS";
 const ROOTFS_POOL_DIR_ENV = "ELASTOS_BROWSER_VM_ROOTFS_POOL_DIR";
+const ROOTFS_MANIFEST_ENV = "ELASTOS_BROWSER_VM_ROOTFS_MANIFEST";
 const ROOTFS_COPY_MODE_ENV = "ELASTOS_BROWSER_VM_ROOTFS_COPY_MODE";
 const ROOTFS_POOL_REFILL_COUNT_ENV = "ELASTOS_BROWSER_VM_ROOTFS_POOL_REFILL_COUNT";
 const ROOTFS_POOL_REFILL_MIN_FREE_MIB_ENV = "ELASTOS_BROWSER_VM_ROOTFS_POOL_REFILL_MIN_FREE_MIB";
@@ -601,14 +602,42 @@ function copyRootfs(rootfs, launchRootfs) {
   return Date.now() - start;
 }
 
-function acquirePreparedRootfs({ poolDir, launchRootfs }) {
+// Pool copies carry the admitted rootfs hash. After an update or Undo, copies
+// of another image are discarded instead of booting with the current kernel.
+function admittedRootfsSha256(rootfs, dataDir) {
+  const manifestPath = process.env[ROOTFS_MANIFEST_ENV] || path.join(dataDir, "browser-vm/browser-vm-rootfs-manifest.json");
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  } catch (error) {
+    throw new Error(`Browser VM rootfs manifest is unreadable: ${manifestPath}: ${error.message}`);
+  }
+  if (!/^[0-9a-f]{64}$/.test(manifest?.sha256 || "") || manifest.size !== fs.statSync(rootfs).size) {
+    throw new Error(`Browser VM rootfs manifest does not describe ${rootfs}`);
+  }
+  return manifest.sha256;
+}
+
+function acquirePreparedRootfs({ poolDir, launchRootfs, imageSha256 }) {
   validateAbsolutePath(poolDir, ROOTFS_POOL_DIR_ENV);
   fs.mkdirSync(path.dirname(launchRootfs), { recursive: true, mode: 0o700 });
   fs.mkdirSync(poolDir, { recursive: true, mode: 0o700 });
-  const candidates = fs.readdirSync(poolDir)
-    .filter((name) => /^rootfs-[A-Za-z0-9._-]+\.ext4$/.test(name))
-    .sort();
-  for (const name of candidates) {
+  const prefix = `rootfs-${imageSha256}-`;
+  const candidates = [];
+  for (const name of fs.readdirSync(poolDir)) {
+    if (!/^rootfs-[A-Za-z0-9._-]+\.ext4$/.test(name)) continue;
+    if (name.startsWith(prefix)) {
+      candidates.push(name);
+      continue;
+    }
+    try {
+      fs.unlinkSync(path.join(poolDir, name));
+      logPhase(`discarded prepared rootfs of another image ${name}`);
+    } catch (error) {
+      if (error?.code !== "ENOENT") logPhase(`could not discard prepared rootfs ${name}: ${error.message}`);
+    }
+  }
+  for (const name of candidates.sort()) {
     const candidate = path.join(poolDir, name);
     try {
       fs.renameSync(candidate, launchRootfs);
@@ -623,9 +652,10 @@ function acquirePreparedRootfs({ poolDir, launchRootfs }) {
   return "";
 }
 
-function readyRootfsFiles(poolDir) {
+function readyRootfsFiles(poolDir, imageSha256) {
   try {
-    return fs.readdirSync(poolDir).filter((name) => /^rootfs-[A-Za-z0-9._-]+\.ext4$/.test(name));
+    return fs.readdirSync(poolDir).filter((name) =>
+      name.startsWith(`rootfs-${imageSha256}-`) && /^rootfs-[A-Za-z0-9._-]+\.ext4$/.test(name));
   } catch (error) {
     if (error?.code === "ENOENT") return [];
     throw error;
@@ -668,13 +698,13 @@ function refillMinFreeBytes() {
   return configured * 1024 * 1024;
 }
 
-async function maybeRefillPreparedRootfsPool({ dataDir, poolDir, rootfs, sessionDir, scriptPath, timeoutMs }) {
+async function maybeRefillPreparedRootfsPool({ dataDir, poolDir, rootfs, imageSha256, sessionDir, scriptPath, timeoutMs }) {
   if (timeoutMs <= 0) return;
   const targetCount = Number(process.env[ROOTFS_POOL_REFILL_COUNT_ENV] || "2");
   if (!Number.isInteger(targetCount) || targetCount < 1) {
     return;
   }
-  const missingCount = targetCount - readyRootfsFiles(poolDir).length;
+  const missingCount = targetCount - readyRootfsFiles(poolDir, imageSha256).length;
   if (missingCount <= 0) {
     return;
   }
@@ -783,23 +813,26 @@ function prepareLaunchRootfs({ rootfs, launchRootfs, dataDir, sessionDir, script
   const poolDir = process.env[ROOTFS_POOL_DIR_ENV] || defaultRootfsPoolDir(dataDir);
   const startedAt = Date.now();
   if (copyMode === "pool-required" || copyMode === "pool-or-copy") {
-    const acquired = acquirePreparedRootfs({ poolDir, launchRootfs });
+    const imageSha256 = admittedRootfsSha256(rootfs, dataDir);
+    const acquired = acquirePreparedRootfs({ poolDir, launchRootfs, imageSha256 });
     if (acquired) {
       return {
         mode: "prepared_pool",
         source: acquired,
         poolDir,
+        imageSha256,
         elapsed_ms: Date.now() - startedAt,
       };
     }
     if (copyMode === "pool-required") {
       refillPreparedRootfsPoolSync({ dataDir, poolDir, rootfs, sessionDir, scriptPath });
-      const refilled = acquirePreparedRootfs({ poolDir, launchRootfs });
+      const refilled = acquirePreparedRootfs({ poolDir, launchRootfs, imageSha256 });
       if (refilled) {
         return {
           mode: "prepared_pool",
           source: refilled,
           poolDir,
+          imageSha256,
           elapsed_ms: Date.now() - startedAt,
         };
       }
@@ -1236,6 +1269,7 @@ async function main() {
       dataDir,
       poolDir: rootfsPrep.poolDir,
       rootfs,
+      imageSha256: rootfsPrep.imageSha256,
       sessionDir,
       scriptPath,
     };
