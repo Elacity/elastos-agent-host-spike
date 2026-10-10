@@ -36,6 +36,14 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   it. Every probe result is published as `assistant:live-models`; the harness
   updates the chip and an open menu from it, keeping keyboard focus on a row or
   menu action. Before, an open menu kept the earlier read while the chip changed.
+- The local pre-push gate refuses what CI refuses: its Cargo calls use
+  `RUSTFLAGS=-D warnings` and drop `CARGO_ENCODED_RUSTFLAGS`, clippy covers
+  the touched packages and their reverse dependencies in each workspace, and a
+  change to `scripts/release-*`, `scripts/install.sh` or
+  `scripts/publish-release.sh` runs `release-platform-input-test.py` and
+  `ci-release-policy-test.py`. Documentation-only changes keep fmt and git
+  checks without rebuilding unrelated workspaces (#319). The installed Home
+  journey waits the model-preparation window for the first engine refusal.
 
 ## [0.8.0-alpha.15]
 
