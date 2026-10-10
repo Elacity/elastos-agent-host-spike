@@ -94,6 +94,13 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - `install.sh` discards `principal-root-upgrade`'s stdout receipt (written to
   the backup directory when objects move) and prints one line. The command's
   JSON output is unchanged for the source-restart scripts that parse it.
+- Setup, Home capsule launch, update refresh and the supervisor install every
+  component only over Carrier by its signed `release_path`; the HTTP
+  `{gateway}/ipfs/<cid>` content path (`download_streaming`,
+  `build_gateway_list`, `ElastosFetchPath`, the update HTTP download helpers)
+  is removed. Admission refuses a component without a non-blank `release_path`
+  (`component_without_signed_release_path_is_refused_before_fetch`). sources.json
+  `gateways` now serves only Carrier ticket refresh.
 
 ## [0.8.0-alpha.15]
 

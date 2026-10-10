@@ -3027,7 +3027,7 @@ async fn real_controller_restart_failure(failure: &str) {
             "home":{"install_path":"capsules/home", "platforms":{}},
             "fixture-provider":{"install_path":"bin/fixture-provider", "platforms":{
                 (crate::setup::detect_platform()):{
-                    "cid":raw_cid(support), "checksum":format!("sha256:{}", digest(support)), "size":support.len()
+                    "release_path":"fixture-provider", "cid":raw_cid(support), "checksum":format!("sha256:{}", digest(support)), "size":support.len()
                 }
             }}
         }
@@ -3886,7 +3886,7 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
             serde_json::to_vec(&json!({
             "schema":"elastos.components/v1", "profiles":{}, "capsules":{},
             "external":{"fixture-provider":{"install_path":"bin/fixture-provider", "platforms":{
-                (crate::setup::detect_platform()): {"cid":raw_cid(bytes), "checksum":format!("sha256:{}", digest(bytes)), "size":bytes.len()}
+                (crate::setup::detect_platform()): {"release_path":"fixture-provider", "cid":raw_cid(bytes), "checksum":format!("sha256:{}", digest(bytes)), "size":bytes.len()}
             }}}
         })).unwrap()
         };
@@ -3924,7 +3924,7 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
             let optional = json!({
                 "install_path":"libexec/optional/v2/runner",
                 "platforms":{(crate::setup::detect_platform()):{
-                    "cid":raw_cid(b"optional support"), "checksum":format!("sha256:{}", digest(b"optional support"))
+                    "release_path":"optional", "cid":raw_cid(b"optional support"), "checksum":format!("sha256:{}", digest(b"optional support"))
                 }}
             });
             if outcome == "optional moved restored" {
@@ -3954,7 +3954,7 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
             let bytes = archive.into_inner().unwrap().finish().unwrap();
             value["external"]["fixture-provider"]["install_path"] = json!("tools/fixture-provider");
             value["external"]["fixture-provider"]["platforms"][crate::setup::detect_platform()] = json!({
-                "cid":raw_cid(&bytes), "checksum":format!("sha256:{}", digest(&bytes)), "size":bytes.len(),
+                "release_path":"fixture-provider.tar.gz", "cid":raw_cid(&bytes), "checksum":format!("sha256:{}", digest(&bytes)), "size":bytes.len(),
                 "install_path":"tools/fixture-provider", "extract_path":"fixture-provider", "binary_path":"runner"
             });
             bytes
@@ -3963,10 +3963,10 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
         };
         if outcome.starts_with("support path") {
             // Only a descriptor without a signed CID is fetched by release name.
-            let platform = &mut value["external"]["fixture-provider"]["platforms"]
-                [crate::setup::detect_platform()];
-            platform["release_path"] = json!("fixture-provider");
-            platform.as_object_mut().unwrap().remove("cid");
+            value["external"]["fixture-provider"]["platforms"][crate::setup::detect_platform()]
+                .as_object_mut()
+                .unwrap()
+                .remove("cid");
         }
         value["capsules"]["fixture-app"] = json!({
             "cid":raw_cid(&app), "sha256":digest(&app), "size":app.len()
@@ -3980,7 +3980,8 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
             value["external"]["fixture-provider"]["platforms"][crate::setup::detect_platform()]
                 ["strategy"] = json!("source-build");
         } else if outcome == "optional missing checksum" {
-            value["external"]["optional"] = json!({"platforms":{"*":{"cid":raw_cid(b"optional")}}});
+            value["external"]["optional"] =
+                json!({"platforms":{"*":{"release_path":"optional", "cid":raw_cid(b"optional")}}});
         } else if outcome == "metadata development strategy" {
             value["external"]["fixture-provider"]["capsule_metadata"] = json!({
                 "platforms":{"*":{"strategy":"local-copy", "checksum":format!("sha256:{}", digest(b"metadata"))}}

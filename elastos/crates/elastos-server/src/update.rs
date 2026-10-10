@@ -231,56 +231,6 @@ fn append_varint(target: &mut Vec<u8>, mut value: usize) {
     target.push(value as u8);
 }
 
-/// HTTP client for release downloads. A download fails only when no bytes
-/// arrive for `DOWNLOAD_IDLE_TIMEOUT`, never on total time; a source that
-/// trickles is still bounded by the size ceiling of each reader below.
-pub(crate) fn download_http_client() -> anyhow::Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .connect_timeout(crate::carrier::DOWNLOAD_IDLE_TIMEOUT)
-        .read_timeout(crate::carrier::DOWNLOAD_IDLE_TIMEOUT)
-        .build()?)
-}
-
-/// Names a stall instead of reqwest's generic timeout.
-pub(crate) fn download_read_error(err: reqwest::Error, name: &str) -> anyhow::Error {
-    if err.is_timeout() {
-        anyhow::anyhow!(
-            "no data for {} s while downloading {name}",
-            crate::carrier::DOWNLOAD_IDLE_TIMEOUT.as_secs()
-        )
-    } else {
-        err.into()
-    }
-}
-
-pub(crate) fn ensure_download_within(name: &str, bytes: u64, max_bytes: u64) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        bytes <= max_bytes,
-        "{name} exceeds its {max_bytes}-byte bound ({bytes} bytes)"
-    );
-    Ok(())
-}
-
-/// Reads a download body of at most `max_bytes`, refusing a larger one
-/// before buffering it.
-pub(crate) async fn read_download_body(
-    mut response: reqwest::Response,
-    name: &str,
-    max_bytes: u64,
-) -> anyhow::Result<Vec<u8>> {
-    ensure_download_within(name, response.content_length().unwrap_or(0), max_bytes)?;
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|err| download_read_error(err, name))?
-    {
-        ensure_download_within(name, (body.len() + chunk.len()) as u64, max_bytes)?;
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
-}
-
 pub fn format_bytes(bytes: usize) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = 1024.0 * 1024.0;
@@ -3375,7 +3325,9 @@ mod tests {
                 .unwrap_err();
                 let message = format!("{error:#}");
                 assert!(
-                    message.contains("checksum") || message.contains("strategy"),
+                    message.contains("checksum")
+                        || message.contains("strategy")
+                        || message.contains("release_path is required"),
                     "{message}"
                 );
                 assert_eq!(std::fs::read(&binary).unwrap(), before_binary);
