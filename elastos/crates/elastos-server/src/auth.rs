@@ -5059,6 +5059,17 @@ pub fn commit_recovered_root_reassignment(
             })
             .map(|principal| principal.proof_binding_id.clone())
             .collect::<Vec<_>>();
+        // The recovered root keeps its authority: the importer becomes Admin if
+        // it already was, or if any record it replaces was Admin.
+        let role = if state.principals.iter().any(|principal| {
+            principal.role == RuntimePrincipalRole::Admin
+                && (principal.proof_binding_id == proof_binding_id
+                    || removed_proof_binding_ids.contains(&principal.proof_binding_id))
+        }) {
+            RuntimePrincipalRole::Admin
+        } else {
+            RuntimePrincipalRole::Guest
+        };
         state.principals.retain(|principal| {
             principal.proof_binding_id == proof_binding_id
                 || (principal.principal_id != recovered_principal_id
@@ -5072,8 +5083,19 @@ pub fn commit_recovered_root_reassignment(
         principal.principal_id = recovered_principal_id;
         principal.localhost_root = recovered_localhost_root;
         principal.initial_profile_display_name = None;
+        principal.role = role;
         principal.updated_at = updated_at;
         let record = principal.clone();
+        if !state.principals.iter().any(|principal| {
+            principal.role == RuntimePrincipalRole::Admin
+                && principal
+                    .proof_binding
+                    .passkey
+                    .as_ref()
+                    .is_some_and(|passkey| passkey.revoked_at.is_none())
+        }) {
+            anyhow::bail!("recovery would leave this Home without an active admin passkey");
+        }
         for stored in &mut state.sessions {
             if stored.grant.proof_binding_id == proof_binding_id
                 || removed_proof_binding_ids
@@ -8954,6 +8976,14 @@ mod tests {
         let recovered_root = reassignment.recovered_localhost_root.clone();
         let protection = serde_json::to_value(&reassignment.protection).unwrap();
         let audit = serde_json::to_value(&reassignment.signed_audit_event).unwrap();
+        let admin = upsert_principal_for_binding_as_role(
+            data_dir.path(),
+            passkey_binding_with_credential("credential-home-admin", 1, 10, 10),
+            "person:local:home-admin".to_string(),
+            RuntimePrincipalRole::Admin,
+            10,
+        )
+        .unwrap();
         let before = load_auth_state(data_dir.path()).unwrap();
         let device_key_path = elastos_identity::device_key_path(data_dir.path());
         let device_key = std::fs::read(&device_key_path).unwrap();
@@ -8961,7 +8991,15 @@ mod tests {
         let recovered = commit_recovered_root_reassignment(data_dir.path(), reassignment).unwrap();
         assert_eq!(recovered.principal_id, replacement_grant.principal_id);
         assert_eq!(recovered.localhost_root, recovered_root);
-        assert_eq!(recovered.role, current.role);
+        // A Guest importing a Kit from another Home stays Guest; the admin is untouched.
+        assert_eq!(recovered.role, RuntimePrincipalRole::Guest);
+        assert_eq!(
+            serde_json::to_value(
+                load_principal_for_proof_binding(data_dir.path(), &admin.proof_binding_id).unwrap()
+            )
+            .unwrap(),
+            serde_json::to_value(&admin).unwrap()
+        );
         assert_eq!(
             serde_json::to_value(&recovered.proof_binding).unwrap(),
             serde_json::to_value(&current.proof_binding).unwrap()
@@ -9000,6 +9038,49 @@ mod tests {
             confirmed_initial_profile_name(data_dir.path(), &replacement_grant).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn recovered_root_reassignment_carries_admin_role_to_guest_importer() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (reassignment, current, _) = recovered_root_reassignment_fixture(data_dir.path());
+        let owner = upsert_principal_for_binding_as_role(
+            data_dir.path(),
+            passkey_binding_with_credential("credential-owner", 1, 10, 10),
+            reassignment.recovered_principal_id.clone(),
+            RuntimePrincipalRole::Admin,
+            10,
+        )
+        .unwrap();
+
+        let recovered = commit_recovered_root_reassignment(data_dir.path(), reassignment).unwrap();
+
+        assert_eq!(recovered.proof_binding_id, current.proof_binding_id);
+        assert_eq!(recovered.role, RuntimePrincipalRole::Admin);
+        let after = load_auth_state(data_dir.path()).unwrap();
+        assert!(!after
+            .principals
+            .iter()
+            .any(|principal| principal.proof_binding_id == owner.proof_binding_id));
+        assert_eq!(
+            active_admin_passkey_principal_count(data_dir.path()).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn recovered_root_reassignment_refuses_to_leave_home_without_admin() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (reassignment, _, _) = recovered_root_reassignment_fixture(data_dir.path());
+        let path = auth_state_path(data_dir.path()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let error = commit_recovered_root_reassignment(data_dir.path(), reassignment)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("active admin"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
