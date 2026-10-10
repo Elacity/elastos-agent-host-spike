@@ -15,6 +15,12 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   file name, such as "qwen2.5-1.5b-instruct-q4-k-m-local". It shows the model's
   name from the model list, such as "Qwen2.5 1.5B Instruct", as soon as Home
   has finished setting it up, without pressing Refresh models.
+- When an update is already running, started from a second System window,
+  System now says "Another update was started on this Home. Wait for it to
+  finish, then check the update again." When a later approval has replaced
+  yours and nothing is running, it says "This approval is no longer valid.
+  Check for the update again and approve it once more." Before, both said the
+  release was refused or verification failed.
 
 ### Developer detail
 
@@ -36,6 +42,13 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   it. Every probe result is published as `assistant:live-models`; the harness
   updates the chip and an open menu from it, keeping keyboard focus on a row or
   menu action. Before, an open menu kept the earlier read while the chip changed.
+- Owner update refusals caused by another owner action are typed. The System
+  update route answers `update_controller::UpdateInProgress` (owner-action lock
+  held, `WouldBlock` only, or a different request queued or active) with 423,
+  and `ApprovalReplaced` (a later approval replaced the receipt and nothing is
+  queued or active) with 410; `system.js` shows the plain messages above. Other
+  lock I/O failures and refusals keep 409. Covered by
+  `system_update_refuses_a_concurrent_tab_and_a_replaced_approval`.
 
 ## [0.8.0-alpha.15]
 

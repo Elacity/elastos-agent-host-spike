@@ -298,6 +298,37 @@ struct OwnerActionReceipt {
     queued: bool,
 }
 
+/// Another owner action holds the lock or has a request queued or running.
+#[derive(Debug)]
+pub(crate) struct UpdateInProgress;
+
+impl std::fmt::Display for UpdateInProgress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Another Home update is in progress.")
+    }
+}
+
+impl std::error::Error for UpdateInProgress {}
+
+/// A later approval replaced this one, and nothing is queued or running.
+#[derive(Debug)]
+pub(crate) struct ApprovalReplaced;
+
+impl std::fmt::Display for ApprovalReplaced {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Home approval was replaced by a later one.")
+    }
+}
+
+impl std::error::Error for ApprovalReplaced {}
+
+fn refuse_other_owner_action(directory: &Path) -> Result<()> {
+    if path_present(&directory.join(REQUEST))? || path_present(&directory.join(ACTIVE_REQUEST))? {
+        return Err(UpdateInProgress.into());
+    }
+    Err(ApprovalReplaced.into())
+}
+
 fn owner_action_guard(data_dir: &Path) -> Result<(PathBuf, FileLock)> {
     let data_dir = fs::canonicalize(data_dir)?;
     let directory = controller_directory(&data_dir)?;
@@ -310,20 +341,30 @@ fn owner_action_guard(data_dir: &Path) -> Result<(PathBuf, FileLock)> {
         .custom_flags(libc::O_NOFOLLOW)
         .open(directory.join("owner-action.lock"))?;
     check_private_file(&lock)?;
-    let lock =
-        FileLock::try_exclusive(lock).context("Another Home owner action is in progress.")?;
+    let lock = FileLock::try_exclusive(lock).map_err(|error| {
+        let held = error.kind() == std::io::ErrorKind::WouldBlock;
+        let error = anyhow::Error::new(error);
+        if held {
+            error.context(UpdateInProgress)
+        } else {
+            error.context("Home could not lock the owner action.")
+        }
+    })?;
     Ok((directory, lock))
 }
 
 fn check_owner_effect(
+    directory: &Path,
     receipt: &OwnerActionReceipt,
     request: &UpdateRequest,
     effect_id: &str,
     request_sha256: &str,
 ) -> Result<()> {
+    if receipt.effect_id != effect_id {
+        return refuse_other_owner_action(directory);
+    }
     anyhow::ensure!(
         receipt.schema == "elastos.home-update-owner/v1"
-            && receipt.effect_id == effect_id
             && receipt.request_sha256 == request_sha256
             && receipt.request == *request,
         "Home approval intent changed."
@@ -357,17 +398,14 @@ pub(crate) fn reserve_owner_update(
             "Unknown Home approval receipt."
         );
         if previous.effect_id == effect_id {
-            return check_owner_effect(&previous, request, effect_id, request_sha256);
+            return check_owner_effect(&directory, &previous, request, effect_id, request_sha256);
         }
-        anyhow::ensure!(
-            !recovered,
-            "Home approval effect belongs to an earlier action."
-        );
-        anyhow::ensure!(
-            !path_present(&directory.join(REQUEST))?
-                && !path_present(&directory.join(ACTIVE_REQUEST))?,
-            "Another Home update is pending."
-        );
+        if recovered
+            || path_present(&directory.join(REQUEST))?
+            || path_present(&directory.join(ACTIVE_REQUEST))?
+        {
+            return refuse_other_owner_action(&directory);
+        }
     } else {
         anyhow::ensure!(!recovered, "Home approval effect has no recovery receipt.");
     }
@@ -391,7 +429,7 @@ pub(crate) fn owner_update_is_queued(
 ) -> Result<bool> {
     let directory = data_dir.join(DIRECTORY);
     let receipt: OwnerActionReceipt = read_private_json(&directory.join("owner-action.json"))?;
-    check_owner_effect(&receipt, request, effect_id, request_sha256)?;
+    check_owner_effect(&directory, &receipt, request, effect_id, request_sha256)?;
     if receipt.queued {
         return Ok(true);
     }
@@ -402,7 +440,7 @@ pub(crate) fn owner_update_is_queued(
         let path = directory.join(name);
         if path_present(&path)? {
             let existing: UpdateRequest = read_private_json(&path)?;
-            anyhow::ensure!(existing == *request, "Another update identity is pending.");
+            anyhow::ensure!(existing == *request, UpdateInProgress);
             dispatched = true;
         }
     }
@@ -444,7 +482,7 @@ pub(crate) fn queue_owner_update(
     let (directory, _lock) = owner_action_guard(data_dir)?;
     let path = directory.join("owner-action.json");
     let mut receipt: OwnerActionReceipt = read_private_json(&path)?;
-    check_owner_effect(&receipt, &request, effect_id, request_sha256)?;
+    check_owner_effect(&directory, &receipt, &request, effect_id, request_sha256)?;
     if receipt.queued {
         return Ok(());
     }
