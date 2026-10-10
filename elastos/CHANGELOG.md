@@ -17,33 +17,40 @@ Test-channel release. Signed releases show these notes in System before you upda
   It stops ElastOS and removes the program and its apps but keeps your identity
   and files, so installing again continues where you were. Add `--remove-data`
   to delete those too; keep your Recovery Kit first.
+- An owner who lost every passkey can recover their Home with their
+  Recovery Kit, even when guest accounts are off. Before, the sign-in screen
+  offered no way back. Choose "Recover this Home with your Recovery Kit" on the
+  sign-in screen, run the command it shows on the computer that runs Home
+  (`elastos identity arm-owner-recovery --origin … --rp-id …` with that page's
+  address filled in), then enter the code the command prints.
 
 ### Changed
 
+- On Linux, Browser asks you once to run its one-time host setup again after
+  this update. Run the command it shows; Browser then works as before.
 - Setup installs one Home; it no longer prints options for other setups.
-- The terminal Home no longer quits with "403 Forbidden" after the first
-  action; you can run actions one after another.
 - The terminal Home no longer offers the old native Chat, which used a
   different network from the Chat on the Desktop.
 - People "Message" in the terminal Home no longer opens that old Chat. In the
   browser terminal it opens Chat on the Desktop at that person's conversation;
   in a native terminal it says "Open Chat on the Desktop to message <name>."
-- In the terminal Inbox, direct messages and service requests say "Open Inbox
-  on the Desktop to answer this" instead of "no longer available".
-- In the terminal Apps tab, Enter on an app that only opens on the Desktop
-  says "Open <App> on the Desktop" instead of doing nothing.
-- Publishing a document (Documents Publish and `elastos share`) works again:
-  it copied a viewer file from a place the Documents app does not ship (#128).
-- An installed Home now runs a local capsule only when it comes from the
-  signed release or is signed by the release publisher. Before, it also ran
-  unsigned capsules from any folder. Homes built from source keep running
-  unsigned capsules. This needs no action after the update.
 - `elastos --help` lists only the everyday commands. Commands for people who
   run servers or publish releases (such as `serve`, `gateway`, `keys` and
   `publish-release`) still work and still have their own `--help`.
 
 ### Fixed
 
+- The terminal Home no longer quits with "403 Forbidden" after the first
+  action; you can run actions one after another.
+- In the terminal Inbox, direct messages and service requests say "Open Inbox
+  on the Desktop to answer this" instead of "no longer available".
+- In the terminal Apps tab, Enter on an app that only opens on the Desktop
+  says "Open <App> on the Desktop" instead of doing nothing.
+- Publishing a document (Documents Publish and `elastos share`) works again:
+  it copied a viewer file from a place the Documents app does not ship (#128).
+- Importing your Recovery Kit with a new passkey now keeps your admin role.
+  Before, an owner who added a guest passkey and imported their Kit stayed a
+  guest, and the Home was left with no admin.
 - Home no longer runs out of memory when it starts with Qwen2.5 1.5B on the
   device. On an 8 GB Linux computer, Home used more than 7 GB within seconds of
   starting, and the system stopped it.
@@ -69,18 +76,6 @@ Test-channel release. Signed releases show these notes in System before you upda
 - Assistant no longer shows a microphone button that cannot work inside Home.
 - The welcome sheet no longer talks about an "updated" Recovery Kit on a new
   Home, and the lock screen shows the first letter of your name.
-- Importing your Recovery Kit with a new passkey now keeps your admin role.
-  Before, an owner who added a guest passkey and imported their Kit stayed a
-  guest, and the Home was left with no admin. Recovery now also refuses any
-  import that would leave the Home without an admin passkey, and any Kit that
-  was not made on this Home for that person: knowing someone's account id is
-  no longer enough to take over their account with a home-made Kit.
-- An owner who lost every passkey can now recover their Home with their
-  Recovery Kit, even when guest accounts are off. Before, the sign-in screen
-  offered no way back. On the computer that runs Home, run the command the
-  sign-in screen shows (`elastos identity arm-owner-recovery --origin … --rp-id …`
-  with that page's address filled in), then choose "Recover this Home with your Recovery Kit" on the
-  sign-in screen and enter the code it shows.
 - Apps that ask for the ElastOS version now get the same version that
   `elastos --version` and System show.
 - A model download that stopped with "Model content could not be read" now
@@ -152,11 +147,15 @@ Test-channel release. Signed releases show these notes in System before you upda
 
 ### Security
 
-- Another computer connecting to yours can no longer tie it up by sending an
-  endless or very slow request or reply. Oversized messages are refused,
-  requests that do not arrive within 10 seconds are dropped, and a connection
-  passing data through your computer is closed after five minutes with no data
-  in either direction.
+- An installed Home runs a local capsule only when it comes from the signed
+  release or is signed by the release publisher. Homes built from source keep
+  running unsigned capsules. This needs no action after the update.
+- Recovery Kit import accepts only a Kit made on this Home for that account,
+  and refuses any import that would leave the Home without an admin passkey.
+- Requests and replies from other computers now have limits and deadlines:
+  whole-object fetch replies are limited to two at once and one per peer, and
+  a connection passing data through your computer closes after five minutes
+  with no data in either direction.
 
 ### Developer detail
 
@@ -189,7 +188,8 @@ Test-channel release. Signed releases show these notes in System before you upda
   pending, no dispatch-unavailable reason), which turns back into the
   unavailable phase with Retry after 120 s. `model-selection.js` adds
   `downloadPercent` and `downloadingModel`.
-- `components.json` keeps only the `home` profile; `demo`, `operator`,
+- `components.json` keeps only the `home` profile and the `browser-host`
+  helper set that setup installs automatically; `demo`, `operator`,
   `blockchain`, `agent-local-ai`, `public-gateway`, `minimal` and `full` are
   removed. Developer components (GBA, site, tunnel, cloudflared, availability
   and the DRM, rights, key, decrypt and custody providers) still publish with
@@ -331,7 +331,6 @@ Test-channel release. Signed releases show these notes in System before you upda
   64 KiB / 10 s and replies at 1 MiB / 1 h. Relays in `carrier.rs`,
   `carrier_engine_media.rs` and `carrier_engine_binding.rs` close after 5 min
   with no bytes either way (`RelayActivity`), and stream acks have deadlines.
-  The SECURITY.md item for the I/O bridge is still open.
 - Model preparation keeps its stage after any `MetadataRead`, `WeightsRead` or
   `Capacity` failure, not only after a read typed as in transit (`Io`). A part
   that a holder refuses or answers malformed is rejected before it is written,
@@ -438,7 +437,7 @@ Test-channel release. Signed releases show these notes in System before you upda
   packages on tags, `main` or dispatch: those unsigned assets were a second
   channel beside the signed Carrier release. CI still packages ARM64 for the
   Jetson compatibility gate. The nine required checks are unchanged.
-- New `update-hop-linux` CI job (not yet required) proves install and update on
+- New `update-hop-linux` CI job proves install and update on
   Linux x86-64 as `source-home-macos` does on Mac: the pinned published release
   (0.8.0-alpha.8, which carries x86_64-linux artifacts) installs with its own
   `install.sh`, its System installs this source and Home reconnects, this
@@ -469,8 +468,7 @@ Test-channel release. Signed releases show these notes in System before you upda
   addresses a peer outside the session relay ports or asks for a TCP relay
   (#307).
 - Linux Browser network setup adds a per-slot output rule: UDP from the TURN
-  relay ports reaches only the slot's TURN ports, so relayed traffic cannot
-  reach other host services such as Carrier's UDP port. coturn's RFC 6062 TCP
+  relay ports reaches only the slot's TURN ports. coturn's RFC 6062 TCP
   relays are off on both hosts. `check` refuses a setup receipt without the
   rule, so Browser asks to re-run the root setup once (#307).
 
