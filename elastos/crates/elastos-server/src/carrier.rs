@@ -11404,6 +11404,7 @@ pub(crate) mod tests {
                 Some(&old_components),
                 &new_components,
                 "*",
+                &crate::capsule_record::UpdateRecords::default(),
             ),
         )
         .await
@@ -11421,6 +11422,7 @@ pub(crate) mod tests {
                 Some(&old_components),
                 &new_components,
                 "*",
+                &crate::capsule_record::UpdateRecords::default(),
                 crate::setup::FirstPartyCarrierContext::Runtime,
             ),
         )

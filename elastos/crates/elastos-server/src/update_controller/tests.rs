@@ -3740,6 +3740,7 @@ async fn staged_support_skips_linux_only_home_component_on_darwin() {
         &fs::read(fixture.data.join("components.json")).unwrap(),
         &components,
         "darwin-arm64",
+        &crate::capsule_record::UpdateRecords::default(),
         &fetch,
         &mut owner,
     )
@@ -3791,6 +3792,7 @@ async fn staged_support_replaces_a_component_left_by_an_interrupted_undo() {
         &components,
         &components,
         &crate::setup::detect_platform(),
+        &crate::capsule_record::UpdateRecords::default(),
         &fetch,
         &mut owner,
     )
