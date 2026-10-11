@@ -222,6 +222,8 @@ try {
     ]) {
       phase = state; preparationFailure = cause;
       await frame.getByRole("button", { name: "Refresh models" }).click();
+      // Cancelled and expired share copy; bind the assertion to this completed read.
+      await frame.locator('[data-model-control="refresh"]:enabled').waitFor();
       await frame.getByText(explanation, { exact: true }).waitFor();
       if (["uncertain", "capacity_pending"].includes(state)) {
         assert.equal(await frame.getByRole("button", { name: "Retry", exact: true }).count(), 0);
