@@ -3,6 +3,11 @@
   const CID = /^bafybei[a-z2-7]{52}$/;
   const STATES = new Set(["capacity_pending", "reserved", "preparing", "verifying", "admission_pending", "admitted", "reclaimed", "failed", "uncertain", "cancelled", "expired"]);
   const active = p => p && ["capacity_pending", "reserved", "preparing", "verifying", "admission_pending", "uncertain"].includes(p.state);
+  const MEMORY_FIT_TEXT = Object.freeze({
+    fits: "Meets this model’s minimum memory requirement",
+    insufficient: "This device has less memory than this model requires. Choose a smaller model.",
+    unavailable: "This Home could not check the device memory. Refresh models, then try Get again.",
+  });
   const FAILURE_TEXT = Object.freeze({
     authorization_unavailable: "Preparation stopped. Open Models again to check access.",
     policy_unavailable: "Preparation stopped. Model policy is unavailable.",
@@ -11,6 +16,8 @@
     storage_service_unavailable: "The storage service is unavailable. Retry when it is running.",
     cache_budget_unavailable: "This model does not fit the local cache budget. Remove an unneeded model, choose a smaller model, or increase the budget, then Retry.",
     memory_budget_unavailable: "This model exceeds the local model memory budget. Choose a smaller model or increase the budget, then Retry.",
+    model_memory_insufficient: MEMORY_FIT_TEXT.insufficient,
+    model_memory_observation_unavailable: MEMORY_FIT_TEXT.unavailable,
     content_unavailable: "Preparation failed. Model content could not be read.",
     local_storage_unavailable: "Preparation failed. Local storage could not be written.",
     verification_failed: "Preparation failed. Model verification did not pass.",
@@ -88,7 +95,8 @@
       check(item.role === "content" && item.installed === false && item.launchable === false
         && CID.test(item.cid) && text(item.title) && text(item.publisher_did, 256)
         && item.publisher_did.startsWith("did:") && item.signature_state === "catalog-signature-verified"
-        && Number.isSafeInteger(item.content_size_bytes) && item.content_size_bytes > 0);
+        && Number.isSafeInteger(item.content_size_bytes) && item.content_size_bytes > 0
+        && typeof item.model_memory_fit === "string" && Object.hasOwn(MEMORY_FIT_TEXT, item.model_memory_fit));
       parseRuntime(item.model_runtime, item.cid);
     }
     return entries;
@@ -151,7 +159,7 @@
           // Only the exact invoked operation can return a final typed denial.
           const bound = body && result?.schema === "elastos.capsules.invoke-result/v1" && result.status === "error"
             && ["capsule", "interface", "method", "request_id"].every(key => result[key] === body[key]);
-          let denial = bound && ["cache_budget_unavailable", "memory_budget_unavailable"].includes(result.code)
+          let denial = bound && ["cache_budget_unavailable", "memory_budget_unavailable", "model_memory_insufficient", "model_memory_observation_unavailable"].includes(result.code)
             ? FAILURE_TEXT[result.code] : "";
           if (bound && result.code === "not_enough_free_space" && text(result.message, 300)
             && /^Not enough free disk space on this Home: this needs \d+(?:\.\d)? GB plus 2 GB kept free\. Free some space, then select Get again\.$/.test(result.message)) denial = result.message;
@@ -249,6 +257,7 @@
       }
       async function act(operation, keep) {
         if (busy || loading || !show() || !model || reconcileRequired) return;
+        if (operation === "use" && !unresolvedUse && model.model_memory_fit !== "fits") return;
         stopRead(); const epoch = ++generation, cid = model.cid;
         const id = model.model_runtime.preparation?.operation_id;
         busy = true; message = ""; refusal = ""; statusFailures = 0; render();
@@ -372,6 +381,7 @@
           ? DISPATCH_UNAVAILABLE_TEXT[r.dispatch_unavailable_reason] : phase === "service_unavailable" && p?.failure_class
             ? failureText(p) : (compact ? COMPACT_PHASE_TEXT : PHASE_TEXT)[phase];
         row.append(element("p", label));
+        row.append(element("p", MEMORY_FIT_TEXT[model.model_memory_fit], "model-memory-fit"));
         if (active(p)) {
           const progress = element("progress"); progress.max = p.total_bytes || 1; progress.value = p.completed_bytes;
           progress.setAttribute("aria-label", "Preparation progress"); row.append(progress, element("p", `${formatBytes(p.completed_bytes)} of ${formatBytes(p.total_bytes)} prepared`));
@@ -379,7 +389,8 @@
         const controls = element("div", "", "model-controls");
         const useLabel = r.dispatch_unavailable_reason === "catalog_updated" ? "Use"
           : (p && p.state !== "reclaimed") || unresolvedUse ? "Retry" : compact ? "Get" : "Download";
-        const use = button(useLabel, () => void act("use"), active(p) || reconcileRequired);
+        const use = button(useLabel, () => void act("use"), active(p) || reconcileRequired
+          || (!unresolvedUse && model.model_memory_fit !== "fits"));
         use.dataset.modelControl = "use";
         if (!active(p) && !r.dispatch_ready && phase !== "finishing") controls.append(use);
         if (r.dispatch_ready && typeof onReadyOpen === "function") {

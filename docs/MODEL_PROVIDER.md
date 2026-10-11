@@ -62,9 +62,14 @@ workspace, and other runs retain their separate access rules. Hosted credentials
 stay in the owning Runtime's secret store; local model artifacts stay in their
 owning boundaries.
 
+Marketplace compares each signed model's declared minimum memory with the
+device's effective physical or cgroup memory capacity before Get. This check
+describes the minimum requirement. Runtime checks current free memory again
+before starting the engine for a reply.
+
 A local engine is admitted right before it starts: free memory must cover the
 model weights, its KV cache at the configured context, batch scratch and
-headroom of max(10% of RAM, 1 GiB); otherwise the run fails with
+headroom of max(10% of effective memory capacity, 1 GiB); otherwise the run fails with
 `model_memory_unavailable` before anything is spawned. Each Runtime runs one
 local engine at a time, stops it after 60 s without requests and starts it
 again on the next request. One Runtime per OS account (the installer's layout)

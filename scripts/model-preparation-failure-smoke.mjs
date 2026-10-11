@@ -62,7 +62,7 @@ const otherCid = `bafybei${"c".repeat(51)}e`;
 const catalogRow = (id, title) => ({
   name: title, title, role: "content", source: "signed-model-catalog", installed: false, launchable: false,
   cid: id, publisher_did: "did:key:zFixturePublisher", content_size_bytes: 1024,
-  signature_state: "catalog-signature-verified", model_runtime: {
+  signature_state: "catalog-signature-verified", model_memory_fit: "fits", model_runtime: {
     admitted: false, kept: false, dispatch_ready: false, offer_id: null, preparation: null,
   },
 });

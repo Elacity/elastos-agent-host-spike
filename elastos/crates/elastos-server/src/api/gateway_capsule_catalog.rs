@@ -52,6 +52,19 @@ pub(super) async fn capsule_catalog(
     }
 }
 
+fn project_model_memory_fit(
+    catalog: &mut CapsuleCatalogResponse,
+    memory: Option<elastos_common::host_memory::HostMemory>,
+) {
+    for row in &mut catalog.capsules {
+        if row.source == "signed-model-catalog" {
+            row.model_memory_fit = row.model_content.as_ref().map(|metadata| {
+                elastos_common::host_memory::model_memory_fit(metadata.minimum_memory_mb, memory)
+            });
+        }
+    }
+}
+
 async fn caller_capsule_catalog_summary(
     state: &GatewayState,
     context: &HomeLaunchTokenContext,
@@ -86,6 +99,10 @@ async fn caller_capsule_catalog_summary(
             }
         }
         let mut catalog = capsule_catalog_summary(&state.data_dir);
+        project_model_memory_fit(
+            &mut catalog,
+            elastos_common::host_memory::observe_host_memory(std::env::consts::OS).ok(),
+        );
         for row in &mut catalog.capsules {
             if row.model_content.is_some() {
                 row.model_runtime = Some(
@@ -650,6 +667,15 @@ async fn dispatch_capsule_affordance(
 
 /// Known Runtime refusal facts have bounded prose; provider details stay private.
 fn preparation_invoke_error(error: anyhow::Error) -> (StatusCode, &'static str, String) {
+    if let Some(memory) =
+        error.downcast_ref::<super::capsule_inventory::preparation::PreparationMemoryRefusal>()
+    {
+        return (
+            StatusCode::CONFLICT,
+            memory.public_class(),
+            memory.public_message().into(),
+        );
+    }
     if let Some(budget) =
         error.downcast_ref::<super::capsule_inventory::preparation::PreparationBudgetRefusal>()
     {
@@ -857,6 +883,56 @@ mod tests {
     use elastos_common::CapsuleExecution;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn model_catalog_device_fit_is_a_signed_row_fact_with_safe_refusals() {
+        use crate::api::capsule_inventory::tests::{
+            model_catalog_fixture, write_model_catalog_fixture,
+        };
+        use elastos_common::host_memory::{HostMemory, ModelMemoryFit};
+        let root = tempfile::tempdir().unwrap();
+        write_model_catalog_fixture(root.path(), &model_catalog_fixture());
+        for (memory, expected) in [
+            (
+                Some(HostMemory {
+                    total: 16 << 30,
+                    available: 0,
+                    pressure_normal: false,
+                }),
+                ModelMemoryFit::Fits,
+            ),
+            (
+                Some(HostMemory {
+                    total: 4 << 30,
+                    available: 4 << 30,
+                    pressure_normal: false,
+                }),
+                ModelMemoryFit::Insufficient,
+            ),
+            (None, ModelMemoryFit::Unavailable),
+        ] {
+            let mut catalog = capsule_catalog_summary(root.path());
+            project_model_memory_fit(&mut catalog, memory);
+            assert_eq!(catalog.capsules.len(), 1);
+            assert_eq!(catalog.capsules[0].model_memory_fit, Some(expected));
+            assert_eq!(catalog.capsules[0].state, "unprepared");
+            let projected = serde_json::to_string(&catalog).unwrap();
+            assert!(!projected.contains(&root.path().display().to_string()));
+            assert!(!projected.contains("\"available\":") && !projected.contains("\"total\":"));
+        }
+        for refusal in [
+            super::super::capsule_inventory::preparation::PreparationMemoryRefusal::Insufficient,
+            super::super::capsule_inventory::preparation::PreparationMemoryRefusal::Unavailable,
+        ] {
+            let (status, code, message) = preparation_invoke_error(
+                anyhow::Error::new(refusal).context("private /secret/provider credential"),
+            );
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(code, refusal.public_class());
+            assert_eq!(message, refusal.public_message());
+            assert!(!message.contains("/secret") && !message.contains("credential"));
+        }
+    }
 
     #[test]
     fn model_get_disk_refusal_keeps_the_reason_and_size() {

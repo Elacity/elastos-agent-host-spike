@@ -139,6 +139,44 @@ impl std::fmt::Display for PreparationBudgetRefusal {
 
 impl std::error::Error for PreparationBudgetRefusal {}
 
+/// Device capacity is separate from the operator's approved model budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::api) enum PreparationMemoryRefusal {
+    Insufficient,
+    Unavailable,
+}
+
+impl PreparationMemoryRefusal {
+    pub(in crate::api) fn public_class(self) -> &'static str {
+        match self {
+            Self::Insufficient => "model_memory_insufficient",
+            Self::Unavailable => "model_memory_observation_unavailable",
+        }
+    }
+    pub(in crate::api) fn public_message(self) -> &'static str {
+        match self {
+            Self::Insufficient => {
+                "This device has less memory than this model requires. Choose a smaller model."
+            }
+            Self::Unavailable => {
+                "This Home could not check the device memory. Refresh models, then try Get again."
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for PreparationMemoryRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.public_class())
+    }
+}
+impl std::error::Error for PreparationMemoryRefusal {}
+
+type MemoryReader = fn() -> std::io::Result<elastos_common::host_memory::HostMemory>;
+fn device_memory() -> std::io::Result<elastos_common::host_memory::HostMemory> {
+    elastos_common::host_memory::observe_host_memory(std::env::consts::OS)
+}
+
 fn failure_phase(error: &anyhow::Error) -> PreparationFailurePhase {
     if error.is::<PreparationStopped>() {
         return PreparationFailurePhase::Interrupted;
@@ -617,8 +655,9 @@ fn reserve(
     caller: &PreparationCaller<'_>,
     request_id: &str,
     cid: &str,
+    read_memory: MemoryReader,
 ) -> anyhow::Result<PreparationRecord> {
-    reserve_at(data_dir, caller, request_id, cid, now()?)
+    reserve_at(data_dir, caller, request_id, cid, now()?, read_memory)
 }
 
 fn reserve_at(
@@ -627,6 +666,7 @@ fn reserve_at(
     request_id: &str,
     cid: &str,
     now: u64,
+    read_memory: MemoryReader,
 ) -> anyhow::Result<PreparationRecord> {
     authorize(caller, "use")?;
     ensure!(
@@ -728,6 +768,55 @@ fn reserve_at(
         full_charge <= grant.max_cache_bytes,
         PreparationBudgetRefusal::Cache
     );
+    // Retained same-ID requests return their bound facts before observing a
+    // changing host. A fresh refusal creates neither inventory nor worker.
+    match std::fs::symlink_metadata(data_dir.join("model-preparation")) {
+        Ok(_) => {
+            let inventory = Inventory::open(data_dir, false)?;
+            let mut state = inventory.load()?;
+            if let Some(existing) = state.records.iter().find(|record| {
+                record.request_binding.principal == caller.context.principal_id
+                    && record.request_binding.capsule == caller.capsule
+                    && record.request_binding.request_id == request_id
+            }) {
+                ensure!(
+                    existing.request_binding == request_binding
+                        && existing.catalog_head_cid == trust.head_cid
+                        && existing.total_bytes == entry.size_bytes,
+                    "preparation request identity changed"
+                );
+                let operation = existing.operation_id.clone();
+                if state.expire(now) {
+                    inventory.save(&state)?;
+                }
+                return Ok(state
+                    .records
+                    .iter()
+                    .find(|record| record.operation_id == operation)
+                    .unwrap()
+                    .clone());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    match elastos_common::host_memory::model_memory_fit(
+        entry
+            .manifest
+            .model_content
+            .as_ref()
+            .unwrap()
+            .minimum_memory_mb,
+        read_memory().ok(),
+    ) {
+        elastos_common::host_memory::ModelMemoryFit::Fits => {}
+        elastos_common::host_memory::ModelMemoryFit::Insufficient => {
+            anyhow::bail!(PreparationMemoryRefusal::Insufficient)
+        }
+        elastos_common::host_memory::ModelMemoryFit::Unavailable => {
+            anyhow::bail!(PreparationMemoryRefusal::Unavailable)
+        }
+    }
     let inventory = Inventory::open(data_dir, true)?;
     let mut state = inventory.load()?;
     // Persist expiry (and its settled_at) before any refusal below, so a
@@ -1125,10 +1214,16 @@ pub(in crate::api) type Revalidate = Arc<dyn Fn() -> anyhow::Result<()> + Send +
 
 /// The invocation route retains this single inventory worker. Status/cancel
 /// use short snapshot locks while the task retains exclusive worker ownership.
-#[derive(Default)]
 pub(in crate::api) struct PreparationOwner {
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     stopping: Arc<AtomicBool>,
+    read_memory: MemoryReader,
+}
+
+impl Default for PreparationOwner {
+    fn default() -> Self {
+        Self::with_memory(device_memory)
+    }
 }
 
 impl Drop for PreparationOwner {
@@ -1140,6 +1235,14 @@ impl Drop for PreparationOwner {
 }
 
 impl PreparationOwner {
+    fn with_memory(read_memory: MemoryReader) -> Self {
+        Self {
+            worker: Mutex::new(None),
+            stopping: Arc::new(AtomicBool::new(false)),
+            read_memory,
+        }
+    }
+
     pub(in crate::api) fn invoke(
         &self,
         data_dir: &Path,
@@ -1191,7 +1294,7 @@ impl PreparationOwner {
                 registry
                     .as_ref()
                     .context("preparation backend unavailable")?;
-                reserve(data_dir, &caller, request_id, &input.cid)?
+                reserve(data_dir, &caller, request_id, &input.cid, self.read_memory)?
             }
             Some("reclaim") => {
                 let input: Use = serde_json::from_value(input.clone())?;
@@ -3862,6 +3965,136 @@ fn settle_failure(
 mod tests {
     use super::*;
 
+    fn test_memory() -> std::io::Result<elastos_common::host_memory::HostMemory> {
+        Ok(elastos_common::host_memory::HostMemory {
+            total: 16 * 1024 * 1024 * 1024,
+            available: 16 * 1024 * 1024 * 1024,
+            pressure_normal: false,
+        })
+    }
+    fn test_owner() -> PreparationOwner {
+        PreparationOwner::with_memory(test_memory)
+    }
+    fn reserve(
+        data_dir: &Path,
+        caller: &PreparationCaller<'_>,
+        request_id: &str,
+        cid: &str,
+    ) -> anyhow::Result<PreparationRecord> {
+        super::reserve(data_dir, caller, request_id, cid, test_memory)
+    }
+    fn reserve_at(
+        data_dir: &Path,
+        caller: &PreparationCaller<'_>,
+        request_id: &str,
+        cid: &str,
+        now: u64,
+    ) -> anyhow::Result<PreparationRecord> {
+        super::reserve_at(data_dir, caller, request_id, cid, now, test_memory)
+    }
+
+    #[test]
+    fn model_preparation_device_minimum_refuses_before_effects_and_retains_replay() {
+        fn insufficient() -> std::io::Result<elastos_common::host_memory::HostMemory> {
+            Ok(elastos_common::host_memory::HostMemory {
+                total: 4 * 1024 * 1024 * 1024,
+                available: 4 * 1024 * 1024 * 1024,
+                pressure_normal: false,
+            })
+        }
+        fn unavailable() -> std::io::Result<elastos_common::host_memory::HostMemory> {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        }
+        fn unexpected_observation() -> std::io::Result<elastos_common::host_memory::HostMemory> {
+            panic!("retained requests are answered before device observation")
+        }
+        let (root, cid) = fixture();
+        let context = context();
+        let method = method("use");
+        let caller = caller(&context, &method);
+        for (read, expected) in [
+            (
+                insufficient as MemoryReader,
+                PreparationMemoryRefusal::Insufficient,
+            ),
+            (
+                unavailable as MemoryReader,
+                PreparationMemoryRefusal::Unavailable,
+            ),
+        ] {
+            let error =
+                super::reserve(root.path(), &caller, "capacity-check", &cid, read).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<PreparationMemoryRefusal>(),
+                Some(&expected)
+            );
+            assert!(!root.path().join("model-preparation").exists());
+        }
+        let admitted = reserve(root.path(), &caller, "capacity-check", &cid).unwrap();
+        let saved = std::fs::read(root.path().join("model-preparation/state.json")).unwrap();
+        assert_eq!(
+            super::reserve(
+                root.path(),
+                &caller,
+                "capacity-check",
+                &cid,
+                unexpected_observation
+            )
+            .unwrap(),
+            admitted
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("model-preparation/state.json")).unwrap(),
+            saved
+        );
+        assert!(
+            super::reserve(root.path(), &caller, "changed-request", &cid, unavailable).is_err()
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("model-preparation/state.json")).unwrap(),
+            saved
+        );
+    }
+
+    #[tokio::test]
+    async fn model_get_device_refusal_starts_no_worker_or_storage_calls() {
+        fn insufficient() -> std::io::Result<elastos_common::host_memory::HostMemory> {
+            Ok(elastos_common::host_memory::HostMemory {
+                total: 4 * 1024 * 1024 * 1024,
+                available: 4 * 1024 * 1024 * 1024,
+                pressure_normal: false,
+            })
+        }
+        fn unavailable() -> std::io::Result<elastos_common::host_memory::HostMemory> {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        }
+        for read in [insufficient as MemoryReader, unavailable as MemoryReader] {
+            let (root, cid) = fixture();
+            let registry = Arc::new(elastos_runtime::provider::ProviderRegistry::new());
+            let backend = Arc::new(PreparationBackend::new(Default::default(), cid.clone()));
+            registry
+                .register_sub_provider("ipfs", backend.clone())
+                .await
+                .unwrap();
+            let owner = PreparationOwner::with_memory(read);
+            let error = owner
+                .invoke(
+                    root.path(),
+                    Some(registry),
+                    caller(&context(), &method("use")),
+                    "device-refusal",
+                    &serde_json::json!({"cid":cid}),
+                    Arc::new(|| Ok(())),
+                )
+                .unwrap_err();
+            assert!(error.is::<PreparationMemoryRefusal>());
+            assert!(owner.worker.lock().unwrap().is_none());
+            assert!(backend.calls.lock().unwrap().is_empty());
+            assert!(backend.capacity_requests.lock().unwrap().is_empty());
+            assert!(!root.path().join("model-preparation").exists());
+        }
+    }
+
     fn method(operation: &str) -> CapsuleAffordanceDescriptor {
         serde_json::from_value(serde_json::json!({
             "id": format!("content.{operation}"), "operation": operation,
@@ -5912,7 +6145,7 @@ mod tests {
             f.model.busy.store(true, Ordering::Release);
             let path = admitted_weights(f.root.path(), &f.old.operation_id);
             let original = std::fs::read(&path).unwrap();
-            let err = PreparationOwner::default()
+            let err = test_owner()
                 .invoke(
                     f.root.path(),
                     Some(Arc::clone(&f.registry)),
@@ -5959,7 +6192,7 @@ mod tests {
             drop(inventory);
             let path = admitted_weights(f.root.path(), &f.old.operation_id);
             let original = std::fs::read(&path).unwrap();
-            let err = PreparationOwner::default()
+            let err = test_owner()
                 .invoke(
                     f.root.path(),
                     Some(Arc::clone(&f.registry)),
@@ -6030,7 +6263,7 @@ mod tests {
             retention_intent(f.root.path(), &context(), &f.old.package_cid, true).unwrap();
             let path = admitted_weights(f.root.path(), &f.old.operation_id);
             assert!(path.is_file());
-            let result = PreparationOwner::default()
+            let result = test_owner()
                 .invoke(
                     f.root.path(),
                     Some(Arc::clone(&f.registry)),
@@ -6558,7 +6791,7 @@ mod tests {
                 .register_sub_provider("model", model.clone())
                 .await
                 .unwrap();
-            let owner = PreparationOwner::default();
+            let owner = test_owner();
             let prepared = owner
                 .invoke(
                     root.path(),
@@ -6644,7 +6877,7 @@ mod tests {
                 .unwrap();
             register_content(&registry, root.path()).await;
             let _engine = install_engine(root.path());
-            let owner = PreparationOwner::default();
+            let owner = test_owner();
             let input = serde_json::json!({"cid":cid});
             let first = owner
                 .invoke(
@@ -6683,7 +6916,7 @@ mod tests {
                 .register_sub_provider("model", model.clone())
                 .await
                 .unwrap();
-            let reopened = PreparationOwner::default();
+            let reopened = test_owner();
             let reused = reopened
                 .invoke(
                     root.path(),
@@ -6795,7 +7028,7 @@ mod tests {
                 .registration_for_uri("elastos://model/")
                 .await
                 .unwrap();
-            let owner = PreparationOwner::default();
+            let owner = test_owner();
             owner
                 .invoke(
                     root.path(),
@@ -6974,7 +7207,7 @@ mod tests {
                 .registration_for_uri("elastos://model/")
                 .await
                 .unwrap();
-            let owner = PreparationOwner::default();
+            let owner = test_owner();
             owner
                 .invoke(
                     root.path(),
@@ -7068,7 +7301,7 @@ mod tests {
                 .registration_for_uri("elastos://model/")
                 .await
                 .unwrap();
-            let owner = PreparationOwner::default();
+            let owner = test_owner();
             owner
                 .invoke(
                     root.path(),
@@ -7667,7 +7900,7 @@ mod tests {
                     .count()
             };
 
-            let owner = PreparationOwner::default();
+            let owner = test_owner();
             let first = owner
                 .invoke(
                     root.path(),
@@ -7747,7 +7980,7 @@ mod tests {
                 record.catalog_head_cid
             );
 
-            let reopened = PreparationOwner::default();
+            let reopened = test_owner();
             let reused = reopened
                 .invoke(
                     root.path(),
@@ -7917,7 +8150,7 @@ mod tests {
 
                 let mut admitted = Vec::new();
                 for index in order {
-                    let owner = PreparationOwner::default();
+                    let owner = test_owner();
                     let response = owner
                         .invoke(
                             root.path(),
@@ -8394,7 +8627,7 @@ server.serve_forever()
                 config["model_catalog"]["local_use"]["max_cache_bytes"] =
                     serde_json::json!(2 * preparation_charge(record.total_bytes).unwrap() - 1);
             });
-            let owner = PreparationOwner::default();
+            let owner = test_owner();
             let pressure = owner.invoke(
                 root.path(),
                 Some(registry.clone()),
@@ -8520,7 +8753,7 @@ server.serve_forever()
         }
         let registry = (!missing_registry)
             .then(|| Arc::new(elastos_runtime::provider::ProviderRegistry::new()));
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         assert!(owner
             .invoke(
                 root.path(),
@@ -8592,7 +8825,7 @@ server.serve_forever()
                 serde_json::json!(2 * charge - 1)
         });
         let state_path = root.path().join("model-preparation/state.json");
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         let pending = owner
             .invoke(
                 root.path(),
@@ -8746,7 +8979,7 @@ server.serve_forever()
             "reservation must not dispatch effects"
         );
         for _ in 0..2 {
-            let owner = PreparationOwner::default();
+            let owner = test_owner();
             let repeated = owner
                 .invoke(
                     root.path(),
@@ -8765,7 +8998,7 @@ server.serve_forever()
         let inventory = Inventory::open(root.path(), false).unwrap();
         let held_worker = inventory.worker_lock().unwrap();
         drop(inventory);
-        assert!(PreparationOwner::default()
+        assert!(test_owner()
             .invoke(
                 root.path(),
                 Some(registry.clone()),
@@ -8950,7 +9183,7 @@ server.serve_forever()
                 ensure!(current == admitted, "preparation authority changed");
                 Ok(())
             });
-            let owner = PreparationOwner::default();
+            let owner = test_owner();
             let output = owner
                 .invoke(
                     root.path(),
@@ -9087,7 +9320,7 @@ server.serve_forever()
                 .await
                 .unwrap();
             register_content(&registry, root.path()).await;
-            let owner = PreparationOwner::default();
+            let owner = test_owner();
             let result = owner
                 .invoke(
                     root.path(),
@@ -9136,7 +9369,7 @@ server.serve_forever()
             .await
             .unwrap();
         register_content(&registry, root.path()).await;
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         let result = owner
             .invoke(
                 root.path(),
@@ -9221,7 +9454,7 @@ server.serve_forever()
             assert_eq!(persisted.state, PreparationState::Cancelled);
             assert_eq!(persisted.reserved_bytes, 0);
         }
-        let restarted = PreparationOwner::default();
+        let restarted = test_owner();
         let status = restarted
             .invoke(
                 root.path(),
@@ -9841,7 +10074,7 @@ server.serve_forever()
                 .await
                 .unwrap();
             register_content(&registry, &data).await;
-            let owner = Arc::new(PreparationOwner::default());
+            let owner = Arc::new(test_owner());
             let test_owner = owner.clone();
             let test_data = data.clone();
             let test_repo = repo.clone();
@@ -10010,7 +10243,7 @@ server.serve_forever()
                         .count(),
                     admission_and_activation_hashes
                 );
-                let reopened = PreparationOwner::default();
+                let reopened = test_owner();
                 if real_model {
                     retention_intent(&test_data, &context(), &cid, true).unwrap();
                 }
@@ -10248,7 +10481,7 @@ server.serve_forever()
         change_config(root.path(), |config| {
             config["model_catalog"]["local_use"] = serde_json::Value::Null
         });
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         owner
             .invoke(
                 root.path(),
@@ -10285,7 +10518,7 @@ server.serve_forever()
     async fn model_preparation_failed_drain_keeps_charge_until_exact_cancel_retry() {
         let (root, record, backend, registry) = staged_fixture(now().unwrap(), false).await;
         backend.fail_drain.store(true, Ordering::Release);
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         let input = serde_json::json!({"operation_id":record.operation_id});
         owner
             .invoke(
@@ -10339,7 +10572,7 @@ server.serve_forever()
             );
             Ok(())
         });
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         owner
             .invoke(
                 root.path(),
@@ -10372,7 +10605,7 @@ server.serve_forever()
         operation_id: &str,
         revalidate: Revalidate,
     ) {
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         owner
             .invoke(
                 root,
@@ -10460,7 +10693,7 @@ server.serve_forever()
     #[tokio::test]
     async fn model_preparation_cancel_on_a_failed_attempt_discards_its_kept_stage() {
         let (root, record, registry, on_disk) = kept_stage_fixture().await;
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         let reply = owner
             .invoke(
                 root.path(),
@@ -10569,7 +10802,7 @@ server.serve_forever()
         )
         .unwrap();
         // Cancel on the old failed attempt leaves the running preparation's stage.
-        let reply = PreparationOwner::default()
+        let reply = test_owner()
             .invoke(
                 root.path(),
                 Some(registry),
@@ -10804,7 +11037,7 @@ server.serve_forever()
     #[tokio::test]
     async fn model_preparation_cancel_expired_complete_stage_does_not_admit() {
         let (root, record, backend, registry) = staged_fixture(1, false).await;
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         owner
             .invoke(
                 root.path(),
@@ -10833,7 +11066,7 @@ server.serve_forever()
     #[tokio::test]
     async fn model_preparation_restart_reconciles_expired_rename_after_exact_hash() {
         let (root, record, backend, registry) = staged_fixture(1, true).await;
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         let input = serde_json::json!({"operation_id":record.operation_id});
         let wrong_cid = "bafybeihgnsjhpoktqbyspaqv6moblyny3txs5nkjdxfx7wm346odxkhlrm";
         *backend.cid.lock().unwrap() = wrong_cid.into();
@@ -10881,7 +11114,7 @@ server.serve_forever()
         cid: &str,
         keep: bool,
     ) -> anyhow::Result<serde_json::Value> {
-        PreparationOwner::default().invoke(
+        test_owner().invoke(
             root,
             None,
             caller(principal, &method("retention")),
@@ -10896,7 +11129,7 @@ server.serve_forever()
         record: &PreparationRecord,
         registry: Arc<elastos_runtime::provider::ProviderRegistry>,
     ) {
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         owner
             .invoke(
                 root,
@@ -11029,7 +11262,7 @@ server.serve_forever()
         );
         assert_eq!(backend.calls.lock().unwrap().len(), baseline_calls);
 
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         let reply = owner
             .invoke(
                 root.path(),
@@ -11228,7 +11461,7 @@ server.serve_forever()
             &[(silent.ticket.clone(), [91u8; 32], silent.did.clone(), now)],
         )
         .await;
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         let started = std::time::Instant::now();
         let reply = owner
             .invoke(
@@ -11291,7 +11524,7 @@ server.serve_forever()
             ],
         )
         .await;
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         let started = std::time::Instant::now();
         let reply = owner
             .invoke(
@@ -11387,7 +11620,7 @@ server.serve_forever()
         )
         .await;
 
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         let reply = owner
             .invoke(
                 root.path(),
@@ -11561,7 +11794,7 @@ server.serve_forever()
 
         /// Run one preparation to settlement; returns its record and wall time.
         async fn prepare(&self, key: &str) -> (PreparationRecord, std::time::Duration) {
-            let owner = PreparationOwner::default();
+            let owner = test_owner();
             let started = std::time::Instant::now();
             let reply = self.invoke(&owner, "use", key, serde_json::json!({"cid": self.cid}));
             let task = owner.worker.lock().unwrap().take().unwrap();
@@ -11713,7 +11946,7 @@ server.serve_forever()
             |_| {},
         )
         .await;
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         let reply = fixture.invoke(
             &owner,
             "use",
@@ -11826,7 +12059,7 @@ server.serve_forever()
             |_| {},
         )
         .await;
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         let reply = fixture.invoke(
             &owner,
             "use",
@@ -12100,7 +12333,7 @@ server.serve_forever()
             |_| {},
         )
         .await;
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         let reply = fixture.invoke(
             &owner,
             "use",
@@ -12135,7 +12368,7 @@ server.serve_forever()
             .unwrap();
         drop(owner);
         // After the restart, status reconciles: the stage stays for the next Use.
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         fixture.invoke(
             &owner,
             "status",
@@ -12428,7 +12661,7 @@ server.serve_forever()
                 std::fs::read(root.path().join("model-preparation/state.json")).unwrap(),
                 saved
             );
-            let owner = PreparationOwner::default();
+            let owner = test_owner();
             let status = owner
                 .invoke(
                     root.path(),
@@ -12482,7 +12715,7 @@ server.serve_forever()
             (&first, "same-principal-alias"),
             (&second, "second-principal-alias"),
         ] {
-            let owner = PreparationOwner::default();
+            let owner = test_owner();
             let reply = owner
                 .invoke(
                     root.path(),
@@ -12520,7 +12753,7 @@ server.serve_forever()
             (&first, &aliases[0]),
             (&second, &aliases[1]),
         ] {
-            let reply = PreparationOwner::default()
+            let reply = test_owner()
                 .invoke(
                     root.path(),
                     None,
@@ -12572,7 +12805,7 @@ server.serve_forever()
             serde_json::json!({"cid":"x".repeat(129),"keep":false}),
             serde_json::json!({"cid":record.package_cid.to_uppercase(),"keep":false}),
         ] {
-            assert!(PreparationOwner::default()
+            assert!(test_owner()
                 .invoke(
                     root.path(),
                     None,
@@ -12594,7 +12827,7 @@ server.serve_forever()
                 "id" => denied.id = "content.use".into(),
                 _ => denied.operation = Some("keep".into()),
             }
-            assert!(PreparationOwner::default()
+            assert!(test_owner()
                 .invoke(
                     root.path(),
                     None,
@@ -12608,7 +12841,7 @@ server.serve_forever()
         let mut invalid = context();
         invalid.principal_id.clear();
         assert!(retention_intent(root.path(), &invalid, &record.package_cid, false).is_err());
-        assert!(PreparationOwner::default()
+        assert!(test_owner()
             .invoke(
                 root.path(),
                 None,
@@ -12620,7 +12853,7 @@ server.serve_forever()
             .is_err());
         let checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed = checks.clone();
-        assert!(PreparationOwner::default()
+        assert!(test_owner()
             .invoke(
                 root.path(),
                 None,
@@ -12710,7 +12943,7 @@ server.serve_forever()
     #[tokio::test]
     async fn model_preparation_exact_cid_reuse_preserves_actor_request_isolation() {
         let (root, record, backend, registry) = staged_fixture(now().unwrap(), true).await;
-        let owner = PreparationOwner::default();
+        let owner = test_owner();
         owner
             .invoke(
                 root.path(),

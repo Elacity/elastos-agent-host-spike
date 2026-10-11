@@ -31,6 +31,7 @@ let delayCatalog = null;
 let protectReclaim = false;
 let preparationFailure = null;
 let useRefusal = null;
+let modelMemoryFit = "fits";
 const fixtureErrors = [];
 function preparation() {
   return phase === "unprepared" ? null : { operation_id: operation, cid: selectedCid, state: phase,
@@ -48,7 +49,7 @@ function catalog() {
     { name: "people", title: "People", role: "app", installed: true, launchable: true, interfaces: [], dependencies: [] },
     { name: "fixture-model", title: "Fixture model", role: "content", source: "signed-model-catalog",
       installed: false, launchable: false, cid: selectedCid, publisher_did: "did:key:zFixturePublisher", content_size_bytes: 1024,
-      signature_state: "catalog-signature-verified", model_content: { format: "gguf" }, model_runtime: runtime() },
+      signature_state: "catalog-signature-verified", model_memory_fit: modelMemoryFit, model_content: { format: "gguf" }, model_runtime: runtime() },
   ] };
 }
 const manifests = Object.fromEntries(await Promise.all(["marketplace", "system"].map(async name =>
@@ -150,7 +151,7 @@ try {
       : { absent: "Ready to prepare", reclaimed: "Model removed from local cache." };
     phase = "unprepared"; kept = false; failure = false; calls.length = 0;
     dispatchUnavailableReason = null;
-    preparationFailure = null; useRefusal = null;
+    preparationFailure = null; useRefusal = null; modelMemoryFit = "fits";
     selectedCid = cid; executable = true; trust = "verified"; protectReclaim = false;
     const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
     activePage = page;
@@ -191,6 +192,26 @@ try {
       assert.equal(await frame.getByText("Not on this device yet", { exact: true }).count(), 1);
       assert.equal(await frame.getByRole("button", { name: "Get", exact: true }).isEnabled(), true);
     }
+    await frame.getByText("Meets this model’s minimum memory requirement", { exact: true }).waitFor();
+    for (const [fit, explanation] of [
+      ["insufficient", "This device has less memory than this model requires. Choose a smaller model."],
+      ["unavailable", "This Home could not check the device memory. Refresh models, then try Get again."],
+    ]) {
+      modelMemoryFit = fit;
+      await frame.getByRole("button", { name: "Refresh models" }).click();
+      await frame.getByText(explanation, { exact: true }).waitFor();
+      assert.equal(await frame.getByRole("button", { name: acquire, exact: true }).isEnabled(), false);
+      assert.equal(calls.filter(call => call.method === "content.use").length, 0,
+        "device fit refusal sends no new Get request");
+    }
+    modelMemoryFit = "private provider /secret credential";
+    await frame.getByRole("button", { name: "Refresh models" }).click();
+    await frame.getByText("Models are unavailable. Check your connection and trusted catalog, then retry.", { exact: true }).waitFor();
+    assert.doesNotMatch(await frame.locator("body").innerText(), /\/secret|credential|private provider/);
+    modelMemoryFit = "fits";
+    await frame.getByRole("button", { name: "Refresh models" }).click();
+    await frame.getByText("Meets this model’s minimum memory requirement", { exact: true }).waitFor();
+    assert.equal(await frame.getByRole("button", { name: acquire, exact: true }).isEnabled(), true);
     for (const [state, cause, explanation] of [
       ["failed", "storage_service_unavailable", "The storage service is unavailable. Retry when it is running."],
       ["cancelled", "download_interrupted", "The download stopped before it finished. Retry."],
@@ -221,6 +242,8 @@ try {
     await frame.getByRole("button", { name: "Refresh models" }).click();
     await frame.getByText(copy.absent, { exact: true }).waitFor();
     for (const [code, explanation] of [
+      ["model_memory_insufficient", "This device has less memory than this model requires. Choose a smaller model."],
+      ["model_memory_observation_unavailable", "This Home could not check the device memory. Refresh models, then try Get again."],
       ["memory_budget_unavailable", "This model exceeds the local model memory budget. Choose a smaller model or increase the budget, then Retry."],
       ["cache_budget_unavailable", "This model does not fit the local cache budget. Remove an unneeded model, choose a smaller model, or increase the budget, then Retry."],
       ["not_enough_free_space", "Not enough free disk space on this Home: this needs 3 GB plus 2 GB kept free. Free some space, then select Get again."],
@@ -440,8 +463,16 @@ try {
     await frame.getByText("Model action could not be confirmed. Refresh to check its status.", { exact: true }).waitFor();
     assert.equal(await frame.getByRole("button", { name: "Retry", exact: true }).isDisabled(), true);
     loseUseResponse = false;
+    // A stale catalogue may not show the retained request yet. Retry keeps
+    // its identity even when a fresh device-memory observation is unavailable.
+    phase = "unprepared"; kept = false; modelMemoryFit = "unavailable";
     await frame.getByRole("button", { name: "Refresh models" }).click();
+    await frame.getByRole("button", { name: "Retry", exact: true }).waitFor();
+    assert.equal(await frame.getByRole("button", { name: "Retry", exact: true }).isEnabled(), true);
+    await frame.getByRole("button", { name: "Retry", exact: true }).click();
     await frame.getByRole("button", { name: "Cancel preparation" }).waitFor();
+    await frame.getByText("This Home could not check the device memory. Refresh models, then try Get again.", { exact: true }).waitFor();
+    modelMemoryFit = "fits";
     const lostRequests = calls.filter(c => c.method === "content.use").slice(usesBeforeLoss);
     assert.ok(lostRequests.length > 0);
     assert.equal(new Set(lostRequests.map(c => c.request_id)).size, 1, "transport retries and reconciliation preserve the same Use identity");
