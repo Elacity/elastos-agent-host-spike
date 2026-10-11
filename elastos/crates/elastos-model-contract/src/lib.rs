@@ -29,6 +29,8 @@ pub const MODEL_REQUEST_MAX_NONCE_BYTES: usize = 128;
 pub const MODEL_REQUEST_EXPIRED_CODE: &str = "request_expired";
 pub const MODEL_REQUEST_EXPIRED_MESSAGE: &str =
     "This request is no longer valid. Check your device's clock, then try again.";
+pub const MODEL_MEMORY_OBSERVATION_UNAVAILABLE_MESSAGE: &str =
+    "This Home could not check the device memory. Ask the Home owner to check the memory limits, then try again.";
 
 /// New model effects carry a bounded time and nonce. Generic Runtime bindings
 /// remain compatible with legacy IDs retained by an existing owner.

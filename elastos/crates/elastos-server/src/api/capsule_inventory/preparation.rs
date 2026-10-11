@@ -159,7 +159,7 @@ impl PreparationMemoryRefusal {
                 "This device has less memory than this model requires. Choose a smaller model."
             }
             Self::Unavailable => {
-                "This Home could not check the device memory. Ask the Home owner to check the memory limits, then try again."
+                elastos_model_contract::MODEL_MEMORY_OBSERVATION_UNAVAILABLE_MESSAGE
             }
         }
     }

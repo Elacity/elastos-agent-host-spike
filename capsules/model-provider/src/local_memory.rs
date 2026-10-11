@@ -39,7 +39,8 @@ impl MemoryPlan {
     }
 }
 
-/// Refuses with `MemoryUnavailable` unless the host fits the model weights,
+/// Refuses with `MemoryObservationUnavailable` when Runtime cannot read the host
+/// limits, or with `MemoryUnavailable` unless the host fits the model weights,
 /// its KV cache at `context`, compute scratch, and a headroom of
 /// max(10% of RAM, 1 GiB) left for the rest of the device.
 pub(crate) fn admit(
@@ -312,7 +313,7 @@ pub(crate) fn host_memory() -> Result<HostMemory, LocalLlamaFault> {
 fn observed_memory(
     observation: std::io::Result<HostMemory>,
 ) -> Result<HostMemory, LocalLlamaFault> {
-    observation.map_err(|_| LocalLlamaFault::MemoryUnavailable)
+    observation.map_err(|_| LocalLlamaFault::MemoryObservationUnavailable)
 }
 
 /// Ample fixed memory, so test engines never depend on the host's load.
@@ -345,7 +346,7 @@ mod tests {
         ] {
             assert_eq!(
                 observed_memory(Err(kind.into())),
-                Err(LocalLlamaFault::MemoryUnavailable)
+                Err(LocalLlamaFault::MemoryObservationUnavailable)
             );
         }
         assert_eq!(
@@ -355,7 +356,7 @@ mod tests {
                 1,
                 unavailable
             ),
-            Err(LocalLlamaFault::MemoryUnavailable)
+            Err(LocalLlamaFault::MemoryObservationUnavailable)
         );
     }
 

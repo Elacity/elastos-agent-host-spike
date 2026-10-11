@@ -32,6 +32,8 @@ pub(crate) enum LocalLlamaFault {
     Timeout,
     /// Free memory does not cover this model; nothing was started.
     MemoryUnavailable,
+    /// Runtime could not observe the host's memory limits; nothing was started.
+    MemoryObservationUnavailable,
 }
 
 pub(crate) enum LocalTimingStage {

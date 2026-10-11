@@ -2245,6 +2245,14 @@ async fn run_decision_worker(
 
 fn map_local_llama_fault(fault: LocalLlamaFault) -> AdapterFault {
     match fault {
+        LocalLlamaFault::MemoryObservationUnavailable => AdapterFault {
+            error: RunError {
+                class: ErrorClass::ContextRejected,
+                code: "model_memory_observation_unavailable".into(),
+                message: elastos_model_contract::MODEL_MEMORY_OBSERVATION_UNAVAILABLE_MESSAGE.into(),
+            },
+            detail: None,
+        },
         LocalLlamaFault::MemoryUnavailable => AdapterFault {
             error: RunError {
                 class: ErrorClass::ContextRejected,
@@ -3529,6 +3537,7 @@ fn bound_detail(detail: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::config::{OfferPolicy, MAX_POLL_INTERVAL_MS};
     use elastos_model_contract::RUNTIME_CREATE_BINDING_SCHEMA;
     use std::io::{self, Read, Write};
@@ -3540,6 +3549,29 @@ mod tests {
     };
     use std::thread;
     use std::time::Instant;
+
+    #[test]
+    fn local_memory_refusals_explain_observation_and_capacity_separately() {
+        let unreadable = map_local_llama_fault(LocalLlamaFault::MemoryObservationUnavailable);
+        assert_eq!(unreadable.error.class, ErrorClass::ContextRejected);
+        assert_eq!(
+            unreadable.error.code,
+            "model_memory_observation_unavailable"
+        );
+        assert_eq!(
+            unreadable.error.message,
+            elastos_model_contract::MODEL_MEMORY_OBSERVATION_UNAVAILABLE_MESSAGE
+        );
+        assert!(unreadable.detail.is_none());
+        let insufficient = map_local_llama_fault(LocalLlamaFault::MemoryUnavailable);
+        assert_eq!(insufficient.error.class, ErrorClass::ContextRejected);
+        assert_eq!(insufficient.error.code, "model_memory_unavailable");
+        assert_eq!(
+            insufficient.error.message,
+            "Not enough free memory for this model. Close other apps or choose a smaller model."
+        );
+        assert!(insufficient.detail.is_none());
+    }
 
     #[derive(Clone)]
     struct HttpResponseSpec {
