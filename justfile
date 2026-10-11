@@ -165,16 +165,10 @@ fmt:
 # Pre-commit gate: data contracts, behavior tests, smoke tests, fmt/lint/test
 verify:
     git --no-pager diff --check
-    just product-data
+    ./scripts/test-source-gate.sh
     node scripts/check-elastos-bus-wit.mjs
     node scripts/check-capsule-templates.mjs
     ./scripts/vendor-ui-tokens.sh --check
-    python3 scripts/components-release-integrity-check.py --self-test
-    python3 scripts/publish-platform-artifacts-test.py
-    python3 scripts/release-platform-input-test.py
-    python3 scripts/prepare-release-platform-test.py
-    python3 scripts/media-tools-build-test.py
-    node scripts/home-agent-shell-smoke.mjs
     node scripts/carrier-dependency-generation-check.mjs
     just product-ui-source
     node scripts/home-clipboard-source-gate.mjs

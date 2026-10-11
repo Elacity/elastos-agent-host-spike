@@ -71,9 +71,9 @@ class PrepushTests(unittest.TestCase):
         self.write("README.md", "Fixture\n")
         self.write("scripts/test-behaviour.sh", "#!/bin/sh\nexec node --test --test-timeout=60000\n")
         (self.root / "scripts/test-behaviour.sh").chmod(0o755)
-        for name in ("release-platform-input-test.py", "ci-release-policy-test.py"):
-            self.write("scripts/" + name, "import os,sys\n"
-                       "raise SystemExit(1 if os.environ.get('PREPUSH_RELEASE_FAIL') else 0)\n")
+        self.write("scripts/test-source-gate.sh", '#!/bin/sh\n[ -z "$PREPUSH_SOURCE_GATE_FAIL" ] || '
+                   '{ echo "✖ fixture source gate"; exit 1; }\n')
+        (self.root / "scripts/test-source-gate.sh").chmod(0o755)
         self.write(".gitignore", "**/target/\n/target-build/\n")
         self.commit()
         self.git("remote", "add", "origin", str(self.origin))
@@ -472,18 +472,18 @@ class PrepushTests(unittest.TestCase):
         lint = [c for c in self.commands() if c["args"][0] == "clippy"][-1]
         self.assertIn("other", lint["args"])
 
-    def test_release_tool_change_runs_self_tests_and_refuses_failure(self):
+    def test_source_gate_runs_for_any_change_and_failure_stops_before_cargo(self):
         self.git("reset", "--hard", "HEAD~1")
-        self.write("scripts/release-example.py", "# changed release tool\n")
+        self.write("README.md", "Changed documentation\n")
         self.commit()
-        result = self.invoke(extra={"PREPUSH_RELEASE_FAIL": "1"})
-        self.assert_stopped(result, "release-platform-input-test.py")
-        self.log.unlink()
+        result = self.invoke(extra={"PREPUSH_SOURCE_GATE_FAIL": "1"})
+        self.assert_stopped(result, "scripts/test-source-gate.sh")
+        self.assertIn("✖ fixture source gate", result.stdout)
+        self.assertTrue(any(c["tool"] == "node" and "--test" in c["args"] for c in self.commands()))
+        self.assertFalse(any(c["tool"] == "cargo" for c in self.commands()))
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertFalse(any(c["args"][0] == "check" for c in self.commands()))
-        self.assertIn("+ python3 scripts/release-platform-input-test.py", result.stdout)
-        self.assertIn("+ python3 scripts/ci-release-policy-test.py", result.stdout)
+        self.assertIn("+ ./scripts/test-source-gate.sh", result.stdout)
 
     def test_shared_runtime_input_seeds_all_members(self):
         self.git("reset", "--hard", "HEAD~1")

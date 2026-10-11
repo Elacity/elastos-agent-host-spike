@@ -159,10 +159,12 @@ Test-channel release. Signed releases show these notes in System before you upda
 
 ### Developer detail
 
-- The local pre-push gate now runs the CI behaviour suite before Cargo work.
-  CI, `just test-behaviour` and the gate share `scripts/test-behaviour.sh`,
-  so a failing Node test stops the push locally and names the test. Run
-  `just test-behaviour-inputs` once to install the pinned Playwright inputs.
+- The local pre-push gate now runs the CI behaviour suite and the CI
+  source-gate checks before Cargo work. CI, `just test-behaviour` and the gate
+  share `scripts/test-behaviour.sh`; CI source-gate, `just verify` and the gate
+  share `scripts/test-source-gate.sh`. A failing check stops the push locally
+  and names the test. Run `just test-behaviour-inputs` once to install the
+  pinned Playwright inputs.
 - Removed `elastos identity passkey-hint` and the private credential-hint
   sign-in path. Anonymous sign-in options still never list an account's
   credentials.

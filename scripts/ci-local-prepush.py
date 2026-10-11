@@ -537,17 +537,10 @@ def crate_units(root, workspace, package, paths, lease):
 
 def gates(root, paths, lease):
     run(["git", "diff", "--check", "origin/develop...HEAD"], root)
-    run(["node", "scripts/check-product-data.mjs"], root)
     # The CI test-behaviour suite (about a minute); its last lines name failures.
     run(["./scripts/test-behaviour.sh"], root)
-    if any(path in {".githooks/pre-push", "scripts/ci-local-prepush.sh",
-                    "scripts/ci-local-prepush.py", "scripts/ci-local-prepush-test.py"}
-           for path in paths):
-        run(["python3", "scripts/ci-local-prepush-test.py"], root)
-    if any(path.startswith("scripts/release-") or path in {
-            "scripts/install.sh", "scripts/publish-release.sh"} for path in paths):
-        run(["python3", "scripts/release-platform-input-test.py"], root)
-        run(["python3", "scripts/ci-release-policy-test.py"], root)
+    # The CI source-gate checks, from the same list CI runs.
+    run(["./scripts/test-source-gate.sh"], root)
     workspaces = touched_workspaces(root, paths, lease)
     formats = {root / "elastos", root / "capsules/chain-provider", *workspaces}
     for workspace in sorted(formats):

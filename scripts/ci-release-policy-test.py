@@ -21,6 +21,8 @@ from unittest import mock
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml"
 SOURCE = WORKFLOW.read_text()
+# CI source-gate steps run sections of this script; it owns the command list.
+SOURCE_GATE = (WORKFLOW.parents[2] / "scripts/test-source-gate.sh").read_text()
 CACHE_ACTION = WORKFLOW.parents[1] / "actions/rust-compile-cache/action.yml"
 LOCAL_CACHE_ACTION = "./.github/actions/rust-compile-cache"
 UNIT_CACHE_JOBS = {"lint", "test-elastos", "test-capsules"}
@@ -652,8 +654,9 @@ class ReleasePolicyTests(unittest.TestCase):
     def test_compile_free_source_gate_keeps_one_nested_installer_suite(self):
         source_gate = JOBS["source-gate"]
         self.assertNotRegex(source_gate, r"(?i)sccache|RUSTC_WRAPPER|rust-compile-cache")
-        self.assertNotIn("python3 scripts/install-bootstrap-test.py", source_gate)
-        self.assertEqual(source_gate.count("python3 scripts/release-platform-input-test.py"), 1)
+        self.assertIn("run: ./scripts/test-source-gate.sh release", source_gate)
+        self.assertNotIn("python3 scripts/install-bootstrap-test.py", SOURCE_GATE)
+        self.assertEqual(SOURCE_GATE.count("python3 scripts/release-platform-input-test.py"), 1)
         nested = (WORKFLOW.parents[2] / "scripts/release-platform-input-test.py").read_text()
         self.assertIn('"install-bootstrap-test.py"', nested)
         self.assertIn('[sys.executable, str(script), "--bash", "/bin/bash"]', nested)
@@ -1463,7 +1466,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertEqual(field(JOBS["source-home-linux-arm64"], "os"), "[ubuntu-22.04-arm]")
         self.assertIn("- os: ubuntu-22.04-arm\n            check_name: ubuntu-24.04-arm",
                       JOBS["source-home-linux-arm64"])
-        self.assertIn("python3 scripts/ci-release-policy-test.py", JOBS["source-gate"])
+        self.assertIn("python3 scripts/ci-release-policy-test.py", SOURCE_GATE)
 
     def run_cancel_watcher(self, polls):
         """Run the watcher shell against successive job lists; return (status, cancels, polls used)."""
