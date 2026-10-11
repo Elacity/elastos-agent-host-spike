@@ -181,13 +181,17 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
                 ));
             }
         }
-        require_retained_run_bindings(&journal, &offers)?;
-        Ok(Self {
+        let replaced_local_runs = require_retained_run_bindings(&journal, &offers)?;
+        let mut state = Self {
             config,
             journal,
             offers,
             adapters,
-        })
+        };
+        for run_id in replaced_local_runs {
+            state.settle_local_text_run_unknown(&run_id)?;
+        }
+        Ok(state)
     }
 
     pub fn ready_offer_count(&self) -> usize {
@@ -757,7 +761,8 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
             .backend_state
             .as_ref()
             .map(is_local_text_backend_state)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || (!self.offers.contains_key(&run.offer.id) && retained_local_llama_run(&run));
         if !is_local {
             return Ok(());
         }
@@ -981,12 +986,19 @@ fn reject_untrusted_binding_fields(input: &Value) -> Result<(), ProviderFault> {
 fn require_retained_run_bindings(
     journal: &RunJournal,
     offers: &BTreeMap<String, ConfiguredOffer>,
-) -> Result<(), ProviderFault> {
+) -> Result<Vec<String>, ProviderFault> {
+    let mut replaced_local_runs = Vec::new();
     for (_, run) in journal.scan_runs()? {
         if !run.status.is_terminal() {
-            let offer = offers.get(&run.offer.id).ok_or_else(|| {
-                ProviderFault::selection_unavailable("retained model binding unavailable")
-            })?;
+            let Some(offer) = offers.get(&run.offer.id) else {
+                if retained_local_llama_run(&run) {
+                    replaced_local_runs.push(run.run_id.clone());
+                    continue;
+                }
+                return Err(ProviderFault::selection_unavailable(
+                    "retained model binding unavailable",
+                ));
+            };
             if offer
                 .execution_binding_hash()
                 .map_err(|_| ProviderFault::invalid_request("invalid model binding"))?
@@ -1010,7 +1022,24 @@ fn require_retained_run_bindings(
             }
         }
     }
-    Ok(())
+    Ok(replaced_local_runs)
+}
+
+// The protected run summary records local context limits only for llama.
+// Hosted workers share the text state schema and retain their own disclosure.
+fn retained_local_llama_run(run: &StoredRun) -> bool {
+    run.offer.operation == "text.generate"
+        && run.offer.context.is_some()
+        && run.offer.hosted.is_none()
+        && run.backend_state.as_ref().is_none_or(|state| {
+            is_local_text_backend_state(state)
+                && state.as_object().is_some_and(|fields| {
+                    fields.len() == 2
+                        && fields
+                            .get("cancel_requested")
+                            .is_some_and(Value::is_boolean)
+                })
+        })
 }
 
 fn assert_run_owner(binding: &RuntimeAccessBinding, run: &StoredRun) -> Result<(), ProviderFault> {
@@ -2294,6 +2323,66 @@ mod tests {
         config.extra["offers"] = json!([state.offers["operator"].clone()]);
         config.extra["runtime_admitted_offers"] = json!([]);
         config
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn engine_replacement_keeps_hosted_and_configured_run_bindings_strict() {
+        for case in ["hosted", "changed", "invalid-state"] {
+            let state = retirement_state();
+            let original = state.offers[if case == "hosted" {
+                "operator"
+            } else {
+                "admitted"
+            }]
+            .clone();
+            let input = json!({"schema": "elastos.model.input.text/v1", "prompt":"retained"});
+            let binding = create_binding(&format!("request:strict-{case}"), &original.id, &input);
+            let mut run = prepared_run_for_offer(binding, &original, now_ms());
+            run.status = RunStatus::Running;
+            run.backend_state = Some(serialize_local_text_backend_state(false).unwrap());
+            if case == "invalid-state" {
+                run.backend_state.as_mut().unwrap()["extra"] = json!(true);
+            }
+            state.journal.store_run(&run).unwrap();
+            let before =
+                serde_json::to_value(&state.journal.load_run(&run.run_id).unwrap()).unwrap();
+            let missing_local = if case == "hosted" {
+                let local = &state.offers["admitted"];
+                let binding =
+                    create_binding("request:missing-local-before-hosted", &local.id, &input);
+                let prepared = prepared_run_for_offer(binding, local, now_ms());
+                state.journal.store_run(&prepared).unwrap();
+                Some(prepared)
+            } else {
+                None
+            };
+            let mut config = state.config.clone();
+            config.extra["offers"] = if case == "changed" {
+                let mut changed = original.clone();
+                changed.policy.runtime_ms_limit += 1;
+                json!([changed])
+            } else {
+                json!([])
+            };
+            config.extra["runtime_admitted_offers"] = json!([]);
+            assert!(
+                ModelProviderState::from_init(config, FakeAdapters::default()).is_err(),
+                "case {case}"
+            );
+            assert_eq!(
+                serde_json::to_value(state.journal.load_run(&run.run_id).unwrap()).unwrap(),
+                before
+            );
+            if let Some(prepared) = missing_local {
+                assert_eq!(
+                    serde_json::to_value(state.journal.load_run(&prepared.run_id).unwrap())
+                        .unwrap(),
+                    serde_json::to_value(prepared).unwrap(),
+                    "validation failure settles no earlier missing local run"
+                );
+            }
+        }
     }
 
     #[cfg(unix)]

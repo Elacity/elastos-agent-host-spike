@@ -2946,6 +2946,16 @@ fn bound_model_offer(
 }
 
 impl ModelActivation {
+    fn engine_successor_of(&self, previous: &Self) -> bool {
+        let invariant = |activation: &Self| {
+            let mut offer = activation.offer.clone();
+            offer.as_object_mut().unwrap().remove("id");
+            offer["adapter"].as_object_mut().unwrap().remove("engine");
+            offer
+        };
+        self.entrypoint == previous.entrypoint && invariant(self) == invariant(previous)
+    }
+
     fn validate(&self, record: &PreparationRecord) -> anyhow::Result<()> {
         ensure!(
             serde_json::to_vec(self)?.len() <= 16 * 1024,
@@ -3049,7 +3059,7 @@ impl ModelActivation {
 
 // The saved activation binds execution identity and policy. The live provider
 // owns wire-schema capabilities and reports context limits for that profile;
-// old descriptors keep their original bytes.
+// this wire-schema projection preserves the saved descriptor bytes.
 fn model_offer_matches(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
     let mut identity = actual.clone();
     let Some(object) = identity.as_object_mut() else {
@@ -3585,10 +3595,14 @@ async fn append_admitted_model_offers_locked(
             .context("activation owner unavailable")?;
         activation.check_root(data_dir, owner)?;
         if let Some(previous) = &owner.activation {
+            previous.check_root(data_dir, owner)?;
             ensure!(
-                previous == &activation,
+                activation.engine_successor_of(previous),
                 "activation descriptor changed on retry"
             );
+            if previous != &activation {
+                pending.push((owner.operation_id.clone(), activation));
+            }
         } else {
             pending.push((owner.operation_id.clone(), activation));
         }
@@ -3612,13 +3626,10 @@ async fn append_admitted_model_offers_locked(
                 .iter_mut()
                 .find(|r| r.operation_id == owner_id)
                 .context("activation owner unavailable")?;
-            ensure!(
-                owner.activation.is_none(),
-                "activation descriptor changed before Init"
-            );
             owner.activation = Some(activation);
+            owner.activation_pending = true;
         }
-        inventory.save(&durable)?;
+        inventory.save_engine_replacements(&durable)?;
     }
     let mut extra = config.extra.clone();
     extra["offers"] = serde_json::Value::Array(offers);
@@ -6904,6 +6915,151 @@ mod tests {
                     );
                 }
             }
+        }
+
+        #[tokio::test]
+        async fn model_startup_binding_rebuilds_only_verified_engine_successors() {
+            let (root, record, backend, registry) = staged_fixture(now().unwrap(), true).await;
+            admit(root.path(), &record);
+            let first_engine = install_engine(root.path());
+            let mut first = config(root.path());
+            append_admitted_model_startup_offers(root.path(), &registry, &mut first)
+                .await
+                .unwrap();
+            let model = Arc::new(ModelActivationFixture::default());
+            *model.configured.lock().unwrap() = Some(serde_json::to_value(&first).unwrap());
+            registry
+                .register_sub_provider("model", model.clone())
+                .await
+                .unwrap();
+            complete_admitted_model_startup(root.path(), &registry, None)
+                .await
+                .unwrap();
+            let original = load_operation(root.path(), &record.operation_id).unwrap();
+            assert!(!original.activation_pending);
+            let old = original.activation.as_ref().unwrap();
+            let bundle = &first_engine.0;
+            std::fs::set_permissions(bundle, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::set_permissions(
+                bundle.join("llama-server"),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+            std::fs::set_permissions(
+                bundle.join(".elastos-engine.json"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            let _replacement = install_engine_bytes(root.path(), b"verified successor engine");
+            let mut current = config(root.path());
+            append_admitted_model_startup_offers(root.path(), &registry, &mut current)
+                .await
+                .unwrap();
+            let replaced = load_operation(root.path(), &record.operation_id).unwrap();
+            let new = replaced.activation.as_ref().unwrap();
+            assert_ne!(new.offer["id"], old.offer["id"]);
+            assert_ne!(new.engine_receipt_sha256, old.engine_receipt_sha256);
+            assert!(new.engine_successor_of(old));
+            assert_eq!(new.offer["adapter"]["model"], old.offer["adapter"]["model"]);
+            assert_eq!(replaced.package_cid, original.package_cid);
+            assert_eq!(replaced.admission_id, original.admission_id);
+            assert!(replaced.activation_pending);
+            assert_eq!(current.extra["offers"][0], first.extra["offers"][0]);
+            assert!(backend.read_sizes.lock().unwrap().is_empty());
+            complete_admitted_model_startup(root.path(), &registry, None)
+                .await
+                .unwrap();
+            assert!(
+                load_operation(root.path(), &record.operation_id)
+                    .unwrap()
+                    .activation_pending,
+                "the old live offer cannot confirm the successor"
+            );
+            let path = root.path().join("model-preparation/state.json");
+            let saved = std::fs::read(&path).unwrap();
+            let mut restarted = config(root.path());
+            append_admitted_model_startup_offers(root.path(), &registry, &mut restarted)
+                .await
+                .unwrap();
+            assert_eq!(restarted.extra, current.extra);
+            assert_eq!(std::fs::read(&path).unwrap(), saved);
+            {
+                let inventory = Inventory::open(root.path(), false).unwrap();
+                let mut state = inventory.load().unwrap();
+                state.records[0].activation = Some(old.clone());
+                assert!(
+                    inventory.save(&state).is_err(),
+                    "ordinary saves cannot replace an engine binding"
+                );
+                state.records[0].activation = Some(new.clone());
+                state.records[0].activation.as_mut().unwrap().offer["title"] =
+                    serde_json::json!("Another model title");
+                assert!(
+                    inventory.save(&state).is_err(),
+                    "ordinary saves preserve the binding"
+                );
+                assert!(
+                    inventory.save_engine_replacements(&state).is_err(),
+                    "engine replacement preserves model fields"
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), saved);
+            }
+            for field in [
+                "title",
+                "operation",
+                "policy",
+                "enabled",
+                "model",
+                "settings",
+                "entrypoint",
+            ] {
+                let mut changed = new.clone();
+                match field {
+                    "title" => changed.offer["title"] = serde_json::json!("changed"),
+                    "operation" => changed.offer["operation"] = serde_json::json!("changed"),
+                    "policy" => changed.offer["policy"]["runtime_ms_limit"] = serde_json::json!(1),
+                    "enabled" => changed.offer["enabled"] = serde_json::json!(false),
+                    "model" => {
+                        changed.offer["adapter"]["model"]["sha256"] =
+                            serde_json::json!(format!("sha256:{}", "b".repeat(64)))
+                    }
+                    "settings" => {
+                        changed.offer["adapter"]["settings"]["threads"] = serde_json::json!(999)
+                    }
+                    "entrypoint" => changed.entrypoint = "other.gguf".into(),
+                    _ => unreachable!(),
+                }
+                assert!(!changed.engine_successor_of(new), "changed {field}");
+            }
+            *model.configured.lock().unwrap() = Some(serde_json::to_value(&current).unwrap());
+            complete_admitted_model_startup(root.path(), &registry, None)
+                .await
+                .unwrap();
+            assert!(
+                !load_operation(root.path(), &record.operation_id)
+                    .unwrap()
+                    .activation_pending
+            );
+            let saved = std::fs::read(&path).unwrap();
+            std::fs::set_permissions(
+                bundle.join("llama-server"),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+            crate::test_support::write_from_child(
+                &bundle.join("llama-server"),
+                b"unverified replacement",
+                0o700,
+            );
+            let mut invalid = config(root.path());
+            let before = invalid.extra.clone();
+            assert!(
+                append_admitted_model_startup_offers(root.path(), &registry, &mut invalid)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(invalid.extra, before);
+            assert_eq!(std::fs::read(&path).unwrap(), saved);
         }
 
         #[tokio::test]

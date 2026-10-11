@@ -4854,6 +4854,90 @@ mod tests {
         provider.shutdown_on_eof();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn engine_replacement_restart_retains_running_and_prepared_local_identity() {
+        for status in [
+            crate::contract::RunStatus::Running,
+            crate::contract::RunStatus::Prepared,
+        ] {
+            let root = temp_root(&format!("engine-replacement-{status:?}"));
+            let (mut original, events, root) = local_llama_offer(&root, "healthy");
+            original.id = "original-local".into();
+            let input = text_input("original");
+            let binding = create_binding("request:original-engine", &original, &input);
+            let run_id = deterministic_run_id(&binding);
+            let mut run = StoredRun::new_prepared(
+                run_id.clone(),
+                binding.clone(),
+                original.summary(),
+                original.execution_binding_hash().unwrap(),
+                crate::journal::now_ms(),
+            );
+            run.status = status.clone();
+            if status == crate::contract::RunStatus::Running {
+                run.backend_state = Some(serialize_local_text_backend_state(false).unwrap());
+            }
+            let journal =
+                RunJournal::open(crate::config::journal_root(&root, None).unwrap()).unwrap();
+            journal.store_run(&run).unwrap();
+            let mut current = original.clone();
+            current.id = "current-local".into();
+            if let AdapterConfig::LocalLlamaCppText { engine, .. } = &mut current.adapter {
+                // The child writer keeps an executable writer fd out of other test forks.
+                assert!(std::process::Command::new("/bin/sh")
+                    .args(["-c", "printf '\\n# successor engine\\n' >> \"$1\"", "sh"])
+                    .arg(&engine.path)
+                    .status()
+                    .unwrap()
+                    .success());
+                engine.sha256 = crate::test_support::sha256_file(Path::new(&engine.path));
+            }
+            assert_ne!(
+                current.execution_binding_hash().unwrap(),
+                run.execution_binding_hash
+            );
+            let mut provider = ProviderCoordinatorHandle::start();
+            init_provider(&provider, &root, vec![current.clone()]);
+            let response = get_run(&provider, &run_id, &access_binding(&binding));
+            assert_eq!(response["data"]["status"], "settlement_unknown");
+            let retained = journal.load_run(&run_id).unwrap();
+            assert_eq!(retained.offer, run.offer);
+            assert_eq!(retained.runtime_binding, binding);
+            assert_eq!(retained.execution_binding_hash, run.execution_binding_hash);
+            assert_eq!(retained.input_hash, run.input_hash);
+            assert!(
+                fake_llama_events(&events).is_empty(),
+                "restart does not redispatch the original request"
+            );
+            let next_input = text_input("current");
+            let next_binding = create_binding("request:current-engine", &current, &next_input);
+            let created = create_run(&provider, &current, &next_binding, &next_input);
+            let completed = wait_for_terminal(
+                &provider,
+                created["data"]["run_id"].as_str().unwrap(),
+                &access_binding(&next_binding),
+            );
+            assert_eq!(
+                completed["data"]["terminal"]["output"]["text"],
+                "reply:current"
+            );
+            assert!(!fake_llama_events(&events)
+                .iter()
+                .any(|event| event == "request:original"));
+            provider.shutdown_on_eof();
+            let prior_events = fake_llama_events(&events);
+            let mut restarted = ProviderCoordinatorHandle::start();
+            init_provider(&restarted, &root, vec![current]);
+            assert_eq!(
+                get_run(&restarted, &run_id, &access_binding(&binding))["data"]["terminal"],
+                response["data"]["terminal"]
+            );
+            assert_eq!(fake_llama_events(&events), prior_events);
+            restarted.shutdown_on_eof();
+        }
+    }
+
     #[test]
     fn restart_of_artifact_create_without_receipt_settles_unknown_without_redispatch() {
         let server = start_server(Vec::new());
