@@ -902,6 +902,34 @@ fn receipt_round_trip_keeps_non_utf8_launch_args_environment_and_working_directo
 }
 
 #[test]
+fn launch_capture_and_restart_preserve_carrier_mdns_choice() {
+    for choice in [None, Some("0"), Some("1")] {
+        let environment = choice.into_iter().map(|value| {
+            (
+                OsString::from("ELASTOS_CARRIER_MDNS"),
+                OsString::from(value),
+            )
+        });
+        let launch = LaunchPlan::capture_environment(environment, PathBuf::from("/Home fixture"));
+        for restarting in [false, true] {
+            let command = launch
+                .command(
+                    Path::new("/Home fixture/bin/elastos"),
+                    &"c".repeat(32),
+                    restarting,
+                )
+                .unwrap();
+            let retained = command
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| *key == OsStr::new("ELASTOS_CARRIER_MDNS"))
+                .and_then(|(_, value)| value);
+            assert_eq!(retained, choice.map(OsStr::new));
+        }
+    }
+}
+
+#[test]
 fn launch_capture_and_retained_commands_exclude_unrelated_credentials() {
     let cwd = PathBuf::from("/private/Home fixture");
     let allowed = [
