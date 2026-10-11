@@ -83,7 +83,6 @@ test("restored CID uses its current engine offer and preserves historical runs, 
     { id: "inactive", mode: "chat", messages: [{ role: "user", content: "Another saved chat" }],
       composerDraft: { text: "Other draft", parts: [] },
       modelSelection: { liveOfferId: originalId, selectedModelCid: cid }, lastTurn: structuredClone(retainedTurn) }];
-  const inactive = structuredClone(records[1]);
   let currentDraft = structuredClone(draft);
   workspace.bindAgentWorkspaceStore({ getSessions: () => records, setSessions() {}, getActiveSessionId: () => "active",
     getReasoningVisible: () => false, setReasoningVisible() {}, setActiveSessionId() {},
@@ -102,6 +101,7 @@ test("restored CID uses its current engine offer and preserves historical runs, 
         input_modalities: ["text/plain"], output_modalities: ["text/plain"] }] } };
   };
   workspace.restoreSessionState(records[0]);
+  const inactive = structuredClone(workspace.getAgentWorkspaceSnapshot().sessions[1]);
   await live.probeLiveInference({ force: true });
   assert.equal(live.selectedLiveOffer().offerId, currentId);
   assert.equal(live.liveOfferChoice(), currentId, "workspace persistence refreshes only the execution hint");
