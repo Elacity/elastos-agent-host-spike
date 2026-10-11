@@ -7523,7 +7523,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_owned_profile_refresh_keeps_receiving_durable_and_sync_session_bound() {
+    async fn runtime_owned_profile_refresh_keeps_live_session_authority() {
         let temp = tempfile::tempdir().unwrap();
         let pair = durable_profile_peer_pair(temp.path()).await;
         let root_a = temp.path().join("a");

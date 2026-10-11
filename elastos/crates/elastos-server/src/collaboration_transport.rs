@@ -524,7 +524,9 @@ mod tests {
     use crate::collaboration_protocol::sign_collaboration_transport_frame;
     use crate::esp_binding::{esp_request_binding, EspRequestBinding};
     use elastos_common::collaboration_protocol::{
+        canonical_collaboration_message_bytes, canonical_signed_collaboration_message_bytes,
         collaboration_message_envelope_sha256, SignedCollaborationMessage,
+        COLLABORATION_MESSAGE_SIGNATURE_DOMAIN_V1,
     };
     use elastos_runtime::provider::ProviderCarrierInvoker;
     use elastos_runtime::signature::{generate_keypair, SigningKey};
@@ -540,8 +542,9 @@ mod tests {
 
     struct FakeCarrier {
         requests: Mutex<Vec<serde_json::Value>>,
-        replies: Mutex<VecDeque<serde_json::Value>>,
+        replies: Mutex<VecDeque<Result<serde_json::Value, ProviderError>>>,
         blocked_metadata: AtomicBool,
+        durable_incoming_before_send: Mutex<Option<Arc<CollaborationCore>>>,
     }
     impl FakeCarrier {
         fn new() -> Arc<Self> {
@@ -549,10 +552,23 @@ mod tests {
                 requests: Mutex::new(Vec::new()),
                 replies: Mutex::new(VecDeque::new()),
                 blocked_metadata: AtomicBool::new(false),
+                durable_incoming_before_send: Mutex::new(None),
             })
         }
         fn push(&self, replies: impl IntoIterator<Item = serde_json::Value>) {
-            self.replies.lock().unwrap().extend(replies);
+            self.replies
+                .lock()
+                .unwrap()
+                .extend(replies.into_iter().map(Ok));
+        }
+        fn push_failure(&self, message: &str) {
+            self.replies
+                .lock()
+                .unwrap()
+                .push_back(Err(ProviderError::Unavailable(message.to_string())));
+        }
+        fn observe_durable_incoming_before_send(&self, core: Arc<CollaborationCore>) {
+            *self.durable_incoming_before_send.lock().unwrap() = Some(core);
         }
         fn requests(&self) -> Vec<serde_json::Value> {
             self.requests.lock().unwrap().clone()
@@ -574,6 +590,16 @@ mod tests {
             request: &serde_json::Value,
         ) -> Result<serde_json::Value, ProviderError> {
             self.requests.lock().unwrap().push(request.clone());
+            if request["op"] == "gossip_send" {
+                if let Some(core) = self.durable_incoming_before_send.lock().unwrap().as_ref() {
+                    let summary = core.summary().unwrap();
+                    assert_eq!(
+                        summary.pending_product_handoffs + summary.replay_tombstones,
+                        1,
+                        "the receipt is sent only after acceptance is durable"
+                    );
+                }
+            }
             if request["op"] == "gossip_send" && self.blocked_metadata.load(Ordering::SeqCst) {
                 return std::future::pending().await;
             }
@@ -584,7 +610,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .pop_front()
-                .ok_or_else(|| ProviderError::Unavailable("offline".to_string()))
+                .unwrap_or_else(|| Err(ProviderError::Unavailable("offline".to_string())))
         }
     }
     fn peek(cursor: u64, next: u64, frames: Vec<serde_json::Value>) -> serde_json::Value {
@@ -602,6 +628,14 @@ mod tests {
 
     fn gossip(frame: &[u8]) -> serde_json::Value {
         serde_json::json!({"content":std::str::from_utf8(frame).unwrap()})
+    }
+
+    fn request_ops(carrier: &FakeCarrier) -> Vec<String> {
+        carrier
+            .requests()
+            .iter()
+            .map(|request| request["op"].as_str().unwrap().to_string())
+            .collect()
     }
 
     struct Fixture {
@@ -790,6 +824,27 @@ mod tests {
             )
             .unwrap();
         (key, prepared.envelope_bytes().to_vec())
+    }
+
+    fn prepare_metadata(
+        fixture: &Fixture,
+        core: &CollaborationCore,
+        request_id: &str,
+    ) -> crate::collaboration_core::DurableOutgoingMessage {
+        let profile = fixture
+            .authority(fixture.device_key.clone())
+            .sender_profile_for_test()
+            .unwrap();
+        let kind = crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE;
+        core.prepare_profile_outgoing(
+            operation(&profile, request_id, kind, &serde_json::json!({}), 45),
+            &profile,
+            kind,
+            serde_json::json!({}),
+            NOW,
+            45,
+        )
+        .unwrap()
     }
 
     fn remote_receipt(
@@ -1358,21 +1413,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mixed_metadata_batch_retries_storage_and_consumes_legacy_chat_and_malformed_frames() {
+    async fn mixed_batch_waits_for_retryable_core_work_but_consumes_deterministic_rejections() {
         let fixture = Fixture::new();
         let core = fixture.core();
         let (key, _) = generate_keypair();
+        let original = presence_frame(&fixture, &key, NOW);
+        let original_envelope =
+            crate::collaboration_protocol::verify_collaboration_transport_frame(&original)
+                .unwrap()
+                .envelope_bytes()
+                .to_vec();
+        assert!(matches!(
+            core.ingest_transport_frame(&original, NOW).unwrap(),
+            CollaborationTransportIngestion::Incoming(_)
+        ));
+        core.acknowledge_product_handoff(&collaboration_message_envelope_sha256(
+            &original_envelope,
+        ))
+        .unwrap();
+        let mut conflict: SignedCollaborationMessage =
+            serde_json::from_slice(&original_envelope).unwrap();
+        conflict.payload.expires_at += 1;
+        let (signature, signer_did) = crate::crypto::domain_separated_sign(
+            &key,
+            COLLABORATION_MESSAGE_SIGNATURE_DOMAIN_V1,
+            &canonical_collaboration_message_bytes(&conflict.payload).unwrap(),
+        );
+        conflict.signature = signature;
+        conflict.signer_did = signer_did;
+        let conflict = sign_collaboration_transport_frame(
+            &key,
+            &canonical_signed_collaboration_message_bytes(&conflict).unwrap(),
+        )
+        .unwrap();
+        let self_message = prepare_metadata(&fixture, &core, "self-metadata");
+        let unknown = sign_collaboration_transport_frame(
+            &key,
+            br#"{"payload":{"schema":"elastos.collaboration.unknown/v1"}}"#,
+        )
+        .unwrap();
         let (_, legacy) = remote_message(&fixture, key.clone(), "legacy Chat");
         let legacy = sign_collaboration_transport_frame(&key, &legacy).unwrap();
-        let metadata = presence_frame(&fixture, &key, NOW);
-        let frames = vec![gossip(b"{"), gossip(&legacy), gossip(&metadata)];
+        let (valid_key, _) = generate_keypair();
+        let metadata = presence_frame(&fixture, &valid_key, NOW);
+        let frames = vec![
+            serde_json::json!({"content":"not-a-frame"}),
+            gossip(b"{"),
+            gossip(&unknown),
+            gossip(
+                &core
+                    .prepare_transport_frame(self_message.envelope_bytes())
+                    .unwrap(),
+            ),
+            gossip(&conflict),
+            gossip(&legacy),
+            gossip(&metadata),
+        ];
         let carrier = FakeCarrier::new();
         let driver = fixture.driver(core.clone(), carrier.clone()).await;
         carrier.push([
-            peek(0, 3, frames.clone()),
-            peek(0, 3, frames),
+            peek(0, 7, frames.clone()),
+            peek(0, 7, frames),
             serde_json::json!({"status":"ok","data":{"remote_peer_count":1}}),
-            ack(0, 3),
+            ack(0, 7),
         ]);
         core.inject_write_fault(WriteFault::BeforeWrite);
         assert!(matches!(
@@ -1386,8 +1489,8 @@ mod tests {
         assert_eq!(
             driver.process_incoming_once(NOW).await.unwrap(),
             CollaborationIncomingOnceOutcome::Acknowledged(CollaborationIncomingOnceSummary {
-                carrier_rejected_frames: 1,
-                deterministic_rejections: 1,
+                carrier_rejected_frames: 2,
+                deterministic_rejections: 4,
                 incoming_acceptances: 1,
                 acceptance_receipt_broadcasts: 1,
                 ..CollaborationIncomingOnceSummary::default()
@@ -1401,6 +1504,16 @@ mod tests {
                 .filter(|request| request["op"] == "gossip_ack")
                 .count(),
             1
+        );
+        assert_eq!(
+            request_ops(&carrier),
+            [
+                "gossip_join_exact",
+                "gossip_peek",
+                "gossip_peek",
+                "gossip_send",
+                "gossip_ack"
+            ]
         );
         assert_eq!(
             requests
@@ -1419,12 +1532,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_metadata_batch_acknowledges_without_product_or_send_effects() {
+    async fn empty_batch_is_acknowledged_without_product_or_transport_effects() {
         let fixture = Fixture::new();
         let core = fixture.core();
         let carrier = FakeCarrier::new();
         let driver = fixture.driver(core.clone(), carrier.clone()).await;
-        carrier.push([peek(0, 0, Vec::new()), ack(0, 0)]);
+        carrier.push([peek(7, 7, Vec::new()), ack(7, 7)]);
         assert_eq!(
             driver.process_incoming_once(NOW).await.unwrap(),
             CollaborationIncomingOnceOutcome::Acknowledged(
@@ -1439,6 +1552,136 @@ mod tests {
                 .filter(|request| request["op"] == "gossip_send")
                 .count(),
             0
+        );
+        assert_eq!(
+            request_ops(&carrier),
+            ["gossip_join_exact", "gossip_peek", "gossip_ack"]
+        );
+    }
+
+    #[tokio::test]
+    async fn incoming_receipt_is_durable_before_send_and_replayed_until_exact_ack() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let (sender, _) = generate_keypair();
+        let frame = presence_frame(&fixture, &sender, NOW);
+        let envelope = crate::collaboration_protocol::verify_collaboration_transport_frame(&frame)
+            .unwrap()
+            .envelope_bytes()
+            .to_vec();
+        let carrier = FakeCarrier::new();
+        let driver = fixture.driver(core.clone(), carrier.clone()).await;
+        // A separately opened Core reads the persisted acceptance before each send.
+        carrier.observe_durable_incoming_before_send(fixture.core());
+        let remote = serde_json::json!({"status":"ok","data":{"remote_peer_count":1}});
+        carrier.push([
+            peek(0, 1, vec![gossip(&frame)]),
+            serde_json::json!({"status":"ok","broadcast":"local_only","data":{"remote_peer_count":0}}),
+        ]);
+        assert!(matches!(
+            driver.process_incoming_once(NOW).await.unwrap(),
+            CollaborationIncomingOnceOutcome::RetryRequired(_)
+        ));
+        assert_eq!(core.summary().unwrap().pending_product_handoffs, 1);
+        core.acknowledge_product_handoff(&collaboration_message_envelope_sha256(&envelope))
+            .unwrap();
+        assert_eq!(core.summary().unwrap().replay_tombstones, 1);
+
+        carrier.push([peek(0, 1, vec![gossip(&frame)])]);
+        carrier.push_failure("receipt send failed");
+        assert!(matches!(
+            driver.process_incoming_once(NOW + 1).await.unwrap(),
+            CollaborationIncomingOnceOutcome::RetryRequired(_)
+        ));
+        carrier.push([peek(0, 1, vec![gossip(&frame)]), remote.clone()]);
+        carrier.push_failure("ack failed");
+        assert!(matches!(
+            driver.process_incoming_once(NOW + 1).await.unwrap(),
+            CollaborationIncomingOnceOutcome::RetryRequired(_)
+        ));
+        carrier.push([peek(0, 1, vec![gossip(&frame)]), remote, ack(0, 1)]);
+        assert!(matches!(
+            driver.process_incoming_once(NOW + 1).await.unwrap(),
+            CollaborationIncomingOnceOutcome::Acknowledged(_)
+        ));
+        let receipts: Vec<Vec<u8>> = carrier
+            .requests()
+            .iter()
+            .filter(|request| request["op"] == "gossip_send")
+            .map(|request| request["message"].as_str().unwrap().as_bytes().to_vec())
+            .collect();
+        assert_eq!(receipts.len(), 4);
+        assert!(receipts.windows(2).all(|pair| pair[0] == pair[1]));
+        assert!(core.allows_gossip_receipt(&receipts[0], &frame).unwrap());
+        assert_eq!(
+            request_ops(&carrier),
+            [
+                "gossip_join_exact",
+                "gossip_peek",
+                "gossip_send",
+                "gossip_peek",
+                "gossip_send",
+                "gossip_peek",
+                "gossip_send",
+                "gossip_ack",
+                "gossip_peek",
+                "gossip_send",
+                "gossip_ack",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn outgoing_observations_never_replace_verified_remote_acceptance() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let outgoing: Vec<_> = ["metadata-one", "metadata-two", "metadata-three"]
+            .into_iter()
+            .map(|request| prepare_metadata(&fixture, &core, request))
+            .collect();
+        for message in &outgoing {
+            core.acknowledge_outgoing_product_projection(message.envelope_sha256())
+                .unwrap();
+        }
+        let (recipient, _) = generate_keypair();
+        let receipt = remote_receipt(&fixture, &outgoing[0], recipient.clone());
+        let receipt = sign_collaboration_transport_frame(&recipient, &receipt).unwrap();
+        let carrier = FakeCarrier::new();
+        let driver = fixture.driver(core.clone(), carrier.clone()).await;
+        carrier.push([
+            serde_json::json!({"status":"ok","data":{"remote_peer_count":1}}),
+            serde_json::json!({"status":"ok","broadcast":"local_only","data":{"remote_peer_count":0}}),
+        ]);
+        carrier.push_failure("metadata send failed");
+        assert_eq!(
+            driver.retry_outgoing_once(NOW).await.unwrap(),
+            CollaborationOutgoingRetrySummary {
+                attempted: 3,
+                remote_broadcasts: 1,
+                local_only_buffered: 1,
+                send_failures: 1,
+            }
+        );
+        assert_eq!(core.pending_outgoing(NOW).unwrap().len(), 3);
+        carrier.push([peek(0, 1, vec![gossip(&receipt)]), ack(0, 1)]);
+        assert_eq!(
+            driver.process_incoming_once(NOW + 1).await.unwrap(),
+            CollaborationIncomingOnceOutcome::Acknowledged(CollaborationIncomingOnceSummary {
+                remote_acceptances: 1,
+                ..CollaborationIncomingOnceSummary::default()
+            })
+        );
+        assert_eq!(core.pending_outgoing(NOW + 1).unwrap().len(), 2);
+        assert_eq!(
+            request_ops(&carrier),
+            [
+                "gossip_join_exact",
+                "gossip_send",
+                "gossip_send",
+                "gossip_send",
+                "gossip_peek",
+                "gossip_ack",
+            ]
         );
     }
 

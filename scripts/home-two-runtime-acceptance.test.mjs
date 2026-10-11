@@ -227,7 +227,7 @@ test("System evidence must prove two distinct manifest-bound Runtime instances",
   ), /two distinct fixture Runtimes/);
 });
 
-test("opaque accepted-contact projections must bind distinct downloaded Recovery Profiles", () => {
+test("opaque accepted-contact projections must prove distinct Profile identities", () => {
   const aProfileDid = "did:key:z6MkAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
   const bProfileDid = "did:key:z6MkBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
   const aContactId = "contact:459124a94946ce899c021a75";
@@ -310,7 +310,7 @@ test("pre-existing contact state fails the fresh-fixture precondition", () => {
   );
 });
 
-test("Welcome Recovery evidence requires the signup Profile and one fixture-owned download per side", (t) => {
+test("Recovery setup evidence requires one verified fixture-owned download per side", (t) => {
   const fixture = fixtureConfig(t);
   const config = loadAcceptanceConfig(fixture.env);
   const valid = {
