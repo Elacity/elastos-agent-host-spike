@@ -1125,6 +1125,7 @@ impl PreparationOwner {
         let activation_retry = record.state == PreparationState::Admitted
             && (caller.method.operation.as_deref() == Some("use")
                 || (record.activation_pending
+                    && registry.is_some()
                     && caller.method.operation.as_deref() == Some("status")));
         if !record.active() && !starting && !activation_retry && !capacity_resume {
             return Ok(project(&record));
@@ -11998,7 +11999,8 @@ server.serve_forever()
                 std::fs::read(root.path().join("model-preparation/state.json")).unwrap(),
                 saved
             );
-            let status = PreparationOwner::default()
+            let owner = PreparationOwner::default();
+            let status = owner
                 .invoke(
                     root.path(),
                     None,
@@ -12009,6 +12011,8 @@ server.serve_forever()
                 )
                 .unwrap();
             assert_eq!(status["kept"], keep);
+            assert_eq!(status["admitted"], true);
+            assert!(owner.worker.lock().unwrap().is_none());
             assert!(status.get("inference_ready").is_none());
             assert_eq!(
                 Inventory::open(root.path(), false)
