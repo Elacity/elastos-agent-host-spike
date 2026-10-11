@@ -302,9 +302,12 @@ fn retire_host(data: &Path, manifest: &super::ComponentsManifest) -> anyhow::Res
     Ok(())
 }
 
-/// True when every folder from `data` down to `relative`'s parent is a real
-/// directory, so a removal stays inside the data directory.
+/// True when the data directory and every folder from it down to `relative`'s
+/// parent are real directories, so a removal stays inside the data directory.
 fn parents_are_real_directories(data: &Path, relative: &Path) -> bool {
+    if !data.symlink_metadata().is_ok_and(|meta| meta.is_dir()) {
+        return false;
+    }
     let mut current = data.to_path_buf();
     for component in relative.parent().into_iter().flat_map(Path::components) {
         let std::path::Component::Normal(part) = component else {
@@ -855,6 +858,18 @@ mod tests {
             .is_symlink());
         // Paths under real folders are still removed.
         assert!(!data.join("scripts/browser-vm-linux-network.py").exists());
+    }
+
+    #[test]
+    fn removal_never_goes_through_a_linked_data_directory() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let (real, linked) = (temp.path().join("real"), temp.path().join("elastos"));
+        fs::create_dir_all(real.join("browser-vm")).unwrap();
+        symlink(&real, &linked).unwrap();
+        let relative = Path::new("browser-vm/image-set");
+        assert!(parents_are_real_directories(&real, relative));
+        assert!(!parents_are_real_directories(&linked, relative));
     }
 
     #[test]
