@@ -3179,7 +3179,23 @@ mod tests {
         ] {
             *field = format!("{}a", "\u{0001}".repeat(MAX_RUNTIME_BINDING_ID_BYTES - 1));
         }
+        assert!((serde_json::to_vec(&header).unwrap().len() as u64) < MAX_RUN_HEADER_BYTES);
+        assert!(validate_new_run_shape(&header).is_ok());
+        header.offer.title = format!("{}a", "\u{0001}".repeat(MAX_OFFER_TITLE_BYTES - 1));
+        header.offer.hosted.as_mut().unwrap().backend_provider_label = format!(
+            "{}a",
+            "\u{0001}".repeat(MAX_HOSTED_PROVIDER_LABEL_BYTES - 1)
+        );
+        header.offer.hosted.as_mut().unwrap().requested_selector =
+            format!("{}a", "\u{0001}".repeat(MAX_MODEL_BYTES - 1));
+        assert!((serde_json::to_vec(&header).unwrap().len() as u64) > MAX_RUN_HEADER_BYTES);
         assert!(validate_new_run_shape(&header).is_err());
+        assert_eq!(
+            journal.store_run(&header).unwrap_err().code(),
+            "policy_limit"
+        );
+        assert!(!run_path(&root, &header.run_id).exists());
+        assert_eq!(file_bytes(&path), original);
         assert!(encode_bounded(
             &"x".repeat(MAX_NEW_RUN_JOURNAL_BYTES as usize),
             MAX_NEW_RUN_JOURNAL_BYTES
