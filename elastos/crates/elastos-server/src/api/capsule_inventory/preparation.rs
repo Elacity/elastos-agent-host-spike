@@ -4656,6 +4656,33 @@ mod tests {
             )
         }
 
+        async fn drain_readiness_worker(root: &Path) {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let result = {
+                        let inventory = Inventory::open(root, false).unwrap();
+                        inventory.worker_lock()
+                    };
+                    match result {
+                        Ok(lock) => {
+                            drop(lock);
+                            return;
+                        }
+                        Err(error)
+                            if error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                                error.kind() == std::io::ErrorKind::WouldBlock
+                            }) =>
+                        {
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                        Err(error) => panic!("readiness worker drain failed: {error:#}"),
+                    }
+                }
+            })
+            .await
+            .expect("readiness activation worker did not release its lock");
+        }
+
         #[tokio::test]
         async fn model_catalog_readiness_rejects_missing_duplicate_wrong_and_malformed_offers() {
             let (root, record, backend, registry) = staged_fixture(now().unwrap(), true).await;
@@ -4866,6 +4893,7 @@ mod tests {
         #[tokio::test]
         async fn model_catalog_readiness_explains_only_missing_source_engine_and_preserves_content()
         {
+            use std::os::unix::fs::MetadataExt as _;
             let (root, record, backend, registry) = staged_fixture(now().unwrap(), true).await;
             admit(root.path(), &record);
             retention_intent(root.path(), &context(), &record.package_cid, true).unwrap();
@@ -4879,6 +4907,30 @@ mod tests {
                 });
             });
             let before = std::fs::read(root.path().join("model-preparation/state.json")).unwrap();
+            let mut expected: PreparationInventory = serde_json::from_slice(&before).unwrap();
+            expected
+                .records
+                .iter_mut()
+                .find(|saved| saved.operation_id == record.operation_id)
+                .unwrap()
+                .failure_phase = Some(PreparationFailurePhase::Activation);
+            let artifact = Inventory::open(root.path(), false)
+                .unwrap()
+                .admitted(&record.admission_id)
+                .unwrap();
+            let artifact_inode = std::fs::metadata(&artifact.path).unwrap().ino();
+            let files: Vec<_> = backend
+                .files
+                .keys()
+                .map(|name| {
+                    let path = artifact.path.join(name);
+                    (
+                        path.clone(),
+                        std::fs::read(&path).unwrap(),
+                        std::fs::metadata(path).unwrap().ino(),
+                    )
+                })
+                .collect();
             let calls = backend.calls.lock().unwrap().clone();
             let (app, token) = readiness_catalog_app(root.path(), registry.clone(), &context());
             for (strategy, expected) in [
@@ -4896,10 +4948,23 @@ mod tests {
                     } else {
                         serde_json::json!({"operation_id":record.operation_id})
                     };
+                    let read_before =
+                        std::fs::read(root.path().join("model-preparation/state.json")).unwrap();
+                    let read_calls = backend.calls.lock().unwrap().clone();
                     let (status, response) = readiness_catalog_request(&app, &token, Some(serde_json::json!({
                         "request_id":"engine-unavailable-status", "capsule":"marketplace",
                         "interface":"elastos.marketplace.catalog", "method":method, "input":input
                     }))).await;
+                    if method == "catalog.list" {
+                        assert_eq!(
+                            std::fs::read(root.path().join("model-preparation/state.json"))
+                                .unwrap(),
+                            read_before
+                        );
+                        assert_eq!(*backend.calls.lock().unwrap(), read_calls);
+                    } else {
+                        drain_readiness_worker(root.path()).await;
+                    }
                     assert_eq!(status, axum::http::StatusCode::OK, "{response}");
                     let value = if method == "catalog.list" {
                         response["output"]["catalog"]["capsules"]
@@ -4951,10 +5016,22 @@ mod tests {
                 .await,
                 unavailable_model_runtime_projection()
             );
-            assert_eq!(
-                std::fs::read(root.path().join("model-preparation/state.json")).unwrap(),
-                before
+            assert!(
+                serde_json::from_slice::<PreparationInventory>(
+                    &std::fs::read(root.path().join("model-preparation/state.json")).unwrap()
+                )
+                .unwrap()
+                    == expected,
+                "Status only records the admitted activation failure"
             );
+            assert_eq!(
+                std::fs::metadata(&artifact.path).unwrap().ino(),
+                artifact_inode
+            );
+            for (path, bytes, inode) in files {
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                assert_eq!(std::fs::metadata(path).unwrap().ino(), inode);
+            }
             assert_eq!(*backend.calls.lock().unwrap(), calls);
             let _engine = install_engine(root.path());
             let (_, provider) = readiness_provider(root.path(), &registry).await;
