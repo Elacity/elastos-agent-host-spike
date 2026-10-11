@@ -13,6 +13,7 @@ const homeClipboardClient = join(repoRoot, "capsules/home/browser/home-clipboard
 const homeClipboardProtocol = join(repoRoot, "capsules/home/browser/home-clipboard-protocol.js");
 const homeLayoutRoot = join(repoRoot, "capsules/home-gui/browser");
 const homeNavigationClient = join(repoRoot, "capsules/home/browser/home-navigation-client.js");
+const sharedRenderMarker = "Shared message before metadata";
 const brave = process.env.BRAVE_BIN || "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
 const require = createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url));
 const playwrightModule = process.env.ELASTOS_PLAYWRIGHT_MODULE
@@ -135,6 +136,7 @@ async function serveFile(response, pathname) {
 function startServer(scenario) {
   const initialDirectRecovery = scenario.startsWith("direct-initial-401");
   const sharedRecovery = scenario === "shared-poll-401";
+  const sharedRenderOrdering = scenario === "shared-poll-render-before-metadata";
   const contactAcceptance = scenario.startsWith("contact-acceptance");
   const historyScenario = scenario === "history-status-order-calendar";
   const unreadScenario = scenario === "direct-unread" || scenario === "visible-read";
@@ -157,6 +159,7 @@ function startServer(scenario) {
     "contact-request": scenario === "contact-acceptance-held-request"
       ? createHold("contact-request")
       : null,
+    "shared-poll-conversations": sharedRenderOrdering ? createHold("shared-poll-conversations") : null,
   };
   const trace = {
     cycles: [],
@@ -170,6 +173,8 @@ function startServer(scenario) {
     leaves: 0,
     pollErrors: 0,
     rejectSharedPoll: false,
+    sharedMarkerReady: false,
+    sharedMarkerPolled: false,
     peerAccepted: false,
     contactRequested: false,
     contactRequests: 0,
@@ -188,6 +193,10 @@ function startServer(scenario) {
   };
   function pollView() {
     const poll = configuredPoll();
+    if (sharedRenderOrdering && trace.sharedMarkerReady) {
+      poll.objects = [historyMessage(1, sharedRenderMarker, "2026-03-09T12:00:00Z")];
+      poll.latest_seq = 1;
+    }
     if (historyScenario) {
       const details = {
         searching: "Checking recent Community history from online participants.",
@@ -359,6 +368,7 @@ function startServer(scenario) {
           trace.pollErrors += 1;
           return json(response, { error: "invalid or expired session" }, 401);
         }
+        if (sharedRenderOrdering && trace.sharedMarkerReady) trace.sharedMarkerPolled = true;
         return json(response, pollView());
       }
       if (url.pathname === "/api/apps/chat-room/contacts/request" && contactAcceptance) {
@@ -395,11 +405,13 @@ function startServer(scenario) {
           return json(response, { conversations: [] });
         }
         directConversationResponses += 1;
-        const hold = directConversationResponses === 1
-          ? holds["initial-conversations"]
-          : directConversationResponses === 3
-            ? holds["poll-conversations"]
-            : null;
+        const hold = sharedRenderOrdering && trace.sharedMarkerPolled && !holds["shared-poll-conversations"].reached
+          ? holds["shared-poll-conversations"]
+          : directConversationResponses === 1
+            ? holds["initial-conversations"]
+            : directConversationResponses === 3
+              ? holds["poll-conversations"]
+              : null;
         if (hold) {
           hold.reached = true;
           await hold.promise;
@@ -656,6 +668,34 @@ async function runScenario(scenario) {
       trace.directListUnavailable = false;
       await error.waitFor({ state: "hidden" });
       assert(await frame.locator("#message-input").inputValue() === draft, "second recovery changed the draft");
+      return;
+    }
+
+    if (scenario === "shared-poll-render-before-metadata") {
+      await waitForConfiguredChatWithoutLegacyFlash(frame, "Shared render ordering");
+      await frame.locator('[data-conversation-choice="direct:sha256:fixture-conversation"]').waitFor({ state: "visible" });
+      const draft = "Keep this Shared draft while metadata waits";
+      await frame.locator("#message-input").fill(draft);
+      trace.sharedMarkerReady = true;
+      const hold = holds["shared-poll-conversations"];
+      await waitFor(() => hold.reached);
+      const marker = frame.locator('#message-list [data-seq="1"] .message-body');
+      await marker.waitFor({ state: "visible", timeout: 5_000 });
+      assert(!hold.released, "Shared marker was checked after metadata release");
+      assert(await marker.count() === 1 && await marker.innerText() === sharedRenderMarker,
+        "Shared poll did not render the exact new message while Direct metadata was held");
+      const state = await directSwitchState(frame);
+      assert(state.chatMode === "shared" && state.selected === "shared" && state.conversationDetail === "Live",
+        "early Shared render changed the active Runtime view", state);
+      assert(await frame.locator("#message-input").inputValue() === draft,
+        "early Shared render changed the draft");
+      assert(await frame.locator("#message-input").isEnabled() && await frame.locator("#send-button").isEnabled(),
+        "early Shared render lost live session controls");
+      const heldPollCount = trace.current.polls;
+      hold.release();
+      await waitFor(() => trace.heldReleases.includes(hold.label) && trace.current.polls > heldPollCount);
+      assert(await marker.count() === 1 && await frame.locator("#message-input").inputValue() === draft,
+        "metadata completion changed the Shared message or draft");
       return;
     }
 
@@ -1361,6 +1401,7 @@ async function main() {
     "session-failure",
     "summary-failure",
     "direct-list-unavailable",
+    "shared-poll-render-before-metadata",
     "direct-switch",
     "direct-switch-hold-initial-conversations",
     "direct-switch-hold-bootstrap-messages",

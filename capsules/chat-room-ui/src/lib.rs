@@ -829,16 +829,18 @@ impl App {
             .await
         {
             Ok(changed) => {
+                if shared_selection_guard
+                    .as_ref()
+                    .is_some_and(|guard| !self.selection_guard_is_current(guard))
+                {
+                    return;
+                }
+                // Show current Shared messages before waiting for auxiliary metadata.
+                let poll_rendered = changed && self.render().is_ok();
                 let mut shell_summary_changed = false;
                 let mut direct_conversations_changed = false;
                 let mut refresh_failed = false;
                 if self.is_shell_mode() {
-                    if shared_selection_guard
-                        .as_ref()
-                        .is_some_and(|guard| !self.selection_guard_is_current(guard))
-                    {
-                        return;
-                    }
                     match self.refresh_direct_conversations().await {
                         Ok(changed) => direct_conversations_changed = changed,
                         Err(401) => return,
@@ -893,7 +895,7 @@ impl App {
                         false
                     }
                 };
-                if changed
+                if (changed && !poll_rendered)
                     || cleared_transient_error
                     || shell_summary_changed
                     || direct_conversations_changed
