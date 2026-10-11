@@ -59,9 +59,7 @@ fn default_runtime_kind() -> String {
 
 fn managed_runtime_default_carrier_mdns(runtime_kind: &str) -> Option<&'static str> {
     match runtime_kind {
-        RUNTIME_KIND_MANAGED_CHAT | RUNTIME_KIND_MANAGED_HOME | RUNTIME_KIND_MANAGED_IDENTITY => {
-            Some("0")
-        }
+        RUNTIME_KIND_MANAGED_IDENTITY => Some("0"),
         _ => None,
     }
 }
@@ -1641,19 +1639,23 @@ mod tests {
     #[test]
     fn managed_runtimes_default_carrier_mdns_off() {
         assert_eq!(
-            managed_runtime_default_carrier_mdns(RUNTIME_KIND_MANAGED_HOME),
-            Some("0")
-        );
-        assert_eq!(
-            managed_runtime_default_carrier_mdns(RUNTIME_KIND_MANAGED_CHAT),
-            Some("0")
-        );
-        assert_eq!(
             managed_runtime_default_carrier_mdns(RUNTIME_KIND_MANAGED_IDENTITY),
             Some("0")
         );
         assert_eq!(
             managed_runtime_default_carrier_mdns(RUNTIME_KIND_OPERATOR),
+            None
+        );
+    }
+
+    #[test]
+    fn managed_home_and_chat_inherit_carrier_mdns_default() {
+        assert_eq!(
+            managed_runtime_default_carrier_mdns(RUNTIME_KIND_MANAGED_HOME),
+            None
+        );
+        assert_eq!(
+            managed_runtime_default_carrier_mdns(RUNTIME_KIND_MANAGED_CHAT),
             None
         );
     }

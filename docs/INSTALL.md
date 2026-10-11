@@ -41,6 +41,19 @@ The installer needs `curl` and a working `python3`; on a Mac without the
 Command Line Tools it stops first and asks you to run `xcode-select --install`.
 Setup and updates need outgoing UDP to port 4433 for Carrier.
 
+Carrier uses mDNS by default to find other Homes on the same local network.
+It announces the Carrier node ID and local addresses. People Discovery controls
+signed Profile advertisements separately. Runtime checks Profile and message
+authority before it accepts Chat messages. Chat uses an encrypted direct
+connection.
+
+To turn mDNS off, set `ELASTOS_CARRIER_MDNS=0` in Runtime's environment before
+starting it. Restart Runtime after changing this setting. A Home then needs an
+address from another source, such as an explicit peer ticket. A saved contact
+identity alone does not give Runtime an address after a restart. See
+[Community availability](COLLABORATION_NETWORK_PROFILE.md#availability) for
+the bootstrap and direct connection limits.
+
 The installer detects the platform (Linux `x86_64`/`aarch64` or
 macOS Apple silicon), verifies the signed release, installs Runtime, and
 fetches the Home profile from the trusted publisher. It
