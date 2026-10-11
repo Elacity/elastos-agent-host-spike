@@ -21,12 +21,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const RUN_JOURNAL_SCHEMA: &str = "elastos.model.provider-run-journal/v1";
 pub const MAX_RUN_JOURNAL_BYTES: u64 = 32 * 1024 * 1024;
+pub const MAX_NEW_RUN_JOURNAL_BYTES: u64 = 1024 * 1024;
+pub const MAX_RUN_HEADER_BYTES: u64 = 32 * 1024;
+pub const MAX_RUN_BACKEND_STATE_BYTES: u64 = 4 * 1024;
+pub const MAX_NEW_JOURNAL_ENTRIES: usize = 256;
+pub const MAX_JOURNAL_GROWTH_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_RECOVERY_JOURNAL_ENTRIES: usize = 512;
+pub const MAX_RECOVERY_SCAN_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_RUN_ERROR_CODE_BYTES: usize = 128;
 pub const MAX_RUN_ERROR_MESSAGE_BYTES: usize = 1024;
 
@@ -108,6 +115,39 @@ pub struct RunJournal {
     runs_dir: PathBuf,
 }
 
+struct JournalEntry {
+    path: PathBuf,
+    metadata: fs::Metadata,
+    transaction: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct JournalUsage {
+    entries: usize,
+    charged_bytes: u64,
+}
+
+fn run_charge(run: &StoredRun, bytes: u64) -> u64 {
+    // The complete compact record reserves the already bounded terminal tail.
+    // Unknown is a retained effect, not an ordinary expiring result.
+    if !run.status.is_terminal() || run.status == RunStatus::SettlementUnknown {
+        bytes.max(MAX_NEW_RUN_JOURNAL_BYTES)
+    } else {
+        bytes
+    }
+}
+
+fn same_execution_identity(old: &StoredRun, next: &StoredRun) -> bool {
+    old.schema == next.schema
+        && old.run_id == next.run_id
+        && old.runtime_binding == next.runtime_binding
+        && old.offer == next.offer
+        && old.execution_binding_hash == next.execution_binding_hash
+        && old.input_hash == next.input_hash
+        && old.created_at_ms == next.created_at_ms
+        && old.deadline_ms == next.deadline_ms
+}
+
 impl RunJournal {
     pub fn open(root: PathBuf) -> Result<Self, ProviderFault> {
         let runs_dir = root.join("runs");
@@ -141,34 +181,95 @@ impl RunJournal {
         validate_run_id(&run.run_id).map_err(|_| ProviderFault::internal("invalid run_id"))?;
         let path = hashed_path(&self.runs_dir, &run.run_id);
         validate_stored_run(&path, &self.runs_dir, Some(&run.run_id), run)?;
-        let bytes = serde_json::to_vec_pretty(run).map_err(|err| {
-            ProviderFault::internal(format!("failed to encode run journal: {err}"))
-        })?;
-        if bytes.len() as u64 > MAX_RUN_JOURNAL_BYTES {
-            return Err(ProviderFault::corrupt_journal(format!(
-                "model run journal exceeds {} bytes for {}",
-                MAX_RUN_JOURNAL_BYTES,
-                path.display()
-            )));
+        let census = self.census()?;
+        let existing = census.iter().find(|entry| entry.path == path);
+        let previous = if let Some(entry) = existing {
+            let old = load_verified_run_snapshot(
+                &path,
+                &self.runs_dir,
+                Some(&run.run_id),
+                &entry.metadata,
+            )?;
+            if !same_execution_identity(&old, run) {
+                return Err(ProviderFault::corrupt_journal(
+                    "model run replacement changed its execution binding",
+                ));
+            }
+            Some((run_charge(&old, entry.metadata.len()), old.status))
+        } else {
+            None
+        };
+        let recovery = previous.as_ref().is_some_and(|(_, status)| {
+            (!status.is_terminal() && run.status.is_terminal())
+                || (*status == RunStatus::SettlementUnknown
+                    && run.status == RunStatus::SettlementUnknown)
+        });
+        let limit = match validate_new_run_shape(run) {
+            Ok(()) => MAX_NEW_RUN_JOURNAL_BYTES,
+            Err(_) if recovery => MAX_RUN_JOURNAL_BYTES,
+            Err(fault) => return Err(fault),
+        };
+        let bytes = encode_bounded(run, limit)?;
+        let charge = run_charge(run, bytes.len() as u64);
+        if let Some((old_charge, _)) = previous {
+            // Existing reservations permit streaming and settlement without
+            // decoding every other retained payload on each worker update.
+            if recovery && charge > old_charge {
+                return Err(journal_budget_fault());
+            }
+            if charge > old_charge {
+                let usage = self.visit_census(&census, |_, _, _| Ok(()))?;
+                if usage.entries > MAX_NEW_JOURNAL_ENTRIES
+                    || usage.charged_bytes - old_charge + charge > MAX_JOURNAL_GROWTH_BYTES
+                {
+                    return Err(journal_budget_fault());
+                }
+            }
+            let actual_bytes: u64 = census.iter().map(|entry| entry.metadata.len()).sum();
+            if actual_bytes - existing.unwrap().metadata.len() + bytes.len() as u64
+                > MAX_RECOVERY_SCAN_BYTES
+            {
+                return Err(journal_budget_fault());
+            }
+        } else {
+            let usage = self.visit_census(&census, |_, _, _| Ok(()))?;
+            if usage.entries >= MAX_NEW_JOURNAL_ENTRIES
+                || usage
+                    .charged_bytes
+                    .checked_add(charge)
+                    .is_none_or(|total| total > MAX_JOURNAL_GROWTH_BYTES)
+            {
+                // This check precedes the durable Prepared record and dispatch.
+                return Err(journal_budget_fault());
+            }
         }
-        atomic_write_owner_only(&path, &bytes)
+        self.verify_census(&census)?;
+        let expected = existing.map(|entry| &entry.metadata);
+        atomic_write_owner_only(&path, &bytes, expected)
     }
 
     pub fn active_run_count(&self, offer_id: &str) -> Result<usize, ProviderFault> {
         let mut total = 0usize;
-        for (_, run) in self.scan_runs()? {
+        self.visit_runs(|_, run, _| {
             if run.offer.id == offer_id && !run.status.is_terminal() {
                 total = total.saturating_add(1);
             }
-        }
+            Ok(())
+        })?;
         Ok(total)
     }
 
     pub fn prune_expired_terminal_runs(&self) -> Result<(), ProviderFault> {
-        for (path, run) in self.scan_runs()? {
-            if is_expired_terminal_run(&run, now_ms()) {
-                delete_verified_run_file(&path, &self.runs_dir, &run.run_id)?;
+        let mut expired = Vec::new();
+        self.visit_runs(|path, run, _| {
+            if is_expired_terminal_run(run, now_ms()) {
+                expired.push((path.to_path_buf(), run.run_id.clone()));
             }
+            Ok(())
+        })?;
+        // Validate the entire bounded journal before any deletion.
+        for (path, run_id) in expired {
+            delete_verified_run_file(&path, &self.runs_dir, &run_id)?;
         }
         Ok(())
     }
@@ -182,14 +283,16 @@ impl RunJournal {
         Ok(true)
     }
 
-    pub(crate) fn scan_runs(&self) -> Result<Vec<(PathBuf, StoredRun)>, ProviderFault> {
+    fn census(&self) -> Result<Vec<JournalEntry>, ProviderFault> {
+        ensure_journal_dir_owner_only(&self.runs_dir)?;
         let entries = fs::read_dir(&self.runs_dir).map_err(|err| {
             ProviderFault::corrupt_journal(format!(
                 "failed to scan model run journal {}: {err}",
                 self.runs_dir.display()
             ))
         })?;
-        let mut runs = Vec::new();
+        let mut census = Vec::new();
+        let mut actual_bytes = 0u64;
         for entry in entries {
             let entry = entry.map_err(|err| {
                 ProviderFault::corrupt_journal(format!(
@@ -198,14 +301,168 @@ impl RunJournal {
                 ))
             })?;
             let path = entry.path();
-            if is_transaction_temp_file(&path) {
+            if census.len() == MAX_RECOVERY_JOURNAL_ENTRIES {
+                return Err(ProviderFault::corrupt_journal(
+                    "model run journal recovery entry limit exceeded",
+                ));
+            }
+            let metadata = fs::symlink_metadata(&path).map_err(|err| {
+                ProviderFault::corrupt_journal(format!(
+                    "failed to inspect model run journal: {err}"
+                ))
+            })?;
+            validate_existing_file(&path, &metadata)?;
+            actual_bytes = actual_bytes.checked_add(metadata.len()).ok_or_else(|| {
+                ProviderFault::corrupt_journal("model run journal recovery byte limit exceeded")
+            })?;
+            if metadata.len() > MAX_RUN_JOURNAL_BYTES || actual_bytes > MAX_RECOVERY_SCAN_BYTES {
+                return Err(ProviderFault::corrupt_journal(
+                    "model run journal recovery byte limit exceeded",
+                ));
+            }
+            census.push(JournalEntry {
+                transaction: is_transaction_temp_file(&path),
+                path,
+                metadata,
+            });
+        }
+        Ok(census)
+    }
+
+    pub(crate) fn visit_runs(
+        &self,
+        visit: impl FnMut(&Path, &StoredRun, u64) -> Result<(), ProviderFault>,
+    ) -> Result<JournalUsage, ProviderFault> {
+        // Visitors collect bounded summaries. Mutation follows full success.
+        self.visit_census(&self.census()?, visit)
+    }
+
+    fn visit_census(
+        &self,
+        census: &[JournalEntry],
+        mut visit: impl FnMut(&Path, &StoredRun, u64) -> Result<(), ProviderFault>,
+    ) -> Result<JournalUsage, ProviderFault> {
+        let mut usage = JournalUsage {
+            entries: census.len(),
+            ..JournalUsage::default()
+        };
+        for entry in census {
+            if entry.transaction {
+                // Crash transactions consume capacity but cannot authorize a run.
+                verify_path_snapshot(&entry.path, &entry.metadata)?;
+                usage.charged_bytes += entry.metadata.len();
                 continue;
             }
-            let run = load_verified_run_file(&path, &self.runs_dir, None)?;
-            runs.push((path, run));
+            let run =
+                load_verified_run_snapshot(&entry.path, &self.runs_dir, None, &entry.metadata)?;
+            usage.charged_bytes = usage
+                .charged_bytes
+                .checked_add(run_charge(&run, entry.metadata.len()))
+                .ok_or_else(|| {
+                    ProviderFault::corrupt_journal("model run journal charge overflow")
+                })?;
+            visit(&entry.path, &run, entry.metadata.len())?;
         }
-        Ok(runs)
+        self.verify_census(census)?;
+        Ok(usage)
     }
+    fn verify_census(&self, census: &[JournalEntry]) -> Result<(), ProviderFault> {
+        let current = self.census()?;
+        if current.len() != census.len()
+            || census.iter().any(|old| {
+                current
+                    .iter()
+                    .find(|entry| entry.path == old.path)
+                    .is_none_or(|entry| !same_snapshot(&old.metadata, &entry.metadata))
+            })
+        {
+            return Err(ProviderFault::corrupt_journal(
+                "model run journal census changed during scan",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn journal_budget_fault() -> ProviderFault {
+    ProviderFault::policy_limit(
+        "Model run history is full. Retry after completed runs expire.",
+        "model run journal admission or growth limit exceeded",
+    )
+}
+
+struct BoundedEncoding {
+    bytes: Vec<u8>,
+    limit: u64,
+}
+impl Write for BoundedEncoding {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if (self.bytes.len() as u64)
+            .checked_add(bytes.len() as u64)
+            .is_none_or(|total| total > self.limit)
+        {
+            return Err(std::io::Error::other(
+                "model run journal encoding limit exceeded",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn encode_bounded(value: &impl Serialize, limit: u64) -> Result<Vec<u8>, ProviderFault> {
+    let mut writer = BoundedEncoding {
+        bytes: Vec::new(),
+        limit,
+    };
+    serde_json::to_writer(&mut writer, value).map_err(|_| journal_budget_fault())?;
+    Ok(writer.bytes)
+}
+
+fn validate_new_run_shape(run: &StoredRun) -> Result<(), ProviderFault> {
+    #[derive(Serialize)]
+    struct Header<'a> {
+        schema: &'a str,
+        run_id: &'a str,
+        runtime_binding: &'a RuntimeCreateBinding,
+        offer: &'a OfferSummary,
+        execution_binding_hash: &'a str,
+        input_hash: &'a str,
+        status: &'a RunStatus,
+        next_sequence: u64,
+        created_at_ms: u64,
+        updated_at_ms: u64,
+        deadline_ms: u64,
+        terminal_at_ms: Option<u64>,
+        retention_until_ms: Option<u64>,
+        error: &'a Option<RunError>,
+    }
+    encode_bounded(
+        &Header {
+            schema: &run.schema,
+            run_id: &run.run_id,
+            runtime_binding: &run.runtime_binding,
+            offer: &run.offer,
+            execution_binding_hash: &run.execution_binding_hash,
+            input_hash: &run.input_hash,
+            status: &run.status,
+            next_sequence: run.next_sequence,
+            created_at_ms: run.created_at_ms,
+            updated_at_ms: run.updated_at_ms,
+            deadline_ms: run.deadline_ms,
+            terminal_at_ms: run.terminal_at_ms,
+            retention_until_ms: run.retention_until_ms,
+            error: &run.error,
+        },
+        MAX_RUN_HEADER_BYTES,
+    )?;
+    if let Some(state) = &run.backend_state {
+        encode_bounded(state, MAX_RUN_BACKEND_STATE_BYTES)?;
+    }
+    Ok(())
 }
 
 pub fn request_fingerprint(
@@ -258,43 +515,97 @@ fn ensure_journal_dir_owner_only(path: &Path) -> Result<(), ProviderFault> {
     Ok(())
 }
 
-fn atomic_write_owner_only(path: &Path, bytes: &[u8]) -> Result<(), ProviderFault> {
+struct OwnedTransaction {
+    path: PathBuf,
+    file: fs::File,
+    committed: bool,
+}
+
+impl Drop for OwnedTransaction {
+    fn drop(&mut self) {
+        if !self.committed {
+            if let Ok(metadata) = self.file.metadata() {
+                if verify_path_snapshot(&self.path, &metadata).is_ok() {
+                    let _ = fs::remove_file(&self.path);
+                }
+            }
+        }
+    }
+}
+
+fn atomic_write_owner_only(
+    path: &Path,
+    bytes: &[u8],
+    expected: Option<&fs::Metadata>,
+) -> Result<(), ProviderFault> {
+    atomic_write_with(
+        path,
+        bytes,
+        expected,
+        |file, bytes| {
+            file.write_all(bytes)?;
+            file.sync_all()
+        },
+        |from, to| fs::rename(from, to),
+        sync_directory,
+    )
+}
+
+fn atomic_write_with(
+    path: &Path,
+    bytes: &[u8],
+    expected: Option<&fs::Metadata>,
+    write: impl FnOnce(&mut fs::File, &[u8]) -> std::io::Result<()>,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    sync_parent: impl FnOnce(&Path) -> Result<(), ProviderFault>,
+) -> Result<(), ProviderFault> {
     if let Some(parent) = path.parent() {
         ensure_journal_dir_owner_only(parent)?;
     }
     validate_run_path_target(path)?;
     let tmp = allocate_temp_path(path)?;
-    {
-        let mut file = open_temp_file_owner_only(&tmp)?;
-        validate_existing_file(
-            &tmp,
-            &file.metadata().map_err(|err| {
-                ProviderFault::corrupt_journal(format!(
-                    "failed to inspect temporary journal file {}: {err}",
-                    tmp.display()
+    let file = open_temp_file_owner_only(&tmp)?;
+    let mut transaction = OwnedTransaction {
+        path: tmp,
+        file,
+        committed: false,
+    };
+    // Keep the created file handle until rename/cleanup; pathname replacement
+    // never gives this transaction authority over the replacement inode.
+    validate_existing_file(
+        &transaction.path,
+        &transaction.file.metadata().map_err(|err| {
+            ProviderFault::corrupt_journal(format!("failed to inspect temporary journal: {err}"))
+        })?,
+    )?;
+    write(&mut transaction.file, bytes).map_err(|err| {
+        ProviderFault::corrupt_journal(format!("failed to write or sync temporary journal: {err}"))
+    })?;
+    verify_path_snapshot(
+        &transaction.path,
+        &transaction.file.metadata().map_err(|err| {
+            ProviderFault::corrupt_journal(format!("failed to inspect temporary journal: {err}"))
+        })?,
+    )?;
+    match expected {
+        Some(metadata) => verify_path_snapshot(path, metadata)?,
+        None => match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => {
+                return Err(ProviderFault::corrupt_journal(
+                    "new model run journal target appeared",
                 ))
-            })?,
-        )?;
-        file.write_all(bytes).map_err(|err| {
-            ProviderFault::corrupt_journal(format!(
-                "failed to write temporary journal file {}: {err}",
-                tmp.display()
-            ))
-        })?;
-        file.sync_all().map_err(|err| {
-            ProviderFault::corrupt_journal(format!(
-                "failed to sync temporary journal file {}: {err}",
-                tmp.display()
-            ))
-        })?;
+            }
+        },
     }
-    fs::rename(&tmp, path).map_err(|err| {
+    rename(&transaction.path, path).map_err(|err| {
         ProviderFault::corrupt_journal(format!(
             "failed to replace provider journal {}: {err}",
             path.display()
         ))
     })?;
-    sync_directory(
+    transaction.committed = true;
+    sync_parent(
         path.parent()
             .ok_or_else(|| ProviderFault::corrupt_journal("run journal file missing parent"))?,
     )?;
@@ -333,12 +644,117 @@ fn load_verified_run_file(
             path.display()
         )));
     }
-    let bytes = fs::read(path).map_err(|err| {
-        ProviderFault::corrupt_journal(format!(
-            "failed to read model run journal {}: {err}",
-            path.display()
-        ))
+    load_verified_run_snapshot(path, runs_dir, expected_run_id, &metadata)
+}
+
+fn same_snapshot(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        left.dev() == right.dev()
+            && left.ino() == right.ino()
+            && left.len() == right.len()
+            && left.mtime() == right.mtime()
+            && left.mtime_nsec() == right.mtime_nsec()
+            && left.ctime() == right.ctime()
+            && left.ctime_nsec() == right.ctime_nsec()
+    }
+    #[cfg(not(unix))]
+    {
+        left.len() == right.len() && left.modified().ok() == right.modified().ok()
+    }
+}
+
+fn verify_path_snapshot(path: &Path, expected: &fs::Metadata) -> Result<(), ProviderFault> {
+    let current = fs::symlink_metadata(path).map_err(|err| {
+        ProviderFault::corrupt_journal(format!("model run journal changed during access: {err}"))
     })?;
+    validate_existing_file(path, &current)?;
+    if !same_snapshot(expected, &current) {
+        return Err(ProviderFault::corrupt_journal(
+            "model run journal changed during access",
+        ));
+    }
+    Ok(())
+}
+
+fn open_run_readonly(path: &Path) -> Result<fs::File, ProviderFault> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+    }
+    options.open(path).map_err(|err| {
+        ProviderFault::corrupt_journal(format!("failed to open model run journal: {err}"))
+    })
+}
+
+fn load_verified_run_snapshot(
+    path: &Path,
+    runs_dir: &Path,
+    expected_run_id: Option<&str>,
+    metadata: &fs::Metadata,
+) -> Result<StoredRun, ProviderFault> {
+    load_verified_run_snapshot_with_reader(
+        path,
+        runs_dir,
+        expected_run_id,
+        metadata,
+        read_bounded_record,
+    )
+}
+
+fn read_bounded_record(file: &mut fs::File, limit: u64) -> Result<Vec<u8>, ProviderFault> {
+    let mut bytes = Vec::new();
+    Read::by_ref(file)
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| {
+            ProviderFault::corrupt_journal(format!("failed to read model run journal: {err}"))
+        })?;
+    if bytes.len() as u64 != limit {
+        return Err(ProviderFault::corrupt_journal(
+            "model run journal changed during read",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn load_verified_run_snapshot_with_reader(
+    path: &Path,
+    runs_dir: &Path,
+    expected_run_id: Option<&str>,
+    metadata: &fs::Metadata,
+    read: impl FnOnce(&mut fs::File, u64) -> Result<Vec<u8>, ProviderFault>,
+) -> Result<StoredRun, ProviderFault> {
+    let mut file = open_run_readonly(path)?;
+    let opened = file.metadata().map_err(|err| {
+        ProviderFault::corrupt_journal(format!("failed to inspect opened model run journal: {err}"))
+    })?;
+    validate_existing_file(path, &opened)?;
+    if opened.len() > MAX_RUN_JOURNAL_BYTES || !same_snapshot(metadata, &opened) {
+        return Err(ProviderFault::corrupt_journal(
+            "model run journal changed before read",
+        ));
+    }
+    let bytes = read(&mut file, opened.len())?;
+    if bytes.len() as u64 != opened.len()
+        || !same_snapshot(
+            &opened,
+            &file.metadata().map_err(|err| {
+                ProviderFault::corrupt_journal(format!(
+                    "failed to inspect opened model run journal: {err}"
+                ))
+            })?,
+        )
+    {
+        return Err(ProviderFault::corrupt_journal(
+            "model run journal changed during read",
+        ));
+    }
+    verify_path_snapshot(path, &opened)?;
     let run = serde_json::from_slice::<StoredRun>(&bytes).map_err(|err| {
         ProviderFault::corrupt_journal(format!(
             "corrupt model run journal {}: {err}",
@@ -978,13 +1394,29 @@ fn delete_verified_run_file(
     runs_dir: &Path,
     expected_run_id: &str,
 ) -> Result<(), ProviderFault> {
-    let run = load_verified_run_file(path, runs_dir, Some(expected_run_id))?;
+    // Keep the verified inode open until removal; a replacement path never
+    // inherits the expired record's deletion authority.
+    let held = open_run_readonly(path)?;
+    let snapshot = held.metadata().map_err(|err| {
+        ProviderFault::corrupt_journal(format!("failed to inspect expiring run journal: {err}"))
+    })?;
+    validate_existing_file(path, &snapshot)?;
+    let run = load_verified_run_snapshot(path, runs_dir, Some(expected_run_id), &snapshot)?;
     if !is_expired_terminal_run(&run, now_ms()) {
         return Err(ProviderFault::corrupt_journal(format!(
             "model run journal is not expired at {}",
             path.display()
         )));
     }
+    let current = held.metadata().map_err(|err| {
+        ProviderFault::corrupt_journal(format!("failed to inspect expiring run journal: {err}"))
+    })?;
+    if !same_snapshot(&snapshot, &current) {
+        return Err(ProviderFault::corrupt_journal(
+            "model run journal changed before expiry removal",
+        ));
+    }
+    verify_path_snapshot(path, &snapshot)?;
     fs::remove_file(path).map_err(|err| {
         ProviderFault::corrupt_journal(format!(
             "failed to delete model run journal {}: {err}",
@@ -1157,6 +1589,15 @@ fn validate_existing_file(path: &Path, metadata: &fs::Metadata) -> Result<(), Pr
             "provider journal path is not a regular file: {}",
             path.display()
         )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err(ProviderFault::corrupt_journal(
+                "provider journal file has multiple links",
+            ));
+        }
     }
     validate_unix_owner_and_mode(path, metadata, 0o600, "file")
 }
@@ -1742,7 +2183,11 @@ mod tests {
 
         let valid_policy_run = completed_run("request:bad-policy", 1, 10, 1);
         let mut policy_run = valid_policy_run.clone();
-        journal.store_run(&valid_policy_run).unwrap();
+        // Retain the separate malformed binding while constructing this fixture.
+        overwrite_run_file(
+            &run_path(&root, &valid_policy_run.run_id),
+            &valid_policy_run,
+        );
         policy_run.offer.policy.event_bytes_limit = MAX_EVENT_BYTES_LIMIT + 1;
         let policy_path = run_path(&root, &policy_run.run_id);
         overwrite_run_file(&policy_path, &policy_run);
@@ -1791,7 +2236,7 @@ mod tests {
         assert!(failed_path.exists());
 
         let mut timestamp = completed_run("request:bad-timestamp", 1, 20, 1);
-        journal.store_run(&timestamp).unwrap();
+        overwrite_run_file(&run_path(&root, &timestamp.run_id), &timestamp);
         timestamp.retention_until_ms = Some(10);
         let timestamp_path = run_path(&root, &timestamp.run_id);
         overwrite_run_file(&timestamp_path, &timestamp);
@@ -1925,7 +2370,7 @@ mod tests {
 
         let expired_unexpired = completed_run("request:delete-unexpired", 1, 10, 1);
         let unexpired_path = run_path(&root, &expired_unexpired.run_id);
-        journal.store_run(&expired_unexpired).unwrap();
+        overwrite_run_file(&unexpired_path, &expired_unexpired);
         let mut unexpired = expired_unexpired.clone();
         let terminal_at_ms = now_ms();
         unexpired.terminal_at_ms = Some(terminal_at_ms);
@@ -1984,5 +2429,474 @@ mod tests {
         journal.store_run(&run).unwrap();
         let loaded = journal.load_run(&run.run_id).unwrap();
         assert_eq!(loaded.run_id, run.run_id);
+    }
+
+    fn crash_transaction(root: &Path, index: usize, bytes: u64) -> PathBuf {
+        let path = root
+            .join("runs")
+            .join(format!(".sha256-{index:064x}.json.tmp-crash"));
+        open_temp_file_owner_only(&path)
+            .unwrap()
+            .set_len(bytes)
+            .unwrap();
+        path
+    }
+
+    fn settle_unknown(run: &StoredRun) -> StoredRun {
+        let mut next = run.clone();
+        let terminal = now_ms().max(run.updated_at_ms);
+        next.status = RunStatus::SettlementUnknown;
+        next.backend_state = None;
+        next.output = None;
+        next.error = Some(RunError {
+            class: crate::contract::ErrorClass::SettlementUnknown,
+            code: "settlement_unknown".into(),
+            message: "model backend settlement is unknown".into(),
+        });
+        next.events.push(RunEvent {
+            schema: RUN_EVENT_SCHEMA.into(),
+            sequence: next.next_sequence,
+            kind: "settlement_unknown".into(),
+            data: serde_json::json!({"code":"settlement_unknown","class":"settlement_unknown"}),
+            backend_report: next.offer.hosted.as_ref().map(|_| BackendReport::unknown()),
+            terminal: true,
+        });
+        next.next_sequence += 1;
+        next.updated_at_ms = terminal;
+        next.terminal_at_ms = Some(terminal);
+        next.retention_until_ms = Some(terminal + next.offer.policy.retention_secs * 1000);
+        next
+    }
+
+    #[test]
+    fn census_bounds_entries_and_aggregate_before_any_decode_or_prune() {
+        let root = temp_root("census-bounds");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let expired = completed_run("expired-retained-on-bound", 1, 10, 1);
+        journal.store_run(&expired).unwrap();
+        let committed = run_path(&root, &expired.run_id);
+        let original = file_bytes(&committed);
+        for index in 0..MAX_RECOVERY_JOURNAL_ENTRIES - 1 {
+            crash_transaction(&root, index, 0);
+        }
+        assert_eq!(
+            journal.census().unwrap().len(),
+            MAX_RECOVERY_JOURNAL_ENTRIES
+        );
+        let extra = crash_transaction(&root, MAX_RECOVERY_JOURNAL_ENTRIES, 0);
+        assert_eq!(
+            journal.prune_expired_terminal_runs().unwrap_err().code(),
+            "journal_corrupt"
+        );
+        assert_eq!(file_bytes(&committed), original);
+        fs::remove_file(extra).unwrap();
+        for entry in journal.census().unwrap() {
+            if entry.transaction {
+                fs::remove_file(entry.path).unwrap();
+            }
+        }
+        for index in 0..4 {
+            crash_transaction(&root, index, MAX_RUN_JOURNAL_BYTES);
+        }
+        // The committed record adds bytes beyond the128MiB recovery ceiling.
+        assert_eq!(
+            journal.prune_expired_terminal_runs().unwrap_err().code(),
+            "journal_corrupt"
+        );
+        assert_eq!(file_bytes(&committed), original);
+        fs::remove_file(&committed).unwrap();
+        assert_eq!(
+            journal
+                .census()
+                .unwrap()
+                .iter()
+                .map(|entry| entry.metadata.len())
+                .sum::<u64>(),
+            MAX_RECOVERY_SCAN_BYTES
+        );
+        let extra = crash_transaction(&root, 4, 1);
+        assert!(journal.census().is_err());
+        assert_eq!(fs::metadata(extra).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn new_admission_counts_crash_transactions_and_reserves_active_and_unknown_tail() {
+        let root = temp_root("admission-reservations");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        for index in 0..64 {
+            let run = prepared_run(&format!("reserved-{index}"));
+            if index == 0 {
+                journal.store_run(&settle_unknown(&run)).unwrap();
+            } else {
+                journal.store_run(&run).unwrap();
+            }
+        }
+        let rejected = prepared_run("reserved-overflow");
+        assert_eq!(
+            journal.store_run(&rejected).unwrap_err().code(),
+            "policy_limit"
+        );
+        assert!(!run_path(&root, &rejected.run_id).exists());
+        assert_eq!(
+            journal.visit_runs(|_, _, _| Ok(())).unwrap().charged_bytes,
+            MAX_JOURNAL_GROWTH_BYTES
+        );
+        let active = journal
+            .load_run(&prepared_run("reserved-1").run_id)
+            .unwrap();
+        journal.store_run(&settle_unknown(&active)).unwrap();
+        assert_eq!(
+            journal.load_run(&active.run_id).unwrap().status,
+            RunStatus::SettlementUnknown
+        );
+        let root = temp_root("admission-crash-count");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        for index in 0..MAX_NEW_JOURNAL_ENTRIES {
+            crash_transaction(&root, index, 0);
+        }
+        assert_eq!(
+            journal.store_run(&rejected).unwrap_err().code(),
+            "policy_limit"
+        );
+        assert!(!run_path(&root, &rejected.run_id).exists());
+    }
+
+    #[test]
+    fn legacy_above_admission_budget_settles_original_binding_and_keeps_unknown() {
+        let root = temp_root("legacy-recovery");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let legacy = prepared_run("legacy-protected");
+        overwrite_run_file(&run_path(&root, &legacy.run_id), &legacy);
+        for index in 0..3 {
+            crash_transaction(&root, index, 24 * 1024 * 1024);
+        }
+        let before = journal.visit_runs(|_, _, _| Ok(())).unwrap().charged_bytes;
+        assert!(before > MAX_JOURNAL_GROWTH_BYTES && before < MAX_RECOVERY_SCAN_BYTES);
+        assert_eq!(
+            journal
+                .store_run(&prepared_run("blocked-new"))
+                .unwrap_err()
+                .code(),
+            "policy_limit"
+        );
+        let recovered = settle_unknown(&legacy);
+        journal.store_run(&recovered).unwrap();
+        assert!(journal.visit_runs(|_, _, _| Ok(())).unwrap().charged_bytes <= before);
+        let actual = journal.load_run(&legacy.run_id).unwrap();
+        assert!(same_execution_identity(&legacy, &actual));
+        assert_eq!(actual.status, RunStatus::SettlementUnknown);
+        let mut expired = actual.clone();
+        expired.created_at_ms = 1;
+        expired.deadline_ms = 31;
+        expired.updated_at_ms = 10;
+        expired.terminal_at_ms = Some(10);
+        expired.retention_until_ms = Some(60_010);
+        // Simulate a legacy expiry without granting a new execution binding.
+        overwrite_run_file(&run_path(&root, &expired.run_id), &expired);
+        let bytes = file_bytes(&run_path(&root, &expired.run_id));
+        let restarted = RunJournal::open(root.clone()).unwrap();
+        assert!(!restarted.prune_expired_loaded_run(&expired).unwrap());
+        assert_eq!(file_bytes(&run_path(&root, &expired.run_id)), bytes);
+    }
+
+    #[test]
+    fn replacement_at_512_entries_has_only_one_owned_extra_transaction() {
+        let root = temp_root("recovery-atomic-count");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let mut run = prepared_run("512-entry-replacement");
+        journal.store_run(&run).unwrap();
+        for index in 0..MAX_RECOVERY_JOURNAL_ENTRIES - 1 {
+            crash_transaction(&root, index, 0);
+        }
+        run.updated_at_ms += 1;
+        journal.store_run(&run).unwrap();
+        assert_eq!(
+            journal.census().unwrap().len(),
+            MAX_RECOVERY_JOURNAL_ENTRIES
+        );
+        let path = run_path(&root, &run.run_id);
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        let bytes = encode_bounded(&settle_unknown(&run), MAX_NEW_RUN_JOURNAL_BYTES).unwrap();
+        atomic_write_with(
+            &path,
+            &bytes,
+            Some(&metadata),
+            |file, bytes| {
+                assert_eq!(
+                    fs::read_dir(root.join("runs"))?.count(),
+                    MAX_RECOVERY_JOURNAL_ENTRIES + 1
+                );
+                assert!(bytes.len() as u64 <= MAX_NEW_RUN_JOURNAL_BYTES);
+                file.write_all(bytes)?;
+                file.sync_all()
+            },
+            |from, to| fs::rename(from, to),
+            sync_directory,
+        )
+        .unwrap();
+        assert_eq!(
+            journal.census().unwrap().len(),
+            MAX_RECOVERY_JOURNAL_ENTRIES
+        );
+        assert_eq!(
+            journal.load_run(&run.run_id).unwrap().status,
+            RunStatus::SettlementUnknown
+        );
+    }
+
+    #[test]
+    fn compact_header_backend_and_record_bounds_preserve_existing_binding() {
+        let root = temp_root("compact-shapes");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let run = prepared_run("backend-shape");
+        journal.store_run(&run).unwrap();
+        let path = run_path(&root, &run.run_id);
+        let original = file_bytes(&path);
+        let mut active = run.clone();
+        active.status = RunStatus::Running;
+        active.backend_state =
+            Some(serde_json::json!({"opaque":"x".repeat(MAX_RUN_BACKEND_STATE_BYTES as usize)}));
+        assert_eq!(
+            journal.store_run(&active).unwrap_err().code(),
+            "policy_limit"
+        );
+        assert_eq!(file_bytes(&path), original);
+        let mut header = prepared_run("header-shape");
+        let escaped = format!("{}a", "\u{0001}".repeat(MAX_HOSTED_POLICY_REF_BYTES - 1));
+        header.offer.hosted.as_mut().unwrap().privacy_policy_ref = escaped.clone();
+        header.offer.hosted.as_mut().unwrap().terms_ref = escaped;
+        for field in [
+            &mut header.runtime_binding.principal_id,
+            &mut header.runtime_binding.session_id,
+            &mut header.runtime_binding.capsule_id,
+            &mut header.runtime_binding.grant_id,
+        ] {
+            *field = format!("{}a", "\u{0001}".repeat(MAX_RUNTIME_BINDING_ID_BYTES - 1));
+        }
+        assert!(validate_new_run_shape(&header).is_err());
+        assert!(encode_bounded(
+            &"x".repeat(MAX_NEW_RUN_JOURNAL_BYTES as usize),
+            MAX_NEW_RUN_JOURNAL_BYTES
+        )
+        .is_err());
+        assert!(!file_bytes(&path).contains(&b'\n'));
+    }
+
+    #[test]
+    fn read_grows_past_limit_and_opened_record_replacement_fail_closed() {
+        let root = temp_root("stable-open-read");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let run = prepared_run("stable-read");
+        journal.store_run(&run).unwrap();
+        let path = run_path(&root, &run.run_id);
+        let before = fs::symlink_metadata(&path).unwrap();
+        let error = load_verified_run_snapshot_with_reader(
+            &path,
+            &root.join("runs"),
+            Some(&run.run_id),
+            &before,
+            |file, limit| {
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap()
+                    .write_all(b" ")
+                    .unwrap();
+                read_bounded_record(file, limit)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "journal_corrupt");
+        let before = fs::symlink_metadata(&path).unwrap();
+        let displaced = root.join("displaced.json");
+        let replacement = prepared_run("replacement-read");
+        let error = load_verified_run_snapshot_with_reader(
+            &path,
+            &root.join("runs"),
+            Some(&run.run_id),
+            &before,
+            |file, limit| {
+                fs::rename(&path, &displaced).unwrap();
+                overwrite_run_file(&path, &replacement);
+                read_bounded_record(file, limit)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "journal_corrupt");
+        assert!(displaced.exists());
+        assert_eq!(
+            serde_json::from_slice::<StoredRun>(&file_bytes(&path))
+                .unwrap()
+                .run_id,
+            replacement.run_id
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hardlink_and_nonregular_census_entries_fail_closed() {
+        let root = temp_root("census-file-types");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let run = prepared_run("hardlink");
+        journal.store_run(&run).unwrap();
+        let path = run_path(&root, &run.run_id);
+        let link = root.join("hardlink.json");
+        fs::hard_link(&path, &link).unwrap();
+        assert!(journal.census().is_err());
+        assert!(journal.load_run(&run.run_id).is_err());
+        fs::remove_file(link).unwrap();
+        fs::create_dir(root.join("runs").join("unexpected-directory")).unwrap();
+        assert!(journal.census().is_err());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn failed_atomic_write_cleans_only_fresh_owned_temp_and_allows_retry() {
+        let root = temp_root("atomic-faults");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let mut run = prepared_run("atomic-fault");
+        journal.store_run(&run).unwrap();
+        let path = run_path(&root, &run.run_id);
+        let original = file_bytes(&path);
+        let stale = crash_transaction(&root, 0, 7);
+        let bytes = encode_bounded(&run, MAX_NEW_RUN_JOURNAL_BYTES).unwrap();
+        for code in [libc::ENOSPC, libc::EIO] {
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            assert!(atomic_write_with(
+                &path,
+                &bytes,
+                Some(&metadata),
+                |file, bytes| {
+                    file.write_all(if code == libc::ENOSPC {
+                        &bytes[..8]
+                    } else {
+                        bytes
+                    })?;
+                    Err(std::io::Error::from_raw_os_error(code))
+                },
+                |from, to| fs::rename(from, to),
+                sync_directory,
+            )
+            .is_err());
+            assert_eq!(file_bytes(&path), original);
+            assert_eq!(journal.census().unwrap().len(), 2);
+        }
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        assert!(atomic_write_with(
+            &path,
+            &bytes,
+            Some(&metadata),
+            |file, bytes| {
+                file.write_all(bytes)?;
+                file.sync_all()
+            },
+            |_, _| Err(std::io::Error::from_raw_os_error(libc::EIO)),
+            sync_directory,
+        )
+        .is_err());
+        assert_eq!(file_bytes(&path), original);
+        assert!(stale.exists());
+        run.updated_at_ms += 1;
+        journal.store_run(&run).unwrap();
+        assert!(same_execution_identity(
+            &run,
+            &journal.load_run(&run.run_id).unwrap()
+        ));
+        assert_eq!(journal.census().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn replaced_transaction_path_is_preserved_on_failure() {
+        let root = temp_root("atomic-temp-replacement");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let run = prepared_run("temp-replacement");
+        journal.store_run(&run).unwrap();
+        let path = run_path(&root, &run.run_id);
+        let original = file_bytes(&path);
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        let bytes = encode_bounded(&run, MAX_NEW_RUN_JOURNAL_BYTES).unwrap();
+        let mut replacement = None;
+        assert!(atomic_write_with(
+            &path,
+            &bytes,
+            Some(&metadata),
+            |_, _| {
+                let temp = fs::read_dir(root.join("runs"))?
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| is_transaction_temp_file(path))
+                    .unwrap();
+                fs::remove_file(&temp)?;
+                open_temp_file_owner_only(&temp)?.write_all(b"replacement")?;
+                replacement = Some(temp);
+                Err(std::io::Error::from_raw_os_error(libc::EIO))
+            },
+            |from, to| fs::rename(from, to),
+            sync_directory,
+        )
+        .is_err());
+        assert_eq!(file_bytes(&path), original);
+        assert_eq!(file_bytes(&replacement.unwrap()), b"replacement");
+    }
+
+    #[test]
+    fn legacy_large_backend_settles_with_original_binding_and_nonincreasing_charge() {
+        let root = temp_root("legacy-large-backend");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let mut legacy = prepared_run("large-legacy");
+        legacy.status = RunStatus::Running;
+        legacy.backend_state =
+            Some(serde_json::json!({"legacy_opaque":"x".repeat(2 * 1024 * 1024)}));
+        let path = run_path(&root, &legacy.run_id);
+        overwrite_run_file(&path, &legacy);
+        let prior_charge = journal.visit_runs(|_, _, _| Ok(())).unwrap().charged_bytes;
+        assert!(prior_charge > MAX_NEW_RUN_JOURNAL_BYTES);
+        assert_eq!(
+            journal.load_run(&legacy.run_id).unwrap().status,
+            RunStatus::Running
+        );
+        journal.store_run(&settle_unknown(&legacy)).unwrap();
+        let actual = journal.load_run(&legacy.run_id).unwrap();
+        assert!(same_execution_identity(&legacy, &actual));
+        assert_eq!(actual.status, RunStatus::SettlementUnknown);
+        assert!(journal.visit_runs(|_, _, _| Ok(())).unwrap().charged_bytes < prior_charge);
+        let bytes = file_bytes(&path);
+        let mut changed = actual.clone();
+        changed.execution_binding_hash = format!("sha256:{}", "0".repeat(64));
+        assert_eq!(
+            journal.store_run(&changed).unwrap_err().code(),
+            "journal_corrupt"
+        );
+        assert_eq!(file_bytes(&path), bytes);
+    }
+
+    #[test]
+    fn committed_record_survives_parent_sync_failure() {
+        let root = temp_root("parent-sync-failure");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let run = prepared_run("parent-sync");
+        journal.store_run(&run).unwrap();
+        let path = run_path(&root, &run.run_id);
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        let next = settle_unknown(&run);
+        let bytes = encode_bounded(&next, MAX_NEW_RUN_JOURNAL_BYTES).unwrap();
+        assert!(atomic_write_with(
+            &path,
+            &bytes,
+            Some(&metadata),
+            |file, bytes| {
+                file.write_all(bytes)?;
+                file.sync_all()
+            },
+            |from, to| fs::rename(from, to),
+            |_| Err(ProviderFault::corrupt_journal(
+                "fixture parent sync failure"
+            ))
+        )
+        .is_err());
+        assert_eq!(file_bytes(&path), bytes);
+        assert_eq!(journal.census().unwrap().len(), 1);
+        let actual = journal.load_run(&run.run_id).unwrap();
+        assert!(same_execution_identity(&run, &actual));
+        assert_eq!(actual.status, RunStatus::SettlementUnknown);
     }
 }

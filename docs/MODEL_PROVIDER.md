@@ -67,6 +67,11 @@ device's effective physical or cgroup memory capacity before Get. This check
 describes the minimum requirement. Runtime checks current free memory again
 before starting the engine for a reply.
 
+On Linux, Runtime verifies the visible cgroup v2 hierarchy and reads every
+ancestor's memory limit and current usage. Missing or unreadable required files
+make the observation unavailable. File cache credit is bounded by current
+usage; an unreadable cache statistic gives zero credit.
+
 A local engine is admitted right before it starts: free memory must cover the
 model weights, its KV cache at the configured context, batch scratch and
 headroom of max(10% of effective memory capacity, 1 GiB); otherwise the run fails with
@@ -193,6 +198,18 @@ emitted text events with their original sequence numbers, but the consumer must
 deduplicate them. Reconnection cannot dispatch the model request again.
 
 ## Cancellation, interruption, and resume
+
+New model runs use compact journals of at most 1 MiB, with a 32 KiB header
+and 4 KiB backend state. Admission allows at most 256 journal entries and
+64 MiB of charged growth. Active and unresolved runs reserve at least 1 MiB
+each. Crash transaction files count toward the limits. Runtime checks these
+limits before it records a new run or dispatches inference.
+
+Recovery reads one record at a time, with ceilings of 512 entries, 32 MiB
+per legacy record and 128 MiB for the complete scan. Existing runs can settle
+with their original binding when new admission is full. An atomic replacement
+temporarily owns one extra file; failed writes remove only that owned file.
+Records above the recovery ceilings remain in place for operator recovery.
 
 Cancellation is a request to stop backend work and settle the request as
 `cancelled`. The provider records the request before closing the backend stream.

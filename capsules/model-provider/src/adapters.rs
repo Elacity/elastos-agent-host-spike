@@ -5699,4 +5699,36 @@ mod tests {
         TEST_EXTERNAL_HTTP_ALLOWED.with(|allowed| allowed.set(true));
         assert!(sink.requests.lock().unwrap().is_empty());
     }
+
+    #[test]
+    fn current_backend_state_producers_fit_journal_reservation() {
+        let limit = crate::journal::MAX_RUN_BACKEND_STATE_BYTES as usize;
+        for cancel in [false, true] {
+            assert!(
+                serde_json::to_vec(&serialize_local_text_backend_state(cancel).unwrap())
+                    .unwrap()
+                    .len()
+                    <= limit
+            );
+        }
+        assert!(
+            serde_json::to_vec(&serialize_http_job_creating_backend_state().unwrap())
+                .unwrap()
+                .len()
+                <= limit
+        );
+        let state = HttpJobBackendState {
+            schema: HTTP_JOB_BACKEND_STATE_SCHEMA.into(),
+            phase: HTTP_JOB_BACKEND_STATE_ACTIVE.into(),
+            job_id: "\\".repeat(MAX_BACKEND_JOB_ID_BYTES),
+            next_poll_at_ms: u64::MAX,
+            cancel_requested: true,
+            cancel_sent: true,
+            cancel_deadline_ms: Some(u64::MAX),
+        };
+        validate_job_id(&state.job_id).unwrap();
+        let encoded = serialize_http_job_backend_state(&state).unwrap();
+        parse_http_job_backend_state(&encoded).unwrap();
+        assert!(serde_json::to_vec(&encoded).unwrap().len() <= limit);
+    }
 }

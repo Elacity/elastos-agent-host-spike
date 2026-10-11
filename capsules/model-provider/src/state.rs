@@ -135,16 +135,19 @@ fn offer_has_unresolved_activity<A: AdapterExecutor>(
     extra: &ProviderInitExtra,
     retained_workers: &[String],
 ) -> Result<bool, ProviderFault> {
-    let runs = state.journal.scan_runs()?;
-    Ok(runs.iter().any(|(_, run)| {
-        run.offer.id == offer_id
+    let mut unresolved = false;
+    let mut run_offers = BTreeMap::new();
+    state.journal.visit_runs(|_, run, _| {
+        unresolved |= run.offer.id == offer_id
             && (!run.status.is_terminal()
-                || (!extra.owner_reclaim && run.status == RunStatus::SettlementUnknown))
-    }) || retained_workers.iter().any(|worker| {
-        runs.iter()
-            .find(|(_, run)| run.run_id == *worker)
-            .is_none_or(|(_, run)| run.offer.id == offer_id)
-    }))
+                || (!extra.owner_reclaim && run.status == RunStatus::SettlementUnknown));
+        run_offers.insert(run.run_id.clone(), run.offer.id.clone());
+        Ok(())
+    })?;
+    Ok(unresolved
+        || retained_workers
+            .iter()
+            .any(|worker| run_offers.get(worker).is_none_or(|id| id == offer_id)))
 }
 
 impl<A: AdapterExecutor> ModelProviderState<A> {
@@ -330,32 +333,27 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
         }
         let retire_offer = retired.pop();
         if let Some(id) = &retire_offer {
-            let runs = self.journal.scan_runs()?;
-            if runs.iter().any(|(_, run)| {
-                run.offer.id == *id
-                    && (!run.status.is_terminal()
-                        || (!extra.owner_reclaim && run.status == RunStatus::SettlementUnknown))
-            }) || retained_workers.iter().any(|worker| {
-                runs.iter()
-                    .find(|(_, run)| run.run_id == *worker)
-                    .is_none_or(|(_, run)| run.offer.id == *id)
-            }) {
+            if offer_has_unresolved_activity(self, id, &extra, retained_workers)? {
                 return Err(ProviderFault::selection_unavailable(
                     "model retirement pending",
                 ));
             }
-        } else if addition
-            && ((execution_owned && !hosted_additions_only)
+        } else if addition {
+            let mut unresolved = false;
+            self.journal.visit_runs(|_, run, _| {
+                unresolved |= !run.status.is_terminal()
+                    || (run.status == RunStatus::SettlementUnknown
+                        && self.offers.contains_key(&run.offer.id));
+                Ok(())
+            })?;
+            if (execution_owned && !hosted_additions_only)
                 || !retained_workers.is_empty()
-                || self.journal.scan_runs()?.iter().any(|(_, r)| {
-                    !r.status.is_terminal()
-                        || (r.status == RunStatus::SettlementUnknown
-                            && self.offers.contains_key(&r.offer.id))
-                }))
-        {
-            return Err(ProviderFault::selection_unavailable(
-                "model activation pending",
-            ));
+                || unresolved
+            {
+                return Err(ProviderFault::selection_unavailable(
+                    "model activation pending",
+                ));
+            }
         }
         if extra.owner_reclaim {
             if let Some(value) = config.extra.as_object_mut() {
@@ -783,20 +781,18 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
     }
 
     pub(crate) fn settle_active_local_text_runs_unknown(&mut self) -> Result<(), ProviderFault> {
-        let run_ids = self
-            .journal
-            .scan_runs()?
-            .into_iter()
-            .filter_map(|(_, run)| {
-                if run.status.is_terminal() {
-                    return None;
-                }
-                run.backend_state
+        let mut run_ids = Vec::new();
+        self.journal.visit_runs(|_, run, _| {
+            if !run.status.is_terminal()
+                && run
+                    .backend_state
                     .as_ref()
-                    .filter(|backend_state| is_local_text_backend_state(backend_state))
-                    .map(|_| run.run_id)
-            })
-            .collect::<Vec<_>>();
+                    .is_some_and(is_local_text_backend_state)
+            {
+                run_ids.push(run.run_id.clone());
+            }
+            Ok(())
+        })?;
         for run_id in run_ids {
             self.settle_local_text_run_unknown(&run_id)?;
         }
@@ -838,20 +834,18 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
     }
 
     pub(crate) fn settle_active_http_job_creates_unknown(&mut self) -> Result<(), ProviderFault> {
-        let run_ids = self
-            .journal
-            .scan_runs()?
-            .into_iter()
-            .filter_map(|(_, run)| {
-                if run.status.is_terminal() {
-                    return None;
-                }
-                run.backend_state
+        let mut run_ids = Vec::new();
+        self.journal.visit_runs(|_, run, _| {
+            if !run.status.is_terminal()
+                && run
+                    .backend_state
                     .as_ref()
-                    .filter(|backend_state| is_http_job_creating_backend_state(backend_state))
-                    .map(|_| run.run_id)
-            })
-            .collect::<Vec<_>>();
+                    .is_some_and(is_http_job_creating_backend_state)
+            {
+                run_ids.push(run.run_id.clone());
+            }
+            Ok(())
+        })?;
         for run_id in run_ids {
             self.settle_http_job_create_run_unknown(&run_id)?;
         }
@@ -988,12 +982,12 @@ fn require_retained_run_bindings(
     offers: &BTreeMap<String, ConfiguredOffer>,
 ) -> Result<Vec<String>, ProviderFault> {
     let mut replaced_local_runs = Vec::new();
-    for (_, run) in journal.scan_runs()? {
+    journal.visit_runs(|_, run, _| {
         if !run.status.is_terminal() {
             let Some(offer) = offers.get(&run.offer.id) else {
-                if retained_local_llama_run(&run) {
+                if retained_local_llama_run(run) {
                     replaced_local_runs.push(run.run_id.clone());
-                    continue;
+                    return Ok(());
                 }
                 return Err(ProviderFault::selection_unavailable(
                     "retained model binding unavailable",
@@ -1021,7 +1015,8 @@ fn require_retained_run_bindings(
                 }
             }
         }
-    }
+        Ok(())
+    })?;
     Ok(replaced_local_runs)
 }
 
@@ -2623,7 +2618,15 @@ mod tests {
             .is_err());
         assert!(state.offers["admitted"].enabled);
         assert_eq!(*state.adapters.dispatch_calls.lock().unwrap(), 0);
-        assert!(state.journal.scan_runs().unwrap().is_empty());
+        let mut retained = 0;
+        state
+            .journal
+            .visit_runs(|_, _, _| {
+                retained += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(retained, 0);
     }
 
     #[cfg(unix)]
@@ -2693,7 +2696,8 @@ mod tests {
         )
         .unwrap();
         expire_terminal_run(&mut run);
-        state.journal.store_run(&run).unwrap();
+        // Age this retained fixture on disk; production writes preserve its original time binding.
+        std::fs::write(&path, serde_json::to_vec(&run).unwrap()).unwrap();
         let before = std::fs::read(&path).unwrap();
         state.journal.prune_expired_terminal_runs().unwrap();
         assert!(state.plan_refresh(desired.clone(), false, &[]).is_err());
@@ -5759,5 +5763,98 @@ mod tests {
 
         assert_eq!(error.code(), "internal_error");
         assert_eq!(serde_json::to_vec(&run).unwrap(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_admission_refuses_before_prepared_and_backend_effects() {
+        use std::os::unix::fs::OpenOptionsExt;
+        for exhausted_count in [false, true] {
+            let root = temp_root("bounded-journal-admission");
+            let model = offer("local-text");
+            let adapters = FakeAdapters::default();
+            let mut state = init_state(&root, vec![model.clone()], adapters.clone());
+            if exhausted_count {
+                let runs = journal_root(&root, None).unwrap().join("runs");
+                for index in 0..crate::journal::MAX_NEW_JOURNAL_ENTRIES {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(runs.join(format!(".sha256-{index:064x}.json.tmp-crash")))
+                        .unwrap();
+                }
+            } else {
+                for index in 0..64 {
+                    let input = json!({"schema":"elastos.model.input.text/v1","prompt":"retained"});
+                    let binding = create_binding(&format!("retained-{index}"), &model.id, &input);
+                    let run = prepared_run_for_offer(binding, &model, now_ms());
+                    state.journal.store_run(&run).unwrap();
+                }
+            }
+            let input = json!({"schema":"elastos.model.input.text/v1","prompt":"fresh"});
+            let binding = create_binding("new-at-capacity", &model.id, &input);
+            let run_id = deterministic_run_id(&binding);
+            let error = state
+                .handle_runs_create(RunsCreateRequest {
+                    op: "runs_create".into(),
+                    offer_id: model.id.clone(),
+                    operation: model.operation.clone(),
+                    input,
+                    runtime_binding: binding,
+                    expected_execution_binding_hash: None,
+                })
+                .unwrap_err();
+            assert_eq!(error.code(), "policy_limit");
+            assert!(!run_path(&root, &run_id).exists());
+            assert_eq!(*adapters.dispatch_calls.lock().unwrap(), 0);
+            assert_eq!(*adapters.reconcile_calls.lock().unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn bounded_settlement_visitor_validates_all_records_before_mutation() {
+        let root = temp_root("visitor-full-validation");
+        let model = offer("local-text");
+        let adapters = FakeAdapters::default();
+        let mut state = init_state(&root, vec![model.clone()], adapters.clone());
+        let mut paths = Vec::new();
+        for index in 0..2 {
+            let input = json!({"schema":"elastos.model.input.text/v1","prompt":"x"});
+            let binding = create_binding(&format!("worker-{index}"), &model.id, &input);
+            let mut run = prepared_run_for_offer(binding, &model, now_ms());
+            run.status = RunStatus::Running;
+            run.backend_state = Some(serialize_local_text_backend_state(false).unwrap());
+            state.journal.store_run(&run).unwrap();
+            paths.push((run_path(&root, &run.run_id), run));
+        }
+        let mut malformed = paths[1].1.clone();
+        malformed.execution_binding_hash = "invalid".into();
+        std::fs::write(&paths[1].0, serde_json::to_vec(&malformed).unwrap()).unwrap();
+        let before = paths
+            .iter()
+            .map(|(path, _)| std::fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            state
+                .settle_active_local_text_runs_unknown()
+                .unwrap_err()
+                .code(),
+            "journal_corrupt"
+        );
+        for ((path, _), bytes) in paths.iter().zip(before) {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        assert_eq!(*adapters.dispatch_calls.lock().unwrap(), 0);
+        assert_eq!(*adapters.reconcile_calls.lock().unwrap(), 0);
+        // Restore the exact original fixture and prove normal bounded settlement.
+        std::fs::write(&paths[1].0, serde_json::to_vec(&paths[1].1).unwrap()).unwrap();
+        state.settle_active_local_text_runs_unknown().unwrap();
+        for (_, run) in paths {
+            assert_eq!(
+                state.journal.load_run(&run.run_id).unwrap().status,
+                RunStatus::SettlementUnknown
+            );
+        }
     }
 }
