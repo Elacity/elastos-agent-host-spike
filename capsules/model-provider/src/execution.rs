@@ -3510,113 +3510,150 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
+    async fn local_llama_cancel_with_active_backend_settles_unknown_without_redispatch() {
+        // A bound Stop result can retain uncertainty when closure cannot be
+        // confirmed. The same ID must continue to answer that fact, even after
+        // the original deadline, rather than dispatch another inference.
+        local_stop_deadline_fixture("unknown").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
     async fn local_stop_deadline_accepts_only_current_bound_pure_settlement() {
-        for case in [
-            "confirmed",
-            "unknown",
-            "stale",
-            "unrequested",
-            "payload",
-            "ordinary",
-        ] {
-            let root = temp_root(&format!("local-stop-deadline-{case}"));
-            let (offer, events, root) = local_llama_offer(&root, "healthy");
-            let (update_tx, updates) = mpsc::channel(UPDATE_CHANNEL_CAPACITY);
-            let (_request_tx, requests) = mpsc::channel(REQUEST_CHANNEL_CAPACITY);
-            let mut coordinator = ProviderCoordinator {
-                provider: None,
-                handle: tokio::runtime::Handle::current(),
-                requests,
-                updates,
-                update_tx,
-            };
-            coordinator
-                .route_request(init_request(&root, vec![offer.clone()]))
-                .await
-                .unwrap();
-            let input = text_input("stall");
-            let binding = create_binding(&format!("request:stop-deadline-{case}"), &offer, &input);
-            let created = coordinator.route_request(ProviderEnvelope {
+        for case in ["confirmed", "stale", "unrequested", "payload", "ordinary"] {
+            local_stop_deadline_fixture(case).await;
+        }
+    }
+
+    #[cfg(unix)]
+    async fn local_stop_deadline_fixture(case: &str) {
+        let root = temp_root(&format!("local-stop-deadline-{case}"));
+        let (offer, events, root) = local_llama_offer(&root, "healthy");
+        let (update_tx, updates) = mpsc::channel(UPDATE_CHANNEL_CAPACITY);
+        let (_request_tx, requests) = mpsc::channel(REQUEST_CHANNEL_CAPACITY);
+        let mut coordinator = ProviderCoordinator {
+            provider: None,
+            handle: tokio::runtime::Handle::current(),
+            requests,
+            updates,
+            update_tx,
+        };
+        coordinator
+            .route_request(init_request(&root, vec![offer.clone()]))
+            .await
+            .unwrap();
+        let input = text_input("stall");
+        let binding = create_binding(&format!("request:stop-deadline-{case}"), &offer, &input);
+        let created = coordinator
+            .route_request(ProviderEnvelope {
+                operation: ProviderOperation::RunsCreate,
+                value: json!({"op":"runs_create", "offer_id":offer.id, "operation":offer.operation,
+                "input":input, "runtime_binding":binding}),
+            })
+            .await
+            .unwrap();
+        let run_id = created["data"]["run_id"].as_str().unwrap();
+        let events_for_wait = events.clone();
+        tokio::task::spawn_blocking(move || {
+            wait_for_fake_llama_event(&events_for_wait, "request:stall")
+        })
+        .await
+        .unwrap();
+        coordinator
+            .route_request(cancel_run_envelope(run_id, &access_binding(&binding)))
+            .await
+            .unwrap();
+        let mut update = tokio::time::timeout(FIXTURE_EVENT_TIMEOUT, coordinator.updates.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let WorkerUpdate::Apply {
+            generation,
+            guard,
+            result,
+            ..
+        } = &mut update
+        else {
+            panic!("expected the owned Stop result");
+        };
+        assert!(crate::adapters::pure_local_stop_result(result));
+        assert!(matches!(guard, WorkerApplyGuard::LocalStopSettlement));
+        let journal_root = crate::config::journal_root(&root, None).unwrap();
+        let journal = RunJournal::open(journal_root.clone()).unwrap();
+        let mut run = journal.load_run(run_id).unwrap();
+        // Hold the real completed-close update across the journal deadline.
+        run.created_at_ms =
+            crate::journal::now_ms().saturating_sub(offer.policy.runtime_ms_limit + 1);
+        run.deadline_ms = run.created_at_ms + offer.policy.runtime_ms_limit;
+        match case {
+            "unknown" => {
+                // A missing closure observation keeps uncertainty, never output.
+                *result = ReconcileResult::Terminal {
+                    events: Vec::new(),
+                    status: crate::contract::RunStatus::SettlementUnknown,
+                    output: None,
+                    error: Some(crate::contract::RunError {
+                        class: crate::contract::ErrorClass::SettlementUnknown,
+                        code: "settlement_unknown".into(),
+                        message: "model backend settlement is unknown".into(),
+                    }),
+                    backend_report: None,
+                };
+            }
+            "stale" => *generation += 1,
+            "unrequested" => {
+                run.backend_state = Some(serialize_local_text_backend_state(false).unwrap())
+            }
+            "payload" => {
+                if let ReconcileResult::Terminal { output, .. } = result {
+                    *output = Some(json!({"text":"late"}));
+                }
+            }
+            "ordinary" => *guard = WorkerApplyGuard::None,
+            _ => {}
+        }
+        // Seed this old-clock fixture directly. Production replacement writes
+        // preserve immutable creation/deadline bindings, including in tests.
+        let run_path = crate::journal::hashed_path(&journal_root.join("runs"), run_id);
+        std::fs::write(&run_path, serde_json::to_vec(&run).unwrap()).unwrap();
+        let aged = journal.load_run(run_id).unwrap();
+        assert_eq!(aged.created_at_ms, run.created_at_ms);
+        assert_eq!(aged.deadline_ms, run.deadline_ms);
+        coordinator.handle_update(update).await;
+        let settled = journal.load_run(run_id).unwrap();
+        assert_eq!(
+            settled.status,
+            match case {
+                "confirmed" => crate::contract::RunStatus::Cancelled,
+                "unknown" => crate::contract::RunStatus::SettlementUnknown,
+                _ => crate::contract::RunStatus::Reconciling,
+            },
+            "case {case}"
+        );
+        assert!(settled.output.is_none());
+        if case == "unknown" {
+            assert_eq!(settled.runtime_binding, binding);
+            let saved = std::fs::read(&run_path).unwrap();
+            let before_events = fake_llama_events(&events);
+            let retried = coordinator.route_request(ProviderEnvelope {
                 operation: ProviderOperation::RunsCreate,
                 value: json!({"op":"runs_create", "offer_id":offer.id, "operation":offer.operation,
                     "input":input, "runtime_binding":binding}),
             }).await.unwrap();
-            let run_id = created["data"]["run_id"].as_str().unwrap();
-            let events_for_wait = events.clone();
-            tokio::task::spawn_blocking(move || {
-                wait_for_fake_llama_event(&events_for_wait, "request:stall")
-            })
-            .await
-            .unwrap();
-            coordinator
-                .route_request(cancel_run_envelope(run_id, &access_binding(&binding)))
-                .await
-                .unwrap();
-            let mut update =
-                tokio::time::timeout(FIXTURE_EVENT_TIMEOUT, coordinator.updates.recv())
-                    .await
-                    .unwrap()
-                    .unwrap();
-            let WorkerUpdate::Apply {
-                generation,
-                guard,
-                result,
-                ..
-            } = &mut update
-            else {
-                panic!("expected the owned Stop result");
-            };
-            assert!(crate::adapters::pure_local_stop_result(result));
-            assert!(matches!(guard, WorkerApplyGuard::LocalStopSettlement));
-            let journal =
-                RunJournal::open(crate::config::journal_root(&root, None).unwrap()).unwrap();
-            let mut run = journal.load_run(run_id).unwrap();
-            // Hold the real completed-close update across the journal deadline.
-            run.created_at_ms =
-                crate::journal::now_ms().saturating_sub(offer.policy.runtime_ms_limit + 1);
-            run.deadline_ms = run.created_at_ms + offer.policy.runtime_ms_limit;
-            match case {
-                "unknown" => {
-                    // A missing closure observation keeps uncertainty, never output.
-                    *result = ReconcileResult::Terminal {
-                        events: Vec::new(),
-                        status: crate::contract::RunStatus::SettlementUnknown,
-                        output: None,
-                        error: Some(crate::contract::RunError {
-                            class: crate::contract::ErrorClass::SettlementUnknown,
-                            code: "settlement_unknown".into(),
-                            message: "model backend settlement is unknown".into(),
-                        }),
-                        backend_report: None,
-                    };
-                }
-                "stale" => *generation += 1,
-                "unrequested" => {
-                    run.backend_state = Some(serialize_local_text_backend_state(false).unwrap())
-                }
-                "payload" => {
-                    if let ReconcileResult::Terminal { output, .. } = result {
-                        *output = Some(json!({"text":"late"}));
-                    }
-                }
-                "ordinary" => *guard = WorkerApplyGuard::None,
-                _ => {}
-            }
-            journal.store_run(&run).unwrap();
-            coordinator.handle_update(update).await;
-            let settled = journal.load_run(run_id).unwrap();
+            assert_eq!(retried["data"]["run_id"], run_id);
+            assert_eq!(retried["data"]["status"], "settlement_unknown");
             assert_eq!(
-                settled.status,
-                match case {
-                    "confirmed" => crate::contract::RunStatus::Cancelled,
-                    "unknown" => crate::contract::RunStatus::SettlementUnknown,
-                    _ => crate::contract::RunStatus::Reconciling,
-                },
-                "case {case}"
+                retried["data"]["terminal"]["error"]["code"],
+                "settlement_unknown"
             );
-            assert!(settled.output.is_none());
-            coordinator.shutdown().await;
+            assert_eq!(std::fs::read(&run_path).unwrap(), saved);
+            assert_eq!(
+                fake_llama_events(&events),
+                before_events,
+                "a retained uncertain Stop never launches or sends inference again"
+            );
         }
+        coordinator.shutdown().await;
     }
 
     #[cfg(unix)]
