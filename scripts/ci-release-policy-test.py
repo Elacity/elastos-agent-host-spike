@@ -1908,13 +1908,14 @@ class InstalledJourneyTests(unittest.TestCase):
             (blocks / key[-3:-1]).mkdir()
             (blocks / key[-3:-1] / f"{key}.data").write_bytes(b"package root")
 
-    def execute(self, home, data, evidence, available=20 * 1024 ** 3, carrier=False, consumer_holds_root=False):
+    def execute(self, home, data, evidence, available=20 * 1024 ** 3, carrier=False, consumer_holds_root=False, memory_gib=0):
         journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
         child = mock.Mock(pid=12345)
         child.poll.return_value = None
         response = mock.MagicMock()
         response.__enter__.return_value.status = 200
         self.holder = mock.Mock(return_value=(mock.Mock(pid=23456), {"holder_did": "did:key:holder"}))
+        self.finite = mock.Mock()
 
         def node_journey(*args, **kwargs):
             if args[0][1] == "scripts/ci-model-package.mjs":
@@ -1943,32 +1944,34 @@ class InstalledJourneyTests(unittest.TestCase):
                     "capacity_bytes": 100 * 1024 ** 3, "available_bytes": available},
                     "process_rows": lambda: {},
                     "cleanup_runtime": lambda *_, **__: {"status": "passed", "before": {}, "after": {}},
-                    "start_holder": self.holder}):
+                    "start_holder": self.holder, "FiniteRuntime": self.finite}):
             try:
-                journey["run"](home, data, evidence, carrier=carrier)
+                journey["run"](home, data, evidence, carrier=carrier, memory_gib=memory_gib)
             finally:
                 self.gateway, self.node, self.stop = gateway, node, stop
         return child
 
     def test_stale_ui_receipt_is_refused_before_fixture_or_runtime_start(self):
         for kind in ("receipt", "dangling_link"):
-            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
-                home, data, evidence, _ = self.fixture(Path(temp), "linux")
-                old = json.dumps({"results": {"installed_runtime_reply": "passed"}})
-                path = evidence / "home-journey.json"
-                if kind == "receipt":
-                    path.write_text(old)
-                else:
-                    path.symlink_to("never-created.json")
-                with self.assertRaisesRegex(RuntimeError, "requires fresh UI evidence"):
-                    self.execute(home, data, evidence)
-                self.gateway.assert_not_called()
-                self.node.assert_not_called()
-                if kind == "receipt":
-                    self.assertEqual(path.read_text(), old)
-                else:
-                    self.assertTrue(path.is_symlink())
-                    self.assertFalse(path.exists())
+            for memory_gib in (0, 1, 4):
+                with self.subTest(kind=kind, memory_gib=memory_gib), tempfile.TemporaryDirectory() as temp:
+                    home, data, evidence, _ = self.fixture(Path(temp), "linux")
+                    old = json.dumps({"results": {"installed_runtime_reply": "passed"}})
+                    path = evidence / "home-journey.json"
+                    if kind == "receipt":
+                        path.write_text(old)
+                    else:
+                        path.symlink_to("never-created.json")
+                    with self.assertRaisesRegex(RuntimeError, "requires fresh UI evidence"):
+                        self.execute(home, data, evidence, memory_gib=memory_gib)
+                    self.gateway.assert_not_called()
+                    self.node.assert_not_called()
+                    self.finite.assert_not_called()
+                    if kind == "receipt":
+                        self.assertEqual(path.read_text(), old)
+                    else:
+                        self.assertTrue(path.is_symlink())
+                        self.assertFalse(path.exists())
 
     def test_gateway_and_node_share_the_installed_fixture_root(self):
         for platform in ("macos", "linux"):
@@ -2240,6 +2243,582 @@ class InstalledJourneyTests(unittest.TestCase):
         self.assertIn("source-home-journeys/**/*.png", upload)
 
 
+class FiniteInstalledJourneyTests(unittest.TestCase):
+    """Exercise the actual finite owner with explicit kernel/service observations."""
+    def setUp(self):
+        self.journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
+        self.globals = self.journey["FiniteRuntime"].observe_once.__globals__
+
+    def proc_process(self, proc, pid=100, ticks=71, state="S", parent=99, executable=None):
+        directory = proc / str(pid)
+        directory.mkdir(parents=True, exist_ok=True)
+        fields = [state, str(parent), str(pid)] + ["0"] * 17
+        fields[19] = str(ticks)
+        (directory / "stat").write_text(f"{pid} (fixture with spaces) " + " ".join(fields))
+        (directory / "status").write_text("Uid:\t1001\t1001\t1001\t1001\n")
+        link = directory / "exe"
+        if link.is_symlink():
+            link.unlink()
+        if executable is not None:
+            link.symlink_to(executable)
+        return directory
+
+    def finite_owner(self, root):
+        home, data, _, _ = InstalledJourneyTests().fixture(root, "linux")
+        owner = self.journey["FiniteRuntime"].__new__(self.journey["FiniteRuntime"])
+        owner.home, owner.data, owner.gib, owner.budget = home, data, 4, 4 * 1024 ** 3
+        owner.unit = "elastos-ci-model-fixture.service"
+        owner.control = home / "finite-control"
+        owner.control.mkdir(mode=0o700)
+        owner.binding = {"InvocationID": "a" * 32, "ControlGroup": "/system.slice/" + owner.unit,
+                         "MainPID": "99", "ActiveState": "active"}
+        owner.group = Path("/sys/fs/cgroup") / owner.binding["ControlGroup"].lstrip("/")
+        owner.pid = 100
+        owner.known, owner.fds, owner.metric_fds, owner.actions = {}, {}, {}, []
+        owner.outside, owner.last_action = [900], 0
+        owner.engine, owner.engine_members = None, set()
+        owner.stop = mock.Mock()
+        owner.stop.is_set.return_value = False
+        owner.thread, owner.error, owner.launch_requested = None, None, True
+        owner.baseline_events = {"oom": 0, "oom_kill": 0}
+        owner.show = mock.Mock(return_value=dict(owner.binding))
+        owner.command = mock.Mock()
+        values = {"memory.max": str(owner.budget), "memory.swap.max": "0", "pids.max": "512",
+                  "memory.current": "100", "memory.peak": "200", "memory.events": "oom 0\noom_kill 0",
+                  "cgroup.events": "populated 0"}
+        owner.metric = mock.Mock(side_effect=lambda name: values[name])
+        return owner, values
+
+    def process_rows(self, owner):
+        _, _, info, bundle = self.journey["engine_paths"](owner.data)
+        paths = {99: str(Path(sys.executable).resolve()), 100: str(owner.data / "bin/elastos"),
+                 101: str(owner.data / "bin/model-provider"), 102: str(owner.data / "bin/model-provider"),
+                 103: str((bundle / info["binary_path"]).resolve())}
+        return {pid: {"pid": pid, "uid": 1001, "start_ticks": pid + 700, "parent": parent,
+                      "group": 103 if pid == 103 else pid, "state": "S", "executable": paths[pid],
+                      "device": Path(paths[pid]).stat().st_dev, "inode": Path(paths[pid]).stat().st_ino,
+                      "exe_sha256": self.journey["digest"](Path(paths[pid])),
+                      "role": {99: "helper", 100: "runtime", 101: "model_provider", 102: "guard", 103: "llama_server"}[pid]}
+                for pid, parent in ((99, 900), (100, 99), (101, 100), (102, 101), (103, 102))}
+
+    def observations(self, owner, rows):
+        return mock.patch.dict(self.globals, {
+            "bounded_text": lambda path, *_: ("--internal-local-llama-guard\0" if Path(path).parent.name == "102" else "fixture\0")
+                            if Path(path).name == "cmdline" else " ".join(map(str, rows)),
+            "linux_process_identity": lambda pid, **_: dict(rows[pid]),
+            "cgroup_membership": lambda pid, *_: "/outside" if pid in owner.outside else owner.binding["ControlGroup"],
+            "pidfd_exited": lambda _: False,
+        })
+
+    def test_finite_readers_bound_control_data_and_preserve_unsafe_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / "control.json"
+            self.journey["private_json"](path, {"id": 1})
+            self.assertEqual(self.journey["private_json"](path), {"id": 1})
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            path.chmod(0o644)
+            with self.assertRaisesRegex(RuntimeError, "ownership"):
+                self.journey["private_json"](path)
+            path.chmod(0o600)
+            foreign = list(path.stat())
+            foreign[4] = os.getuid() + 1
+            with mock.patch.object(os, "fstat", return_value=os.stat_result(foreign)), \
+                    self.assertRaisesRegex(RuntimeError, "ownership"):
+                self.journey["private_json"](path)
+            hardlink = root / "hardlink.json"
+            os.link(path, hardlink)
+            with self.assertRaisesRegex(RuntimeError, "ownership"):
+                self.journey["private_json"](path)
+            hardlink.unlink()
+            link = root / "link.json"
+            link.symlink_to(path)
+            with self.assertRaises(OSError):
+                self.journey["private_json"](link)
+            path.write_bytes(b"x" * 65537)
+            with self.assertRaisesRegex(RuntimeError, "bound"):
+                self.journey["private_json"](path)
+            with self.assertRaisesRegex(RuntimeError, "bound"):
+                self.journey["bounded_text"](path, 65536)
+            with self.assertRaisesRegex(RuntimeError, "bound"):
+                self.journey["private_json"](root / "new.json", {"private": "x" * 65537})
+            self.assertFalse((root / "new.json").exists())
+            self.assertTrue(link.is_symlink())
+
+    def test_finite_z_leader_requires_retained_birth_and_whole_process_pidfd_exit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            executable = root / "engine"
+            executable.write_bytes(b"fixture; never executed")
+            proc = root / "proc"
+            self.proc_process(proc, executable=executable)
+            identity = self.journey["linux_process_identity"](100, proc)
+            self.proc_process(proc, state="Z")
+            retained = self.journey["linux_process_identity"](100, proc, retained=identity)
+            self.assertEqual(retained["state"], "Z")
+            self.assertTrue(self.journey["same_process"](identity, retained))
+            with self.assertRaises(FileNotFoundError):
+                self.journey["linux_process_identity"](100, proc)
+            self.proc_process(proc, ticks=72, state="Z")
+            with self.assertRaises(FileNotFoundError):
+                self.journey["linux_process_identity"](100, proc, retained=identity)
+            selector = mock.Mock(POLLIN=1, POLLERR=8, POLLHUP=16, POLLNVAL=32)
+            for events, exited in (([], False), ([(45, selector.POLLIN)], True),
+                                   ([(45, selector.POLLIN | selector.POLLHUP)], True)):
+                poll = mock.Mock()
+                poll.poll.return_value = events
+                selector.poll.return_value = poll
+                with mock.patch.dict(self.globals, {"select": selector}):
+                    self.assertEqual(self.journey["pidfd_exited"](45), exited)
+                poll.register.assert_called_once_with(45, selector.POLLIN)
+                poll.poll.assert_called_once_with(0)
+            for events in ([(45, selector.POLLHUP)], [(45, selector.POLLERR)], [(45, selector.POLLNVAL)],
+                           [(45, 2)], [(45, selector.POLLIN | selector.POLLERR)],
+                           [(45, selector.POLLIN | selector.POLLHUP | selector.POLLERR)],
+                           [(46, selector.POLLIN)], [(45, selector.POLLIN), (45, selector.POLLIN)]):
+                poll = mock.Mock()
+                poll.poll.return_value = events
+                selector.poll.return_value = poll
+                with mock.patch.dict(self.globals, {"select": selector}), \
+                        self.assertRaisesRegex(RuntimeError, "exit is unavailable"):
+                    self.journey["pidfd_exited"](45)
+
+    def test_finite_preflight_requires_global_v2_visibility_and_explicit_platform(self):
+        for fault in (None, "platform", "hidden_root", "subtree_type", "root_max", "root_current", "v1",
+                      "controller", "overmount", "hidden_parent", "ancestor_overmount", "membership",
+                      "unreadable_type", "mount_changed", "membership_changed"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp) / "cgroup"
+                proc = Path(temp) / "proc"
+                root.mkdir()
+                (proc / "self").mkdir(parents=True)
+                mount_root = "/private-subtree" if fault == "hidden_root" else "/"
+                kind = "cgroup" if fault == "v1" else "cgroup2"
+                mount = "1 0 0:0 / / rw - rootfs rootfs rw\n"
+                mount += f"2 {900 if fault == 'hidden_parent' else 1} 0:1 {mount_root} {root} rw - {kind} cgroup rw\n"
+                if fault == "overmount":
+                    mount += f"3 2 0:2 / {root}/covered rw - tmpfs tmpfs rw\n"
+                if fault == "ancestor_overmount":
+                    mount += f"3 1 0:2 / {root.parent} rw - tmpfs tmpfs rw\n"
+                (proc / "self/mountinfo").write_text(mount)
+                (proc / "self/cgroup").write_text("0::/outside\n" if fault != "membership" else "1:memory:/hidden\n")
+                (root / "cgroup.controllers").write_text("cpu pids" if fault == "controller" else "cpu memory pids")
+                if fault == "subtree_type":
+                    (root / "cgroup.type").write_text("domain\n")
+                if fault in ("root_max", "root_current"):
+                    (root / ("memory.max" if fault == "root_max" else "memory.current")).write_text("max\n")
+                reads = {}
+                reader = self.journey["bounded_text"]
+
+                def observation(path, limit):
+                    path = Path(path)
+                    reads[path] = reads.get(path, 0) + 1
+                    if fault == "unreadable_type" and path.name == "cgroup.type":
+                        raise PermissionError("fixture observation refused")
+                    value = reader(path, limit)
+                    if fault == "mount_changed" and path.name == "mountinfo" and reads[path] > 1:
+                        return value + "\n"
+                    if fault == "membership_changed" and path.name == "cgroup" and reads[path] > 1:
+                        return "0::/changed\n"
+                    return value
+
+                with mock.patch.dict(self.globals, {"bounded_text": observation}), \
+                        mock.patch.object(os, "pidfd_open", create=True), \
+                        mock.patch.object(signal, "pidfd_send_signal", create=True):
+                    if fault:
+                        with self.assertRaises((RuntimeError, OSError)):
+                            self.journey["finite_memory_preflight"]("darwin" if fault == "platform" else "linux", proc, root)
+                    else:
+                        self.assertEqual(self.journey["finite_memory_preflight"]("linux", proc, root), "/outside")
+
+    def test_finite_census_binds_pidfds_and_rejects_reuse_escaped_children_and_oom(self):
+        for fault in (None, "birth", "uid", "escaped", "observer_inside", "oom", "peak", "limit_changed", "swap_changed",
+                      "duplicate", "census_bound", "omitted_live", "omitted_exited"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temp:
+                owner, values = self.finite_owner(Path(temp))
+                rows = self.process_rows(owner)
+                with self.observations(owner, rows), mock.patch.object(os, "getuid", return_value=1001), \
+                        mock.patch.object(os, "pidfd_open", side_effect=lambda pid, flags: pid + 1000, create=True):
+                    self.assertEqual(set(owner.observe_once()), set(rows))
+                    self.assertEqual(set(owner.fds), set(rows))
+                    self.assertEqual(owner.engines(owner.known), [103])
+                    if fault is None:
+                        continue
+                    if fault == "birth":
+                        rows[103]["start_ticks"] += 1
+                    elif fault == "uid":
+                        rows[103]["uid"] = 9999
+                    elif fault == "escaped":
+                        self.globals["cgroup_membership"] = lambda *_: "/foreign"
+                    elif fault == "observer_inside":
+                        self.globals["cgroup_membership"] = lambda *_: owner.binding["ControlGroup"]
+                    elif fault == "oom":
+                        values["memory.events"] = "oom 1\noom_kill 0"
+                    elif fault == "peak":
+                        values["memory.peak"] = str(owner.budget + 1)
+                    elif fault == "limit_changed":
+                        values["memory.max"] = "max"
+                    elif fault == "swap_changed":
+                        values["memory.swap.max"] = "max"
+                    elif fault == "duplicate":
+                        self.globals["bounded_text"] = lambda *_: "100 100"
+                    elif fault == "census_bound":
+                        self.globals["bounded_text"] = lambda *_: " ".join(map(str, range(513)))
+                    else:
+                        rows.pop(103)
+                        if fault == "omitted_exited":
+                            self.globals["pidfd_exited"] = lambda fd: fd == owner.fds[103]
+                            self.assertNotIn(103, owner.observe_once())
+                            self.assertIn(103, owner.fds)
+                            continue
+                    with self.assertRaises(RuntimeError):
+                        owner.observe_once()
+
+    def test_finite_census_accepts_same_birth_exec_and_never_rebinds_an_exited_pidfd(self):
+        with tempfile.TemporaryDirectory() as temp:
+            owner, _ = self.finite_owner(Path(temp))
+            rows = self.process_rows(owner)
+            engine = dict(rows[103])
+            rows[103].update({key: rows[102][key] for key in ("executable", "device", "inode")})
+            with self.observations(owner, rows), mock.patch.object(os, "getuid", return_value=1001), \
+                    mock.patch.object(os, "pidfd_open", side_effect=lambda pid, flags: pid + 1000, create=True) as opened:
+                owner.observe_once()
+                rows[103] = engine
+                self.assertEqual(owner.engines(owner.observe_once()), [103])
+                self.assertEqual(opened.call_count, len(rows))
+                self.globals["pidfd_exited"] = lambda fd: fd == owner.fds[103]
+                self.assertNotIn(103, owner.observe_once())
+                self.assertEqual(opened.call_count, len(rows))
+
+    def test_finite_pidfd_binding_closes_on_identity_race_or_unreadable_child(self):
+        for fault in ("reused", "disappeared", "denied"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temp:
+                owner, _ = self.finite_owner(Path(temp))
+                row = self.process_rows(owner)[100]
+                second = (dict(row, start_ticks=row["start_ticks"] + 1) if fault == "reused" else
+                          FileNotFoundError("fixture child exited") if fault == "disappeared" else
+                          PermissionError("fixture identity unavailable"))
+                with self.observations(owner, {100: row}), \
+                        mock.patch.dict(self.globals, {"linux_process_identity": mock.Mock(side_effect=[row, second])}), \
+                        mock.patch.object(os, "getuid", return_value=1001), \
+                        mock.patch.object(os, "pidfd_open", return_value=1100, create=True), \
+                        mock.patch.object(os, "close") as closed:
+                    with self.assertRaises((RuntimeError, OSError)):
+                        owner.observe_once()
+                closed.assert_called_once_with(1100)
+                self.assertEqual(owner.fds, {})
+                self.assertEqual(owner.known, {})
+
+    def test_finite_helper_rejects_changed_owner_or_runtime_and_closes_failed_launch_pidfd(self):
+        for fault in ("owner", "runtime", "launch"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                runtime = root / "elastos"
+                runtime.write_bytes(b"exact installed Runtime fixture")
+                identity = {"pid": 900, "uid": 1001, "start_ticks": 71, "executable": "/fixture/python",
+                            "device": 1, "inode": 2}
+                payload = {"owner": identity, "runtime": str(runtime), "runtime_sha256": self.journey["digest"](runtime),
+                           "environment": {}, "address": "127.0.0.1:1", "log": str(root / "private.log")}
+                if fault == "runtime":
+                    payload["runtime_sha256"] = "f" * 64
+                self.journey["private_json"](root / "launch.json", payload)
+                observed = dict(identity, start_ticks=72) if fault == "owner" else identity
+                with mock.patch.dict(self.globals, {"linux_process_identity": lambda *_: observed,
+                                                    "pidfd_exited": lambda _: False}), \
+                        mock.patch.object(os, "pidfd_open", return_value=77, create=True) as opened, \
+                        mock.patch.object(os, "close") as closed, \
+                        mock.patch.object(signal, "signal"), \
+                        mock.patch.object(subprocess, "Popen", side_effect=RuntimeError("fixture launch failed")) as launch:
+                    with self.assertRaises(RuntimeError):
+                        self.journey["runtime_unit_helper"](root)
+                if fault == "owner":
+                    opened.assert_not_called()
+                    closed.assert_not_called()
+                else:
+                    opened.assert_called_once_with(900, 0)
+                    closed.assert_called_once_with(77)
+                self.assertEqual(launch.call_count, int(fault == "launch"))
+                self.assertFalse((root / "runtime.json").exists())
+                self.assertFalse((root / "runtime-stopped.json").exists())
+
+    def test_finite_owner_refuses_existing_control_root_and_invalid_budget_before_launch(self):
+        for fault in ("directory", "symlink", "root_uid", "budget"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temp:
+                home, data, _, _ = InstalledJourneyTests().fixture(Path(temp), "linux")
+                control = home / "finite-control"
+                if fault == "directory":
+                    control.mkdir(mode=0o700)
+                    (control / "retained").write_text("owned earlier evidence")
+                elif fault == "symlink":
+                    control.symlink_to(home / "missing")
+                with mock.patch.dict(self.globals, {"finite_memory_preflight": lambda *_: "/outside"}), \
+                        mock.patch.object(os, "getuid", return_value=0 if fault == "root_uid" else 1001), \
+                        mock.patch.object(subprocess, "run") as command:
+                    with self.assertRaises((RuntimeError, FileExistsError)):
+                        self.journey["FiniteRuntime"](home, data, "127.0.0.1:1", {}, 2 if fault == "budget" else 4,
+                                                      platform="linux")
+                command.assert_not_called()
+                if fault == "directory":
+                    self.assertEqual((control / "retained").read_text(), "owned earlier evidence")
+                elif fault == "symlink":
+                    self.assertTrue(control.is_symlink())
+                else:
+                    self.assertFalse(control.exists())
+
+    def test_finite_helper_reaps_its_actual_child_on_owner_exit_and_escalates_wait_timeout(self):
+        for wait_timeout in (False, True):
+            with self.subTest(wait_timeout=wait_timeout), tempfile.TemporaryDirectory() as temp:
+                owner, _ = self.finite_owner(Path(temp))
+                runtime = owner.data / "bin/elastos"
+                identity = {"pid": 900, "uid": 1001, "start_ticks": 71, "executable": "/fixture/python",
+                            "device": 1, "inode": 2}
+                runtime_identity = self.process_rows(owner)[100]
+                environment = {"HOME": str(owner.home)}
+                self.journey["private_json"](owner.control / "launch.json", {
+                    "owner": identity, "runtime": str(runtime), "runtime_sha256": self.journey["digest"](runtime),
+                    "environment": environment, "address": "127.0.0.1:1", "log": str(owner.home / "private.log")})
+                child = mock.Mock(pid=100)
+                child.poll.return_value = None
+                child.wait.side_effect = [subprocess.TimeoutExpired("fixture Runtime", 15), 0] if wait_timeout else [0]
+                with mock.patch.dict(self.globals, {
+                        "linux_process_identity": mock.Mock(side_effect=[identity, identity, runtime_identity]),
+                        "pidfd_exited": mock.Mock(side_effect=[False, True])}), \
+                        mock.patch.object(os, "pidfd_open", return_value=77, create=True) as opened, \
+                        mock.patch.object(os, "close") as closed, mock.patch.object(signal, "signal"), \
+                        mock.patch.object(subprocess, "Popen", return_value=child) as launch:
+                    self.journey["runtime_unit_helper"](owner.control)
+                opened.assert_called_once_with(900, 0)
+                closed.assert_called_once_with(77)
+                self.assertEqual(launch.call_args.args[0], [str(runtime), "gateway", "--addr", "127.0.0.1:1"])
+                self.assertEqual(launch.call_args.kwargs["env"], environment)
+                self.assertTrue(launch.call_args.kwargs["start_new_session"])
+                child.terminate.assert_called_once()
+                self.assertEqual(child.kill.call_count, int(wait_timeout))
+                self.assertEqual(child.wait.call_args_list, [mock.call(timeout=15)] + ([mock.call(timeout=5)] if wait_timeout else []))
+                self.assertEqual(self.journey["private_json"](owner.control / "runtime.json"), runtime_identity)
+                self.assertEqual(self.journey["private_json"](owner.control / "runtime-stopped.json"), {"reaped": True})
+
+    def test_finite_engine_crash_uses_only_the_selected_pidfd_and_checks_group_exit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            owner, _ = self.finite_owner(Path(temp))
+            rows = self.process_rows(owner)
+            rows[104] = dict(rows[102], pid=104, start_ticks=804, parent=103, group=103)
+            owner.known = rows
+            owner.fds = {pid: pid + 1000 for pid in rows}
+            owner.observe_once = mock.Mock(return_value=rows)
+            with mock.patch.dict(self.globals, {"pidfd_exited": lambda _: False}), \
+                    mock.patch.object(signal, "pidfd_send_signal", create=True) as kill, \
+                    mock.patch.object(os, "kill") as numeric_kill:
+                owner.action({"id": 1, "action": "engine_running"})
+                owner.action({"id": 2, "action": "crash_engine"})
+                kill.assert_called_once_with(owner.fds[103], signal.SIGKILL)
+                numeric_kill.assert_not_called()
+                # A vanished executable/leader is not proof that its whole group exited.
+                owner.observe_once.return_value = {pid: row for pid, row in rows.items() if pid != 103}
+                with self.assertRaisesRegex(RuntimeError, "group exit is unconfirmed"):
+                    owner.action({"id": 3, "action": "engine_stopped"})
+                self.assertEqual(owner.last_action, 2)
+            with mock.patch.dict(self.globals, {"pidfd_exited": lambda _: True}):
+                owner.action({"id": 3, "action": "engine_stopped"})
+            self.assertEqual([row["action"] for row in owner.actions], ["engine_running", "crash_engine", "engine_stopped"])
+
+    def test_finite_engine_stage_refuses_wrong_binding_interruption_and_deadline(self):
+        with tempfile.TemporaryDirectory() as temp:
+            owner, _ = self.finite_owner(Path(temp))
+            owner.observe_once = mock.Mock(return_value={})
+            owner.engines = mock.Mock(return_value=[])
+            for request in ({"id": 2, "action": "engine_running"}, {"id": True, "action": "engine_running"},
+                            {"id": 1, "action": "foreign"}, {"id": 1, "action": "engine_running", "pid": 123}):
+                with self.subTest(request=request), self.assertRaises(RuntimeError):
+                    owner.action(request)
+            owner.observe_once.assert_not_called()
+            owner.stop.is_set.return_value = True
+            with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                owner.action({"id": 1, "action": "engine_running"})
+            owner.stop.is_set.return_value = False
+            clock = mock.Mock()
+            clock.monotonic.side_effect = [0, 0, 21]
+            with mock.patch.dict(self.globals, {"time": clock}), self.assertRaisesRegex(RuntimeError, "deadline"):
+                owner.action({"id": 1, "action": "engine_running"})
+            self.assertEqual(owner.actions, [])
+            self.assertFalse((owner.control / "response.json").exists())
+
+    def test_finite_start_requires_actual_runtime_and_every_kernel_limit(self):
+        for fault in (None, "launcher_pid", "wrong_parent", "unit_max", "swap", "tasks", "tighter_parent",
+                      "missing_max", "missing_current", "malformed_current"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temp:
+                owner, values = self.finite_owner(Path(temp))
+                rows = self.process_rows(owner)
+                runtime = rows[99] if fault == "launcher_pid" else dict(rows[100])
+                if fault == "wrong_parent":
+                    runtime["parent"] = 900
+                self.journey["private_json"](owner.control / "runtime.json", runtime)
+                owner.observe_once = mock.Mock(return_value=rows)
+                if fault == "unit_max":
+                    values["memory.max"] = "max"
+                if fault == "swap":
+                    values["memory.swap.max"] = "max"
+                if fault == "tasks":
+                    values["pids.max"] = "max"
+
+                def ancestor(path, *_):
+                    if Path(path).name == "memory.max":
+                        if fault == "missing_max":
+                            raise FileNotFoundError(path)
+                        if Path(path).parent == owner.group:
+                            return str(owner.budget)
+                        return str(owner.budget - 1) if fault == "tighter_parent" else "max"
+                    if fault == "missing_current":
+                        raise FileNotFoundError(path)
+                    return "bad" if fault == "malformed_current" else "100"
+
+                with mock.patch.dict(self.globals, {"private_json": lambda _: runtime,
+                                                    "linux_process_identity": lambda pid, **_: runtime,
+                                                    "bounded_text": ancestor}), \
+                        mock.patch.object(os, "getuid", return_value=1001), \
+                        mock.patch.object(os, "open", side_effect=range(700, 707)), \
+                        mock.patch.object(self.globals["threading"], "Thread") as observer:
+                    if fault:
+                        with self.assertRaises((RuntimeError, FileNotFoundError)):
+                            owner.start()
+                        observer.assert_not_called()
+                        owner.observe_once.assert_not_called()
+                    else:
+                        self.assertIs(owner.start(), owner)
+                        self.assertEqual(owner.pid, 100)
+                        owner.observe_once.assert_called_once()
+                        observer.return_value.start.assert_called_once()
+                self.assertEqual(owner.command.call_args.args[0], "systemd-run")
+                self.assertIn("--property=MemoryMax=" + str(owner.budget), owner.command.call_args.args)
+                self.assertIn("--property=MemorySwapMax=0", owner.command.call_args.args)
+
+    def test_finite_cleanup_needs_whole_exit_reap_empty_unit_and_finished_observer(self):
+        for fault in (None, "live_sibling", "populated", "oom", "peak", "unreaped", "observer", "unit_reused", "unit_replaced_late",
+                      "partial_start", "stop_failure", "reap_timeout"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temp:
+                owner, values = self.finite_owner(Path(temp))
+                owner.known = self.process_rows(owner)
+                owner.fds = {pid: pid + 1000 for pid in owner.known}
+                owner.metric_fds = {name: index + 2000 for index, name in enumerate(values)}
+                if fault != "reap_timeout":
+                    self.journey["private_json"](owner.control / "runtime-stopped.json", {"reaped": fault != "unreaped"})
+                if fault == "populated":
+                    values["cgroup.events"] = "populated 1"
+                if fault == "oom":
+                    values["memory.events"] = "oom 0\noom_kill 1"
+                if fault == "peak":
+                    values["memory.peak"] = str(owner.budget + 1)
+                if fault == "observer":
+                    owner.thread = mock.Mock()
+                    owner.thread.is_alive.return_value = True
+                if fault == "unit_reused":
+                    owner.show.return_value["InvocationID"] = "b" * 32
+                if fault == "unit_replaced_late":
+                    owner.show.side_effect = [dict(owner.binding), dict(owner.binding, InvocationID="b" * 32)]
+                if fault == "partial_start":
+                    owner.binding = None
+                    owner.baseline_events = None
+                    owner.metric_fds.pop("memory.max")
+                if fault == "stop_failure":
+                    owner.command.side_effect = subprocess.TimeoutExpired("systemctl", 40)
+                clock = mock.Mock()
+                clock.monotonic.side_effect = [0, 26]
+                patches = {"pidfd_exited": lambda fd: fault != "live_sibling" or fd != owner.fds[103]}
+                if fault in ("reap_timeout", "populated"):
+                    if fault == "populated":
+                        clock.monotonic.side_effect = [0, 100, 200, 300, 400]
+                    patches["time"] = clock
+                descriptors = set(owner.fds.values()) | set(owner.metric_fds.values())
+                with mock.patch.dict(self.globals, patches), mock.patch.object(os, "close") as closed:
+                    receipt = owner.finish()
+                self.assertEqual(receipt["status"], "failed" if fault else "passed")
+                self.assertEqual({call.args[0] for call in closed.call_args_list}, descriptors)
+                if fault in ("unit_reused", "unit_replaced_late"):
+                    owner.command.assert_not_called()
+                elif fault == "populated":
+                    self.assertEqual(owner.command.call_args_list, [
+                        mock.call("systemctl", "kill", "--kill-whom=all", "--signal=" + action, owner.unit)
+                        for action in ("SIGTERM", "SIGKILL")] + [mock.call("systemctl", "stop", owner.unit)])
+                else:
+                    owner.command.assert_called_once_with("systemctl", "stop", owner.unit)
+                if fault is None:
+                    self.assertTrue(receipt["whole_process_exit"])
+                    self.assertTrue(receipt["runtime_reaped"])
+                    self.assertNotEqual(receipt["actual_runtime_pid"], receipt["helper_main_pid"])
+
+    def finite_receipt(self, gib):
+        flags = ("memory_refusal", "finite_home_recovery") if gib == 1 else (
+            "model_busy", "model_stop", "model_stop_recovery", "model_idle_release", "model_idle_recovery",
+            "model_engine_crash", "model_crash_recovery", "finite_home_recovery")
+        actions = [] if gib == 1 else ["engine_running", "engine_stopped", "engine_running", "idle_stopped",
+                                      "engine_running", "engine_running", "crash_engine", "engine_stopped", "engine_running"]
+        processes = [{"pid": pid, "uid": os.getuid(), "start_ticks": pid + 700, "exe_sha256": "e" * 64, "role": role}
+                     for pid, role in ((99, "helper"), (100, "runtime"), (101, "model_provider"))]
+        if gib == 4:
+            processes += [{"pid": pid, "uid": os.getuid(), "start_ticks": pid + 700,
+                           "exe_sha256": ("e" if role == "guard" else "f") * 64, "role": role}
+                          for pid, role in ((102, "guard"), (103, "llama_server"))]
+        return {"installed_runtime_sha256": "e" * 64, "installed_model_provider_sha256": "e" * 64,
+                "installed_engine": {"executable_sha256": "f" * 64}, "results": {name: "passed" for name in flags},
+                "finite_memory": {"status": "passed", "limit_bytes": gib * 1024 ** 3, "swap_limit_bytes": 0,
+                                  "tasks_limit": 512, "memory_peak_bytes": 512 * 1024 ** 2,
+                                  "memory_events_before": {"oom": 0, "oom_kill": 0},
+                                  "memory_events_after": {"oom": 0, "oom_kill": 0},
+                                  "cgroup_empty": True, "whole_process_exit": True, "runtime_reaped": True,
+                                  "observer_complete": True, "outside_runtime_unit": True, "browser_closed": True,
+                                  "control_group": "/system.slice/elastos-ci-model-fixture.service",
+                                  "native_membership_verified": True,
+                                  "actual_runtime_pid": 100, "helper_main_pid": 99, "processes": processes,
+                                  "actions": [{"action": action, "elapsed_seconds": 60 if action == "idle_stopped" else 1,
+                                               "engine_pid": 103, "engine_start_ticks": 803} for action in actions]}}
+
+    def test_finite_summary_refuses_missing_false_malformed_or_wrong_process_evidence(self):
+        for gib in (1, 4):
+            original = self.finite_receipt(gib)
+            self.assertTrue(self.journey["finite_receipt_valid"](original, gib))
+            for field, value in (("status", "failed"), ("limit_bytes", 0), ("swap_limit_bytes", "max"),
+                                 ("tasks_limit", 0), ("memory_peak_bytes", 0), ("memory_peak_bytes", True),
+                                 ("memory_peak_bytes", "100"), ("actual_runtime_pid", None),
+                                 ("helper_main_pid", 100), ("processes", []),
+                                 ("control_group", None), ("control_group", True),
+                                 ("control_group", "/foreign/elastos-ci-model-fixture.service"),
+                                 ("control_group", "/system.slice/elastos-ci-model-fixture .service"),
+                                 ("control_group", "/system.slice/elastos-ci-model-../fixture.service"),
+                                 ("native_membership_verified", 1), ("native_membership_verified", "true"),
+                                 ("browser_closed", 1), ("browser_closed", "true"),
+                                 *((key, False) for key in ("cgroup_empty", "whole_process_exit", "runtime_reaped",
+                                                           "observer_complete", "outside_runtime_unit", "browser_closed",
+                                                           "native_membership_verified"))):
+                with self.subTest(gib=gib, field=field, value=value):
+                    row = json.loads(json.dumps(original))
+                    row["finite_memory"][field] = value
+                    self.assertFalse(self.journey["finite_receipt_valid"](row, gib))
+            for field in ("control_group", "native_membership_verified", "browser_closed"):
+                with self.subTest(gib=gib, missing=field):
+                    row = json.loads(json.dumps(original))
+                    row["finite_memory"].pop(field)
+                    self.assertFalse(self.journey["finite_receipt_valid"](row, gib))
+            for fault in ("oom", "missing_flag", "wrong_role", "missing_birth", "wrong_runtime_hash", "engine_or_action"):
+                with self.subTest(gib=gib, fault=fault):
+                    row = json.loads(json.dumps(original))
+                    finite = row["finite_memory"]
+                    if fault == "oom":
+                        finite["memory_events_after"]["oom_kill"] = 1
+                    elif fault == "missing_flag":
+                        row["results"].pop("finite_home_recovery")
+                    elif fault == "wrong_role":
+                        finite["processes"][1]["role"] = "helper"
+                    elif fault == "missing_birth":
+                        finite["processes"][1].pop("start_ticks")
+                    elif fault == "wrong_runtime_hash":
+                        finite["processes"][1]["exe_sha256"] = "a" * 64
+                    elif gib == 1:
+                        finite["processes"].append({"pid": 103, "role": "llama_server"})
+                    else:
+                        finite["actions"].pop()
+                    self.assertFalse(self.journey["finite_receipt_valid"](row, gib))
+
+
 class InstalledModelTimingTests(unittest.TestCase):
     def setUp(self):
         self.timing = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-model-timing.py"))
@@ -2470,8 +3049,10 @@ class InstalledModelTimingTests(unittest.TestCase):
                 step, = [step for step in steps(job) if step.startswith(f"name: {name}\n")]
                 if job == "source-home-linux":
                     self.assertEqual(field(step, "CI_CARRIER_GET"), "${{ matrix.os == 'ubuntu-24.04' }}")
+                    self.assertEqual(field(step, "CI_FINITE_MEMORY"), "${{ matrix.os == 'ubuntu-24.04' }}")
                 else:
                     self.assertNotIn("CI_CARRIER_GET", step)
+                    self.assertNotIn("CI_FINITE_MEMORY", step)
         self.assertEqual(re.search(r"(?m)^        os: \[([^\]]+)\]$", JOBS["source-home-linux"])[1], "ubuntu-24.04")
 
     def test_probe_refuses_wrong_alias_malformed_and_oversize_responses(self):

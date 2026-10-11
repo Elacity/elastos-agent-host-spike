@@ -17,6 +17,10 @@ test("public failures accept only owned stages and fixed failure codes", () => {
     { failure_stage: "installed_runtime_reply", failure: "assertion_failed" });
   assert.deepEqual(publicJourneyFailure({ name: "AssertionError", message: "secret" }, "engine_absent_refusal"),
     { failure_stage: "engine_absent_refusal", failure: "assertion_failed" });
+  for (const stage of ["memory_refusal", "finite_resource_lifecycle"]) {
+    assert.deepEqual(publicJourneyFailure({ name: "AssertionError", message: "secret" }, stage, "reply_display"),
+      { failure_stage: stage, failure: "assertion_failed" });
+  }
   assert.deepEqual(publicJourneyFailure({ name: "secret", message: "secret" }, "secret"),
     { failure_stage: "journey", failure: "journey_failed" });
   assert.deepEqual(publicJourneyFailure(null, null), { failure_stage: "journey", failure: "journey_failed" });

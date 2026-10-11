@@ -1,23 +1,221 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { readFileSync, statfsSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, statfsSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { applyRunEventsPage, terminalOutputText } from "../capsules/assistant/browser/model-contract.js";
 import { publicJourneyFailure } from "./ci-installed-home-failure.mjs";
 const require = createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url));
 const { chromium } = require("playwright");
-const [base, evidence, data, mode] = process.argv.slice(2);
-assert(!mode || mode === "--home-only", "supported installed journey mode required");
+const [base, evidence, data, mode, resourceControl] = process.argv.slice(2);
+assert(!mode || ["--home-only", "--memory-refusal", "--resource-lifecycle"].includes(mode), "supported installed journey mode required");
+assert(Boolean(resourceControl) === ["--memory-refusal", "--resource-lifecycle"].includes(mode));
 const fixture = JSON.parse(readFileSync(join(evidence, "package.json")));
 const cid = fixture.cid;
 // A holder Get reads the package over Carrier in 64 KiB bounded reads; a same-Home Get is local.
 const readyMs = fixture.carrier_holder === true ? 15 * 60 * 1000 : 180000;
-let browser, page;
+let browser, browserOpening, browserClosing, page;
+let journeyFailed = false;
+function closeBrowser() {
+  browserClosing ??= (async () => {
+    const owned = browser ?? await browserOpening;
+    await owned?.close();
+    if (resourceControl) writeFileSync(join(resourceControl, "browser-stopped.json"), JSON.stringify({ closed: true }), { flag: "wx", mode: 0o600 });
+  })();
+  return browserClosing;
+}
+if (resourceControl) {
+  for (const [name, code] of [["SIGTERM", 143], ["SIGINT", 130]]) {
+    process.once(name, () => { closeBrowser().then(() => process.exit(code), () => process.exit(1)); });
+  }
+}
 let stage = "journey";
 let subcheck = null;
 const results = {};
 const disk = {};
+let resourceSequence = 0;
+const resourceTurns = [];
+async function resourceAction(action) {
+  const id = ++resourceSequence;
+  const path = join(resourceControl, "request.json");
+  writeFileSync(path + ".next", JSON.stringify({ id, action }), { flag: "wx", mode: 0o600 });
+  renameSync(path + ".next", path);
+  const deadline = Date.now() + (action === "idle_stopped" ? 100000 : 25000);
+  while (Date.now() < deadline) {
+    let response;
+    try { response = JSON.parse(readFileSync(join(resourceControl, "response.json"), "utf8")); }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+    if (response?.id === id) {
+      assert.equal(response.status, "passed", "owned finite-resource stage passes");
+      return response;
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert.fail("owned finite-resource stage deadline");
+}
+async function configureTokens(assistant, tokens) {
+  await assistant.locator('[data-sidebar-nav="configure"]').click();
+  await assistant.locator('[data-configure-section="prompt"]').click();
+  await assistant.locator("[data-agent-max-tokens]").fill(String(tokens));
+  await assistant.locator("[data-page-close]").click();
+}
+async function visibleFailure(assistant, message) {
+  const status = assistant.locator("[data-agent-stream-status]");
+  await status.waitFor({ state: "visible", timeout: 10000 });
+  await assistant.waitForFunction(message =>
+    document.querySelector("[data-agent-stream-status]")?.textContent === message,
+  message, { timeout: 10000 });
+}
+async function selectModel(assistant, offer) {
+  await assistant.locator("#agent-model-picker").waitFor({ state: "visible", timeout: 30000 });
+  await assistant.locator("#agent-model-picker").click();
+  const option = assistant.locator(`#agent-model-menu [role="option"][data-model-cid="${cid}"]`);
+  await option.waitFor({ state: "visible", timeout: 30000 });
+  assert.equal(await option.getAttribute("data-live-offer-id"), offer);
+  await option.click();
+  await assistant.locator("#agent-model-menu").waitFor({ state: "hidden", timeout: 30000 });
+}
+async function startResourceTurn(assistant, offer, prompt, tokens) {
+  const ownerPage = assistant.page();
+  const response = ownerPage.waitForResponse(response => {
+    if (!response.url().endsWith("/api/provider/model/runs_create") || response.request().frame() !== assistant) return false;
+    const body = response.request().postDataJSON();
+    return body?.offer_id === offer && body?.operation === "text.generate";
+  }, { timeout: 30000 });
+  response.catch(() => {});
+  const created = response.then(async accepted => {
+    assert(accepted.ok());
+    const body = accepted.request().postDataJSON();
+    assert.equal(body.input?.max_output_tokens, tokens);
+    assert(/^model-v1:[1-9][0-9]*:[A-Za-z0-9_.:-]{1,128}$/.test(body.request_id));
+    const token = await assistant.evaluate(() => new URLSearchParams(location.hash.slice(1)).get("home_token"));
+    assert(token && accepted.request().headers()["x-elastos-home-token"] === token);
+    const value = await accepted.json();
+    assert.equal(value.status, "ok");
+    assert(value.data?.run_id);
+    return value.data;
+  });
+  created.catch(() => {});
+  let resolve, reject, timer;
+  const terminal = new Promise((yes, no) => { resolve = yes; reject = no; });
+  terminal.catch(() => {});
+  const listener = async response => {
+    try {
+      if (!response.url().endsWith("/api/provider/model/runs_events") || response.request().frame() !== assistant) return;
+      const run = await created;
+      const request = response.request().postDataJSON();
+      if (request?.run_id !== run.run_id) return;
+      assert(response.ok());
+      const body = await response.json();
+      const final = applyRunEventsPage(body.data, request.after_sequence).terminal;
+      if (final) resolve(final);
+    } catch (error) { reject(error); }
+  };
+  // Capture events before Send; a fast terminal page may precede create parsing.
+  ownerPage.on("response", listener);
+  timer = setTimeout(() => reject(new Error("finite model turn deadline")), 150000);
+  const settled = terminal.finally(() => { clearTimeout(timer); ownerPage.off("response", listener); });
+  settled.catch(() => {});
+  created.then(run => { if (run.terminal) resolve(run.terminal); }, reject);
+  try {
+    await assistant.locator("#agent-composer-input").fill(prompt);
+    await assistant.locator('#agent-composer-send[data-mode="send"]').click();
+    const run = await created;
+    return { run, terminal: settled };
+  } catch (error) { reject(error); throw error; }
+}
+async function resourceReply(assistant, offer, label) {
+  await assistant.locator('#agent-composer-send[data-mode="send"]').waitFor({ state: "visible", timeout: 10000 });
+  await configureTokens(assistant, 16);
+  const turn = await startResourceTurn(assistant, offer, "Say hello in one sentence.", 16);
+  const final = await turn.terminal;
+  assert.equal(final.status, "completed");
+  assert(final.outputRetained !== false && terminalOutputText(final.output).trim());
+  await assistant.waitForFunction(() => {
+    const body = [...document.querySelectorAll(".agent-msg-agent .agent-msg-body")].at(-1);
+    return body?.closest(".agent-msg-agent")?.dataset.streamPhase === "presentation_done" && /\S/.test(body?.innerText ?? "");
+  }, null, { timeout: 10000 });
+  resourceTurns.push({ stage: label, run_id: turn.run.run_id, status: final.status });
+  await page.screenshot({ path: join(evidence, `finite-${label}.png`), fullPage: true });
+  return turn;
+}
+async function returnHome() {
+  const shell = page.frameLocator("#active-shell-frame");
+  await shell.locator("#assistant-toggle").click();
+  await shell.locator("#assistant-space").waitFor({ state: "hidden", timeout: 10000 });
+  await shell.locator("#desktop").waitFor({ state: "visible" });
+  assert.equal(await page.getAttribute("body", "data-home-status"), "ready");
+  await page.screenshot({ path: join(evidence, "finite-home-recovery.png"), fullPage: true });
+}
+async function resourceLifecycle(assistant, offer, context) {
+  stage = "finite_resource_lifecycle";
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await assistant.locator("#agent-harness-new-chat").click();
+  await configureTokens(assistant, 1024);
+  const longPrompt = "Write a numbered list from 1 to 1000. Each item must say hello and give one detail. Continue the list without an introduction or conclusion.";
+  const secondPage = await context.newPage();
+  try {
+    // Reopen this normally launched app in a second tab with its existing authority.
+    await secondPage.goto(assistant.url(), { waitUntil: "domcontentloaded" });
+    const second = secondPage.mainFrame();
+    await second.locator("#agent-harness-new-chat").waitFor({ state: "visible" });
+    await second.locator("#agent-harness-new-chat").click();
+    await selectModel(second, offer);
+    await configureTokens(second, 16);
+    const owner = await startResourceTurn(assistant, offer, longPrompt, 1024);
+    assert(!owner.run.terminal && ["prepared", "running"].includes(owner.run.status));
+    await resourceAction("engine_running");
+    const busy = await startResourceTurn(second, offer, "Say hello.", 16);
+    const refused = await busy.terminal;
+    assert.equal(refused.status, "failed");
+    assert.equal(refused.error?.code, "model_busy");
+    await visibleFailure(second, "Model is busy.");
+    await secondPage.screenshot({ path: join(evidence, "finite-model-busy.png"), fullPage: true });
+    resourceTurns.push({ stage: "busy", run_id: busy.run.run_id, status: refused.status, code: refused.error.code });
+    results.model_busy = "passed";
+    const cancelled = page.waitForResponse(response => {
+      if (!response.url().endsWith("/api/provider/model/runs_cancel") || response.request().frame() !== assistant) return false;
+      return response.request().postDataJSON()?.run_id === owner.run.run_id;
+    }, { timeout: 30000 });
+    cancelled.catch(() => {});
+    await assistant.locator('#agent-composer-send[data-mode="stop"]').click();
+    assert((await cancelled).ok());
+    const stopped = await owner.terminal;
+    assert.equal(stopped.status, "cancelled", "Stop confirms the exact live run's settlement");
+    await resourceAction("engine_stopped");
+    resourceTurns.push({ stage: "stop", run_id: owner.run.run_id, status: stopped.status });
+    results.model_stop = "passed";
+  } finally { await secondPage.close(); }
+  await resourceReply(assistant, offer, "stop_recovery");
+  results.model_stop_recovery = "passed";
+  const warm = await resourceAction("engine_running");
+  await resourceAction("idle_stopped");
+  results.model_idle_release = "passed";
+  await resourceReply(assistant, offer, "idle_recovery");
+  const restarted = await resourceAction("engine_running");
+  assert(warm.engine_pid !== restarted.engine_pid || warm.engine_start_ticks !== restarted.engine_start_ticks);
+  results.model_idle_recovery = "passed";
+  await assistant.locator("#agent-harness-new-chat").click();
+  await configureTokens(assistant, 1024);
+  const crashing = await startResourceTurn(assistant, offer, longPrompt, 1024);
+  assert(!crashing.run.terminal);
+  await assistant.waitForFunction(() => /\S/.test([...document.querySelectorAll(".agent-msg-agent .agent-msg-body")].at(-1)?.innerText ?? ""), null, { timeout: 60000 });
+  const doomed = await resourceAction("engine_running");
+  await resourceAction("crash_engine");
+  const failed = await crashing.terminal;
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.error?.message, "model backend transport was interrupted");
+  await visibleFailure(assistant, "Model run failed: model backend transport was interrupted");
+  await resourceAction("engine_stopped");
+  resourceTurns.push({ stage: "engine_crash", run_id: crashing.run.run_id, status: failed.status, code: failed.error?.code });
+  results.model_engine_crash = "passed";
+  await resourceReply(assistant, offer, "crash_recovery");
+  const recovered = await resourceAction("engine_running");
+  assert(doomed.engine_pid !== recovered.engine_pid || doomed.engine_start_ticks !== recovered.engine_start_ticks);
+  results.model_crash_recovery = "passed";
+  await returnHome();
+  results.finite_home_recovery = "passed";
+}
 function observeDisk() {
   const usage = statfsSync(data);
   return { capacity_bytes: usage.blocks * usage.bsize, available_bytes: usage.bavail * usage.bsize };
@@ -50,7 +248,8 @@ async function projection(frame, path) {
   }, path);
 }
 try {
-  browser = await chromium.launch({ headless: true });
+  browserOpening = chromium.launch({ headless: true, handleSIGTERM: !resourceControl, handleSIGINT: !resourceControl });
+  browser = await browserOpening;
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   page = await context.newPage();
   const cdp = await context.newCDPSession(page);
@@ -86,6 +285,10 @@ try {
   assert.equal(initialCatalog.model_catalog_state, "verified");
   const initialModel = initialCatalog.capsules.find(row => row.cid === cid);
   assert.equal(initialModel?.signature_state, "catalog-signature-verified");
+  if (resourceControl) {
+    assert.equal(initialModel?.model_content?.minimum_memory_mb, 512);
+    assert.equal(initialModel?.model_memory_fit, "fits", "signed minimum fits; dynamic run admission remains separate");
+  }
   assert.equal(initialModel?.model_runtime?.dispatch_ready, false, "fresh Home starts before model admission");
   await marketplace.locator(`[data-action="model-detail"][data-app="model:${cid}"]`).click();
   const get = marketplace.locator('[data-model-control="use"]');
@@ -167,6 +370,26 @@ try {
     await assistant.locator('[data-configure-section="prompt"]').click();
     await assistant.locator("[data-agent-max-tokens]").fill("16");
     await assistant.locator("[data-page-close]").click();
+    if (mode === "--memory-refusal") {
+      stage = "memory_refusal";
+      const refused = await startResourceTurn(assistant, offer, "Say hello in one sentence.", 16);
+      const terminal = await refused.terminal;
+      assert.equal(terminal.status, "failed");
+      assert.equal(terminal.error?.code, "model_memory_unavailable");
+      assert.equal(terminal.error?.class, "context_rejected");
+      const message = "Not enough free memory for this model. Close other apps or choose a smaller model.";
+      assert.equal(terminal.error?.message, message);
+      await visibleFailure(assistant, `Model run failed: ${message}`);
+      await page.screenshot({ path: join(evidence, "finite-memory-refusal.png"), fullPage: true });
+      resourceTurns.push({ stage: "memory_refusal", run_id: refused.run.run_id, status: terminal.status, code: terminal.error.code });
+      results.memory_refusal = "passed";
+      await returnHome();
+      results.finite_home_recovery = "passed";
+      writeFileSync(join(evidence, "home-journey.json"), JSON.stringify({
+        results, disk, model_cid: cid, offer_id: offer, max_output_tokens: 16, resource_turns: resourceTurns,
+        journey: "signed Get succeeds; dynamic memory admission refuses Assistant Send; Home stays usable",
+      }, null, 2));
+    } else {
     const createdResponse = page.waitForResponse(response => {
       if (!response.url().endsWith("/api/provider/model/runs_create") || response.request().frame() !== assistant) return false;
       const body = response.request().postDataJSON();
@@ -231,19 +454,36 @@ try {
     assert(bounds && bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= 390 && bounds.y + bounds.height <= 844, "phone viewport displays the local reply");
     assert.equal((await phoneReply.innerText()).trim(), text);
     await page.screenshot({ path: join(evidence, "assistant-reply-phone.png"), fullPage: true });
+    subcheck = null;
+    if (mode === "--resource-lifecycle") await resourceLifecycle(assistant, offer, context);
     writeFileSync(join(evidence, "home-journey.json"), JSON.stringify({
       results, disk, reply_characters: text.length, model_cid: cid, offer_id: offer,
-      max_output_tokens: request.input.max_output_tokens, journey: "Marketplace Get to visible Assistant reply",
+      max_output_tokens: request.input.max_output_tokens, resource_turns: resourceTurns,
+      journey: mode === "--resource-lifecycle" ? "Marketplace Get, reply, Busy, Stop, idle closure and crash recovery" : "Marketplace Get to visible Assistant reply",
     }, null, 2));
+    }
   }
 } catch (error) {
+  journeyFailed = true;
   results[stage] = "failed";
   disk.at_failure = observeDisk();
   const failure = publicJourneyFailure(error, stage, subcheck);
   writeFileSync(join(data, "journey-browser.private.log"), String(error?.stack ?? error), { mode: 0o600 });
-  writeFileSync(join(evidence, "home-journey.json"), JSON.stringify({ results, disk, ...failure }, null, 2));
+  writeFileSync(join(evidence, "home-journey.json"), JSON.stringify({ results, disk, resource_turns: resourceTurns, ...failure }, null, 2));
   await page?.screenshot({ path: join(evidence, "home-failure.png"), fullPage: true }).catch(() => {});
   throw new Error(`Installed Home journey failed: stage=${failure.failure_stage} code=${failure.failure}${failure.failure_check ? ` check=${failure.failure_check}` : ""}`);
 } finally {
-  await browser?.close();
+  try { await closeBrowser(); }
+  catch (error) {
+    try { appendFileSync(join(data, "journey-browser.private.log"), `\nBrowser cleanup failed:\n${String(error?.stack ?? error)}`, { mode: 0o600 }); }
+    catch { /* The fixed public failure still applies if private logging fails. */ }
+    try {
+      const path = join(evidence, "home-journey.json");
+      const receipt = JSON.parse(readFileSync(path, "utf8"));
+      receipt.results.process_cleanup = "failed";
+      if (!journeyFailed) Object.assign(receipt, publicJourneyFailure(error, stage, subcheck));
+      writeFileSync(path, JSON.stringify(receipt, null, 2));
+    } catch { /* A missing receipt cannot satisfy the installed proof. */ }
+    if (!journeyFailed) throw new Error("Installed Home journey failed: stage=journey code=journey_failed");
+  }
 }
