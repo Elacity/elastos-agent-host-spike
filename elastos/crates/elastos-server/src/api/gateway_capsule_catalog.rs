@@ -667,9 +667,9 @@ async fn dispatch_capsule_affordance(
 
 /// Known Runtime refusal facts have bounded prose; provider details stay private.
 fn preparation_invoke_error(error: anyhow::Error) -> (StatusCode, &'static str, String) {
-    if let Some(expired) =
-        error.downcast_ref::<super::capsule_inventory::preparation::PreparationRequestExpired>()
-    {
+    if let Some(expired) = error
+        .downcast_ref::<crate::api::capsule_inventory::preparation::PreparationRequestExpired>(
+    ) {
         return (
             StatusCode::CONFLICT,
             expired.public_class(),
@@ -677,7 +677,7 @@ fn preparation_invoke_error(error: anyhow::Error) -> (StatusCode, &'static str, 
         );
     }
     if let Some(memory) =
-        error.downcast_ref::<super::capsule_inventory::preparation::PreparationMemoryRefusal>()
+        error.downcast_ref::<crate::api::capsule_inventory::preparation::PreparationMemoryRefusal>()
     {
         return (
             StatusCode::CONFLICT,
@@ -686,7 +686,7 @@ fn preparation_invoke_error(error: anyhow::Error) -> (StatusCode, &'static str, 
         );
     }
     if let Some(budget) =
-        error.downcast_ref::<super::capsule_inventory::preparation::PreparationBudgetRefusal>()
+        error.downcast_ref::<crate::api::capsule_inventory::preparation::PreparationBudgetRefusal>()
     {
         return (
             StatusCode::CONFLICT,
@@ -930,8 +930,8 @@ mod tests {
             assert!(!projected.contains("\"available\":") && !projected.contains("\"total\":"));
         }
         for refusal in [
-            super::super::capsule_inventory::preparation::PreparationMemoryRefusal::Insufficient,
-            super::super::capsule_inventory::preparation::PreparationMemoryRefusal::Unavailable,
+            crate::api::capsule_inventory::preparation::PreparationMemoryRefusal::Insufficient,
+            crate::api::capsule_inventory::preparation::PreparationMemoryRefusal::Unavailable,
         ] {
             let (status, code, message) = preparation_invoke_error(
                 anyhow::Error::new(refusal).context("private /secret/provider credential"),
@@ -947,7 +947,7 @@ mod tests {
     fn model_get_expired_request_shows_only_the_fixed_runtime_reason() {
         let (status, code, message) = preparation_invoke_error(
             anyhow::Error::new(
-                super::super::capsule_inventory::preparation::PreparationRequestExpired,
+                crate::api::capsule_inventory::preparation::PreparationRequestExpired,
             )
             .context("private provider /secret credential"),
         );
@@ -980,7 +980,7 @@ mod tests {
 
     #[test]
     fn model_get_budget_refusals_show_only_fixed_runtime_facts() {
-        use super::super::capsule_inventory::preparation::PreparationBudgetRefusal;
+        use crate::api::capsule_inventory::preparation::PreparationBudgetRefusal;
         for budget in [
             PreparationBudgetRefusal::Cache,
             PreparationBudgetRefusal::Memory,
