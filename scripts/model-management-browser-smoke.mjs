@@ -195,7 +195,7 @@ try {
     await frame.getByText("Meets this model’s minimum memory requirement", { exact: true }).waitFor();
     for (const [fit, explanation] of [
       ["insufficient", "This device has less memory than this model requires. Choose a smaller model."],
-      ["unavailable", "This Home could not check the device memory. Refresh models, then try Get again."],
+      ["unavailable", "This Home could not check the device memory. Ask the Home owner to check the memory limits, then try again."],
     ]) {
       modelMemoryFit = fit;
       await frame.getByRole("button", { name: "Refresh models" }).click();
@@ -243,7 +243,7 @@ try {
     await frame.getByText(copy.absent, { exact: true }).waitFor();
     for (const [code, explanation] of [
       ["model_memory_insufficient", "This device has less memory than this model requires. Choose a smaller model."],
-      ["model_memory_observation_unavailable", "This Home could not check the device memory. Refresh models, then try Get again."],
+      ["model_memory_observation_unavailable", "This Home could not check the device memory. Ask the Home owner to check the memory limits, then try again."],
       ["memory_budget_unavailable", "This model exceeds the local model memory budget. Choose a smaller model or increase the budget, then Retry."],
       ["cache_budget_unavailable", "This model does not fit the local cache budget. Remove an unneeded model, choose a smaller model, or increase the budget, then Retry."],
       ["request_expired", "This request is no longer valid. Try again."],
@@ -472,7 +472,7 @@ try {
     assert.equal(await frame.getByRole("button", { name: "Retry", exact: true }).isEnabled(), true);
     await frame.getByRole("button", { name: "Retry", exact: true }).click();
     await frame.getByRole("button", { name: "Cancel preparation" }).waitFor();
-    await frame.getByText("This Home could not check the device memory. Refresh models, then try Get again.", { exact: true }).waitFor();
+    await frame.getByText("This Home could not check the device memory. Ask the Home owner to check the memory limits, then try again.", { exact: true }).waitFor();
     modelMemoryFit = "fits";
     const lostRequests = calls.filter(c => c.method === "content.use").slice(usesBeforeLoss);
     assert.ok(lostRequests.length > 0);

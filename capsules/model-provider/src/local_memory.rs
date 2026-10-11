@@ -304,8 +304,15 @@ pub(crate) fn host_memory() -> Result<HostMemory, LocalLlamaFault> {
             pressure_normal: false,
         });
     }
-    elastos_common::host_memory::observe_host_memory(std::env::consts::OS)
-        .map_err(|_| LocalLlamaFault::Failed)
+    observed_memory(elastos_common::host_memory::observe_host_memory(
+        std::env::consts::OS,
+    ))
+}
+
+fn observed_memory(
+    observation: std::io::Result<HostMemory>,
+) -> Result<HostMemory, LocalLlamaFault> {
+    observation.map_err(|_| LocalLlamaFault::MemoryUnavailable)
 }
 
 /// Ample fixed memory, so test engines never depend on the host's load.
@@ -324,6 +331,33 @@ mod tests {
     use crate::test_support::fake_gguf;
 
     const GIB: u64 = 1024 * MIB;
+
+    #[test]
+    fn unavailable_memory_refuses_before_opening_model_with_typed_cause() {
+        fn unavailable() -> Result<HostMemory, LocalLlamaFault> {
+            observed_memory(Err(std::io::ErrorKind::PermissionDenied.into()))
+        }
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::InvalidData,
+            std::io::ErrorKind::Unsupported,
+        ] {
+            assert_eq!(
+                observed_memory(Err(kind.into())),
+                Err(LocalLlamaFault::MemoryUnavailable)
+            );
+        }
+        assert_eq!(
+            admit(
+                Path::new("memory-refused-unopened-model.gguf"),
+                4096,
+                1,
+                unavailable
+            ),
+            Err(LocalLlamaFault::MemoryUnavailable)
+        );
+    }
 
     #[test]
     fn plan_counts_weights_once_plus_kv_scratch_and_headroom() {

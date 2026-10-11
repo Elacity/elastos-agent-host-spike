@@ -680,6 +680,12 @@ mod tests {
             .is_err()
         );
     }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_macos_memory_observation_is_readable() {
+        let host = observe_host_memory("macos").unwrap();
+        assert!(host.total > 0 && host.available <= host.total);
+    }
     #[test]
     fn signed_minimum_checks_capacity_without_promising_free_memory() {
         let host = HostMemory {

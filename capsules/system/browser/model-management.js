@@ -6,7 +6,7 @@
   const MEMORY_FIT_TEXT = Object.freeze({
     fits: "Meets this model’s minimum memory requirement",
     insufficient: "This device has less memory than this model requires. Choose a smaller model.",
-    unavailable: "This Home could not check the device memory. Refresh models, then try Get again.",
+    unavailable: "This Home could not check the device memory. Ask the Home owner to check the memory limits, then try again.",
   });
   const FAILURE_TEXT = Object.freeze({
     authorization_unavailable: "Preparation stopped. Open Models again to check access.",
