@@ -8,8 +8,30 @@
       const composerForm = document.getElementById("composer-form");
       const composerField = composerForm?.querySelector(".composer-field") || null;
       const messageInput = document.getElementById("message-input");
+      const sendButton = document.getElementById("send-button");
+      const communityStatus = document.getElementById("community-status");
       let homeReadySent = false;
       let lastMenuManifest = "";
+
+      // Runtime supplies the state; this bridge only renders its controls.
+      globalThis.elastosChatRenderCommunity = (state, sharedSelected, baseSendEnabled) => {
+        const labels = {
+          not_joined: "Community not joined",
+          left: "Left Community",
+          joined_unreachable: "Community unreachable",
+          live: "Community live",
+        };
+        if (communityStatus) {
+          communityStatus.dataset.state = state;
+          communityStatus.textContent = labels[state];
+          communityStatus.hidden = state === "live";
+        }
+        if (sharedSelected) {
+          const disabled = !baseSendEnabled || state !== "live";
+          if (messageInput) messageInput.disabled = disabled;
+          if (sendButton) sendButton.disabled = disabled;
+        }
+      };
 
       function canUseAccessSettings() {
         return !!roomAccessToggle && !roomAccessToggle.hidden && !roomAccessToggle.disabled;

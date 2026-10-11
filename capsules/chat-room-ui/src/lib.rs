@@ -65,6 +65,35 @@ enum AccessMode {
     Shell,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum CommunityState {
+    #[default]
+    NotJoined,
+    Left,
+    JoinedUnreachable,
+    Live,
+}
+
+impl CommunityState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotJoined => "not_joined",
+            Self::Left => "left",
+            Self::JoinedUnreachable => "joined_unreachable",
+            Self::Live => "live",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::NotJoined => "Not joined",
+            Self::Left => "Left Community",
+            Self::JoinedUnreachable => "Community unreachable",
+            Self::Live => "Live",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct AppConfig {
     access_mode: AccessMode,
@@ -80,7 +109,7 @@ struct AppState {
     selection_generation: u64,
     room_mode_known: bool,
     collaboration_configured: bool,
-    community_left: bool,
+    community_state: CommunityState,
     session_active: bool,
     close_leave_sent: bool,
     poll_loop_started: bool,
@@ -129,6 +158,15 @@ struct AppState {
     direct_in_flight: BTreeMap<String, String>,
     direct_retry_terminal: BTreeMap<String, String>,
     direct_send_again: BTreeMap<String, PendingDirectSend>,
+}
+
+impl AppState {
+    fn community_send_enabled(&self) -> bool {
+        self.session_active
+            && self.community_state == CommunityState::Live
+            && !self.reconnect_needed
+            && !self.reconnecting
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -425,6 +463,17 @@ struct RoomTransportView {
     status: Option<String>,
     #[serde(default)]
     history: Option<RoomHistoryView>,
+}
+
+impl RoomTransportView {
+    fn community_state(&self) -> CommunityState {
+        match (self.configured, self.community_joined, self.available) {
+            (true, Some(false), _) => CommunityState::Left,
+            (true, Some(true), false) => CommunityState::JoinedUnreachable,
+            (true, Some(true), true) => CommunityState::Live,
+            _ => CommunityState::NotJoined,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -2465,7 +2514,7 @@ impl App {
         if self.is_direct_mode() {
             return self.send_direct_message().await;
         }
-        if !self.state.borrow().session_active || self.state.borrow().community_left {
+        if !self.state.borrow().community_send_enabled() {
             return Ok(());
         }
         let body = self.message_input.value().trim().to_string();
@@ -2834,7 +2883,7 @@ impl App {
         body: &str,
         guard: &SelectionGuard,
     ) -> Result<bool, String> {
-        if !self.state.borrow().session_active {
+        if !self.state.borrow().community_send_enabled() {
             return Ok(false);
         }
         let payload = SendMessageInput { request_id, body };
@@ -3339,7 +3388,7 @@ impl App {
             .borrow()
             .as_ref()
             .is_some_and(|current| current.id == request.id)
-            && self.state.borrow().session_active
+            && self.state.borrow().community_send_enabled()
             && self.selection_guard_is_current(&request.selection)
     }
 
@@ -3534,7 +3583,6 @@ impl App {
         let projection = render_projection(&state, self.is_shell_mode());
         let session_active = projection.session_active;
         let direct_mode = projection.direct_mode;
-        set_hidden(&self.community_status, !projection.community_unreachable)?;
         let direct_send_enabled = direct_mode
             && state
                 .direct
@@ -3550,7 +3598,8 @@ impl App {
             state.room_mode_known,
             state.collaboration_configured,
             self.is_shell_mode(),
-            session_active && !state.community_left,
+            session_active,
+            state.community_state,
             state.show_access_controls,
             !state.pending_requests.is_empty(),
         );
@@ -3663,15 +3712,16 @@ impl App {
             &state.direct,
             state.history.as_ref(),
             state.community_unread,
+            (state.room_mode_known || session_active).then_some(state.community_state),
         )?;
         set_hidden(&self.presence_card, direct_mode)?;
         set_hidden(
             &self.participant_toggle,
-            direct_mode || !session_active || state.community_left,
+            direct_mode || !session_active || state.community_state == CommunityState::Left,
         )?;
         set_hidden(
             &self.participant_close,
-            direct_mode || !session_active || state.community_left,
+            direct_mode || !session_active || state.community_state == CommunityState::Left,
         )?;
         set_hidden(
             &self.room_access_toggle,
@@ -3748,6 +3798,23 @@ impl App {
                 !controls.enable_text_send
             });
         }
+        if state.room_mode_known || session_active {
+            let window =
+                web_sys::window().ok_or_else(|| JsValue::from_str("Chat window is unavailable"))?;
+            let render_community = Reflect::get(
+                window.as_ref(),
+                &JsValue::from_str("elastosChatRenderCommunity"),
+            )?
+            .dyn_into::<Function>()?;
+            render_community.call3(
+                &JsValue::UNDEFINED,
+                &JsValue::from_str(state.community_state.as_str()),
+                &JsValue::from_bool(!direct_mode),
+                &JsValue::from_bool(state.community_send_enabled()),
+            )?;
+        } else {
+            set_hidden(&self.community_status, true)?;
+        }
 
         if direct_mode {
             self.participant_list.set_inner_html("");
@@ -3784,6 +3851,7 @@ impl App {
         direct: &DirectUiState,
         history: Option<&RoomHistoryView>,
         community_unread: bool,
+        community_state: Option<CommunityState>,
     ) -> Result<(), JsValue> {
         self.conversation_selector.set_inner_html("");
         let shared = self.document.create_element("button")?;
@@ -3808,7 +3876,7 @@ impl App {
             &shared,
             "#",
             "Community",
-            "Shared room",
+            community_state.map_or("Opening Community", CommunityState::label),
         )?;
         if community_unread {
             shared.set_class_name(if direct.selected_conversation_id.is_none() {
@@ -3865,7 +3933,11 @@ impl App {
             .as_deref()
             .and_then(|id| selected_conversation(&direct.conversations, id));
         let (avatar, title, detail) = selected.map_or(
-            ("#".to_string(), "Community".to_string(), "Shared room"),
+            (
+                "#".to_string(),
+                "Community".to_string(),
+                community_state.map_or("Opening Community", CommunityState::label),
+            ),
             |conversation| {
                 (
                     conversation_initial(&conversation.display_name),
@@ -4874,9 +4946,9 @@ fn apply_active_poll_state(
     let previous_status_detail = state.status_detail.clone();
     let previous_history = state.history.clone();
     let previous_collaboration_configured = state.collaboration_configured;
-    let previous_community_left = state.community_left;
+    let previous_community_state = state.community_state;
     state.collaboration_configured = poll.transport.configured;
-    state.community_left = poll.transport.community_joined == Some(false);
+    state.community_state = poll.transport.community_state();
     if !was_session_active
         && (state.reconnect_needed
             || state.error_text.as_deref() == Some(SHELL_SESSION_LOST_DETAIL))
@@ -4887,20 +4959,13 @@ fn apply_active_poll_state(
     state.session_active = true;
     state.close_leave_sent = false;
     state.display_name = poll.display_name.clone();
-    state.status_badge = if state.community_left {
-        "Left Community"
-    } else if poll.transport.configured && !poll.transport.available {
-        "Community unreachable"
-    } else {
-        "Live"
-    }
-    .to_string();
+    state.status_badge = state.community_state.label().to_string();
     state.status_detail = transport_summary;
     state.history = poll.transport.history;
     state.latest_seq = state.latest_seq.max(poll.latest_seq);
     state.objects.extend(poll.objects);
     state.participants = poll.participants;
-    if state.community_left {
+    if state.community_state == CommunityState::Left {
         state.show_participants = false;
         state.participants.clear();
     }
@@ -4919,7 +4984,7 @@ fn apply_active_poll_state(
     }
 
     let changed = previous_collaboration_configured != state.collaboration_configured
-        || previous_community_left != state.community_left
+        || previous_community_state != state.community_state
         || was_session_active != state.session_active
         || previous_display_name != state.display_name
         || previous_latest_seq != state.latest_seq
@@ -4978,7 +5043,6 @@ fn apply_direct_refresh_if_current(
 struct RenderProjection {
     session_active: bool,
     direct_mode: bool,
-    community_unreachable: bool,
     participant_count: String,
 }
 
@@ -4988,10 +5052,6 @@ fn render_projection(state: &AppState, shell_mode: bool) -> RenderProjection {
     RenderProjection {
         session_active: state.session_active,
         direct_mode,
-        community_unreachable: state.session_active
-            && state.collaboration_configured
-            && !state.community_left
-            && state.status_badge == "Community unreachable",
         participant_count: if loading_room {
             "Opening conversation".to_string()
         } else {
@@ -5007,7 +5067,7 @@ fn apply_summary_state(
 ) -> bool {
     let previous_room_mode_known = state.room_mode_known;
     let previous_collaboration_configured = state.collaboration_configured;
-    let previous_community_left = state.community_left;
+    let previous_community_state = state.community_state;
     let previous_browser_access_allowed = state.browser_access_allowed;
     let previous_browser_access_block_reason = state.browser_access_block_reason.clone();
     let previous_pending_requests = state.pending_requests.clone();
@@ -5017,7 +5077,7 @@ fn apply_summary_state(
     let previous_status_detail = state.status_detail.clone();
     state.room_mode_known = true;
     state.collaboration_configured = summary.transport.configured;
-    state.community_left = summary.transport.community_joined == Some(false);
+    state.community_state = summary.transport.community_state();
     if state.collaboration_configured {
         state.browser_access_allowed = summary.browser_access_allowed;
         state.browser_access_block_reason = summary.browser_access_block_reason.clone();
@@ -5033,7 +5093,10 @@ fn apply_summary_state(
         state.active_sessions = summary.active_sessions.clone();
         state.room_control = summary.room_control.clone();
     }
-    if !state.session_active && state.request_id.is_none() {
+    if state.session_active {
+        state.status_badge = state.community_state.label().to_string();
+        state.status_detail = live_status_detail(&summary.transport);
+    } else if state.request_id.is_none() {
         if access_mode == AccessMode::Shell {
             if state.collaboration_configured
                 || summary.local_runtime_role.is_some()
@@ -5066,7 +5129,7 @@ fn apply_summary_state(
     }
     previous_room_mode_known != state.room_mode_known
         || previous_collaboration_configured != state.collaboration_configured
-        || previous_community_left != state.community_left
+        || previous_community_state != state.community_state
         || previous_browser_access_allowed != state.browser_access_allowed
         || previous_browser_access_block_reason != state.browser_access_block_reason
         || previous_pending_requests != state.pending_requests
@@ -5101,7 +5164,7 @@ fn load_state(session_storage: Option<&Storage>, config: &AppConfig) -> AppState
         selection_generation: 0,
         room_mode_known: false,
         collaboration_configured: false,
-        community_left: false,
+        community_state: CommunityState::NotJoined,
         session_active: false,
         close_leave_sent: false,
         poll_loop_started: false,
@@ -5218,9 +5281,9 @@ mod tests {
         participant_shown_name, pending_chat_request_id, render_projection,
         resolve_conversation_choice, room_send_error_text, selection_guard_matches,
         settle_sent_draft, shell_summary_allows_session, switch_composer_draft, AccessMode,
-        AppConfig, AppState, AttachmentView, ConversationObjectKind, ConversationObjectView,
-        ParticipantView, PendingChatSend, RenderProjection, RoomPollView, RoomTransportView,
-        ShellSessionBootstrapFailure, ShellSessionStartOutput, SummaryView,
+        AppConfig, AppState, AttachmentView, CommunityState, ConversationObjectKind,
+        ConversationObjectView, ParticipantView, PendingChatSend, RenderProjection, RoomPollView,
+        RoomTransportView, ShellSessionBootstrapFailure, ShellSessionStartOutput, SummaryView,
     };
 
     fn two_direct_conversations() -> AppState {
@@ -5433,6 +5496,7 @@ mod tests {
             let mut poll = shared_poll(0);
             poll.transport.configured = true;
             poll.transport.available = true;
+            poll.transport.community_joined = Some(true);
             poll.transport.history = Some(super::RoomHistoryView {
                 status: status.into(),
                 detail: format!("History {status}."),
@@ -5446,9 +5510,22 @@ mod tests {
     }
 
     #[test]
-    fn community_unreachable_keeps_session_drafts_and_direct_selection() {
+    fn community_states_keep_session_history_drafts_and_direct_selection() {
         let mut state = two_direct_conversations();
         state.session_active = true;
+        state.objects.push(ConversationObjectView {
+            seq: 1,
+            created_at: 100,
+            sender: "Peer".into(),
+            sender_ref: None,
+            sender_profile_verified: Some(true),
+            from_current_session: false,
+            kind: ConversationObjectKind::Text,
+            body: Some("A retained Community message".into()),
+            emoji: None,
+            link: None,
+            attachment: None,
+        });
         state.drafts.insert(None, ("saved Shared draft".into(), 1));
         state.direct.selected_conversation_id = Some("direct:sha256:a".into());
         state.direct.pending_send = Some(PendingDirectSend {
@@ -5458,36 +5535,36 @@ mod tests {
         });
         let direct = state.direct.clone();
         let drafts = state.drafts.clone();
-        for (configured, available, joined, badge) in [
-            (true, false, Some(true), "Community unreachable"),
-            (true, true, Some(true), "Live"),
-            (true, true, Some(false), "Left Community"),
-            (false, false, None, "Live"),
+        let objects = state.objects.clone();
+        for (configured, available, joined, expected) in [
+            (true, false, Some(true), CommunityState::JoinedUnreachable),
+            (true, true, Some(true), CommunityState::Live),
+            (true, true, Some(false), CommunityState::Left),
+            (false, false, None, CommunityState::NotJoined),
+            (true, true, None, CommunityState::NotJoined),
         ] {
             let mut poll = shared_poll(0);
             poll.transport.configured = configured;
             poll.transport.available = available;
             poll.transport.community_joined = joined;
             apply_active_poll_state(&mut state, poll);
-            assert_eq!(state.status_badge, badge);
+            assert_eq!(state.community_state, expected);
+            assert_eq!(state.status_badge, expected.label());
+            assert_eq!(
+                state.community_send_enabled(),
+                expected == CommunityState::Live
+            );
             assert!(state.session_active);
             assert!(!state.reconnect_needed);
             assert_eq!(state.direct, direct);
             assert_eq!(state.drafts, drafts);
+            assert_eq!(state.objects, objects);
             for shell_mode in [false, true] {
                 let projection = render_projection(&state, shell_mode);
-                assert_eq!(
-                    projection.community_unreachable,
-                    badge == "Community unreachable"
-                );
                 assert!(projection.direct_mode);
                 let mut shared = state.clone();
                 shared.direct.selected_conversation_id = None;
                 let projection = render_projection(&shared, shell_mode);
-                assert_eq!(
-                    projection.community_unreachable,
-                    badge == "Community unreachable"
-                );
                 assert!(!projection.direct_mode);
             }
         }
@@ -5500,9 +5577,10 @@ mod tests {
         state.session_active = true;
         state.show_participants = true;
         let mut left = shared_poll(0);
+        left.transport.configured = true;
         left.transport.community_joined = Some(false);
         assert!(apply_active_poll_state(&mut state, left).1);
-        assert!(state.community_left);
+        assert_eq!(state.community_state, CommunityState::Left);
         assert!(!state.show_participants);
         assert_eq!(
             state.drafts.get(&None).map(|(text, _)| text.as_str()),
@@ -5513,7 +5591,8 @@ mod tests {
                 true,
                 true,
                 true,
-                state.session_active && !state.community_left,
+                state.session_active,
+                state.community_state,
                 false,
                 false
             )
@@ -5528,15 +5607,18 @@ mod tests {
             Some(selected.as_str())
         );
         let mut joined = shared_poll(0);
+        joined.transport.configured = true;
+        joined.transport.available = true;
         joined.transport.community_joined = Some(true);
         assert!(apply_active_poll_state(&mut state, joined).1);
-        assert!(!state.community_left);
+        assert_eq!(state.community_state, CommunityState::Live);
         assert!(
             chat_control_policy(
                 true,
                 true,
                 true,
-                state.session_active && !state.community_left,
+                state.session_active,
+                state.community_state,
                 false,
                 false
             )
@@ -5983,7 +6065,7 @@ mod tests {
         assert!(shell_summary_allows_session(&summary));
         assert!(!summary.browser_access_allowed);
 
-        let policy = chat_control_policy(true, true, true, true, true, true);
+        let policy = chat_control_policy(true, true, true, true, CommunityState::Live, true, true);
         assert!(policy.enable_text_send);
         assert!(!policy.show_attach);
         assert!(!policy.enable_attach);
@@ -5992,7 +6074,8 @@ mod tests {
         assert!(!policy.show_room_access);
         assert!(!policy.enable_gateway_controls);
 
-        let public_policy = chat_control_policy(true, true, false, false, true, true);
+        let public_policy =
+            chat_control_policy(true, true, false, false, CommunityState::Live, true, true);
         assert!(!public_policy.enable_text_send);
         assert!(!public_policy.show_browser_requests);
     }
@@ -6171,16 +6254,33 @@ mod tests {
                 .allow_members_to_host_guests
         );
 
-        let shell_isolated = chat_control_policy(true, false, true, true, true, true);
-        assert!(shell_isolated.enable_text_send);
+        let shell_isolated = chat_control_policy(
+            true,
+            false,
+            true,
+            true,
+            CommunityState::NotJoined,
+            true,
+            true,
+        );
+        assert!(!shell_isolated.enable_text_send);
         assert!(shell_isolated.show_attach);
-        assert!(shell_isolated.enable_attach);
+        assert!(!shell_isolated.enable_attach);
         assert!(!shell_isolated.show_browser_requests);
         assert!(!shell_isolated.show_room_access_toggle);
         assert!(!shell_isolated.show_room_access);
         assert!(!shell_isolated.enable_gateway_controls);
 
-        let gateway_isolated = chat_control_policy(true, false, false, true, true, true);
+        let gateway_isolated = chat_control_policy(
+            true,
+            false,
+            false,
+            true,
+            CommunityState::NotJoined,
+            true,
+            true,
+        );
+        assert!(!gateway_isolated.enable_text_send);
         assert!(gateway_isolated.show_browser_requests);
         assert!(gateway_isolated.show_room_access_toggle);
         assert!(gateway_isolated.show_room_access);
@@ -6189,7 +6289,15 @@ mod tests {
 
     #[test]
     fn chat_controls_require_an_explicitly_known_room_mode() {
-        let unknown = chat_control_policy(false, false, true, false, true, true);
+        let unknown = chat_control_policy(
+            false,
+            false,
+            true,
+            false,
+            CommunityState::NotJoined,
+            true,
+            true,
+        );
         assert!(!unknown.show_attach);
         assert!(!unknown.enable_attach);
         assert!(!unknown.show_browser_requests);
@@ -6309,7 +6417,6 @@ mod tests {
             RenderProjection {
                 session_active: true,
                 direct_mode: false,
-                community_unreachable: false,
                 participant_count: super::format_participant_count(1),
             }
         );
@@ -6353,7 +6460,6 @@ mod tests {
             RenderProjection {
                 session_active: false,
                 direct_mode: false,
-                community_unreachable: false,
                 participant_count: "Opening conversation".to_string(),
             }
         );
@@ -6660,14 +6766,18 @@ fn chat_control_policy(
     configured: bool,
     shell_mode: bool,
     session_active: bool,
+    community_state: CommunityState,
     show_access_controls: bool,
     has_pending_requests: bool,
 ) -> ChatControlPolicy {
     let gateway_surface = room_mode_known && !shell_mode && !configured;
     ChatControlPolicy {
-        enable_text_send: session_active,
+        enable_text_send: session_active && community_state == CommunityState::Live,
         show_attach: room_mode_known && !configured,
-        enable_attach: room_mode_known && !configured && session_active,
+        enable_attach: room_mode_known
+            && !configured
+            && session_active
+            && community_state == CommunityState::Live,
         show_browser_requests: gateway_surface && has_pending_requests,
         show_room_access_toggle: gateway_surface && session_active,
         show_room_access: gateway_surface && session_active && show_access_controls,

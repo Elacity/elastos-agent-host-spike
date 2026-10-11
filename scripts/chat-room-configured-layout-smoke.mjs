@@ -57,6 +57,7 @@ function configuredPoll() {
     transport: {
       configured: true,
       available: true,
+      community_joined: true,
       connected_peer_count: 0,
       topic: "test-network/test-conversation",
       status: "Collaboration is configured; remote peer presence is not observed here.",
@@ -314,6 +315,7 @@ function startServer(scenario) {
           transport: {
             configured: true,
             available: true,
+            community_joined: true,
             connected_peer_count: 0,
             topic: "test-network/test-conversation",
             status: "Collaboration is configured; remote peer presence is not observed here.",
@@ -1093,7 +1095,7 @@ async function runScenario(scenario) {
         switched.chatMode === "shared"
           && switched.selected === "shared"
           && switched.conversationTitle === "Community"
-          && switched.conversationDetail === "Shared room"
+          && switched.conversationDetail === "Live"
           && switched.errorText === ""
           && switched.attachHidden,
         "direct-to-shared switch did not leave configured Chat in shared mode",
@@ -1229,7 +1231,7 @@ async function runScenario(scenario) {
           state.choices.length === 1
             && state.choices[0]?.id === "shared"
             && state.choices[0]?.name === "Community"
-            && state.choices[0]?.detail === "Shared room"
+            && state.choices[0]?.detail === "Live"
             && state.choices[0]?.active,
           "single-conversation Chat projected an unexpected conversation set",
           state,
@@ -1244,7 +1246,7 @@ async function runScenario(scenario) {
           state.choices.length === 2
             && state.choices[0]?.id === "shared"
             && state.choices[0]?.name === "Community"
-            && state.choices[0]?.detail === "Shared room"
+            && state.choices[0]?.detail === "Live"
             && state.choices[0]?.active
             && state.choices[1]?.id === "direct:sha256:fixture-conversation"
             && state.choices[1]?.name === "Fixture Friend"
@@ -1259,7 +1261,7 @@ async function runScenario(scenario) {
         );
       }
       assert(
-        state.conversationTitle === "Community" && state.conversationDetail === "Shared room",
+        state.conversationTitle === "Community" && state.conversationDetail === "Live",
         "active conversation header does not match the selected conversation",
         state,
       );
