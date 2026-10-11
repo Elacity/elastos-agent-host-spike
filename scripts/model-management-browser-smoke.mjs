@@ -45,7 +45,7 @@ function runtime() {
     offer_id: malformedRuntime ? "wrong" : phase === "admitted" && !dispatchPending ? `model:${"b".repeat(64)}` : null, preparation: preparation() };
 }
 function catalog() {
-  return { schema: "elastos.capsules.catalog/v1", model_catalog_state: trust, capsules: [
+  return { schema: "elastos.capsules.catalog/v1", policy: { protected_content: true }, model_catalog_state: trust, capsules: [
     { name: "people", title: "People", role: "app", installed: true, launchable: true, interfaces: [], dependencies: [] },
     { name: "fixture-model", title: "Fixture model", role: "content", source: "signed-model-catalog",
       installed: false, launchable: false, cid: selectedCid, publisher_did: "did:key:zFixturePublisher", content_size_bytes: 1024,
