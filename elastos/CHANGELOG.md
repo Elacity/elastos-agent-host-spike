@@ -23,9 +23,14 @@ Test-channel release. Signed releases show these notes in System before you upda
   sign-in screen, run the command it shows on the computer that runs Home
   (`elastos identity arm-owner-recovery --origin … --rp-id …` with that page's
   address filled in), then enter the code the command prints.
+- Browser installs and runs on Apple Silicon Macs and on Linux ARM64 computers
+  such as a Jetson. On Linux it needs a one-time host setup, which the
+  installer offers.
 
 ### Changed
 
+- Browser is hidden on computers without a local Engine (anything other than
+  an Apple Silicon Mac or a Linux ARM64 computer such as a Jetson) for now.
 - On Linux, Browser asks you once to run its one-time host setup again after
   this update. Run the command it shows; Browser then works as before.
 - Setup installs one Home; it no longer prints options for other setups.
@@ -40,6 +45,9 @@ Test-channel release. Signed releases show these notes in System before you upda
 
 ### Fixed
 
+- On Linux, Carrier sends one UDP datagram at a time. Some Wi-Fi drivers, such
+  as the Jetson's, dropped batched datagrams, which stalled connections, Chat
+  and downloads.
 - The terminal Home no longer quits with "403 Forbidden" after the first
   action; you can run actions one after another.
 - In the terminal Inbox, direct messages and service requests say "Open Inbox
