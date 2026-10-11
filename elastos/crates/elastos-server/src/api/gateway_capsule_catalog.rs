@@ -927,7 +927,11 @@ mod tests {
             assert_eq!(catalog.capsules.len(), 1);
             assert_eq!(catalog.capsules[0].model_memory_fit, Some(expected));
             assert_eq!(catalog.capsules[0].state, "unprepared");
-            let projected = serde_json::to_string(&catalog).unwrap();
+            let mut public = serde_json::to_value(&catalog).unwrap();
+            assert_eq!(public["counts"]["total"], catalog.capsules.len());
+            // Capsule count is public; raw device memory remains private.
+            public["counts"].as_object_mut().unwrap().remove("total");
+            let projected = serde_json::to_string(&public).unwrap();
             assert!(!projected.contains(&root.path().display().to_string()));
             assert!(!projected.contains("\"available\":") && !projected.contains("\"total\":"));
         }
