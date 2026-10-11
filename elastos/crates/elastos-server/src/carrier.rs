@@ -1479,7 +1479,7 @@ fn short_lived_endpoint_builder(
         network != CarrierNodeNetwork::Isolated || approved_relay.is_none(),
         "ELASTOS_RELAY_URL cannot be set with ELASTOS_CARRIER_NETWORK=direct"
     );
-    Ok(match network {
+    let builder = match network {
         CarrierNodeNetwork::Isolated => apply_isolated_endpoint_policy(
             Endpoint::builder(iroh::endpoint::presets::Minimal).secret_key(secret_key),
         ),
@@ -1487,7 +1487,17 @@ fn short_lived_endpoint_builder(
             Endpoint::builder(iroh::endpoint::presets::N0).secret_key(secret_key),
             approved_relay,
         ),
-    })
+    };
+    // Some Linux network drivers reject batched UDP sends (segmentation offload)
+    // with EIO, and the UDP layer reports success, so whole QUIC batches vanish
+    // (seen on the Jetson's Wi-Fi). Send one datagram per call on Linux.
+    #[cfg(target_os = "linux")]
+    let builder = builder.transport_config(
+        iroh::endpoint::QuicTransportConfig::builder()
+            .enable_segmentation_offload(false)
+            .build(),
+    );
+    Ok(builder)
 }
 
 async fn bind_carrier_endpoint(
