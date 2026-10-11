@@ -167,7 +167,14 @@ pub(in crate::api::gateway) fn capsule_catalog_summary_for(
 pub(in crate::api::gateway) fn capsule_interface_registry_summary(
     data_dir: &std::path::Path,
 ) -> CapsuleInterfaceRegistryResponse {
-    let catalog = capsule_catalog_summary(data_dir);
+    capsule_interface_registry_summary_for(data_dir, &crate::setup::detect_platform())
+}
+
+pub(in crate::api::gateway) fn capsule_interface_registry_summary_for(
+    data_dir: &std::path::Path,
+    platform: &str,
+) -> CapsuleInterfaceRegistryResponse {
+    let catalog = capsule_catalog_summary_for(data_dir, platform);
     let mut interfaces = Vec::new();
     for capsule in catalog.capsules {
         for interface in capsule.interfaces {

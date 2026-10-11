@@ -1512,7 +1512,8 @@ mod tests {
             }
         }
 
-        let registry = capsule_interface_registry_summary(data_dir.path());
+        let registry =
+            read_model::capsule_interface_registry_summary_for(data_dir.path(), "darwin-arm64");
         assert_eq!(
             registry.schema,
             read_model::CAPSULE_INTERFACE_REGISTRY_SCHEMA
