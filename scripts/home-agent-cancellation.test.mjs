@@ -70,6 +70,60 @@ test("content intent survives missing catalog and overlapping refresh; hosted re
   live.selectLiveOffer("");
 });
 
+test("restored CID uses its current engine offer and preserves historical runs, inactive chats and drafts", async t => {
+  t.after(() => { workspace.bindAgentWorkspaceStore(null); live.selectLiveOffer(""); });
+  const cid = `bafybei${"a".repeat(52)}`;
+  const originalId = "original-local-engine", currentId = "current-local-engine";
+  const draft = { text: "Keep my unsent text", parts: [{ type: "text", text: "Keep my attachment" }] };
+  const retainedTurn = { turnId: "old-turn", providerRunId: "original-run", state: "settlement_unknown",
+    contextManifest: { offerId: originalId, selectedModelCid: cid } };
+  const records = [{ id: "active", mode: "chat", messages: [{ role: "assistant", content: "Original reply" }],
+    composerDraft: structuredClone(draft), modelSelection: { liveOfferId: originalId, selectedModelCid: cid },
+    lastTurn: structuredClone(retainedTurn) },
+    { id: "inactive", mode: "chat", messages: [{ role: "user", content: "Another saved chat" }],
+      composerDraft: { text: "Other draft", parts: [] },
+      modelSelection: { liveOfferId: originalId, selectedModelCid: cid }, lastTurn: structuredClone(retainedTurn) }];
+  const inactive = structuredClone(records[1]);
+  let currentDraft = structuredClone(draft);
+  workspace.bindAgentWorkspaceStore({ getSessions: () => records, setSessions() {}, getActiveSessionId: () => "active",
+    getReasoningVisible: () => false, setReasoningVisible() {}, setActiveSessionId() {},
+    getSessionMode: () => "chat", setSessionMode() {}, getComposerDraft: () => currentDraft,
+    applyComposerDraft: value => { currentDraft = value; }, getWorkspaceHydrated: () => true, setWorkspaceHydrated() {} });
+  const calls = [];
+  let currentCid = cid;
+  globalThis.fetch = async url => {
+    const path = new URL(url).pathname; calls.push(path);
+    return { ok: true, json: async () => path === "/api/capsules/catalog"
+      ? { schema: "elastos.capsules.catalog/v1", model_catalog_state: "verified", capsules: [{
+        source: "signed-model-catalog", role: "content", installed: false, launchable: false, cid: currentCid,
+        title: "Same saved model", signature_state: "catalog-signature-verified",
+        model_runtime: { admitted: true, dispatch_ready: true, offer_id: currentId } }] }
+      : { offers: [{ id: currentId, title: "Same saved model", operation: "text",
+        input_modalities: ["text/plain"], output_modalities: ["text/plain"] }] } };
+  };
+  workspace.restoreSessionState(records[0]);
+  await live.probeLiveInference({ force: true });
+  assert.equal(live.selectedLiveOffer().offerId, currentId);
+  assert.equal(live.liveOfferChoice(), currentId, "workspace persistence refreshes only the execution hint");
+  assert.equal(live.liveContentChoice(), cid);
+  const saved = workspace.getAgentWorkspaceSnapshot();
+  assert.equal(saved.liveOfferId, currentId);
+  assert.equal(saved.sessions[0].modelSelection.liveOfferId, currentId);
+  assert.equal(saved.sessions[0].modelSelection.selectedModelCid, cid);
+  assert.deepEqual(saved.sessions[0].lastTurn, retainedTurn, "the original run and context identity stay historical");
+  assert.deepEqual(saved.sessions[0].messages, records[0].messages);
+  assert.deepEqual(saved.sessions[1], inactive, "inactive saved chats keep their original hints and data");
+  assert.deepEqual(saved.composerDraft, draft);
+  assert.ok(calls.every(path => ["/api/capsules/catalog", "/api/provider/model/offers_list"].includes(path)),
+    "restore and hint refresh remain read-only");
+  currentCid = `bafybei${"c".repeat(51)}e`;
+  await live.probeLiveInference({ force: true });
+  assert.equal(live.selectedLiveOffer(), null, "changed model content requires a new user choice");
+  assert.equal(live.liveContentChoice(), cid);
+  assert.deepEqual(workspace.getAgentWorkspaceSnapshot().sessions[0].lastTurn, retainedTurn);
+  assert.deepEqual(currentDraft, draft);
+});
+
 test("explicit local model selection awaits Keep while restore and nonlocal choices stay read-only", async t => {
   t.after(() => { workspace.bindAgentWorkspaceStore(null); live.selectLiveOffer(""); });
   const cid = `bafybei${"a".repeat(52)}`;

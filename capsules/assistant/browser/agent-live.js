@@ -196,8 +196,8 @@ export function clearBackendReports() {
   }
 }
 
-/* An existing choice stays exact. Only a workspace with no choice uses the
-   initial first advertised offer; later absence never substitutes another. */
+/* CID intent uses its current verified offer. Service intent stays exact.
+   Only a workspace with no choice uses the initial first advertised offer. */
 let selectedLiveOfferId = "";
 let selectedContentCid = null;
 let selectionEpoch = 0;
@@ -267,13 +267,15 @@ export function liveDownloadingModel() {
   return downloadingModel(liveState.catalogModels || []);
 }
 function currentChoice(models, content) {
-  // Initial empty workspace may use the first offer. An existing choice stays exact.
+  // An empty workspace may use the first offer; saved CID and service intent stay exact.
   const id = selectedLiveOfferId || (selectedContentCid == null ? models[0]?.offerId : "");
   return selectedModelOffer(models.map(m => ({ ...m, id: m.offerId })), id, selectedContentCid, content || []);
 }
 
 export function liveOfferChoice() {
-  return selectedLiveOfferId;
+  return selectedContentCid != null
+    ? currentChoice(liveState.models, liveState.catalogModels)?.offerId || selectedLiveOfferId
+    : selectedLiveOfferId;
 }
 
 export function selectedLiveOffer() {

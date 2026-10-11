@@ -547,6 +547,15 @@ export function createAssistantApp({
     return { response, payload };
   }
 
+  function reconcileSelectedModelHint() {
+    if (state.offersLoading || state.workspaceLoading || state.offersError || state.workspaceError || state.selectedModelCid == null) return;
+    const offer = selectedModelOffer(state.textOffers, state.selectedOfferId, state.selectedModelCid, state.models);
+    if (offer && state.selectedOfferId !== offer.id) {
+      state.selectedOfferId = offer.id;
+      markWorkspaceDirty();
+    }
+  }
+
   async function loadOffers() {
     const epoch = ++offersEpoch;
     state.offersLoading = true;
@@ -589,10 +598,11 @@ export function createAssistantApp({
       return;
     }
     if (
-      !state.workspaceLoading && !state.selectedOfferId
+      !state.workspaceLoading && state.selectedModelCid == null && !state.selectedOfferId
     ) {
       state.selectedOfferId = state.textOffers[0]?.id ?? null;
     }
+    reconcileSelectedModelHint();
     if (
       !state.selectedStudioOfferId
     ) {
@@ -654,10 +664,11 @@ export function createAssistantApp({
     state.activeMode = activeSession?.mode === MODE_BUILD ? MODE_BUILD : MODE_CHAT;
     if (
       state.textOffers.length &&
-      !state.selectedOfferId && !state.offersError
+      state.selectedModelCid == null && !state.selectedOfferId && !state.offersError
     ) {
       state.selectedOfferId = state.textOffers[0].id;
     }
+    reconcileSelectedModelHint();
     if (
       !state.offersLoading &&
       !state.offersError &&
@@ -918,13 +929,14 @@ export function createAssistantApp({
 
   function setSelectedOfferId(nextOfferId, modelCid = null) {
     const offers = state.activeMode === MODE_STUDIO ? state.studioOffers : state.textOffers;
-    if (state.offersLoading || state.workspaceLoading || state.offersError || !selectedModelOffer(offers, nextOfferId, modelCid, state.models)) return;
+    const offer = selectedModelOffer(offers, nextOfferId, modelCid, state.models);
+    if (state.offersLoading || state.workspaceLoading || state.offersError || !offer) return;
     if (state.activeMode === MODE_STUDIO) {
       state.selectedStudioOfferId = nextOfferId || null;
       notify();
       return;
     }
-    state.selectedOfferId = nextOfferId || null;
+    state.selectedOfferId = offer.id;
     state.selectedModelCid = modelCid;
     markWorkspaceDirty();
     notify();
