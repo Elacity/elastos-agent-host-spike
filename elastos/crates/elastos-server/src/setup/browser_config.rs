@@ -251,7 +251,8 @@ fn retire_host(data: &Path, manifest: &super::ComponentsManifest) -> anyhow::Res
         fs::create_dir_all(data.join("config"))?;
         super::atomic_write_file(&selection, b"{\"adapters\": []}\n")?;
     }
-    let mut paths = vec![data.join(super::browser_vm_image::INSTALL_PATH)];
+    // Exact release paths, relative to the data directory.
+    let mut paths = vec![PathBuf::from(super::browser_vm_image::INSTALL_PATH)];
     if let Some(profile) = manifest.profiles.get("browser-host") {
         for name in &profile.components {
             let shared = manifest
@@ -265,31 +266,24 @@ fn retire_host(data: &Path, manifest: &super::ComponentsManifest) -> anyhow::Res
             for info in component.platforms.values() {
                 if let Some(relative) = super::resolve_install_path(component, Some(info)) {
                     crate::install_transaction::validate_support_path(Path::new(relative))?;
-                    paths.push(data.join(relative));
+                    paths.push(PathBuf::from(relative));
                 }
                 if info.binary_path.is_some() {
-                    paths.push(data.join("bin").join(name));
+                    paths.push(Path::new("bin").join(name));
                 }
-            }
-        }
-    }
-    for dir in ["bin", "scripts"] {
-        let Ok(entries) = fs::read_dir(data.join(dir)) else {
-            continue;
-        };
-        for entry in entries {
-            let entry = entry?;
-            if entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with("browser-vm-"))
-            {
-                paths.push(entry.path());
             }
         }
     }
     let mut removed = false;
-    for path in paths {
+    for relative in paths {
+        if !parents_are_real_directories(data, &relative) {
+            println!(
+                "Kept {}: a folder on its path is a link, so removing it could reach files outside the data directory.",
+                relative.display()
+            );
+            continue;
+        }
+        let path = data.join(&relative);
         // A link is removed itself; its target is never followed.
         match path.symlink_metadata() {
             Ok(meta) if meta.is_dir() => fs::remove_dir_all(&path)?,
@@ -306,6 +300,25 @@ fn retire_host(data: &Path, manifest: &super::ComponentsManifest) -> anyhow::Res
         println!("Browser is not available on this computer yet.");
     }
     Ok(())
+}
+
+/// True when every folder from `data` down to `relative`'s parent is a real
+/// directory, so a removal stays inside the data directory.
+fn parents_are_real_directories(data: &Path, relative: &Path) -> bool {
+    let mut current = data.to_path_buf();
+    for component in relative.parent().into_iter().flat_map(Path::components) {
+        let std::path::Component::Normal(part) = component else {
+            return false;
+        };
+        current.push(part);
+        match current.symlink_metadata() {
+            Ok(meta) if meta.is_dir() => {}
+            // A missing folder holds nothing to remove.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+            _ => return false,
+        }
+    }
+    true
 }
 
 pub(super) fn configure(data: &Path, platform: &str, release_image: bool) -> anyhow::Result<()> {
@@ -744,15 +757,21 @@ mod tests {
     #[tokio::test]
     async fn linux_setup_removes_browser_host_files_an_earlier_release_installed() {
         use std::os::unix::fs::symlink;
-        let manifest: super::super::ComponentsManifest =
+        let mut manifest: super::super::ComponentsManifest =
             serde_json::from_str(include_str!("../../../../../components.json")).unwrap();
+        // A component another profile also lists keeps its files.
+        manifest.profiles.insert(
+            "other".into(),
+            super::super::Profile {
+                description: None,
+                components: vec!["browser-vm-artifact-preflight".into()],
+            },
+        );
         let temp = tempfile::tempdir().unwrap();
         let data = temp.path();
         let crosvm = "libexec/browser/crosvm/0.1.0-2ac141082d17/linux-arm64";
         let removed = [
             "scripts/browser-vm-linux-network.py",
-            "scripts/browser-vm-artifact-preflight.sh",
-            "scripts/browser-vm-retired-by-an-earlier-release.mjs",
             "bin/browser-vm-control-service",
             "bin/browser-vm-control-service.mjs",
             "bin/browser-vm-local-crosvm-launcher",
@@ -765,6 +784,9 @@ mod tests {
             "bin/elastos-unrelated",
             "scripts/unrelated.sh",
             "capsules/browser/capsule.json",
+            "scripts/browser-vm-artifact-preflight.sh",
+            // Only exact component paths go; a matching name alone does not.
+            "scripts/browser-vm-retired-by-an-earlier-release.mjs",
         ];
         for name in removed.iter().chain(&kept) {
             let path = data.join(name);
@@ -799,6 +821,40 @@ mod tests {
         }
         let config: Value = serde_json::from_slice(&fs::read(&selection).unwrap()).unwrap();
         assert_eq!(config["adapters"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn linux_setup_never_removes_through_a_linked_folder() {
+        use std::os::unix::fs::symlink;
+        let manifest: super::super::ComponentsManifest =
+            serde_json::from_str(include_str!("../../../../../components.json")).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let (data, outside) = (temp.path().join("elastos"), temp.path().join("outside"));
+        let kept = [
+            data.join("Users/owner/image-set/profile.ext4"),
+            outside.join("browser-vm-control-service"),
+            outside.join("crosvm"),
+        ];
+        for path in &kept {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"owner data").unwrap();
+        }
+        symlink(data.join("Users/owner"), data.join("browser-vm")).unwrap();
+        symlink(&outside, data.join("bin")).unwrap();
+        fs::create_dir_all(data.join("scripts")).unwrap();
+        fs::write(data.join("scripts/browser-vm-linux-network.py"), b"helper").unwrap();
+        prepare_home(&data, &manifest, "linux-arm64", true).await;
+        for path in &kept {
+            assert_eq!(fs::read(path).unwrap(), b"owner data", "{}", path.display());
+        }
+        assert!(data.join("bin").symlink_metadata().unwrap().is_symlink());
+        assert!(data
+            .join("browser-vm")
+            .symlink_metadata()
+            .unwrap()
+            .is_symlink());
+        // Paths under real folders are still removed.
+        assert!(!data.join("scripts/browser-vm-linux-network.py").exists());
     }
 
     #[test]
