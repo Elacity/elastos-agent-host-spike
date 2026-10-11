@@ -666,6 +666,7 @@ async fn dispatch_capsule_affordance(
 }
 
 /// Known Runtime refusal facts have bounded prose; provider details stay private.
+#[cfg(unix)]
 fn preparation_invoke_error(error: anyhow::Error) -> (StatusCode, &'static str, String) {
     if let Some(expired) = error
         .downcast_ref::<crate::api::capsule_inventory::preparation::PreparationRequestExpired>(
@@ -893,6 +894,7 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[cfg(unix)]
     #[test]
     fn model_catalog_device_fit_is_a_signed_row_fact_with_safe_refusals() {
         use crate::api::capsule_inventory::tests::{
@@ -943,6 +945,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn model_get_expired_request_shows_only_the_fixed_runtime_reason() {
         let (status, code, message) = preparation_invoke_error(
@@ -963,6 +966,7 @@ mod tests {
         assert_eq!(code, "preparation_unavailable");
     }
 
+    #[cfg(unix)]
     #[test]
     fn model_get_disk_refusal_keeps_the_reason_and_size() {
         let refused = anyhow::Error::new(elastos_common::NotEnoughFreeSpace { needed: 3 << 30 })
@@ -978,6 +982,7 @@ mod tests {
         assert_eq!(code, "preparation_unavailable");
     }
 
+    #[cfg(unix)]
     #[test]
     fn model_get_budget_refusals_show_only_fixed_runtime_facts() {
         use crate::api::capsule_inventory::preparation::PreparationBudgetRefusal;
