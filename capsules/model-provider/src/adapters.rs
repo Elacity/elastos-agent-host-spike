@@ -316,7 +316,11 @@ pub(crate) enum WorkerApplyAck {
 #[derive(Debug, Clone)]
 pub(crate) enum WorkerApplyGuard {
     None,
-    HttpArtifactBackendState { backend_state: Value },
+    /// A local Stop settled after owned closure, or retains explicit uncertainty.
+    LocalStopSettlement,
+    HttpArtifactBackendState {
+        backend_state: Value,
+    },
 }
 
 enum WorkerControl {
@@ -1403,6 +1407,10 @@ fn parse_local_text_backend_state(
     Ok(state)
 }
 
+pub(crate) fn local_text_cancel_requested(value: &Value) -> bool {
+    parse_local_text_backend_state(value).is_ok_and(|state| state.cancel_requested)
+}
+
 fn reconcile_local_text(
     executor: &LiveAdapterExecutor,
     binding: &RuntimeCreateBinding,
@@ -1496,10 +1504,18 @@ async fn run_local_text_worker(mut task: LocalTextWorkerTask) -> bool {
             }
         }
     };
+    let guard = if matches!(&task.backend, LocalTextBackend::LocalLlama { .. })
+        && *task.cancel_rx.borrow()
+        && pure_local_stop_result(&result)
+    {
+        WorkerApplyGuard::LocalStopSettlement
+    } else {
+        WorkerApplyGuard::None
+    };
     let applied = send_worker_apply_update_with_timing(
         &task.run_id,
         task.generation,
-        WorkerApplyGuard::None,
+        guard,
         result,
         &task.updates,
         timing.as_ref(),
@@ -1822,7 +1838,7 @@ async fn run_local_text_worker_with_timing(
             let run = tokio::select! {
                 biased;
                 _ = task.cancel_rx.wait_for(|cancelled| *cancelled) => {
-                    return Ok(queued_local_cancelled());
+                    return Ok(local_cancelled());
                 }
                 run = tokio::time::timeout(
                     remaining_run_timeout(task.deadline_ms)?,
@@ -1839,9 +1855,14 @@ async fn run_local_text_worker_with_timing(
                     model,
                     settings,
                     remaining_run_timeout(task.deadline_ms)?,
+                    Some(&mut task.cancel_rx),
                 )
-                .await
-                .map_err(map_local_llama_fault)?;
+                .await;
+            let stop_requested = *task.cancel_rx.borrow();
+            if stop_requested {
+                return Ok(cancel_text_worker(&task.backend).await);
+            }
+            let endpoint = endpoint.map_err(map_local_llama_fault)?;
             let mut body = text_generation_request_body(
                 &task.offer,
                 &endpoint.model,
@@ -1882,14 +1903,16 @@ async fn run_local_text_worker_with_timing(
             timing.record(LocalTimingStage::InputTokensStarted);
         }
         let counted = tokio::select! {
-            _ = task.cancel_rx.changed() => return Ok(worker_settlement_unknown_result()),
+            biased;
+            _ = task.cancel_rx.changed() => return Ok(cancel_text_worker(&task.backend).await),
             response = count_request.send() => response.map_err(|err| map_text_reqwest_failure(err, true))?,
         };
         if !counted.status().is_success() {
             return Err(map_effect_http_status(&counted, None));
         }
         let count = tokio::select! {
-            _ = task.cancel_rx.changed() => return Ok(worker_settlement_unknown_result()),
+            biased;
+            _ = task.cancel_rx.changed() => return Ok(cancel_text_worker(&task.backend).await),
             response = read_bounded_json_response_async(counted) => response?,
         };
         let input_tokens = count["input_tokens"]
@@ -1953,9 +1976,9 @@ async fn run_local_text_worker_with_timing(
         timing.record(LocalTimingStage::GenerationStarted);
     }
     let response = tokio::select! {
+        biased;
         _ = task.cancel_rx.changed() => {
-            // Closing a local or hosted HTTP stream does not confirm backend stop.
-            return Ok(worker_settlement_unknown_result());
+            return Ok(cancel_text_worker(&task.backend).await);
         }
         response = request.send() => response.map_err(|err| map_text_reqwest_failure(err, private_endpoint))?
     };
@@ -1978,8 +2001,9 @@ async fn run_local_text_worker_with_timing(
 
     while !done {
         let next = tokio::select! {
+            biased;
             _ = task.cancel_rx.changed() => {
-                return Ok(worker_settlement_unknown_result());
+                return Ok(cancel_text_worker(&task.backend).await);
             }
             _ = flush_timer.tick(), if timed_flushes < LOCAL_TEXT_TIMED_FLUSH_LIMIT
                 && !stream_state.delta_buffer.is_empty() => {
@@ -2242,7 +2266,28 @@ fn map_local_llama_fault(fault: LocalLlamaFault) -> AdapterFault {
     }
 }
 
-fn queued_local_cancelled() -> ReconcileResult {
+async fn cancel_text_worker(backend: &LocalTextBackend) -> ReconcileResult {
+    if let LocalTextBackend::LocalLlama {
+        engines, offer_id, ..
+    } = backend
+    {
+        return cancel_local_execution(engines, offer_id).await;
+    }
+    worker_settlement_unknown_result()
+}
+
+pub(crate) async fn cancel_local_execution(
+    engines: &LocalLlamaEngines,
+    offer_id: &str,
+) -> ReconcileResult {
+    if engines.close_offer(offer_id).await.is_ok() {
+        local_cancelled()
+    } else {
+        worker_settlement_unknown_result()
+    }
+}
+
+fn local_cancelled() -> ReconcileResult {
     ReconcileResult::Terminal {
         events: Vec::new(),
         status: RunStatus::Cancelled,
@@ -2250,10 +2295,37 @@ fn queued_local_cancelled() -> ReconcileResult {
         error: Some(RunError {
             class: ErrorClass::Cancelled,
             code: "cancelled".into(),
-            message: "Model run was cancelled before execution.".into(),
+            message: "Model run was cancelled.".into(),
         }),
         backend_report: None,
     }
+}
+
+pub(crate) fn pure_local_stop_result(result: &ReconcileResult) -> bool {
+    let ReconcileResult::Terminal {
+        events,
+        status,
+        output: None,
+        error: Some(error),
+        backend_report: None,
+    } = result
+    else {
+        return false;
+    };
+    events.is_empty()
+        && match status {
+            RunStatus::Cancelled => {
+                error.class == ErrorClass::Cancelled
+                    && error.code == "cancelled"
+                    && error.message == "Model run was cancelled."
+            }
+            RunStatus::SettlementUnknown => {
+                error.class == ErrorClass::SettlementUnknown
+                    && error.code == "settlement_unknown"
+                    && error.message == "model backend settlement is unknown"
+            }
+            _ => false,
+        }
 }
 
 fn text_generation_request_body(

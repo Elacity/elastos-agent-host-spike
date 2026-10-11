@@ -194,11 +194,13 @@ Cancellation is a request to stop backend work and settle the request as
 If the backend cannot confirm cancellation, the request enters reconciliation
 rather than being reported as safely cancelled.
 
-The managed local engine and hosted Chat Completions and Responses adapters
-settle cancellation as `settlement_unknown` once dispatch may have happened.
-Closing an HTTP stream does not confirm that the backend stopped. Their terminal
-result and events remain durable across replay and restart without redispatch.
-Installed cancellation and backend-stop proof remain open.
+The managed local engine holds its execution slot while Runtime closes its
+owned engine and process group. Confirmed closure settles the request as
+`cancelled`; an unresolved close settles as `settlement_unknown` and retains
+the engine ownership. Hosted Chat Completions and Responses cancellation settles
+as `settlement_unknown` after dispatch because stream closure alone cannot
+confirm backend stop. Terminal results and events keep their original identity
+across replay and restart. Installed acceptance stays with the owning issue.
 
 Interrupting the presentation layer does not cancel provider work by itself.
 The Agent Host can reconnect to the same request ID and recover durable events.

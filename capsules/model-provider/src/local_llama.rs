@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 #[cfg(not(test))]
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
+use tokio::sync::{watch, Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio::time::sleep;
 
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -261,8 +261,15 @@ impl LocalLlamaEngines {
         model: &LocalArtifactConfig,
         settings: &LocalLlamaSettings,
     ) -> Result<LocalLlamaEndpoint, LocalLlamaFault> {
-        self.endpoint_with_timeout(offer_id, engine, model, settings, Duration::from_secs(30))
-            .await
+        self.endpoint_with_timeout(
+            offer_id,
+            engine,
+            model,
+            settings,
+            Duration::from_secs(30),
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn endpoint_with_timeout(
@@ -272,10 +279,11 @@ impl LocalLlamaEngines {
         model: &LocalArtifactConfig,
         settings: &LocalLlamaSettings,
         timeout: Duration,
+        cancel: Option<&mut watch::Receiver<bool>>,
     ) -> Result<LocalLlamaEndpoint, LocalLlamaFault> {
         let timing = LocalTiming::start();
         let result = self
-            .endpoint_with_timing(offer_id, engine, model, settings, timeout, &timing)
+            .endpoint_with_timing(offer_id, engine, model, settings, timeout, &timing, cancel)
             .await;
         timing.record(match &result {
             Ok(_) => LocalTimingStage::EngineReady,
@@ -285,6 +293,7 @@ impl LocalLlamaEngines {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn endpoint_with_timing(
         &self,
         offer_id: &str,
@@ -293,6 +302,7 @@ impl LocalLlamaEngines {
         settings: &LocalLlamaSettings,
         timeout: Duration,
         timing: &LocalTiming,
+        mut cancel: Option<&mut watch::Receiver<bool>>,
     ) -> Result<LocalLlamaEndpoint, LocalLlamaFault> {
         let deadline = Instant::now() + timeout;
         let mut engines = tokio::time::timeout(timeout, self.engines.lock())
@@ -309,7 +319,11 @@ impl LocalLlamaEngines {
         }
         let stale = match engines.get_mut(offer_id) {
             Some(running) if running.closing => true,
-            Some(running) => match running_engine_is_ready(running, deadline).await? {
+            Some(running) => match tokio::select! {
+                biased;
+                _ = local_stop_requested(cancel.as_deref_mut()) => Err(LocalLlamaFault::Failed),
+                ready = running_engine_is_ready(running, deadline) => ready,
+            }? {
                 true => return Ok(running.endpoint.clone()),
                 false => true,
             },
@@ -346,6 +360,9 @@ impl LocalLlamaEngines {
             )
         };
         drop(sockets);
+        if cancel.as_ref().is_some_and(|cancel| *cancel.borrow()) {
+            return Err(LocalLlamaFault::Failed);
+        }
         if let EngineTarget::Unix(path) = &target {
             remove_stale_engine_socket(path)?;
         }
@@ -391,14 +408,19 @@ impl LocalLlamaEngines {
                     Err(fault) => Err(fault),
                     Ok(()) => {
                         timing.record(LocalTimingStage::GuardInitialized);
-                        wait_until_healthy(
-                            &mut running.child,
-                            running.guard_group,
-                            &running.endpoint,
-                            &alias,
-                            health_timeout.min(deadline.saturating_duration_since(Instant::now())),
-                        )
-                        .await
+                        // The child is in the owned map before this cancellable
+                        // wait. Its close result below still owns settlement.
+                        tokio::select! {
+                            biased;
+                            _ = local_stop_requested(cancel.as_deref_mut()) => Err(LocalLlamaFault::Failed),
+                            healthy = wait_until_healthy(
+                                &mut running.child,
+                                running.guard_group,
+                                &running.endpoint,
+                                &alias,
+                                health_timeout.min(deadline.saturating_duration_since(Instant::now())),
+                            ) => healthy,
+                        }
                     }
                 }
             }
@@ -431,6 +453,15 @@ impl LocalLlamaEngines {
             }
         }
         result
+    }
+}
+
+async fn local_stop_requested(cancel: Option<&mut watch::Receiver<bool>>) {
+    match cancel {
+        Some(cancel) => {
+            let _ = cancel.wait_for(|cancelled| *cancelled).await;
+        }
+        None => std::future::pending::<()>().await,
     }
 }
 
@@ -1459,6 +1490,14 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
         tokio::time::resume();
         assert!(engines.retains_artifacts().await);
+        assert!(matches!(
+            crate::adapters::cancel_local_execution(&engines, "offer").await,
+            crate::adapters::ReconcileResult::Terminal {
+                status: crate::contract::RunStatus::SettlementUnknown,
+                output: None,
+                ..
+            }
+        ));
         assert_eq!(
             engines.endpoint("offer", &engine, &model, &settings).await,
             Err(LocalLlamaFault::Timeout)

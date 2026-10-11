@@ -284,8 +284,16 @@ impl ProviderCoordinator {
                 }
                 match provider.run_deadline_expired(run_id.as_str()) {
                     Ok(true) => {
-                        let _ = acknowledge.send(WorkerApplyAck::TimedOut);
-                        return;
+                        let owned_stop = matches!(&guard, WorkerApplyGuard::LocalStopSettlement)
+                            && provider
+                                .owned_local_stop_matches(&run_id, &result)
+                                .unwrap_or(false);
+                        if !owned_stop {
+                            let _ = acknowledge.send(WorkerApplyAck::TimedOut);
+                            return;
+                        }
+                        // Owned Stop settlement carries no late output. The
+                        // current worker generation was checked above.
                     }
                     Err(err) => {
                         err.log();
@@ -3399,6 +3407,220 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn local_llama_stop_confirms_closure_and_unblocks_offer_refresh() {
+        let root = temp_root("local-llama-confirmed-stop");
+        let (offer, events, root) = local_llama_offer(&root, "healthy");
+        let mut provider = ProviderCoordinatorHandle::start();
+        init_provider(&provider, &root, vec![offer.clone()]);
+        let input = text_input("stall");
+        let binding = create_binding("request:confirmed-stop", &offer, &input);
+        let created = create_run(&provider, &offer, &binding, &input);
+        let run_id = created["data"]["run_id"].as_str().unwrap();
+        wait_for_fake_llama_event(&events, "request:stall");
+        let engine_pid: i32 = fake_llama_events(&events)
+            .iter()
+            .find_map(|event| event.strip_prefix("start:"))
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let _ = cancel_run(&provider, run_id, &access_binding(&binding));
+        let terminal = wait_for_terminal(&provider, run_id, &access_binding(&binding));
+        assert_eq!(terminal["data"]["status"], "cancelled");
+        assert_ne!(unsafe { libc::kill(engine_pid, 0) }, 0);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert_eq!(
+            create_run(&provider, &offer, &binding, &input)["data"]["terminal"],
+            terminal["data"]["terminal"]
+        );
+        assert_eq!(
+            fake_llama_events(&events)
+                .iter()
+                .filter(|event| *event == "request:stall")
+                .count(),
+            1
+        );
+        let mut added = offer.clone();
+        added.id = "later-model".into();
+        let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
+        loop {
+            let refreshed = provider
+                .request(init_request(&root, vec![offer.clone(), added.clone()]))
+                .unwrap();
+            if refreshed["status"] == "ok" {
+                break;
+            }
+            assert_eq!(refreshed["code"], "selection_unavailable");
+            assert!(
+                Instant::now() < deadline,
+                "stopped run still blocks refresh"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let later_input = text_input("later");
+        let later_binding = create_binding("request:after-stop", &added, &later_input);
+        let later = create_run(&provider, &added, &later_binding, &later_input);
+        let completed = wait_for_terminal(
+            &provider,
+            later["data"]["run_id"].as_str().unwrap(),
+            &access_binding(&later_binding),
+        );
+        assert_eq!(
+            completed["data"]["terminal"]["output"]["text"],
+            "reply:later"
+        );
+        provider.shutdown_on_eof();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_llama_stop_interrupts_owned_startup_before_health_timeout() {
+        let root = temp_root("local-llama-stop-startup");
+        let (offer, events, root) = local_llama_offer(&root, "timeout_ignore_term");
+        let mut provider = ProviderCoordinatorHandle::start();
+        init_provider(&provider, &root, vec![offer.clone()]);
+        let input = text_input("hello");
+        let binding = create_binding("request:stop-startup", &offer, &input);
+        let created = create_run(&provider, &offer, &binding, &input);
+        let run_id = created["data"]["run_id"].as_str().unwrap();
+        let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
+        while !fake_llama_events(&events)
+            .iter()
+            .any(|event| event.starts_with("start:"))
+        {
+            assert!(Instant::now() < deadline, "fixture engine did not start");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let started = Instant::now();
+        let _ = cancel_run(&provider, run_id, &access_binding(&binding));
+        let terminal = wait_for_terminal(&provider, run_id, &access_binding(&binding));
+        assert_eq!(terminal["data"]["status"], "cancelled");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "Stop waited for engine readiness"
+        );
+        assert!(fake_llama_events(&events)
+            .iter()
+            .all(|event| !event.starts_with("request:")));
+        provider.shutdown_on_eof();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_stop_deadline_accepts_only_current_bound_pure_settlement() {
+        for case in [
+            "confirmed",
+            "unknown",
+            "stale",
+            "unrequested",
+            "payload",
+            "ordinary",
+        ] {
+            let root = temp_root(&format!("local-stop-deadline-{case}"));
+            let (offer, events, root) = local_llama_offer(&root, "healthy");
+            let (update_tx, updates) = mpsc::channel(UPDATE_CHANNEL_CAPACITY);
+            let (_request_tx, requests) = mpsc::channel(REQUEST_CHANNEL_CAPACITY);
+            let mut coordinator = ProviderCoordinator {
+                provider: None,
+                handle: tokio::runtime::Handle::current(),
+                requests,
+                updates,
+                update_tx,
+            };
+            coordinator
+                .route_request(init_request(&root, vec![offer.clone()]))
+                .await
+                .unwrap();
+            let input = text_input("stall");
+            let binding = create_binding(&format!("request:stop-deadline-{case}"), &offer, &input);
+            let created = coordinator.route_request(ProviderEnvelope {
+                operation: ProviderOperation::RunsCreate,
+                value: json!({"op":"runs_create", "offer_id":offer.id, "operation":offer.operation,
+                    "input":input, "runtime_binding":binding}),
+            }).await.unwrap();
+            let run_id = created["data"]["run_id"].as_str().unwrap();
+            let events_for_wait = events.clone();
+            tokio::task::spawn_blocking(move || {
+                wait_for_fake_llama_event(&events_for_wait, "request:stall")
+            })
+            .await
+            .unwrap();
+            coordinator
+                .route_request(cancel_run_envelope(run_id, &access_binding(&binding)))
+                .await
+                .unwrap();
+            let mut update =
+                tokio::time::timeout(FIXTURE_EVENT_TIMEOUT, coordinator.updates.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let WorkerUpdate::Apply {
+                generation,
+                guard,
+                result,
+                ..
+            } = &mut update
+            else {
+                panic!("expected the owned Stop result");
+            };
+            assert!(crate::adapters::pure_local_stop_result(result));
+            assert!(matches!(guard, WorkerApplyGuard::LocalStopSettlement));
+            let journal =
+                RunJournal::open(crate::config::journal_root(&root, None).unwrap()).unwrap();
+            let mut run = journal.load_run(run_id).unwrap();
+            // Hold the real completed-close update across the journal deadline.
+            run.created_at_ms =
+                crate::journal::now_ms().saturating_sub(offer.policy.runtime_ms_limit + 1);
+            run.deadline_ms = run.created_at_ms + offer.policy.runtime_ms_limit;
+            match case {
+                "unknown" => {
+                    // A missing closure observation keeps uncertainty, never output.
+                    *result = ReconcileResult::Terminal {
+                        events: Vec::new(),
+                        status: crate::contract::RunStatus::SettlementUnknown,
+                        output: None,
+                        error: Some(crate::contract::RunError {
+                            class: crate::contract::ErrorClass::SettlementUnknown,
+                            code: "settlement_unknown".into(),
+                            message: "model backend settlement is unknown".into(),
+                        }),
+                        backend_report: None,
+                    };
+                }
+                "stale" => *generation += 1,
+                "unrequested" => {
+                    run.backend_state = Some(serialize_local_text_backend_state(false).unwrap())
+                }
+                "payload" => {
+                    if let ReconcileResult::Terminal { output, .. } = result {
+                        *output = Some(json!({"text":"late"}));
+                    }
+                }
+                "ordinary" => *guard = WorkerApplyGuard::None,
+                _ => {}
+            }
+            journal.store_run(&run).unwrap();
+            coordinator.handle_update(update).await;
+            let settled = journal.load_run(run_id).unwrap();
+            assert_eq!(
+                settled.status,
+                match case {
+                    "confirmed" => crate::contract::RunStatus::Cancelled,
+                    "unknown" => crate::contract::RunStatus::SettlementUnknown,
+                    _ => crate::contract::RunStatus::Reconciling,
+                },
+                "case {case}"
+            );
+            assert!(settled.output.is_none());
+            coordinator.shutdown().await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn local_llama_stop_interrupts_stalled_count_body() {
         let root = temp_root("local-llama-stalled-count");
         let (offer, events, root) = local_llama_offer(&root, "stalled_count");
@@ -3414,7 +3636,7 @@ mod tests {
         let terminal = wait_for_terminal(&provider, run_id, &access_binding(&binding));
         // Without the interruption, the stalled count would last until the run deadline.
         assert!(started.elapsed() < Duration::from_millis(offer.policy.runtime_ms_limit));
-        assert_eq!(terminal["data"]["status"], "settlement_unknown");
+        assert_eq!(terminal["data"]["status"], "cancelled");
         assert_eq!(
             fake_llama_events(&events)
                 .iter()
@@ -3537,11 +3759,9 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn local_llama_cancel_with_active_backend_settles_unknown_without_redispatch() {
+    fn local_llama_cancel_with_active_backend_settles_cancelled_without_redispatch() {
         let root = temp_root("local-llama-cancel");
         let (offer, events, root) = local_llama_offer(&root, "active_after_disconnect");
-        let active = events.with_extension("active");
-        let release = events.with_extension("release");
         let mut provider = ProviderCoordinatorHandle::start();
         init_provider(&provider, &root, vec![offer.clone()]);
 
@@ -3553,13 +3773,11 @@ mod tests {
         let cancelled = cancel_run(&provider, run_id, &access_binding(&binding));
         assert_eq!(cancelled["data"]["status"], "reconciling");
         let terminal = wait_for_terminal(&provider, run_id, &access_binding(&binding));
-        wait_for_fake_llama_event(&events, "disconnected:stall");
-        assert!(active.exists(), "backend work outlives the HTTP consumer");
-        assert!(!release.exists());
-        assert_eq!(terminal["data"]["status"], "settlement_unknown");
+        wait_for_fake_llama_event(&events, "term");
+        assert_eq!(terminal["data"]["status"], "cancelled");
         let run = load_run(&root, run_id);
-        assert_eq!(run.status, crate::contract::RunStatus::SettlementUnknown);
-        assert_eq!(run.events.last().unwrap().kind, "settlement_unknown");
+        assert_eq!(run.status, crate::contract::RunStatus::Cancelled);
+        assert_eq!(run.events.last().unwrap().kind, "cancelled");
         assert_eq!(
             run.events
                 .iter()
@@ -3589,7 +3807,6 @@ mod tests {
                 page["data"]["events"]
             );
         }
-        assert!(active.exists());
         assert_eq!(
             fake_llama_events(&events)
                 .iter()
@@ -3597,10 +3814,6 @@ mod tests {
                 .count(),
             1
         );
-        std::fs::write(&release, b"release").unwrap();
-        wait_for_fake_llama_event(&events, "work_stopped:stall");
-        assert!(!active.exists());
-
         let later_input = text_input("later");
         let later_binding = create_binding("request:local-later", &offer, &later_input);
         let later = create_run(&provider, &offer, &later_binding, &later_input);
@@ -3621,7 +3834,7 @@ mod tests {
                 .iter()
                 .filter(|line| line.starts_with("start:"))
                 .count(),
-            1
+            2
         );
         provider.shutdown_on_eof();
         let settled_events = fake_llama_events(&events);
@@ -3637,7 +3850,7 @@ mod tests {
         );
         assert_eq!(
             cancel_run(&restarted, run_id, &access_binding(&binding))["data"]["status"],
-            "settlement_unknown"
+            "cancelled"
         );
         assert_eq!(
             events_page(&restarted, run_id, &access_binding(&binding), 0)["data"]["events"],

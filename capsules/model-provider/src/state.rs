@@ -1,6 +1,7 @@
 use crate::adapters::{
-    is_http_job_creating_backend_state, is_local_text_backend_state, AdapterExecutor, CancelResult,
-    DispatchResult, ReconcileResult, WorkerApplyGuard,
+    is_http_job_creating_backend_state, is_local_text_backend_state, local_text_cancel_requested,
+    pure_local_stop_result, AdapterExecutor, CancelResult, DispatchResult, ReconcileResult,
+    WorkerApplyGuard,
 };
 use crate::config::{
     journal_root, AdapterConfig, BridgeProviderConfig, ConfiguredOffer, ProviderInitExtra,
@@ -674,6 +675,11 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
         if run.status.is_terminal() {
             return Ok(());
         }
+        if matches!(&guard, WorkerApplyGuard::LocalStopSettlement)
+            && !self.local_stop_matches(&run, &result)?
+        {
+            return Ok(());
+        }
         let Some(result) = normalize_worker_result(&run, guard, result)? else {
             return Ok(());
         };
@@ -681,6 +687,38 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
         apply_reconcile_result(&stored_offer, &mut run, result)?;
         self.journal.store_run(&run)?;
         Ok(())
+    }
+
+    pub(crate) fn owned_local_stop_matches(
+        &self,
+        run_id: &str,
+        result: &ReconcileResult,
+    ) -> Result<bool, ProviderFault> {
+        let Some(run) = self.journal.load_run_if_present(run_id)? else {
+            return Ok(false);
+        };
+        self.local_stop_matches(&run, result)
+    }
+
+    fn local_stop_matches(
+        &self,
+        run: &StoredRun,
+        result: &ReconcileResult,
+    ) -> Result<bool, ProviderFault> {
+        let Some(offer) = self.offers.get(&run.offer.id) else {
+            return Ok(false);
+        };
+        Ok(!run.status.is_terminal()
+            && matches!(&offer.adapter, AdapterConfig::LocalLlamaCppText { .. })
+            && offer
+                .execution_binding_hash()
+                .map_err(|_| ProviderFault::internal("invalid local execution binding"))?
+                == run.execution_binding_hash
+            && run
+                .backend_state
+                .as_ref()
+                .is_some_and(local_text_cancel_requested)
+            && pure_local_stop_result(result))
     }
 
     pub(crate) fn run_deadline_expired(&self, run_id: &str) -> Result<bool, ProviderFault> {
@@ -926,7 +964,7 @@ fn normalize_worker_result(
     result: ReconcileResult,
 ) -> Result<Option<ReconcileResult>, ProviderFault> {
     match guard {
-        WorkerApplyGuard::None => Ok(Some(result)),
+        WorkerApplyGuard::None | WorkerApplyGuard::LocalStopSettlement => Ok(Some(result)),
         WorkerApplyGuard::HttpArtifactBackendState { backend_state } => {
             if run.backend_state.as_ref() != Some(&backend_state) {
                 return Ok(None);
@@ -2256,6 +2294,96 @@ mod tests {
         config.extra["offers"] = json!([state.offers["operator"].clone()]);
         config.extra["runtime_admitted_offers"] = json!([]);
         config
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_local_stop_rejects_hosted_unbound_or_impure_facts() {
+        let mut state = retirement_state();
+        for case in [
+            "local",
+            "hosted",
+            "unrequested",
+            "hash",
+            "output",
+            "events",
+            "report",
+            "error",
+        ] {
+            let configured = state.offers[if case == "hosted" {
+                "operator"
+            } else {
+                "admitted"
+            }]
+            .clone();
+            let binding = create_binding(
+                &format!("request:stop-fact-{case}"),
+                &configured.id,
+                &json!({"prompt":"x"}),
+            );
+            let mut run = prepared_run_for_offer(binding, &configured, now_ms());
+            run.status = RunStatus::Reconciling;
+            run.backend_state = Some(
+                crate::adapters::serialize_local_text_backend_state(case != "unrequested").unwrap(),
+            );
+            if case == "hash" {
+                run.execution_binding_hash = format!("sha256:{}", "f".repeat(64));
+            }
+            state.journal.store_run(&run).unwrap();
+            let mut result = ReconcileResult::Terminal {
+                events: Vec::new(),
+                status: RunStatus::Cancelled,
+                output: None,
+                error: Some(RunError {
+                    class: ErrorClass::Cancelled,
+                    code: "cancelled".into(),
+                    message: "Model run was cancelled.".into(),
+                }),
+                backend_report: None,
+            };
+            if let ReconcileResult::Terminal {
+                events,
+                output,
+                error,
+                backend_report,
+                ..
+            } = &mut result
+            {
+                match case {
+                    "output" => *output = Some(json!({"text":"late"})),
+                    "events" => events.push(crate::adapters::EventSeed {
+                        kind: "text_delta".into(),
+                        data: json!({"text":"late"}),
+                    }),
+                    "report" => *backend_report = Some(Box::new(BackendReport::unknown())),
+                    "error" => error.as_mut().unwrap().message = "private provider detail".into(),
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                state
+                    .owned_local_stop_matches(&run.run_id, &result)
+                    .unwrap(),
+                case == "local",
+                "case {case}"
+            );
+            state
+                .apply_worker_reconcile_result(
+                    &run.run_id,
+                    WorkerApplyGuard::LocalStopSettlement,
+                    result,
+                )
+                .unwrap();
+            assert_eq!(
+                state.journal.load_run(&run.run_id).unwrap().status,
+                if case == "local" {
+                    RunStatus::Cancelled
+                } else {
+                    RunStatus::Reconciling
+                },
+                "case {case}"
+            );
+        }
     }
 
     #[cfg(unix)]
