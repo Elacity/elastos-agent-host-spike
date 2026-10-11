@@ -3332,7 +3332,9 @@ mod tests {
                     .find(|path| is_transaction_temp_file(path))
                     .unwrap();
                 fs::remove_file(&temp)?;
-                open_temp_file_owner_only(&temp)?.write_all(b"replacement")?;
+                open_temp_file_owner_only(&temp)
+                    .expect("open owned fixture replacement")
+                    .write_all(b"replacement")?;
                 replacement = Some(temp);
                 Err(std::io::Error::from_raw_os_error(libc::EIO))
             },
