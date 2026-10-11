@@ -29,12 +29,14 @@ let malformedRuntime = false;
 let mismatchRetention = false;
 let delayCatalog = null;
 let protectReclaim = false;
+let preparationFailure = null;
+let useRefusal = null;
 const fixtureErrors = [];
 function preparation() {
   return phase === "unprepared" ? null : { operation_id: operation, cid: selectedCid, state: phase,
     total_bytes: 1024, completed_bytes: phase === "capacity_pending" ? 0 : ["admitted", "reclaimed"].includes(phase) ? 1024 : 256,
     cancel_requested: false, admitted: phase === "admitted", activation_pending: activationPending,
-    failure_class: activationFailure ? "activation_unavailable" : null };
+    failure_class: activationFailure ? "activation_unavailable" : preparationFailure };
 }
 function runtime() {
   return { admitted: phase === "admitted", kept, dispatch_ready: phase === "admitted" && !dispatchPending,
@@ -84,6 +86,13 @@ const server = createServer(async (req, res) => {
       assert.ok(["use", "status", "cancel", "retention", "reclaim"].includes(method.operation));
       assert.equal(method.risk, method.operation === "status" ? "read" : "write");
       if (failure) { json({ error: "private runtime provider path /secret" }, 503); return; }
+      if (method.operation === "use" && useRefusal) {
+        json({ schema: "elastos.capsules.invoke-result/v1", status: "error", code: useRefusal.code,
+          message: useRefusal.message || "private provider /secret credential", capsule: input.capsule,
+          interface: input.interface, method: input.method,
+          request_id: useRefusal.wrongIdentity ? "wrong-request" : input.request_id }, 409);
+        return;
+      }
       if (method.operation === "use") { assert.deepEqual(input.input, { cid }); phase = "preparing"; kept = true; }
       if (method.operation === "use" && loseUseResponse) { req.socket.destroy(); return; }
       if (["status", "cancel"].includes(method.operation)) assert.deepEqual(input.input, { operation_id: operation });
@@ -141,6 +150,7 @@ try {
       : { absent: "Ready to prepare", reclaimed: "Model removed from local cache." };
     phase = "unprepared"; kept = false; failure = false; calls.length = 0;
     dispatchUnavailableReason = null;
+    preparationFailure = null; useRefusal = null;
     selectedCid = cid; executable = true; trust = "verified"; protectReclaim = false;
     const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
     activePage = page;
@@ -181,7 +191,22 @@ try {
       assert.equal(await frame.getByText("Not on this device yet", { exact: true }).count(), 1);
       assert.equal(await frame.getByRole("button", { name: "Get", exact: true }).isEnabled(), true);
     }
-    phase = "capacity_pending";
+    for (const [state, cause, explanation] of [
+      ["failed", "storage_service_unavailable", "The storage service is unavailable. Retry when it is running."],
+      ["cancelled", "download_interrupted", "The download stopped before it finished. Retry."],
+      ["expired", "download_interrupted", "The download stopped before it finished. Retry."],
+      ["uncertain", "storage_service_unavailable", "The storage service is unavailable. Waiting for preparation to settle."],
+      ["capacity_pending", "cache_budget_unavailable", "Waiting for room in the local cache budget. Remove an unneeded model or increase the budget and it continues."],
+    ]) {
+      phase = state; preparationFailure = cause;
+      await frame.getByRole("button", { name: "Refresh models" }).click();
+      await frame.getByText(explanation, { exact: true }).waitFor();
+      if (["uncertain", "capacity_pending"].includes(state)) {
+        assert.equal(await frame.getByRole("button", { name: "Retry", exact: true }).count(), 0);
+        assert.equal(await frame.getByRole("button", { name: "Cancel preparation" }).count(), 1);
+      } else assert.equal(await frame.getByRole("button", { name: "Retry", exact: true }).isEnabled(), true);
+    }
+    preparationFailure = null; phase = "capacity_pending";
     await frame.getByRole("button", { name: "Refresh models" }).click();
     await frame.getByText("Waiting for free space. This model needs 1.02 KB on this Home, plus 2 GB kept free. Free some space and it continues.", { exact: true }).waitFor();
     assert.equal(await frame.getByRole("button", { name: "Cancel preparation" }).count(), 1);
@@ -195,6 +220,33 @@ try {
     phase = "unprepared";
     await frame.getByRole("button", { name: "Refresh models" }).click();
     await frame.getByText(copy.absent, { exact: true }).waitFor();
+    for (const [code, explanation] of [
+      ["memory_budget_unavailable", "This model exceeds the local model memory budget. Choose a smaller model or increase the budget, then Retry."],
+      ["cache_budget_unavailable", "This model does not fit the local cache budget. Remove an unneeded model, choose a smaller model, or increase the budget, then Retry."],
+      ["not_enough_free_space", "Not enough free disk space on this Home: this needs 3 GB plus 2 GB kept free. Free some space, then select Get again."],
+    ]) {
+      useRefusal = { code, ...(code === "not_enough_free_space" ? { message: explanation } : {}) };
+      await frame.getByRole("button", { name: acquire, exact: true }).click();
+      await frame.getByText(explanation, { exact: true }).waitFor();
+      assert.equal(await frame.getByRole("button", { name: acquire, exact: true }).isEnabled(), true);
+      assert.doesNotMatch(await frame.locator("body").innerText(), /\/secret|credential|private provider/);
+    }
+    for (const refusal of [
+      { code: "memory_budget_unavailable", wrongIdentity: true },
+      { code: "not_enough_free_space", message: "private provider /secret credential" },
+    ]) {
+      useRefusal = refusal;
+      await frame.getByRole("button", { name: acquire, exact: true }).click();
+      await frame.getByText("Model action could not be confirmed. Refresh to check its status.", { exact: true }).waitFor();
+      assert.doesNotMatch(await frame.locator("body").innerText(), /\/secret|credential|private provider/);
+      useRefusal = null; phase = "reclaimed";
+      await frame.getByRole("button", { name: "Refresh models" }).click();
+      await frame.getByText(copy.reclaimed, { exact: true }).waitFor();
+      phase = "unprepared";
+      await frame.getByRole("button", { name: "Refresh models" }).click();
+      await frame.getByText(copy.absent, { exact: true }).waitFor();
+    }
+    useRefusal = null; calls.length = 0;
     let releaseUse;
     const useReceived = new Promise(resolveUse => { delayUse = reply => { releaseUse = reply; resolveUse(); }; });
     await frame.getByRole("button", { name: acquire, exact: true }).evaluate(button => { button.click(); button.click(); });
@@ -227,6 +279,8 @@ try {
     for (const [reason, explanation] of [
       ["unsupported_host", "Local AI is not supported on this device."],
       ["source_engine_required", "This source Home needs its local model engine. Install the engine through source setup, then Retry."],
+      ["memory_budget_unavailable", "This model exceeds the local model memory budget. Choose a smaller model or increase the budget, then Retry."],
+      ["cache_budget_unavailable", "This model does not fit the local cache budget. Remove an unneeded model, choose a smaller model, or increase the budget, then Retry."],
     ]) {
       dispatchUnavailableReason = reason;
       await frame.getByRole("button", { name: "Refresh models" }).click();

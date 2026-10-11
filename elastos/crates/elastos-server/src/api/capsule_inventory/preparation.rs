@@ -38,6 +38,11 @@ const ADMITTED_MODEL_CONTEXT_SIZE: u32 = 4096;
 enum PreparationFailurePhase {
     Preparation,
     Activation,
+    Interrupted,
+    StorageService,
+    CacheBudget,
+    MemoryBudget,
+    LocalStorage,
     Authority,
     Policy,
     Capacity,
@@ -66,10 +71,16 @@ impl PreparationFailurePhase {
             Self::Authority => "authorization_unavailable",
             Self::Policy => "policy_unavailable",
             Self::Capacity => "capacity_unavailable",
+            Self::Interrupted => "download_interrupted",
+            Self::StorageService => "storage_service_unavailable",
+            Self::CacheBudget => PreparationBudgetRefusal::Cache.public_class(),
+            Self::MemoryBudget => PreparationBudgetRefusal::Memory.public_class(),
             Self::MetadataRead | Self::WeightsRead => "content_unavailable",
-            Self::MetadataWrite | Self::MetadataSync | Self::WeightsWrite | Self::WeightsSync => {
-                "local_storage_unavailable"
-            }
+            Self::LocalStorage
+            | Self::MetadataWrite
+            | Self::MetadataSync
+            | Self::WeightsWrite
+            | Self::WeightsSync => "local_storage_unavailable",
             Self::MetadataIntegrity | Self::WeightsHeader | Self::WeightsIntegrity => {
                 "verification_failed"
             }
@@ -86,9 +97,83 @@ impl PreparationFailurePhase {
     fn keeps_stage(self) -> bool {
         matches!(
             self,
-            Self::MetadataRead | Self::WeightsRead | Self::Capacity
+            Self::MetadataRead
+                | Self::WeightsRead
+                | Self::Capacity
+                | Self::Interrupted
+                | Self::StorageService
+                | Self::CacheBudget
+                | Self::MemoryBudget
         )
     }
+}
+
+/// Runtime-owned budget facts contain no provider text or private paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::api) enum PreparationBudgetRefusal {
+    Cache,
+    Memory,
+}
+
+impl PreparationBudgetRefusal {
+    pub(in crate::api) fn public_class(self) -> &'static str {
+        match self {
+            Self::Cache => "cache_budget_unavailable",
+            Self::Memory => "memory_budget_unavailable",
+        }
+    }
+
+    pub(in crate::api) fn public_message(self) -> &'static str {
+        match self {
+            Self::Cache => "This model does not fit the local cache budget. Remove an unneeded model, choose a smaller model, or increase the budget, then Retry.",
+            Self::Memory => "This model exceeds the local model memory budget. Choose a smaller model or increase the budget, then Retry.",
+        }
+    }
+}
+
+impl std::fmt::Display for PreparationBudgetRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.public_class())
+    }
+}
+
+impl std::error::Error for PreparationBudgetRefusal {}
+
+fn failure_phase(error: &anyhow::Error) -> PreparationFailurePhase {
+    if error.is::<PreparationStopped>() {
+        return PreparationFailurePhase::Interrupted;
+    }
+    if let Some(budget) = error.downcast_ref::<PreparationBudgetRefusal>() {
+        return match budget {
+            PreparationBudgetRefusal::Cache => PreparationFailurePhase::CacheBudget,
+            PreparationBudgetRefusal::Memory => PreparationFailurePhase::MemoryBudget,
+        };
+    }
+    if error.is::<elastos_common::NotEnoughFreeSpace>() {
+        return PreparationFailurePhase::Capacity;
+    }
+    error
+        .downcast_ref::<PreparationFailurePhase>()
+        .copied()
+        .unwrap_or(PreparationFailurePhase::Preparation)
+}
+
+fn backend_capacity_error(error: elastos_runtime::provider::ProviderError) -> anyhow::Error {
+    match error {
+        elastos_runtime::provider::ProviderError::NotEnoughFreeSpace(space) => {
+            anyhow::Error::new(space).context(PreparationFailurePhase::Capacity)
+        }
+        error => anyhow::Error::new(error).context(PreparationFailurePhase::StorageService),
+    }
+}
+
+fn runtime_capacity_error(error: anyhow::Error) -> anyhow::Error {
+    let phase = if error.is::<elastos_common::NotEnoughFreeSpace>() {
+        PreparationFailurePhase::Capacity
+    } else {
+        PreparationFailurePhase::LocalStorage
+    };
+    error.context(phase)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -632,7 +717,7 @@ fn reserve_at(
     .context("model memory overflow")?;
     ensure!(
         memory_bytes <= grant.max_model_memory_bytes,
-        "model exceeds local memory budget"
+        PreparationBudgetRefusal::Memory
     );
     ensure!(
         entry.size_bytes <= MAX_PACKAGE_BYTES - 65536,
@@ -641,7 +726,7 @@ fn reserve_at(
     let full_charge = preparation_charge(entry.size_bytes)?;
     ensure!(
         full_charge <= grant.max_cache_bytes,
-        "model exceeds local cache budget"
+        PreparationBudgetRefusal::Cache
     );
     let inventory = Inventory::open(data_dir, true)?;
     let mut state = inventory.load()?;
@@ -711,8 +796,8 @@ fn reserve_at(
                     .context("preparation byte accounting overflow")
             })?;
     let unwritten = unwritten_charge(&inventory, &state, initial_charge)?;
-    let capacity_pending =
-        reserved_bytes > grant.max_cache_bytes || !inventory.space_fits(unwritten)?;
+    let cache_pending = reserved_bytes > grant.max_cache_bytes;
+    let capacity_pending = cache_pending || !inventory.space_fits(unwritten)?;
     // Existing admissions already occupy disk. Charge only this new reservation
     // again against observed free space, while quota above counts every artifact.
     // A refusal names this model's whole unwritten size, not the zero-byte probe.
@@ -746,7 +831,11 @@ fn reserve_at(
         cancel_requested: false,
         admission_id: String::new(),
         activation: None,
-        failure_phase: None,
+        failure_phase: if cache_pending {
+            Some(PreparationFailurePhase::CacheBudget)
+        } else {
+            None
+        },
         settled_at: None,
         created_at: now,
         expires_at: now
@@ -1165,14 +1254,31 @@ impl PreparationOwner {
                     0
                 };
                 let unwritten = unwritten_charge(&inventory, &snapshot, charge)?;
+                let cache_pending = !cache_budget_fits(data_dir, &snapshot, charge)?;
                 capacity_pending = snapshot.retirement.is_some()
-                    || !cache_budget_fits(data_dir, &snapshot, charge)?
+                    || cache_pending
                     || !inventory.space_fits(unwritten)?;
+                let cause = cache_pending.then_some(PreparationFailurePhase::CacheBudget);
+                if pending.failure_phase != cause {
+                    snapshot
+                        .records
+                        .iter_mut()
+                        .find(|r| r.operation_id == record.operation_id)
+                        .unwrap()
+                        .failure_phase = cause;
+                    inventory.save(&snapshot)?;
+                }
                 if capacity_pending {
                     if snapshot.retirement.is_none()
                         && retirement_candidate(data_dir, &snapshot)?.is_none()
                     {
-                        return Ok(project(pending));
+                        return Ok(project(
+                            snapshot
+                                .records
+                                .iter()
+                                .find(|r| r.operation_id == record.operation_id)
+                                .unwrap(),
+                        ));
                     }
                 } else {
                     // Pending intent acquires its full charge only under the existing
@@ -1185,6 +1291,7 @@ impl PreparationOwner {
                         .context("preparation disappeared")?;
                     pending.state = PreparationState::Reserved;
                     pending.reserved_bytes = charge;
+                    pending.failure_phase = None;
                 }
             }
         }
@@ -1257,12 +1364,20 @@ impl PreparationOwner {
                 reconcile(&data, &registry, &operation, &stopping, &revalidate).await
             };
             if let Err(error) = result {
-                let phase = error
-                    .downcast_ref::<PreparationFailurePhase>()
-                    .copied()
-                    .unwrap_or(PreparationFailurePhase::Preparation);
+                let phase = failure_phase(&error);
                 let recorded = update_operation(&data, &operation, |record| {
-                    record.failure_phase.get_or_insert(phase);
+                    if matches!(
+                        phase,
+                        PreparationFailurePhase::Interrupted
+                            | PreparationFailurePhase::CacheBudget
+                            | PreparationFailurePhase::MemoryBudget
+                            | PreparationFailurePhase::Capacity
+                            | PreparationFailurePhase::StorageService
+                    ) {
+                        record.failure_phase = Some(phase);
+                    } else {
+                        record.failure_phase.get_or_insert(phase);
+                    }
                 })
                 .is_ok();
                 // The serialized local barrier is required even after transport
@@ -1289,6 +1404,7 @@ impl PreparationOwner {
                             ProviderError::NoProvider(_) => "NoProvider",
                             ProviderError::Unavailable(_) => "Unavailable",
                             ProviderError::Io(_) => "Io",
+                            ProviderError::NotEnoughFreeSpace(_) => "NotEnoughFreeSpace",
                         });
                 tracing::warn!(operation_id = %operation, ?phase, ?provider_error_kind,
                     io_error_kind = ?error.downcast_ref::<std::io::Error>().map(std::io::Error::kind),
@@ -1308,7 +1424,16 @@ impl PreparationOwner {
             {
                 let _ = update_operation(&data, &operation, |record| {
                     if record.state == PreparationState::Admitted && record.activation_pending {
-                        record.failure_phase = Some(PreparationFailurePhase::Activation);
+                        record.failure_phase =
+                            Some(match error.downcast_ref::<PreparationBudgetRefusal>() {
+                                Some(PreparationBudgetRefusal::Cache) => {
+                                    PreparationFailurePhase::CacheBudget
+                                }
+                                Some(PreparationBudgetRefusal::Memory) => {
+                                    PreparationFailurePhase::MemoryBudget
+                                }
+                                None => PreparationFailurePhase::Activation,
+                            });
                     }
                 });
                 tracing::debug!(?error, "private model activation pending");
@@ -1433,7 +1558,7 @@ fn set_activation_pending(data_dir: &Path, operation: &str, pending: bool) -> an
 fn require_cache_budget(data_dir: &Path, state: &PreparationInventory) -> anyhow::Result<()> {
     ensure!(
         cache_budget_fits(data_dir, state, 0)?,
-        "cache budget unavailable"
+        PreparationBudgetRefusal::Cache
     );
     Ok(())
 }
@@ -1796,10 +1921,7 @@ async fn prepare_capacity(
 ) -> anyhow::Result<bool> {
     for _ in 0..=MAX_RECORDS {
         revalidate()?;
-        ensure!(
-            !stopping.load(Ordering::Acquire),
-            "model preparation stopped"
-        );
+        ensure!(!stopping.load(Ordering::Acquire), PreparationStopped);
         let live = registry.local_model_offers().await?;
         let retirement = {
             let inventory = Inventory::open(data_dir, false)?;
@@ -1828,7 +1950,18 @@ async fn prepare_capacity(
                 } else {
                     0
                 };
-                if cache_budget_fits(data_dir, &state, charge)?
+                let cache_pending = !cache_budget_fits(data_dir, &state, charge)?;
+                let cause = cache_pending.then_some(PreparationFailurePhase::CacheBudget);
+                if record.failure_phase != cause {
+                    state
+                        .records
+                        .iter_mut()
+                        .find(|r| r.operation_id == operation)
+                        .unwrap()
+                        .failure_phase = cause;
+                    inventory.save(&state)?;
+                }
+                if !cache_pending
                     && inventory.space_fits(unwritten_charge(&inventory, &state, charge)?)?
                 {
                     let record = state
@@ -1838,6 +1971,7 @@ async fn prepare_capacity(
                         .unwrap();
                     record.state = PreparationState::Preparing;
                     record.reserved_bytes = charge;
+                    record.failure_phase = None;
                     if charge > 0 {
                         // As at a normal start: this preparation takes the kept
                         // stage over and its reservation covers those bytes.
@@ -1931,10 +2065,16 @@ fn current_entry(
         .as_ref()
         .context("model metadata unavailable")?;
     ensure!(
-        entry.size_bytes == record.total_bytes
-            && preparation_charge(entry.size_bytes)? <= grant.max_cache_bytes
-            && u64::from(model.minimum_memory_mb) * 1024 * 1024 <= grant.max_model_memory_bytes,
+        entry.size_bytes == record.total_bytes,
         "model policy changed"
+    );
+    ensure!(
+        preparation_charge(entry.size_bytes)? <= grant.max_cache_bytes,
+        PreparationBudgetRefusal::Cache
+    );
+    ensure!(
+        u64::from(model.minimum_memory_mb) * 1024 * 1024 <= grant.max_model_memory_bytes,
+        PreparationBudgetRefusal::Memory
     );
     // Only a model the current trusted catalogue still offers under the same
     // package CID and grant reports a catalogue update; revocation, removal and
@@ -2042,7 +2182,10 @@ async fn require_capacity(
         record.completed_bytes,
         record.index_bytes,
     )?;
-    let observed = registry.check_local_ipfs_capacity(backend).await?;
+    let observed = registry
+        .check_local_ipfs_capacity(backend)
+        .await
+        .map_err(backend_capacity_error)?;
     require_runtime_capacity(data_dir, record, observed.volume_id)?;
     Ok(observed.volume_id)
 }
@@ -2061,9 +2204,12 @@ async fn require_recovery_capacity(
     )?;
     let observed = registry
         .check_local_ipfs_capacity(outstanding_stage.max(1))
-        .await?;
+        .await
+        .map_err(backend_capacity_error)?;
     require_cache_budget(data_dir, &Inventory::open(data_dir, false)?.load()?)?;
-    Inventory::open(data_dir, false)?.require_space(outstanding_stage)?;
+    Inventory::open(data_dir, false)?
+        .require_space(outstanding_stage)
+        .map_err(runtime_capacity_error)?;
     Ok(observed.volume_id)
 }
 
@@ -2090,7 +2236,9 @@ fn require_runtime_capacity(
     let inventory = Inventory::open(data_dir, false)?;
     require_cache_budget(data_dir, &inventory.load()?)?;
     let required = runtime_capacity_charge(record, inventory.volume()? == backend_volume)?;
-    inventory.require_space(required)
+    inventory
+        .require_space(required)
+        .map_err(runtime_capacity_error)
 }
 
 // A bounded model read is not an effect. While reads are in flight, cancel ends
@@ -2109,7 +2257,7 @@ async fn unless_cancelled<T>(
             result = &mut read => return result,
             _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
                 if load_operation(data_dir, id)?.cancel_requested {
-                    anyhow::bail!("preparation stopped");
+                    return Err(PreparationStopped.into());
                 }
             }
         }
@@ -2222,14 +2370,11 @@ async fn check_part(
         let mut record = require_active(data_dir, id, stop, revalidate)?;
         record.completed_bytes = delivered;
         if backend_check {
-            let volume = require_capacity(data_dir, registry, &record)
-                .await
-                .context(PreparationFailurePhase::Capacity)?;
+            let volume = require_capacity(data_dir, registry, &record).await?;
             require_active(data_dir, id, stop, revalidate)?;
             anyhow::Ok(Some(volume))
         } else {
-            require_runtime_capacity(data_dir, &record, checks.backend_volume)
-                .context(PreparationFailurePhase::Capacity)?;
+            require_runtime_capacity(data_dir, &record, checks.backend_volume)?;
             Ok(None)
         }
     }
@@ -2242,12 +2387,7 @@ async fn check_part(
             Ok(())
         }
         Err(error) => {
-            checks.refused = Some(
-                error
-                    .downcast_ref::<PreparationFailurePhase>()
-                    .copied()
-                    .unwrap_or(PreparationFailurePhase::Preparation),
-            );
+            checks.refused = Some(failure_phase(&error));
             Err(error)
         }
     }
@@ -2290,7 +2430,7 @@ async fn prepare(
         tracing::warn!(target: "elastos::model_index_read", stage = "ipfs_prepare",
             "model index read substage failed");
     }
-    backend.context(PreparationFailurePhase::MetadataRead)?;
+    backend.context(PreparationFailurePhase::StorageService)?;
     require_active(data_dir, id, stop, revalidate)?;
     let entry = current_entry(data_dir, &record)?;
     let closure = crate::content::parse_content_object_manifest(
@@ -2316,9 +2456,7 @@ async fn prepare(
     // package. Progress and capacity then start from the bytes on disk.
     let resumed = resume_kept_stage(data_dir, id, &entry, &closure, stop, revalidate).await?;
     let record = require_active(data_dir, id, stop, revalidate)?;
-    let backend_volume = require_capacity(data_dir, registry, &record)
-        .await
-        .context(PreparationFailurePhase::Capacity)?;
+    let backend_volume = require_capacity(data_dir, registry, &record).await?;
     require_active(data_dir, id, stop, revalidate)?;
     // One route per package: after a local miss, later parts skip the local backend.
     let reads = crate::content::ModelPartReads::default();
@@ -2675,7 +2813,10 @@ async fn reconcile(
     // Status/cancel never restart a transfer. Expiry bounds the network
     // attempt. A complete unrenamed stage is hashed in place after current
     // caller, catalog, and capacity checks, without rewriting the deadline.
-    registry.prepare_local_ipfs_backend().await?;
+    registry
+        .prepare_local_ipfs_backend()
+        .await
+        .context(PreparationFailurePhase::StorageService)?;
     let record = load_operation(data_dir, id)?;
     let renamed = record.admission_id == id
         && match Inventory::open(data_dir, false)?.admitted(id) {
@@ -2700,6 +2841,9 @@ async fn reconcile(
         )
         .await
     } else if record.cancel_requested {
+        update_operation(data_dir, id, |record| {
+            record.failure_phase = Some(PreparationFailurePhase::Interrupted)
+        })?;
         settle_failure(data_dir, id, true, false)
     } else if let Some(closure) = complete_unrenamed_stage(data_dir, &record)? {
         finish_admission(
@@ -2714,6 +2858,9 @@ async fn reconcile(
         .await
     } else {
         // An interrupted transfer keeps its stage for the next Use.
+        update_operation(data_dir, id, |record| {
+            record.failure_phase = Some(PreparationFailurePhase::Interrupted)
+        })?;
         settle_failure(data_dir, id, true, true)
     }
 }
@@ -2815,8 +2962,7 @@ async fn finish_admission(
         AdmissionGate::RecoverComplete | AdmissionGate::RecoverRenamed => {
             require_recovery_capacity(data_dir, registry, &record).await
         }
-    }
-    .context(PreparationFailurePhase::Capacity)?;
+    }?;
     require_admission(data_dir, id, stop, revalidate, gate)?;
     verify_package_identity(registry, &stage, &record, &entry, closure).await?;
     require_admission(data_dir, id, stop, revalidate, gate)?;
@@ -3219,6 +3365,10 @@ pub(in crate::api) async fn model_runtime_projection(
             })
         })()
         .map_err(|error| {
+            if let Some(budget) = error.downcast_ref::<PreparationBudgetRefusal>() {
+                projection["dispatch_unavailable_reason"] =
+                    serde_json::json!(budget.public_class());
+            }
             if let Some(reason) =
                 error.downcast_ref::<crate::setup::LocalModelExecutionUnavailable>()
             {
@@ -3481,7 +3631,14 @@ pub async fn complete_admitted_model_startup(
             && ready.contains(&record.admission_id)
         {
             record.activation_pending = false;
-            if record.failure_phase == Some(PreparationFailurePhase::Activation) {
+            if matches!(
+                record.failure_phase,
+                Some(
+                    PreparationFailurePhase::Activation
+                        | PreparationFailurePhase::CacheBudget
+                        | PreparationFailurePhase::MemoryBudget
+                )
+            ) {
                 record.failure_phase = None;
             }
             changed = true;
@@ -3743,6 +3900,70 @@ mod tests {
         std::fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
     }
 
+    #[test]
+    fn model_preparation_budget_causes_refuse_before_effects_and_recover() {
+        let (root, cid) = fixture();
+        for (field, budget) in [
+            ("max_model_memory_bytes", PreparationBudgetRefusal::Memory),
+            ("max_cache_bytes", PreparationBudgetRefusal::Cache),
+        ] {
+            let path = root.path().join("components.json");
+            let original = std::fs::read(&path).unwrap();
+            change_config(root.path(), |config| {
+                config["model_catalog"]["local_use"][field] = serde_json::json!(1)
+            });
+            let error = reserve(
+                root.path(),
+                &caller(&context(), &method("use")),
+                "known-budget",
+                &cid,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<PreparationBudgetRefusal>(),
+                Some(&budget)
+            );
+            assert!(
+                !root.path().join("model-preparation").exists(),
+                "a refused Get has no reservation or stage"
+            );
+            std::fs::write(&path, original).unwrap();
+        }
+        let record = reserve(
+            root.path(),
+            &caller(&context(), &method("use")),
+            "known-budget",
+            &cid,
+        )
+        .unwrap();
+        let saved = std::fs::read(root.path().join("model-preparation/state.json")).unwrap();
+        for (field, budget) in [
+            ("max_model_memory_bytes", PreparationBudgetRefusal::Memory),
+            ("max_cache_bytes", PreparationBudgetRefusal::Cache),
+        ] {
+            let path = root.path().join("components.json");
+            let original = std::fs::read(&path).unwrap();
+            change_config(root.path(), |config| {
+                config["model_catalog"]["local_use"][field] = serde_json::json!(1)
+            });
+            let error = current_entry(root.path(), &record).err().unwrap();
+            assert_eq!(
+                error.downcast_ref::<PreparationBudgetRefusal>(),
+                Some(&budget)
+            );
+            assert_eq!(
+                failure_phase(&error.context(PreparationFailurePhase::Policy)).public_class(),
+                budget.public_class()
+            );
+            assert_eq!(
+                std::fs::read(root.path().join("model-preparation/state.json")).unwrap(),
+                saved
+            );
+            std::fs::write(&path, original).unwrap();
+            assert!(current_entry(root.path(), &record).is_ok());
+        }
+    }
+
     fn caller<'a>(
         context: &'a HomeLaunchTokenContext,
         method: &'a CapsuleAffordanceDescriptor,
@@ -3766,6 +3987,7 @@ mod tests {
             std::collections::BTreeMap<String, std::collections::BTreeMap<String, Vec<u8>>>,
         calls: Mutex<Vec<String>>,
         capacity_requests: Mutex<Vec<u64>>,
+        capacity_available: Mutex<Option<u64>>,
         capacity_volume: u64,
         fail_capacity_at: Option<usize>,
         read_sizes: Mutex<Vec<usize>>,
@@ -3909,10 +4131,15 @@ mod tests {
                         ));
                     }
                     Ok(serde_json::json!({"status":"ok","data":{
-                        "volume_id":self.capacity_volume,"capacity_bytes":1_u64 << 40,"available_bytes":1_u64 << 39,"required_bytes":request["required_bytes"]
+                        "volume_id":self.capacity_volume,"capacity_bytes":1_u64 << 40,"available_bytes":self.capacity_available.lock().unwrap().unwrap_or(1_u64 << 39),"required_bytes":request["required_bytes"]
                     }}))
                 }
                 "runtime_prepare_backend" => {
+                    if *self.read_fault.lock().unwrap() == Some("storage_service_unavailable") {
+                        return Err(elastos_runtime::provider::ProviderError::Provider(
+                            "private stopped storage /secret credential".into(),
+                        ));
+                    }
                     if self.hold_drain.swap(false, Ordering::AcqRel) {
                         self.entered.notify_one();
                         self.release.notified().await;
@@ -4059,6 +4286,63 @@ mod tests {
     ) {
         let (payload, files) = package_fixture(b"GGUF\x03\0\0\0fixture".to_vec());
         staged_package_fixture(created_at, renamed, payload, files).await
+    }
+
+    #[tokio::test]
+    async fn model_readiness_budget_causes_preserve_admitted_content() {
+        let (root, record, backend, _) = staged_fixture(now().unwrap(), true).await;
+        update_operation(root.path(), &record.operation_id, |record| {
+            record.state = PreparationState::Admitted
+        })
+        .unwrap();
+        let path = root.path().join("components.json");
+        let config = std::fs::read(&path).unwrap();
+        let inventory = root.path().join("model-preparation/state.json");
+        let saved = std::fs::read(&inventory).unwrap();
+        let weights = std::fs::read(root.path().join(format!(
+            "model-preparation/admitted-{}/weights.gguf",
+            record.admission_id
+        )))
+        .unwrap();
+        for (field, budget) in [
+            ("max_model_memory_bytes", PreparationBudgetRefusal::Memory),
+            ("max_cache_bytes", PreparationBudgetRefusal::Cache),
+        ] {
+            change_config(root.path(), |config| {
+                config["model_catalog"]["local_use"][field] = serde_json::json!(1)
+            });
+            let projection =
+                model_runtime_projection(root.path(), None, &context(), &record.package_cid, None)
+                    .await;
+            assert_eq!(projection["admitted"], true);
+            assert_eq!(projection["kept"], true);
+            assert_eq!(projection["dispatch_ready"], false);
+            assert_eq!(
+                projection["dispatch_unavailable_reason"],
+                budget.public_class()
+            );
+            assert_eq!(std::fs::read(&inventory).unwrap(), saved);
+            assert_eq!(
+                std::fs::read(root.path().join(format!(
+                    "model-preparation/admitted-{}/weights.gguf",
+                    record.admission_id
+                )))
+                .unwrap(),
+                weights
+            );
+            assert!(
+                backend.calls.lock().unwrap().is_empty(),
+                "readiness refuses before engine or content effects"
+            );
+            std::fs::write(&path, &config).unwrap();
+            let restored =
+                model_runtime_projection(root.path(), None, &context(), &record.package_cid, None)
+                    .await;
+            assert_ne!(
+                restored["dispatch_unavailable_reason"],
+                budget.public_class()
+            );
+        }
     }
 
     async fn staged_package_fixture(
@@ -8189,6 +8473,7 @@ server.serve_forever()
                 extra_packages: std::collections::BTreeMap::new(),
                 calls: Mutex::new(vec![]),
                 capacity_requests: Mutex::new(vec![]),
+                capacity_available: Mutex::new(None),
                 capacity_volume: 7,
                 fail_capacity_at: None,
                 read_sizes: Mutex::new(vec![]),
@@ -8319,6 +8604,7 @@ server.serve_forever()
             )
             .unwrap();
         assert_eq!(pending["state"], "capacity_pending");
+        assert_eq!(pending["failure_class"], "cache_budget_unavailable");
         assert!(owner.worker.lock().unwrap().is_none());
         let pending_bytes = std::fs::read(&state_path).unwrap();
 
@@ -8587,6 +8873,11 @@ server.serve_forever()
             ),
             ("header", PreparationFailurePhase::WeightsHeader, false),
             (
+                "storage_service_unavailable",
+                PreparationFailurePhase::StorageService,
+                false,
+            ),
+            (
                 "authority_revoked",
                 PreparationFailurePhase::Authority,
                 false,
@@ -8663,7 +8954,7 @@ server.serve_forever()
             let output = owner
                 .invoke(
                     root.path(),
-                    Some(registry),
+                    Some(registry.clone()),
                     caller(&context, &method("use")),
                     "failure-phase",
                     &serde_json::json!({"cid":cid}),
@@ -8673,7 +8964,10 @@ server.serve_forever()
             join_worker(&owner).await;
             let record =
                 load_operation(root.path(), output["operation_id"].as_str().unwrap()).unwrap();
-            let undrained = fault == "file_unavailable_undrained";
+            let undrained = matches!(
+                fault,
+                "file_unavailable_undrained" | "storage_service_unavailable"
+            );
             assert_eq!(
                 record.state,
                 if undrained {
@@ -8684,7 +8978,15 @@ server.serve_forever()
                 "{fault}"
             );
             assert_eq!(record.failure_phase, Some(phase), "{fault}");
-            assert_eq!(record.completed_bytes, metadata_bytes, "{fault}");
+            assert_eq!(
+                record.completed_bytes,
+                if fault == "storage_service_unavailable" {
+                    0
+                } else {
+                    metadata_bytes
+                },
+                "{fault}"
+            );
             assert_eq!(
                 record.reserved_bytes,
                 if undrained {
@@ -8719,6 +9021,46 @@ server.serve_forever()
             old.as_object_mut().unwrap().remove("failure_phase");
             let old: PreparationRecord = serde_json::from_value(old).unwrap();
             assert_eq!(old.projection()["failure_class"], serde_json::Value::Null);
+            if fault == "storage_service_unavailable" {
+                *backend.read_fault.lock().unwrap() = None;
+                owner
+                    .invoke(
+                        root.path(),
+                        Some(registry.clone()),
+                        caller(&context, &method("status")),
+                        "storage-restored",
+                        &serde_json::json!({"operation_id":record.operation_id}),
+                        Arc::new(|| Ok(())),
+                    )
+                    .unwrap();
+                join_worker(&owner).await;
+                let reconciled = load_operation(root.path(), &record.operation_id).unwrap();
+                assert_eq!(reconciled.state, PreparationState::Failed);
+                assert_eq!(reconciled.reserved_bytes, 0);
+                assert_eq!(
+                    reconciled.failure_phase,
+                    Some(PreparationFailurePhase::Interrupted)
+                );
+                let retry = owner
+                    .invoke(
+                        root.path(),
+                        Some(registry.clone()),
+                        caller(&context, &method("use")),
+                        "retry-storage-restored",
+                        &serde_json::json!({"cid":cid}),
+                        Arc::new(|| Ok(())),
+                    )
+                    .unwrap();
+                join_worker(&owner).await;
+                let recovered =
+                    load_operation(root.path(), retry["operation_id"].as_str().unwrap()).unwrap();
+                assert_eq!(recovered.state, PreparationState::Admitted);
+                assert!(Inventory::open(root.path(), false)
+                    .unwrap()
+                    .load()
+                    .unwrap()
+                    .kept(&context.principal_id, &cid));
+            }
         }
     }
 
@@ -8838,7 +9180,7 @@ server.serve_forever()
         assert_eq!(record.state, PreparationState::Cancelled);
         assert_eq!(
             record.failure_phase,
-            Some(PreparationFailurePhase::WeightsRead)
+            Some(PreparationFailurePhase::Interrupted)
         );
         assert_eq!(record.completed_bytes, before.completed_bytes);
         assert_eq!(record.reserved_bytes, 0);
@@ -11615,7 +11957,7 @@ server.serve_forever()
         assert_eq!(record.state, PreparationState::Failed, "{record:?}");
         assert_eq!(
             record.failure_phase,
-            Some(PreparationFailurePhase::Capacity)
+            Some(PreparationFailurePhase::StorageService)
         );
         assert_eq!(fixture.reads_at(stalled), 1, "no repeat after the refusal");
         fixture.shutdown().await;
@@ -11803,6 +12145,10 @@ server.serve_forever()
         join_worker(&owner).await;
         let settled = load_operation(fixture.root.path(), &id).unwrap();
         assert_eq!(settled.state, PreparationState::Failed, "{settled:?}");
+        assert_eq!(
+            settled.projection()["failure_class"],
+            "download_interrupted"
+        );
         assert_eq!(fixture.kept_stage(), Some(id));
         let parts = fixture.part_reads();
         let (record, _) = fixture.prepare("after-restart-use").await;
@@ -13225,6 +13571,40 @@ server.serve_forever()
             *backend.capacity_requests.lock().unwrap(),
             vec![full_backend - delivered]
         );
+        assert_eq!(
+            load_operation(root.path(), &record.operation_id)
+                .unwrap()
+                .reserved_bytes,
+            record.reserved_bytes
+        );
+    }
+
+    #[tokio::test]
+    async fn model_preparation_capacity_owner_distinguishes_space_and_service() {
+        let (root, record, backend, registry) = capacity_window_fixture(false, None).await;
+        *backend.capacity_available.lock().unwrap() = Some(5);
+        let error = require_capacity(root.path(), &registry, &record)
+            .await
+            .unwrap_err();
+        assert_eq!(failure_phase(&error), PreparationFailurePhase::Capacity);
+        assert!(error.is::<elastos_common::NotEnoughFreeSpace>());
+        assert!(backend.read_sizes.lock().unwrap().is_empty());
+        assert!(!backend
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|op| op == "runtime_hash_staged_directory"));
+        let (root, record, backend, registry) = capacity_window_fixture(false, Some(1)).await;
+        let error = require_capacity(root.path(), &registry, &record)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            failure_phase(&error),
+            PreparationFailurePhase::StorageService
+        );
+        assert!(!error.is::<elastos_common::NotEnoughFreeSpace>());
+        assert!(backend.read_sizes.lock().unwrap().is_empty());
         assert_eq!(
             load_operation(root.path(), &record.operation_id)
                 .unwrap()

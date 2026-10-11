@@ -6,7 +6,11 @@
   const FAILURE_TEXT = Object.freeze({
     authorization_unavailable: "Preparation stopped. Open Models again to check access.",
     policy_unavailable: "Preparation stopped. Model policy is unavailable.",
-    capacity_unavailable: "Preparation stopped. Storage capacity is unavailable.",
+    capacity_unavailable: "Not enough free disk space for this model. Free some space, then Retry.",
+    download_interrupted: "The download stopped before it finished. Retry.",
+    storage_service_unavailable: "The storage service is unavailable. Retry when it is running.",
+    cache_budget_unavailable: "This model does not fit the local cache budget. Remove an unneeded model, choose a smaller model, or increase the budget, then Retry.",
+    memory_budget_unavailable: "This model exceeds the local model memory budget. Choose a smaller model or increase the budget, then Retry.",
     content_unavailable: "Preparation failed. Model content could not be read.",
     local_storage_unavailable: "Preparation failed. Local storage could not be written.",
     verification_failed: "Preparation failed. Model verification did not pass.",
@@ -18,6 +22,8 @@
     unsupported_host: "Local AI is not supported on this device.",
     source_engine_required: "This source Home needs its local model engine. Install the engine through source setup, then Retry.",
     catalog_updated: "Model list updated. Press Use to keep using this model.",
+    cache_budget_unavailable: FAILURE_TEXT.cache_budget_unavailable,
+    memory_budget_unavailable: FAILURE_TEXT.memory_budget_unavailable,
   });
   // One phase per Runtime projection. The full view (System) and the compact
   // Marketplace detail read their copy from the same phase.
@@ -100,7 +106,9 @@
     return `${(bytes / 1000 ** rank).toLocaleString(undefined, { maximumFractionDigits: rank ? 2 : 0 })} ${units[rank]}`;
   }
   // Waiting for space names how much this model still needs, so the user knows what to free.
-  const capacityText = p => `Waiting for free space. This model needs ${formatBytes(p.total_bytes - p.completed_bytes)} on this Home, plus 2 GB kept free. Free some space and it continues.`;
+  const capacityText = p => p.failure_class === "cache_budget_unavailable"
+    ? "Waiting for room in the local cache budget. Remove an unneeded model or increase the budget and it continues."
+    : `Waiting for free space. This model needs ${formatBytes(p.total_bytes - p.completed_bytes)} on this Home, plus 2 GB kept free. Free some space and it continues.`;
   function element(tag, value, className) {
     const node = document.createElement(tag);
     if (value) node.textContent = value;
@@ -136,17 +144,21 @@
         const response = await fetch(path, { method: body ? "POST" : "GET", headers: {
           "x-elastos-home-token": token, ...(body ? { "content-type": "application/json" } : {}),
         }, ...(body ? { body: JSON.stringify(body) } : {}), signal });
-        if (!response.ok) {
-          // A disk-space refusal is final and carries its plain reason; show it as is.
-          const refusal = await response.json().catch(() => null);
-          if (refusal?.code === "not_enough_free_space" && text(refusal.message, 300)) {
-            throw Object.assign(new Error(refusal.message), { refusal: refusal.message });
-          }
-          throw new Error("Model request failed");
-        }
         const raw = await response.text();
         check(raw.length <= 2 * 1024 * 1024);
-        return JSON.parse(raw);
+        const result = JSON.parse(raw);
+        if (!response.ok) {
+          // Only the exact invoked operation can return a final typed denial.
+          const bound = body && result?.schema === "elastos.capsules.invoke-result/v1" && result.status === "error"
+            && ["capsule", "interface", "method", "request_id"].every(key => result[key] === body[key]);
+          let denial = bound && ["cache_budget_unavailable", "memory_budget_unavailable"].includes(result.code)
+            ? FAILURE_TEXT[result.code] : "";
+          if (bound && result.code === "not_enough_free_space" && text(result.message, 300)
+            && /^Not enough free disk space on this Home: this needs \d+(?:\.\d)? GB plus 2 GB kept free\. Free some space, then select Get again\.$/.test(result.message)) denial = result.message;
+          if (denial) throw Object.assign(new Error(denial), { refusal: denial });
+          throw new Error("Model request failed");
+        }
+        return result;
       }
       async function invoke(operation, input, signal, requestId) {
         const method = methods.get(operation);
@@ -354,7 +366,9 @@
         if (!activating(r, p)) finishingOperation = "";
         else if (finishingOperation !== p.operation_id) { finishingOperation = p.operation_id; finishingSince = Date.now(); }
         const phase = phaseOf(r, p, message, Boolean(finishingOperation) && Date.now() - finishingSince >= FINISHING_DEADLINE_MS);
-        const label = phase === "failed" ? failureText(p) : phase === "capacity" ? capacityText(p) : phase === "service_unavailable" && r.dispatch_unavailable_reason
+        const label = (phase === "failed" || (["cancelled", "expired"].includes(phase) && p?.failure_class)) ? failureText(p)
+          : phase === "settling" && p?.failure_class === "storage_service_unavailable" ? "The storage service is unavailable. Waiting for preparation to settle."
+          : phase === "capacity" ? capacityText(p) : phase === "service_unavailable" && r.dispatch_unavailable_reason
           ? DISPATCH_UNAVAILABLE_TEXT[r.dispatch_unavailable_reason] : phase === "service_unavailable" && p?.failure_class
             ? failureText(p) : (compact ? COMPACT_PHASE_TEXT : PHASE_TEXT)[phase];
         row.append(element("p", label));

@@ -648,8 +648,17 @@ async fn dispatch_capsule_affordance(
     }
 }
 
-/// A disk-space refusal keeps its reason and size; other failures stay generic.
+/// Known Runtime refusal facts have bounded prose; provider details stay private.
 fn preparation_invoke_error(error: anyhow::Error) -> (StatusCode, &'static str, String) {
+    if let Some(budget) =
+        error.downcast_ref::<super::capsule_inventory::preparation::PreparationBudgetRefusal>()
+    {
+        return (
+            StatusCode::CONFLICT,
+            budget.public_class(),
+            budget.public_message().into(),
+        );
+    }
     if let Some(space) = error.downcast_ref::<elastos_common::NotEnoughFreeSpace>() {
         let reason = space.to_string();
         let reason = reason
@@ -862,6 +871,26 @@ mod tests {
         );
         let (_, code, _) = preparation_invoke_error(anyhow::anyhow!("other failure"));
         assert_eq!(code, "preparation_unavailable");
+    }
+
+    #[test]
+    fn model_get_budget_refusals_show_only_fixed_runtime_facts() {
+        use super::super::capsule_inventory::preparation::PreparationBudgetRefusal;
+        for budget in [
+            PreparationBudgetRefusal::Cache,
+            PreparationBudgetRefusal::Memory,
+        ] {
+            let error = anyhow::Error::new(budget).context("private provider /secret credential");
+            let (status, code, message) = preparation_invoke_error(error);
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(code, budget.public_class());
+            assert_eq!(message, budget.public_message());
+            assert!(!message.contains("/secret") && !message.contains("credential"));
+        }
+        let (_, code, message) =
+            preparation_invoke_error(anyhow::anyhow!("private provider /secret credential"));
+        assert_eq!(code, "preparation_unavailable");
+        assert_eq!(message, "Model preparation is unavailable.");
     }
 
     #[tokio::test]
