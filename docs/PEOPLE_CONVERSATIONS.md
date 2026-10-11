@@ -421,7 +421,8 @@ Scope:
   - device signature proves the sending endpoint;
   - the retained signed Profile document proves that device is currently
     authorized for the participant Profile DID.
-- Carrier connects the two Homes directly over encrypted Iroh QUIC/TLS.
+- Carrier connects the two Homes over encrypted Iroh QUIC/TLS under the
+  [release connection contract](COLLABORATION_NETWORK_PROFILE.md#availability).
   Runtime binds delivery to the accepted Profile's current authorized endpoint
   before admitting the message. The sender and recipient own Direct plaintext
   and authority; the Community bootstrap node supplies network discovery.

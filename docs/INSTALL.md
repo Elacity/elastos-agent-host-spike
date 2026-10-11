@@ -44,15 +44,15 @@ Setup and updates need outgoing UDP to port 4433 for Carrier.
 Carrier uses mDNS by default to find other Homes on the same local network.
 It announces the Carrier node ID and local addresses. People Discovery controls
 signed Profile advertisements separately. Runtime checks Profile and message
-authority before it accepts Chat messages. Chat uses an encrypted direct
+authority before it accepts Chat messages. Chat uses an encrypted Carrier
 connection.
 
 To turn mDNS off, set `ELASTOS_CARRIER_MDNS=0` in Runtime's environment before
-starting it. Restart Runtime after changing this setting. A Home then needs an
-address from another source, such as an explicit peer ticket. A saved contact
-identity alone does not give Runtime an address after a restart. See
+starting it. Restart Runtime after changing this setting. Keep mDNS on for
+automatic direct reconnection after a restart or local address change. Carrier
+owns peer address resolution. See
 [Community availability](COLLABORATION_NETWORK_PROFILE.md#availability) for
-the bootstrap and direct connection limits.
+the bootstrap and connection contract.
 
 The installer detects the platform (Linux `x86_64`/`aarch64` or
 macOS Apple silicon), verifies the signed release, installs Runtime, and
