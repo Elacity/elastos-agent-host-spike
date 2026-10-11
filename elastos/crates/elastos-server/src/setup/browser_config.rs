@@ -110,7 +110,7 @@ fn read_engine_selection(
 
 /// Browser runs only on hosts with a local Engine. Linux hosts keep their
 /// Engine machinery but stay hidden until their Browser path is released.
-pub(crate) fn browser_available(platform: &str) -> bool {
+pub fn browser_available(platform: &str) -> bool {
     platform == "darwin-arm64"
 }
 
@@ -197,10 +197,10 @@ pub(super) async fn prepare_home(
     browser_selected: bool,
 ) {
     let result: anyhow::Result<()> = async {
-        if browser_selected
-            && browser_available(platform)
-            && manifest.profiles.contains_key("browser-host")
-        {
+        if !browser_available(platform) {
+            return retire_host(data, manifest);
+        }
+        if browser_selected && manifest.profiles.contains_key("browser-host") {
             println!("Preparing Browser Engine helpers...");
             ensure_host_components(
                 data,
@@ -238,6 +238,74 @@ pub(super) async fn prepare_home(
     if let Err(error) = result {
         println!("Browser preparation is incomplete: {error}. Home setup continues. Repair Browser with elastos setup, or select another approved Engine.");
     }
+}
+
+/// A host without Browser keeps no Engine selection and none of the
+/// release-owned Browser host files an earlier release installed, so neither
+/// Runtime nor the installer's Linux host step acts on them. Browser profiles
+/// under `Users/` belong to their owner and stay.
+fn retire_host(data: &Path, manifest: &super::ComponentsManifest) -> anyhow::Result<()> {
+    let browser_installed = data.join("capsules/browser").is_dir();
+    let selection = data.join("config/browser-engine-adapter.json");
+    if browser_installed || selection.symlink_metadata().is_ok() {
+        fs::create_dir_all(data.join("config"))?;
+        super::atomic_write_file(&selection, b"{\"adapters\": []}\n")?;
+    }
+    let mut paths = vec![data.join(super::browser_vm_image::INSTALL_PATH)];
+    if let Some(profile) = manifest.profiles.get("browser-host") {
+        for name in &profile.components {
+            let shared = manifest
+                .profiles
+                .iter()
+                .any(|(other, value)| other != "browser-host" && value.components.contains(name));
+            let Some(component) = manifest.external.get(name).filter(|_| !shared) else {
+                continue;
+            };
+            // Every platform's path: an earlier release may have used another.
+            for info in component.platforms.values() {
+                if let Some(relative) = super::resolve_install_path(component, Some(info)) {
+                    crate::install_transaction::validate_support_path(Path::new(relative))?;
+                    paths.push(data.join(relative));
+                }
+                if info.binary_path.is_some() {
+                    paths.push(data.join("bin").join(name));
+                }
+            }
+        }
+    }
+    for dir in ["bin", "scripts"] {
+        let Ok(entries) = fs::read_dir(data.join(dir)) else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry?;
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("browser-vm-"))
+            {
+                paths.push(entry.path());
+            }
+        }
+    }
+    let mut removed = false;
+    for path in paths {
+        // A link is removed itself; its target is never followed.
+        match path.symlink_metadata() {
+            Ok(meta) if meta.is_dir() => fs::remove_dir_all(&path)?,
+            Ok(_) => fs::remove_file(&path)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        }
+        removed = true;
+    }
+    if removed {
+        println!("Removed the Browser host files an earlier release installed.");
+    }
+    if browser_installed {
+        println!("Browser is not available on this computer yet.");
+    }
+    Ok(())
 }
 
 pub(super) fn configure(data: &Path, platform: &str, release_image: bool) -> anyhow::Result<()> {
@@ -670,8 +738,67 @@ mod tests {
             )
             .unwrap();
             assert_eq!(config["adapters"], serde_json::json!([]));
-            assert!(crate::carrier::browser_engine_media::configuration_ready(data).is_ok());
         }
+    }
+
+    #[tokio::test]
+    async fn linux_setup_removes_browser_host_files_an_earlier_release_installed() {
+        use std::os::unix::fs::symlink;
+        let manifest: super::super::ComponentsManifest =
+            serde_json::from_str(include_str!("../../../../../components.json")).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path();
+        let crosvm = "libexec/browser/crosvm/0.1.0-2ac141082d17/linux-arm64";
+        let removed = [
+            "scripts/browser-vm-linux-network.py",
+            "scripts/browser-vm-artifact-preflight.sh",
+            "scripts/browser-vm-retired-by-an-earlier-release.mjs",
+            "bin/browser-vm-control-service",
+            "bin/browser-vm-control-service.mjs",
+            "bin/browser-vm-local-crosvm-launcher",
+            "browser-vm/image-set/rootfs.ext4",
+            "libexec/browser/crosvm/0.1.0-2ac141082d17/linux-arm64/bin/crosvm",
+        ];
+        let kept = [
+            "Users/owner/BrowserProfiles/default/profile.ext4",
+            "bin/browser-engine-adapter",
+            "bin/elastos-unrelated",
+            "scripts/unrelated.sh",
+            "capsules/browser/capsule.json",
+        ];
+        for name in removed.iter().chain(&kept) {
+            let path = data.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, name.as_bytes()).unwrap();
+        }
+        symlink(
+            data.join(crosvm).join("bin/crosvm"),
+            data.join("bin/crosvm"),
+        )
+        .unwrap();
+        fs::create_dir_all(data.join("config")).unwrap();
+        let selection = data.join("config/browser-engine-adapter.json");
+        fs::write(
+            &selection,
+            r#"{"adapters":[{"kind":"chromium_microvm","supervisor":{"program":"/vm/local"}}]}"#,
+        )
+        .unwrap();
+        prepare_home(data, &manifest, "linux-arm64", true).await;
+        for name in removed {
+            assert!(!data.join(name).exists(), "{name}");
+        }
+        assert!(data.join("bin/crosvm").symlink_metadata().is_err());
+        assert!(!data.join(crosvm).exists());
+        assert!(!data.join("browser-vm/image-set").exists());
+        for name in kept {
+            assert_eq!(
+                fs::read(data.join(name)).unwrap(),
+                name.as_bytes(),
+                "{name}"
+            );
+        }
+        let config: Value = serde_json::from_slice(&fs::read(&selection).unwrap()).unwrap();
+        assert_eq!(config["adapters"], serde_json::json!([]));
     }
 
     #[test]

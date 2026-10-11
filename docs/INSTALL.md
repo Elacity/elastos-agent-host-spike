@@ -157,7 +157,10 @@ the image during reopen and updates.
 
 On other computers, including Linux ARM64 (Jetson) and Linux x86-64, Browser is
 hidden until the next release; setup prints "Browser is not available on this
-computer yet." and the installer asks for no administrator step. If an earlier
+computer yet." Setup also clears the Browser Engine selection and removes the
+Browser host helpers and image an earlier release installed (Browser profiles
+stay). The installer runs its Linux host step only after setup and only if the
+helper is still present, so it asks for no administrator step. If an earlier
 release set up Browser host access on Linux, it can be removed with:
 
 ```sh

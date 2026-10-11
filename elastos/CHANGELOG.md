@@ -462,9 +462,11 @@ Test-channel release. Signed releases show these notes in System before you upda
   copy (#307).
 - Linux Browser support (per-Home TURN credential in the owner-only
   `runtime-turn/turn-credentials.env`, crosvm launcher, network setup) stays in
-  the code, but setup selects Browser only on `darwin-arm64`: on Linux it
-  installs neither the Browser host helpers nor the image, so the installer
-  never asks for the Linux root setup (#307).
+  the code, but setup selects Browser only on `darwin-arm64`. Elsewhere the
+  capsule catalog omits Browser, Runtime starts no Browser helpers, and setup
+  resets the Engine selection to empty and removes the release-owned Browser
+  host files and image an earlier release installed (profiles under `Users/`
+  stay), so the installer's later Linux host step never asks for sudo (#307).
 - Browser TURN relays only to its own relay address on both hosts: coturn
   denies loopback, private ranges and every other peer. On Mac, a loopback relay
   keeps loopback peers, and the media bridge closes any guest TURN stream that
