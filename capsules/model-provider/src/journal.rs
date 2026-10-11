@@ -384,11 +384,13 @@ impl RunJournal {
             let path = entry
                 .map_err(|_| ProviderFault::corrupt_journal("request floor census failed"))?
                 .path();
-            if path
+            let name = path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(".pruned-request-floor.json.tmp"))
-            {
+                .ok_or_else(|| {
+                    ProviderFault::corrupt_journal("request floor entry name is invalid")
+                })?;
+            if name.starts_with(".pruned-request-floor.json.tmp") {
                 let metadata = fs::symlink_metadata(&path).map_err(|_| {
                     ProviderFault::corrupt_journal("request floor transaction is unreadable")
                 })?;
@@ -3647,10 +3649,12 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn recovery_refuses_unsafe_or_unattributed_transactions_before_cleanup() {
+        use std::os::unix::ffi::OsStringExt;
         use std::os::unix::fs::symlink;
         for case in [
             "untagged",
             "bad-name",
+            "non-utf8",
             "symlink",
             "hardlink",
             "mode",
@@ -3670,6 +3674,11 @@ mod tests {
             let unsafe_path = match case {
                 "untagged" => root.join(".pruned-request-floor.json.tmp"),
                 "bad-name" => root.join(".pruned-request-floor.json.tmp-01"),
+                "non-utf8" => {
+                    let mut name = b".pruned-request-floor.json.tmp-".to_vec();
+                    name.push(0xff);
+                    root.join(std::ffi::OsString::from_vec(name))
+                }
                 _ => path,
             };
             match case {
