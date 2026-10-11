@@ -295,6 +295,8 @@ pub enum ProviderError {
     Unavailable(String),
     /// IO error
     Io(std::io::Error),
+    /// A verified local volume cannot fit the requested bytes and shared reserve.
+    NotEnoughFreeSpace(elastos_common::NotEnoughFreeSpace),
 }
 
 /// Provider-to-provider invocation transfer contract.
@@ -604,6 +606,7 @@ impl std::fmt::Display for ProviderError {
             ProviderError::NoProvider(scheme) => write!(f, "no provider for scheme: {}", scheme),
             ProviderError::Unavailable(msg) => write!(f, "peer unavailable: {}", msg),
             ProviderError::Io(e) => write!(f, "IO error: {}", e),
+            ProviderError::NotEnoughFreeSpace(e) => std::fmt::Display::fmt(e, f),
         }
     }
 }
@@ -1550,7 +1553,7 @@ impl ProviderRegistry {
             u128::from(observation.available_bytes),
             u128::from(required_bytes),
         )
-        .map_err(|error| ProviderError::Provider(error.to_string()))?;
+        .map_err(ProviderError::NotEnoughFreeSpace)?;
         Ok(observation)
     }
 
@@ -3437,10 +3440,13 @@ mod tests {
         // Exactly the work plus the shared reserve fits; one byte less does not.
         assert!(registry.check_local_ipfs_capacity(110).await.is_ok());
         let refused = registry.check_local_ipfs_capacity(111).await.unwrap_err();
-        assert_eq!(
-            refused.to_string(),
-            ProviderError::Provider(elastos_common::NotEnoughFreeSpace { needed: 111 }.to_string())
-                .to_string()
+        assert!(matches!(refused, ProviderError::NotEnoughFreeSpace(space) if space.needed == 111));
+        *provider.response.lock().await = Some(serde_json::json!({"status":"ok","data":{
+            "volume_id":7,"capacity_bytes":1000,"available_bytes":5,"required_bytes":10
+        }}));
+        assert!(
+            matches!(registry.check_local_ipfs_capacity(10).await.unwrap_err(),
+            ProviderError::NotEnoughFreeSpace(space) if space.needed == 10)
         );
         let valid = serde_json::json!({"status":"ok","data":{
             "volume_id":7,"capacity_bytes":1_u64 << 40,
