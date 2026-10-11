@@ -3,6 +3,12 @@ use std::io::{self, Read as _};
 use std::path::Path;
 
 const MAX_OBSERVATION_BYTES: u64 = 1024 * 1024;
+const MAX_MEMORY_TEXT_BYTES: usize = 64 * 1024;
+const MAX_CGROUP_PATH_BYTES: usize = 4096;
+const MAX_CGROUP_DEPTH: usize = 64;
+const MAX_MOUNT_ENTRIES: usize = 4096;
+const MAX_STAT_FIELDS: usize = 512;
+const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostMemory {
@@ -62,17 +68,7 @@ pub fn observe_host_memory_with_reader(
     read: impl Fn(&Path) -> io::Result<String>,
 ) -> io::Result<HostMemory> {
     match platform {
-        "linux" => {
-            let host = parse_meminfo(&read(Path::new("/proc/meminfo"))?)?;
-            // Preserve the current v1/missing-file behavior. The v2 observer
-            // applies every observed finite ancestor to capacity and headroom.
-            Ok(match read(Path::new("/proc/self/cgroup")) {
-                Ok(groups) => cgroup_memory(&groups, Path::new("/sys/fs/cgroup"), host, |path| {
-                    read(path).ok()
-                }),
-                Err(_) => host,
-            })
-        }
+        "linux" => linux_host_memory(&read),
         "macos" => {
             #[cfg(target_os = "macos")]
             {
@@ -110,48 +106,279 @@ fn parse_meminfo(text: &str) -> io::Result<HostMemory> {
     })
 }
 
-fn cgroup_memory(
-    groups: &str,
-    root: &Path,
-    mut memory: HostMemory,
-    read: impl Fn(&Path) -> Option<String>,
-) -> HostMemory {
-    let Some(group) = groups.lines().find_map(|line| line.strip_prefix("0::")) else {
-        return memory;
-    };
-    let mut path = root.to_path_buf();
-    for part in Path::new(group).components() {
-        if let std::path::Component::Normal(name) = part {
-            path.push(name);
+fn unavailable() -> io::Error {
+    io::Error::other("host memory observation unavailable")
+}
+
+fn bounded_read(
+    read: &impl Fn(&Path) -> io::Result<String>,
+    path: &Path,
+    limit: usize,
+) -> io::Result<String> {
+    let text = read(path)?;
+    if text.len() > limit {
+        return Err(unavailable());
+    }
+    Ok(text)
+}
+
+fn require_absent(read: &impl Fn(&Path) -> io::Result<String>, path: &Path) -> io::Result<()> {
+    match read(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        _ => Err(unavailable()),
+    }
+}
+
+fn cgroup_membership(text: &str) -> io::Result<&str> {
+    let mut lines = text.lines();
+    let group = lines
+        .next()
+        .and_then(|line| line.strip_prefix("0::"))
+        .ok_or_else(unavailable)?;
+    if lines.next().is_some() || !group.starts_with('/') || group.len() > MAX_CGROUP_PATH_BYTES {
+        return Err(unavailable());
+    }
+    if group == "/" {
+        return Ok(group);
+    }
+    let mut depth = 0;
+    for part in group[1..].split('/') {
+        depth += 1;
+        if depth > MAX_CGROUP_DEPTH
+            || part.is_empty()
+            || part == "."
+            || part == ".."
+            || part.len() > 255
+            || part.chars().any(char::is_control)
+        {
+            return Err(unavailable());
         }
     }
-    while path.starts_with(root) {
-        let number = |file: &str| read(&path.join(file))?.trim().parse::<u64>().ok();
-        if let (Some(limit), Some(current)) = (number("memory.max"), number("memory.current")) {
-            let cache = read(&path.join("memory.stat")).map_or(0, |stat| file_cache(&stat));
-            memory.total = memory.total.min(limit);
-            memory.available = memory
-                .available
-                .min(limit.saturating_sub(current.saturating_sub(cache)));
+    Ok(group)
+}
+
+/// Mount root `/` and the absence of the non-root-only `cgroup.type` prove
+/// visible ancestry. A namespace or subtree mount can hide a tighter parent.
+fn require_global_cgroup_mount(text: &str) -> io::Result<()> {
+    let mut cgroup_mounts = 0;
+    let mut entries = 0;
+    let root = Path::new(CGROUP_ROOT);
+    let mut ancestors = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        entries += 1;
+        if entries > MAX_MOUNT_ENTRIES {
+            return Err(unavailable());
         }
-        if path == root || !path.pop() {
+        let fields: Vec<_> = line.split_whitespace().take(65).collect();
+        if fields.len() > 64 {
+            return Err(unavailable());
+        }
+        let split = fields
+            .iter()
+            .position(|field| *field == "-")
+            .ok_or_else(unavailable)?;
+        if split < 6 || fields.len() != split + 4 {
+            return Err(unavailable());
+        }
+        let id = unsigned(fields[0])?;
+        let parent = unsigned(fields[1])?;
+        let (major, minor) = fields[2].split_once(':').ok_or_else(unavailable)?;
+        unsigned(major)?;
+        unsigned(minor)?;
+        let mountpoint = mountinfo_path(fields[4])?;
+        if fields[split + 1] == "cgroup2" {
+            cgroup_mounts += 1;
+            if mountinfo_path(fields[3])? != Path::new("/") || mountpoint != root {
+                return Err(unavailable());
+            }
+        } else if mountpoint.starts_with(root) {
+            // A listed underlying cgroup mount does not prove the files read
+            // below it when another filesystem hides their mountpoints.
+            return Err(unavailable());
+        }
+        if root.starts_with(&mountpoint) {
+            // Only four possible paths: /, /sys, /sys/fs, and the cgroup root.
+            if ancestors.len() >= 4
+                || ancestors.values().any(|(known, _)| *known == id)
+                || ancestors.insert(mountpoint, (id, parent)).is_some()
+            {
+                return Err(unavailable());
+            }
+        }
+    }
+    if cgroup_mounts != 1 {
+        return Err(unavailable());
+    }
+    // A later mount at an ancestor can cover the listed cgroup mount. Every
+    // relevant visible path must belong to its actual mount-ID parent chain.
+    let mut path = root;
+    let mut visited = 0;
+    loop {
+        let (_, parent) = ancestors.get(path).ok_or_else(unavailable)?;
+        visited += 1;
+        if path == Path::new("/") {
             break;
         }
+        let (parent_path, _) = ancestors
+            .iter()
+            .find(|(_, (id, _))| id == parent)
+            .ok_or_else(unavailable)?;
+        if parent_path == path || !path.starts_with(parent_path) {
+            return Err(unavailable());
+        }
+        path = parent_path;
     }
-    memory
+    if visited != ancestors.len() {
+        return Err(unavailable());
+    }
+    Ok(())
+}
+
+fn mountinfo_path(field: &str) -> io::Result<std::path::PathBuf> {
+    // proc escapes spaces, tabs, newlines and backslashes in pathname fields.
+    let mut bytes = Vec::with_capacity(field.len());
+    let input = field.as_bytes();
+    let mut offset = 0;
+    while offset < input.len() {
+        if input[offset] == b'\\' {
+            let escaped = input.get(offset + 1..offset + 4).ok_or_else(unavailable)?;
+            bytes.push(match escaped {
+                b"040" => b' ',
+                b"011" => b'\t',
+                b"012" => b'\n',
+                b"134" => b'\\',
+                _ => return Err(unavailable()),
+            });
+            offset += 4;
+        } else {
+            bytes.push(input[offset]);
+            offset += 1;
+        }
+    }
+    let path = std::path::PathBuf::from(String::from_utf8(bytes).map_err(|_| unavailable())?);
+    if !path.is_absolute()
+        || path.components().any(|part| {
+            !matches!(
+                part,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        })
+    {
+        return Err(unavailable());
+    }
+    Ok(path)
+}
+
+fn unsigned(text: &str) -> io::Result<u64> {
+    let text = text.trim();
+    if text.is_empty() || text.len() > 20 || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(unavailable());
+    }
+    text.parse().map_err(|_| unavailable())
+}
+
+fn linux_host_memory(read: &impl Fn(&Path) -> io::Result<String>) -> io::Result<HostMemory> {
+    let mut memory = parse_meminfo(&bounded_read(
+        read,
+        Path::new("/proc/meminfo"),
+        MAX_MEMORY_TEXT_BYTES,
+    )?)?;
+    let groups = bounded_read(read, Path::new("/proc/self/cgroup"), MAX_CGROUP_PATH_BYTES)?;
+    let group = cgroup_membership(&groups)?;
+    let mounts = bounded_read(
+        read,
+        Path::new("/proc/self/mountinfo"),
+        MAX_OBSERVATION_BYTES as usize,
+    )?;
+    require_global_cgroup_mount(&mounts)?;
+    let root = Path::new(CGROUP_ROOT);
+    let controllers = bounded_read(read, &root.join("cgroup.controllers"), 4096)?;
+    let mut names = std::collections::BTreeSet::new();
+    for name in controllers.split_whitespace() {
+        if name.len() > 64
+            || names.len() >= 64
+            || !names.insert(name)
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err(unavailable());
+        }
+    }
+    if !names.contains("memory") {
+        return Err(unavailable());
+    }
+    // Linux exposes these files only on non-root cgroups. Missing is allowed
+    // exactly here after proving the global mount and memory controller.
+    for name in ["cgroup.type", "memory.max", "memory.current"] {
+        require_absent(read, &root.join(name))?;
+    }
+    let mut path = root.join(&group[1..]);
+    while path != root {
+        let limit = bounded_read(read, &path.join("memory.max"), 64)?;
+        let current = unsigned(&bounded_read(read, &path.join("memory.current"), 64)?)?;
+        if limit.trim() != "max" {
+            let limit = unsigned(&limit)?;
+            let cache = bounded_read(read, &path.join("memory.stat"), MAX_MEMORY_TEXT_BYTES)
+                .ok()
+                .and_then(|stat| file_cache(&stat))
+                .unwrap_or(0)
+                .min(current);
+            memory.total = memory.total.min(limit);
+            memory.available = memory.available.min(limit.saturating_sub(current - cache));
+        }
+        if !path.pop() || !path.starts_with(root) {
+            return Err(unavailable());
+        }
+    }
+    // Moving between groups during observation invalidates the ancestor census.
+    let current_groups = bounded_read(read, Path::new("/proc/self/cgroup"), MAX_CGROUP_PATH_BYTES)?;
+    if cgroup_membership(&current_groups)? != group {
+        return Err(unavailable());
+    }
+    if bounded_read(
+        read,
+        Path::new("/proc/self/mountinfo"),
+        MAX_OBSERVATION_BYTES as usize,
+    )? != mounts
+    {
+        return Err(unavailable());
+    }
+    Ok(memory)
 }
 
 /// File LRU pages are reclaimable; dirty/writeback pages and tmpfs stay used.
-fn file_cache(stat: &str) -> u64 {
-    let field = |name: &str| {
-        stat.lines()
-            .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .unwrap_or(0)
-    };
-    field("active_file")
-        .saturating_add(field("inactive_file"))
-        .saturating_sub(field("file_dirty").saturating_add(field("file_writeback")))
+/// Any malformed statistic gives zero credit rather than inventing headroom.
+fn file_cache(stat: &str) -> Option<u64> {
+    let mut seen = std::collections::BTreeSet::new();
+    let (mut active, mut inactive, mut dirty, mut writeback) = (None, None, None, None);
+    for line in stat.lines() {
+        let mut fields = line.split_whitespace();
+        let key = fields.next()?;
+        let value = unsigned(fields.next()?).ok()?;
+        if fields.next().is_some()
+            || key.len() > 64
+            || !key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            || seen.len() >= MAX_STAT_FIELDS
+            || !seen.insert(key)
+        {
+            return None;
+        }
+        match key {
+            "active_file" => active = Some(value),
+            "inactive_file" => inactive = Some(value),
+            "file_dirty" => dirty = Some(value),
+            "file_writeback" => writeback = Some(value),
+            _ => {}
+        }
+    }
+    Some(
+        active?
+            .checked_add(inactive?)?
+            .saturating_sub(dirty?.checked_add(writeback?)?),
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -258,7 +485,7 @@ mod tests {
             .cloned()
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
     }
-    fn files() -> BTreeMap<String, String> {
+    fn memory_files() -> BTreeMap<String, String> {
         BTreeMap::from([
             (
                 "/proc/meminfo".into(),
@@ -271,6 +498,33 @@ mod tests {
             (
                 "/proc/self/cgroup".into(),
                 "0::/system.slice/home.service\n".into(),
+            ),
+            (
+                "/proc/self/mountinfo".into(),
+                "1 1 8:1 / / rw - ext4 /dev/root rw\n\
+                 23 1 0:23 / /sys rw - sysfs sysfs rw\n\
+                 29 23 0:26 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n"
+                    .into(),
+            ),
+            (
+                "/sys/fs/cgroup/cgroup.controllers".into(),
+                "cpuset cpu io memory pids\n".into(),
+            ),
+            (
+                "/sys/fs/cgroup/system.slice/memory.max".into(),
+                "max\n".into(),
+            ),
+            (
+                "/sys/fs/cgroup/system.slice/memory.current".into(),
+                "0\n".into(),
+            ),
+            (
+                "/sys/fs/cgroup/system.slice/home.service/memory.max".into(),
+                "max\n".into(),
+            ),
+            (
+                "/sys/fs/cgroup/system.slice/home.service/memory.current".into(),
+                "0\n".into(),
             ),
         ])
     }
@@ -297,7 +551,7 @@ mod tests {
     }
     #[test]
     fn cgroup_v2_ancestor_limit_lowers_available() {
-        let mut files = files();
+        let mut files = memory_files();
         assert_eq!(
             observe_host_memory_with_reader("linux", |p| read_fixture(&files, p))
                 .unwrap()
@@ -351,16 +605,11 @@ mod tests {
             ModelMemoryFit::Insufficient
         );
         files.insert("/proc/self/cgroup".into(), "4:memory:/home\n".into());
-        assert_eq!(
-            observe_host_memory_with_reader("linux", |p| read_fixture(&files, p))
-                .unwrap()
-                .available,
-            6 * GIB
-        );
+        assert!(observe_host_memory_with_reader("linux", |p| read_fixture(&files, p)).is_err());
     }
     #[test]
     fn cgroup_v2_page_cache_is_not_counted_as_used() {
-        let mut files = files();
+        let mut files = memory_files();
         files.insert(
             "/sys/fs/cgroup/system.slice/memory.max".into(),
             (7680 * MIB).to_string(),
@@ -377,7 +626,7 @@ mod tests {
         assert_eq!(observe(&files), 4285 * MIB);
         // The file counter includes tmpfs; only the two file LRUs are credited.
         let stat = format!(
-            "active_file {}\ninactive_file {}\nfile {}\nshmem {}\n",
+            "active_file {}\ninactive_file {}\nfile {}\nshmem {}\nfile_dirty 0\nfile_writeback 0\n",
             1953 * MIB,
             1321 * MIB,
             3338 * MIB,
@@ -399,16 +648,13 @@ mod tests {
         assert_eq!(observe(&files), (7680 - 121) * MIB);
         files.insert(
             "/sys/fs/cgroup/system.slice/memory.stat".into(),
-            format!(
-                "{stat}file_dirty {}\nfile_writeback {}\n",
-                200 * MIB,
-                56 * MIB
-            ),
+            stat.replace("file_dirty 0", &format!("file_dirty {}", 200 * MIB))
+                .replace("file_writeback 0", &format!("file_writeback {}", 56 * MIB)),
         );
         assert_eq!(observe(&files), (7680 - 377) * MIB);
         files.insert(
             "/sys/fs/cgroup/system.slice/memory.stat".into(),
-            format!("{stat}file_dirty {}\n", 4000 * MIB),
+            stat.replace("file_dirty 0", &format!("file_dirty {}", 4000 * MIB)),
         );
         assert_eq!(observe(&files), 4285 * MIB);
     }
@@ -420,7 +666,7 @@ mod tests {
     #[test]
     fn live_host_memory_is_readable() {
         // Fixed OS input covers the observation without depending on the test host.
-        let files = files();
+        let files = memory_files();
         let host = observe_host_memory_with_reader("linux", |p| read_fixture(&files, p)).unwrap();
         assert!(host.total > 0 && host.available <= host.total);
         assert!(observe_host_memory_with_reader("unsupported", |_| panic!(
@@ -458,6 +704,314 @@ mod tests {
                 })
             ),
             ModelMemoryFit::Insufficient
+        );
+    }
+    #[test]
+    fn linux_memory_requires_a_proven_global_v2_root() {
+        for (path, replacement) in [
+            ("/proc/self/mountinfo", None),
+            (
+                "/proc/self/mountinfo",
+                Some("29 23 0:26 /hidden /sys/fs/cgroup rw - cgroup2 cgroup rw\n"),
+            ),
+            (
+                "/proc/self/mountinfo",
+                Some("29 23 0:26 / /other rw - cgroup2 cgroup rw\n"),
+            ),
+            (
+                "/proc/self/mountinfo",
+                Some("invalid 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n"),
+            ),
+            ("/sys/fs/cgroup/cgroup.controllers", None),
+            ("/sys/fs/cgroup/cgroup.controllers", Some("cpu io pids\n")),
+            ("/sys/fs/cgroup/cgroup.controllers", Some("memory memory\n")),
+            (
+                "/sys/fs/cgroup/cgroup.controllers",
+                Some("memory invalid/controller\n"),
+            ),
+            ("/sys/fs/cgroup/cgroup.type", Some("domain\n")),
+            ("/sys/fs/cgroup/cgroup.type", Some("")),
+            ("/sys/fs/cgroup/memory.max", Some("max\n")),
+            ("/sys/fs/cgroup/memory.current", Some("0\n")),
+        ] {
+            let mut files = memory_files();
+            match replacement {
+                Some(value) => {
+                    files.insert(path.into(), value.into());
+                }
+                None => {
+                    files.remove(path);
+                }
+            }
+            assert!(
+                observe_host_memory_with_reader("linux", |p| read_fixture(&files, p)).is_err(),
+                "{path} {replacement:?}"
+            );
+        }
+        let mut files = memory_files();
+        let duplicate = files["/proc/self/mountinfo"].clone();
+        files
+            .get_mut("/proc/self/mountinfo")
+            .unwrap()
+            .push_str(&duplicate);
+        assert!(observe_host_memory_with_reader("linux", |p| read_fixture(&files, p)).is_err());
+        // A true global-root membership needs no non-root limit files.
+        let mut files = memory_files();
+        files.insert("/proc/self/cgroup".into(), "0::/\n".into());
+        assert_eq!(
+            observe_host_memory_with_reader("linux", |p| read_fixture(&files, p))
+                .unwrap()
+                .total,
+            8 * GIB
+        );
+    }
+
+    #[test]
+    fn unreadable_root_and_required_ancestor_files_refuse() {
+        let files = memory_files();
+        for denied in [
+            "/proc/self/cgroup",
+            "/proc/self/mountinfo",
+            "/sys/fs/cgroup/cgroup.controllers",
+            "/sys/fs/cgroup/cgroup.type",
+            "/sys/fs/cgroup/memory.max",
+            "/sys/fs/cgroup/memory.current",
+            "/sys/fs/cgroup/system.slice/memory.max",
+            "/sys/fs/cgroup/system.slice/memory.current",
+            "/sys/fs/cgroup/system.slice/home.service/memory.max",
+            "/sys/fs/cgroup/system.slice/home.service/memory.current",
+        ] {
+            assert!(
+                observe_host_memory_with_reader("linux", |p| {
+                    if p == Path::new(denied) {
+                        Err(io::Error::from(io::ErrorKind::PermissionDenied))
+                    } else {
+                        read_fixture(&files, p)
+                    }
+                })
+                .is_err(),
+                "{denied}"
+            );
+        }
+        for key in [
+            "/sys/fs/cgroup/system.slice/memory.max",
+            "/sys/fs/cgroup/system.slice/memory.current",
+            "/sys/fs/cgroup/system.slice/home.service/memory.max",
+            "/sys/fs/cgroup/system.slice/home.service/memory.current",
+        ] {
+            for bad in [
+                None,
+                Some(""),
+                Some("-1"),
+                Some("18446744073709551616"),
+                Some("1 2"),
+                Some("invalid"),
+            ] {
+                let mut files = files.clone();
+                match bad {
+                    Some(value) => {
+                        files.insert(key.into(), value.into());
+                    }
+                    None => {
+                        files.remove(key);
+                    }
+                }
+                assert!(
+                    observe_host_memory_with_reader("linux", |p| read_fixture(&files, p)).is_err(),
+                    "{key} {bad:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cgroup_overmounts_refuse_hidden_memory_files() {
+        for mount in [
+            "30 1 0:27 / /sys rw - tmpfs tmpfs rw\n",
+            "30 23 0:27 / /sys/fs rw - tmpfs tmpfs rw\n",
+            "30 29 0:27 / /sys/fs/cgroup rw - tmpfs tmpfs rw\n",
+            "30 29 0:27 / /sys/fs/cgroup/system.slice rw - tmpfs tmpfs rw\n",
+            "30 29 0:27 / /sys/fs/cgroup/cgroup.type rw - tmpfs tmpfs rw\n",
+            "30 29 0:27 / /sys/fs/cgroup/hidden\\040limit rw - tmpfs tmpfs rw\n",
+            "30 29 0:27 / /sys/fs/cgroup\\057system.slice rw - tmpfs tmpfs rw\n",
+        ] {
+            let mut files = memory_files();
+            files
+                .get_mut("/proc/self/mountinfo")
+                .unwrap()
+                .push_str(mount);
+            assert!(
+                observe_host_memory_with_reader("linux", |p| read_fixture(&files, p)).is_err(),
+                "{mount:?}"
+            );
+        }
+        let mut files = memory_files();
+        files.get_mut("/proc/self/mountinfo").unwrap().push_str(
+            "30 23 0:27 / /sys/fs/cgroup-other rw - tmpfs tmpfs rw\n\
+             31 23 0:28 / /unrelated\\040directory rw - tmpfs tmpfs rw\n",
+        );
+        assert_eq!(
+            observe_host_memory_with_reader("linux", |p| read_fixture(&files, p))
+                .unwrap()
+                .available,
+            6 * GIB
+        );
+        // An ancestor mount installed before cgroup is valid when the actual
+        // parent chain passes through it.
+        let mut files = memory_files();
+        files
+            .get_mut("/proc/self/mountinfo")
+            .unwrap()
+            .push_str("24 23 0:27 / /sys/fs rw - tmpfs tmpfs rw\n");
+        let mounts = files.get_mut("/proc/self/mountinfo").unwrap();
+        *mounts = mounts.replace("29 23 0:26", "29 24 0:26");
+        assert_eq!(
+            observe_host_memory_with_reader("linux", |p| read_fixture(&files, p))
+                .unwrap()
+                .available,
+            6 * GIB
+        );
+    }
+
+    #[test]
+    fn cgroup_membership_is_unique_bounded_and_stable() {
+        for membership in [
+            "",
+            "4:memory:/home\n",
+            "0::/home\n4:memory:/home\n",
+            "0::/\n0::/\n",
+            "0::relative\n",
+            "0::/a/../b\n",
+            "0::/a/./b\n",
+            "0:://a\n",
+            "0::/a/\n",
+        ] {
+            let mut files = memory_files();
+            files.insert("/proc/self/cgroup".into(), membership.into());
+            assert!(
+                observe_host_memory_with_reader("linux", |p| read_fixture(&files, p)).is_err(),
+                "{membership:?}"
+            );
+        }
+        let mut files = memory_files();
+        files.insert(
+            "/proc/self/cgroup".into(),
+            format!("0::/{}\n", vec!["a"; MAX_CGROUP_DEPTH + 1].join("/")),
+        );
+        assert!(observe_host_memory_with_reader("linux", |p| read_fixture(&files, p)).is_err());
+        let files = memory_files();
+        let reads = std::cell::Cell::new(0);
+        assert!(observe_host_memory_with_reader("linux", |p| {
+            if p == Path::new("/proc/self/cgroup") {
+                reads.set(reads.get() + 1);
+                if reads.get() > 1 {
+                    return Ok("0::/\n".into());
+                }
+            }
+            read_fixture(&files, p)
+        })
+        .is_err());
+        assert_eq!(
+            reads.get(),
+            2,
+            "membership is checked again after the ancestor read"
+        );
+        let reads = std::cell::Cell::new(0);
+        assert!(observe_host_memory_with_reader("linux", |p| {
+            if p == Path::new("/proc/self/mountinfo") {
+                reads.set(reads.get() + 1);
+                if reads.get() > 1 {
+                    return Ok(format!(
+                        "{}30 23 0:27 / /unrelated rw - tmpfs tmpfs rw\n",
+                        files["/proc/self/mountinfo"]
+                    ));
+                }
+            }
+            read_fixture(&files, p)
+        })
+        .is_err());
+        assert_eq!(reads.get(), 2, "mount ancestry is checked again");
+    }
+
+    #[test]
+    fn observer_payload_and_mount_work_are_bounded() {
+        for (path, limit) in [
+            ("/proc/meminfo", MAX_MEMORY_TEXT_BYTES),
+            ("/proc/self/cgroup", MAX_CGROUP_PATH_BYTES),
+            ("/proc/self/mountinfo", MAX_OBSERVATION_BYTES as usize),
+            ("/sys/fs/cgroup/cgroup.controllers", 4096),
+            ("/sys/fs/cgroup/system.slice/memory.max", 64),
+            ("/sys/fs/cgroup/system.slice/memory.current", 64),
+        ] {
+            let mut files = memory_files();
+            files.insert(path.into(), "1".repeat(limit + 1));
+            assert!(
+                observe_host_memory_with_reader("linux", |p| read_fixture(&files, p)).is_err(),
+                "{path}"
+            );
+        }
+        let mut files = memory_files();
+        let line = "29 23 0:26 / /elsewhere rw - tmpfs tmpfs rw\n";
+        files
+            .get_mut("/proc/self/mountinfo")
+            .unwrap()
+            .push_str(&line.repeat(MAX_MOUNT_ENTRIES));
+        assert!(observe_host_memory_with_reader("linux", |p| read_fixture(&files, p)).is_err());
+    }
+
+    #[test]
+    fn malformed_or_unreadable_page_cache_gives_zero_credit() {
+        let mut files = memory_files();
+        let base = "/sys/fs/cgroup/system.slice";
+        files.insert(format!("{base}/memory.max"), (4 * GIB).to_string());
+        files.insert(format!("{base}/memory.current"), (3 * GIB).to_string());
+        let key = format!("{base}/memory.stat");
+        for stat in [
+            "active_file 1\ninactive_file 2\n",
+            "active_file broken\ninactive_file 2\nfile_dirty 0\nfile_writeback 0\n",
+            "active_file 1\nactive_file 2\ninactive_file 2\nfile_dirty 0\nfile_writeback 0\n",
+            "active_file 18446744073709551615\ninactive_file 2\nfile_dirty 0\nfile_writeback 0\n",
+        ] {
+            files.insert(key.clone(), stat.into());
+            assert_eq!(
+                observe_host_memory_with_reader("linux", |p| read_fixture(&files, p))
+                    .unwrap()
+                    .available,
+                GIB
+            );
+        }
+        files.insert(key.clone(), "x".repeat(MAX_MEMORY_TEXT_BYTES + 1));
+        assert_eq!(
+            observe_host_memory_with_reader("linux", |p| read_fixture(&files, p))
+                .unwrap()
+                .available,
+            GIB
+        );
+        assert_eq!(
+            observe_host_memory_with_reader("linux", |p| {
+                if p == Path::new(&key) {
+                    Err(io::Error::from(io::ErrorKind::PermissionDenied))
+                } else {
+                    read_fixture(&files, p)
+                }
+            })
+            .unwrap()
+            .available,
+            GIB
+        );
+        // Even valid cache credit is capped by the observed current use.
+        files.insert(
+            key,
+            format!(
+                "active_file {}\ninactive_file 0\nfile_dirty 0\nfile_writeback 0\n",
+                10 * GIB
+            ),
+        );
+        assert_eq!(
+            observe_host_memory_with_reader("linux", |p| read_fixture(&files, p))
+                .unwrap()
+                .available,
+            4 * GIB
         );
     }
 }
