@@ -289,8 +289,8 @@ mod tests {
         let signature = forged["signature"].as_str().unwrap();
         let flipped = if signature.starts_with('0') { "1" } else { "0" };
         forged["signature"] = serde_json::json!(format!("{flipped}{}", &signature[1..]));
-        let error =
-            CapsuleRecords::from_release(&listed(vec![forged]), &[did.clone()]).unwrap_err();
+        let error = CapsuleRecords::from_release(&listed(vec![forged]), std::slice::from_ref(&did))
+            .unwrap_err();
         assert!(format!("{error:#}").contains("Capsule record signature refused"));
 
         // The signature covers the payload: a changed size is refused.
@@ -302,9 +302,11 @@ mod tests {
         // A record signed by a key the Home does not accept is refused, even when it verifies.
         let (other, _) = elastos_runtime::signature::generate_keypair();
         let other_did = crate::crypto::encode_signing_key_did(&other);
-        let error =
-            CapsuleRecords::from_release(&listed(vec![envelope.clone()]), &[other_did.clone()])
-                .unwrap_err();
+        let error = CapsuleRecords::from_release(
+            &listed(vec![envelope.clone()]),
+            std::slice::from_ref(&other_did),
+        )
+        .unwrap_err();
         assert!(format!("{error:#}").contains("not signed by an accepted publisher"));
         let mut payload = envelope["payload"].clone();
         payload["signer_did"] = serde_json::json!(other_did);
@@ -374,9 +376,11 @@ mod tests {
             payload
         };
         let accepted = signed_record(&key, payload(serde_json::json!({})));
-        assert!(
-            CapsuleRecords::from_release(&listed(vec![accepted.clone()]), &[did.clone()]).is_ok()
-        );
+        assert!(CapsuleRecords::from_release(
+            &listed(vec![accepted.clone()]),
+            std::slice::from_ref(&did)
+        )
+        .is_ok());
         for (case, extra) in [
             (
                 "unknown field",
@@ -392,7 +396,8 @@ mod tests {
         ] {
             let record = signed_record(&key, payload(extra));
             assert!(
-                CapsuleRecords::from_release(&listed(vec![record]), &[did.clone()]).is_err(),
+                CapsuleRecords::from_release(&listed(vec![record]), std::slice::from_ref(&did))
+                    .is_err(),
                 "{case}"
             );
         }
@@ -400,7 +405,7 @@ mod tests {
         missing.as_object_mut().unwrap().remove("capsule_version");
         assert!(CapsuleRecords::from_release(
             &listed(vec![signed_record(&key, missing)]),
-            &[did.clone()]
+            std::slice::from_ref(&did)
         )
         .is_err());
         let error = CapsuleRecords::from_release(&listed(vec![accepted.clone(), accepted]), &[did])
