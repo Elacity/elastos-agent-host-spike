@@ -108,9 +108,10 @@ fn read_engine_selection(
     }
 }
 
-/// Browser runs only on hosts with a local Engine.
+/// Browser runs only on hosts with a local Engine. Linux hosts keep their
+/// Engine machinery but stay hidden until their Browser path is released.
 pub(crate) fn browser_available(platform: &str) -> bool {
-    matches!(platform, "darwin-arm64" | "linux-arm64")
+    platform == "darwin-arm64"
 }
 
 fn local_vm_selected_with_override(
@@ -196,7 +197,10 @@ pub(super) async fn prepare_home(
     browser_selected: bool,
 ) {
     let result: anyhow::Result<()> = async {
-        if browser_selected && manifest.profiles.contains_key("browser-host") {
+        if browser_selected
+            && browser_available(platform)
+            && manifest.profiles.contains_key("browser-host")
+        {
             println!("Preparing Browser Engine helpers...");
             ensure_host_components(
                 data,
@@ -468,7 +472,7 @@ mod tests {
             r#"{"external":{},"profiles":{}}"#,
         )
         .unwrap();
-        prepare_home(data, &manifest, "linux-arm64", true).await;
+        prepare_home(data, &manifest, "darwin-arm64", true).await;
         assert_eq!(fs::read(data.join("profile.ext4")).unwrap(), b"owner state");
         assert_eq!(
             fs::read(data.join("config/browser-engine-adapter.json")).unwrap(),
@@ -491,7 +495,8 @@ mod tests {
                     .all(|name| name == "crosvm" || !names.contains(name)));
             }
         }
-        for platform in ["darwin-arm64", "linux-arm64"] {
+        let platform = "darwin-arm64";
+        {
             let temp = tempfile::tempdir().unwrap();
             let data = temp.path();
             fs::create_dir_all(data.join("capsules/browser")).unwrap();
@@ -640,20 +645,33 @@ mod tests {
         assert!(!temp.path().join("bin").exists());
     }
 
-    #[test]
-    fn x86_setup_prepares_remote_viewer_without_host_helpers() {
-        let temp = tempfile::tempdir().unwrap();
-        let data = temp.path();
-        fs::create_dir_all(data.join("capsules/browser")).unwrap();
-        configure(data, "linux-amd64", true).unwrap();
-        assert!(!local_vm_selected(data, "linux-amd64").unwrap());
-        let config: Value = serde_json::from_slice(
-            &fs::read(data.join("config/browser-engine-adapter.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(config["adapters"], serde_json::json!([]));
-        assert!(crate::carrier::browser_engine_media::configuration_ready(data).is_ok());
-        assert!(!data.join("bin").exists());
+    #[tokio::test]
+    async fn linux_setup_installs_no_browser_host_helpers_or_image() {
+        let manifest: super::super::ComponentsManifest =
+            serde_json::from_str(include_str!("../../../../../components.json")).unwrap();
+        assert!(manifest.profiles["browser-host"]
+            .components
+            .iter()
+            .any(|name| name == "browser-vm-linux-network"));
+        for platform in ["linux-arm64", "linux-amd64"] {
+            assert!(!browser_available(platform));
+            let temp = tempfile::tempdir().unwrap();
+            let data = temp.path();
+            fs::create_dir_all(data.join("capsules/browser")).unwrap();
+            prepare_home(data, &manifest, platform, true).await;
+            assert!(!local_vm_selected(data, platform).unwrap());
+            // install.sh asks for sudo only when this helper exists.
+            assert!(!data.join("scripts/browser-vm-linux-network.py").exists());
+            assert!(!data.join("scripts").exists());
+            assert!(!data.join("bin").exists());
+            assert!(!data.join("browser-vm").exists());
+            let config: Value = serde_json::from_slice(
+                &fs::read(data.join("config/browser-engine-adapter.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(config["adapters"], serde_json::json!([]));
+            assert!(crate::carrier::browser_engine_media::configuration_ready(data).is_ok());
+        }
     }
 
     #[test]
@@ -665,16 +683,19 @@ mod tests {
         fs::create_dir_all(data.join("config")).unwrap();
         let file = data.join("config/browser-engine-adapter.json");
         fs::write(&file, local).unwrap();
-        assert!(local_vm_selected_with_override(data, "linux-arm64", None).unwrap());
+        assert!(local_vm_selected_with_override(data, "darwin-arm64", None).unwrap());
+        for platform in ["linux-arm64", "linux-amd64"] {
+            assert!(!local_vm_selected_with_override(data, platform, None).unwrap());
+            assert!(!local_vm_selected_with_override(data, platform, Some(local)).unwrap());
+        }
         for inline in [
             r#"{"adapters":[]}"#,
             r#"{"adapters":[{"kind":"chromium_microvm","supervisor":{"program":"/vm/browser-vm-remote-vz-launcher"}}]}"#,
         ] {
-            assert!(!local_vm_selected_with_override(data, "linux-arm64", Some(inline)).unwrap());
             assert!(!local_vm_selected_with_override(data, "darwin-arm64", Some(inline)).unwrap());
         }
-        assert!(local_vm_selected_with_override(data, "linux-arm64", Some(local)).unwrap());
-        assert!(local_vm_selected_with_override(data, "linux-arm64", Some("invalid")).is_err());
+        assert!(local_vm_selected_with_override(data, "darwin-arm64", Some(local)).unwrap());
+        assert!(local_vm_selected_with_override(data, "darwin-arm64", Some("invalid")).is_err());
         assert_eq!(fs::read_to_string(file).unwrap(), local);
     }
 
