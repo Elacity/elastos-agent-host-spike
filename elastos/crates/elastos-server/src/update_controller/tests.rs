@@ -3730,7 +3730,10 @@ async fn staged_support_skips_linux_only_home_component_on_darwin() {
         "profiles":{"home":{"components":["browser-stream-bridge"]}},
         "external":{"browser-stream-bridge":{
             "install_path":"bin/browser-stream-bridge",
-            "platforms":{"linux-arm64":{"cid":raw_cid(b"linux support")}}
+            "platforms":{"linux-arm64":{
+                "release_path":"browser-stream-bridge-linux-arm64", "cid":raw_cid(b"linux support"),
+                "checksum":format!("sha256:{}", digest(b"linux support")), "size":b"linux support".len()
+            }}
         }}
     }))
     .unwrap();
@@ -3778,7 +3781,7 @@ async fn staged_support_replaces_a_component_left_by_an_interrupted_undo() {
     let components = serde_json::to_vec(&json!({
         "schema":"elastos.components/v1", "capsules":{}, "profiles":{},
         "external":{"fixture-provider":{"install_path":"bin/fixture-provider", "platforms":{
-            (crate::setup::detect_platform()): {"cid":cid, "checksum":format!("sha256:{}", digest(signed)), "size":signed.len()}
+            (crate::setup::detect_platform()): {"release_path":"fixture-provider", "cid":cid, "checksum":format!("sha256:{}", digest(signed)), "size":signed.len()}
         }}}
     }))
     .unwrap();
@@ -4418,7 +4421,7 @@ async fn system_update_fetches_the_pinned_network_before_stop_and_joins_after_ac
             json!({
                 "schema":"elastos.components/v1", "profiles":{}, "capsules":{},
                 "external":{"fixture-provider":{"install_path":"bin/fixture-provider", "platforms":{
-                    (crate::setup::detect_platform()): {"cid":raw_cid(bytes), "checksum":format!("sha256:{}", digest(bytes)), "size":bytes.len()}
+                    (crate::setup::detect_platform()): {"release_path":"fixture-provider", "cid":raw_cid(bytes), "checksum":format!("sha256:{}", digest(bytes)), "size":bytes.len()}
                 }}}
             })
         };
