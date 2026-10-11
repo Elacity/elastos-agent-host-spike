@@ -424,6 +424,36 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
             ));
         }
         reject_untrusted_binding_fields(&request.input)?;
+        request
+            .runtime_binding
+            .validate(&request.offer_id, &request.operation, &request.input)
+            .map_err(|_| ProviderFault::invalid_request("invalid runtime binding"))?;
+        let fingerprint = request_fingerprint(
+            &request.runtime_binding,
+            &request.runtime_binding.input_hash,
+        )?;
+        let run_id = deterministic_run_id(&request.runtime_binding);
+        // A retained request owns its original result, including legacy IDs and
+        // results whose offer has since changed or retired.
+        if let Some(mut existing) = self.journal.load_run_if_present(&run_id)? {
+            if request_fingerprint(&existing.runtime_binding, &existing.input_hash)? != fingerprint
+            {
+                return Err(ProviderFault::invalid_request(
+                    "request_id conflicts with an existing model run",
+                ));
+            }
+            if !existing.status.is_terminal() {
+                let current_offer = self.current_execution_offer_for_run(&existing)?;
+                self.refresh_run_if_needed(current_offer.as_ref(), &mut existing)?;
+            }
+            return serialize_run_view(&existing);
+        }
+        elastos_model_contract::validate_new_model_request_id(
+            &request.runtime_binding.request_id,
+            now_ms(),
+            self.journal.pruned_issued_floor_ms()?,
+        )
+        .map_err(|_| ProviderFault::request_expired())?;
         let offer = self
             .offers
             .get(&request.offer_id)
@@ -447,10 +477,6 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
                 "requested operation does not match configured offer",
             ));
         }
-        request
-            .runtime_binding
-            .validate(&request.offer_id, &request.operation, &request.input)
-            .map_err(|_| ProviderFault::invalid_request("invalid runtime binding"))?;
         let input_bytes = serde_json::to_vec(&request.input)
             .map_err(|err| ProviderFault::internal(format!("failed to encode input: {err}")))?
             .len() as u64;
@@ -464,24 +490,6 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
             ));
         }
         self.journal.prune_expired_terminal_runs()?;
-        let fingerprint = request_fingerprint(
-            &request.runtime_binding,
-            &request.runtime_binding.input_hash,
-        )?;
-        let run_id = deterministic_run_id(&request.runtime_binding);
-        if let Some(mut existing) = self.journal.load_run_if_present(&run_id)? {
-            if request_fingerprint(&existing.runtime_binding, &existing.input_hash)? != fingerprint
-            {
-                return Err(ProviderFault::invalid_request(
-                    "request_id conflicts with an existing model run",
-                ));
-            }
-            if !existing.status.is_terminal() {
-                let current_offer = self.current_execution_offer_for_run(&existing)?;
-                self.refresh_run_if_needed(current_offer.as_ref(), &mut existing)?;
-            }
-            return serialize_run_view(&existing);
-        }
 
         let created_at_ms = now_ms();
         let offer_summary = offer.summary();
@@ -1793,7 +1801,7 @@ mod tests {
             session_id: "session:test".to_string(),
             capsule_id: "assistant".to_string(),
             grant_id: "grant:test".to_string(),
-            request_id: request_id.to_string(),
+            request_id: crate::test_support::fixture_model_request_id(request_id),
             offer_id: offer_id.to_string(),
             operation: "text.generate".to_string(),
             input_hash: model_input_hash(input).unwrap(),
@@ -1811,6 +1819,19 @@ mod tests {
             request_id: binding.request_id.clone(),
             run_id,
         }
+    }
+
+    fn expired_create_binding(label: &str, offer_id: &str, input: &Value) -> RuntimeCreateBinding {
+        let mut binding = create_binding(label, offer_id, input);
+        binding.request_id = crate::test_support::fixture_model_request_id_at(
+            label,
+            now_ms().saturating_sub(
+                elastos_model_contract::MODEL_REQUEST_MAX_AGE_MS
+                    + elastos_model_contract::MODEL_REQUEST_FUTURE_SKEW_MS
+                    + 1,
+            ),
+        );
+        binding
     }
 
     fn rotate_create_audit(
@@ -3000,9 +3021,20 @@ mod tests {
         let mut oversized = input;
         oversized["messages"][3]["content"] =
             json!("x".repeat(current.policy.input_bytes_limit as usize));
+        // A changed input under a retained identity conflicts before new admission.
         assert_eq!(
             state
-                .handle_runs_create(request(oversized))
+                .handle_runs_create(request(oversized.clone()))
+                .unwrap_err()
+                .code(),
+            "invalid_request"
+        );
+        let mut fresh_oversized = request(oversized);
+        fresh_oversized.runtime_binding.request_id =
+            crate::test_support::fixture_model_request_id("request:v2-new-oversized");
+        assert_eq!(
+            state
+                .handle_runs_create(fresh_oversized)
                 .unwrap_err()
                 .code(),
             "policy_limit"
@@ -4467,7 +4499,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(settled["data"]["status"], "completed");
-        remote.request_id = "request:remote-after-settlement".to_string();
+        remote.request_id =
+            crate::test_support::fixture_model_request_id("request:remote-after-settlement");
         let resumed = state.handle_runs_create(request(remote)).unwrap();
         assert_eq!(resumed["data"]["status"], "running");
         assert_eq!(*adapters.dispatch_calls.lock().unwrap(), 2);
@@ -4479,7 +4512,7 @@ mod tests {
         let adapters = FakeAdapters::default();
         let mut state = init_state(&root, vec![offer("local-text")], adapters);
         let input = serde_json::json!({"schema":"elastos.model.input.text/v1","prompt":"hello"});
-        let binding = create_binding("request:retention", "local-text", &input);
+        let binding = expired_create_binding("request:retention", "local-text", &input);
         let mut run = StoredRun::new_prepared(
             deterministic_run_id(&binding),
             binding.clone(),
@@ -4526,7 +4559,7 @@ mod tests {
         let mut state = init_state(&root, vec![offer("local-text")], adapters);
 
         let old_input = serde_json::json!({"schema":"elastos.model.input.text/v1","prompt":"old"});
-        let old_binding = create_binding("request:old-expired", "local-text", &old_input);
+        let old_binding = expired_create_binding("request:old-expired", "local-text", &old_input);
         let mut old_run = StoredRun::new_prepared(
             deterministic_run_id(&old_binding),
             old_binding,
@@ -4572,7 +4605,8 @@ mod tests {
         let mut state = init_state(&root, vec![offer("local-text")], adapters);
 
         let old_input = serde_json::json!({"schema":"elastos.model.input.text/v1","prompt":"old"});
-        let old_binding = create_binding("request:old-invalid-create", "local-text", &old_input);
+        let old_binding =
+            expired_create_binding("request:old-invalid-create", "local-text", &old_input);
         let mut old_run = StoredRun::new_prepared(
             deterministic_run_id(&old_binding),
             old_binding,
@@ -4621,7 +4655,7 @@ mod tests {
         let adapters = FakeAdapters::default();
         let mut state = init_state(&root, vec![offer("local-text")], adapters.clone());
         let input = serde_json::json!({"schema":"elastos.model.input.text/v1","prompt":"hello"});
-        let binding = create_binding("request:owner-prune", "local-text", &input);
+        let binding = expired_create_binding("request:owner-prune", "local-text", &input);
         let mut run = StoredRun::new_prepared(
             deterministic_run_id(&binding),
             binding.clone(),
@@ -4693,7 +4727,7 @@ mod tests {
         let adapters = FakeAdapters::default();
         let mut state = init_state(&root, vec![offer("local-text")], adapters);
         let input = serde_json::json!({"schema":"elastos.model.input.text/v1","prompt":"hello"});
-        let binding = create_binding("request:wrong-owner-prune", "local-text", &input);
+        let binding = expired_create_binding("request:wrong-owner-prune", "local-text", &input);
         let mut run = StoredRun::new_prepared(
             deterministic_run_id(&binding),
             binding.clone(),
@@ -5855,6 +5889,128 @@ mod tests {
                 state.journal.load_run(&run.run_id).unwrap().status,
                 RunStatus::SettlementUnknown
             );
+        }
+    }
+
+    #[test]
+    fn unseen_expired_requests_leave_journal_and_backend_unchanged() {
+        let root = temp_root("expired-create-no-effects");
+        let adapters = FakeAdapters::default();
+        let current = offer("local-text");
+        let mut state = init_state(&root, vec![current.clone()], adapters.clone());
+        let input = json!({"schema":"elastos.model.input.text/v1","prompt":"old"});
+        let old_binding = expired_create_binding("request:unrelated-expired", &current.id, &input);
+        let mut old = prepared_run_for_offer(old_binding, &current, now_ms());
+        transition_terminal(
+            &current,
+            &mut old,
+            RunStatus::Completed,
+            Some(json!({"schema":RUN_OUTPUT_TEXT_SCHEMA,"text":"old"})),
+            None,
+        )
+        .unwrap();
+        expire_terminal_run(&mut old);
+        state.journal.store_run(&old).unwrap();
+        let old_path = run_path(&root, &old.run_id);
+        let before = std::fs::read(&old_path).unwrap();
+        for id in [
+            "legacy-unseen".to_string(),
+            "model-v1:0:invalid".to_string(),
+            crate::test_support::fixture_model_request_id_at("expired-unseen", now_ms() - 300_001),
+            crate::test_support::fixture_model_request_id_at("future-unseen", now_ms() + 120_000),
+        ] {
+            let fresh_input = json!({"schema":"elastos.model.input.text/v1","prompt":"fresh"});
+            let mut binding = create_binding("request:unseen", &current.id, &fresh_input);
+            binding.request_id = id;
+            let path = run_path(&root, &deterministic_run_id(&binding));
+            assert_eq!(
+                state
+                    .handle_runs_create(RunsCreateRequest {
+                        op: "runs_create".into(),
+                        offer_id: current.id.clone(),
+                        operation: current.operation.clone(),
+                        input: fresh_input,
+                        runtime_binding: binding,
+                        expected_execution_binding_hash: None,
+                    })
+                    .unwrap_err()
+                    .code(),
+                "request_expired"
+            );
+            assert!(!path.exists());
+            assert_eq!(std::fs::read(&old_path).unwrap(), before);
+            assert_eq!(state.journal.pruned_issued_floor_ms().unwrap(), 0);
+        }
+        assert_eq!(*adapters.dispatch_calls.lock().unwrap(), 0);
+        assert_eq!(*adapters.reconcile_calls.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn retained_request_precedes_freshness_floor_policy_and_unrelated_pruning() {
+        for legacy in [false, true] {
+            let root = temp_root("retained-first");
+            let adapters = FakeAdapters::default();
+            let current = offer("local-text");
+            let mut state = init_state(&root, vec![current.clone()], adapters.clone());
+            let input = json!({"schema":"elastos.model.input.text/v1","prompt":"kept"});
+            let mut binding = expired_create_binding("request:kept-old", &current.id, &input);
+            if legacy {
+                binding.request_id = "legacy-retained-exact".into();
+            }
+            let mut retained = prepared_run_for_offer(binding.clone(), &current, now_ms());
+            transition_terminal(
+                &current,
+                &mut retained,
+                RunStatus::SettlementUnknown,
+                None,
+                Some(RunError {
+                    class: ErrorClass::SettlementUnknown,
+                    code: "settlement_unknown".into(),
+                    message: "Unknown".into(),
+                }),
+            )
+            .unwrap();
+            state.journal.store_run(&retained).unwrap();
+            // A different old request raises the durable floor without pruning Unknown.
+            let mut expired_binding =
+                expired_create_binding("request:raise-floor", &current.id, &input);
+            expired_binding.request_id = crate::test_support::fixture_model_request_id_at(
+                "higher-floor",
+                now_ms() - 360_000 - 1,
+            );
+            let mut expired = prepared_run_for_offer(expired_binding, &current, now_ms());
+            transition_terminal(
+                &current,
+                &mut expired,
+                RunStatus::Completed,
+                Some(json!({"schema":RUN_OUTPUT_TEXT_SCHEMA,"text":"old"})),
+                None,
+            )
+            .unwrap();
+            expire_terminal_run(&mut expired);
+            state.journal.store_run(&expired).unwrap();
+            state.journal.prune_expired_terminal_runs().unwrap();
+            assert!(state.journal.pruned_issued_floor_ms().unwrap() > 0);
+            let bytes = std::fs::read(run_path(&root, &retained.run_id)).unwrap();
+            state.offers.get_mut(&current.id).unwrap().enabled = false;
+            let response = state
+                .handle_runs_create(RunsCreateRequest {
+                    op: "runs_create".into(),
+                    offer_id: current.id.clone(),
+                    operation: current.operation.clone(),
+                    input,
+                    runtime_binding: binding,
+                    expected_execution_binding_hash: Some("sha256:".to_string() + &"0".repeat(64)),
+                })
+                .unwrap();
+            assert_eq!(response["data"]["run_id"], retained.run_id);
+            assert_eq!(response["data"]["status"], "settlement_unknown");
+            assert_eq!(
+                std::fs::read(run_path(&root, &retained.run_id)).unwrap(),
+                bytes
+            );
+            assert_eq!(*adapters.dispatch_calls.lock().unwrap(), 0);
+            assert_eq!(*adapters.reconcile_calls.lock().unwrap(), 0);
         }
     }
 }

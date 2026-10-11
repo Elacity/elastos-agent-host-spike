@@ -12,6 +12,35 @@ pub(crate) const FIXTURE_EVENT_TIMEOUT: std::time::Duration = std::time::Duratio
 
 thread_local! {
     static TEST_ROOT_REGISTRY: TestRootRegistry = TestRootRegistry::default();
+    static TEST_REQUEST_IDS: RefCell<std::collections::BTreeMap<String, String>> = RefCell::default();
+}
+
+/// Each named creation keeps one time and nonce across retries and changed input.
+pub(crate) fn fixture_model_request_id(label: &str) -> String {
+    if elastos_model_contract::model_request_issued_ms(label).is_some() {
+        return label.to_string();
+    }
+    TEST_REQUEST_IDS.with(|ids| {
+        ids.borrow_mut()
+            .entry(label.to_string())
+            .or_insert_with(|| {
+                let issued = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64;
+                fixture_model_request_id_at(label, issued)
+            })
+            .clone()
+    })
+}
+
+pub(crate) fn fixture_model_request_id_at(label: &str, issued_ms: u64) -> String {
+    use sha2::Digest as _;
+    let nonce = sha2::Sha256::digest(label.as_bytes());
+    format!(
+        "model-v1:{issued_ms}:fixture-{}-{nonce:x}",
+        std::process::id()
+    )
 }
 
 #[derive(Default)]

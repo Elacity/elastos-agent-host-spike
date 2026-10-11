@@ -197,7 +197,7 @@ fn start_local_llama_run(label: &str) -> (ProviderProcess, PathBuf) {
             "session_id": "session:test",
             "capsule_id": "assistant",
             "grant_id": "grant:test",
-            "request_id": format!("request:{label}"),
+            "request_id": test_support::fixture_model_request_id(&format!("request:{label}")),
             "offer_id": "local-text",
             "operation": "text.generate",
             "input_hash": model_input_hash(&input).unwrap()
@@ -467,7 +467,9 @@ for (const id of ['chat','responses']) {
         );
         for (id, operation, _) in &adapters {
             let input = json!({});
-            let request_id = format!("request:external-paused:{pass}:{id}");
+            let request_id = test_support::fixture_model_request_id(&format!(
+                "request:external-paused:{pass}:{id}"
+            ));
             let create = json!({"op":"runs_create","offer_id":id,"operation":operation,
             "input":input,"runtime_binding":{
                 "schema":RUNTIME_CREATE_BINDING_SCHEMA,"principal_id":"person:local:test",

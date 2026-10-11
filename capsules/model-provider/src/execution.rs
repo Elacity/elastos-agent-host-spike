@@ -817,7 +817,7 @@ mod tests {
             session_id: "session:test".to_string(),
             capsule_id: "assistant".to_string(),
             grant_id: "grant:test".to_string(),
-            request_id: request_id.to_string(),
+            request_id: crate::test_support::fixture_model_request_id(request_id),
             offer_id: offer.id.clone(),
             operation: offer.operation.clone(),
             input_hash: model_input_hash(input).unwrap(),

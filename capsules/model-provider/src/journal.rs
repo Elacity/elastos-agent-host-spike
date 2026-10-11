@@ -34,6 +34,8 @@ pub const MAX_NEW_JOURNAL_ENTRIES: usize = 256;
 pub const MAX_JOURNAL_GROWTH_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_RECOVERY_JOURNAL_ENTRIES: usize = 512;
 pub const MAX_RECOVERY_SCAN_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_REQUEST_FLOOR_BYTES: u64 = 1024;
+const REQUEST_FLOOR_SCHEMA: &str = "elastos.model.pruned-request-floor/v1";
 pub const MAX_RUN_ERROR_CODE_BYTES: usize = 128;
 pub const MAX_RUN_ERROR_MESSAGE_BYTES: usize = 1024;
 
@@ -113,6 +115,14 @@ impl StoredRun {
 
 pub struct RunJournal {
     runs_dir: PathBuf,
+    request_floor_path: PathBuf,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrunedRequestFloor {
+    schema: String,
+    issued_ms: u64,
 }
 
 struct JournalEntry {
@@ -153,9 +163,106 @@ impl RunJournal {
         let runs_dir = root.join("runs");
         ensure_journal_dir_owner_only(&root)?;
         ensure_journal_dir_owner_only(&runs_dir)?;
-        let journal = Self { runs_dir };
+        let journal = Self {
+            runs_dir,
+            request_floor_path: root.join("pruned-request-floor.json"),
+        };
+        journal.pruned_issued_floor_ms()?;
         journal.prune_expired_terminal_runs()?;
         Ok(journal)
+    }
+
+    pub fn pruned_issued_floor_ms(&self) -> Result<u64, ProviderFault> {
+        self.load_request_floor().map(|(floor, _)| floor)
+    }
+
+    fn load_request_floor(&self) -> Result<(u64, Option<fs::Metadata>), ProviderFault> {
+        let parent = self.request_floor_path.parent().ok_or_else(|| {
+            ProviderFault::corrupt_journal("model request floor is missing its parent")
+        })?;
+        ensure_journal_dir_owner_only(parent)?;
+        let expected = match fs::symlink_metadata(&self.request_floor_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, None)),
+            Err(error) => {
+                return Err(ProviderFault::corrupt_journal(format!(
+                    "failed to inspect model request floor: {error}"
+                )))
+            }
+        };
+        validate_existing_file(&self.request_floor_path, &expected)?;
+        if expected.len() > MAX_REQUEST_FLOOR_BYTES {
+            return Err(ProviderFault::corrupt_journal(
+                "model request floor is too large",
+            ));
+        }
+        let mut file = open_run_readonly(&self.request_floor_path)?;
+        let opened = file.metadata().map_err(|error| {
+            ProviderFault::corrupt_journal(format!(
+                "failed to inspect opened request floor: {error}"
+            ))
+        })?;
+        validate_existing_file(&self.request_floor_path, &opened)?;
+        if !same_snapshot(&expected, &opened) {
+            return Err(ProviderFault::corrupt_journal(
+                "model request floor changed before read",
+            ));
+        }
+        let bytes = read_bounded_record(&mut file, opened.len())?;
+        let after = file.metadata().map_err(|error| {
+            ProviderFault::corrupt_journal(format!(
+                "failed to inspect request floor after read: {error}"
+            ))
+        })?;
+        if !same_snapshot(&opened, &after) {
+            return Err(ProviderFault::corrupt_journal(
+                "model request floor changed during read",
+            ));
+        }
+        verify_path_snapshot(&self.request_floor_path, &opened)?;
+        let floor: PrunedRequestFloor = serde_json::from_slice(&bytes)
+            .map_err(|_| ProviderFault::corrupt_journal("model request floor is malformed"))?;
+        if floor.schema != REQUEST_FLOOR_SCHEMA || floor.issued_ms == 0 {
+            return Err(ProviderFault::corrupt_journal(
+                "model request floor is invalid",
+            ));
+        }
+        Ok((floor.issued_ms, Some(opened)))
+    }
+
+    fn record_pruned_issuance(&self, request_id: &str) -> Result<(), ProviderFault> {
+        let Some(issued_ms) = elastos_model_contract::model_request_issued_ms(request_id) else {
+            // Retained legacy IDs cannot authorize a new request.
+            return Ok(());
+        };
+        let (previous, expected) = self.load_request_floor()?;
+        if issued_ms <= previous {
+            return Ok(());
+        }
+        let bytes = encode_bounded(
+            &PrunedRequestFloor {
+                schema: REQUEST_FLOOR_SCHEMA.into(),
+                issued_ms,
+            },
+            MAX_REQUEST_FLOOR_BYTES,
+        )?;
+        // One fixed transaction bounds crash metadata outside runs/. A crash
+        // file is preserved and blocks the next replacement for recovery.
+        let temp = self
+            .request_floor_path
+            .with_file_name(".pruned-request-floor.json.tmp");
+        atomic_write_with_temp(
+            &self.request_floor_path,
+            &bytes,
+            expected.as_ref(),
+            temp,
+            |file, bytes| {
+                file.write_all(bytes)?;
+                file.sync_all()
+            },
+            |from, to| fs::rename(from, to),
+            sync_directory,
+        )
     }
 
     pub fn load_run(&self, run_id: &str) -> Result<StoredRun, ProviderFault> {
@@ -260,6 +367,7 @@ impl RunJournal {
     }
 
     pub fn prune_expired_terminal_runs(&self) -> Result<(), ProviderFault> {
+        self.pruned_issued_floor_ms()?;
         let mut expired = Vec::new();
         self.visit_runs(|path, run, _| {
             if is_expired_terminal_run(run, now_ms()) {
@@ -269,7 +377,9 @@ impl RunJournal {
         })?;
         // Validate the entire bounded journal before any deletion.
         for (path, run_id) in expired {
-            delete_verified_run_file(&path, &self.runs_dir, &run_id)?;
+            delete_verified_run_file(&path, &self.runs_dir, &run_id, |run| {
+                self.record_pruned_issuance(&run.runtime_binding.request_id)
+            })?;
         }
         Ok(())
     }
@@ -278,8 +388,11 @@ impl RunJournal {
         if !is_expired_terminal_run(run, now_ms()) {
             return Ok(false);
         }
+        self.pruned_issued_floor_ms()?;
         let path = hashed_path(&self.runs_dir, &run.run_id);
-        delete_verified_run_file(&path, &self.runs_dir, &run.run_id)?;
+        delete_verified_run_file(&path, &self.runs_dir, &run.run_id, |run| {
+            self.record_pruned_issuance(&run.runtime_binding.request_id)
+        })?;
         Ok(true)
     }
 
@@ -559,11 +672,30 @@ fn atomic_write_with(
     rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
     sync_parent: impl FnOnce(&Path) -> Result<(), ProviderFault>,
 ) -> Result<(), ProviderFault> {
+    atomic_write_with_temp(
+        path,
+        bytes,
+        expected,
+        allocate_temp_path(path)?,
+        write,
+        rename,
+        sync_parent,
+    )
+}
+
+fn atomic_write_with_temp(
+    path: &Path,
+    bytes: &[u8],
+    expected: Option<&fs::Metadata>,
+    tmp: PathBuf,
+    write: impl FnOnce(&mut fs::File, &[u8]) -> std::io::Result<()>,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    sync_parent: impl FnOnce(&Path) -> Result<(), ProviderFault>,
+) -> Result<(), ProviderFault> {
     if let Some(parent) = path.parent() {
         ensure_journal_dir_owner_only(parent)?;
     }
     validate_run_path_target(path)?;
-    let tmp = allocate_temp_path(path)?;
     let file = open_temp_file_owner_only(&tmp)?;
     let mut transaction = OwnedTransaction {
         path: tmp,
@@ -1386,13 +1518,19 @@ fn is_expired_terminal_run(run: &StoredRun, now_ms: u64) -> bool {
         && run.status != RunStatus::SettlementUnknown
         && run
             .retention_until_ms
-            .is_some_and(|retention_until_ms| now_ms > retention_until_ms)
+            .is_some_and(|retention_until_ms| {
+                let replay_deadline = elastos_model_contract::model_request_replay_deadline_ms(
+                    &run.runtime_binding.request_id,
+                ).unwrap_or(0);
+                now_ms > retention_until_ms.max(replay_deadline)
+            })
 }
 
 fn delete_verified_run_file(
     path: &Path,
     runs_dir: &Path,
     expected_run_id: &str,
+    before_remove: impl FnOnce(&StoredRun) -> Result<(), ProviderFault>,
 ) -> Result<(), ProviderFault> {
     // Keep the verified inode open until removal; a replacement path never
     // inherits the expired record's deletion authority.
@@ -1408,6 +1546,8 @@ fn delete_verified_run_file(
             path.display()
         )));
     }
+    // Commit the refusal floor before deleting the sole retained identity.
+    before_remove(&run)?;
     let current = held.metadata().map_err(|err| {
         ProviderFault::corrupt_journal(format!("failed to inspect expiring run journal: {err}"))
     })?;
@@ -2363,8 +2503,10 @@ mod tests {
         malformed.events[0].sequence = 2;
         overwrite_run_file(&malformed_path, &malformed);
         let malformed_error =
-            delete_verified_run_file(&malformed_path, &root.join("runs"), &expired.run_id)
-                .unwrap_err();
+            delete_verified_run_file(&malformed_path, &root.join("runs"), &expired.run_id, |_| {
+                Ok(())
+            })
+            .unwrap_err();
         assert_eq!(malformed_error.code(), "journal_corrupt");
         assert!(malformed_path.exists());
 
@@ -2382,6 +2524,7 @@ mod tests {
             &unexpired_path,
             &root.join("runs"),
             &expired_unexpired.run_id,
+            |_| Ok(()),
         )
         .unwrap_err();
         assert_eq!(unexpired_error.code(), "journal_corrupt");
@@ -2898,5 +3041,147 @@ mod tests {
         let actual = journal.load_run(&run.run_id).unwrap();
         assert!(same_execution_identity(&run, &actual));
         assert_eq!(actual.status, RunStatus::SettlementUnknown);
+    }
+
+    #[test]
+    fn replay_retention_uses_strict_maximum_and_keeps_unknown_and_legacy_facts() {
+        let id = crate::test_support::fixture_model_request_id_at("replay-window", 1_000);
+        let mut run = completed_run(&id, 1_000, 1_100, 1);
+        let replay = elastos_model_contract::model_request_replay_deadline_ms(&id).unwrap();
+        assert_eq!(replay, 361_000);
+        assert!(!is_expired_terminal_run(&run, 2_101));
+        assert!(!is_expired_terminal_run(&run, replay));
+        assert!(is_expired_terminal_run(&run, replay + 1));
+        run.offer.policy.retention_secs = 400;
+        run.retention_until_ms = Some(401_100);
+        assert!(!is_expired_terminal_run(&run, 401_100));
+        assert!(is_expired_terminal_run(&run, 401_101));
+        let unknown = settle_unknown(&prepared_run(&id));
+        assert!(!is_expired_terminal_run(&unknown, u64::MAX));
+        let legacy = completed_run("legacy-retained", 1_000, 1_100, 1);
+        assert!(is_expired_terminal_run(&legacy, 2_101));
+        assert_eq!(legacy.runtime_binding.request_id, "legacy-retained");
+    }
+
+    #[test]
+    fn pruned_floor_survives_restart_and_refuses_clock_rollback_replay() {
+        let root = temp_root("request-floor-restart");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let issued = now_ms() - 400_000;
+        let id = crate::test_support::fixture_model_request_id_at("pruned", issued);
+        let run = completed_run(&id, issued, issued + 10, 1);
+        journal.store_run(&run).unwrap();
+        let path = run_path(&root, &run.run_id);
+        journal.prune_expired_terminal_runs().unwrap();
+        assert!(!path.exists());
+        assert_eq!(journal.pruned_issued_floor_ms().unwrap(), issued);
+        assert!(
+            fs::metadata(&journal.request_floor_path).unwrap().len() <= MAX_REQUEST_FLOOR_BYTES
+        );
+        assert!(journal.census().unwrap().is_empty());
+        let reopened = RunJournal::open(root).unwrap();
+        assert_eq!(reopened.pruned_issued_floor_ms().unwrap(), issued);
+        // This request would be fresh after a clock rollback, but was already pruned.
+        assert!(
+            elastos_model_contract::validate_new_model_request_id(&id, issued + 1, issued).is_err()
+        );
+        let next = crate::test_support::fixture_model_request_id_at("next", issued + 1);
+        assert!(
+            elastos_model_contract::validate_new_model_request_id(&next, issued + 1, issued)
+                .is_ok()
+        );
+        reopened
+            .record_pruned_issuance(&crate::test_support::fixture_model_request_id_at(
+                "older",
+                issued - 1,
+            ))
+            .unwrap();
+        assert_eq!(reopened.pruned_issued_floor_ms().unwrap(), issued);
+    }
+
+    #[test]
+    fn failed_floor_persistence_keeps_run_and_only_one_crash_transaction() {
+        let root = temp_root("request-floor-crash");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let issued = now_ms() - 400_000;
+        let id = crate::test_support::fixture_model_request_id_at("floor-crash", issued);
+        let run = completed_run(&id, issued, issued + 10, 1);
+        journal.store_run(&run).unwrap();
+        let path = run_path(&root, &run.run_id);
+        let before = file_bytes(&path);
+        let temp = root.join(".pruned-request-floor.json.tmp");
+        let mut stale = open_temp_file_owner_only(&temp).unwrap();
+        stale.write_all(b"retained crash transaction").unwrap();
+        stale.sync_all().unwrap();
+        for _ in 0..2 {
+            assert!(journal.prune_expired_terminal_runs().is_err());
+            assert_eq!(file_bytes(&path), before);
+            assert_eq!(file_bytes(&temp), b"retained crash transaction");
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        }
+        assert_eq!(journal.pruned_issued_floor_ms().unwrap(), 0);
+        // Only the fixture removes its exact stale file; production preserves it.
+        drop(stale);
+        fs::remove_file(temp).unwrap();
+        journal.prune_expired_terminal_runs().unwrap();
+        assert!(!path.exists());
+        assert_eq!(journal.pruned_issued_floor_ms().unwrap(), issued);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn malformed_or_oversized_floor_preserves_runs_before_pruning() {
+        let root = temp_root("request-floor-invalid");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let run = completed_run("legacy-expired-with-bad-floor", 1, 10, 1);
+        journal.store_run(&run).unwrap();
+        let path = run_path(&root, &run.run_id);
+        let before = file_bytes(&path);
+        for bytes in [
+            b"invalid".to_vec(),
+            vec![b'x'; MAX_REQUEST_FLOOR_BYTES as usize + 1],
+        ] {
+            let mut file = if journal.request_floor_path.exists() {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(&journal.request_floor_path)
+                    .unwrap()
+            } else {
+                open_temp_file_owner_only(&journal.request_floor_path).unwrap()
+            };
+            file.write_all(&bytes).unwrap();
+            file.sync_all().unwrap();
+            assert!(journal.prune_expired_terminal_runs().is_err());
+            assert!(RunJournal::open(root.clone()).is_err());
+            assert_eq!(file_bytes(&path), before);
+            assert_eq!(file_bytes(&journal.request_floor_path), bytes);
+        }
+    }
+
+    #[test]
+    fn committed_floor_precedes_run_deletion_and_preserves_replacement() {
+        let root = temp_root("floor-before-exact-delete");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let issued = now_ms() - 400_000;
+        let id = crate::test_support::fixture_model_request_id_at("replaced-prune", issued);
+        let run = completed_run(&id, issued, issued + 10, 1);
+        journal.store_run(&run).unwrap();
+        let path = run_path(&root, &run.run_id);
+        let held_original = root.join("original-run-fixture.json");
+        assert!(
+            delete_verified_run_file(&path, &root.join("runs"), &run.run_id, |run| {
+                journal.record_pruned_issuance(&run.runtime_binding.request_id)?;
+                assert_eq!(journal.pruned_issued_floor_ms()?, issued);
+                fs::rename(&path, &held_original).unwrap();
+                let mut replacement = open_temp_file_owner_only(&path).unwrap();
+                replacement.write_all(b"replacement retained").unwrap();
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(file_bytes(&path), b"replacement retained");
+        assert_eq!(journal.pruned_issued_floor_ms().unwrap(), issued);
+        assert!(held_original.exists());
     }
 }
