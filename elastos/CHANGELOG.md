@@ -6,6 +6,13 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Developer detail
+
+- Only the Runtime binary (`elastos`) compiles in the release version. Home
+  CLI, the shell and the Browser VZ supervisor no longer do, so their bytes
+  stay the same across releases when their code does not change (#194). The
+  terminal Home shows the Runtime version it reads from the Runtime.
+
 ## [0.8.0-alpha.15]
 
 Test-channel release. Signed releases show these notes in System before you update.
