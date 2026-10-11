@@ -144,6 +144,18 @@ mandates.
 ## Request identity and session facts
 
 Runtime assigns or validates a durable request ID unique within the agent task.
+New preparation and inference requests use `model-v1:<issued_ms>:<nonce>`.
+The client creates a random nonce for each new action and retains that complete
+ID during recovery. Runtime and the provider look up retained bindings first,
+including legacy IDs. An unseen ID needs a valid timestamp within five minutes,
+with at most one minute of future clock skew. An expired or missing legacy ID
+receives the fixed `request_expired` refusal before new work starts.
+
+Retained bindings survive their complete freshness window. Before pruning a
+terminal result, its owner persists the maximum pruned issuance time. This
+floor also refuses the old ID after restart or a backwards clock change.
+Unresolved runs retain their binding. A new action needs a new request ID.
+
 The provider binds these facts before dispatch:
 
 - agent and Runtime session identifiers;
@@ -259,10 +271,13 @@ ordinary capsules.
 
 For a remote create, Runtime can return a request-bound
 `elastos.model.invocation-refusal/v1` assertion. It states that this invocation
-stopped before provider dispatch. The destination emits it, the consumer checks
+stopped before provider dispatch (`dispatch: not_started`). A closed provider
+`request_expired` fault has a separate phase, `dispatch: provider_refused`:
+provider validation ran and declined new inference. The destination emits it, the consumer checks
 the exact request, offer, input hash and remote binding, and the gateway returns
-HTTP 409. Assistant accepts it only for a fresh remote submission. A retained or
-pending request, provider error, malformed assertion or lost reply keeps its
+HTTP 409. The local gateway binds the same provider expiry fact to its normalized
+request. Assistant checks its fresh request identity, offer, operation and phase.
+A retained or pending request, generic provider error, malformed assertion or lost reply keeps its
 recovery or unknown status. Carrier tries another address after connection
 failure, but stops after a model create invocation error. This assertion settles
 the current invocation only; it does not settle earlier uncertain attempts.

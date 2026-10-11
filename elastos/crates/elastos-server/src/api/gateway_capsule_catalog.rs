@@ -667,6 +667,15 @@ async fn dispatch_capsule_affordance(
 
 /// Known Runtime refusal facts have bounded prose; provider details stay private.
 fn preparation_invoke_error(error: anyhow::Error) -> (StatusCode, &'static str, String) {
+    if let Some(expired) =
+        error.downcast_ref::<super::capsule_inventory::preparation::PreparationRequestExpired>()
+    {
+        return (
+            StatusCode::CONFLICT,
+            expired.public_class(),
+            expired.public_message().into(),
+        );
+    }
     if let Some(memory) =
         error.downcast_ref::<super::capsule_inventory::preparation::PreparationMemoryRefusal>()
     {
@@ -932,6 +941,26 @@ mod tests {
             assert_eq!(message, refusal.public_message());
             assert!(!message.contains("/secret") && !message.contains("credential"));
         }
+    }
+
+    #[test]
+    fn model_get_expired_request_shows_only_the_fixed_runtime_reason() {
+        let (status, code, message) = preparation_invoke_error(
+            anyhow::Error::new(
+                super::super::capsule_inventory::preparation::PreparationRequestExpired,
+            )
+            .context("private provider /secret credential"),
+        );
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(code, elastos_model_contract::MODEL_REQUEST_EXPIRED_CODE);
+        assert_eq!(
+            message,
+            elastos_model_contract::MODEL_REQUEST_EXPIRED_MESSAGE
+        );
+        let (_, code, _) = preparation_invoke_error(anyhow::anyhow!(
+            elastos_model_contract::MODEL_REQUEST_EXPIRED_MESSAGE
+        ));
+        assert_eq!(code, "preparation_unavailable");
     }
 
     #[test]
