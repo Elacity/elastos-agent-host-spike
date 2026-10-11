@@ -3167,6 +3167,7 @@ mod tests {
             "policy_limit"
         );
         assert_eq!(file_bytes(&path), original);
+        // Exercise the raw encoding cap separately from stored-string validation.
         let mut header = prepared_run("header-shape");
         let escaped = format!("{}a", "\u{0001}".repeat(MAX_HOSTED_POLICY_REF_BYTES - 1));
         header.offer.hosted.as_mut().unwrap().privacy_policy_ref = escaped.clone();
@@ -3192,9 +3193,33 @@ mod tests {
         assert!(validate_new_run_shape(&header).is_err());
         assert_eq!(
             journal.store_run(&header).unwrap_err().code(),
-            "policy_limit"
+            "journal_corrupt"
         );
         assert!(!run_path(&root, &header.run_id).exists());
+        assert_eq!(file_bytes(&path), original);
+        let mut valid_header = prepared_run("escaped-header-shape");
+        let escaped = format!("{}a", "\"\\".repeat((MAX_HOSTED_POLICY_REF_BYTES - 1) / 2));
+        valid_header
+            .offer
+            .hosted
+            .as_mut()
+            .unwrap()
+            .privacy_policy_ref = escaped.clone();
+        valid_header.offer.hosted.as_mut().unwrap().terms_ref = escaped;
+        let valid_path = run_path(&root, &valid_header.run_id);
+        validate_stored_run(
+            &valid_path,
+            &root.join("runs"),
+            Some(&valid_header.run_id),
+            &valid_header,
+        )
+        .unwrap();
+        assert!(validate_new_run_shape(&valid_header).is_ok());
+        journal.store_run(&valid_header).unwrap();
+        let retained = journal.load_run(&valid_header.run_id).unwrap();
+        assert_eq!(retained.runtime_binding, valid_header.runtime_binding);
+        assert_eq!(retained.offer, valid_header.offer);
+        assert_eq!(journal.census().unwrap().len(), 2);
         assert_eq!(file_bytes(&path), original);
         assert!(encode_bounded(
             &"x".repeat(MAX_NEW_RUN_JOURNAL_BYTES as usize),
