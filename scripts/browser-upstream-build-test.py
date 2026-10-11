@@ -79,7 +79,11 @@ class BrowserUpstreamBuildTest(unittest.TestCase):
             with self.subTest(platform=platform):
                 self.native_build(platform)
 
-    def native_build(self, platform):
+    def test_coturn_build_refuses_a_changed_include_path_marker(self):
+        with self.assertRaisesRegex(ValueError, 'coturn include-path marker changed'):
+            self.native_build('linux-arm64', b'LIBEVENT_INCLUDE = -I/usr/include/\n')
+
+    def native_build(self, platform, coturn_makefile=b'LIBEVENT_INCLUDE = -I${PREFIX}/include/ -I/usr/local/include/\n'):
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch).resolve()
             recipe = assets.resolved_recipe(next(r for r in assets.selected_recipes(platform) if r['component'] == 'turnserver'))
@@ -94,9 +98,13 @@ class BrowserUpstreamBuildTest(unittest.TestCase):
                     data = b'inert configure fixture\n'
                     member.size, member.mode = len(data), 0o755
                     archive.addfile(member, io.BytesIO(data))
+                    extra = {}
                     if name.startswith('openssl-'):
-                        member = tarfile.TarInfo(name + '/util/mkbuildinf.pl')
-                        data = b"my $cflags = join(' ', @ARGV);\nprint $cflags;\n"
+                        extra['util/mkbuildinf.pl'] = b"my $cflags = join(' ', @ARGV);\nprint $cflags;\n"
+                    if name.startswith('coturn-'):
+                        extra['Makefile.in'] = coturn_makefile + b'INCFLAGS = -Isrc ${LIBEVENT_INCLUDE}\n'
+                    for relative, data in extra.items():
+                        member = tarfile.TarInfo(name + '/' + relative)
                         member.size = len(data)
                         archive.addfile(member, io.BytesIO(data))
                 return source(name + '.tar.gz', buffer.getvalue())
@@ -108,6 +116,10 @@ class BrowserUpstreamBuildTest(unittest.TestCase):
             calls, environments = [], []
             real_run = subprocess.run
             mac = platform.startswith('darwin')
+            headers = root / 'uapi'
+            for name in ('linux', 'asm-generic', 'asm'):
+                (headers / name).mkdir(parents=True)
+                (headers / name / 'fixture.h').write_bytes(b'build header fixture')
             def run(args, **kwargs):
                 calls.append(args)
                 environments.append(kwargs.get("env", {}))
@@ -117,6 +129,24 @@ class BrowserUpstreamBuildTest(unittest.TestCase):
                                       env=env, capture_output=True, text=True, check=True)
                     self.assertNotIn(env['ELASTOS_BROWSER_BUILD_ROOT'], result.stdout)
                     self.assertIn('/usr/src/elastos-browser', result.stdout)
+                    # OpenSSL's Configure turns -static into no-threads.
+                    self.assertNotIn('-static', env['LDFLAGS'].split())
+                if args[0] == 'pkg-config':
+                    packages = [a for a in args[1:] if not a.startswith('--')]
+                    output = '-Ifixture/include' if '--cflags' in args else ' '.join(
+                        '-l' + name.removeprefix('lib') for name in packages)
+                    return subprocess.CompletedProcess(args, 0, output + '\n', '')
+                if args[0] == './configure' and Path(kwargs['cwd']).name == recipe['root']:
+                    makefile = (Path(kwargs['cwd']) / 'Makefile.in').read_text()
+                    self.assertIn('LIBEVENT_INCLUDE =\n', makefile)
+                    self.assertNotIn('/usr/local/include', makefile)
+                    if not mac:
+                        uapi = Path(kwargs['env']['C_INCLUDE_PATH'])
+                        self.assertEqual((uapi / 'linux/fixture.h').read_bytes(), b'build header fixture')
+                    # GNU ld resolves static archives in order: libevent_openssl, then OpenSSL.
+                    libraries = kwargs['env']['EVENT_LIBS'].split()
+                    self.assertLess(libraries.index('-levent_openssl'), libraries.index('-lssl'))
+                    self.assertLess(libraries.index('-lssl'), libraries.index('-lcrypto'))
                 if args[:2] == ['make', 'install'] and Path(kwargs['cwd']).name == recipe['root']:
                     binary = Path(kwargs['cwd']).parents[1] / 'install/usr/bin/turnserver'
                     binary.parent.mkdir(parents=True)
@@ -139,6 +169,7 @@ class BrowserUpstreamBuildTest(unittest.TestCase):
                  patch.object(builder.platform, 'machine', return_value='x86_64' if platform == 'linux-amd64' else 'arm64'), \
                  patch.object(builder.shutil, 'which', return_value='/fixture/build-tool'), \
                  patch.object(builder.subprocess, 'run', side_effect=run), \
+                 patch.dict(os.environ, {'ELASTOS_BROWSER_LINUX_UAPI_INCLUDE': str(headers)}), \
                  patch.object(upstream, 'builder_module', return_value=builder):
                 receipt = upstream.package(recipe, root / 'cache', root / 'output')
             self.assertFalse((root / "cache" / ("turnserver-built-" + platform + ".tar.gz")).exists())
@@ -150,6 +181,7 @@ class BrowserUpstreamBuildTest(unittest.TestCase):
                              'sources/coturn-4.13.1.tar.gz', 'sources/openssl-3.6.3.tar.gz',
                              'sources/libevent-release-2.1.13-stable.tar.gz', 'sources/browser-upstream-build.py']:
                     self.assertIn(recipe['root'] + '/' + name, names)
+                self.assertEqual(recipe['root'] + '/sources/linux-uapi.tar.gz' in names, not mac)
             if not mac:
                 self.assertTrue(any(e.get('CC') == 'musl-gcc' and ' -static' in e.get('LDFLAGS', '') for e in environments))
             self.assertTrue(any('no-shared' in args for args in calls))
