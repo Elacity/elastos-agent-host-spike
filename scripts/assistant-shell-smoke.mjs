@@ -183,6 +183,7 @@ function createFetchFixture({
       };
     }
     if (url === "/api/provider/model/runs_create") {
+      if (typeof createResponse === "function") return createResponse(JSON.parse(init.body));
       return {
         ok: true,
         status: 200,
@@ -249,7 +250,7 @@ async function buildApp(options = {}) {
   const timerOrder = [];
   let timerId = 0;
   let uuidCounter = 0;
-  let nowMs = 0;
+  let nowMs = 1000;
   const clipboard = {
     config: null,
     startCount: 0,
@@ -863,7 +864,7 @@ for (const first of ["offers", "workspace"]) {
   });
   assert.equal(createBody.offer_id, "offer:text-1");
   assert.equal(createBody.operation, "text.generate");
-  assert.match(createBody.request_id, /^uuid-/);
+  assert.match(createBody.request_id, /^model-v1:\d+:uuid-/);
   const messages = app.snapshot().currentSession.messages;
   assert.equal(messages.at(-1).content, "Hello world");
 }
@@ -927,6 +928,58 @@ for (const first of ["offers", "workspace"]) {
     /> Note: Transcript truncated to fit the trusted Home Clipboard limit\.$/,
   );
   assert.equal(clipboardWrites[0].text.includes("\ufffd"), false);
+}
+
+// An exact refusal keeps the unsent draft and removes only this attempt's
+// message. A mismatched refusal keeps the original uncertain request blocked.
+for (const [exact, editDuringCreate] of [[true, null], [true, "Newer edit"], [true, ""], [false, null]]) {
+  const prompt = "Keep this draft";
+  const originalMessages = [{ role: "user", content: prompt }, { role: "assistant", content: "Earlier reply" }];
+  let appRef, requests = 0;
+  const { app, fetch } = await buildApp({
+    workspace: { schema: "elastos.assistant.workspace/v1", revision: 3,
+      sessions: [{ id: "saved-chat", mode: "chat", title: "Saved chat", messages: originalMessages }],
+      draft: prompt, selected_offer_id: "offer:text-1" },
+    createResponse: body => {
+      if (++requests > 1) return { ok: true, status: 200, json: async () => ({ status: "ok", data: {
+        schema: "elastos.model.run/v1", run_id: `run:sha256:${"a".repeat(64)}`,
+        status: "completed", sequence_cursor: 1,
+        terminal: { output: { schema: "elastos.model.output.text/v1", text: "Fresh reply" } },
+      } }) };
+      if (editDuringCreate !== null) appRef.setDraft(editDuringCreate);
+      return { ok: false, status: 409, json: async () => ({ status: "error", code: "model_invocation_refused",
+        reason: "request_expired", message: "This request is no longer valid. Check your device's clock, then try again.",
+        refusal: { schema: "elastos.model.invocation-refusal/v1", scope: "invocation", dispatch: "provider_refused",
+          request_id: exact ? body.request_id : "different-request", offer_id: body.offer_id,
+          operation: body.operation, input_hash: `sha256:${"b".repeat(64)}` },
+      }) };
+    },
+  });
+  appRef = app;
+  assert.equal(await app.sendDraft(), false);
+  const firstId = JSON.parse(fetch.fetchCalls.find(([url]) => url.endsWith("runs_create"))[1].body).request_id;
+  assert.equal(app.snapshot().activeRun.status, exact ? "not_sent" : "settlement_unknown");
+  assert.equal(app.snapshot().activeRun.terminal, exact);
+  if (exact) {
+    assert.deepEqual(app.snapshot().currentSession.messages, originalMessages, "only the unsent attempt is removed");
+    assert.equal(app.snapshot().draft, editDuringCreate ?? prompt, "a newer edit keeps even an empty draft");
+    if (editDuringCreate === "") {
+      assert.equal(await app.sendDraft(), false);
+      assert.equal(requests, 1, "a deliberately cleared draft stays unsent");
+      app.setDraft("Fresh deliberate edit");
+    }
+    assert.equal(await app.sendDraft(), true);
+    const creates = fetch.fetchCalls.filter(([url]) => url.endsWith("runs_create")).map(([,init]) => JSON.parse(init.body));
+    assert.notEqual(creates[1].request_id, firstId);
+    assert.equal(creates[1].input.prompt, editDuringCreate === "" ? "Fresh deliberate edit" : editDuringCreate ?? prompt);
+    assert.equal(app.snapshot().currentSession.messages.filter(message => message.role === "user").length, 2,
+      "a deliberate retry adds one user message");
+  } else {
+    app.setDraft(prompt);
+    assert.equal(await app.sendDraft(), false);
+    assert.equal(requests, 1);
+    assert.equal(app.snapshot().activeRun.createRequestId, firstId);
+  }
 }
 
 {
@@ -1164,7 +1217,7 @@ for (const first of ["offers", "workspace"]) {
   const timers = new Map();
   const timerOrder = [];
   let timerId = 0;
-  let nowMs = 0;
+  let nowMs = 1000;
   const savedBodies = [];
   let workspaceRevision = 4;
   let resolveFirstSave = null;

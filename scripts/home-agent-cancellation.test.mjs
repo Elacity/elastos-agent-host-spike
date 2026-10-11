@@ -1333,13 +1333,13 @@ test("only an exact provider-refused expired fresh create permits deliberate ret
       if (mode === "wrong-phase") refusal.dispatch = "not_started";
       return { ok: false, status: mode === "wrong-status" ? 200 : 409, json: async () => ({ status: "error",
         code: mode === "generic" ? "denied" : mode === "remote" ? "remote_model_invocation_refused" : "model_invocation_refused",
-        reason: "request_expired", message: "This request is no longer valid. Try again.", refusal }) };
+        reason: "request_expired", message: "This request is no longer valid. Check your device's clock, then try again.", refusal }) };
     };
     live.selectLiveOffer(offerId);
     await live.probeLiveInference({ force: true });
     const confirmed = ["valid", "remote"].includes(mode);
     await assert.rejects(live.streamChatViaContract([{ role: "user", content: "fixture" }], { onState: state => states.push(state) }), error => {
-      if (confirmed) assert.equal(controller.formatStreamError(error), "This request is no longer valid. Try again.");
+      if (confirmed) assert.equal(controller.formatStreamError(error), "This request is no longer valid. Check your device's clock, then try again.");
       return error.code === (confirmed ? mode === "remote" ? "remote_model_invocation_refused" : "model_invocation_refused" : "run_acceptance_unknown");
     });
     assert.match(calls[0].request_id, /^model-v1:\d+:/);

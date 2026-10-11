@@ -27,7 +27,8 @@ pub const MODEL_REQUEST_MAX_AGE_MS: u64 = 300_000;
 pub const MODEL_REQUEST_FUTURE_SKEW_MS: u64 = 60_000;
 pub const MODEL_REQUEST_MAX_NONCE_BYTES: usize = 128;
 pub const MODEL_REQUEST_EXPIRED_CODE: &str = "request_expired";
-pub const MODEL_REQUEST_EXPIRED_MESSAGE: &str = "This request is no longer valid. Try again.";
+pub const MODEL_REQUEST_EXPIRED_MESSAGE: &str =
+    "This request is no longer valid. Check your device's clock, then try again.";
 
 /// New model effects carry a bounded time and nonce. Generic Runtime bindings
 /// remain compatible with legacy IDs retained by an existing owner.

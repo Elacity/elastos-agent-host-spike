@@ -398,6 +398,7 @@ export function createAssistantApp({
     }
   }
   let offersEpoch = 0;
+  let draftEditVersion = 0;
   let disposed = false;
   let pollInFlight = false;
   const homeClipboard = homeClipboardClientFactory({
@@ -640,6 +641,7 @@ export function createAssistantApp({
     state.workspaceRevision = workspace.revision;
     state.sessions = workspace.sessions;
     state.draft = workspace.draft;
+    draftEditVersion += 1;
     state.selectedOfferId = workspace.selected_offer_id;
     state.selectedModelCid = workspace.selected_model_cid;
       state.workspaceVersion = 0;
@@ -768,12 +770,13 @@ export function createAssistantApp({
   }
 
   function appendUserMessage(session, prompt) {
+    const message = {
+      role: "user",
+      content: boundedText(prompt, MAX_MESSAGE_CONTENT_BYTES),
+    };
     session.messages = [
       ...session.messages,
-      {
-        role: "user",
-        content: boundedText(prompt, MAX_MESSAGE_CONTENT_BYTES),
-      },
+      message,
     ].slice(-MAX_MESSAGES_PER_SESSION);
     if (
       session.messages.filter((message) => message.role === "user").length === 1 &&
@@ -782,6 +785,7 @@ export function createAssistantApp({
       session.title = titleFromPrompt(prompt, session.mode);
     }
     replaceSession(session);
+    return message;
   }
 
   function setSessionMode(mode) {
@@ -923,6 +927,7 @@ export function createAssistantApp({
       return;
     }
     state.draft = boundedText(text, MAX_DRAFT_BYTES);
+    draftEditVersion += 1;
     markWorkspaceDirty();
     notify();
   }
@@ -1162,8 +1167,8 @@ export function createAssistantApp({
       setStatus("Assistant session is full.");
       return false;
     }
+    const pendingUserMessage = session ? appendUserMessage(session, prompt) : null;
     if (session) {
-      appendUserMessage(session, prompt);
       state.draft = "";
     } else {
       state.studioProgress = null;
@@ -1176,6 +1181,7 @@ export function createAssistantApp({
       return false;
     }
     const createRequestId = newModelRequestId(nowFn(), cryptoRef);
+    const submittedDraftVersion = draftEditVersion;
     // Reserve the request identity synchronously, before either persistence or
     // network work can yield. A second click observes this pending run.
     const pendingRun = {
@@ -1221,8 +1227,13 @@ export function createAssistantApp({
       })) {
         pendingRun.status = "not_sent";
         pendingRun.terminal = true;
-        state.statusMessage = "This request is no longer valid. Try again.";
-        if (session && !state.draft) state.draft = promptSource;
+        state.statusMessage = "This request is no longer valid. Check your device's clock, then try again.";
+        const currentSession = session && findSession(state.sessions, session.id);
+        if (currentSession) {
+          currentSession.messages = currentSession.messages.filter(message => message !== pendingUserMessage);
+          replaceSession(currentSession);
+        }
+        if (session && !state.draft && draftEditVersion === submittedDraftVersion) state.draft = promptSource;
         if (session) markWorkspaceDirty();
         notify();
         return false;

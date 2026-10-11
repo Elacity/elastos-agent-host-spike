@@ -246,7 +246,7 @@ try {
       ["model_memory_observation_unavailable", "This Home could not check the device memory. Ask the Home owner to check the memory limits, then try again."],
       ["memory_budget_unavailable", "This model exceeds the local model memory budget. Choose a smaller model or increase the budget, then Retry."],
       ["cache_budget_unavailable", "This model does not fit the local cache budget. Remove an unneeded model, choose a smaller model, or increase the budget, then Retry."],
-      ["request_expired", "This request is no longer valid. Try again."],
+      ["request_expired", "This request is no longer valid. Check your device's clock, then try again."],
       ["not_enough_free_space", "Not enough free disk space on this Home: this needs 3 GB plus 2 GB kept free. Free some space, then select Get again."],
     ]) {
       useRefusal = { code, ...(code === "not_enough_free_space" ? { message: explanation } : {}) };
@@ -490,7 +490,7 @@ try {
       await frame.getByRole("button", { name: "Refresh models" }).click();
       useRefusal = { code: "request_expired" };
       await frame.getByRole("button", { name: "Retry", exact: true }).click();
-      await frame.getByText("This request is no longer valid. Try again.", { exact: true }).waitFor();
+      await frame.getByText("This request is no longer valid. Check your device's clock, then try again.", { exact: true }).waitFor();
       assert.equal(await frame.getByRole("button", { name: "Retry", exact: true }).isDisabled(), true,
         "a refusal of this invocation keeps the earlier uncertain preparation in recovery");
       const uncertainRequests = calls.filter(c => c.method === "content.use").slice(uncertainStart);

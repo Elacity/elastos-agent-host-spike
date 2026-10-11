@@ -144,7 +144,7 @@ test("Studio accepts an exact expired fresh refusal and preserves deliberate ret
       requests++;
       if (requests > 1) return completed();
       return { ok: false, status: 409, json: async () => ({ status: "error", code: "model_invocation_refused", reason: "request_expired",
-        message: "This request is no longer valid. Try again.", refusal: { schema: "elastos.model.invocation-refusal/v1", scope: "invocation", dispatch: "provider_refused",
+        message: "This request is no longer valid. Check your device's clock, then try again.", refusal: { schema: "elastos.model.invocation-refusal/v1", scope: "invocation", dispatch: "provider_refused",
           request_id: exact ? body.request_id : "other", offer_id: body.offer_id, operation: body.operation, input_hash: `sha256:${"a".repeat(64)}` } }) };
     } });
     assert.equal(await f.app.sendDraft(), false);

@@ -506,7 +506,7 @@ export async function modelRunCall(op, body = {}) {
     const expiredRefusal = op === "runs_create" && res.status === 409 && isExpiredInvocationRefusal(data, body);
     if (expiredRefusal) {
       error.reason = "request_expired";
-      error.message = "This request is no longer valid. Try again.";
+      error.message = "This request is no longer valid. Check your device's clock, then try again.";
     }
     error.preDispatchRefusal =
       data?.code === "approval_required" || data?.code === "approval_denied"

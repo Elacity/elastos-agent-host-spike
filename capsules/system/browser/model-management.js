@@ -18,7 +18,7 @@
     memory_budget_unavailable: "This model exceeds the local model memory budget. Choose a smaller model or increase the budget, then Retry.",
     model_memory_insufficient: MEMORY_FIT_TEXT.insufficient,
     model_memory_observation_unavailable: MEMORY_FIT_TEXT.unavailable,
-    request_expired: "This request is no longer valid. Try again.",
+    request_expired: "This request is no longer valid. Check your device's clock, then try again.",
     content_unavailable: "Preparation failed. Model content could not be read.",
     local_storage_unavailable: "Preparation failed. Local storage could not be written.",
     verification_failed: "Preparation failed. Model verification did not pass.",

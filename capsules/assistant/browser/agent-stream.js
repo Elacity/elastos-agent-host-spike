@@ -528,7 +528,7 @@ export function formatStreamError(err) {
   }
   if (["model_invocation_refused", "remote_model_invocation_refused"].includes(code)
       && err?.reason === "request_expired" && err?.preDispatchRefusal === true) {
-    return "This request is no longer valid. Try again.";
+    return "This request is no longer valid. Check your device's clock, then try again.";
   }
   if (code === "remote_model_invocation_refused" && err?.preDispatchRefusal === true) {
     return "Request refused. This attempt stopped before provider dispatch. Review service access before a new request.";
