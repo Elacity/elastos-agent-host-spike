@@ -505,11 +505,13 @@ try {
       await refreshModels();
       if (recoveredPhase === "unprepared") {
         await frame.getByRole("button", { name: acquire, exact: true }).click();
+      }
+      await frame.getByRole("button", { name: "Cancel preparation" }).waitFor();
+      if (recoveredPhase === "unprepared") {
         const next = calls.filter(c => c.method === "content.use").at(-1);
         assert.notEqual(next.request_id, uncertainRequests[0].request_id,
           "a confirmed expiry and successful empty refresh permit a fresh deliberate Get");
       }
-      await frame.getByRole("button", { name: "Cancel preparation" }).waitFor();
       phase = "unprepared"; kept = false;
       await refreshModels();
       await frame.getByRole("button", { name: acquire, exact: true }).waitFor();
