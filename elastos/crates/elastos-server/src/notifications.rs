@@ -1210,6 +1210,35 @@ mod tests {
     }
 
     #[test]
+    fn sync_room_notifications_creates_attention_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        sync_room_notifications(tmp.path(), &sample_summary()).unwrap();
+        let summary = load_summary(tmp.path()).unwrap();
+        assert_eq!(summary.unread_count, 1);
+        assert_eq!(summary.attention_count, 1);
+        assert_eq!(summary.entries[0].source_app, "chat-room");
+        assert_eq!(summary.entries[0].id, "room-access-request:req-1");
+        assert_eq!(summary.entries[0].kind, ROOM_ACCESS_REQUEST_KIND);
+        assert_eq!(
+            summary.entries[0]
+                .action_ref
+                .as_ref()
+                .map(|action_ref| action_ref.action_id.as_str()),
+            Some("room-approve-request:req-1")
+        );
+    }
+
+    #[test]
+    fn sync_room_notifications_prunes_stale_pair_requests() {
+        let tmp = tempfile::tempdir().unwrap();
+        sync_room_notifications(tmp.path(), &sample_summary()).unwrap();
+        let empty = RoomSummary::default();
+        sync_room_notifications(tmp.path(), &empty).unwrap();
+        let summary = load_summary(tmp.path()).unwrap();
+        assert!(summary.entries.is_empty());
+    }
+
+    #[test]
     fn mark_acted_for_action_hides_notification_entry() {
         let tmp = tempfile::tempdir().unwrap();
         sync_room_notifications(tmp.path(), &sample_summary()).unwrap();
