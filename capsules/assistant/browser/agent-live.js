@@ -15,6 +15,8 @@ import {
   applyRunEventsPage,
   terminalOutputText,
   contractError,
+  newModelRequestId,
+  isExpiredInvocationRefusal,
 } from "./model-contract.js";
 import {
   compileContext,
@@ -501,8 +503,14 @@ export async function modelRunCall(op, body = {}) {
     error.code = data?.code || "model_error";
     error.status = res.status;
     if (data?.code === "approval_required") error.approvalOfferId = body.offer_id;
+    const expiredRefusal = op === "runs_create" && res.status === 409 && isExpiredInvocationRefusal(data, body);
+    if (expiredRefusal) {
+      error.reason = "request_expired";
+      error.message = "This request is no longer valid. Try again.";
+    }
     error.preDispatchRefusal =
       data?.code === "approval_required" || data?.code === "approval_denied"
+      || expiredRefusal
       || (op === "runs_create" && res.status === 409
         && /^remote:[A-Za-z0-9_-]{1,128}:[A-Za-z0-9_.:-]{1,160}$/.test(body.offer_id)
         && data?.code === "remote_model_invocation_refused"
@@ -596,7 +604,7 @@ export async function streamChatViaContract(
   const resuming = Boolean(turn.providerRunId);
   let created;
   let runId;
-  const createRequestId = resuming ? null : newRequestId();
+  const createRequestId = resuming ? null : newModelRequestId();
   if (!resuming) {
     backendReportRunId = "";
     forgetBackendReport(offer?.offerId);

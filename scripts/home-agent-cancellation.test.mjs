@@ -26,6 +26,17 @@ const defer = () => { let resolve, reject; const promise = new Promise((r, e) =>
 const terminal = (kind) => ({ events: [{ sequence: 1, kind, terminal: true, data: kind === "output" ? { schema: "elastos.model.output.text/v1", text: "Done" } : {} }], next_cursor: 1, has_more: false });
 const fixtureContext = { context_window_tokens: 4096, max_output_tokens: 1024 };
 
+test("new model request IDs capture a bounded clock and cryptographic nonce", async () => {
+  const { newModelRequestId } = await import("../capsules/assistant/browser/model-contract.js");
+  let nonceCalls = 0;
+  assert.equal(newModelRequestId(1234, { randomUUID: () => { nonceCalls++; return "fixture-uuid"; } }), "model-v1:1234:fixture-uuid");
+  assert.equal(nonceCalls, 1);
+  for (const clock of [0, -1, NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1])
+    assert.throws(() => newModelRequestId(clock, { randomUUID: () => "nonce" }), error => error.code === "request_id_unavailable");
+  for (const cryptoRef of [null, {}, { randomUUID: () => "" }, { randomUUID: () => "/private" }, { randomUUID: () => "a".repeat(129) }])
+    assert.throws(() => newModelRequestId(1234, cryptoRef), error => error.code === "request_id_unavailable");
+});
+
 test("content intent survives missing catalog and overlapping refresh; hosted replacement is deliberate", async t => {
   t.after(() => live.selectLiveOffer(""));
   const cid = `bafybei${"a".repeat(52)}`;
@@ -1302,6 +1313,39 @@ test("only a matching fresh invocation refusal settles a failed create", async (
     assert.equal(calls.length, 1);
     assert.equal(states.at(-1).state, mode === "valid" ? "failed" : "settlement_unknown");
     assert.equal(Boolean(states.at(-1).completedAt), mode === "valid");
+  }
+});
+
+test("only an exact provider-refused expired fresh create permits deliberate retry", async () => {
+  for (const mode of ["valid", "remote", "wrong-request", "wrong-offer", "wrong-operation", "wrong-hash", "wrong-scope", "wrong-phase", "generic", "wrong-status"]) {
+    const states = [], calls = [];
+    const offerId = mode === "remote" ? "remote:g:fixture" : "model:local";
+    globalThis.fetch = async (url, init) => {
+      const op = new URL(url).pathname.split("/").pop();
+      if (op === "offers_list") return { ok: true, json: async () => ({ offers: [{ id: offerId, title: "Fixture", operation: "text.generate",
+        input_modalities: ["text/plain"], output_modalities: ["text/plain"], context: fixtureContext }] }) };
+      if (op !== "runs_create") throw new Error(`unexpected ${op}`);
+      const body = JSON.parse(init.body); calls.push(body);
+      const refusal = { schema: "elastos.model.invocation-refusal/v1", scope: "invocation", dispatch: "provider_refused",
+        request_id: body.request_id, offer_id: body.offer_id, operation: body.operation, input_hash: `sha256:${"a".repeat(64)}` };
+      if (mode.startsWith("wrong-") && !["wrong-status", "wrong-phase"].includes(mode))
+        refusal[{ "wrong-request": "request_id", "wrong-offer": "offer_id", "wrong-operation": "operation", "wrong-hash": "input_hash", "wrong-scope": "scope" }[mode]] = "other";
+      if (mode === "wrong-phase") refusal.dispatch = "not_started";
+      return { ok: false, status: mode === "wrong-status" ? 200 : 409, json: async () => ({ status: "error",
+        code: mode === "generic" ? "denied" : mode === "remote" ? "remote_model_invocation_refused" : "model_invocation_refused",
+        reason: "request_expired", message: "This request is no longer valid. Try again.", refusal }) };
+    };
+    live.selectLiveOffer(offerId);
+    await live.probeLiveInference({ force: true });
+    const confirmed = ["valid", "remote"].includes(mode);
+    await assert.rejects(live.streamChatViaContract([{ role: "user", content: "fixture" }], { onState: state => states.push(state) }), error => {
+      if (confirmed) assert.equal(controller.formatStreamError(error), "This request is no longer valid. Try again.");
+      return error.code === (confirmed ? mode === "remote" ? "remote_model_invocation_refused" : "model_invocation_refused" : "run_acceptance_unknown");
+    });
+    assert.match(calls[0].request_id, /^model-v1:\d+:/);
+    assert.equal(calls.length, 1);
+    assert.equal(states.at(-1).state, confirmed ? "failed" : "settlement_unknown");
+    assert.equal(Boolean(states.at(-1).completedAt), confirmed);
   }
 });
 

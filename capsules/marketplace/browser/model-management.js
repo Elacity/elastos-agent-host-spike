@@ -18,6 +18,7 @@
     memory_budget_unavailable: "This model exceeds the local model memory budget. Choose a smaller model or increase the budget, then Retry.",
     model_memory_insufficient: MEMORY_FIT_TEXT.insufficient,
     model_memory_observation_unavailable: MEMORY_FIT_TEXT.unavailable,
+    request_expired: "This request is no longer valid. Try again.",
     content_unavailable: "Preparation failed. Model content could not be read.",
     local_storage_unavailable: "Preparation failed. Local storage could not be written.",
     verification_failed: "Preparation failed. Model verification did not pass.",
@@ -159,11 +160,11 @@
           // Only the exact invoked operation can return a final typed denial.
           const bound = body && result?.schema === "elastos.capsules.invoke-result/v1" && result.status === "error"
             && ["capsule", "interface", "method", "request_id"].every(key => result[key] === body[key]);
-          let denial = bound && ["cache_budget_unavailable", "memory_budget_unavailable", "model_memory_insufficient", "model_memory_observation_unavailable"].includes(result.code)
+          let denial = bound && ["cache_budget_unavailable", "memory_budget_unavailable", "model_memory_insufficient", "model_memory_observation_unavailable", "request_expired"].includes(result.code)
             ? FAILURE_TEXT[result.code] : "";
           if (bound && result.code === "not_enough_free_space" && text(result.message, 300)
             && /^Not enough free disk space on this Home: this needs \d+(?:\.\d)? GB plus 2 GB kept free\. Free some space, then select Get again\.$/.test(result.message)) denial = result.message;
-          if (denial) throw Object.assign(new Error(denial), { refusal: denial });
+          if (denial) throw Object.assign(new Error(denial), { refusal: denial, code: result.code });
           throw new Error("Model request failed");
         }
         return result;
@@ -259,13 +260,14 @@
         if (busy || loading || !show() || !model || reconcileRequired) return;
         if (operation === "use" && !unresolvedUse && model.model_memory_fit !== "fits") return;
         stopRead(); const epoch = ++generation, cid = model.cid;
+        const freshUse = operation === "use" && !unresolvedUse;
         const id = model.model_runtime.preparation?.operation_id;
         busy = true; message = ""; refusal = ""; statusFailures = 0; render();
         const io = controller();
         try {
           const opening = operation === "open";
           const input = opening ? { cid, keep: true } : operation === "retention" ? { cid, keep } : operation === "cancel" ? { operation_id: id } : { cid };
-          if (operation === "use" && !unresolvedUse) unresolvedUse = { cid, id: `model-${crypto.randomUUID()}` };
+          if (freshUse) unresolvedUse = { cid, id: `model-v1:${Date.now()}:${crypto.randomUUID()}` };
           const result = await invoke(opening ? "retention" : operation, input, io.signal, operation === "use" ? unresolvedUse.id : undefined);
           if (epoch !== generation || !show() || model?.cid !== cid) return;
           check(result.cid === cid);
@@ -296,7 +298,8 @@
           }
         } catch (error) {
           if (epoch === generation && show() && operation === "use" && error?.refusal) {
-            unresolvedUse = null;
+            if (error.code === "request_expired" && !freshUse) reconcileRequired = true;
+            else unresolvedUse = null;
             refusal = error.refusal;
           } else if (epoch === generation && show()) {
             if (operation === "reclaim") {

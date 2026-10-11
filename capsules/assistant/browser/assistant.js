@@ -4,7 +4,7 @@ import {
 } from "/apps/home/home-clipboard-client.js?v=home-20260726a";
 import { renderToString as renderMathToString } from "./vendor/katex/katex.mjs";
 import { catalogModels, selectedModelOffer, readyModelChoices } from "./model-selection.js";
-import { applyRunEventsPage, parseCursor } from "./model-contract.js";
+import { applyRunEventsPage, parseCursor, newModelRequestId, isExpiredInvocationRefusal } from "./model-contract.js";
 
 const MODEL_TEXT_INPUT_SCHEMA = "elastos.model.input.text/v1";
 const MODEL_IMAGE_INPUT_SCHEMA = "elastos.model.input.image/v1";
@@ -1175,7 +1175,7 @@ export function createAssistantApp({
       notify();
       return false;
     }
-    const createRequestId = cryptoRef.randomUUID();
+    const createRequestId = newModelRequestId(nowFn(), cryptoRef);
     // Reserve the request identity synchronously, before either persistence or
     // network work can yield. A second click observes this pending run.
     const pendingRun = {
@@ -1216,6 +1216,17 @@ export function createAssistantApp({
       return false;
     }
     if (!response.ok || payload?.status === "error") {
+      if (response.status === 409 && isExpiredInvocationRefusal(payload, {
+        request_id: createRequestId, offer_id: offer.id, operation: offer.operation,
+      })) {
+        pendingRun.status = "not_sent";
+        pendingRun.terminal = true;
+        state.statusMessage = "This request is no longer valid. Try again.";
+        if (session && !state.draft) state.draft = promptSource;
+        if (session) markWorkspaceDirty();
+        notify();
+        return false;
+      }
       state.statusMessage = readStatusMessage(payload, "Model provider unavailable.");
       pendingRun.status = "settlement_unknown";
       if (session) {

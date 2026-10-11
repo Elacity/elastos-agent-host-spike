@@ -246,6 +246,7 @@ try {
       ["model_memory_observation_unavailable", "This Home could not check the device memory. Refresh models, then try Get again."],
       ["memory_budget_unavailable", "This model exceeds the local model memory budget. Choose a smaller model or increase the budget, then Retry."],
       ["cache_budget_unavailable", "This model does not fit the local cache budget. Remove an unneeded model, choose a smaller model, or increase the budget, then Retry."],
+      ["request_expired", "This request is no longer valid. Try again."],
       ["not_enough_free_space", "Not enough free disk space on this Home: this needs 3 GB plus 2 GB kept free. Free some space, then select Get again."],
     ]) {
       useRefusal = { code, ...(code === "not_enough_free_space" ? { message: explanation } : {}) };
@@ -476,6 +477,26 @@ try {
     const lostRequests = calls.filter(c => c.method === "content.use").slice(usesBeforeLoss);
     assert.ok(lostRequests.length > 0);
     assert.equal(new Set(lostRequests.map(c => c.request_id)).size, 1, "transport retries and reconciliation preserve the same Use identity");
+    assert.match(lostRequests[0].request_id, /^model-v1:\d+:/);
+    phase = "unprepared"; kept = false;
+    await frame.getByRole("button", { name: "Refresh models" }).click();
+    await frame.getByRole("button", { name: acquire, exact: true }).waitFor();
+    loseUseResponse = true;
+    const uncertainStart = calls.filter(c => c.method === "content.use").length;
+    await frame.getByRole("button", { name: acquire, exact: true }).click();
+    await frame.getByText("Model action could not be confirmed. Refresh to check its status.", { exact: true }).waitFor();
+    loseUseResponse = false; phase = "unprepared"; kept = false;
+    await frame.getByRole("button", { name: "Refresh models" }).click();
+    useRefusal = { code: "request_expired" };
+    await frame.getByRole("button", { name: "Retry", exact: true }).click();
+    await frame.getByText("This request is no longer valid. Try again.", { exact: true }).waitFor();
+    assert.equal(await frame.getByRole("button", { name: "Retry", exact: true }).isDisabled(), true,
+      "a refusal of this invocation keeps the earlier uncertain preparation in recovery");
+    const uncertainRequests = calls.filter(c => c.method === "content.use").slice(uncertainStart);
+    assert.equal(new Set(uncertainRequests.map(c => c.request_id)).size, 1);
+    useRefusal = null; phase = "preparing"; kept = true;
+    await frame.getByRole("button", { name: "Refresh models" }).click();
+    await frame.getByRole("button", { name: "Cancel preparation" }).waitFor();
     phase = "unprepared"; kept = false;
     await frame.getByRole("button", { name: "Refresh models" }).click();
     await frame.getByRole("button", { name: acquire, exact: true }).waitFor();
