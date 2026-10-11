@@ -220,7 +220,7 @@
           bindMethods(interfaces); model = parseCatalog(catalog);
           reconcileRequired = false;
           reclaimStep = "idle";
-          if (model?.cid !== unresolvedUse?.cid || model?.model_runtime.preparation) unresolvedUse = null;
+          if (model?.cid !== unresolvedUse?.cid || model?.model_runtime.preparation || unresolvedUse?.expiredConfirmed) unresolvedUse = null;
         } catch {
           if (epoch !== generation || !show()) return;
           model = null; choices = []; message = "Models are unavailable. Check your connection and trusted catalog, then retry.";
@@ -298,7 +298,10 @@
           }
         } catch (error) {
           if (epoch === generation && show() && operation === "use" && error?.refusal) {
-            if (error.code === "request_expired" && !freshUse) reconcileRequired = true;
+            if (error.code === "request_expired" && !freshUse) {
+              unresolvedUse.expiredConfirmed = true;
+              reconcileRequired = true;
+            }
             else unresolvedUse = null;
             refusal = error.refusal;
           } else if (epoch === generation && show()) {

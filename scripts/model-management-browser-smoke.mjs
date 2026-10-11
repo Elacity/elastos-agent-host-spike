@@ -481,25 +481,33 @@ try {
     phase = "unprepared"; kept = false;
     await frame.getByRole("button", { name: "Refresh models" }).click();
     await frame.getByRole("button", { name: acquire, exact: true }).waitFor();
-    loseUseResponse = true;
-    const uncertainStart = calls.filter(c => c.method === "content.use").length;
-    await frame.getByRole("button", { name: acquire, exact: true }).click();
-    await frame.getByText("Model action could not be confirmed. Refresh to check its status.", { exact: true }).waitFor();
-    loseUseResponse = false; phase = "unprepared"; kept = false;
-    await frame.getByRole("button", { name: "Refresh models" }).click();
-    useRefusal = { code: "request_expired" };
-    await frame.getByRole("button", { name: "Retry", exact: true }).click();
-    await frame.getByText("This request is no longer valid. Try again.", { exact: true }).waitFor();
-    assert.equal(await frame.getByRole("button", { name: "Retry", exact: true }).isDisabled(), true,
-      "a refusal of this invocation keeps the earlier uncertain preparation in recovery");
-    const uncertainRequests = calls.filter(c => c.method === "content.use").slice(uncertainStart);
-    assert.equal(new Set(uncertainRequests.map(c => c.request_id)).size, 1);
-    useRefusal = null; phase = "preparing"; kept = true;
-    await frame.getByRole("button", { name: "Refresh models" }).click();
-    await frame.getByRole("button", { name: "Cancel preparation" }).waitFor();
-    phase = "unprepared"; kept = false;
-    await frame.getByRole("button", { name: "Refresh models" }).click();
-    await frame.getByRole("button", { name: acquire, exact: true }).waitFor();
+    for (const recoveredPhase of ["preparing", "unprepared"]) {
+      loseUseResponse = true;
+      const uncertainStart = calls.filter(c => c.method === "content.use").length;
+      await frame.getByRole("button", { name: acquire, exact: true }).click();
+      await frame.getByText("Model action could not be confirmed. Refresh to check its status.", { exact: true }).waitFor();
+      loseUseResponse = false; phase = "unprepared"; kept = false;
+      await frame.getByRole("button", { name: "Refresh models" }).click();
+      useRefusal = { code: "request_expired" };
+      await frame.getByRole("button", { name: "Retry", exact: true }).click();
+      await frame.getByText("This request is no longer valid. Try again.", { exact: true }).waitFor();
+      assert.equal(await frame.getByRole("button", { name: "Retry", exact: true }).isDisabled(), true,
+        "a refusal of this invocation keeps the earlier uncertain preparation in recovery");
+      const uncertainRequests = calls.filter(c => c.method === "content.use").slice(uncertainStart);
+      assert.equal(new Set(uncertainRequests.map(c => c.request_id)).size, 1);
+      useRefusal = null; phase = recoveredPhase; kept = recoveredPhase === "preparing";
+      await frame.getByRole("button", { name: "Refresh models" }).click();
+      if (recoveredPhase === "unprepared") {
+        await frame.getByRole("button", { name: acquire, exact: true }).click();
+        const next = calls.filter(c => c.method === "content.use").at(-1);
+        assert.notEqual(next.request_id, uncertainRequests[0].request_id,
+          "a confirmed expiry and successful empty refresh permit a fresh deliberate Get");
+      }
+      await frame.getByRole("button", { name: "Cancel preparation" }).waitFor();
+      phase = "unprepared"; kept = false;
+      await frame.getByRole("button", { name: "Refresh models" }).click();
+      await frame.getByRole("button", { name: acquire, exact: true }).waitFor();
+    }
     wrongIdentity = true;
     await frame.getByRole("button", { name: acquire, exact: true }).click();
     await frame.getByText("Model action could not be confirmed. Refresh to check its status.", { exact: true }).waitFor();
