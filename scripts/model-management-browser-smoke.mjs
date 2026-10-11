@@ -13,6 +13,7 @@ const calls = [];
 let phase = "unprepared";
 let kept = false;
 let activationPending = false;
+let activationFailure = false;
 let dispatchPending = false;
 let dispatchUnavailableReason = null;
 let failure = false;
@@ -32,7 +33,8 @@ const fixtureErrors = [];
 function preparation() {
   return phase === "unprepared" ? null : { operation_id: operation, cid: selectedCid, state: phase,
     total_bytes: 1024, completed_bytes: phase === "capacity_pending" ? 0 : ["admitted", "reclaimed"].includes(phase) ? 1024 : 256,
-    cancel_requested: false, admitted: phase === "admitted", activation_pending: activationPending };
+    cancel_requested: false, admitted: phase === "admitted", activation_pending: activationPending,
+    failure_class: activationFailure ? "activation_unavailable" : null };
 }
 function runtime() {
   return { admitted: phase === "admitted", kept, dispatch_ready: phase === "admitted" && !dispatchPending,
@@ -234,9 +236,15 @@ try {
       if (app === "system") assert.equal(await frame.getByRole("checkbox", { name: "Keep on this device" }).isChecked(), true);
     }
     dispatchUnavailableReason = null;
+    activationFailure = true;
+    await frame.getByRole("button", { name: "Refresh models" }).click();
+    await frame.getByText("Local AI could not start. The model stays on this device. Retry.", { exact: true }).waitFor();
+    assert.equal(await frame.getByRole("button", { name: "Retry", exact: true }).count(), 1);
+    assert.equal(await frame.getByRole("button", { name: "Open in Assistant", exact: true }).count(), 0);
+    if (app === "system") assert.equal(await frame.getByRole("checkbox", { name: "Keep on this device" }).isChecked(), true);
     const activationUses = calls.filter(c => c.method === "content.use").length;
     assert.equal(await frame.getByRole("button", { name: "Cancel preparation" }).count(), 0, "admitted content is not cancellable");
-    activationPending = false; dispatchPending = false;
+    activationPending = false; activationFailure = false; dispatchPending = false;
     await frame.locator("[data-model-management] p").filter({ hasText: /^Available on this device$/ }).waitFor();
     assert.equal(calls.filter(c => c.method === "content.use").length, activationUses, "activation readiness uses status without another Use");
     if (app === "marketplace") {

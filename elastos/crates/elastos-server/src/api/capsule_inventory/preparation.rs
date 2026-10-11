@@ -37,6 +37,7 @@ const ADMITTED_MODEL_CONTEXT_SIZE: u32 = 4096;
 #[serde(rename_all = "snake_case")]
 enum PreparationFailurePhase {
     Preparation,
+    Activation,
     Authority,
     Policy,
     Capacity,
@@ -73,6 +74,7 @@ impl PreparationFailurePhase {
                 "verification_failed"
             }
             Self::Preparation => "preparation_unavailable",
+            Self::Activation => "activation_unavailable",
         }
     }
 
@@ -1121,7 +1123,9 @@ impl PreparationOwner {
         let starting = record.pre_dispatch() && caller.method.operation.as_deref() == Some("use");
         let capacity_resume = record.state == PreparationState::CapacityPending;
         let activation_retry = record.state == PreparationState::Admitted
-            && caller.method.operation.as_deref() == Some("use");
+            && (caller.method.operation.as_deref() == Some("use")
+                || (record.activation_pending
+                    && caller.method.operation.as_deref() == Some("status")));
         if !record.active() && !starting && !activation_retry && !capacity_resume {
             return Ok(project(&record));
         }
@@ -1301,6 +1305,11 @@ impl PreparationOwner {
             )
             .await
             {
+                let _ = update_operation(&data, &operation, |record| {
+                    if record.state == PreparationState::Admitted && record.activation_pending {
+                        record.failure_phase = Some(PreparationFailurePhase::Activation);
+                    }
+                });
                 tracing::debug!(?error, "private model activation pending");
             }
             drop(worker_lock);
@@ -3461,6 +3470,9 @@ pub async fn complete_admitted_model_startup(
             && ready.contains(&record.admission_id)
         {
             record.activation_pending = false;
+            if record.failure_phase == Some(PreparationFailurePhase::Activation) {
+                record.failure_phase = None;
+            }
             changed = true;
         }
     }
@@ -6154,6 +6166,98 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn pending_model_status_retries_activation_without_repreparing_content() {
+            let root = tempfile::tempdir().unwrap();
+            let (payload, files) = package_fixture(b"GGUF\x03\0\0\0fixture".to_vec());
+            write_preparation_catalog(root.path(), &payload);
+            let cid = payload["entries"][0]["cid"].as_str().unwrap().to_owned();
+            let backend = Arc::new(PreparationBackend::new(files, cid.clone()));
+            let registry = Arc::new(elastos_runtime::provider::ProviderRegistry::new());
+            registry
+                .register_sub_provider("ipfs", backend.clone())
+                .await
+                .unwrap();
+            register_content(&registry, root.path()).await;
+            let _engine = install_engine(root.path());
+            let model = Arc::new(ModelActivationFixture::default());
+            model.busy.store(true, Ordering::Release);
+            registry
+                .register_sub_provider("model", model.clone())
+                .await
+                .unwrap();
+            let owner = PreparationOwner::default();
+            let prepared = owner
+                .invoke(
+                    root.path(),
+                    Some(registry.clone()),
+                    caller(&context(), &method("use")),
+                    "pending-model",
+                    &serde_json::json!({"cid":cid}),
+                    Arc::new(|| Ok(())),
+                )
+                .unwrap();
+            join_worker(&owner).await;
+            let operation = prepared["operation_id"].as_str().unwrap();
+            let pending = load_operation(root.path(), operation).unwrap();
+            assert_eq!(pending.state, PreparationState::Admitted);
+            assert!(pending.activation_pending);
+            let reads = backend
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|op| *op == "cat")
+                .count();
+            let pending_status = owner
+                .invoke(
+                    root.path(),
+                    Some(registry.clone()),
+                    caller(&context(), &method("status")),
+                    "pending-status",
+                    &serde_json::json!({"operation_id":operation}),
+                    Arc::new(|| Ok(())),
+                )
+                .unwrap();
+            assert_eq!(pending_status["failure_class"], "activation_unavailable");
+            join_worker(&owner).await;
+            assert!(
+                load_operation(root.path(), operation)
+                    .unwrap()
+                    .activation_pending
+            );
+            model.busy.store(false, Ordering::Release);
+            owner
+                .invoke(
+                    root.path(),
+                    Some(registry.clone()),
+                    caller(&context(), &method("status")),
+                    "idle-status",
+                    &serde_json::json!({"operation_id":operation}),
+                    Arc::new(|| Ok(())),
+                )
+                .unwrap();
+            join_worker(&owner).await;
+            let ready = load_operation(root.path(), operation).unwrap();
+            assert_eq!(ready.state, PreparationState::Admitted);
+            assert!(!ready.activation_pending);
+            assert_eq!(ready.operation_id, pending.operation_id);
+            assert_eq!(ready.admission_id, pending.admission_id);
+            assert_eq!(ready.activation, pending.activation);
+            assert!(ready.failure_phase.is_none());
+            assert_eq!(
+                backend
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|op| *op == "cat")
+                    .count(),
+                reads
+            );
+            assert!(model.configured.lock().unwrap().is_some());
+        }
+
+        #[tokio::test]
         async fn model_preparation_enabled_activation_hashes_each_verification_phase() {
             let root = tempfile::tempdir().unwrap();
             let (payload, files) = package_fixture(b"GGUF\x03\0\0\0fixture".to_vec());
@@ -6252,6 +6356,7 @@ mod tests {
             for entry in &mut snapshot.records {
                 if entry.admission_id == record.admission_id {
                     entry.activation_pending = true;
+                    entry.failure_phase = Some(PreparationFailurePhase::Activation);
                 }
             }
             inventory.save(&snapshot).unwrap();
@@ -6273,6 +6378,12 @@ mod tests {
                     .unwrap()
                     .activation_pending
             );
+            for operation in [&record.operation_id, &alias.operation_id] {
+                assert!(load_operation(root.path(), operation)
+                    .unwrap()
+                    .failure_phase
+                    .is_none());
+            }
         }
 
         #[tokio::test]

@@ -11,6 +11,7 @@
     local_storage_unavailable: "Preparation failed. Local storage could not be written.",
     verification_failed: "Preparation failed. Model verification did not pass.",
     preparation_unavailable: "Preparation failed.",
+    activation_unavailable: "Local AI could not start. The model stays on this device. Retry.",
   });
   const failureText = p => FAILURE_TEXT[p.failure_class] || "Preparation failed.";
   const DISPATCH_UNAVAILABLE_TEXT = Object.freeze({
@@ -25,15 +26,14 @@
     if (r.dispatch_ready) return "ready";
     // Admitted content whose engine is still being activated is finishing,
     // not broken: Runtime clears activation_pending once dispatch can start.
-    // Activation failures are not reported, so a finish that takes longer
-    // than FINISHING_DEADLINE_MS reads as unavailable and offers Retry.
+    // An unresolved finish has a bounded wait before offering Retry.
     if (r.admitted) return activating(r, p) && !finishingExpired ? "finishing" : "service_unavailable";
     if (active(p)) return p.cancel_requested ? "cancelling" : p.state === "capacity_pending" ? "capacity" : p.state === "uncertain" ? "settling" : p.state === "verifying" ? "verifying" : "preparing";
     if (!p) return "absent";
     return p.state;
   }
   const FINISHING_DEADLINE_MS = 120000;
-  const activating = (r, p) => Boolean(r.admitted && p?.activation_pending && !r.dispatch_unavailable_reason);
+  const activating = (r, p) => Boolean(r.admitted && p?.activation_pending && !p.failure_class && !r.dispatch_unavailable_reason);
   const PHASE_TEXT = Object.freeze({
     unavailable: "Current status unavailable", ready: "Available on this device",
     service_unavailable: "Available on this device. Model service unavailable.",
@@ -355,7 +355,8 @@
         else if (finishingOperation !== p.operation_id) { finishingOperation = p.operation_id; finishingSince = Date.now(); }
         const phase = phaseOf(r, p, message, Boolean(finishingOperation) && Date.now() - finishingSince >= FINISHING_DEADLINE_MS);
         const label = phase === "failed" ? failureText(p) : phase === "capacity" ? capacityText(p) : phase === "service_unavailable" && r.dispatch_unavailable_reason
-          ? DISPATCH_UNAVAILABLE_TEXT[r.dispatch_unavailable_reason] : (compact ? COMPACT_PHASE_TEXT : PHASE_TEXT)[phase];
+          ? DISPATCH_UNAVAILABLE_TEXT[r.dispatch_unavailable_reason] : phase === "service_unavailable" && p?.failure_class
+            ? failureText(p) : (compact ? COMPACT_PHASE_TEXT : PHASE_TEXT)[phase];
         row.append(element("p", label));
         if (active(p)) {
           const progress = element("progress"); progress.max = p.total_bytes || 1; progress.value = p.completed_bytes;
