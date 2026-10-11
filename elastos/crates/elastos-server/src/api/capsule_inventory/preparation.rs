@@ -6924,20 +6924,22 @@ mod tests {
             admit(root.path(), &record);
             let first_engine = install_engine(root.path());
             let mut first = config(root.path());
-            append_admitted_model_startup_offers(root.path(), &registry, &mut first)
-                .await
-                .unwrap();
+            let first_worker =
+                append_admitted_model_startup_offers(root.path(), &registry, &mut first)
+                    .await
+                    .unwrap();
             let model = Arc::new(ModelActivationFixture::default());
             *model.configured.lock().unwrap() = Some(serde_json::to_value(&first).unwrap());
             registry
                 .register_sub_provider("model", model.clone())
                 .await
                 .unwrap();
-            complete_admitted_model_startup(root.path(), &registry, None)
+            complete_admitted_model_startup(root.path(), &registry, first_worker.as_ref())
                 .await
                 .unwrap();
             let original = load_operation(root.path(), &record.operation_id).unwrap();
             assert!(!original.activation_pending);
+            drop(first_worker);
             let old = original.activation.as_ref().unwrap();
             let bundle = &first_engine.0;
             std::fs::set_permissions(bundle, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -6953,9 +6955,10 @@ mod tests {
             .unwrap();
             let _replacement = install_engine_bytes(root.path(), b"verified successor engine");
             let mut current = config(root.path());
-            append_admitted_model_startup_offers(root.path(), &registry, &mut current)
-                .await
-                .unwrap();
+            let current_worker =
+                append_admitted_model_startup_offers(root.path(), &registry, &mut current)
+                    .await
+                    .unwrap();
             let replaced = load_operation(root.path(), &record.operation_id).unwrap();
             let new = replaced.activation.as_ref().unwrap();
             assert_ne!(new.offer["id"], old.offer["id"]);
@@ -6967,7 +6970,7 @@ mod tests {
             assert!(replaced.activation_pending);
             assert_eq!(current.extra["offers"][0], first.extra["offers"][0]);
             assert!(backend.read_sizes.lock().unwrap().is_empty());
-            complete_admitted_model_startup(root.path(), &registry, None)
+            complete_admitted_model_startup(root.path(), &registry, current_worker.as_ref())
                 .await
                 .unwrap();
             assert!(
@@ -6976,12 +6979,14 @@ mod tests {
                     .activation_pending,
                 "the old live offer cannot confirm the successor"
             );
+            drop(current_worker);
             let path = root.path().join("model-preparation/state.json");
             let saved = std::fs::read(&path).unwrap();
             let mut restarted = config(root.path());
-            append_admitted_model_startup_offers(root.path(), &registry, &mut restarted)
-                .await
-                .unwrap();
+            let restarted_worker =
+                append_admitted_model_startup_offers(root.path(), &registry, &mut restarted)
+                    .await
+                    .unwrap();
             assert_eq!(restarted.extra, current.extra);
             assert_eq!(std::fs::read(&path).unwrap(), saved);
             {
@@ -7033,7 +7038,7 @@ mod tests {
                 assert!(!changed.engine_successor_of(new), "changed {field}");
             }
             *model.configured.lock().unwrap() = Some(serde_json::to_value(&current).unwrap());
-            complete_admitted_model_startup(root.path(), &registry, None)
+            complete_admitted_model_startup(root.path(), &registry, restarted_worker.as_ref())
                 .await
                 .unwrap();
             assert!(
@@ -7041,6 +7046,7 @@ mod tests {
                     .unwrap()
                     .activation_pending
             );
+            drop(restarted_worker);
             let saved = std::fs::read(&path).unwrap();
             std::fs::set_permissions(
                 bundle.join("llama-server"),
