@@ -1825,10 +1825,8 @@ fn transaction_creator(path: &Path, floor: bool) -> Option<i32> {
     let pid = i32::try_from(number(parts.next()?)?)
         .ok()
         .filter(|pid| *pid > 0)?;
-    if !floor {
-        if number(parts.next()?)? == 0 || number(parts.next()?)? >= 128 {
-            return None;
-        }
+    if !floor && (number(parts.next()?)? == 0 || number(parts.next()?)? >= 128) {
+        return None;
     }
     if parts.next().is_some() {
         return None;
