@@ -10,6 +10,7 @@ import argparse
 import base64
 import copy
 import fcntl
+import getpass
 import hashlib
 import http.server
 import json
@@ -1411,11 +1412,21 @@ prepare_browser_linux_host
                 with self.subTest(case=case):
                     self.assertEqual(result.returncode, root_result if case == 'declined' else 0, result.stderr)
                     self.assertEqual('ROOT_STEP:' in result.stdout, case in ('setup', 'declined'))
+                    helper = root / 'scripts/browser-vm-linux-network.py'
+                    root_helper = '/usr/local/lib/elastos/browser-vm-linux-network.py'
+                    user = getpass.getuser()
+                    install = f'install -D -o root -g root -m 755 {helper} {root_helper}'
+                    run = f'fixture_python -I {root_helper} setup --user {user}'
                     if case == 'setup':
-                        self.assertIn('setup --user ', result.stdout)
-                        self.assertIn('remove --user ', result.stdout)
+                        # sudo runs only the root-owned copy, never the user-writable helper.
+                        self.assertEqual(
+                            [line for line in result.stdout.splitlines() if line.startswith('ROOT_STEP:')],
+                            [f'ROOT_STEP:{install}', f'ROOT_STEP:{run}'],
+                        )
+                        self.assertIn(f'fixture_python -I {root_helper} remove --user ', result.stdout)
                     if case == 'headless':
                         self.assertIn('Run from a terminal', result.stdout)
+                        self.assertIn(f'  sudo {install}\n  sudo {run}\n', result.stdout)
                     if case == 'unavailable':
                         self.assertIn('virtualization is unavailable', result.stdout)
 

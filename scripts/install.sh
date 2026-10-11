@@ -908,6 +908,8 @@ prepare_browser_linux_host() {
     BROWSER_LINUX_HOST_READY=false
     [[ "$(uname -s)" == Linux ]] || return 0
     local helper="${DATA_DIR}/scripts/browser-vm-linux-network.py" user
+    # sudo runs only a root-owned copy, never the user-writable helper.
+    local root_helper=/usr/local/lib/elastos/browser-vm-linux-network.py
     [[ -f "$helper" ]] || return 0
     if [[ ! -e /dev/kvm ]]; then
         info "Browser virtualization is unavailable: this host has no /dev/kvm device."
@@ -919,16 +921,18 @@ prepare_browser_linux_host() {
     elif ( : </dev/tty ) 2>/dev/null && command -v sudo >/dev/null 2>&1; then
         info "Browser needs one-time administrator setup for KVM access and its private network devices."
         info "The setup shows its changes and asks for confirmation. Runtime then runs as your user."
-        sudo /usr/bin/python3 -I "$helper" setup --user "$user" </dev/tty || return $?
+        sudo install -D -o root -g root -m 755 "$helper" "$root_helper" </dev/tty || return $?
+        sudo /usr/bin/python3 -I "$root_helper" setup --user "$user" </dev/tty || return $?
         /usr/bin/python3 -I "$helper" check >/dev/null 2>&1 || return $?
     else
         info "Browser needs one-time administrator setup. Run from a terminal:"
-        printf '  sudo /usr/bin/python3 -I %q setup --user %q\n' "$helper" "$user"
+        printf '  sudo install -D -o root -g root -m 755 %q %q\n' "$helper" "$root_helper"
+        printf '  sudo /usr/bin/python3 -I %q setup --user %q\n' "$root_helper" "$user"
         return 0
     fi
     BROWSER_LINUX_HOST_READY=true
     info "To remove Browser host access after closing Browser:"
-    printf '  sudo /usr/bin/python3 -I /usr/local/lib/elastos/browser-vm-linux-network.py remove --user %q\n' "$user"
+    printf '  sudo /usr/bin/python3 -I %q remove --user %q\n' "$root_helper" "$user"
 }
 
 finish_install() {
