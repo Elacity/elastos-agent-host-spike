@@ -1,4 +1,4 @@
-use crate::adapters::{LiveAdapterExecutor, WorkerApplyAck, WorkerUpdate};
+use crate::adapters::{LiveAdapterExecutor, WorkerApplyAck, WorkerApplyGuard, WorkerUpdate};
 use crate::config::ProviderInitExtra;
 use crate::contract::{
     ok_response, InitRequest, OffersListRequest, ProviderEnvelope, ProviderFault,
@@ -369,7 +369,7 @@ impl ProviderCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::serialize_local_text_backend_state;
+    use crate::adapters::{serialize_local_text_backend_state, ReconcileResult};
     use crate::config::{
         AdapterConfig, ConfiguredOffer, LocalArtifactConfig, LocalLlamaSettings, OfferPolicy,
     };
