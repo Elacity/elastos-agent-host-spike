@@ -213,15 +213,21 @@ deduplicate them. Reconnection cannot dispatch the model request again.
 
 New model runs use compact journals of at most 1 MiB, with a 32 KiB header
 and 4 KiB backend state. Admission allows at most 256 journal entries and
-64 MiB of charged growth. Active and unresolved runs reserve at least 1 MiB
-each. Crash transaction files count toward the limits. Runtime checks these
-limits before it records a new run or dispatches inference.
+64 MiB of charged growth. Active runs reserve at least 1 MiB each. Frozen
+terminal records, including unresolved outcomes, use their actual bounded
+size and still count toward the entry limit. Unresolved identities stay
+retained. Crash transaction files count toward the limits. Runtime checks
+these limits before it records a new run or dispatches inference.
 
 Recovery reads one record at a time, with ceilings of 512 entries, 32 MiB
 per legacy record and 128 MiB for the complete scan. Existing runs can settle
 with their original binding when new admission is full. An atomic replacement
 temporarily owns one extra file; failed writes remove only that owned file.
-Records above the recovery ceilings remain in place for operator recovery.
+At startup, the coordinator validates the complete bounded journal and
+committed request floor before it removes an abandoned transaction. Removal
+requires the exact private file and parent identities and a confirmed absent
+creator PID. Files with a live or unproven creator, invalid metadata, or changed
+identity remain in place for operator recovery, as do records above the ceilings.
 
 Cancellation is a request to stop backend work and settle the request as
 `cancelled`. The provider records the request before closing the backend stream.

@@ -5847,6 +5847,114 @@ mod tests {
     }
 
     #[test]
+    fn retained_unknown_charges_actual_bytes_and_keeps_exact_recovery_at_count_cap() {
+        let root = temp_root("unknown-actual-charge");
+        let model = offer("local-text");
+        let adapters = FakeAdapters {
+            dispatch_results: Arc::new(Mutex::new(vec![Ok(DispatchResult::Terminal {
+                events: vec![],
+                status: RunStatus::SettlementUnknown,
+                output: None,
+                error: Some(RunError {
+                    class: ErrorClass::SettlementUnknown,
+                    code: "settlement_unknown".into(),
+                    message: "Unknown".into(),
+                }),
+            })])),
+            ..Default::default()
+        };
+        let mut state = init_state(&root, vec![model.clone()], adapters.clone());
+        let input = json!({"schema":"elastos.model.input.text/v1","prompt":"retained"});
+        let mut retained = Vec::new();
+        for index in 0..64 {
+            let binding = create_binding(&format!("unknown-{index}"), &model.id, &input);
+            let mut run = prepared_run_for_offer(binding.clone(), &model, now_ms());
+            transition_terminal(
+                &model,
+                &mut run,
+                RunStatus::SettlementUnknown,
+                None,
+                Some(RunError {
+                    class: ErrorClass::SettlementUnknown,
+                    code: "settlement_unknown".into(),
+                    message: "Unknown".into(),
+                }),
+            )
+            .unwrap();
+            state.journal.store_run(&run).unwrap();
+            retained.push((binding, run));
+        }
+        let fresh = create_binding("fresh-after-64-unknown", &model.id, &input);
+        let admitted = state
+            .handle_runs_create(RunsCreateRequest {
+                op: "runs_create".into(),
+                offer_id: model.id.clone(),
+                operation: model.operation.clone(),
+                input: input.clone(),
+                runtime_binding: fresh,
+                expected_execution_binding_hash: None,
+            })
+            .unwrap();
+        assert_eq!(admitted["data"]["status"], "settlement_unknown");
+        let dispatched = *adapters.dispatch_calls.lock().unwrap();
+        assert_eq!(dispatched, 1);
+        let config = state.config.clone();
+        drop(state);
+        let mut state = ModelProviderState::from_init(config, adapters.clone()).unwrap();
+        for (binding, run) in &retained {
+            let before = std::fs::read(run_path(&root, &run.run_id)).unwrap();
+            let response = state
+                .handle_runs_create(RunsCreateRequest {
+                    op: "runs_create".into(),
+                    offer_id: model.id.clone(),
+                    operation: model.operation.clone(),
+                    input: input.clone(),
+                    runtime_binding: binding.clone(),
+                    expected_execution_binding_hash: None,
+                })
+                .unwrap();
+            assert_eq!(response["data"]["run_id"], run.run_id);
+            assert_eq!(response["data"]["status"], "settlement_unknown");
+            assert_eq!(std::fs::read(run_path(&root, &run.run_id)).unwrap(), before);
+        }
+        assert_eq!(*adapters.dispatch_calls.lock().unwrap(), dispatched);
+        // Frozen Unknown records still count: capacity never grows without a bound.
+        for index in 64..crate::journal::MAX_NEW_JOURNAL_ENTRIES - 1 {
+            let binding = create_binding(&format!("unknown-{index}"), &model.id, &input);
+            let mut run = prepared_run_for_offer(binding, &model, now_ms());
+            transition_terminal(
+                &model,
+                &mut run,
+                RunStatus::SettlementUnknown,
+                None,
+                Some(RunError {
+                    class: ErrorClass::SettlementUnknown,
+                    code: "settlement_unknown".into(),
+                    message: "Unknown".into(),
+                }),
+            )
+            .unwrap();
+            state.journal.store_run(&run).unwrap();
+        }
+        let binding = create_binding("fresh-at-unknown-cap", &model.id, &input);
+        let run_id = deterministic_run_id(&binding);
+        let error = state
+            .handle_runs_create(RunsCreateRequest {
+                op: "runs_create".into(),
+                offer_id: model.id.clone(),
+                operation: model.operation.clone(),
+                input,
+                runtime_binding: binding,
+                expected_execution_binding_hash: None,
+            })
+            .unwrap_err();
+        assert_eq!(error.code(), "policy_limit");
+        assert!(error.message().contains("unresolved runs stay retained"));
+        assert!(!run_path(&root, &run_id).exists());
+        assert_eq!(*adapters.dispatch_calls.lock().unwrap(), dispatched);
+    }
+
+    #[test]
     fn bounded_settlement_visitor_validates_all_records_before_mutation() {
         let root = temp_root("visitor-full-validation");
         let model = offer("local-text");
