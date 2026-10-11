@@ -52,7 +52,7 @@ def validate(recipe, upstream):
 def extract(source, root, destination, upstream):
     # Validate first; materialize file aliases as copies, without following links.
     members = upstream.archive_members(source, 'tar.gz', root, 1024**3,
-                                       source_archive=True, max_files=8192)
+                                       source_archive='build', max_files=8192)
     with tarfile.open(source, 'r:gz') as archive:
         for name, info in members.items():
             path = destination / name
@@ -399,18 +399,20 @@ def build_browser_native(recipe, payload, cache, upstream):
             binaries['crosvm'] = source / 'target' / target / 'release/crosvm'
         audit_records = []
         for name, binary in binaries.items():
-            upstream.regular(binary)
-            if str(work).encode() in binary.read_bytes():
-                raise ValueError('Browser binary contains its private build path: ' + name)
-            result = subprocess.run(['otool', '-L', str(binary)] if native.startswith('darwin')
-                                    else ['ldd', str(binary)], capture_output=True, text=True)
-            audit_libraries(result.stdout + result.stderr, native.startswith('darwin'))
-            audit_records.append((result.stdout + result.stderr).replace(str(binary), name))
+            # Cargo hard-links release outputs into deps/. Audit and ship an
+            # independent copy (a symlink stays a symlink and is refused).
             relocated = work / 'relocated/bin' / name
             relocated.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(binary, relocated)
-            # debugfs -V reports version; crosvm supports --version.
-            check = subprocess.run([str(relocated), '--version' if name == 'crosvm' else '-V'],
+            shutil.copy2(binary, relocated, follow_symlinks=False)
+            upstream.regular(relocated)
+            if str(work).encode() in relocated.read_bytes():
+                raise ValueError('Browser binary contains its private build path: ' + name)
+            result = subprocess.run(['otool', '-L', str(relocated)] if native.startswith('darwin')
+                                    else ['ldd', str(relocated)], capture_output=True, text=True)
+            audit_libraries(result.stdout + result.stderr, native.startswith('darwin'))
+            audit_records.append((result.stdout + result.stderr).replace(str(relocated), name))
+            # debugfs -V reports its version; crosvm has a `version` subcommand.
+            check = subprocess.run([str(relocated), 'version' if name == 'crosvm' else '-V'],
                                    env=env, capture_output=True, text=True)
             accepted = (0,) if name == 'crosvm' else (0, 1)
             if check.returncode not in accepted or not (check.stdout + check.stderr).strip():

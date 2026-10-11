@@ -45,6 +45,10 @@ class BrowserUpstreamBuildTest(unittest.TestCase):
                 item = tarfile.TarInfo('source/.cargo/config.toml')
                 item.size = 1
                 archive.addfile(item, io.BytesIO(b'x'))
+                # crosvm's pinned tree has recipe fixtures such as "full props.json".
+                item = tarfile.TarInfo('source/expected/full props.json')
+                item.size = 1
+                archive.addfile(item, io.BytesIO(b'x'))
                 for number in range(4500):
                     item = tarfile.TarInfo('source/tests/empty' + str(number))
                     item.type = tarfile.DIRTYPE
@@ -53,6 +57,12 @@ class BrowserUpstreamBuildTest(unittest.TestCase):
             self.assertEqual((extracted / 'empty.c').read_bytes(), b'')
             self.assertEqual((extracted / 'nonempty.c').read_bytes(), b'x')
             self.assertEqual((extracted / '.cargo/config.toml').read_bytes(), b'x')
+            self.assertEqual((extracted / 'expected/full props.json').read_bytes(), b'x')
+            # Installed payloads keep the stricter rule; edge spaces stay refused in sources.
+            for name, mode in (('source/expected/full props.json', True), ('source/trailing ', 'build'),
+                               ('source/ leading', 'build')):
+                with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'unsafe package path'):
+                    upstream.relative(name, source_archive=mode)
             with self.assertRaises(ValueError):
                 upstream.archive_members(source, 'tar.gz', 'source', 1024)
             with tarfile.open(source, 'w:gz', format=tarfile.PAX_FORMAT, pax_headers={'path': '../foreign'}) as archive:
@@ -400,7 +410,10 @@ class BrowserUpstreamBuildTest(unittest.TestCase):
                     struct.pack_into('<HH', header, 16, 2, 183)
                     binary.write_bytes(header)
                     binary.chmod(0o755)
-                return subprocess.CompletedProcess(args, 0, 'crosvm fixture\n' if args[-1] == '--version' else '',
+                    # Cargo hard-links each release binary into deps/.
+                    (binary.parent / 'deps').mkdir()
+                    os.link(binary, binary.parent / 'deps/crosvm-0123456789abcdef')
+                return subprocess.CompletedProcess(args, 0, 'crosvm fixture\n' if args[-1] == 'version' else '',
                                                    'not a dynamic executable\n' if args[0] == 'ldd' else '')
             with patch.object(builder.platform, 'system', return_value='Linux'), \
                  patch.object(builder.platform, 'machine', return_value='aarch64'), \
