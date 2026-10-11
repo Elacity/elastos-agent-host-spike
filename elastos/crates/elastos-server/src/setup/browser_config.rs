@@ -108,12 +108,17 @@ fn read_engine_selection(
     }
 }
 
+/// Browser runs only on hosts with a local Engine.
+pub(crate) fn browser_available(platform: &str) -> bool {
+    matches!(platform, "darwin-arm64" | "linux-arm64")
+}
+
 fn local_vm_selected_with_override(
     data: &Path,
     platform: &str,
     inline: Option<&str>,
 ) -> anyhow::Result<bool> {
-    if !matches!(platform, "darwin-arm64" | "linux-arm64") {
+    if !browser_available(platform) {
         return Ok(false);
     }
     let Some(config) = read_engine_selection(data, inline)? else {
@@ -254,12 +259,12 @@ pub(super) fn configure(data: &Path, platform: &str, release_image: bool) -> any
         }
         return Ok(());
     }
-    if !matches!(platform, "darwin-arm64" | "linux-arm64") {
+    if !browser_available(platform) {
         super::atomic_write_file(
             &config.join("browser-engine-adapter.json"),
             b"{\"adapters\": []}\n",
         )?;
-        println!("Browser uses a remote Engine on this computer. Select an approved Engine in Home Services.");
+        println!("Browser is not available on this computer yet.");
         return Ok(());
     }
     let mut required = vec![
