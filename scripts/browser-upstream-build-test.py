@@ -9,6 +9,7 @@ import os
 import struct
 from pathlib import Path
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -157,6 +158,25 @@ class BrowserUpstreamBuildTest(unittest.TestCase):
             self.assertTrue(any(e.get('PKG_CONFIG_SYSROOT_DIR') and e.get('TURN_DISABLE_RPATH') == '1' for e in environments))
             self.assertTrue(any('relocated/bin/turnserver' in args[0] for args in calls))
             self.assertFalse(any(args[0] in ('curl', 'wget') for args in calls))
+
+    def test_asset_json_stdout_carries_only_json_while_builds_write_output(self):
+        # Native configure/make inherit file descriptors; their output must not
+        # enter the JSON that publish-release.sh captures from stdout.
+        program = ('import importlib.util, subprocess, sys\n'
+                   'spec = importlib.util.spec_from_file_location("assets", sys.argv[1])\n'
+                   'assets = importlib.util.module_from_spec(spec); spec.loader.exec_module(assets)\n'
+                   'def prepare(*args):\n'
+                   '    subprocess.run(["sh", "-c", "echo checking for gcc... yes"], check=True)\n'
+                   '    print("python build note")\n'
+                   '    return {"external": {"turnserver": {}}}\n'
+                   'assets.prepare = prepare\n'
+                   'sys.argv = ["release-upstream-assets.py", "--platform", "darwin-arm64", "--cache", "c", "--output", "o"]\n'
+                   'assets.main()\n')
+        result = subprocess.run([sys.executable, '-c', program, str(ROOT / 'scripts/release-upstream-assets.py')],
+                                capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout), {'external': {'turnserver': {}}})
+        self.assertIn('checking for gcc... yes', result.stderr)
+        self.assertIn('python build note', result.stderr)
 
     def test_official_node_archives_pin_each_platform_and_include_license(self):
         inventory = json.loads(assets.RECIPE_FILE.read_text())
