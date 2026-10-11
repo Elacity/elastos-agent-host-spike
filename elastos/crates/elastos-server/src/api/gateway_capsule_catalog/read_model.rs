@@ -15,12 +15,20 @@ pub(in crate::api::gateway) const CAPSULE_INTERFACE_REGISTRY_SCHEMA: &str =
 pub(in crate::api::gateway) fn capsule_catalog_summary(
     data_dir: &std::path::Path,
 ) -> CapsuleCatalogResponse {
+    capsule_catalog_summary_for(data_dir, &crate::setup::detect_platform())
+}
+
+pub(in crate::api::gateway) fn capsule_catalog_summary_for(
+    data_dir: &std::path::Path,
+    platform: &str,
+) -> CapsuleCatalogResponse {
     let launch_targets = home_launch_targets(data_dir)
         .into_iter()
         .map(|target| (target.target.clone(), target))
         .collect::<BTreeMap<_, _>>();
     let components = load_capsule_components(data_dir);
     let accepted_content_by_viewer = accepted_content_by_viewer(data_dir);
+    let protected_content = crate::protected_content_runtime::protected_content_enabled(data_dir);
 
     let mut capsules = crate::api::capsule_inventory::list_active_capsule_manifests(data_dir)
         .into_iter()
@@ -28,6 +36,12 @@ pub(in crate::api::gateway) fn capsule_catalog_summary(
         .filter(|manifest| manifest.name != "home-agent")
         // A directory or component entry cannot authenticate model content.
         .filter(|manifest| manifest.model_content.is_none())
+        .filter(|manifest| {
+            protected_content
+                || manifest.name != crate::protected_content_runtime::ELACITY_PLAYER_CAPSULE_ID
+        })
+        // Browser is absent, not merely unlaunchable, where it is unavailable.
+        .filter(|manifest| manifest.name != "browser" || crate::setup::browser_available(platform))
         .map(|manifest| {
             catalog_capsule_summary(
                 manifest,
@@ -37,6 +51,16 @@ pub(in crate::api::gateway) fn capsule_catalog_summary(
             )
         })
         .collect::<Vec<_>>();
+    // The browser terminal only starts in developer mode, so the Terminal
+    // Home view is offered only when it can start.
+    if !home_terminal_policy_allows(data_dir) {
+        for capsule in capsules
+            .iter_mut()
+            .filter(|capsule| capsule.name == HOME_CLI_SHELL_ID)
+        {
+            capsule.launchable = false;
+        }
+    }
     let model_catalog_state = match crate::api::capsule_inventory::model_catalog_entries(data_dir) {
         Ok(None) => "unconfigured",
         Ok(Some(entries))
@@ -135,6 +159,7 @@ pub(in crate::api::gateway) fn capsule_catalog_summary(
             payment_note: "Paid apps and services must use wallet/payment provider receipts, not embedded payment SDKs.".to_string(),
             drm_state: "provider-rail-required".to_string(),
             drm_note: "Protected apps and content must use rights, key, and decrypt providers for dDRM enforcement.".to_string(),
+            protected_content,
         },
     }
 }
@@ -142,7 +167,16 @@ pub(in crate::api::gateway) fn capsule_catalog_summary(
 pub(in crate::api::gateway) fn capsule_interface_registry_summary(
     data_dir: &std::path::Path,
 ) -> CapsuleInterfaceRegistryResponse {
-    capsule_interface_registry_summary_from_catalog(&capsule_catalog_summary(data_dir))
+    capsule_interface_registry_summary_for(data_dir, &crate::setup::detect_platform())
+}
+
+pub(in crate::api::gateway) fn capsule_interface_registry_summary_for(
+    data_dir: &std::path::Path,
+    platform: &str,
+) -> CapsuleInterfaceRegistryResponse {
+    capsule_interface_registry_summary_from_catalog(&capsule_catalog_summary_for(
+        data_dir, platform,
+    ))
 }
 
 pub(in crate::api::gateway) fn capsule_interface_registry_summary_from_catalog(
@@ -885,6 +919,8 @@ pub(in crate::api::gateway) struct CapsuleCatalogPolicy {
     pub(in crate::api::gateway) payment_note: String,
     pub(in crate::api::gateway) drm_state: String,
     pub(in crate::api::gateway) drm_note: String,
+    /// Whether Home shows protected-content surfaces (Media, Protect and List).
+    pub(in crate::api::gateway) protected_content: bool,
 }
 
 #[derive(Serialize)]

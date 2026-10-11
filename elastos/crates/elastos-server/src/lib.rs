@@ -66,7 +66,6 @@ pub mod runtime;
 pub mod runtime_control;
 pub mod setup;
 pub mod shares;
-pub mod shell_cmd;
 pub mod sources;
 pub mod supervisor;
 #[cfg(all(test, unix))]

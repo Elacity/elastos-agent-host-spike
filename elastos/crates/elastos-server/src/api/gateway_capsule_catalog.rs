@@ -621,14 +621,7 @@ async fn dispatch_capsule_affordance(
                         revalidate,
                     )
                 };
-                let mut output = invoke().map_err(|error| {
-                    tracing::debug!(error = ?error, "private model preparation invocation failed");
-                    (
-                        StatusCode::CONFLICT,
-                        "preparation_unavailable",
-                        "Model preparation is unavailable.".into(),
-                    )
-                })?;
+                let mut output = invoke().map_err(preparation_invoke_error)?;
                 let cid = output["cid"].as_str().unwrap_or("");
                 let operation = output["operation_id"].as_str();
                 let projection =
@@ -665,6 +658,27 @@ async fn dispatch_capsule_affordance(
             }
         }
     }
+}
+
+/// A disk-space refusal keeps its reason and size; other failures stay generic.
+fn preparation_invoke_error(error: anyhow::Error) -> (StatusCode, &'static str, String) {
+    if let Some(space) = error.downcast_ref::<elastos_common::NotEnoughFreeSpace>() {
+        let reason = space.to_string();
+        let reason = reason
+            .strip_prefix("not enough free space: ")
+            .unwrap_or(&reason);
+        return (
+            StatusCode::INSUFFICIENT_STORAGE,
+            "not_enough_free_space",
+            format!("Not enough free disk space on this Home: {reason}. Free some space, then select Get again."),
+        );
+    }
+    tracing::debug!(error = ?error, "private model preparation invocation failed");
+    (
+        StatusCode::CONFLICT,
+        "preparation_unavailable",
+        "Model preparation is unavailable.".into(),
+    )
 }
 
 async fn dispatch_capsule_launch_affordance(
@@ -846,6 +860,21 @@ mod tests {
     use elastos_common::CapsuleExecution;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn model_get_disk_refusal_keeps_the_reason_and_size() {
+        let refused = anyhow::Error::new(elastos_common::NotEnoughFreeSpace { needed: 3 << 30 })
+            .context("model preparation reservation");
+        let (status, code, message) = preparation_invoke_error(refused);
+        assert_eq!(status, StatusCode::INSUFFICIENT_STORAGE);
+        assert_eq!(code, "not_enough_free_space");
+        assert_eq!(
+            message,
+            "Not enough free disk space on this Home: this needs 3 GB plus 2 GB kept free. Free some space, then select Get again."
+        );
+        let (_, code, _) = preparation_invoke_error(anyhow::anyhow!("other failure"));
+        assert_eq!(code, "preparation_unavailable");
+    }
 
     #[tokio::test]
     #[ignore = "requires Playwright and Chromium; CI uses the content_sandbox_browser filter"]
@@ -1082,7 +1111,21 @@ mod tests {
             .filter(|capsule| capsule.role == CapsuleRole::Shell && capsule.launchable)
             .map(|capsule| capsule.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(launchable_shells, vec!["home-cli", "home-gui"]);
+        // The browser terminal needs host developer mode, so Terminal is
+        // offered only once it is on.
+        assert_eq!(launchable_shells, vec!["home-gui"]);
+        fs::write(
+            data_dir.path().join("config.toml"),
+            "developer_mode = true\n",
+        )
+        .unwrap();
+        let developer_shells = capsule_catalog_summary(data_dir.path())
+            .capsules
+            .into_iter()
+            .filter(|capsule| capsule.role == CapsuleRole::Shell && capsule.launchable)
+            .map(|capsule| capsule.name)
+            .collect::<Vec<_>>();
+        assert_eq!(developer_shells, vec!["home-cli", "home-gui"]);
         let marketplace = catalog
             .capsules
             .iter()
@@ -1221,7 +1264,16 @@ mod tests {
             "expected the first-party development capsule set to be visible"
         );
 
-        let catalog = capsule_catalog_summary(data_dir.path());
+        for platform in ["linux-arm64", "linux-amd64"] {
+            // Where Browser is unavailable it is absent, not merely unlaunchable.
+            assert!(
+                !read_model::capsule_catalog_summary_for(data_dir.path(), platform)
+                    .capsules
+                    .iter()
+                    .any(|capsule| capsule.name == "browser")
+            );
+        }
+        let catalog = read_model::capsule_catalog_summary_for(data_dir.path(), "darwin-arm64");
         assert_eq!(catalog.schema, read_model::CAPSULE_CATALOG_SCHEMA);
         assert_eq!(catalog.counts.total, catalog.capsules.len());
         let catalog_names = catalog
@@ -1234,6 +1286,11 @@ mod tests {
         let expected = manifest_names
             .intersection(&active_names)
             .copied()
+            // Protected content ships after 0.8.0, so its viewer stays out of Home.
+            .filter(|name| {
+                crate::protected_content_runtime::protected_content_enabled(data_dir.path())
+                    || *name != crate::protected_content_runtime::ELACITY_PLAYER_CAPSULE_ID
+            })
             .collect::<BTreeSet<_>>();
         assert_eq!(catalog_names, expected);
         assert!(!catalog_names.contains("bus-v1-conformance"));
@@ -1279,7 +1336,7 @@ mod tests {
             .filter(|capsule| capsule.role == CapsuleRole::Shell && capsule.launchable)
             .map(|capsule| capsule.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(launchable_shells, vec!["home-cli", "home-gui"]);
+        assert_eq!(launchable_shells, vec!["home-gui"]);
         let home_gui = catalog
             .capsules
             .iter()
@@ -1467,7 +1524,8 @@ mod tests {
             }
         }
 
-        let registry = capsule_interface_registry_summary(data_dir.path());
+        let registry =
+            read_model::capsule_interface_registry_summary_for(data_dir.path(), "darwin-arm64");
         assert_eq!(
             registry.schema,
             read_model::CAPSULE_INTERFACE_REGISTRY_SCHEMA

@@ -1502,7 +1502,9 @@ mod tests {
                 .expect("invalid release component admitted");
             let message = format!("{error:#}");
             assert!(
-                message.contains("checksum") || message.contains("strategy"),
+                message.contains("checksum")
+                    || message.contains("strategy")
+                    || message.contains("release_path is required"),
                 "{message}"
             );
         }

@@ -1220,7 +1220,14 @@ async fn setup_server_infrastructure_impl(
         Err(e) => tracing::warn!("Skipping net-provider due to verification failure: {}", e),
     }
 
-    if let Some(local_exit_config) = browser_local_exit_config_from_env(&data_dir) {
+    // Retained Browser helpers from an earlier release stay stopped where
+    // Browser is unavailable.
+    let browser_available =
+        elastos_server::setup::browser_available(&elastos_server::setup::detect_platform());
+    if let Some(local_exit_config) = browser_available
+        .then(|| browser_local_exit_config_from_env(&data_dir))
+        .flatten()
+    {
         if let Some(path) = crate::find_installed_provider_binary("browser-local-exit") {
             if let Err(e) = verify_provider_binary("browser-local-exit", &path) {
                 tracing::warn!(
@@ -1272,14 +1279,21 @@ async fn setup_server_infrastructure_impl(
         Err(e) => tracing::warn!("Skipping exit-provider due to verification failure: {}", e),
     }
 
-    match binaries::resolve_verified_native_provider_binary("browser-engine-adapter") {
+    let browser_engine_adapter = if browser_available {
+        binaries::resolve_verified_native_provider_binary("browser-engine-adapter")
+    } else {
+        Ok(None)
+    };
+    match browser_engine_adapter {
         Ok(Some(path)) => {
             let browser_engine_config = provider::BridgeProviderConfig {
                 extra: browser_engine_adapter_config_from_env(&data_dir)
                     .unwrap_or(serde_json::Value::Null),
                 ..Default::default()
             };
-            match provider::ProviderBridge::spawn(&path, browser_engine_config).await {
+            match provider::ProviderBridge::spawn_with_owned_helpers(&path, browser_engine_config)
+                .await
+            {
                 Ok(bridge) => {
                     let bridge = Arc::new(bridge);
                     match start_browser_engine_provider(
@@ -2418,6 +2432,44 @@ mod tests {
         );
         crate::test_support::write_from_child(&binary, script, 0o700);
         (binary, pid_file, request_log, status_signal, status_release)
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn browser_helper_pipe_closes_with_runtime_provider_shutdown() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../scripts/browser-helper-parent-lifetime.test.py");
+        let binary = temp.path().join("browser-provider.sh");
+        crate::test_support::write_from_child(
+            &binary,
+            format!(
+                "#!/bin/sh\nexec python3 '{}' --provider '{}'\n",
+                script.display(),
+                temp.path().display()
+            ),
+            0o700,
+        );
+        let bridge =
+            provider::ProviderBridge::spawn_with_owned_helpers(&binary, Default::default())
+                .await
+                .unwrap();
+        let ready: serde_json::Value =
+            serde_json::from_slice(&fs::read(temp.path().join("ready.json")).unwrap()).unwrap();
+        let pid = ready["helper"].as_u64().unwrap() as libc::pid_t;
+        bridge.shutdown().await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let gone = unsafe { libc::kill(pid, 0) } != 0;
+        if !gone {
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+        assert!(gone, "Browser helper outlived Runtime provider shutdown");
+        assert!(temp.path().join("clean-stop").exists());
     }
 
     #[tokio::test]

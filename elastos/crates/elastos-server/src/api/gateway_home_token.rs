@@ -1374,9 +1374,9 @@ mod tests {
         .contains("invalid home launch token payload"));
 
         let mut future = valid_envelope.clone();
-        // Keep this token beyond the clock allowance while the full parallel
-        // suite signs it and checks its current authority.
-        future.payload.iat = now_ts().saturating_add(HOME_LAUNCH_TOKEN_TTL_SECS + 61);
+        // Signing and verification can cross a second under suite load.
+        // Keep this fixture well beyond the 60-second clock allowance.
+        future.payload.iat = now_ts().saturating_add(3600);
         future.payload.exp = future
             .payload
             .iat
