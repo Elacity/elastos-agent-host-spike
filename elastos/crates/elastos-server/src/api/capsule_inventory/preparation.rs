@@ -10283,7 +10283,7 @@ server.serve_forever()
                 .unwrap();
             register_content(&registry, &data).await;
             let owner = Arc::new(test_owner());
-            let test_owner = owner.clone();
+            let running_owner = owner.clone();
             let test_data = data.clone();
             let test_repo = repo.clone();
             let test_registry = registry.clone();
@@ -10301,7 +10301,7 @@ server.serve_forever()
             let mut work = tokio::spawn(async move {
                 let started = Instant::now();
                 let input = serde_json::json!({"cid":cid});
-                let response = test_owner
+                let response = running_owner
                     .invoke_fixture(
                         &test_data,
                         Some(test_registry.clone()),
@@ -10321,7 +10321,7 @@ server.serve_forever()
                 let mut last_sample = Instant::now();
                 let mut max_sample_gap_ms = 0;
                 let mut rss_peak_kib = 0;
-                while !test_owner
+                while !running_owner
                     .worker
                     .lock()
                     .unwrap()
@@ -10370,7 +10370,7 @@ server.serve_forever()
                     tokio::time::sleep(Duration::from_millis(if real_model { 1000 } else { 10 }))
                         .await;
                 }
-                join_worker(&test_owner).await;
+                join_worker(&running_owner).await;
                 let elapsed_ms = started.elapsed().as_millis();
                 let record = load_operation(&test_data, &id).unwrap();
                 assert_eq!(record.state, PreparationState::Admitted);
