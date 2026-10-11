@@ -172,6 +172,26 @@ impl std::fmt::Display for PreparationMemoryRefusal {
 }
 impl std::error::Error for PreparationMemoryRefusal {}
 
+#[derive(Debug)]
+pub(in crate::api) struct PreparationRequestExpired;
+
+impl PreparationRequestExpired {
+    pub(in crate::api) fn public_class(&self) -> &'static str {
+        elastos_model_contract::MODEL_REQUEST_EXPIRED_CODE
+    }
+    pub(in crate::api) fn public_message(&self) -> &'static str {
+        elastos_model_contract::MODEL_REQUEST_EXPIRED_MESSAGE
+    }
+}
+
+impl std::fmt::Display for PreparationRequestExpired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.public_class())
+    }
+}
+
+impl std::error::Error for PreparationRequestExpired {}
+
 type MemoryReader = fn() -> std::io::Result<elastos_common::host_memory::HostMemory>;
 fn device_memory() -> std::io::Result<elastos_common::host_memory::HostMemory> {
     elastos_common::host_memory::observe_host_memory(std::env::consts::OS)
@@ -270,6 +290,8 @@ struct PreparationInventory {
     records: Vec<PreparationRecord>,
     retention_claims: Vec<RetentionClaim>,
     #[serde(default)]
+    pruned_issued_floor_ms: u64,
+    #[serde(default)]
     retirement: Option<ModelRetirement>,
     /// Staged bytes a failed preparation left for the next Use. That Use
     /// continues them when they hold its signed package, else removes them.
@@ -321,6 +343,7 @@ impl Default for PreparationInventory {
             schema: SCHEMA.into(),
             records: Vec::new(),
             retention_claims: Vec::new(),
+            pruned_issued_floor_ms: 0,
             retirement: None,
             kept_stage: None,
         }
@@ -675,6 +698,7 @@ fn reserve_at(
     );
     // Reclaimed requests are immutable history, even after catalog rotation.
     // They cannot become a fresh preparation or reactivate their old offer.
+    let mut pruned_issued_floor_ms = 0;
     match std::fs::symlink_metadata(data_dir.join("model-preparation")) {
         Ok(_) => {
             let inventory = Inventory::open(data_dir, false)?;
@@ -774,21 +798,22 @@ fn reserve_at(
         Ok(_) => {
             let inventory = Inventory::open(data_dir, false)?;
             let mut state = inventory.load()?;
+            pruned_issued_floor_ms = state.pruned_issued_floor_ms;
             if let Some(existing) = state.records.iter().find(|record| {
                 record.request_binding.principal == caller.context.principal_id
                     && record.request_binding.capsule == caller.capsule
                     && record.request_binding.request_id == request_id
             }) {
-                ensure!(
-                    existing.request_binding == request_binding
-                        && existing.catalog_head_cid == trust.head_cid
-                        && existing.total_bytes == entry.size_bytes,
-                    "preparation request identity changed"
-                );
+                let same_binding = existing.request_binding == request_binding
+                    && existing.catalog_head_cid == trust.head_cid
+                    && existing.total_bytes == entry.size_bytes;
                 let operation = existing.operation_id.clone();
+                // The retained owner keeps the observed expiry even when this
+                // retry presents a changed binding.
                 if state.expire(now) {
                     inventory.save(&state)?;
                 }
+                ensure!(same_binding, "preparation request identity changed");
                 return Ok(state
                     .records
                     .iter()
@@ -800,6 +825,15 @@ fn reserve_at(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
+    let now_ms = now
+        .checked_mul(1000)
+        .context("preparation clock overflow")?;
+    elastos_model_contract::validate_new_model_request_id(
+        request_id,
+        now_ms,
+        pruned_issued_floor_ms,
+    )
+    .map_err(|_| PreparationRequestExpired)?;
     match elastos_common::host_memory::model_memory_fit(
         entry
             .manifest
@@ -837,6 +871,12 @@ fn reserve_at(
         );
         return Ok(existing.clone());
     }
+    elastos_model_contract::validate_new_model_request_id(
+        request_id,
+        now_ms,
+        state.pruned_issued_floor_ms,
+    )
+    .map_err(|_| PreparationRequestExpired)?;
     ensure!(
         !state.retirement.as_ref().is_some_and(|retirement| {
             state.records.iter().any(|record| {
@@ -852,6 +892,16 @@ fn reserve_at(
         let Some(oldest) = prunable_record(&state, now) else {
             break;
         };
+        if let Some(issued) = elastos_model_contract::model_request_issued_ms(
+            &state.records[oldest].request_binding.request_id,
+        ) {
+            if issued > state.pruned_issued_floor_ms {
+                state.pruned_issued_floor_ms = issued;
+                // Save while the old binding still exists. A later failed
+                // transaction preserves replay facts and the monotonic floor.
+                inventory.save(&state)?;
+            }
+        }
         state.records.remove(oldest);
     }
     ensure!(
@@ -951,7 +1001,7 @@ fn reserve_at(
 /// least `TERMINAL_HISTORY_SECONDS` before `now` and owns nothing: no kept
 /// stage, no retirement, no other record's admission and no reclaimed history
 /// (which keeps a reclaimed request from becoming a fresh preparation). A
-/// pruned request id that is replayed starts a new reservation.
+/// pruned request ID is refused by its freshness window and durable floor.
 fn prunable_record(state: &PreparationInventory, now: u64) -> Option<usize> {
     // Records written before `settled_at` existed ended by their deadline.
     let settled = |record: &PreparationRecord| record.settled_at.unwrap_or(record.expires_at);
@@ -964,6 +1014,10 @@ fn prunable_record(state: &PreparationInventory, now: u64) -> Option<usize> {
                 record.state,
                 PreparationState::Failed | PreparationState::Expired | PreparationState::Cancelled
             ) && now.saturating_sub(settled(record)) >= TERMINAL_HISTORY_SECONDS
+                && elastos_model_contract::model_request_replay_deadline_ms(
+                    &record.request_binding.request_id,
+                )
+                .is_none_or(|deadline| now.saturating_mul(1000) > deadline)
                 && state
                     .kept_stage
                     .as_ref()
@@ -3975,13 +4029,51 @@ mod tests {
     fn test_owner() -> PreparationOwner {
         PreparationOwner::with_memory(test_memory)
     }
+    fn fixture_request_id(data_dir: &Path, label: &str, issued_seconds: u64) -> String {
+        if label.starts_with("model-v1:") || !bounded_id(label, 128) {
+            return label.to_owned();
+        }
+        static IDS: std::sync::OnceLock<
+            Mutex<std::collections::BTreeMap<(std::path::PathBuf, String), String>>,
+        > = std::sync::OnceLock::new();
+        IDS.get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .entry((data_dir.to_owned(), label.to_owned()))
+            .or_insert_with(|| format!("model-v1:{}:{label}", issued_seconds * 1000))
+            .clone()
+    }
+    impl PreparationOwner {
+        fn invoke_fixture(
+            &self,
+            data_dir: &Path,
+            registry: Option<Arc<elastos_runtime::provider::ProviderRegistry>>,
+            caller: PreparationCaller<'_>,
+            request_id: &str,
+            input: &serde_json::Value,
+            revalidate: Revalidate,
+        ) -> anyhow::Result<serde_json::Value> {
+            let id = if caller.method.operation.as_deref() == Some("use") {
+                fixture_request_id(data_dir, request_id, now()?)
+            } else {
+                request_id.to_owned()
+            };
+            self.invoke(data_dir, registry, caller, &id, input, revalidate)
+        }
+    }
     fn reserve(
         data_dir: &Path,
         caller: &PreparationCaller<'_>,
         request_id: &str,
         cid: &str,
     ) -> anyhow::Result<PreparationRecord> {
-        super::reserve(data_dir, caller, request_id, cid, test_memory)
+        super::reserve(
+            data_dir,
+            caller,
+            &fixture_request_id(data_dir, request_id, now()?),
+            cid,
+            test_memory,
+        )
     }
     fn reserve_at(
         data_dir: &Path,
@@ -3990,7 +4082,14 @@ mod tests {
         cid: &str,
         now: u64,
     ) -> anyhow::Result<PreparationRecord> {
-        super::reserve_at(data_dir, caller, request_id, cid, now, test_memory)
+        super::reserve_at(
+            data_dir,
+            caller,
+            &fixture_request_id(data_dir, request_id, now),
+            cid,
+            now,
+            test_memory,
+        )
     }
 
     #[test]
@@ -4012,6 +4111,7 @@ mod tests {
         let context = context();
         let method = method("use");
         let caller = caller(&context, &method);
+        let capacity_id = fixture_request_id(root.path(), "capacity-check", now().unwrap());
         for (read, expected) in [
             (
                 insufficient as MemoryReader,
@@ -4022,8 +4122,7 @@ mod tests {
                 PreparationMemoryRefusal::Unavailable,
             ),
         ] {
-            let error =
-                super::reserve(root.path(), &caller, "capacity-check", &cid, read).unwrap_err();
+            let error = super::reserve(root.path(), &caller, &capacity_id, &cid, read).unwrap_err();
             assert_eq!(
                 error.downcast_ref::<PreparationMemoryRefusal>(),
                 Some(&expected)
@@ -4036,7 +4135,7 @@ mod tests {
             super::reserve(
                 root.path(),
                 &caller,
-                "capacity-check",
+                &capacity_id,
                 &cid,
                 unexpected_observation
             )
@@ -4047,12 +4146,116 @@ mod tests {
             std::fs::read(root.path().join("model-preparation/state.json")).unwrap(),
             saved
         );
-        assert!(
-            super::reserve(root.path(), &caller, "changed-request", &cid, unavailable).is_err()
-        );
+        assert!(super::reserve(
+            root.path(),
+            &caller,
+            &fixture_request_id(root.path(), "changed-request", now().unwrap()),
+            &cid,
+            unavailable
+        )
+        .is_err());
         assert_eq!(
             std::fs::read(root.path().join("model-preparation/state.json")).unwrap(),
             saved
+        );
+    }
+
+    #[tokio::test]
+    async fn model_get_unseen_legacy_or_expired_id_refuses_before_effects() {
+        fn unexpected_observation() -> std::io::Result<elastos_common::host_memory::HostMemory> {
+            panic!("expired new requests stop before host observation")
+        }
+        for id in [
+            "legacy-request".to_owned(),
+            format!("model-v1:{}:expired", now().unwrap() * 1000 - 300_001),
+            format!("model-v1:{}:future", now().unwrap() * 1000 + 600_000),
+        ] {
+            let (root, cid) = fixture();
+            let registry = Arc::new(elastos_runtime::provider::ProviderRegistry::new());
+            let backend = Arc::new(PreparationBackend::new(Default::default(), cid.clone()));
+            registry
+                .register_sub_provider("ipfs", backend.clone())
+                .await
+                .unwrap();
+            let owner = PreparationOwner::with_memory(unexpected_observation);
+            let error = owner
+                .invoke(
+                    root.path(),
+                    Some(registry),
+                    caller(&context(), &method("use")),
+                    &id,
+                    &serde_json::json!({"cid":cid}),
+                    Arc::new(|| Ok(())),
+                )
+                .unwrap_err();
+            assert!(error.is::<PreparationRequestExpired>());
+            assert!(owner.worker.lock().unwrap().is_none());
+            assert!(backend.calls.lock().unwrap().is_empty());
+            assert!(backend.capacity_requests.lock().unwrap().is_empty());
+            assert!(!root.path().join("model-preparation").exists());
+        }
+    }
+
+    #[test]
+    fn model_preparation_retained_legacy_id_precedes_freshness_and_floor() {
+        fn unexpected_observation() -> std::io::Result<elastos_common::host_memory::HostMemory> {
+            panic!("retained legacy facts stop before host observation")
+        }
+        let (root, cid) = fixture();
+        let context = context();
+        let use_method = method("use");
+        let cancel_method = method("cancel");
+        let t0 = now().unwrap();
+        let admitted = reserve_at(
+            root.path(),
+            &caller(&context, &use_method),
+            "legacy-fixture",
+            &cid,
+            t0,
+        )
+        .unwrap();
+        manage(
+            root.path(),
+            &caller(&context, &cancel_method),
+            &admitted.operation_id,
+            true,
+            t0,
+        )
+        .unwrap();
+        let retained = {
+            let inventory = Inventory::open(root.path(), false).unwrap();
+            let mut state = inventory.load().unwrap();
+            let record = &mut state.records[0];
+            record.request_binding.request_id = "retained-legacy".into();
+            record.request_binding = binding(record);
+            record.operation_id = operation_id(record).unwrap();
+            record.admission_id = record.operation_id.clone();
+            let retained = record.clone();
+            state.pruned_issued_floor_ms = (t0 + 3600) * 1000;
+            inventory.save(&state).unwrap();
+            retained
+        };
+        let path = root.path().join("model-preparation/state.json");
+        let saved = std::fs::read(&path).unwrap();
+        assert_eq!(
+            super::reserve_at(
+                root.path(),
+                &caller(&context, &use_method),
+                "retained-legacy",
+                &cid,
+                t0 + 7200,
+                unexpected_observation
+            )
+            .unwrap(),
+            retained
+        );
+        assert_eq!(std::fs::read(path).unwrap(), saved);
+        let inventory = Inventory::open(root.path(), false).unwrap();
+        let mut state = inventory.load().unwrap();
+        state.pruned_issued_floor_ms -= 1;
+        assert!(
+            inventory.save(&state).is_err(),
+            "the persisted floor is monotonic"
         );
     }
 
@@ -4078,7 +4281,7 @@ mod tests {
                 .unwrap();
             let owner = PreparationOwner::with_memory(read);
             let error = owner
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     Some(registry),
                     caller(&context(), &method("use")),
@@ -6146,7 +6349,7 @@ mod tests {
             let path = admitted_weights(f.root.path(), &f.old.operation_id);
             let original = std::fs::read(&path).unwrap();
             let err = test_owner()
-                .invoke(
+                .invoke_fixture(
                     f.root.path(),
                     Some(Arc::clone(&f.registry)),
                     caller(&context(), &method("reclaim")),
@@ -6193,7 +6396,7 @@ mod tests {
             let path = admitted_weights(f.root.path(), &f.old.operation_id);
             let original = std::fs::read(&path).unwrap();
             let err = test_owner()
-                .invoke(
+                .invoke_fixture(
                     f.root.path(),
                     Some(Arc::clone(&f.registry)),
                     caller(&context(), &method("reclaim")),
@@ -6264,7 +6467,7 @@ mod tests {
             let path = admitted_weights(f.root.path(), &f.old.operation_id);
             assert!(path.is_file());
             let result = test_owner()
-                .invoke(
+                .invoke_fixture(
                     f.root.path(),
                     Some(Arc::clone(&f.registry)),
                     caller(&context(), &method("reclaim")),
@@ -6573,7 +6776,9 @@ mod tests {
                     .iter()
                     .filter(|r| r.admission_id == f.old.operation_id)
                     .all(|r| r.reserved_bytes == 0
-                        && if r.request_binding.request_id == "cancelled-alias" {
+                        && if r.request_binding.request_id
+                            == fixture_request_id(f.root.path(), "cancelled-alias", now().unwrap(),)
+                        {
                             r.state == PreparationState::Cancelled
                         } else {
                             r.state == PreparationState::Reclaimed
@@ -6793,7 +6998,7 @@ mod tests {
                 .unwrap();
             let owner = test_owner();
             let prepared = owner
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     Some(registry.clone()),
                     caller(&context(), &method("use")),
@@ -6815,7 +7020,7 @@ mod tests {
                 .filter(|op| *op == "cat")
                 .count();
             let pending_status = owner
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     Some(registry.clone()),
                     caller(&context(), &method("status")),
@@ -6833,7 +7038,7 @@ mod tests {
             );
             model.busy.store(false, Ordering::Release);
             owner
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     Some(registry.clone()),
                     caller(&context(), &method("status")),
@@ -6880,7 +7085,7 @@ mod tests {
             let owner = test_owner();
             let input = serde_json::json!({"cid":cid});
             let first = owner
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     Some(registry.clone()),
                     caller(&context(), &method("use")),
@@ -6918,7 +7123,7 @@ mod tests {
                 .unwrap();
             let reopened = test_owner();
             let reused = reopened
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     Some(registry.clone()),
                     caller(&context(), &method("use")),
@@ -7030,7 +7235,7 @@ mod tests {
                 .unwrap();
             let owner = test_owner();
             owner
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     Some(registry.clone()),
                     caller(&context(), &method("status")),
@@ -7209,7 +7414,7 @@ mod tests {
                 .unwrap();
             let owner = test_owner();
             owner
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     Some(registry.clone()),
                     caller(&context(), &method("status")),
@@ -7236,7 +7441,7 @@ mod tests {
             model.busy.store(false, Ordering::Release);
             for _ in 0..2 {
                 owner
-                    .invoke(
+                    .invoke_fixture(
                         root.path(),
                         Some(registry.clone()),
                         caller(&context(), &method("use")),
@@ -7303,7 +7508,7 @@ mod tests {
                 .unwrap();
             let owner = test_owner();
             owner
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     Some(registry.clone()),
                     caller(&context(), &method("status")),
@@ -7327,7 +7532,7 @@ mod tests {
             )
             .await;
             owner
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     Some(registry.clone()),
                     caller(&context(), &method("use")),
@@ -7362,7 +7567,7 @@ mod tests {
                 config["model_catalog"]["local_use"]["max_cache_bytes"] =
                     serde_json::json!(2 * charge - 1);
             });
-            let pressure_use = owner.invoke(
+            let pressure_use = owner.invoke_fixture(
                 root.path(),
                 Some(registry.clone()),
                 caller(&context(), &method("use")),
@@ -7902,7 +8107,7 @@ mod tests {
 
             let owner = test_owner();
             let first = owner
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     Some(registry.clone()),
                     caller(&context(), &method("use")),
@@ -7982,7 +8187,7 @@ mod tests {
 
             let reopened = test_owner();
             let reused = reopened
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     Some(registry.clone()),
                     caller(&context(), &method("use")),
@@ -8152,7 +8357,7 @@ mod tests {
                 for index in order {
                     let owner = test_owner();
                     let response = owner
-                        .invoke(
+                        .invoke_fixture(
                             root.path(),
                             Some(registry.clone()),
                             caller(&context(), &method("use")),
@@ -8478,7 +8683,10 @@ server.serve_forever()
                         session_id: ctx.session_id.clone(),
                         capsule_id: "assistant".into(),
                         grant_id: ctx.grant_id.clone(),
-                        request_id: format!("small-output-{prompt}"),
+                        request_id: format!(
+                            "model-v1:{}:small-output-{prompt}",
+                            now().unwrap() * 1000
+                        ),
                         offer_id: offer.clone(),
                         operation: "text.generate".into(),
                         input_hash: model_input_hash(&input).unwrap(),
@@ -8628,7 +8836,7 @@ server.serve_forever()
                     serde_json::json!(2 * preparation_charge(record.total_bytes).unwrap() - 1);
             });
             let owner = test_owner();
-            let pressure = owner.invoke(
+            let pressure = owner.invoke_fixture(
                 root.path(),
                 Some(registry.clone()),
                 caller(&context(), &method("use")),
@@ -8755,7 +8963,7 @@ server.serve_forever()
             .then(|| Arc::new(elastos_runtime::provider::ProviderRegistry::new()));
         let owner = test_owner();
         assert!(owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 registry,
                 caller(&context(), &method("use")),
@@ -8827,7 +9035,7 @@ server.serve_forever()
         let state_path = root.path().join("model-preparation/state.json");
         let owner = test_owner();
         let pending = owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry.clone()),
                 caller(&context(), &method("use")),
@@ -8855,7 +9063,7 @@ server.serve_forever()
         assert_eq!(retried.reserved_bytes, 0);
         assert_eq!(std::fs::read(&state_path).unwrap(), pending_bytes);
         let started = owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry),
                 caller(&context(), &method("use")),
@@ -8981,7 +9189,7 @@ server.serve_forever()
         for _ in 0..2 {
             let owner = test_owner();
             let repeated = owner
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     Some(registry.clone()),
                     caller(&context(), &method("use")),
@@ -8999,7 +9207,7 @@ server.serve_forever()
         let held_worker = inventory.worker_lock().unwrap();
         drop(inventory);
         assert!(test_owner()
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry.clone()),
                 caller(&context(), &method("use")),
@@ -9185,7 +9393,7 @@ server.serve_forever()
             });
             let owner = test_owner();
             let output = owner
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     Some(registry.clone()),
                     caller(&context, &method("use")),
@@ -9257,7 +9465,7 @@ server.serve_forever()
             if fault == "storage_service_unavailable" {
                 *backend.read_fault.lock().unwrap() = None;
                 owner
-                    .invoke(
+                    .invoke_fixture(
                         root.path(),
                         Some(registry.clone()),
                         caller(&context, &method("status")),
@@ -9275,7 +9483,7 @@ server.serve_forever()
                     Some(PreparationFailurePhase::Interrupted)
                 );
                 let retry = owner
-                    .invoke(
+                    .invoke_fixture(
                         root.path(),
                         Some(registry.clone()),
                         caller(&context, &method("use")),
@@ -9322,7 +9530,7 @@ server.serve_forever()
             register_content(&registry, root.path()).await;
             let owner = test_owner();
             let result = owner
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     Some(registry),
                     caller(&context(), &method("use")),
@@ -9371,7 +9579,7 @@ server.serve_forever()
         register_content(&registry, root.path()).await;
         let owner = test_owner();
         let result = owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry.clone()),
                 caller(&context(), &method("use")),
@@ -9390,7 +9598,7 @@ server.serve_forever()
         let before = load_operation(root.path(), id).unwrap();
         let started = std::time::Instant::now();
         let cancelled = owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry.clone()),
                 caller(&context(), &method("cancel")),
@@ -9434,7 +9642,7 @@ server.serve_forever()
         let mut previous_status = None;
         for request_id in ["status-1", "status-2"] {
             let status = owner
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     Some(registry.clone()),
                     caller(&context(), &method("status")),
@@ -9456,7 +9664,7 @@ server.serve_forever()
         }
         let restarted = test_owner();
         let status = restarted
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry.clone()),
                 caller(&context(), &method("status")),
@@ -9471,7 +9679,7 @@ server.serve_forever()
         assert_eq!(Some(&status), previous_status.as_ref());
         assert!(restarted.worker.lock().unwrap().is_none());
         let again = restarted
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry),
                 caller(&context(), &method("status")),
@@ -10094,7 +10302,7 @@ server.serve_forever()
                 let started = Instant::now();
                 let input = serde_json::json!({"cid":cid});
                 let response = test_owner
-                    .invoke(
+                    .invoke_fixture(
                         &test_data,
                         Some(test_registry.clone()),
                         caller(&context(), &method("use")),
@@ -10249,7 +10457,7 @@ server.serve_forever()
                 }
                 let reuse_started = Instant::now();
                 let alias = reopened
-                    .invoke(
+                    .invoke_fixture(
                         &test_data,
                         Some(test_registry.clone()),
                         caller(&context(), &method("use")),
@@ -10483,7 +10691,7 @@ server.serve_forever()
         });
         let owner = test_owner();
         owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry),
                 caller(&context(), &method("cancel")),
@@ -10521,7 +10729,7 @@ server.serve_forever()
         let owner = test_owner();
         let input = serde_json::json!({"operation_id":record.operation_id});
         owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry.clone()),
                 caller(&context(), &method("cancel")),
@@ -10540,7 +10748,7 @@ server.serve_forever()
             .exists());
         backend.fail_drain.store(false, Ordering::Release);
         owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry),
                 caller(&context(), &method("cancel")),
@@ -10574,7 +10782,7 @@ server.serve_forever()
         });
         let owner = test_owner();
         owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry),
                 caller(&context(), &method("status")),
@@ -10607,7 +10815,7 @@ server.serve_forever()
     ) {
         let owner = test_owner();
         owner
-            .invoke(
+            .invoke_fixture(
                 root,
                 Some(registry),
                 caller(&context(), &method("status")),
@@ -10695,7 +10903,7 @@ server.serve_forever()
         let (root, record, registry, on_disk) = kept_stage_fixture().await;
         let owner = test_owner();
         let reply = owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry),
                 caller(&context(), &method("cancel")),
@@ -10803,7 +11011,7 @@ server.serve_forever()
         .unwrap();
         // Cancel on the old failed attempt leaves the running preparation's stage.
         let reply = test_owner()
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry),
                 caller(&context(), &method("cancel")),
@@ -11039,7 +11247,7 @@ server.serve_forever()
         let (root, record, backend, registry) = staged_fixture(1, false).await;
         let owner = test_owner();
         owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry),
                 caller(&context(), &method("cancel")),
@@ -11071,7 +11279,7 @@ server.serve_forever()
         let wrong_cid = "bafybeihgnsjhpoktqbyspaqv6moblyny3txs5nkjdxfx7wm346odxkhlrm";
         *backend.cid.lock().unwrap() = wrong_cid.into();
         owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry.clone()),
                 caller(&context(), &method("status")),
@@ -11088,7 +11296,7 @@ server.serve_forever()
         // A later cancel cannot erase the already-renamed artifact; it settles
         // the exact prior effect after current authority and bytes are verified.
         owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry),
                 caller(&context(), &method("cancel")),
@@ -11114,7 +11322,7 @@ server.serve_forever()
         cid: &str,
         keep: bool,
     ) -> anyhow::Result<serde_json::Value> {
-        test_owner().invoke(
+        test_owner().invoke_fixture(
             root,
             None,
             caller(principal, &method("retention")),
@@ -11131,7 +11339,7 @@ server.serve_forever()
     ) {
         let owner = test_owner();
         owner
-            .invoke(
+            .invoke_fixture(
                 root,
                 Some(registry),
                 caller(&context(), &method("status")),
@@ -11264,7 +11472,7 @@ server.serve_forever()
 
         let owner = test_owner();
         let reply = owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry.clone()),
                 caller(&context(), &method("use")),
@@ -11464,7 +11672,7 @@ server.serve_forever()
         let owner = test_owner();
         let started = std::time::Instant::now();
         let reply = owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry.clone()),
                 caller(&context(), &method("use")),
@@ -11486,7 +11694,7 @@ server.serve_forever()
             "the read is waiting on the connected silent holder"
         );
         let cancelled = owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry.clone()),
                 caller(&context(), &method("cancel")),
@@ -11527,7 +11735,7 @@ server.serve_forever()
         let owner = test_owner();
         let started = std::time::Instant::now();
         let reply = owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry.clone()),
                 caller(&context(), &method("use")),
@@ -11622,7 +11830,7 @@ server.serve_forever()
 
         let owner = test_owner();
         let reply = owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry.clone()),
                 caller(&context(), &method("use")),
@@ -11773,7 +11981,7 @@ server.serve_forever()
             }
         }
 
-        fn invoke(
+        fn invoke_fixture(
             &self,
             owner: &PreparationOwner,
             method_name: &str,
@@ -11781,7 +11989,7 @@ server.serve_forever()
             input: serde_json::Value,
         ) -> serde_json::Value {
             owner
-                .invoke(
+                .invoke_fixture(
                     self.root.path(),
                     Some(self.registry.clone()),
                     caller(&context(), &method(method_name)),
@@ -11796,7 +12004,8 @@ server.serve_forever()
         async fn prepare(&self, key: &str) -> (PreparationRecord, std::time::Duration) {
             let owner = test_owner();
             let started = std::time::Instant::now();
-            let reply = self.invoke(&owner, "use", key, serde_json::json!({"cid": self.cid}));
+            let reply =
+                self.invoke_fixture(&owner, "use", key, serde_json::json!({"cid": self.cid}));
             let task = owner.worker.lock().unwrap().take().unwrap();
             tokio::time::timeout(std::time::Duration::from_secs(120), task)
                 .await
@@ -11947,7 +12156,7 @@ server.serve_forever()
         )
         .await;
         let owner = test_owner();
-        let reply = fixture.invoke(
+        let reply = fixture.invoke_fixture(
             &owner,
             "use",
             "cancel-mid",
@@ -11961,7 +12170,7 @@ server.serve_forever()
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert!(fixture.part_reads() >= 12, "download is under way");
-        let cancelled = fixture.invoke(
+        let cancelled = fixture.invoke_fixture(
             &owner,
             "cancel",
             "cancel-mid-request",
@@ -12060,7 +12269,7 @@ server.serve_forever()
         )
         .await;
         let owner = test_owner();
-        let reply = fixture.invoke(
+        let reply = fixture.invoke_fixture(
             &owner,
             "use",
             "cancel-backoff",
@@ -12077,7 +12286,7 @@ server.serve_forever()
         // The second read misses its 5 s answer deadline; the part then waits
         // out its 1 s backoff before a third read. Cancel inside it.
         tokio::time::sleep(std::time::Duration::from_millis(5400)).await;
-        let cancelled = fixture.invoke(
+        let cancelled = fixture.invoke_fixture(
             &owner,
             "cancel",
             "cancel-backoff-request",
@@ -12334,7 +12543,7 @@ server.serve_forever()
         )
         .await;
         let owner = test_owner();
-        let reply = fixture.invoke(
+        let reply = fixture.invoke_fixture(
             &owner,
             "use",
             "before-restart",
@@ -12369,7 +12578,7 @@ server.serve_forever()
         drop(owner);
         // After the restart, status reconciles: the stage stays for the next Use.
         let owner = test_owner();
-        fixture.invoke(
+        fixture.invoke_fixture(
             &owner,
             "status",
             "after-restart",
@@ -12663,7 +12872,7 @@ server.serve_forever()
             );
             let owner = test_owner();
             let status = owner
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     None,
                     caller(&context(), &method("status")),
@@ -12717,7 +12926,7 @@ server.serve_forever()
         ] {
             let owner = test_owner();
             let reply = owner
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     Some(registry.clone()),
                     caller(principal, &method("use")),
@@ -12754,7 +12963,7 @@ server.serve_forever()
             (&second, &aliases[1]),
         ] {
             let reply = test_owner()
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     None,
                     caller(principal, &method("status")),
@@ -12806,7 +13015,7 @@ server.serve_forever()
             serde_json::json!({"cid":record.package_cid.to_uppercase(),"keep":false}),
         ] {
             assert!(test_owner()
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     None,
                     caller(&context(), &method("retention")),
@@ -12828,7 +13037,7 @@ server.serve_forever()
                 _ => denied.operation = Some("keep".into()),
             }
             assert!(test_owner()
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     None,
                     caller(&context(), &denied),
@@ -12842,7 +13051,7 @@ server.serve_forever()
         invalid.principal_id.clear();
         assert!(retention_intent(root.path(), &invalid, &record.package_cid, false).is_err());
         assert!(test_owner()
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 None,
                 caller(&context(), &method("retention")),
@@ -12854,7 +13063,7 @@ server.serve_forever()
         let checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed = checks.clone();
         assert!(test_owner()
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 None,
                 caller(&context(), &method("retention")),
@@ -12945,7 +13154,7 @@ server.serve_forever()
         let (root, record, backend, registry) = staged_fixture(now().unwrap(), true).await;
         let owner = test_owner();
         owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry.clone()),
                 caller(&context(), &method("status")),
@@ -12959,7 +13168,7 @@ server.serve_forever()
         other.principal_id = "person:other-fixture".into();
         for op in ["status", "cancel"] {
             assert!(owner
-                .invoke(
+                .invoke_fixture(
                     root.path(),
                     Some(registry.clone()),
                     caller(&other, &method(op)),
@@ -12971,7 +13180,7 @@ server.serve_forever()
         }
         let input = serde_json::json!({"cid":record.package_cid});
         let response = owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry.clone()),
                 caller(&other, &method("use")),
@@ -12988,7 +13197,10 @@ server.serve_forever()
         assert_eq!(reused.admission_id, record.operation_id);
         assert_eq!(reused.reserved_bytes, 0);
         assert_eq!(reused.request_binding.principal, other.principal_id);
-        assert_eq!(reused.request_binding.request_id, "fresh");
+        assert_eq!(
+            reused.request_binding.request_id,
+            fixture_request_id(root.path(), "fresh", now().unwrap())
+        );
         assert_eq!(
             load_operation(root.path(), &record.operation_id)
                 .unwrap()
@@ -12998,7 +13210,7 @@ server.serve_forever()
         assert!(!root.path().join("model-preparation/stage").exists());
         let prior = backend.calls.lock().unwrap().len();
         let replay = owner
-            .invoke(
+            .invoke_fixture(
                 root.path(),
                 Some(registry),
                 caller(&other, &method("use")),
@@ -13243,7 +13455,12 @@ server.serve_forever()
         assert_eq!(expired.state, PreparationState::Expired);
         assert_eq!(expired.reserved_bytes, 0);
         assert_eq!(expired.request_binding, record.request_binding);
-        let next = reserve_at(root.path(), &caller, "req-2", &cid, record.expires_at).unwrap();
+        let state_path = root.path().join("model-preparation/state.json");
+        let saved = std::fs::read(&state_path).unwrap();
+        let stale = reserve_at(root.path(), &caller, "req-2", &cid, record.expires_at).unwrap_err();
+        assert!(stale.downcast_ref::<PreparationRequestExpired>().is_some());
+        assert_eq!(std::fs::read(&state_path).unwrap(), saved);
+        let next = reserve_at(root.path(), &caller, "req-3", &cid, record.expires_at).unwrap();
         assert_ne!(next.operation_id, record.operation_id);
     }
 
@@ -13392,6 +13609,24 @@ server.serve_forever()
         let just_failed = ids.last().unwrap();
         let polled = status(root.path(), &caller(&context, &status_method), just_failed).unwrap();
         assert_eq!(polled.state, PreparationState::Failed);
+        let state_path = root.path().join("model-preparation/state.json");
+        let before_prune = std::fs::read(&state_path).unwrap();
+        let transaction = root.path().join("model-preparation/state.next");
+        std::fs::create_dir(&transaction).unwrap();
+        assert!(reserve_at(
+            root.path(),
+            &caller(&context, &use_method),
+            "blocked-floor-publication",
+            &cid,
+            late(60)
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read(&state_path).unwrap(),
+            before_prune,
+            "a failed floor transaction preserves every old binding before deletion"
+        );
+        std::fs::remove_dir(transaction).unwrap();
         // An hour later the longest-settled attempt makes room.
         let next = reserve_at(
             root.path(),
@@ -13407,7 +13642,7 @@ server.serve_forever()
             load_operation(root.path(), just_failed).unwrap().state,
             PreparationState::Failed
         );
-        // A replay of the pruned request id starts a new reservation.
+        // A replay of the pruned request cannot create another reservation.
         let caller_cancel = caller(&context, &cancel_method);
         manage(
             root.path(),
@@ -13417,6 +13652,7 @@ server.serve_forever()
             late(60),
         )
         .unwrap();
+        let saved = std::fs::read(root.path().join("model-preparation/state.json")).unwrap();
         let replay = reserve_at(
             root.path(),
             &caller(&context, &use_method),
@@ -13424,10 +13660,27 @@ server.serve_forever()
             &cid,
             late(120),
         )
-        .unwrap();
-        assert_eq!(replay.state, PreparationState::Reserved);
-        assert_eq!(replay.created_at, late(120));
-        assert_ne!(replay.operation_id, ids[0]);
+        .unwrap_err();
+        assert!(replay.is::<PreparationRequestExpired>());
+        assert_eq!(
+            std::fs::read(root.path().join("model-preparation/state.json")).unwrap(),
+            saved
+        );
+        // Reopening after a clock rollback preserves the floor. The old ID is
+        // refused even when its timestamp is fresh again.
+        let replay = reserve_at(
+            root.path(),
+            &caller(&context, &use_method),
+            "retry-0",
+            &cid,
+            t0,
+        )
+        .unwrap_err();
+        assert!(replay.is::<PreparationRequestExpired>());
+        assert_eq!(
+            std::fs::read(root.path().join("model-preparation/state.json")).unwrap(),
+            saved
+        );
     }
 
     /// A replay refused for a changed identity still saves the expiry it found.
@@ -14133,6 +14386,7 @@ server.serve_forever()
             schema: SCHEMA.into(),
             records: vec![rewritten],
             retention_claims: Vec::new(),
+            pruned_issued_floor_ms: 0,
             retirement: None,
             kept_stage: None,
         };
@@ -14325,7 +14579,8 @@ server.serve_forever()
             grant_id: "preparation-grant".into(),
         };
         let capsule = "marketplace";
-        let request_id = "prepare-fixture-1";
+        let request_id = fixture_request_id(root.path(), "prepare-fixture-1", now().unwrap());
+        let request_id = request_id.as_str();
         let use_method = method("use");
         let status_method = method("status");
         let cancel_method = method("cancel");

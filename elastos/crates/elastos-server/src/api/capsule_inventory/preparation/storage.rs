@@ -314,6 +314,10 @@ impl Inventory {
         );
         self.check_loaded()?;
         let previous = self.snapshot()?;
+        ensure!(
+            state.pruned_issued_floor_ms >= previous.pruned_issued_floor_ms,
+            "preparation replay floor moved backwards"
+        );
         for owner in previous.records.iter().filter(|r| r.activation.is_some()) {
             let next = state
                 .records
