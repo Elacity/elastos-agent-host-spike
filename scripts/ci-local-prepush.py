@@ -542,7 +542,24 @@ def crate_units(root, workspace, package, paths, lease):
         raise GateError(package["name"] + " has zero unit tests on this host")
 
 
+LARGE_FILE_LIMIT = 50 * 1024 * 1024
+
+
+def refuse_large_files(root):
+    """GitHub refuses a push whose history adds a file over 100 MB, even if a
+    later commit deletes it, and warns above 50 MB. Check this first, in seconds."""
+    listing = run(["git", "rev-list", "--objects", "origin/develop..HEAD"], root, capture=True)
+    sizes = subprocess.run(["git", "cat-file", "--batch-check=%(objecttype) %(objectsize) %(rest)"],
+                           cwd=root, input=listing, check=True, capture_output=True, text=True).stdout
+    large = [line.split(" ", 2)[2] for line in sizes.splitlines()
+             if line.startswith("blob ") and int(line.split(" ", 2)[1]) > LARGE_FILE_LIMIT]
+    if large:
+        raise GateError("history adds files over 50 MB (deleting them in a later commit does not help; "
+                        "remove them from the commits that add them): " + ", ".join(sorted(set(large))[:5]))
+
+
 def gates(root, paths, lease):
+    refuse_large_files(root)
     run(["git", "diff", "--check", "origin/develop...HEAD"], root)
     # The CI test-behaviour suite (about a minute); its last lines name failures.
     run(["./scripts/test-behaviour.sh"], root)

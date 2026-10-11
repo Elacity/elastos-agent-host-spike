@@ -375,6 +375,19 @@ class PrepushTests(unittest.TestCase):
         self.assertTrue(any(c["args"][:4] == ["test", "-p", "server", "--lib"] and
                             "--nocapture" in c["args"] for c in self.commands()))
 
+    def test_large_file_in_history_stops_before_any_check(self):
+        large = self.root / "output/model.gguf"
+        large.parent.mkdir(parents=True, exist_ok=True)
+        large.write_bytes(b"\0" * (51 * 1024 * 1024))
+        self.git("add", "-f", "output/model.gguf")
+        self.git("commit", "-qm", "accidental large file")
+        self.git("rm", "-q", "output/model.gguf")
+        self.git("commit", "-qm", "delete it again")
+        result = self.invoke()
+        self.assert_stopped(result, "history adds files over 50 MB")
+        self.assertIn("output/model.gguf", result.stdout + result.stderr)
+        self.assertFalse(any(c["tool"] in {"cargo", "node"} for c in self.commands()))
+
     def test_unchanged_empty_binary_is_skipped_when_a_manifest_changes(self):
         self.git("reset", "--hard", "HEAD~1")  # the base fixture commit changes Rust source
         self.write("elastos/crates/server/Cargo.toml", "[package]\nname = \"server\"\n# changed manifest\n")
