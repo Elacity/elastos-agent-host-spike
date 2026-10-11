@@ -459,10 +459,12 @@ def unit_plan(root, package, paths):
     targets = unit_targets(package)
     folder = Path(package["manifest_path"]).parent
     changed = [root / path for path in paths if (root / path).is_relative_to(folder)]
-    # A full plan runs every target because no single target's source proves the
-    # change (a manifest, lockfile or dependency changed); such targets are not
-    # themselves changed, so one with no tests (a thin `fn main`) is skipped.
-    full = [(target, selectors, {""}, False) for target, selectors in targets]
+    # Policy beyond CI: a package whose own Rust source changed must run tests.
+    # A package reached only through other inputs (manifest, lockfile, config
+    # file, dependency) is tested when it has tests and never refused when it
+    # has none: CI does not refuse it either.
+    own_source = any(path.suffix == ".rs" for path in changed)
+    full = [(target, selectors, {""}, own_source) for target, selectors in targets]
     if not changed or any(path.suffix != ".rs" or not path.exists() for path in changed):
         return full
     plan = {}
@@ -536,7 +538,7 @@ def crate_units(root, workspace, package, paths, lease):
             if count == 0:
                 raise GateError(package["name"] + " executed zero passing unit tests")
             executed += count
-    if executed == 0:
+    if executed == 0 and any(touched for _, _, _, touched in plan):
         raise GateError(package["name"] + " has zero unit tests on this host")
 
 

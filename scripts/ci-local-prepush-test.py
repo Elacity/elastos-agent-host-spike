@@ -376,6 +376,7 @@ class PrepushTests(unittest.TestCase):
                             "--nocapture" in c["args"] for c in self.commands()))
 
     def test_unchanged_empty_binary_is_skipped_when_a_manifest_changes(self):
+        self.git("reset", "--hard", "HEAD~1")  # the base fixture commit changes Rust source
         self.write("elastos/crates/server/Cargo.toml", "[package]\nname = \"server\"\n# changed manifest\n")
         self.commit()
         result = self.invoke(extra={"PREPUSH_EMPTY_BIN": "1"})
@@ -384,6 +385,15 @@ class PrepushTests(unittest.TestCase):
                             "--nocapture" in c["args"] for c in self.commands()))
         self.assertFalse(any(c["args"][:4] == ["test", "-p", "server", "--bin"] and
                              "--nocapture" in c["args"] for c in self.commands()))
+
+    def test_unchanged_package_without_tests_is_skipped_when_a_manifest_changes(self):
+        # A tool crate with no tests at all, reached only through a manifest change.
+        self.git("reset", "--hard", "HEAD~1")
+        self.write("elastos/crates/server/Cargo.toml", "[package]\nname = \"server\"\n# changed manifest\n")
+        self.commit()
+        result = self.invoke(extra={"PREPUSH_NO_TESTS": "1"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(any(c["args"][0] == "test" and "--nocapture" in c["args"] for c in self.commands()))
 
     def test_standalone_binary_and_workspace_manifest_scope(self):
         self.write("capsules/chain-provider/src/main.rs", "// changed binary\n")
@@ -713,12 +723,13 @@ class PrepushTests(unittest.TestCase):
                                                ["scripts/ci-example.py", "scripts/ci-example.mjs", "scripts/ci-local-prepush.py"])
         self.assertEqual(owners, set())
 
-    def test_broad_runtime_input_refuses_a_selected_target_with_zero_tests(self):
+    def test_broad_runtime_input_checks_but_does_not_refuse_a_package_without_tests(self):
+        # Only a package whose own Rust source changed must have tests (CI refuses neither).
         self.git("reset", "--hard", "HEAD~1")
         self.write("elastos/config/input.json", '{}\n')
         self.commit()
         result = self.invoke(extra={"PREPUSH_EMPTY_PACKAGE": "other"})
-        self.assert_stopped(result, "other has zero unit tests")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(any(c["args"][0] == "clippy" and "other" in c["args"] for c in self.commands()))
 
     def test_hook_git_environment_cannot_mutate_owned_sentinel_repository(self):
