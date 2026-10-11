@@ -72,6 +72,7 @@ let spaceHideTimer = 0;
 let closing = false;
 /* The Space the user came from; the ring returns there when the room closes. */
 let returnStageId = "";
+let browserAvailable = false;
 
 function taskbarEl() {
   return document.querySelector(".taskbar");
@@ -391,7 +392,7 @@ function onFrameMessage(event) {
     }
     case "home-agent:open-browser": {
       const url = normalizeHomeAgentBrowserUrl(message);
-      if (url && typeof deps?.openTarget === "function") {
+      if (url && browserAvailable && typeof deps?.openTarget === "function") {
         deps.openTarget("browser", { query: { url } });
       }
       break;
@@ -410,6 +411,7 @@ export function syncAssistantFaceAvailability(summary) {
   if (!toggle || !deps) {
     return;
   }
+  browserAvailable = Boolean(deps.targetById(summary, "browser"));
   const target = deps.targetById(summary, TARGET_ID);
   toggle.hidden = !target;
   if (target) {
