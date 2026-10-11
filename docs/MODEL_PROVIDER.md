@@ -70,16 +70,20 @@ before starting the engine for a reply.
 On Linux, Runtime verifies the visible cgroup v2 hierarchy and reads every
 ancestor's memory limit and current usage. Missing or unreadable required files
 make the observation unavailable. File cache credit is bounded by current
-usage; an unreadable cache statistic gives zero credit.
+usage; an unreadable cache statistic gives zero credit. An unavailable memory
+observation returns `model_memory_observation_unavailable` and asks the Home
+owner to check the memory limits before trying again.
 
 A local engine is admitted right before it starts: free memory must cover the
 model weights, its KV cache at the configured context, batch scratch and
 headroom of max(10% of effective memory capacity, 1 GiB); otherwise the run fails with
-`model_memory_unavailable` before anything is spawned. Each Runtime runs one
-local engine at a time, stops it after 60 s without requests and starts it
-again on the next request. One Runtime per OS account (the installer's layout)
-is the exclusivity boundary; two Runtimes of different accounts each admit
-against the memory that is free when they start.
+`model_memory_unavailable` before anything is spawned. Each model-provider
+process runs one local engine at a time, stops it after 60 s without requests
+and starts it again on the next request. Runtime's host lock protects its Home
+data root. Distinct data roots use separate locks and providers, including
+under the same OS account. For supported Local AI operation, run one active
+Home per device. Each provider checks the memory that is free when it starts
+its engine.
 
 The owning Runtime DID signs the service offer, which names the admitted
 provider capability and contains only bounded capability and policy facts. The
