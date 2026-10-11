@@ -459,7 +459,10 @@ def unit_plan(root, package, paths):
     targets = unit_targets(package)
     folder = Path(package["manifest_path"]).parent
     changed = [root / path for path in paths if (root / path).is_relative_to(folder)]
-    full = [(target, selectors, {""}) for target, selectors in targets]
+    # A full plan runs every target because no single target's source proves the
+    # change (a manifest, lockfile or dependency changed); such targets are not
+    # themselves changed, so one with no tests (a thin `fn main`) is skipped.
+    full = [(target, selectors, {""}, False) for target, selectors in targets]
     if not changed or any(path.suffix != ".rs" or not path.exists() for path in changed):
         return full
     plan = {}
@@ -473,7 +476,7 @@ def unit_plan(root, package, paths):
             return full
         for index, prefix in matches:
             plan.setdefault(index, set()).add(prefix)
-    return [(targets[index][0], targets[index][1], prefixes) for index, prefixes in sorted(plan.items())]
+    return [(targets[index][0], targets[index][1], prefixes, True) for index, prefixes in sorted(plan.items())]
 
 
 def passed_tests(output):
@@ -503,12 +506,14 @@ def crate_units(root, workspace, package, paths, lease):
         raise GateError(package["name"] + " has no enabled unit test target")
     prepared = False
     executed = 0
-    for target, selectors, prefixes in plan:
+    for target, selectors, prefixes, touched in plan:
         args = ["cargo", "test", "-p", package["name"], *selectors]
         listed = run([*args, "--", "--list"], workspace, capture=True, lease=lease)
         tests = re.findall(r"(?m)^(.+): test$", listed)
         if not tests:
-            raise GateError(package["name"] + " has zero unit tests on this host: " + " ".join(selectors))
+            if touched:
+                raise GateError(package["name"] + " has zero unit tests on this host: " + " ".join(selectors))
+            continue
         # A source module can use tests in another module. Fall back to all
         # tests in that target when a proven file path has no matching tests.
         if any(not any(name.startswith(prefix) for name in tests) for prefix in prefixes):

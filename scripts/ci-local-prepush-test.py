@@ -375,6 +375,16 @@ class PrepushTests(unittest.TestCase):
         self.assertTrue(any(c["args"][:4] == ["test", "-p", "server", "--lib"] and
                             "--nocapture" in c["args"] for c in self.commands()))
 
+    def test_unchanged_empty_binary_is_skipped_when_a_manifest_changes(self):
+        self.write("elastos/crates/server/Cargo.toml", "[package]\nname = \"server\"\n# changed manifest\n")
+        self.commit()
+        result = self.invoke(extra={"PREPUSH_EMPTY_BIN": "1"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(any(c["args"][:4] == ["test", "-p", "server", "--lib"] and
+                            "--nocapture" in c["args"] for c in self.commands()))
+        self.assertFalse(any(c["args"][:4] == ["test", "-p", "server", "--bin"] and
+                             "--nocapture" in c["args"] for c in self.commands()))
+
     def test_standalone_binary_and_workspace_manifest_scope(self):
         self.write("capsules/chain-provider/src/main.rs", "// changed binary\n")
         self.write("elastos/Cargo.toml", "[workspace]\n# changed workspace\n")
