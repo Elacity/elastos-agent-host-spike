@@ -34,6 +34,12 @@ SOURCE_ROOT=/opt/elastos/release-source
 
 die() { echo "release-publish: $*" >&2; exit 1; }
 need_env() { local name; for name; do [[ -n "${!name:-}" ]] || die "set $name"; done; }
+# The Runtime reads dirs::data_dir()/elastos, i.e. $XDG_DATA_HOME/elastos; ELASTOS_DATA_DIR alone is not enough.
+need_seed_data() {
+    need_env RELEASE_SEED_DATA
+    [[ "$RELEASE_SEED_DATA" == /*/elastos ]] \
+        || die "RELEASE_SEED_DATA must be an absolute path ending in /elastos, because the Runtime reads \$XDG_DATA_HOME/elastos"
+}
 sha() { shasum -a 256 "$1" | cut -d ' ' -f 1; }
 artifact_prefix() {
     case "$1" in aarch64-darwin) echo release-mac ;; *) echo "release-$1" ;; esac
@@ -80,6 +86,16 @@ checked_ci() {
     echo "$ci"
 }
 
+# CI's update journey at the source starts from its pinned release; that must be the head users run now.
+checked_update_pin() {
+    local commit="$1" pinned public
+    git -C "$ROOT" fetch -q origin "$commit"
+    pinned=$(git -C "$ROOT" show "$commit:scripts/update-hop-previous-release.json" | jq -er .head_cid) \
+        || die "source $commit has no update journey pin (scripts/update-hop-previous-release.json head_cid)"
+    public=$(curl -fsS --max-time 20 "$ORIGIN/release-head.json" | provenance head-cid) || die "cannot read the public release head"
+    [[ "$pinned" == "$public" ]] || die "the candidate's update journey did not start from the release users run now (pinned head $pinned, public head $public); bump the pin with scripts/update-hop-compare.py pin-previous-release and rerun CI"
+}
+
 # Print the same source and run identities at each operator handoff.
 publication_record() {
     local work="$1" commit run ci_id ci_url
@@ -119,6 +135,7 @@ prepare() {
     [[ "$seen" == *" aarch64-darwin "* ]] || die "operator Mac inputs must include aarch64-darwin"
     need_env RELEASE_SEED RELEASE_SEED_DATA
     approval_json=$(provenance approval) || die "independent approval refused"
+    checked_update_pin "$(jq -r .source.commit <<< "$approval_json")"
     run_attempt=$(provenance run --run "$run") || die "package producer refused"
     work=$(work_dir "$version")
     [[ ! -e "$work" ]] || die "$work exists; remove it to prepare again"
@@ -168,7 +185,6 @@ prepare() {
     ci_run=$(checked_ci "$commit")
     echo "# Develop CI run: $(jq -r '[(.id | tostring), .url] | join(" ")' <<< "$ci_run")"
     [[ ${#platforms[@]} -gt 1 ]] || args+=(--preview-platform aarch64-darwin)
-    git -C "$ROOT" fetch -q origin "$commit"
     git -C "$ROOT" worktree add -q --detach "$work/source" "$commit"
     [[ "$(git -C "$work/source" rev-parse 'HEAD^{tree}')" == "$tree" ]] || die "source tree differs"
     for platform in "${platforms[@]}"; do
@@ -236,8 +252,9 @@ policy() {
 
 seed() {
     [[ $# == 2 ]] || die "usage: seed VERSION SIGNED_DIR"
-    need_env RELEASE_SEED RELEASE_SEED_DATA RELEASE_SEED_UNIT RELEASE_SEED_STAGE RELEASE_SEED_RUNTIME
-    local version="$1" signed work run name did platform id digest stage file artifact_commit artifact_attempt candidate recorded local_files=()
+    need_env RELEASE_SEED RELEASE_SEED_UNIT RELEASE_SEED_STAGE RELEASE_SEED_RUNTIME
+    need_seed_data
+    local version="$1" signed work run name did prev platform id digest stage file artifact_commit artifact_attempt candidate recorded local_files=()
     signed=$(realpath "$2") work=$(work_dir "$version")
     run=$(jq -er .run "$work/run.json")
     name=$(jq -er .input "$work/run.json")
@@ -253,6 +270,7 @@ seed() {
     done < <(jq -er '.platforms[]' "$work/run.json")
     publication_record "$work"
     did=$(jq -er .signer_did "$signed/release-head.json")
+    prev=$(jq -r '.payload.prev_head_cid // ""' "$signed/release-head.json")
     stage="$RELEASE_SEED_STAGE/$version"
     (cd "$signed" && shasum -a 256 -- *) > "$work/signed.SHA256SUMS"
     # The seed takes native artifacts from the run; every other signed file is
@@ -268,6 +286,13 @@ scp $work/signed.SHA256SUMS $RELEASE_SEED:$stage/
 
 EOF
     seed_preamble "$stage"
+    # Same file the Runtime will read; fail in seconds, not after the downloads.
+    # A rerun of the committed version passes; the Runtime then checks its exact head CID.
+    cat <<EOF
+jq -e --arg prev '$prev' --arg version '$version' '(.last_head_cid // "") == \$prev or .last_version == \$version' \\
+    $RELEASE_SEED_DATA/ElastOS/SystemServices/Publisher/publish-state.json > /dev/null \\
+    || { echo 'saved publish state neither precedes the signed head (prev_head_cid) nor holds this version; check RELEASE_SEED_DATA' >&2; exit 1; }
+EOF
     while read -r platform; do
         id=$(jq -er --arg platform "$platform" '.receipts[] | select(.platform == $platform) | .artifact.id' "$work/run.json")
         digest=$(jq -er --arg platform "$platform" '.receipts[] | select(.platform == $platform) | .artifact.digest | sub("^sha256:"; "")' "$work/run.json")
@@ -285,7 +310,7 @@ cut -c67- signed.SHA256SUMS | while read -r f; do
 done
 (cd signed && sha256sum -c --quiet ../signed.SHA256SUMS)
 [ "\$(ls signed | wc -l)" = "\$(wc -l < signed.SHA256SUMS)" ]
-export ELASTOS_DATA_DIR=$RELEASE_SEED_DATA
+export ELASTOS_DATA_DIR=$RELEASE_SEED_DATA XDG_DATA_HOME=${RELEASE_SEED_DATA%/elastos}
 publish() { $RELEASE_SEED_RUNTIME publish-release --version $version --channel canary --signed-publication signed \\
             --publisher-did $did --ipfs-provider-bin $RELEASE_SEED_DATA/bin/ipfs-provider "\$@"; }
 sudo -v; [ -x $RELEASE_SEED_RUNTIME ]; [ -x $RELEASE_SEED_DATA/bin/ipfs-provider ]; [ -w $RELEASE_SEED_DATA ]
@@ -300,7 +325,8 @@ EOF
 
 seed_upgrade() {
     [[ $# == 1 && "$1" =~ ^[1-9][0-9]*$ ]] || die "usage: seed-upgrade RUN_ID"
-    need_env RELEASE_SEED_USER RELEASE_SEED_DATA RELEASE_SEED_UNIT RELEASE_SEED_STAGE RELEASE_SEED_RUNTIME
+    need_env RELEASE_SEED_USER RELEASE_SEED_UNIT RELEASE_SEED_STAGE RELEASE_SEED_RUNTIME
+    need_seed_data
     local pkg id digest commit ci_run seed_proof_dir receipt source_tree artifact_attempt proof_id proof_digest proof_attempt
     pkg=$(checked_artifact "$1" release-seed)
     read -r id digest commit artifact_attempt <<< "$pkg"
@@ -334,7 +360,7 @@ jq --arg c "sha256:\$(sha256sum seed/ipfs-provider | cut -d ' ' -f 1)" --argjson
    '.external["ipfs-provider"].platforms["linux-amd64"] += {checksum: \$c, size: \$s}' \\
    $RELEASE_SEED_DATA/components.json > components.json
 sudo -v; [ -w /opt/elastos ]; [ -w \$(dirname $RELEASE_SEED_RUNTIME) ]; [ -w $RELEASE_SEED_DATA/bin ]; [ -w $RELEASE_SEED_DATA ]
-export ELASTOS_DATA_DIR=$RELEASE_SEED_DATA
+export ELASTOS_DATA_DIR=$RELEASE_SEED_DATA XDG_DATA_HOME=${RELEASE_SEED_DATA%/elastos}
 sudo systemctl stop $RELEASE_SEED_UNIT
 trap 'sudo systemctl start $RELEASE_SEED_UNIT' EXIT  # the seed is never left down
 rm -rf $SOURCE_ROOT; mv $SOURCE_ROOT.new $SOURCE_ROOT
