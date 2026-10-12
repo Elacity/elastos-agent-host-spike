@@ -5,7 +5,7 @@ import { appendFileSync, readFileSync, statfsSync, writeFileSync, renameSync } f
 import { join } from "node:path";
 import { applyRunEventsPage, terminalOutputText } from "../capsules/assistant/browser/model-contract.js";
 import { publicJourneyFailure } from "./ci-installed-home-failure.mjs";
-import { returnInstalledHome } from "./ci-installed-home-navigation.mjs";
+import { openInstalledAssistant, returnInstalledHome } from "./ci-installed-home-navigation.mjs";
 const require = createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url));
 const { chromium } = require("playwright");
 const [base, evidence, data, mode, resourceControl] = process.argv.slice(2);
@@ -142,22 +142,26 @@ async function resourceReply(assistant, offer, label) {
 }
 async function resourceLifecycle(assistant, offer, context) {
   stage = "finite_resource_lifecycle";
+  subcheck = "owner_configure";
   await page.setViewportSize({ width: 1440, height: 900 });
   await assistant.locator("#agent-harness-new-chat").click();
   await configureTokens(assistant, 1024);
   const longPrompt = "Write a numbered list from 1 to 1000. Each item must say hello and give one detail. Continue the list without an introduction or conclusion.";
+  subcheck = "contender_launch";
   const secondPage = await context.newPage();
   try {
-    // Reopen this normally launched app in a second tab with its existing authority.
-    await secondPage.goto(assistant.url(), { waitUntil: "domcontentloaded" });
-    const second = secondPage.mainFrame();
+    // Each Home launches its own Assistant and completes the Shell's room handoff.
+    const second = await openInstalledAssistant(secondPage, `${base}/home/`);
+    subcheck = "contender_configure";
     await second.locator("#agent-harness-new-chat").waitFor({ state: "visible" });
     await second.locator("#agent-harness-new-chat").click();
     await selectModel(second, offer);
     await configureTokens(second, 16);
+    subcheck = "owner_start";
     const owner = await startResourceTurn(assistant, offer, longPrompt, 1024);
     assert(!owner.run.terminal && ["prepared", "running"].includes(owner.run.status));
     await resourceAction("engine_running");
+    subcheck = "busy";
     const busy = await startResourceTurn(second, offer, "Say hello.", 16);
     const refused = await busy.terminal;
     assert.equal(refused.status, "failed");
@@ -166,6 +170,7 @@ async function resourceLifecycle(assistant, offer, context) {
     await secondPage.screenshot({ path: join(evidence, "finite-model-busy.png"), fullPage: true });
     resourceTurns.push({ stage: "busy", run_id: busy.run.run_id, status: refused.status, code: refused.error.code });
     results.model_busy = "passed";
+    subcheck = "stop";
     const cancelled = page.waitForResponse(response => {
       if (!response.url().endsWith("/api/provider/model/runs_cancel") || response.request().frame() !== assistant) return false;
       return response.request().postDataJSON()?.run_id === owner.run.run_id;
@@ -179,15 +184,19 @@ async function resourceLifecycle(assistant, offer, context) {
     resourceTurns.push({ stage: "stop", run_id: owner.run.run_id, status: stopped.status });
     results.model_stop = "passed";
   } finally { await secondPage.close(); }
+  subcheck = "stop_recovery";
   await resourceReply(assistant, offer, "stop_recovery");
   results.model_stop_recovery = "passed";
+  subcheck = "idle";
   const warm = await resourceAction("engine_running");
   await resourceAction("idle_stopped");
   results.model_idle_release = "passed";
+  subcheck = "idle_recovery";
   await resourceReply(assistant, offer, "idle_recovery");
   const restarted = await resourceAction("engine_running");
   assert(warm.engine_pid !== restarted.engine_pid || warm.engine_start_ticks !== restarted.engine_start_ticks);
   results.model_idle_recovery = "passed";
+  subcheck = "crash";
   await assistant.locator("#agent-harness-new-chat").click();
   await configureTokens(assistant, 1024);
   const crashing = await startResourceTurn(assistant, offer, longPrompt, 1024);
@@ -202,11 +211,13 @@ async function resourceLifecycle(assistant, offer, context) {
   await resourceAction("engine_stopped");
   resourceTurns.push({ stage: "engine_crash", run_id: crashing.run.run_id, status: failed.status, code: failed.error?.code });
   results.model_engine_crash = "passed";
+  subcheck = "crash_recovery";
   await resourceReply(assistant, offer, "crash_recovery");
   const recovered = await resourceAction("engine_running");
   assert(doomed.engine_pid !== recovered.engine_pid || doomed.engine_start_ticks !== recovered.engine_start_ticks);
   results.model_crash_recovery = "passed";
   stage = "finite_home_recovery";
+  subcheck = null;
   await returnInstalledHome(page, assistant, evidence);
   results.finite_home_recovery = "passed";
 }
