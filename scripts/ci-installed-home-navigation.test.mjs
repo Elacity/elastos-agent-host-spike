@@ -128,6 +128,7 @@ test("installed contender opens the real Assistant through a signed, ready Home"
       if (url.pathname === "/shell") {
         response.writeHead(200, { "content-type": "text/html" });
         response.end(`<!doctype html><style>html,body,iframe{width:100%;height:100%;margin:0;border:0}</style>
+          <body data-home-status="ready" data-home-authority="signed">
           <div id="desktop">Home desktop</div>
           <div id="setup-sheet"><button id="setup-sheet-close">Close setup</button></div>
           <button id="assistant-toggle">Assistant</button>
@@ -217,6 +218,173 @@ test("installed contender opens the real Assistant through a signed, ready Home"
           }
           assert.deepEqual(pageErrors, []);
         } finally { await page.close(); }
+      });
+    }
+    assert.deepEqual(errors, []);
+  } finally {
+    await browser?.close();
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test("installed contender waits for real Home GUI session restoration before Assistant", async t => {
+  // Runtime responses are controlled; Shell restoration and the Assistant handoff use their real modules.
+  const capsuleRoots = Object.fromEntries(["home-gui", "assistant", "home"]
+    .map(name => [name, new URL(`../capsules/${name}/browser/`, import.meta.url)]));
+  const browserContextId = `browser:${"a".repeat(32)}`;
+  const targets = ["marketplace", "wallet", "assistant"].map(target => ({
+    target, title: target[0].toUpperCase() + target.slice(1), role: "app", attach_kind: "iframe", launchable: true,
+  }));
+  const summary = {
+    authority: { signed_in: true, principal_id: "did:key:fixture", proof_binding_id: "fixture", session_id: "fixture" },
+    identity: { display_name: "Fixture Home", recovery_readiness: { schema: "elastos.recovery.readiness/v1", status: "ready" },
+      profile_readiness: { schema: "elastos.profile.readiness/v1", status: "ready" } },
+    targets, active_shell: { active: "home-gui", candidates: [] },
+    appearance: { schema: "elastos.home.appearance/v1", revision: 0, theme: "dark", accent: "blue", accent_custom: "#4f7fff",
+      dock_auto_hide: false, sounds: false, focus_mode: false, background_image_url: null,
+      background_overlay_enabled: true, background_overlay_opacity: 0.55 },
+    browser_state: { principal_id: "did:key:fixture", recent_targets: [],
+      session: { browser_context_id: browserContextId, root_shell: "home-gui", active_stage: "desk-1", space_order: ["desk-1"],
+        windows: [{ target: "marketplace", x: 20, y: 80, width: 480, height: 360 },
+          { target: "wallet", x: 520, y: 80, width: 480, height: 360 }] },
+      layout: { taskbar: ["marketplace", "wallet"], desktop: {}, desktopHidden: [], desktopLabels: {}, desktopIconsVisible: true } },
+    desktop_objects: { objects: [] }, people: { contacts: [], discovery: { enabled: true, status: "visible", expires_at: 9999999999 } },
+    notifications: { unread_count: 0, attention_count: 0, entries: [] }, room: {}, runtime: {}, services: {},
+  };
+  const schema = "elastos.assistant.workspace/v2";
+  let workspace = { schema, revision: 0, document: {} };
+  const errors = [];
+  const server = http.createServer(async (request, response) => {
+    const url = new URL(request.url, "http://fixture");
+    const headers = { "access-control-allow-origin": "null", "access-control-allow-headers": "content-type,x-elastos-home-token",
+      "access-control-allow-methods": "GET,POST,PUT,OPTIONS", "cache-control": "no-store" };
+    const json = (value, status = 200) => { response.writeHead(status, { ...headers, "content-type": "application/json" }); response.end(JSON.stringify(value)); };
+    try {
+      if (request.method === "OPTIONS") { response.writeHead(204, headers).end(); return; }
+      if (url.pathname === "/home/") {
+        const mode = url.searchParams.get("mode") || "restored";
+        const origin = `http://127.0.0.1:${server.address().port}`;
+        response.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+        response.end(`<!doctype html><style>html,body,iframe{width:100%;height:100%;margin:0;border:0}</style>
+          <body data-home-status="ready" data-home-authority="signed"><div id="home-unlock" hidden></div>
+          <iframe id="active-shell-frame" sandbox="allow-scripts allow-forms"
+            src="/apps/home-gui/?home_origin=${encodeURIComponent(origin)}#home_token=fixture"></iframe>
+          <script>
+            window.calls=[];window.pendingSavedWindows=[];let released=false;
+            const frame=document.querySelector('#active-shell-frame');
+            const reply=(message)=>frame.contentWindow.postMessage(message,'*');
+            const launch=(message)=>{
+              if(message.target==='assistant'&&${JSON.stringify(mode)}==='launch_refused'){
+                reply({type:'home:shell-response',requestId:message.requestId,error:'Fixture Assistant launch refused',status:403});return;
+              }
+              reply({type:'home:shell-response',requestId:message.requestId,result:{target:message.target,title:message.target,
+                attach_kind:'iframe',route:message.target==='assistant'?'/apps/assistant/?home_origin=${encodeURIComponent(origin)}#home_token=fixture'
+                  :'/restored-app?target='+message.target+'#home_token=fixture'}});
+            };
+            window.releaseSavedWindows=()=>{released=true;window.pendingSavedWindows.splice(0).forEach(launch);};
+            addEventListener('message',event=>{
+              if(event.source!==frame.contentWindow||event.data?.homeToken!=='fixture')return;
+              const message=event.data;window.calls.push(message);
+              if(message.type==='home:shell-ready'){
+                reply({type:'home:shell-context',browserContextId:${JSON.stringify(browserContextId)}});
+                reply({type:'home:shell-summary',summary:${JSON.stringify(summary)}});
+              }
+              if(message.type==='home:launch-target'){
+                if(message.target!=='assistant'&&!released)window.pendingSavedWindows.push(message);
+                else launch(message);
+              }
+            });
+          </script>`);
+        return;
+      }
+      if (url.pathname === "/restored-app") {
+        response.writeHead(200, { ...headers, "content-type": "text/html" }); response.end("<!doctype html><p>Restored app</p>"); return;
+      }
+      if (url.pathname.startsWith("/api/")) {
+        assert.equal(request.headers["x-elastos-home-token"], "fixture");
+        if (url.pathname === "/api/apps/home/state") { json({}); return; }
+        if (url.pathname === "/api/apps/assistant/workspace-v2") {
+          if (request.method === "PUT") {
+            let body = ""; for await (const chunk of request) body += chunk;
+            const input = JSON.parse(body); assert.equal(input.schema, schema);
+            if (input.if_revision !== workspace.revision) { json({ error: "workspace revision conflict" }, 409); return; }
+            workspace = { schema, revision: workspace.revision + 1, document: input.document };
+          }
+          json(workspace); return;
+        }
+        if (url.pathname === "/api/provider/model/offers_list") { json({ offers: [] }); return; }
+        if (url.pathname === "/api/capsules/catalog") { json({ schema: "elastos.capsules.catalog/v1", model_catalog_state: "verified", capsules: [] }); return; }
+        throw new Error("unexpected restoration fixture operation");
+      }
+      if (url.pathname === "/favicon.ico") { response.writeHead(204).end(); return; }
+      const path = /^\/apps\/(home-gui|assistant|home)\/(.*)$/.exec(url.pathname);
+      assert(path, "restoration fixture serves Home GUI, Assistant and Home dependencies");
+      const root = capsuleRoots[path[1]];
+      const asset = new URL(path[2] || "index.html", root);
+      assert(asset.href.startsWith(root.href));
+      const bytes = await readFile(asset);
+      response.writeHead(200, { ...headers, "content-type": ({ ".html": "text/html", ".js": "text/javascript", ".css": "text/css",
+        ".mjs": "text/javascript", ".svg": "image/svg+xml", ".woff2": "font/woff2" })[extname(asset.pathname)] || "application/octet-stream" });
+      response.end(bytes);
+    } catch (error) { errors.push(error); json({ error: "fixture failure" }, 500); }
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    for (const mode of ["restored", "shell_unready", "launch_refused"]) {
+      await t.test(mode, async () => {
+        const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+        const pageErrors = [];
+        page.on("pageerror", error => pageErrors.push(error));
+        await page.addInitScript(() => {
+          window.assistantClicks = [];
+          document.addEventListener("click", event => {
+            if (event.target.closest?.("#assistant-toggle")) window.assistantClicks.push({
+              status: document.body.dataset.homeStatus, authority: document.body.dataset.homeAuthority,
+            });
+          }, true);
+        });
+        let opening;
+        try {
+          opening = openInstalledAssistant(page, `${origin}/home/?mode=${mode}`, mode === "restored" ? 10000 : 2000);
+          opening.catch(() => {});
+          await page.waitForFunction(() => window.pendingSavedWindows?.length === 1, null, { timeout: 5000 });
+          const shell = page.frameLocator("#active-shell-frame");
+          assert.equal(await page.getAttribute("body", "data-home-status"), "ready");
+          assert.equal(await shell.locator("body").getAttribute("data-home-authority"), "signed");
+          assert.equal(await shell.locator("body").getAttribute("data-home-status"), "booting");
+          assert.equal(await shell.locator("#desktop").isVisible(), true);
+          assert.equal(await shell.locator("#assistant-toggle").isVisible(), true);
+          assert.deepEqual(await shell.locator("body").evaluate(() => window.assistantClicks), []);
+          if (mode === "shell_unready") {
+            await assert.rejects(opening, error => error.name === "TimeoutError");
+            assert.deepEqual(await shell.locator("body").evaluate(() => window.assistantClicks), []);
+          } else {
+            await page.evaluate(() => window.releaseSavedWindows());
+            if (mode === "launch_refused") {
+              await assert.rejects(opening, error => error.name === "TimeoutError");
+              assert.equal(await shell.locator("#assistant-space-error").isVisible(), true);
+              assert.match(await shell.locator("#assistant-space-error-detail").textContent(), /Fixture Assistant launch refused/);
+              assert.equal(await shell.locator("#assistant-space-frame").isVisible(), false);
+            } else {
+              const assistant = await opening;
+              assert.equal(await assistant.locator("html").getAttribute("data-shelf-handover"), "1");
+              await assistant.locator("#agent-harness-new-chat").click();
+              await assistant.locator("#agent-shelf-flip-back").click();
+              await shell.locator("#assistant-space").waitFor({ state: "hidden", timeout: 5000 });
+              assert.equal(await shell.locator("#desktop").isVisible(), true);
+            }
+            assert.deepEqual(await shell.locator("body").evaluate(() => window.assistantClicks), [{ status: "ready", authority: "signed" }]);
+            assert.equal(await shell.locator('.window[data-target="marketplace"]').count(), 1);
+            assert.equal(await shell.locator('.window[data-target="wallet"]').count(), 1);
+          }
+          assert.deepEqual(await page.evaluate(() => window.calls.filter(message => message.type === "home:launch-target").map(message => message.target)),
+            mode === "shell_unready" ? ["marketplace"] : ["marketplace", "wallet", "assistant"]);
+          assert.deepEqual(pageErrors, []);
+        } finally { await page.close(); await opening?.catch(() => {}); }
       });
     }
     assert.deepEqual(errors, []);
