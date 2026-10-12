@@ -124,8 +124,10 @@ jobs:
         working-directory: elastos
         run: |
           set -euo pipefail
+          # A failed listing must fail the job, not audit a partial list.
+          listing=$(git -C .. ls-files '*Cargo.lock')
           locks=()
-          while IFS= read -r lock; do locks+=("$lock"); done < <(git -C .. ls-files '*Cargo.lock')
+          while IFS= read -r lock; do [[ -n "$lock" ]] && locks+=("$lock"); done <<< "$listing"
           (( ${#locks[@]} > 0 ))
           db="$RUNNER_TEMP/advisory-db"
           fetch=()

@@ -547,6 +547,19 @@ def validate_dependency_audit(source):
                 raise AssertionError("cargo-audit fetches the advisory database once per run")
             if (result.returncode != 0) != (failing is not None):
                 raise AssertionError(f"cargo-audit result ignores {failing or 'a clean run'}")
+        # A lockfile listing that prints part of the list and then fails must fail the job.
+        broken = Path(directory) / "broken-git"
+        broken.mkdir()
+        (broken / "git").write_text('#!/bin/sh\necho Cargo.lock\nexit 2\n')
+        (broken / "git").chmod(0o755)
+        log = Path(directory) / "audit.log"
+        log.write_text("")
+        env = {**os.environ, "PATH": f"{broken}{os.pathsep}{tools}{os.pathsep}{os.environ['PATH']}",
+               "RUNNER_TEMP": directory, "AUDIT_LOG": str(log), "AUDIT_FAIL": "none"}
+        result = subprocess.run(["/bin/bash", "-c", script], cwd=root / "elastos", env=env,
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            raise AssertionError("cargo-audit fails when the Cargo.lock listing fails")
 
 
 def validate_journey_builds(source, release_source):
