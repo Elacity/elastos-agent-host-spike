@@ -237,6 +237,20 @@ pub(crate) fn admit(
     }
 }
 
+/// Admit a release's whole components manifest against its records before any
+/// capsule of it is written: every released row has exactly its signed record,
+/// including rows an update leaves in place.
+pub(crate) fn admit_components(
+    records: Option<&CapsuleRecords>,
+    manifest: &crate::setup::ComponentsManifest,
+) -> Result<()> {
+    match records {
+        Some(records) => records.admit_manifest(manifest),
+        None if REQUIRED => anyhow::bail!("The release lists no capsule records"),
+        None => Ok(()),
+    }
+}
+
 /// A record envelope signed by `key`, as the release signer writes it.
 #[cfg(test)]
 pub(crate) fn signed_record(
@@ -411,6 +425,59 @@ mod tests {
         let error = CapsuleRecords::from_release(&listed(vec![accepted.clone(), accepted]), &[did])
             .unwrap_err();
         assert!(error.to_string().contains("twice"));
+    }
+
+    #[test]
+    fn every_released_row_needs_exactly_its_record_even_when_unchanged() {
+        let (envelope, did) = fixture();
+        let records = CapsuleRecords::from_release(&listed(vec![envelope.clone()]), &[did])
+            .unwrap()
+            .unwrap();
+        let row = serde_json::to_value(row(&envelope["payload"])).unwrap();
+        let manifest = |external: serde_json::Value| -> crate::setup::ComponentsManifest {
+            serde_json::from_value(serde_json::json!({"profiles": {}, "external": external}))
+                .unwrap()
+        };
+        admit_components(
+            Some(&records),
+            &manifest(serde_json::json!({"system": {"platforms": {"*": row}}})),
+        )
+        .unwrap();
+        let mut sized = row.clone();
+        sized["size"] = serde_json::json!(38);
+        let other = serde_json::json!({"platforms": {"*": {
+            "release_path": "services.tar.gz", "checksum": format!("sha256:{}", "1".repeat(64)),
+            "size": 1, "cid": "bafkreid46p2l75p47opclbxhh56vvq2355cg3ohh7ruypnygjuy2p52ibu"}}});
+        for (case, external, refusal) in [
+            (
+                "size differs from an unchanged record",
+                serde_json::json!({"system": {"platforms": {"*": sized}}}),
+                "differs from the release components",
+            ),
+            (
+                "a row without a record",
+                serde_json::json!({"system": {"platforms": {"*": row}}, "services": other}),
+                "no signed capsule record for services",
+            ),
+            (
+                "another platform key",
+                serde_json::json!({"system": {"platforms": {"darwin-arm64": row}}}),
+                "differs from the release components",
+            ),
+            (
+                "another declared version",
+                serde_json::json!({"system": {"version": "2", "platforms": {"*": row}}}),
+                "differs from the release components",
+            ),
+            (
+                "a record without a row",
+                serde_json::json!({}),
+                "no component row uses",
+            ),
+        ] {
+            let error = admit_components(Some(&records), &manifest(external)).unwrap_err();
+            assert!(error.to_string().contains(refusal), "{case}: {error:#}");
+        }
     }
 
     #[test]

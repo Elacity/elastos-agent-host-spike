@@ -718,6 +718,15 @@ async fn admit_installed_setup_metadata(
             components.len() as u64,
         )?;
         let manifest: ComponentsManifest = serde_json::from_slice(&components)?;
+        // Each capsule record verifies and matches its row before setup writes.
+        crate::capsule_record::admit_components(
+            crate::capsule_record::CapsuleRecords::from_release(
+                &release["payload"],
+                &source.publisher_dids,
+            )?
+            .as_ref(),
+            &manifest,
+        )?;
         let catalog = if let Some(trust) = &manifest.model_catalog {
             let bytes = client
                 .fetch_content_bounded(&trust.head_cid, MAX_MODEL_CATALOG_BYTES)
@@ -1223,28 +1232,29 @@ async fn ensure_browser_vm_image_in_context(
     let Some(info) = pending else {
         return Ok(());
     };
+    admit_installed_capsule_records(data_dir)?;
     let dest = data_dir.join(browser_vm_image::INSTALL_PATH);
     download_component(data_dir, browser_vm_image::NAME, &info, &dest, context).await
 }
 
-/// The verified capsule records of this Home's installed signed release, whose
-/// components must be `components`. `None` for a Home without a signed release
-/// (a source or CI Home) or a release that lists no records.
-fn installed_capsule_records(
-    data_dir: &Path,
-    components: &[u8],
-) -> anyhow::Result<Option<crate::capsule_record::CapsuleRecords>> {
+/// Before a capsule of this Home's installed signed release is written: every
+/// record the release lists verifies against the publisher DIDs and matches the
+/// installed signed components, row for row. Returns those components; `None`
+/// for a Home without a signed release (a source or CI Home).
+pub(crate) fn admit_installed_capsule_records(data_dir: &Path) -> anyhow::Result<Option<Vec<u8>>> {
     let Some(source) = installed_release_source(data_dir)? else {
         return Ok(None);
     };
     let binary = fs::canonicalize(&source.install_path)?;
-    let (release, signed) =
+    let (release, components) =
         crate::installed_release::read_signed_release(data_dir, &binary, &source, false)?;
-    anyhow::ensure!(
-        signed == components,
-        "installed components differ from the signed release; run the installer again"
-    );
-    crate::capsule_record::CapsuleRecords::from_release(&release["payload"], &source.publisher_dids)
+    let manifest: ComponentsManifest = serde_json::from_slice(&components)?;
+    let records = crate::capsule_record::CapsuleRecords::from_release(
+        &release["payload"],
+        &source.publisher_dids,
+    )?;
+    crate::capsule_record::admit_components(records.as_ref(), &manifest)?;
+    Ok(Some(components))
 }
 
 pub(crate) async fn ensure_capsule_component_for_home_launch(
@@ -1316,11 +1326,10 @@ pub(crate) async fn ensure_capsule_component_for_home_launch(
     if platform_info.strategy.as_deref() == Some("local-copy") {
         anyhow::bail!("capsule component '{name}' uses local-copy and cannot be JIT materialized");
     }
-    crate::capsule_record::admit(
-        installed_capsule_records(data_dir, &manifest_bytes)?.as_ref(),
-        name,
-        platform_info,
-    )?;
+    anyhow::ensure!(
+        admit_installed_capsule_records(data_dir)?.is_none_or(|signed| signed == manifest_bytes),
+        "installed components differ from the signed release; run the installer again"
+    );
 
     let dest = data_dir.join(install_path);
     download_component(
@@ -3042,6 +3051,7 @@ pub(crate) async fn repair_installed_support(
         )?,
     };
     let manifest: ComponentsManifest = serde_json::from_slice(&components)?;
+    crate::capsule_record::admit_components(records.next.as_ref(), &manifest)?;
     remove_replacement_leftovers(data_dir, &manifest, &detect_platform())?;
     if let Some(trust) = &manifest.model_catalog {
         let dest = data_dir.join(MODEL_CATALOG_FILE);
@@ -3942,12 +3952,12 @@ pub(crate) async fn stage_update_support(
 fn component_signature(component: Option<&Component>, platform: &str) -> Option<String> {
     let component = component?;
     let platform_info = resolve_platform_info(component, platform)?;
+    // The legacy `url` hint is never fetched, so it does not decide a replacement.
     Some(format!(
-        "version={:?}|component_install={:?}|platform_install={:?}|url={:?}|cid={:?}|release_path={:?}|checksum={:?}|extract={:?}|binary={:?}|strategy={:?}|source={:?}",
+        "version={:?}|component_install={:?}|platform_install={:?}|cid={:?}|release_path={:?}|checksum={:?}|extract={:?}|binary={:?}|strategy={:?}|source={:?}",
         component.version,
         component.install_path,
         platform_info.install_path,
-        platform_info.url,
         platform_info.cid,
         platform_info.release_path,
         platform_info.checksum,
@@ -3973,11 +3983,11 @@ fn component_capsule_metadata_signature(
 ) -> Option<String> {
     let metadata = component?.capsule_metadata.as_ref()?;
     let platform_info = resolve_component_capsule_metadata_platform_info(metadata, platform)?;
+    // The legacy `url` hint is never fetched, so it does not decide a replacement.
     Some(format!(
-        "component_install={:?}|platform_install={:?}|url={:?}|cid={:?}|release_path={:?}|checksum={:?}|extract={:?}|binary={:?}|strategy={:?}|source={:?}|size={:?}",
+        "component_install={:?}|platform_install={:?}|cid={:?}|release_path={:?}|checksum={:?}|extract={:?}|binary={:?}|strategy={:?}|source={:?}|size={:?}",
         metadata.install_path,
         platform_info.install_path,
-        platform_info.url,
         platform_info.cid,
         platform_info.release_path,
         platform_info.checksum,
@@ -7890,6 +7900,24 @@ pub(crate) mod tests {
             .unwrap_err();
             assert!(error.to_string().contains(refusal), "{error:#}");
         }
+        assert_eq!(fetched.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(fs::read(&installed).unwrap(), b"installed provider");
+
+        // A changed legacy URL hint alone, under an unchanged record, is not a change.
+        let mut hinted = current.clone();
+        hinted["url"] = serde_json::json!("https://example.invalid/fixture-provider");
+        let (_stage, paths) = stage_update_support(
+            temp.path(),
+            &manifest(&current),
+            &manifest(&hinted),
+            "darwin-arm64",
+            &unchanged,
+            &fetch,
+            &mut Owner,
+        )
+        .await
+        .unwrap();
+        assert!(paths.is_empty());
         assert_eq!(fetched.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(fs::read(&installed).unwrap(), b"installed provider");
 

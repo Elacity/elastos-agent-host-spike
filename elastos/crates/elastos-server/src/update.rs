@@ -1314,7 +1314,9 @@ async fn run_upgrade_with_restart(
             "Installed components exceed their byte bound"
         );
         let manifest: crate::setup::ComponentsManifest = serde_json::from_slice(&comp_data)?;
-        crate::setup::admit_release_components(&manifest, &component_platform)
+        crate::setup::admit_release_components(&manifest, &component_platform)?;
+        // Every row of the next release, replaced or kept, has exactly its record.
+        crate::capsule_record::admit_components(next_records.as_ref(), &manifest)
     })())?;
 
     if apply_mode == ApplyMode::Normal {
