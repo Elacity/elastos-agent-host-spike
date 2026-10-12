@@ -154,6 +154,7 @@ class PrepareWorkerTest(unittest.TestCase):
             "publish-release.sh", "prepare-release-platform.sh", "release-platform-input.py",
             "components-release-integrity-check.py", "release-platforms.json", "release-signer.py", "check-versioning.sh", "build-media-tools.sh",
             "release-upstream-assets.py", "release-upstream-input.py", "browser-host-release.py",
+            "verify-linux-engine.py",
             "browser-vm-image-inputs.py", "browser-image-cid-input.py",
         ):
             (scripts / name).write_bytes((SOURCE / "scripts" / name).read_bytes())
@@ -313,6 +314,13 @@ class PrepareWorkerTest(unittest.TestCase):
         (mock / "uname").write_text(
             '#!/bin/sh\nif [ "$1" = -s ]; then echo "${MOCK_OS:-Darwin}"; '
             'else echo "${MOCK_ARCH:-arm64}"; fi\n')
+        (mock / "readelf").write_text(
+            '#!/bin/sh\ncase "$1" in\n'
+            '-h) echo "Class: ELF64"; if [ "$MOCK_ARCH" = x86_64 ]; then echo "Machine: Advanced Micro Devices X86-64"; '
+            'else echo "Machine: AArch64"; fi ;;\n'
+            '-d) echo \'(RUNPATH) [$ORIGIN]\'; echo "(NEEDED) [libc.so.6]" ;;\n'
+            '--version-info) echo "GLIBC_2.35" ;;\nesac\n')
+        (mock / "ldd").write_text('#!/bin/sh\necho "libc.so.6 => resolved"\n')
         for path in mock.iterdir():
             path.chmod(0o755)
         self.env = {**os.environ, "PATH": str(mock) + os.pathsep + os.environ["PATH"],

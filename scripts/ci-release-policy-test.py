@@ -167,6 +167,7 @@ RUST_CACHE_KEY = "-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}"
 # A restored non-Rust input and the step that checks it against its pinned hash.
 RESTORE_VERIFIERS = {
     "restore pinned ARM64 engine": 'build-llama-server-bundle.sh --verify-archive "$RUNNER_TEMP/llama-arm64-bundle"',
+    "restore pinned AMD64 engine": 'build-llama-server-bundle.sh --platform linux-amd64 --verify-archive "$RUNNER_TEMP/llama-amd64-bundle"',
     "restore Ubuntu prerequisite archives": "bash scripts/ci-apt-prerequisites.sh",
     "restore verified Kubo inputs": "python3 scripts/ci-kubo-cache.py fetch ",
     "restore the pinned published release": "python3 scripts/update-hop-compare.py fetch-previous-release",
@@ -1187,7 +1188,7 @@ class ReleasePolicyTests(unittest.TestCase):
         validate_cache_guards(SOURCE)
         caches = [(job, step) for job in JOBS for step in steps(job)
                   if CACHE_RE.search(step)]
-        self.assertEqual(len(caches), 31)
+        self.assertEqual(len(caches), 33)
         for event, ref, ref_type, override, cached in CASES:
             with self.subTest(event=event, ref=ref, override=override):
                 context = {"github.event_name": event, "github.ref": ref,
@@ -1518,6 +1519,7 @@ class ReleasePolicyTests(unittest.TestCase):
         expected = {
             "source-gate": ("source-gate", "ubuntu-24.04"),
             "engine-llama-arm64": ("engine-llama-arm64", "ubuntu-24.04-arm"),
+            "engine-llama-amd64": ("engine-llama-amd64", "ubuntu-24.04"),
             "lint": ("lint", "ubuntu-24.04"),
             "test-elastos": ("test-elastos", "ubuntu-24.04"),
             "test-behaviour": ("test-behaviour", "ubuntu-24.04"),
@@ -1711,6 +1713,8 @@ class ReleasePolicyTests(unittest.TestCase):
             source = root / "scripts/build/build-llama-server-bundle.sh"
             source.parent.mkdir(parents=True)
             source.write_text("original flags")
+            helper = root / "scripts/verify-linux-engine.py"
+            helper.write_text("original verifier")
             output = root / "output"
             env = {**os.environ, "GITHUB_OUTPUT": str(output),
                    "BUILD_CONTAINER_IMAGE": "pinned-image", "ENGINE_BUILD_TOOLS": "pinned-tools"}
@@ -1720,6 +1724,9 @@ class ReleasePolicyTests(unittest.TestCase):
                                cwd=root, env=env, check=True)
                 return output.read_text()
             original = key()
+            helper.write_text("changed verifier")
+            self.assertNotEqual(original, key())
+            helper.write_text("original verifier")
             self.assertRegex(original, r"^cache-key=develop-llama-arm64-[0-9a-f]{64}\n$")
             source.write_text("changed flags")
             self.assertNotEqual(original, key())
@@ -1739,10 +1746,10 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertNotIn("RECIPE_COMMIT: ${{ github.sha }}", JOBS["engine-llama-arm64"])
 
     def test_engine_consumers_gate_the_current_run_input_with_shared_pin(self):
-        self.assertEqual(field(JOBS["source-home-linux"], "needs"), "source-gate")
+        self.assertEqual(field(JOBS["source-home-linux"], "needs"), "[source-gate, engine-llama-amd64]")
         self.assertEqual(field(JOBS["source-home-linux-arm64"], "needs"),
                          "[source-gate, engine-llama-arm64]")
-        download, = [step for step in steps("source-home-linux-arm64") if "actions/download-artifact@" in step]
+        download, = [step for step in steps("source-home-linux-arm64") if "actions/download-artifact@" in step and "name: llama-arm64-bundle" in step]
         self.assertIn("name: llama-arm64-bundle", download)
         self.assertEqual(field(download, "if"), "matrix.os == 'ubuntu-22.04-arm'")
         self.assertNotIn("run-id:", download)
@@ -1768,17 +1775,58 @@ class ReleasePolicyTests(unittest.TestCase):
         builder = WORKFLOW.parents[2] / "scripts/build/build-llama-server-bundle.sh"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "llama-b10516-bin-ubuntu22.04-arm64-cpu.tar.gz").write_bytes(b"fixture engine")
-            correct = hashlib.sha256(b"fixture engine").hexdigest()
+            archive_path = root / "llama-b10516-bin-ubuntu22.04-arm64-cpu.tar.gz"
+            with tarfile.open(archive_path, "w:gz", format=tarfile.GNU_FORMAT) as archive:
+                for name in ("llama-server", "libllama.so"):
+                    member = tarfile.TarInfo("llama-b10516/" + name)
+                    data = b"\x7fELFinert fixture"
+                    member.size = len(data)
+                    member.mode = 0o755
+                    archive.addfile(member, io.BytesIO(data))
+            tools = root / "tools"
+            tools.mkdir()
+            (tools / "readelf").write_text('#!/bin/sh\ncase "$1" in -h) printf "Class: ELF64\\nMachine: AArch64\\n" ;; -d) echo \'(RUNPATH) [$ORIGIN]\'; echo "(NEEDED) [libc.so.6]" ;; *) echo GLIBC_2.35 ;; esac\n')
+            (tools / "ldd").write_text('#!/bin/sh\necho "resolved dependencies"\n')
+            for path in tools.iterdir():
+                path.chmod(0o755)
+            correct = hashlib.sha256(archive_path.read_bytes()).hexdigest()
             for checksum in (correct, "0" * 64, "", "untrusted", "md5:" + "0" * 64):
                 result = subprocess.run(["bash", str(builder), "--verify-archive", directory],
-                                        env={**os.environ, "CI_LLAMA_ARM64_SHA256": checksum},
+                                        env={**os.environ, "CI_LLAMA_ARM64_SHA256": checksum,
+                                             "PATH": str(tools) + os.pathsep + os.environ["PATH"]},
                                         capture_output=True, text=True)
                 self.assertEqual(result.returncode == 0, checksum == correct, result.stderr)
 
+    def test_linux_engine_producers_share_pins_and_verify_every_archive_member(self):
+        recipes = json.loads((WORKFLOW.parents[2] / "scripts/release-upstream-recipes.json").read_text())["recipes"]
+        release_jobs = jobs((WORKFLOW.parent / "release-package.yml").read_text())
+        for arch in ("amd64", "arm64"):
+            recipe = next(row for row in recipes if row["component"] == "llama-server" and row["platform"] == "linux-" + arch)
+            self.assertEqual(recipe["source"]["path"], "@llama-" + arch + "-bundle")
+            self.assertEqual("sha256:" + field(SOURCE, "CI_LLAMA_" + arch.upper() + "_SHA256"), recipe["source"]["checksum"])
+            job = "engine-llama-" + arch
+            for workflow_jobs in (JOBS, release_jobs):
+                producer = steps(job, workflow_jobs)
+                build, = [step for step in producer if "id: engine-build\n" in step]
+                verify, = [step for step in producer if "--verify-archive" in step]
+                self.assertLess(producer.index(build), producer.index(verify))
+                self.assertNotIn("if:", verify)
+                self.assertIn("--verify-archive", verify)
+                self.assertIn("cat scripts/verify-linux-engine.py", workflow_jobs[job])
+                if arch == "amd64":
+                    self.assertIn("--platform linux-amd64", build)
+                    self.assertIn("--platform linux-amd64", verify)
+        builder = (WORKFLOW.parents[2] / "scripts/build/build-llama-server-bundle.sh").read_text()
+        self.assertIn("-DGGML_OPENMP=OFF", builder)
+        self.assertIn('--archive "$2/llama-b10516-bin-ubuntu22.04-$architecture-cpu.tar.gz"', builder)
+        prepare = (WORKFLOW.parents[2] / "scripts/prepare-release-platform.sh").read_text()
+        self.assertIn('--archive "$STAGING/artifacts/llama-server-$SETUP_PLATFORM.tar.gz"', prepare)
+
     def test_engine_elf_validator_refuses_wrong_architecture_libraries_and_symbols(self):
-        source = (WORKFLOW.parents[2] / "scripts/build/build-llama-server-bundle.sh").read_text()
-        validator = source.split('> "$out/elf-verification.txt" <<\'PY\'\n', 1)[1].split("\nPY", 1)[0]
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("engine_validator", WORKFLOW.parents[2] / "scripts/verify-linux-engine.py")
+        validator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(validator)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for name in ("llama-server", "libllama.so"):
@@ -1801,10 +1849,10 @@ class ReleasePolicyTests(unittest.TestCase):
                      mock.patch("subprocess.check_output", side_effect=inspect), \
                      mock.patch("builtins.print"):
                     if accepted:
-                        exec(compile(validator, "engine ELF validator", "exec"), {})
+                        validator.verify_bundle(root, "arm64")
                     else:
-                        with self.assertRaises(AssertionError):
-                            exec(compile(validator, "engine ELF validator", "exec"), {})
+                        with self.assertRaises(ValueError):
+                            validator.verify_bundle(root, "arm64")
 
 
 class CustodyKuboDownloadTests(unittest.TestCase):

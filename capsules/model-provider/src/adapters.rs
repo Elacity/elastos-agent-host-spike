@@ -2268,7 +2268,7 @@ fn map_local_llama_fault(fault: LocalLlamaFault) -> AdapterFault {
             "local llama engine health deadline expired",
         ),
         LocalLlamaFault::Failed => AdapterFault::backend_failed(
-            "model backend failed",
+            "The local model engine is unavailable. Reinstall the engine, then try again.",
             "local llama engine was unavailable",
         ),
     }
@@ -3571,6 +3571,74 @@ mod tests {
             "Not enough free memory for this model. Close other apps or choose a smaller model."
         );
         assert!(insufficient.detail.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_engine_start_failure_explains_install_recovery_and_reaps_child() {
+        use crate::test_support::{sha256_file, temp_root_path, write_fake_llama_server};
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root_path("model-provider-engine-start", "missing-library");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let (engine_path, model_path, events) = write_fake_llama_server(&root, "loader_failure");
+        let engines = LocalLlamaEngines::default();
+        let (update_tx, mut update_rx) = mpsc::channel(1);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let mut task = LocalTextWorkerTask {
+            request_id: "fixture-engine-start".into(),
+            hosted_socket: None,
+            run_id: "run-engine-start".into(),
+            generation: 1,
+            backend: LocalTextBackend::LocalLlama {
+                engines: engines.clone(),
+                offer_id: "local-text".into(),
+                engine: LocalArtifactConfig {
+                    sha256: sha256_file(&engine_path),
+                    path: engine_path.to_string_lossy().into_owned(),
+                },
+                model: LocalArtifactConfig {
+                    sha256: sha256_file(&model_path),
+                    path: model_path.to_string_lossy().into_owned(),
+                },
+                settings: LocalLlamaSettings {
+                    context_size: 256,
+                    parallel: 1,
+                    threads: 1,
+                    batch_threads: 1,
+                    gpu_layers: 0,
+                    health_timeout_ms: 30_000,
+                    shutdown_timeout_ms: 5_000,
+                    enable_thinking: false,
+                },
+                requested_output_tokens: None,
+            },
+            offer: offer(),
+            deadline_ms: now_ms().saturating_add(30_000),
+            messages: vec![json!({"role": "user", "content": "hello"})],
+            cancel_rx,
+            updates: update_tx,
+        };
+
+        let error = run_local_text_worker_inner(&mut task)
+            .await
+            .unwrap_err()
+            .error;
+        assert_eq!(error.class, ErrorClass::BackendFailed);
+        assert_eq!(error.code, "backend_failed");
+        assert_eq!(
+            error.message,
+            "The local model engine is unavailable. Reinstall the engine, then try again."
+        );
+        assert!(!error.message.contains("libgomp"));
+        assert!(std::fs::read_to_string(events)
+            .unwrap()
+            .contains("loader_failure"));
+        assert!(update_rx.try_recv().is_err());
+        engines.shutdown().await.unwrap();
+        assert!(!engines.retains_artifacts().await);
     }
 
     #[derive(Clone)]

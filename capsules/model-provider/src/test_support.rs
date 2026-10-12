@@ -212,6 +212,10 @@ else:
     signal.signal(signal.SIGTERM, terminate)
 record('start:' + str(os.getpid()))
 record('parent:' + str(os.getppid()))
+if mode == 'loader_failure':
+    record('loader_failure')
+    print('libgomp.so.1: missing loader dependency', file=sys.stderr)
+    raise SystemExit(127)
 if mode == 'healthy_with_subtree':
     subtree = subprocess.Popen([
         sys.executable,
