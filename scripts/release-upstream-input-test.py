@@ -274,6 +274,32 @@ class UpstreamTest(unittest.TestCase):
                 upstream.response(source)
             build.return_value.open.return_value.close.assert_called_once()
 
+    def test_transient_upstream_errors_are_retried_and_permanent_ones_are_not(self):
+        source = {"url": "https://upstream.example.test/input", "max_bytes": 10}
+        busy = lambda: urllib.error.HTTPError(source["url"], 504, "Gateway Time-out", {}, io.BytesIO())
+        reply = io.BytesIO(b"inert")
+        reply.status = 200
+        reply.headers = {"Content-Length": "5"}
+        with reply, patch.object(upstream.urllib.request, "build_opener") as build, \
+                patch.object(upstream.time, "sleep") as sleep:
+            build.return_value.open.side_effect = [busy(), busy(), reply]
+            self.assertIs(upstream.response(source), reply)
+            self.assertEqual(build.return_value.open.call_count, 3)
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4])
+        with patch.object(upstream.urllib.request, "build_opener") as build, \
+                patch.object(upstream.time, "sleep"):
+            build.return_value.open.side_effect = [busy() for _ in range(4)]
+            with self.assertRaises(urllib.error.HTTPError):
+                upstream.response(source)
+            self.assertEqual(build.return_value.open.call_count, 4)
+        with patch.object(upstream.urllib.request, "build_opener") as build, \
+                patch.object(upstream.time, "sleep") as sleep:
+            build.return_value.open.side_effect = urllib.error.HTTPError(source["url"], 404, "Not Found", {}, io.BytesIO())
+            with self.assertRaises(urllib.error.HTTPError):
+                upstream.response(source)
+            self.assertEqual(build.return_value.open.call_count, 1)
+            sleep.assert_not_called()
+
     def test_kubo_recipes_accept_official_asset_redirect_and_refuse_unlisted_host(self):
         inventory = json.loads(Path(__file__).with_name("release-upstream-recipes.json").read_text())
         recipes = [recipe for recipe in inventory["recipes"] if recipe["component"] == "kubo"]
