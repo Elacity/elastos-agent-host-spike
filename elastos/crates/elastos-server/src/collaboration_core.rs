@@ -1,6 +1,6 @@
 //! Durable provider-neutral state for one verified open default conversation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -26,7 +26,8 @@ use crate::collaboration_network::VerifiedCollaborationNetworkProfile;
 use crate::collaboration_protocol::{
     verify_collaboration_acceptance_receipt, verify_collaboration_transport_frame,
     verify_stored_acceptance_receipt_envelope, verify_stored_collaboration_acceptance_receipt,
-    verify_stored_collaboration_message, VerifiedCollaborationMessage,
+    verify_stored_collaboration_message, VerifiedCollaborationAcceptanceReceipt,
+    VerifiedCollaborationMessage,
 };
 use crate::collaboration_rate_limit::{
     CommunitySendRateLimited, HeldFrame, HeldFrames, HoldOutcome, ProfileRateLimiter,
@@ -51,6 +52,10 @@ const MAX_PENDING_INCOMING: usize = 32;
 pub(crate) const MAX_PENDING_INCOMING_PER_SENDER: usize = 8;
 const MAX_ACCEPTANCE_RECEIPTS_PER_OUTGOING: usize = 32;
 const MAX_INCOMING_RECORDS_AND_TOMBSTONES: usize = 4_096;
+const MAX_VERIFICATION_CACHE_ENTRIES: usize = MAX_OUTGOING_RECORDS
+    * MAX_ACCEPTANCE_RECEIPTS_PER_OUTGOING
+    + MAX_INCOMING_RECORDS_AND_TOMBSTONES
+    + MAX_PENDING_INCOMING;
 pub(crate) const MAX_CONVERSATION_HISTORY_MESSAGES: usize = 200;
 pub(crate) const MAX_CONVERSATION_HISTORY_BYTES: usize = 1024 * 1024;
 pub(crate) const CONVERSATION_HISTORY_RETENTION_SECS: u64 = 24 * 60 * 60;
@@ -68,6 +73,12 @@ pub(crate) struct CollaborationCore {
     /// Serializes receive-rate admission through its durable commit and count.
     receive_admission_mutex: Mutex<()>,
     held: HeldFrames,
+    message_verifications: Mutex<SignedBytesCache<AuthorizedDefaultConversationMessage>>,
+    receipt_verifications: Mutex<SignedBytesCache<VerifiedCollaborationAcceptanceReceipt>>,
+    bound_receipt_verifications: Mutex<SignedBytesCache<VerifiedCollaborationAcceptanceReceipt>>,
+    verified_state: Mutex<Option<(Vec<u8>, CoreState)>>,
+    #[cfg(test)]
+    verification_misses: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     write_fault: std::sync::atomic::AtomicU8,
 }
@@ -320,6 +331,64 @@ struct Mutation<T> {
     changed: bool,
 }
 
+/// Success-only verification reuse within one immutable Core authority. Keys
+/// retain exact bytes; the digest only indexes them. FIFO eviction bounds both
+/// signed-byte storage and the number of entries independently of file state.
+struct SignedBytesCache<T> {
+    entries: HashMap<[u8; 32], (Vec<u8>, T)>,
+    order: VecDeque<[u8; 32]>,
+    bytes: usize,
+}
+
+impl<T: Clone> SignedBytesCache<T> {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+        }
+    }
+
+    fn get(&self, bytes: &[u8]) -> Option<T> {
+        let key: [u8; 32] = Sha256::digest(bytes).into();
+        self.entries
+            .get(&key)
+            .filter(|(exact, _)| exact == bytes)
+            .map(|(_, value)| value.clone())
+    }
+
+    fn insert(&mut self, bytes: &[u8], value: T) {
+        if bytes.len() > MAX_CORE_STATE_BYTES {
+            return;
+        }
+        let key: [u8; 32] = Sha256::digest(bytes).into();
+        if self
+            .entries
+            .get(&key)
+            .is_some_and(|(exact, _)| exact == bytes)
+        {
+            return;
+        }
+        if let Some((previous, _)) = self.entries.remove(&key) {
+            self.bytes -= previous.len();
+            self.order.retain(|old| *old != key);
+        }
+        while self.bytes.saturating_add(bytes.len()) > MAX_CORE_STATE_BYTES
+            || self.entries.len() >= MAX_VERIFICATION_CACHE_ENTRIES
+        {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some((previous, _)) = self.entries.remove(&oldest) {
+                self.bytes -= previous.len();
+            }
+        }
+        self.bytes += bytes.len();
+        self.order.push_back(key);
+        self.entries.insert(key, (bytes.to_vec(), value));
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WriteFault {
@@ -362,6 +431,12 @@ impl CollaborationCore {
             ),
             receive_admission_mutex: Mutex::new(()),
             held: HeldFrames::default(),
+            message_verifications: Mutex::new(SignedBytesCache::new()),
+            receipt_verifications: Mutex::new(SignedBytesCache::new()),
+            bound_receipt_verifications: Mutex::new(SignedBytesCache::new()),
+            verified_state: Mutex::new(None),
+            #[cfg(test)]
+            verification_misses: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             write_fault: std::sync::atomic::AtomicU8::new(0),
         })
@@ -407,12 +482,113 @@ impl CollaborationCore {
         &self,
         envelope_bytes: &[u8],
     ) -> anyhow::Result<AuthorizedDefaultConversationMessage> {
+        if let Some(verified) = self
+            .message_verifications
+            .lock()
+            .map_err(|_| anyhow::anyhow!("collaboration message verification cache poisoned"))?
+            .get(envelope_bytes)
+        {
+            return Ok(verified);
+        }
+        self.note_verification_miss();
         let verified = verify_stored_collaboration_message(
             envelope_bytes,
             self.authority.profile(),
             self.authority.sender_service(),
         )?;
-        authorize_default_conversation_message(self.authority.grant(), &verified)
+        let authorized = authorize_default_conversation_message(self.authority.grant(), &verified)?;
+        self.message_verifications
+            .lock()
+            .map_err(|_| anyhow::anyhow!("collaboration message verification cache poisoned"))?
+            .insert(envelope_bytes, authorized.clone());
+        Ok(authorized)
+    }
+
+    fn note_verification_miss(&self) {
+        #[cfg(test)]
+        self.verification_misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn incoming_identity_conflicts(
+        &self,
+        state: &CoreState,
+        message: &VerifiedCollaborationMessage,
+    ) -> anyhow::Result<bool> {
+        incoming_identity_conflicts(state, message, |bytes| self.verify_receipt_envelope(bytes))
+    }
+
+    fn reject_incoming_conflicts(
+        &self,
+        state: &CoreState,
+        message: &VerifiedCollaborationMessage,
+    ) -> anyhow::Result<()> {
+        if self.incoming_identity_conflicts(state, message)? {
+            anyhow::bail!("collaboration sender reused a message ID or nonce");
+        }
+        Ok(())
+    }
+
+    fn outgoing_handle(
+        &self,
+        entry: &OutgoingRecord,
+        verified: VerifiedCollaborationMessage,
+    ) -> DurableOutgoingMessage {
+        outgoing_handle(entry, verified, |bytes| self.verify_receipt_envelope(bytes))
+    }
+
+    fn verify_receipt_envelope(
+        &self,
+        bytes: &[u8],
+    ) -> anyhow::Result<VerifiedCollaborationAcceptanceReceipt> {
+        if let Some(verified) = self
+            .receipt_verifications
+            .lock()
+            .map_err(|_| anyhow::anyhow!("collaboration receipt verification cache poisoned"))?
+            .get(bytes)
+        {
+            return Ok(verified);
+        }
+        self.note_verification_miss();
+        let verified = verify_stored_acceptance_receipt_envelope(bytes)?;
+        self.receipt_verifications
+            .lock()
+            .map_err(|_| anyhow::anyhow!("collaboration receipt verification cache poisoned"))?
+            .insert(bytes, verified.clone());
+        Ok(verified)
+    }
+
+    fn verify_receipt_for_message(
+        &self,
+        bytes: &[u8],
+        message: &VerifiedCollaborationMessage,
+    ) -> anyhow::Result<VerifiedCollaborationAcceptanceReceipt> {
+        let mut key = Vec::with_capacity(message.envelope_sha256().len() + bytes.len());
+        key.extend_from_slice(message.envelope_sha256().as_bytes());
+        key.extend_from_slice(bytes);
+        if let Some(verified) = self
+            .bound_receipt_verifications
+            .lock()
+            .map_err(|_| {
+                anyhow::anyhow!("collaboration bound receipt verification cache poisoned")
+            })?
+            .get(&key)
+        {
+            return Ok(verified);
+        }
+        self.note_verification_miss();
+        let verified = verify_stored_collaboration_acceptance_receipt(bytes, message)?;
+        self.bound_receipt_verifications
+            .lock()
+            .map_err(|_| {
+                anyhow::anyhow!("collaboration bound receipt verification cache poisoned")
+            })?
+            .insert(&key, verified.clone());
+        self.receipt_verifications
+            .lock()
+            .map_err(|_| anyhow::anyhow!("collaboration receipt verification cache poisoned"))?
+            .insert(bytes, verified.clone());
+        Ok(verified)
     }
 
     /// Historical admission checks original authorship and the exact grant,
@@ -570,8 +746,7 @@ impl CollaborationCore {
                     == crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE)
             }
             Ok(CollaborationTransportFrameKind::AcceptanceReceipt) => {
-                let Ok(receipt) = verify_stored_acceptance_receipt_envelope(frame.envelope_bytes())
-                else {
+                let Ok(receipt) = self.verify_receipt_envelope(frame.envelope_bytes()) else {
                     return Ok(false);
                 };
                 let state = self.load_state()?.unwrap_or_else(|| self.empty_state());
@@ -605,10 +780,7 @@ impl CollaborationCore {
             return Ok(false);
         }
         let receipt = verify_collaboration_transport_frame(receipt_frame)?;
-        crate::collaboration_protocol::verify_stored_collaboration_acceptance_receipt(
-            receipt.envelope_bytes(),
-            message.message(),
-        )?;
+        self.verify_receipt_for_message(receipt.envelope_bytes(), message.message())?;
         Ok(true)
     }
 
@@ -652,7 +824,7 @@ impl CollaborationCore {
         now: u64,
     ) -> anyhow::Result<()> {
         self.community_membership.require_joined()?;
-        let verified = verify_stored_acceptance_receipt_envelope(receipt)?;
+        let verified = self.verify_receipt_envelope(receipt)?;
         if self.is_bootstrap_endpoint(endpoint)
             || verified.accepting_endpoint_did() != endpoint
             || verified.envelope().payload.message_envelope_sha256 != message_hash
@@ -748,12 +920,8 @@ impl CollaborationCore {
         source_endpoint_did: &str,
         now: u64,
     ) -> Result<CollaborationTransportIngestion, CollaborationTransportRetryableError> {
-        let verified = match verify_stored_collaboration_message(
-            frame,
-            self.authority.profile(),
-            self.authority.sender_service(),
-        ) {
-            Ok(verified) => verified,
+        let verified = match self.authorize_stored_product_message(frame) {
+            Ok(authorized) => authorized.message().clone(),
             Err(_) => {
                 return Ok(CollaborationTransportIngestion::Rejected(
                     CollaborationTransportRejection::InvalidMessage,
@@ -829,7 +997,8 @@ impl CollaborationCore {
                 ))
             }
         };
-        if incoming_identity_conflicts(&state, incoming.message())
+        if self
+            .incoming_identity_conflicts(&state, incoming.message())
             .map_err(|_| CollaborationTransportRetryableError)?
         {
             return Ok(CollaborationTransportIngestion::Rejected(
@@ -889,7 +1058,7 @@ impl CollaborationCore {
         source_endpoint_did: &str,
         now: u64,
     ) -> Result<CollaborationTransportIngestion, CollaborationTransportRetryableError> {
-        let receipt = match verify_stored_acceptance_receipt_envelope(frame) {
+        let receipt = match self.verify_receipt_envelope(frame) {
             Ok(receipt) => receipt,
             Err(_) => {
                 return Ok(CollaborationTransportIngestion::Rejected(
@@ -927,7 +1096,8 @@ impl CollaborationCore {
             .verify_outgoing_record(entry)
             .map_err(|_| CollaborationTransportRetryableError)?;
         for existing_bytes in &entry.remote_acceptance_receipts {
-            let existing = verify_stored_acceptance_receipt_envelope(existing_bytes.as_bytes())
+            let existing = self
+                .verify_receipt_envelope(existing_bytes.as_bytes())
                 .map_err(|_| CollaborationTransportRetryableError)?;
             if existing.envelope().payload.recipient_endpoint_did
                 == receipt_payload.recipient_endpoint_did
@@ -1009,7 +1179,7 @@ impl CollaborationCore {
                     ttl_secs,
                 )?;
                 return Ok(Mutation {
-                    value: outgoing_handle(existing, verified),
+                    value: self.outgoing_handle(existing, verified),
                     changed: false,
                 });
             }
@@ -1047,7 +1217,7 @@ impl CollaborationCore {
                 local_product_projection: OutgoingProductProjectionState::Pending,
                 remote_acceptance_receipts: Vec::new(),
             };
-            let value = outgoing_handle(&record, prepared.verified_message().clone());
+            let value = self.outgoing_handle(&record, prepared.verified_message().clone());
             state.outgoing.push(record);
             ensure_state_fits(state)?;
             Ok(Mutation {
@@ -1132,7 +1302,7 @@ impl CollaborationCore {
                     if verified.envelope().payload.created_at
                         <= now.saturating_add(MAX_COLLABORATION_CLOCK_SKEW_SECS)
                     {
-                        Some(Ok(outgoing_handle(entry, verified)))
+                        Some(Ok(self.outgoing_handle(entry, verified)))
                     } else {
                         None
                     }
@@ -1189,7 +1359,7 @@ impl CollaborationCore {
                             <= now.saturating_add(MAX_COLLABORATION_CLOCK_SKEW_SECS) =>
                 {
                     Some(Ok(PendingOutgoingProductProjection {
-                        outgoing: outgoing_handle(entry, verified),
+                        outgoing: self.outgoing_handle(entry, verified),
                     }))
                 }
                 Ok(_) => None,
@@ -1233,7 +1403,7 @@ impl CollaborationCore {
         receipt_bytes: &[u8],
         now: u64,
     ) -> anyhow::Result<()> {
-        let receipt = verify_stored_acceptance_receipt_envelope(receipt_bytes)?;
+        let receipt = self.verify_receipt_envelope(receipt_bytes)?;
         let message_hash = receipt.envelope().payload.message_envelope_sha256.clone();
         let recipient_did = receipt.envelope().payload.recipient_endpoint_did.clone();
         if recipient_did == self.authority.local_device_did() {
@@ -1257,7 +1427,7 @@ impl CollaborationCore {
             verify_collaboration_acceptance_receipt(receipt_bytes, &verified_message, now)?;
 
             for existing in &entry.remote_acceptance_receipts {
-                let existing = verify_stored_acceptance_receipt_envelope(existing.as_bytes())?;
+                let existing = self.verify_receipt_envelope(existing.as_bytes())?;
                 if existing.envelope().payload.recipient_endpoint_did == recipient_did {
                     if existing.envelope() == receipt.envelope()
                         && entry
@@ -1328,7 +1498,7 @@ impl CollaborationCore {
                     changed: false,
                 });
             }
-            reject_incoming_conflicts(state, incoming.message())?;
+            self.reject_incoming_conflicts(state, incoming.message())?;
             self.ensure_incoming_capacity(state, incoming.message(), envelope_bytes)?;
 
             let receipt_bytes = self.authority.prepare_acceptance_receipt(&incoming, now)?;
@@ -1410,7 +1580,7 @@ impl CollaborationCore {
         validate_sha256_label(envelope_hash)?;
         self.with_mutation(None, |state| {
             if state.incoming_tombstones.iter().any(|entry| {
-                verify_stored_acceptance_receipt_envelope(entry.acceptance_receipt.as_bytes())
+                self.verify_receipt_envelope(entry.acceptance_receipt.as_bytes())
                     .map(|receipt| {
                         receipt.envelope().payload.message_envelope_sha256 == envelope_hash
                     })
@@ -1436,7 +1606,7 @@ impl CollaborationCore {
             }
             let record = state.incoming.remove(index);
             let verified = self.verify_incoming_record(&record)?;
-            let receipt = verify_stored_collaboration_acceptance_receipt(
+            let receipt = self.verify_receipt_for_message(
                 record.acceptance_receipt.as_bytes(),
                 verified.message(),
             )?;
@@ -1473,23 +1643,19 @@ impl CollaborationCore {
         }
         if let Some(entry) = state.incoming_tombstones.iter().find(|entry| {
             entry.retain_until >= now
-                && verify_stored_acceptance_receipt_envelope(entry.acceptance_receipt.as_bytes())
+                && self
+                    .verify_receipt_envelope(entry.acceptance_receipt.as_bytes())
                     .map(|receipt| {
                         receipt.envelope().payload.message_envelope_sha256 == envelope_hash
                     })
                     .unwrap_or(false)
         }) {
-            let verified = verify_stored_collaboration_message(
-                envelope_bytes,
-                self.authority.profile(),
-                self.authority.sender_service(),
-            )?;
-            let authorized =
-                authorize_default_conversation_message(self.authority.grant(), &verified)?;
+            let authorized = self.authorize_stored_product_message(envelope_bytes)?;
+            let verified = authorized.message();
             if verified.envelope().signer_did == self.authority.local_device_did() {
                 anyhow::bail!("persisted incoming replay is a local self-echo");
             }
-            verify_stored_collaboration_acceptance_receipt(
+            self.verify_receipt_for_message(
                 entry.acceptance_receipt.as_bytes(),
                 authorized.message(),
             )?;
@@ -1591,22 +1757,15 @@ impl CollaborationCore {
         &self,
         entry: &OutgoingRecord,
     ) -> anyhow::Result<VerifiedCollaborationMessage> {
-        let verified = verify_stored_collaboration_message(
-            entry.envelope.as_bytes(),
-            self.authority.profile(),
-            self.authority.sender_service(),
-        )?;
-        authorize_default_conversation_message(self.authority.grant(), &verified)?;
+        let authorized = self.authorize_stored_product_message(entry.envelope.as_bytes())?;
+        let verified = authorized.message().clone();
         if verified.envelope().signer_did != self.authority.local_device_did() {
             anyhow::bail!("persisted outgoing message is not signed by the local device");
         }
         validate_operation_for_message(&entry.operation, &self.operation_capsule, &verified)?;
         let mut recipients = HashSet::new();
         for receipt_bytes in &entry.remote_acceptance_receipts {
-            let receipt = verify_stored_collaboration_acceptance_receipt(
-                receipt_bytes.as_bytes(),
-                &verified,
-            )?;
+            let receipt = self.verify_receipt_for_message(receipt_bytes.as_bytes(), &verified)?;
             let recipient = &receipt.envelope().payload.recipient_endpoint_did;
             if recipient == &self.authority.local_device_did() {
                 anyhow::bail!("persisted remote acceptance is signed by the local device");
@@ -1625,22 +1784,14 @@ impl CollaborationCore {
         if entry.product_handoff != ProductHandoffState::Pending {
             anyhow::bail!("persisted incoming product handoff is invalid");
         }
-        let receipt =
-            verify_stored_acceptance_receipt_envelope(entry.acceptance_receipt.as_bytes())?;
+        let receipt = self.verify_receipt_envelope(entry.acceptance_receipt.as_bytes())?;
         let accepted_at = receipt.envelope().payload.accepted_at;
-        let verified = verify_stored_collaboration_message(
-            entry.envelope.as_bytes(),
-            self.authority.profile(),
-            self.authority.sender_service(),
-        )?;
-        let authorized = authorize_default_conversation_message(self.authority.grant(), &verified)?;
+        let authorized = self.authorize_stored_product_message(entry.envelope.as_bytes())?;
+        let verified = authorized.message();
         if verified.envelope().signer_did == self.authority.local_device_did() {
             anyhow::bail!("persisted incoming message is a local self-echo");
         }
-        verify_stored_collaboration_acceptance_receipt(
-            entry.acceptance_receipt.as_bytes(),
-            authorized.message(),
-        )?;
+        self.verify_receipt_for_message(entry.acceptance_receipt.as_bytes(), authorized.message())?;
         if receipt.envelope().payload.recipient_endpoint_did != self.authority.local_device_did()
             || accepted_at > verified.envelope().payload.expires_at
         {
@@ -1669,7 +1820,14 @@ impl CollaborationCore {
         let mutation = f(&mut state)?;
         if mutation.changed || pruned || repaired {
             self.validate_state(&state)?;
+            // An indeterminate rename must be read and validated again.
+            *self.verified_state.lock().map_err(|_| {
+                anyhow::anyhow!("collaboration state verification cache poisoned")
+            })? = None;
             self.write_state(&state)?;
+            *self.verified_state.lock().map_err(|_| {
+                anyhow::anyhow!("collaboration state verification cache poisoned")
+            })? = Some((canonical_state_bytes(&state)?, state));
         }
         Ok(mutation.value)
     }
@@ -1715,12 +1873,12 @@ impl CollaborationCore {
             return Ok(None);
         }
         let path = self.state_path();
-        let metadata = match fs::symlink_metadata(&path) {
+        let named_before = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(err.into()),
         };
-        validate_owner_only_regular_file(&path, &metadata)?;
+        validate_owner_only_regular_file(&path, &named_before)?;
         let mut options = OpenOptions::new();
         options.read(true);
         #[cfg(unix)]
@@ -1733,17 +1891,61 @@ impl CollaborationCore {
             .with_context(|| format!("failed to open collaboration state {}", path.display()))?;
         let metadata = file.metadata()?;
         validate_owner_only_regular_file(&path, &metadata)?;
+        anyhow::ensure!(
+            same_state_file(&named_before, &metadata),
+            "collaboration state changed during open"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            anyhow::ensure!(
+                metadata.nlink() == 1,
+                "collaboration state has multiple links"
+            );
+        }
         if metadata.len() as usize > MAX_CORE_STATE_BYTES {
             anyhow::bail!("collaboration durable state exceeds its byte limit");
         }
         let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        file.read_to_end(&mut bytes)?;
+        Read::take(&mut file, MAX_CORE_STATE_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() <= MAX_CORE_STATE_BYTES,
+            "collaboration durable state exceeds its byte limit"
+        );
+        let fd_after = file.metadata()?;
+        let named_after = fs::symlink_metadata(&path)?;
+        validate_owner_only_regular_file(&path, &fd_after)?;
+        validate_owner_only_regular_file(&path, &named_after)?;
+        anyhow::ensure!(
+            same_state_file(&metadata, &fd_after)
+                && same_state_file(&fd_after, &named_after)
+                && bytes.len() as u64 == fd_after.len()
+                && self.validate_existing_state_ancestors()?,
+            "collaboration state changed during read"
+        );
+        {
+            let mut cached = self
+                .verified_state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("collaboration state verification cache poisoned"))?;
+            if let Some((exact, state)) = cached.as_ref() {
+                if exact == &bytes {
+                    return Ok(Some(state.clone()));
+                }
+            }
+            *cached = None;
+        }
         let state: CoreState =
             serde_json::from_slice(&bytes).context("invalid collaboration durable state")?;
         if canonical_state_bytes(&state)? != bytes {
             anyhow::bail!("collaboration durable state is not canonical JSON");
         }
         self.validate_state(&state)?;
+        *self
+            .verified_state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("collaboration state verification cache poisoned"))? =
+            Some((bytes, state.clone()));
         Ok(Some(state))
     }
 
@@ -1815,8 +2017,7 @@ impl CollaborationCore {
             )?;
         }
         for entry in &live.incoming_tombstones {
-            let receipt =
-                verify_stored_acceptance_receipt_envelope(entry.acceptance_receipt.as_bytes())?;
+            let receipt = self.verify_receipt_envelope(entry.acceptance_receipt.as_bytes())?;
             insert_receipt_identity(&mut ids, &mut nonces, &receipt.envelope().payload)?;
         }
         for envelope in envelopes {
@@ -1978,8 +2179,7 @@ impl CollaborationCore {
             anyhow::bail!("collaboration durable state exceeds its per-sender limit");
         }
         for entry in &state.incoming_tombstones {
-            let receipt =
-                verify_stored_acceptance_receipt_envelope(entry.acceptance_receipt.as_bytes())?;
+            let receipt = self.verify_receipt_envelope(entry.acceptance_receipt.as_bytes())?;
             let payload = &receipt.envelope().payload;
             if payload.network_id != self.authority.network_id()
                 || payload.conversation_id != self.authority.grant().grant().conversation_id
@@ -2207,19 +2407,10 @@ fn transport_incoming_acceptance(
     }
 }
 
-fn reject_incoming_conflicts(
-    state: &CoreState,
-    message: &VerifiedCollaborationMessage,
-) -> anyhow::Result<()> {
-    if incoming_identity_conflicts(state, message)? {
-        anyhow::bail!("collaboration sender reused a message ID or nonce");
-    }
-    Ok(())
-}
-
 fn incoming_identity_conflicts(
     state: &CoreState,
     message: &VerifiedCollaborationMessage,
+    verify_receipt: impl Fn(&[u8]) -> anyhow::Result<VerifiedCollaborationAcceptanceReceipt>,
 ) -> anyhow::Result<bool> {
     let candidate = &message.envelope().payload;
     for entry in &state.incoming {
@@ -2232,8 +2423,7 @@ fn incoming_identity_conflicts(
         }
     }
     for entry in &state.incoming_tombstones {
-        let receipt =
-            verify_stored_acceptance_receipt_envelope(entry.acceptance_receipt.as_bytes())?;
+        let receipt = verify_receipt(entry.acceptance_receipt.as_bytes())?;
         let receipt = &receipt.envelope().payload;
         if receipt.sender_profile_did == candidate.sender_profile_did
             && (receipt.message_id == candidate.message_id
@@ -2304,6 +2494,7 @@ fn insert_receipt_identity(
 fn outgoing_handle(
     entry: &OutgoingRecord,
     verified: VerifiedCollaborationMessage,
+    verify_receipt: impl Fn(&[u8]) -> anyhow::Result<VerifiedCollaborationAcceptanceReceipt>,
 ) -> DurableOutgoingMessage {
     DurableOutgoingMessage {
         envelope_bytes: entry.envelope.as_bytes().to_vec(),
@@ -2315,7 +2506,7 @@ fn outgoing_handle(
             .remote_acceptance_receipts
             .iter()
             .filter_map(|bytes| {
-                verify_stored_acceptance_receipt_envelope(bytes.as_bytes())
+                verify_receipt(bytes.as_bytes())
                     .ok()
                     .map(|receipt| receipt.accepting_endpoint_did().to_string())
             })
@@ -2335,6 +2526,26 @@ fn state_namespace(authority: &DefaultConversationDeviceAuthority) -> String {
         hasher.update(field);
     }
     hex::encode(hasher.finalize())
+}
+
+fn same_state_file(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.dev() != after.dev()
+            || before.ino() != after.ino()
+            || before.uid() != after.uid()
+            || before.mode() != after.mode()
+            || before.nlink() != after.nlink()
+            || before.mtime() != after.mtime()
+            || before.mtime_nsec() != after.mtime_nsec()
+            || before.ctime() != after.ctime()
+            || before.ctime_nsec() != after.ctime_nsec()
+        {
+            return false;
+        }
+    }
+    before.len() == after.len() && before.modified().ok() == after.modified().ok()
 }
 
 fn canonical_state_bytes(state: &CoreState) -> anyhow::Result<Vec<u8>> {
@@ -3155,7 +3366,11 @@ mod tests {
         Ok(())
     }
 
-    fn assert_validation_fixture_rejects_tampering(core: &CollaborationCore, state: &CoreState) {
+    fn assert_validation_fixture_rejects_tampering(
+        fixture: &Fixture,
+        core: &CollaborationCore,
+        state: &CoreState,
+    ) {
         let original = canonical_state_bytes(state).unwrap();
         // Change only one valid hex signature byte. Preserve JSON canonicality,
         // sizes, identity fields and authority bindings, including the last row.
@@ -3190,9 +3405,248 @@ mod tests {
             );
             assert!(quiet_worker_validation_reads(core).is_err());
             assert!(core.summary().is_err());
+            assert!(fixture.core().summary().is_err());
             write_owner_only(&core.state_path(), &original);
             quiet_worker_validation_reads(core).unwrap();
         }
+        if !state.outgoing.is_empty() {
+            let mut damaged = state.clone();
+            let envelope = &mut damaged.outgoing.last_mut().unwrap().envelope;
+            let mut signed: SignedCollaborationMessage = serde_json::from_str(envelope).unwrap();
+            let replacement = if signed.signature.starts_with('0') {
+                "1"
+            } else {
+                "0"
+            };
+            signed.signature.replace_range(..1, replacement);
+            *envelope =
+                String::from_utf8(canonical_signed_collaboration_message_bytes(&signed).unwrap())
+                    .unwrap();
+            write_owner_only(
+                &core.state_path(),
+                &canonical_state_bytes(&damaged).unwrap(),
+            );
+            assert!(core.load_state().is_err());
+            assert!(fixture.core().load_state().is_err());
+            write_owner_only(&core.state_path(), &original);
+            quiet_worker_validation_reads(core).unwrap();
+        }
+        if !state.incoming_tombstones.is_empty()
+            && state.incoming_tombstones.len() < MAX_INCOMING_RECORDS_AND_TOMBSTONES
+        {
+            let mut duplicate = state.clone();
+            duplicate
+                .incoming_tombstones
+                .push(state.incoming_tombstones[0].clone());
+            write_owner_only(
+                &core.state_path(),
+                &canonical_state_bytes(&duplicate).unwrap(),
+            );
+            assert!(core.load_state().is_err()); // Cached signatures do not admit duplicate identities.
+            write_owner_only(&core.state_path(), &original);
+            quiet_worker_validation_reads(core).unwrap();
+        }
+    }
+
+    #[test]
+    fn verified_state_reuses_signatures_and_verifies_only_new_records() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let first = prepare(
+            &core,
+            "cache-first",
+            serde_json::json!({"body":"first"}),
+            NOW,
+            TTL,
+        )
+        .unwrap();
+        complete_projection(&core, &first);
+        let first_misses = core
+            .verification_misses
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(first_misses, 1);
+        for _ in 0..3 {
+            core.load_state().unwrap();
+            core.pending_outgoing(NOW).unwrap();
+        }
+        assert_eq!(
+            core.verification_misses
+                .load(std::sync::atomic::Ordering::Relaxed),
+            first_misses
+        );
+        let second = prepare(
+            &core,
+            "cache-second",
+            serde_json::json!({"body":"second"}),
+            NOW + 11,
+            TTL,
+        )
+        .unwrap();
+        complete_projection(&core, &second);
+        assert_eq!(
+            core.verification_misses
+                .load(std::sync::atomic::Ordering::Relaxed),
+            first_misses + 1
+        );
+        let receipt = remote_receipt(&fixture, &second, generate_keypair().0, NOW + 12);
+        core.record_remote_acceptance(&receipt, NOW + 12).unwrap();
+        let receipt_misses = core
+            .verification_misses
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(receipt_misses > first_misses + 1);
+        core.record_remote_acceptance(&receipt, NOW + 12).unwrap();
+        core.load_state().unwrap();
+        assert_eq!(
+            core.verification_misses
+                .load(std::sync::atomic::Ordering::Relaxed),
+            receipt_misses
+        );
+        let writer = fixture.core();
+        let third = prepare(
+            &writer,
+            "cache-external-writer",
+            serde_json::json!({"body":"external"}),
+            NOW + 22,
+            TTL,
+        )
+        .unwrap();
+        complete_projection(&writer, &third);
+        let state = core.load_state().unwrap().unwrap();
+        assert_eq!(state.outgoing.len(), 3);
+        assert!(state
+            .outgoing
+            .iter()
+            .any(|entry| entry.envelope.as_bytes() == third.envelope_bytes()));
+        assert_eq!(
+            core.verification_misses
+                .load(std::sync::atomic::Ordering::Relaxed),
+            receipt_misses + 1
+        );
+        let original = canonical_state_bytes(&state).unwrap();
+        for operation_tamper in [true, false] {
+            let mut changed = state.clone();
+            if operation_tamper {
+                changed.outgoing[2].operation.sha256 = "00".repeat(32);
+            } else {
+                changed.binding.operation_capsule = "foreign-capsule".to_string();
+            }
+            // Signed envelopes remain byte-identical to the warm cache entries.
+            assert_eq!(changed.outgoing[2].envelope, state.outgoing[2].envelope);
+            write_owner_only(
+                &core.state_path(),
+                &canonical_state_bytes(&changed).unwrap(),
+            );
+            assert!(core.load_state().is_err());
+            assert!(fixture.core().load_state().is_err());
+            write_owner_only(&core.state_path(), &original);
+            core.load_state().unwrap();
+        }
+        let cold = fixture.core();
+        let state = cold.load_state().unwrap().unwrap();
+        assert_eq!(state.outgoing.len(), 3);
+        assert!(state
+            .outgoing
+            .iter()
+            .any(|entry| entry.envelope.as_bytes() == first.envelope_bytes()));
+        assert!(
+            cold.verification_misses
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
+        );
+    }
+
+    #[test]
+    fn verified_state_is_seeded_only_after_successful_fsync() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let first = prepare(
+            &core,
+            "before-rename-fault",
+            serde_json::json!({"body":"first"}),
+            NOW,
+            TTL,
+        )
+        .unwrap();
+        complete_projection(&core, &first);
+        assert!(core.verified_state.lock().unwrap().is_some());
+        core.inject_write_fault(WriteFault::AfterRename);
+        assert!(prepare(
+            &core,
+            "after-rename-fault",
+            serde_json::json!({"body":"second"}),
+            NOW + 11,
+            TTL
+        )
+        .is_err());
+        assert!(core.verified_state.lock().unwrap().is_none());
+        assert_eq!(core.load_state().unwrap().unwrap().outgoing.len(), 2);
+        assert!(core.verified_state.lock().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn warm_state_cache_preserves_permission_symlink_and_hardlink_refusals() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let first = prepare(
+            &core,
+            "warm-path-guards",
+            serde_json::json!({"body":"first"}),
+            NOW,
+            TTL,
+        )
+        .unwrap();
+        complete_projection(&core, &first);
+        let path = core.state_path();
+        let preserved = core.state_dir.join("preserved-state.json");
+        fs::write(&preserved, fs::read(&path).unwrap()).unwrap();
+        fs::set_permissions(&preserved, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::rename(&preserved, &path).unwrap();
+        core.load_state().unwrap(); // Exact verified bytes in a new owned inode.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(core.load_state().is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::rename(&path, &preserved).unwrap();
+        symlink(&preserved, &path).unwrap();
+        assert!(core.load_state().is_err());
+        fs::remove_file(&path).unwrap();
+        fs::hard_link(&preserved, &path).unwrap();
+        assert!(core.load_state().is_err());
+        fs::remove_file(&path).unwrap();
+        fs::rename(&preserved, &path).unwrap();
+        core.load_state().unwrap();
+    }
+
+    #[test]
+    fn signed_verification_cache_evicts_oldest_success_at_entry_bound() {
+        let mut cache = SignedBytesCache::new();
+        for i in 0..=MAX_VERIFICATION_CACHE_ENTRIES {
+            cache.insert(&i.to_le_bytes(), i);
+        }
+        assert_eq!(cache.entries.len(), MAX_VERIFICATION_CACHE_ENTRIES);
+        assert!(cache.get(&0usize.to_le_bytes()).is_none());
+        assert_eq!(
+            cache.get(&MAX_VERIFICATION_CACHE_ENTRIES.to_le_bytes()),
+            Some(MAX_VERIFICATION_CACHE_ENTRIES)
+        );
+        assert!(cache.bytes <= MAX_CORE_STATE_BYTES);
+        let largest = vec![1u8; MAX_CORE_STATE_BYTES];
+        cache.insert(&largest, 1);
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.bytes, MAX_CORE_STATE_BYTES);
+        assert_eq!(cache.get(&largest), Some(1));
+        assert!(cache
+            .get(&MAX_VERIFICATION_CACHE_ENTRIES.to_le_bytes())
+            .is_none());
+        cache.insert(b"new", 2);
+        assert!(cache.get(&largest).is_none());
+        assert_eq!(cache.bytes, 3);
+        let oversized = vec![3u8; MAX_CORE_STATE_BYTES + 1];
+        cache.insert(&oversized, 3);
+        assert!(cache.get(&oversized).is_none());
+        assert_eq!(cache.get(b"new"), Some(2));
+        assert_eq!(cache.bytes, 3);
     }
 
     #[test]
@@ -3211,7 +3665,109 @@ mod tests {
             "no-op paths attempted a state write"
         );
         assert_eq!(fs::read(core.state_path()).unwrap(), original);
-        assert_validation_fixture_rejects_tampering(&core, &state);
+        assert_validation_fixture_rejects_tampering(&fixture, &core, &state);
+    }
+
+    #[test]
+    fn new_incoming_frames_verify_only_new_records_beside_retained_replay_state() {
+        let fixture = Fixture::new();
+        let seeded = fixture.core();
+        signed_validation_fixture(
+            &fixture,
+            &seeded,
+            MAX_INCOMING_RECORDS_AND_TOMBSTONES - 2,
+            0,
+            0,
+        );
+        let core = fixture.core();
+        core.load_state().unwrap();
+        assert_eq!(
+            core.verification_misses
+                .load(std::sync::atomic::Ordering::Relaxed),
+            MAX_INCOMING_RECORDS_AND_TOMBSTONES - 2
+        );
+        let remote_key = generate_keypair().0;
+        for i in 0..2 {
+            let (_, frame) = remote_transport_message(&fixture, remote_key.clone(), NOW + i);
+            let before = core
+                .verification_misses
+                .load(std::sync::atomic::Ordering::Relaxed);
+            assert!(matches!(
+                core.ingest_transport_frame(&frame, NOW + i).unwrap(),
+                CollaborationTransportIngestion::Incoming(_)
+            ));
+            let after = core
+                .verification_misses
+                .load(std::sync::atomic::Ordering::Relaxed);
+            assert!(
+                after > before && after - before <= 3,
+                "old replay records were reverified for a new frame"
+            );
+            core.load_state().unwrap();
+            core.summary().unwrap();
+            assert_eq!(
+                core.verification_misses
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                after
+            );
+        }
+        let state = core.load_state().unwrap().unwrap();
+        assert_eq!(
+            (state.incoming.len(), state.incoming_tombstones.len()),
+            (2, MAX_INCOMING_RECORDS_AND_TOMBSTONES - 2)
+        );
+    }
+
+    #[test]
+    fn receipt_verification_cache_preserves_exact_original_binding() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let first = prepare(
+            &core,
+            "receipt-first",
+            serde_json::json!({"body":"first"}),
+            NOW,
+            TTL,
+        )
+        .unwrap();
+        let second = prepare(
+            &core,
+            "receipt-second",
+            serde_json::json!({"body":"second"}),
+            NOW,
+            TTL,
+        )
+        .unwrap();
+        let receipt = remote_receipt(&fixture, &first, generate_keypair().0, NOW);
+        let first = core
+            .authorize_stored_product_message(first.envelope_bytes())
+            .unwrap();
+        let second = core
+            .authorize_stored_product_message(second.envelope_bytes())
+            .unwrap();
+        core.verify_receipt_envelope(&receipt).unwrap();
+        core.verify_receipt_for_message(&receipt, first.message())
+            .unwrap();
+        let misses = core
+            .verification_misses
+            .load(std::sync::atomic::Ordering::Relaxed);
+        core.verify_receipt_for_message(&receipt, first.message())
+            .unwrap();
+        assert_eq!(
+            core.verification_misses
+                .load(std::sync::atomic::Ordering::Relaxed),
+            misses
+        );
+        for _ in 0..2 {
+            assert!(core
+                .verify_receipt_for_message(&receipt, second.message())
+                .is_err());
+        }
+        assert_eq!(
+            core.verification_misses
+                .load(std::sync::atomic::Ordering::Relaxed),
+            misses + 2
+        );
     }
 
     // Run alone, after the shared-cache owner releases it. Use the same bounded
@@ -3289,7 +3845,7 @@ mod tests {
             "measured paths attempted a state write"
         );
         assert_eq!(fs::read(core.state_path()).unwrap(), original);
-        assert_validation_fixture_rejects_tampering(&core, &state);
+        assert_validation_fixture_rejects_tampering(&fixture, &core, &state);
         println!(
             "{}",
             serde_json::json!({
