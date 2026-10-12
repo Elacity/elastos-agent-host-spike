@@ -2508,7 +2508,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
 
     def test_finite_census_binds_pidfds_and_rejects_reuse_escaped_children_and_oom(self):
         for fault in (None, "birth", "uid", "escaped", "observer_inside", "oom", "peak", "limit_changed", "swap_changed",
-                      "duplicate", "census_bound", "omitted_live", "omitted_exited"):
+                      "duplicate", "census_bound", "omitted_live", "omitted_exited", "nested", "unknown_executable"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temp:
                 owner, values = self.finite_owner(Path(temp))
                 rows = self.process_rows(owner)
@@ -2525,6 +2525,13 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                         rows[103]["uid"] = 9999
                     elif fault == "escaped":
                         self.globals["cgroup_membership"] = lambda *_: "/foreign"
+                    elif fault == "nested":
+                        self.globals["cgroup_membership"] = lambda pid, *_: ("/outside" if pid in owner.outside else
+                                                                           owner.binding["ControlGroup"] + "/nested")
+                    elif fault == "unknown_executable":
+                        executable = Path(temp) / "foreign-child"
+                        executable.write_bytes(b"unowned fixture")
+                        rows[103].update(executable=str(executable), device=executable.stat().st_dev, inode=executable.stat().st_ino)
                     elif fault == "observer_inside":
                         self.globals["cgroup_membership"] = lambda *_: owner.binding["ControlGroup"]
                     elif fault == "oom":
@@ -2657,7 +2664,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                 child.wait.side_effect = [subprocess.TimeoutExpired("fixture Runtime", 15), 0] if wait_timeout else [0]
                 with mock.patch.dict(self.globals, {
                         "linux_process_identity": mock.Mock(side_effect=[identity, identity, runtime_identity]),
-                        "pidfd_exited": mock.Mock(side_effect=[False, True])}), \
+                        "pidfd_exited": mock.Mock(side_effect=[False, True, True])}), \
                         mock.patch.object(os, "pidfd_open", return_value=77, create=True) as opened, \
                         mock.patch.object(os, "close") as closed, mock.patch.object(signal, "signal"), \
                         mock.patch.object(subprocess, "Popen", return_value=child) as launch:
@@ -2769,12 +2776,17 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
 
     def test_finite_cleanup_needs_whole_exit_reap_empty_unit_and_finished_observer(self):
         for fault in (None, "live_sibling", "populated", "oom", "peak", "unreaped", "observer", "unit_reused", "unit_replaced_late",
-                      "partial_start", "stop_failure", "reap_timeout"):
+                      "partial_start", "stop_failure", "reap_timeout", "helper_release_timeout", "unknown_child"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temp:
                 owner, values = self.finite_owner(Path(temp))
                 owner.known = self.process_rows(owner)
                 owner.fds = {pid: pid + 1000 for pid in owner.known}
                 owner.metric_fds = {name: index + 2000 for index, name in enumerate(values)}
+                owner.group = Path(temp) / "retained-cgroup"
+                owner.group.mkdir()
+                owner.observe_once = mock.Mock(return_value={99: owner.known[99]})
+                if fault == "unknown_child":
+                    owner.observe_once.side_effect = RuntimeError("fixture child executable is outside installed artifacts")
                 if fault != "reap_timeout":
                     self.journey["private_json"](owner.control / "runtime-stopped.json", {"reaped": fault != "unreaped"})
                 if fault == "populated":
@@ -2789,7 +2801,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                 if fault == "unit_reused":
                     owner.show.return_value["InvocationID"] = "b" * 32
                 if fault == "unit_replaced_late":
-                    owner.show.side_effect = [dict(owner.binding), dict(owner.binding, InvocationID="b" * 32)]
+                    owner.show.side_effect = [dict(owner.binding), dict(owner.binding), dict(owner.binding, InvocationID="b" * 32)]
                 if fault == "partial_start":
                     owner.binding = None
                     owner.baseline_events = None
@@ -2798,28 +2810,191 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                     owner.command.side_effect = subprocess.TimeoutExpired("systemctl", 40)
                 clock = mock.Mock()
                 clock.monotonic.side_effect = [0, 26]
-                patches = {"pidfd_exited": lambda fd: fault != "live_sibling" or fd != owner.fds[103]}
-                if fault in ("reap_timeout", "populated"):
-                    if fault == "populated":
-                        clock.monotonic.side_effect = [0, 100, 200, 300, 400]
+                released = False
+                write_control = self.journey["private_json"]
+
+                def control(path, value=None):
+                    nonlocal released
+                    result = write_control(path, value)
+                    if Path(path).name == "release.json" and value == {"release": True} and fault != "helper_release_timeout":
+                        released = True
+                    return result
+
+                patches = {"private_json": control,
+                           "pidfd_exited": lambda fd: (fd != owner.fds[99] or released)
+                                           and (fault != "live_sibling" or fd != owner.fds[103])}
+                if fault in ("reap_timeout", "helper_release_timeout"):
+                    if fault == "helper_release_timeout":
+                        clock.monotonic.side_effect = [0, 1, 7]
                     patches["time"] = clock
                 descriptors = set(owner.fds.values()) | set(owner.metric_fds.values())
-                with mock.patch.dict(self.globals, patches), mock.patch.object(os, "close") as closed:
+                with mock.patch.dict(self.globals, patches), mock.patch.object(os, "close") as closed, \
+                        mock.patch.object(signal, "pidfd_send_signal", create=True) as kill:
                     receipt = owner.finish()
-                self.assertEqual(receipt["status"], "failed" if fault else "passed")
+                self.assertEqual(receipt["status"], "failed" if fault else "passed", receipt)
                 self.assertEqual({call.args[0] for call in closed.call_args_list}, descriptors)
+                kill.assert_not_called()
+                if fault == "observer":
+                    owner.observe_once.assert_not_called()
+                    self.assertEqual(receipt["failure_phase"], "observer_stop")
                 if fault in ("unit_reused", "unit_replaced_late"):
                     owner.command.assert_not_called()
-                elif fault == "populated":
-                    self.assertEqual(owner.command.call_args_list, [
-                        mock.call("systemctl", "kill", "--kill-whom=all", "--signal=" + action, owner.unit)
-                        for action in ("SIGTERM", "SIGKILL")] + [mock.call("systemctl", "stop", owner.unit)])
                 else:
                     owner.command.assert_called_once_with("systemctl", "stop", owner.unit)
                 if fault is None:
                     self.assertTrue(receipt["whole_process_exit"])
                     self.assertTrue(receipt["runtime_reaped"])
                     self.assertNotEqual(receipt["actual_runtime_pid"], receipt["helper_main_pid"])
+
+    def test_finite_cleanup_reads_kernel_counters_before_helper_exit_prunes_the_unit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            owner, values = self.finite_owner(Path(temp))
+            owner.known = self.process_rows(owner)
+            for row in owner.known.values():
+                row["uid"] = os.getuid()
+            owner.fds = {pid: pid + 1000 for pid in owner.known}
+            owner.metric_fds = {name: index + 2000 for index, name in enumerate(values)}
+            live = {99, 101}
+            self.journey["private_json"](owner.control / "runtime-stopped.json", {"reaped": True})
+            captured = []
+            write_control = self.journey["private_json"]
+
+            def control(path, value=None):
+                result = write_control(path, value)
+                if Path(path).name == "release.json" and value == {"release": True}:
+                    self.assertIn("memory.peak", captured)
+                    self.assertIn("memory.events", captured)
+                    self.assertEqual(live, {99})
+                    live.remove(99)
+                return result
+
+            def metric(name):
+                if 99 not in live:
+                    raise OSError(19, "fixture cgroup was pruned")
+                captured.append(name)
+                return "populated 1" if name == "cgroup.events" else values[name]
+
+            def command(*args):
+                if args[:2] == ("systemctl", "kill"):
+                    live.clear()
+
+            owner.metric.side_effect = metric
+            owner.show.side_effect = lambda: dict(owner.binding, ControlGroup=owner.binding["ControlGroup"] if live else "")
+            owner.command.side_effect = command
+            rows = {pid: row for pid, row in owner.known.items() if pid in live}
+            with self.observations(owner, rows), mock.patch.dict(self.globals, {
+                    "private_json": control,
+                    "bounded_text": lambda path, *_: "fixture\0" if Path(path).name == "cmdline" else " ".join(map(str, live)),
+                    "pidfd_exited": lambda fd: fd - 1000 not in live,
+                    "linux_process_identity": lambda pid, **_: dict(owner.known[pid])}), \
+                    mock.patch.object(os, "close"), \
+                    mock.patch.object(signal, "pidfd_send_signal", side_effect=lambda fd, _: live.discard(fd - 1000), create=True) as kill:
+                receipt = owner.finish()
+            self.assertEqual(receipt["status"], "passed", receipt)
+            self.assertTrue(receipt["cgroup_empty"])
+            self.assertTrue(receipt["whole_process_exit"])
+            self.assertEqual(live, set())
+            self.assertEqual(kill.call_args_list, [mock.call(owner.fds[101], signal.SIGTERM)])
+            owner.command.assert_called_once_with("systemctl", "stop", owner.unit)
+
+    def test_finite_cleanup_escalates_only_bound_native_pidfds_before_releasing_helper(self):
+        for exit_during_signal in (False, True):
+            with self.subTest(exit_during_signal=exit_during_signal), tempfile.TemporaryDirectory() as temp:
+                owner, values = self.finite_owner(Path(temp))
+                owner.known = self.process_rows(owner)
+                owner.fds = {pid: pid + 1000 for pid in owner.known}
+                owner.metric_fds = {name: index + 2000 for index, name in enumerate(values)}
+                self.journey["private_json"](owner.control / "runtime-stopped.json", {"reaped": True})
+                live = {99, 101}
+                owner.observe_once = mock.Mock(side_effect=lambda **_: {pid: owner.known[pid] for pid in live})
+                write_control = self.journey["private_json"]
+
+                def control(path, value=None):
+                    result = write_control(path, value)
+                    if Path(path).name == "release.json" and value == {"release": True}:
+                        self.assertEqual(live, {99})
+                        live.remove(99)
+                    return result
+
+                def terminate(fd, action):
+                    if action == signal.SIGKILL or exit_during_signal:
+                        live.remove(fd - 1000)
+                    if exit_during_signal:
+                        raise ProcessLookupError("fixture native child exited during signal")
+
+                clock = mock.Mock()
+                clock.monotonic.side_effect = [0, 1, 2, 3] if exit_during_signal else [0, 1, 17, 18, 19, 20]
+                with mock.patch.dict(self.globals, {"private_json": control, "time": clock,
+                                                   "pidfd_exited": lambda fd: fd - 1000 not in live}), \
+                        mock.patch.object(os, "close"), \
+                        mock.patch.object(signal, "pidfd_send_signal", side_effect=terminate, create=True) as kill:
+                    receipt = owner.finish()
+                self.assertEqual(receipt["status"], "passed", receipt)
+                actions = (signal.SIGTERM,) if exit_during_signal else (signal.SIGTERM, signal.SIGKILL)
+                self.assertEqual(kill.call_args_list, [mock.call(owner.fds[101], action) for action in actions])
+                owner.command.assert_called_once_with("systemctl", "stop", owner.unit)
+
+    def test_finite_helper_holds_reaped_runtime_counters_until_owner_release(self):
+        with tempfile.TemporaryDirectory() as temp:
+            owner, _ = self.finite_owner(Path(temp))
+            runtime = owner.data / "bin/elastos"
+            identity = {"pid": 900, "uid": 1001, "start_ticks": 71, "executable": "/fixture/python",
+                        "device": 1, "inode": 2}
+            self.journey["private_json"](owner.control / "launch.json", {
+                "owner": identity, "runtime": str(runtime), "runtime_sha256": self.journey["digest"](runtime),
+                "environment": {}, "address": "127.0.0.1:1", "log": str(owner.home / "private.log")})
+            self.journey["private_json"](owner.control / "stop.json", {"stop": True})
+            child = mock.Mock(pid=100)
+            child.poll.return_value = None
+            stopping, releasing = mock.Mock(), mock.Mock()
+            stopping.is_set.return_value = releasing.is_set.return_value = False
+
+            def release(_):
+                child.wait.assert_called_once_with(timeout=15)
+                self.assertEqual(self.journey["private_json"](owner.control / "runtime-stopped.json"), {"reaped": True})
+                self.journey["private_json"](owner.control / "release.json", {"release": True})
+
+            releasing.wait.side_effect = release
+            with mock.patch.dict(self.globals, {"linux_process_identity": lambda pid: identity,
+                                               "pidfd_exited": lambda _: False}), \
+                    mock.patch.object(os, "pidfd_open", return_value=77, create=True), \
+                    mock.patch.object(os, "close") as closed, mock.patch.object(signal, "signal"), \
+                    mock.patch.object(self.globals["threading"], "Event", side_effect=[stopping, releasing]), \
+                    mock.patch.object(subprocess, "Popen", return_value=child):
+                self.journey["runtime_unit_helper"](owner.control)
+            releasing.wait.assert_called_once_with(.1)
+            closed.assert_called_once_with(77)
+
+    def test_finite_helper_bounds_release_wait_and_rejects_invalid_release(self):
+        for fault in ("timeout", "invalid", "owner_exit"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temp:
+                owner, _ = self.finite_owner(Path(temp))
+                runtime = owner.data / "bin/elastos"
+                identity = {"pid": 900, "uid": 1001, "start_ticks": 71, "executable": "/fixture/python",
+                            "device": 1, "inode": 2}
+                self.journey["private_json"](owner.control / "launch.json", {
+                    "owner": identity, "runtime": str(runtime), "runtime_sha256": self.journey["digest"](runtime),
+                    "environment": {}, "address": "127.0.0.1:1", "log": str(owner.home / "private.log")})
+                self.journey["private_json"](owner.control / "stop.json", {"stop": True})
+                if fault == "invalid":
+                    self.journey["private_json"](owner.control / "release.json", {"release": False})
+                child = mock.Mock(pid=100)
+                child.poll.return_value = None
+                clock = mock.Mock()
+                clock.monotonic.side_effect = [0, 1, 2, 63 if fault == "timeout" else 3]
+                with mock.patch.dict(self.globals, {"linux_process_identity": lambda pid: identity, "time": clock,
+                                                    "pidfd_exited": mock.Mock(side_effect=[False, fault == "owner_exit"])}), \
+                        mock.patch.object(os, "pidfd_open", return_value=77, create=True), \
+                        mock.patch.object(os, "close") as closed, mock.patch.object(signal, "signal"), \
+                        mock.patch.object(subprocess, "Popen", return_value=child):
+                    if fault == "invalid":
+                        with self.assertRaisesRegex(RuntimeError, "helper release differs"):
+                            self.journey["runtime_unit_helper"](owner.control)
+                    else:
+                        self.journey["runtime_unit_helper"](owner.control)
+                child.wait.assert_called_once_with(timeout=15)
+                closed.assert_called_once_with(77)
+                self.assertEqual(self.journey["private_json"](owner.control / "runtime-stopped.json"), {"reaped": True})
 
     def finite_receipt(self, gib):
         flags = ("memory_refusal", "finite_home_recovery") if gib == 1 else (

@@ -181,8 +181,12 @@ def runtime_unit_helper(control):
         if digest(installed) != payload["runtime_sha256"]:
             raise RuntimeError("finite journey Runtime bytes changed")
         stopping = threading.Event()
-        signal.signal(signal.SIGTERM, lambda *_: stopping.set())
-        signal.signal(signal.SIGINT, lambda *_: stopping.set())
+        releasing = threading.Event()
+        def terminate(*_):
+            stopping.set()
+            releasing.set()
+        signal.signal(signal.SIGTERM, terminate)
+        signal.signal(signal.SIGINT, terminate)
         log_fd = os.open(payload["log"], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(log_fd, "wb") as log:
             child = subprocess.Popen([str(installed), "gateway", "--addr", payload["address"]],
@@ -205,6 +209,15 @@ def runtime_unit_helper(control):
                     child.kill()
                     child.wait(timeout=5)
                 private_json(control / "runtime-stopped.json", {"reaped": True})
+                # Hold the unit's kernel counters until its outside owner reads
+                # them. systemd prunes an empty RemainAfterExit service cgroup.
+                deadline = time.monotonic() + 60
+                while not releasing.is_set() and time.monotonic() < deadline and not pidfd_exited(owner_fd):
+                    if (control / "release.json").exists():
+                        if private_json(control / "release.json") != {"release": True}:
+                            raise RuntimeError("finite journey helper release differs")
+                        break
+                    releasing.wait(.1)
     finally:
         os.close(owner_fd)
 
@@ -316,7 +329,7 @@ class FiniteRuntime:
     def poll(self):
         return 1 if self.error or self.pid in self.fds and pidfd_exited(self.fds[self.pid]) else None
 
-    def observe_once(self):
+    def observe_once(self, require_runtime=True):
         if (self.metric("memory.max") != str(self.budget) or self.metric("memory.swap.max") != "0"
                 or self.metric("pids.max") != "512"):
             raise RuntimeError("finite journey kernel limits changed")
@@ -414,7 +427,7 @@ class FiniteRuntime:
             current[pid] = self.known[pid]
         if any(pid not in current and not pidfd_exited(fd) for pid, fd in self.fds.items()):
             raise RuntimeError("finite journey live child left its unit census")
-        if self.pid not in current:
+        if require_runtime and self.pid not in current:
             raise RuntimeError("finite journey Runtime left its unit")
         memory = [self.metric(name) for name in ("memory.current", "memory.peak")]
         if any(not value.isdecimal() or int(value) > self.budget for value in memory):
@@ -500,6 +513,7 @@ class FiniteRuntime:
                   "status": "failed", "cgroup_empty": False,
                   "observer_complete": self.thread is None or not self.thread.is_alive(),
                   "actions": self.actions, "outside_runtime_unit": True}
+        phase = "unit_binding"
         try:
             if not self.launch_requested:
                 return record
@@ -512,6 +526,10 @@ class FiniteRuntime:
             if current.get("InvocationID") != self.binding["InvocationID"] or current.get("ControlGroup") != self.binding["ControlGroup"]:
                 raise RuntimeError("finite journey unit identity changed before cleanup")
             try:
+                phase = "observer_stop"
+                if not record["observer_complete"]:
+                    raise RuntimeError("finite journey observer did not stop before cleanup")
+                phase = "runtime_reap"
                 private_json(self.control / "stop.json", {"stop": True})
                 deadline = time.monotonic() + 25
                 while not (self.control / "runtime-stopped.json").exists() and time.monotonic() < deadline:
@@ -519,45 +537,88 @@ class FiniteRuntime:
                 reaped = private_json(self.control / "runtime-stopped.json") == {"reaped": True}
                 if len(self.metric_fds) != 7 or self.baseline_events is None:
                     return record
-                # RemainAfterExit retains the empty unit's kernel counters. The
-                # helper reaps Runtime; systemd owns every remaining native child.
-                for action in ("SIGTERM", "SIGKILL"):
-                    populated = dict(row.split() for row in self.metric("cgroup.events").splitlines()).get("populated")
-                    if populated == "0":
+                if not reaped:
+                    raise RuntimeError("finite journey Runtime reap is unconfirmed")
+                helper = int(self.binding["MainPID"])
+                if self.known.get(helper, {}).get("role") != "helper" or helper not in self.fds:
+                    raise RuntimeError("finite journey helper identity is unavailable")
+                phase = "native_cleanup"
+                # The helper remains alive while native children exit. Bind any
+                # remaining child through the same census before signalling it.
+                for action in (signal.SIGTERM, signal.SIGKILL):
+                    current = self.observe_once(require_runtime=False)
+                    native = {pid for pid in current if pid != helper}
+                    if not native:
                         break
                     binding = self.show()
-                    if populated != "1" or any(binding.get(key) != self.binding[key] for key in ("InvocationID", "ControlGroup")):
+                    if any(binding.get(key) != self.binding[key] for key in ("InvocationID", "ControlGroup")):
                         raise RuntimeError("finite journey unit cleanup binding differs")
-                    self.command("systemctl", "kill", "--kill-whom=all", "--signal=" + action, self.unit)
-                    deadline = time.monotonic() + (15 if action == "SIGTERM" else 5)
+                    for pid in native:
+                        if not pidfd_exited(self.fds[pid]):
+                            try:
+                                signal.pidfd_send_signal(self.fds[pid], action)
+                            except ProcessLookupError:
+                                if not pidfd_exited(self.fds[pid]):
+                                    raise
+                    deadline = time.monotonic() + (15 if action == signal.SIGTERM else 5)
                     while time.monotonic() < deadline:
-                        if dict(row.split() for row in self.metric("cgroup.events").splitlines()).get("populated") == "0":
+                        if set(self.observe_once(require_runtime=False)) == {helper}:
                             break
                         time.sleep(.1)
+                if (set(self.observe_once(require_runtime=False)) != {helper}
+                        or any(not pidfd_exited(fd) for pid, fd in self.fds.items() if pid != helper)
+                        or pidfd_exited(self.fds[helper])):
+                    raise RuntimeError("finite journey native process exit is unconfirmed")
+                phase = "kernel_snapshot"
                 events = self.events()
-                cleanup = all(pidfd_exited(fd) for fd in self.fds.values())
-                empty = dict(row.split() for row in self.metric("cgroup.events").splitlines()).get("populated") == "0"
                 no_oom = all(events.get(key, 0) == self.baseline_events.get(key, 0) for key in ("oom", "oom_kill"))
                 peak = int(self.metric("memory.peak"))
                 if (self.metric("memory.max") != str(self.budget) or self.metric("memory.swap.max") != "0"
                         or self.metric("pids.max") != "512"):
                     raise RuntimeError("finite journey final kernel limits differ")
                 record.update(memory_peak_bytes=peak, memory_events_before=self.baseline_events, memory_events_after=events,
-                              cgroup_empty=empty, whole_process_exit=cleanup, runtime_reaped=reaped,
+                              runtime_reaped=reaped,
                               control_group=self.binding["ControlGroup"], native_membership_verified=True,
                               processes=[{key: row[key] for key in ("pid", "uid", "start_ticks", "exe_sha256", "role")} for row in self.known.values()],
                               actual_runtime_pid=self.pid, helper_main_pid=int(self.binding["MainPID"]))
+                phase = "helper_release"
+                private_json(self.control / "release.json", {"release": True})
+                deadline = time.monotonic() + 5
+                while not pidfd_exited(self.fds[helper]) and time.monotonic() < deadline:
+                    time.sleep(.1)
+                cleanup = all(pidfd_exited(fd) for fd in self.fds.values())
+                binding = self.show()
+                if (binding.get("InvocationID") != self.binding["InvocationID"]
+                        or binding.get("ControlGroup") not in (self.binding["ControlGroup"], "")):
+                    raise RuntimeError("finite journey unit identity changed after release")
+                # An empty exited service can already have lost its cgroup and
+                # metric files. Every observed whole process must also be gone.
+                empty = not self.group.exists()
+                if not empty and binding.get("ControlGroup") == self.binding["ControlGroup"]:
+                    try:
+                        empty = dict(row.split() for row in self.metric("cgroup.events").splitlines()).get("populated") == "0"
+                    except OSError:
+                        if self.group.exists():
+                            raise
+                        empty = True
+                record.update(cgroup_empty=empty, whole_process_exit=cleanup)
             finally:
                 # Stop only this bound unit. This also closes native descendants
                 # if Runtime startup, UI, or the observer failed part way through.
+                observed_phase, phase = phase, "unit_stop"
                 binding = self.show()
-                if any(binding.get(key) != self.binding[key] for key in ("InvocationID", "ControlGroup")):
+                removed = (binding.get("ControlGroup") == "" and hasattr(self, "group") and not self.group.exists()
+                           and all(pidfd_exited(fd) for fd in self.fds.values()))
+                if (binding.get("InvocationID") != self.binding["InvocationID"]
+                        or binding.get("ControlGroup") != self.binding["ControlGroup"] and not removed):
                     raise RuntimeError("finite journey unit was replaced before stop")
                 self.command("systemctl", "stop", self.unit)
+                phase = observed_phase
             if cleanup and empty and reaped and no_oom and peak <= self.budget and record["observer_complete"] and not self.error:
                 record["status"] = "passed"
         except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError):
             record["status"] = "failed"
+            record["failure_phase"] = phase
         finally:
             for fd in (*self.fds.values(), *self.metric_fds.values()):
                 os.close(fd)
