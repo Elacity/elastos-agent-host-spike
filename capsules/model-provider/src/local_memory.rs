@@ -293,6 +293,7 @@ fn metadata(reader: impl Read) -> std::io::Result<Metadata> {
 
 /// Provider process fixtures may inject a fixed reading in debug builds.
 /// Runtime Get always calls the common observer directly.
+#[cfg(not(test))]
 pub(crate) fn host_memory() -> Result<HostMemory, LocalLlamaFault> {
     #[cfg(debug_assertions)]
     if let Some(bytes) = std::env::var("ELASTOS_MODEL_PROVIDER_TEST_FREE_MEMORY")
