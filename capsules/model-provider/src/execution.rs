@@ -1578,17 +1578,29 @@ mod tests {
         }
     }
 
+    fn journal_transaction_in_progress(error: &ProviderFault) -> bool {
+        if error.code() != "journal_corrupt" {
+            return false;
+        }
+        // The private detail has no accessor. Compare the complete known fault
+        // so these fixture readers keep unrelated corruption as a failure.
+        let fault = format!("{error:?}");
+        fault
+            == format!(
+                "{:?}",
+                ProviderFault::corrupt_journal(
+                    "journal transaction creator is live or its exit is unproven"
+                )
+            )
+            || (fault.contains("filename mismatch") && fault.contains(".json.tmp-"))
+    }
+
     fn load_run(root: &str, run_id: &str) -> StoredRun {
         let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
         loop {
             let journal = match RunJournal::open(crate::config::journal_root(root, None).unwrap()) {
                 Ok(journal) => journal,
-                Err(err)
-                    if {
-                        let detail = format!("{err:?}");
-                        detail.contains("filename mismatch") && detail.contains(".json.tmp-")
-                    } =>
-                {
+                Err(err) if journal_transaction_in_progress(&err) => {
                     assert!(
                         Instant::now() < deadline,
                         "timed out loading run {run_id}; journal open never settled: {err:?}"
@@ -1600,12 +1612,7 @@ mod tests {
             };
             match journal.load_run(run_id) {
                 Ok(run) => return run,
-                Err(err)
-                    if {
-                        let detail = format!("{err:?}");
-                        detail.contains("filename mismatch") && detail.contains(".json.tmp-")
-                    } =>
-                {
+                Err(err) if journal_transaction_in_progress(&err) => {
                     assert!(
                         Instant::now() < deadline,
                         "timed out loading run {run_id}; journal temp file never settled: {err:?}"
@@ -1771,12 +1778,7 @@ mod tests {
         loop {
             let journal = match RunJournal::open(crate::config::journal_root(root, None).unwrap()) {
                 Ok(journal) => journal,
-                Err(err)
-                    if {
-                        let detail = format!("{err:?}");
-                        detail.contains("filename mismatch") && detail.contains(".json.tmp-")
-                    } =>
-                {
+                Err(err) if journal_transaction_in_progress(&err) => {
                     assert!(
                         Instant::now() < deadline,
                         "timed out waiting for {description}; journal open never settled: {err:?}"
@@ -1788,12 +1790,7 @@ mod tests {
             };
             let run = match journal.load_run(run_id) {
                 Ok(run) => run,
-                Err(err)
-                    if {
-                        let detail = format!("{err:?}");
-                        detail.contains("filename mismatch") && detail.contains(".json.tmp-")
-                    } =>
-                {
+                Err(err) if journal_transaction_in_progress(&err) => {
                     assert!(
                         Instant::now() < deadline,
                         "timed out waiting for {description}; journal temp file never settled: {err:?}"

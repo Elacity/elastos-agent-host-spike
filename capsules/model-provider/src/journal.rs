@@ -3722,6 +3722,17 @@ mod tests {
                 }
                 _ => path,
             };
+            if case == "non-utf8" {
+                assert_eq!(transaction_creator(&unsafe_path, true), None);
+                // APFS rejects this byte sequence before a file can exist. Keep
+                // the parser refusal on Mac; Linux also checks disk recovery.
+                #[cfg(target_os = "macos")]
+                {
+                    assert!(valid.exists());
+                    assert_eq!(file_bytes(&run_path(&root, &run.run_id)), before);
+                    continue;
+                }
+            }
             match case {
                 "symlink" => symlink(&valid, &unsafe_path).unwrap(),
                 "hardlink" => fs::hard_link(&valid, &unsafe_path).unwrap(),
