@@ -320,6 +320,23 @@ struct ConversationObjectView {
     link: Option<LinkPreviewView>,
     attachment: Option<AttachmentView>,
     created_at: u64,
+    #[serde(default)]
+    delivery_state: Option<CommunityDeliveryState>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CommunityDeliveryState {
+    Sending,
+    Accepted,
+    Expired,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CommunityDeliveryView {
+    seq: u64,
+    state: CommunityDeliveryState,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -419,6 +436,8 @@ struct RoomPollView {
     objects: Vec<ConversationObjectView>,
     #[serde(default)]
     transport: RoomTransportView,
+    #[serde(default)]
+    own_delivery: Vec<CommunityDeliveryView>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -4483,7 +4502,10 @@ impl App {
                 sender.set_attribute("tabindex", "0")?;
             }
             let time = self.document.create_element("span")?;
-            time.set_text_content(Some(&format_time(object.created_at)));
+            let time_text = community_delivery_label(object.delivery_state)
+                .map(str::to_string)
+                .unwrap_or_else(|| format_time(object.created_at));
+            time.set_text_content(Some(&time_text));
             meta.append_child(&sender)?;
             meta.append_child(&time)?;
 
@@ -4972,6 +4994,21 @@ fn apply_active_poll_state(
         state.participants.clear();
     }
     dedupe_objects(&mut state.objects);
+    let mut delivery_changed = false;
+    if state.collaboration_configured {
+        let own_delivery = poll
+            .own_delivery
+            .into_iter()
+            .map(|delivery| (delivery.seq, delivery.state))
+            .collect::<BTreeMap<_, _>>();
+        for object in &mut state.objects {
+            let delivery = own_delivery.get(&object.seq).copied();
+            if object.delivery_state != delivery {
+                object.delivery_state = delivery;
+                delivery_changed = true;
+            }
+        }
+    }
     if state.collaboration_configured {
         state.objects.retain(configured_shared_object_visible);
         state
@@ -4994,8 +5031,17 @@ fn apply_active_poll_state(
         || previous_participants != state.participants
         || previous_status_badge != state.status_badge
         || previous_status_detail != state.status_detail;
-    let changed = changed || previous_history != state.history;
+    let changed = changed || previous_history != state.history || delivery_changed;
     (attachments_to_cache, changed)
+}
+
+fn community_delivery_label(state: Option<CommunityDeliveryState>) -> Option<&'static str> {
+    match state {
+        Some(CommunityDeliveryState::Sending) => Some("Sending"),
+        Some(CommunityDeliveryState::Expired) => Some("Expired"),
+        Some(CommunityDeliveryState::Unknown) => Some("Delivery status unavailable"),
+        Some(CommunityDeliveryState::Accepted) | None => None,
+    }
 }
 
 fn apply_active_poll_if_current(
@@ -5370,6 +5416,7 @@ mod tests {
     #[test]
     fn a_lost_home_session_shows_how_to_reconnect_until_it_is_back() {
         let poll = || RoomPollView {
+            own_delivery: Vec::new(),
             room_slug: "chat-room".to_string(),
             display_name: "Shared room".to_string(),
             latest_seq: 1,
@@ -5437,6 +5484,7 @@ mod tests {
 
     fn shared_poll(latest_seq: u64) -> RoomPollView {
         RoomPollView {
+            own_delivery: Vec::new(),
             room_slug: "chat-room".to_string(),
             display_name: "Shared room".to_string(),
             latest_seq,
@@ -5447,8 +5495,77 @@ mod tests {
     }
 
     #[test]
+    fn runtime_delivery_changes_refresh_known_community_rows_without_new_sequence() {
+        use super::CommunityDeliveryState::{Accepted, Expired, Sending, Unknown};
+        let object = |seq, is_own| ConversationObjectView {
+            delivery_state: None,
+            seq,
+            sender: if is_own { "Local" } else { "Peer" }.into(),
+            sender_ref: None,
+            sender_profile_verified: Some(true),
+            from_current_session: is_own,
+            kind: ConversationObjectKind::Text,
+            body: Some(format!("original {seq}")),
+            emoji: None,
+            link: None,
+            attachment: None,
+            created_at: 100,
+        };
+        let poll = |delivery, objects| RoomPollView {
+            objects,
+            own_delivery: vec![super::CommunityDeliveryView {
+                seq: 1,
+                state: delivery,
+            }],
+            transport: RoomTransportView {
+                configured: true,
+                available: true,
+                community_joined: Some(true),
+                ..RoomTransportView::default()
+            },
+            ..shared_poll(2)
+        };
+        let mut state = two_direct_conversations();
+        state.session_active = true;
+        state.drafts.insert(None, ("unsent draft".into(), 1));
+        let direct = state.direct.clone();
+        let drafts = state.drafts.clone();
+        apply_active_poll_state(
+            &mut state,
+            poll(Sending, vec![object(1, true), object(2, false)]),
+        );
+        assert_eq!(state.objects[0].delivery_state, Some(Sending));
+        for (delivery, label) in [
+            (Accepted, None),
+            (Expired, Some("Expired")),
+            (Unknown, Some("Delivery status unavailable")),
+            (Sending, Some("Sending")),
+        ] {
+            assert!(apply_active_poll_state(&mut state, poll(delivery, vec![])).1);
+            assert_eq!(state.latest_seq, 2);
+            assert_eq!(state.objects.len(), 2);
+            assert_eq!(state.objects[0].body.as_deref(), Some("original 1"));
+            assert_eq!(state.objects[0].delivery_state, Some(delivery));
+            assert_eq!(
+                super::community_delivery_label(state.objects[0].delivery_state),
+                label
+            );
+            assert_eq!(state.objects[1].delivery_state, None);
+            assert_eq!(state.direct, direct);
+            assert_eq!(state.drafts, drafts);
+            assert!(!apply_active_poll_state(&mut state, poll(delivery, vec![])).1);
+        }
+        let mut no_evidence = poll(Sending, vec![]);
+        no_evidence.own_delivery.clear();
+        assert!(apply_active_poll_state(&mut state, no_evidence).1);
+        assert_eq!(state.objects[0].delivery_state, None);
+        assert_eq!(super::community_delivery_label(None), None);
+    }
+
+    #[test]
     fn recovered_history_changes_display_order_without_rewinding_poll_cursor() {
         let object = |seq, created_at| ConversationObjectView {
+            delivery_state: None,
             seq,
             created_at,
             sender: "Peer".into(),
@@ -5516,6 +5633,7 @@ mod tests {
         let mut state = two_direct_conversations();
         state.session_active = true;
         state.objects.push(ConversationObjectView {
+            delivery_state: None,
             seq: 1,
             created_at: 100,
             sender: "Peer".into(),
@@ -5650,6 +5768,7 @@ mod tests {
     #[test]
     fn a_late_community_send_does_not_move_a_direct_reader() {
         let sent = || ConversationObjectView {
+            delivery_state: None,
             seq: 7,
             sender: "Me".into(),
             sender_ref: None,
@@ -5676,6 +5795,7 @@ mod tests {
     #[test]
     fn a_late_community_receipt_keeps_one_object_and_the_newer_poll_cursor() {
         let object = |seq, sender: &str, body: &str| ConversationObjectView {
+            delivery_state: None,
             seq,
             sender: sender.into(),
             sender_ref: None,
@@ -5703,6 +5823,7 @@ mod tests {
         let revisions = (state.composer_revision, state.composer_edits);
 
         let poll = RoomPollView {
+            own_delivery: Vec::new(),
             objects: vec![sent.clone(), newer_peer],
             ..shared_poll(9)
         };
@@ -6098,6 +6219,7 @@ mod tests {
         assert_eq!(participant_detail(&participant, false, false), "active now");
 
         let object = ConversationObjectView {
+            delivery_state: None,
             sender_ref: None,
             seq: 1,
             sender: "Owner".to_string(),
@@ -6117,6 +6239,7 @@ mod tests {
     fn configured_chat_defensively_omits_false_or_none_rows_before_render() {
         let mut state = AppState::default();
         let poll = RoomPollView {
+            own_delivery: Vec::new(),
             room_slug: "chat-room".to_string(),
             display_name: "Shared room".to_string(),
             latest_seq: 4,
@@ -6164,6 +6287,7 @@ mod tests {
             ],
             objects: vec![
                 ConversationObjectView {
+                    delivery_state: None,
                     sender_ref: None,
                     seq: 1,
                     sender: "Owner".to_string(),
@@ -6177,6 +6301,7 @@ mod tests {
                     created_at: 1,
                 },
                 ConversationObjectView {
+                    delivery_state: None,
                     sender_ref: None,
                     seq: 2,
                     sender: "Wrong profile".to_string(),
@@ -6190,6 +6315,7 @@ mod tests {
                     created_at: 2,
                 },
                 ConversationObjectView {
+                    delivery_state: None,
                     sender_ref: None,
                     seq: 3,
                     sender: "Wrong endpoint".to_string(),
@@ -6203,6 +6329,7 @@ mod tests {
                     created_at: 3,
                 },
                 ConversationObjectView {
+                    delivery_state: None,
                     sender_ref: None,
                     seq: 4,
                     sender: String::new(),
@@ -6549,6 +6676,17 @@ mod tests {
             browser_session_request_storage_key: "test-key".to_string(),
         };
         let mut state = super::load_state(None, &config);
+        state.objects = vec![serde_json::from_value(serde_json::json!({
+            "seq": 1,
+            "sender": "Configured User",
+            "sender_profile_verified": true,
+            "from_current_session": true,
+            "kind": "text",
+            "body": "own original",
+            "created_at": 1,
+            "delivery_state": "sending"
+        }))
+        .unwrap()];
         state.direct.conversations = vec![DirectConversationView {
             conversation_id: "direct:sha256:fixture-conversation".to_string(),
             display_name: "Fixture Friend".to_string(),
@@ -6572,6 +6710,7 @@ mod tests {
                 "is_current_session": true
             }],
             "objects": [],
+            "own_delivery": [{"seq": 1, "state": "accepted"}],
             "transport": {
                 "configured": true,
                 "available": true,
@@ -6587,6 +6726,11 @@ mod tests {
             Some("direct:sha256:fixture-conversation")
         );
         assert!(!state.session_active);
+        assert_eq!(
+            state.objects[0].delivery_state,
+            Some(super::CommunityDeliveryState::Sending)
+        );
+        assert_eq!(state.objects[0].body.as_deref(), Some("own original"));
     }
 
     #[test]

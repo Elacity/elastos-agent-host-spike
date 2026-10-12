@@ -166,6 +166,24 @@ pub struct ConversationObjectView {
     #[serde(default)]
     pub attachment: Option<AttachmentView>,
     pub created_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_state: Option<CommunityDeliveryState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommunityDeliveryState {
+    Sending,
+    /// A verified remote receipt exists; other participants may still be pending.
+    Accepted,
+    Expired,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommunityDeliveryView {
+    pub seq: u64,
+    pub state: CommunityDeliveryState,
 }
 
 #[derive(Debug, Clone)]
@@ -329,6 +347,8 @@ pub struct RoomPollView {
     pub objects: Vec<ConversationObjectView>,
     #[serde(default)]
     pub transport: RoomTransportView,
+    #[serde(default)]
+    pub own_delivery: Vec<CommunityDeliveryView>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -779,6 +799,8 @@ struct ConversationObjectRecord {
     #[serde(default)]
     attachment: Option<AttachmentView>,
     created_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delivery_state: Option<CommunityDeliveryState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2766,6 +2788,7 @@ pub fn room_poll(data_dir: &Path, token: &str, since: u64) -> anyhow::Result<Roo
             .map(|item| object_view_from_record(item, Some(&current_session)))
             .collect::<Vec<_>>();
         Ok(RoomPollView {
+            own_delivery: Vec::new(),
             room_slug,
             display_name,
             expires_at,
@@ -2806,6 +2829,7 @@ pub fn append_object_with_transport(
         let object = push_object(
             state,
             ConversationObjectRecord {
+                delivery_state: None,
                 seq: 0,
                 event_id: new_object_event_id(),
                 collaboration_scope: None,
@@ -2874,9 +2898,8 @@ pub(crate) fn project_collaboration_text(
 
         if let Some(existing) = state
             .objects
-            .iter()
+            .iter_mut()
             .find(|object| object.event_id == event_id)
-            .cloned()
         {
             if existing.collaboration_scope.as_ref() != Some(&scope)
                 || existing.sender != sender
@@ -2891,12 +2914,19 @@ pub(crate) fn project_collaboration_text(
             {
                 anyhow::bail!("collaboration projection event conflicts with stored Chat object");
             }
-            return Ok(object_view_from_record(existing, current_session.as_ref()));
+            if local_session_token.is_some() && existing.delivery_state.is_none() {
+                existing.delivery_state = Some(CommunityDeliveryState::Sending);
+            }
+            return Ok(object_view_from_record(
+                existing.clone(),
+                current_session.as_ref(),
+            ));
         }
 
         let object = push_object(
             state,
             ConversationObjectRecord {
+                delivery_state: local_session_token.map(|_| CommunityDeliveryState::Sending),
                 seq: 0,
                 event_id,
                 collaboration_scope: Some(scope),
@@ -2953,36 +2983,108 @@ pub(crate) fn collaboration_room_poll(
 ) -> anyhow::Result<RoomPollView> {
     let scope = collaboration_object_scope(network_id, conversation_id)?;
     with_expired_read_state(data_dir, |state| {
-        let (display_name, expires_at, current_session) = {
-            let session = validate_session_for_read(state, token)?;
-            (
-                session.display_name.clone(),
-                session.expires_at,
-                current_session_identity(session),
-            )
-        };
-        let participants =
-            participant_views_from_state(state, Some(&current_session), Some(&scope));
-        let objects = state
-            .objects
+        collaboration_poll_from_state(state, token, &scope, since)
+    })
+}
+
+/// Refresh only this authenticated Profile's original rows. The snapshot is
+/// independent of the feed cursor, so receipt/expiry changes preserve seq.
+pub(crate) fn collaboration_room_poll_with_delivery(
+    data_dir: &Path,
+    token: &str,
+    scope: (&str, &str),
+    since: u64,
+    reader_profile_did: &str,
+    delivery: &[crate::collaboration_core::OutgoingChatDeliveryEvidence],
+    now: u64,
+) -> anyhow::Result<RoomPollView> {
+    let scope = collaboration_object_scope(scope.0, scope.1)?;
+    let reader = normalize_member_did(reader_profile_did)?;
+    let paths = storage_paths(data_dir)?;
+    let lockfile = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&paths.lock_path)?;
+    let lock = lock_state_file(lockfile)?;
+    let result = (|| {
+        let mut state = load_state(&paths)?;
+        let _ = expire_state_in_place(&mut state);
+        let session = validate_session_for_read(&state, token)?;
+        if session.member_did.as_deref() != Some(reader.as_str()) {
+            anyhow::bail!("Chat delivery reader does not match the room Profile");
+        }
+        let evidence = delivery
             .iter()
-            .filter(|item| {
-                item.collaboration_scope.as_ref() == Some(&scope)
-                    && item.seq > since
-                    && verified_collaboration_sender_profile(item).is_some()
+            .map(|entry| (entry.envelope_sha256.as_str(), entry))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut changed = false;
+        for object in &mut state.objects {
+            if object.collaboration_scope.as_ref() != Some(&scope)
+                || object.sender_member_did.as_deref() != Some(reader.as_str())
+                || verified_collaboration_sender_profile(object).is_none()
+            {
+                continue;
+            }
+            let next = match evidence.get(object.event_id.as_str()) {
+                Some(entry) if entry.accepted => Some(CommunityDeliveryState::Accepted),
+                Some(entry) if entry.expires_at <= now => Some(CommunityDeliveryState::Expired),
+                Some(_) => Some(CommunityDeliveryState::Sending),
+                None if object.delivery_state == Some(CommunityDeliveryState::Sending) => {
+                    Some(CommunityDeliveryState::Unknown)
+                }
+                None => object.delivery_state,
+            };
+            if object.delivery_state != next {
+                object.delivery_state = next;
+                changed = true;
+            }
+        }
+        if changed {
+            write_json_atomic(&paths.objects_path, &state.objects)?;
+        }
+        collaboration_poll_from_state(&state, token, &scope, since)
+    })();
+    unlock_state_file(lock)?;
+    result
+}
+
+fn collaboration_poll_from_state(
+    state: &RoomState,
+    token: &str,
+    scope: &CollaborationObjectScope,
+    since: u64,
+) -> anyhow::Result<RoomPollView> {
+    let session = validate_session_for_read(state, token)?;
+    let current_session = current_session_identity(session);
+    let participants = participant_views_from_state(state, Some(&current_session), Some(scope));
+    let scoped = state.objects.iter().filter(|item| {
+        item.collaboration_scope.as_ref() == Some(scope)
+            && verified_collaboration_sender_profile(item).is_some()
+    });
+    let own_delivery = scoped
+        .clone()
+        .filter(|item| item.sender_member_did.as_deref() == current_session.member_did.as_deref())
+        .filter_map(|item| {
+            item.delivery_state.map(|delivery| CommunityDeliveryView {
+                seq: item.seq,
+                state: delivery,
             })
-            .cloned()
-            .map(|item| object_view_from_record(item, Some(&current_session)))
-            .collect::<Vec<_>>();
-        Ok(RoomPollView {
-            room_slug: state.room_slug.clone(),
-            display_name,
-            expires_at,
-            latest_seq: objects.last().map(|item| item.seq).unwrap_or(since),
-            participants,
-            objects,
-            transport: RoomTransportView::default(),
         })
+        .collect();
+    let objects = scoped
+        .filter(|item| item.seq > since)
+        .cloned()
+        .map(|item| object_view_from_record(item, Some(&current_session)))
+        .collect::<Vec<_>>();
+    Ok(RoomPollView {
+        room_slug: state.room_slug.clone(),
+        display_name: session.display_name.clone(),
+        expires_at: session.expires_at,
+        latest_seq: objects.last().map(|item| item.seq).unwrap_or(since),
+        participants,
+        objects,
+        transport: RoomTransportView::default(),
+        own_delivery,
     })
 }
 
@@ -3031,6 +3133,7 @@ pub fn ingest_room_object_envelope(
         let object = push_object(
             state,
             ConversationObjectRecord {
+                delivery_state: None,
                 seq: 0,
                 event_id,
                 collaboration_scope: None,
@@ -4225,6 +4328,7 @@ fn append_attachment_record(
     let object = push_object(
         state,
         ConversationObjectRecord {
+            delivery_state: None,
             seq: 0,
             event_id: new_object_event_id(),
             collaboration_scope: None,
@@ -4252,6 +4356,7 @@ fn push_system_object(
     push_object(
         state,
         ConversationObjectRecord {
+            delivery_state: None,
             seq: 0,
             event_id: new_object_event_id(),
             collaboration_scope: None,
@@ -4290,6 +4395,7 @@ fn push_member_system_object_for_actor(
     push_object(
         state,
         ConversationObjectRecord {
+            delivery_state: None,
             seq: 0,
             event_id: new_object_event_id(),
             collaboration_scope: None,
@@ -4360,7 +4466,13 @@ fn object_view_from_record(
     } else {
         object.sender_profile.as_ref().map(|_| true)
     };
+    let delivery_state = current_session
+        .filter(|session| {
+            session.member_did.is_some() && session.member_did == object.sender_member_did
+        })
+        .and(object.delivery_state);
     ConversationObjectView {
+        delivery_state,
         sender_profile_verified,
         seq: object.seq,
         sender: verified_sender_profile
@@ -6774,6 +6886,7 @@ mod tests {
                 removed_by: None,
             });
             state.objects.push(ConversationObjectRecord {
+                delivery_state: None,
                 seq: 1,
                 event_id: "evt-admin".to_string(),
                 collaboration_scope: None,
@@ -6789,6 +6902,7 @@ mod tests {
                 created_at: 10,
             });
             state.objects.push(ConversationObjectRecord {
+                delivery_state: None,
                 seq: 2,
                 event_id: "evt-guest".to_string(),
                 collaboration_scope: None,
@@ -7425,6 +7539,7 @@ mod tests {
                 push_object(
                     state,
                     ConversationObjectRecord {
+                        delivery_state: None,
                         seq: 0,
                         event_id: format!("sha256:{index:064x}"),
                         collaboration_scope: Some(scope.clone()),
@@ -7895,6 +8010,7 @@ mod tests {
         let scope = collaboration_object_scope("network-one", "conversation-one").unwrap();
         with_locked_state(tmp.path(), |_, state| {
             state.objects.push(ConversationObjectRecord {
+                delivery_state: None,
                 seq: 2,
                 event_id: "evt-mismatch".to_string(),
                 collaboration_scope: Some(scope.clone()),
@@ -7938,6 +8054,7 @@ mod tests {
             scope: Option<CollaborationObjectScope>,
         ) -> ConversationObjectRecord {
             ConversationObjectRecord {
+                delivery_state: None,
                 seq: 0,
                 event_id,
                 collaboration_scope: scope,

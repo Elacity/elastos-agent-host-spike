@@ -127,6 +127,14 @@ impl DurableOutgoingMessage {
     }
 }
 
+/// Product read evidence from the verified, bounded outgoing store. It includes
+/// expired originals while Core retains them; it does not change retry selection.
+pub(crate) struct OutgoingChatDeliveryEvidence {
+    pub(crate) envelope_sha256: String,
+    pub(crate) expires_at: u64,
+    pub(crate) accepted: bool,
+}
+
 #[derive(Debug)]
 pub(crate) struct DurableIncomingAcceptance {
     authorized: AuthorizedDefaultConversationMessage,
@@ -1102,6 +1110,34 @@ impl CollaborationCore {
                 Err(err) => Some(Err(err)),
             })
             .collect()
+    }
+
+    pub(crate) fn outgoing_chat_delivery(
+        &self,
+        reader_profile_did: &str,
+    ) -> anyhow::Result<Vec<OutgoingChatDeliveryEvidence>> {
+        // load_state verifies the namespace, original signatures, request
+        // bindings and every stored receipt once for this response.
+        let state = self.load_state()?.unwrap_or_else(|| self.empty_state());
+        let mut delivery = Vec::new();
+        for entry in state.outgoing {
+            if entry.local_product_projection != OutgoingProductProjectionState::Complete {
+                continue;
+            }
+            let message: SignedCollaborationMessage = serde_json::from_str(&entry.envelope)?;
+            if message.payload.payload_type == COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE
+                && message.payload.sender_profile_did == reader_profile_did
+            {
+                delivery.push(OutgoingChatDeliveryEvidence {
+                    envelope_sha256: collaboration_message_envelope_sha256(
+                        entry.envelope.as_bytes(),
+                    ),
+                    expires_at: message.payload.expires_at,
+                    accepted: !entry.remote_acceptance_receipts.is_empty(),
+                });
+            }
+        }
+        Ok(delivery)
     }
 
     pub(crate) fn pending_outgoing_product_projections(

@@ -384,7 +384,18 @@ impl CollaborationChatProductPort {
         mark_read: bool,
         now: u64,
     ) -> anyhow::Result<crate::room_service::RoomPollView> {
-        let poll = self.conversation_poll(data_dir, token, since)?;
+        let delivery = self
+            .core
+            .outgoing_chat_delivery(&reader.document().profile_did)?;
+        let poll = crate::room_service::collaboration_room_poll_with_delivery(
+            data_dir,
+            token,
+            self.core.conversation_scope(),
+            since,
+            &reader.document().profile_did,
+            &delivery,
+            now,
+        )?;
         if mark_read {
             let read_through = poll
                 .objects
@@ -1010,6 +1021,347 @@ mod tests {
         )
         .unwrap();
         (authority, person_profile)
+    }
+
+    fn delivery_poll(
+        fixture: &Fixture,
+        token: &str,
+        since: u64,
+        now: u64,
+    ) -> crate::room_service::RoomPollView {
+        fixture
+            .port
+            .conversation_poll_with_read_intent(
+                &fixture.data_root,
+                token,
+                since,
+                &fixture.person_profile,
+                false,
+                now,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn community_delivery_receipt_refreshes_own_row_without_settling_other_peers() {
+        use crate::room_service::CommunityDeliveryState::{Accepted, Sending};
+        let fixture = fixture();
+        let now = now_secs();
+        let session = crate::room_service::start_local_runtime_session(
+            &fixture.data_root,
+            &fixture.person_profile.document().profile_did,
+            "Local",
+            "Delivery test",
+        )
+        .unwrap();
+        let prepared = fixture
+            .port
+            .prepare_message(
+                binding(&fixture, "delivery-own", "own original"),
+                "own original",
+                &fixture.person_profile,
+                now,
+            )
+            .unwrap();
+        let own = fixture
+            .port
+            .project_prepared_message(&fixture.data_root, &prepared, Some(&session.token))
+            .unwrap();
+        assert_eq!(own.delivery_state, Some(Sending));
+        let pending = delivery_poll(&fixture, &session.token, own.seq, now);
+        assert!(pending.objects.is_empty());
+        assert_eq!(pending.latest_seq, own.seq);
+        assert_eq!(pending.own_delivery[0].state, Sending);
+
+        let (remote, remote_profile) = remote_authority(&fixture);
+        let accepted = remote
+            .authorize_incoming(
+                &prepared.envelope_bytes,
+                &fixture.core.local_device_did(),
+                now + 1,
+            )
+            .unwrap();
+        fixture
+            .core
+            .record_home_chat_acceptance(
+                &remote
+                    .prepare_acceptance_receipt(&accepted, now + 1)
+                    .unwrap(),
+                &prepared.envelope_sha256,
+                &remote.local_device_did(),
+                now + 1,
+            )
+            .unwrap();
+        let refreshed = delivery_poll(&fixture, &session.token, own.seq, now + 1);
+        assert!(refreshed.objects.is_empty());
+        assert_eq!(refreshed.latest_seq, own.seq);
+        assert_eq!(refreshed.own_delivery[0].state, Accepted);
+        let retries = fixture.core.pending_outgoing(now + 1).unwrap();
+        assert_eq!(retries.len(), 1);
+        assert!(retries[0].accepted_by(&remote.local_device_did()));
+        assert!(!retries[0].accepted_by(&remote_authority(&fixture).0.local_device_did()));
+
+        let incoming = remote
+            .prepare_profile_outgoing(
+                &remote_profile,
+                CHAT_SERVICE,
+                CHAT_PAYLOAD_TYPE,
+                serde_json::json!({"body":"received original"}),
+                now + 2,
+                CHAT_MESSAGE_TTL_SECS,
+            )
+            .unwrap();
+        fixture
+            .core
+            .accept_incoming_from_signed_source_for_test(incoming.envelope_bytes(), now + 2)
+            .unwrap();
+        fixture
+            .port
+            .project_handoff(
+                &fixture.data_root,
+                &fixture.port.pending_messages().unwrap().remove(0),
+            )
+            .unwrap();
+        let view = delivery_poll(&fixture, &session.token, 0, now + 2);
+        assert_eq!(view.own_delivery.len(), 1);
+        assert_eq!(view.objects[1].delivery_state, None);
+        assert_eq!(view.objects[0].body.as_deref(), Some("own original"));
+        let private_projection = serde_json::to_value(&view.own_delivery).unwrap();
+        assert_eq!(
+            private_projection,
+            serde_json::json!([{ "seq": own.seq, "state": "accepted" }])
+        );
+        let later = prepared.expires_at
+            + elastos_common::collaboration_protocol::MAX_COLLABORATION_CLOCK_SKEW_SECS
+            + 1;
+        fixture
+            .port
+            .prepare_message(
+                binding(&fixture, "after-accepted", "new intent"),
+                "new intent",
+                &fixture.person_profile,
+                later,
+            )
+            .unwrap();
+        let retained = fixture
+            .port
+            .conversation_poll(&fixture.data_root, &session.token, 0)
+            .unwrap();
+        assert_eq!(retained.objects[0].delivery_state, Some(Accepted));
+    }
+
+    #[test]
+    fn community_delivery_observed_expiry_survives_core_pruning_and_restart() {
+        use crate::room_service::CommunityDeliveryState::Expired;
+        let fixture = fixture();
+        let now = now_secs();
+        let session = crate::room_service::start_local_runtime_session(
+            &fixture.data_root,
+            &fixture.person_profile.document().profile_did,
+            "Local",
+            "Expiry test",
+        )
+        .unwrap();
+        let prepared = fixture
+            .port
+            .prepare_message(
+                binding(&fixture, "expiry-own", "retained original"),
+                "retained original",
+                &fixture.person_profile,
+                now,
+            )
+            .unwrap();
+        let own = fixture
+            .port
+            .project_prepared_message(&fixture.data_root, &prepared, Some(&session.token))
+            .unwrap();
+        let history = fixture.core.conversation_history(now).unwrap();
+        let expired = delivery_poll(&fixture, &session.token, own.seq, prepared.expires_at);
+        assert!(expired.objects.is_empty());
+        assert_eq!(expired.own_delivery[0].state, Expired);
+        let later = prepared.expires_at
+            + elastos_common::collaboration_protocol::MAX_COLLABORATION_CLOCK_SKEW_SECS
+            + 1;
+        fixture
+            .port
+            .prepare_message(
+                binding(&fixture, "after-expiry", "new intent"),
+                "new intent",
+                &fixture.person_profile,
+                later,
+            )
+            .unwrap();
+        assert!(fixture
+            .core
+            .outgoing_chat_delivery(&fixture.person_profile.document().profile_did)
+            .unwrap()
+            .is_empty());
+        let restarted = CollaborationChatProductPort::new(Arc::new(
+            CollaborationCore::new(
+                &fixture.data_root,
+                fixture.device_key.clone(),
+                fixture.profile.clone(),
+                fixture.grant.clone(),
+                CHAT_ROOM_CAPSULE,
+            )
+            .unwrap(),
+        ))
+        .unwrap();
+        let reopened = restarted
+            .conversation_poll_with_read_intent(
+                &fixture.data_root,
+                &session.token,
+                0,
+                &fixture.person_profile,
+                false,
+                later,
+            )
+            .unwrap();
+        assert_eq!(reopened.objects[0].delivery_state, Some(Expired));
+        assert_eq!(reopened.objects[0].seq, own.seq);
+        assert_eq!(
+            reopened.objects[0].body.as_deref(),
+            Some("retained original")
+        );
+        assert_eq!(fixture.core.conversation_history(later).unwrap(), history);
+    }
+
+    #[test]
+    fn community_delivery_lost_evidence_is_unknown_without_labeling_unobserved_history() {
+        use crate::room_service::CommunityDeliveryState::{Sending, Unknown};
+        let fixture = fixture();
+        let now = now_secs();
+        let session = crate::room_service::start_local_runtime_session(
+            &fixture.data_root,
+            &fixture.person_profile.document().profile_did,
+            "Local",
+            "Unknown test",
+        )
+        .unwrap();
+        let prepared = fixture
+            .port
+            .prepare_message(
+                binding(&fixture, "unknown-own", "observed original"),
+                "observed original",
+                &fixture.person_profile,
+                now,
+            )
+            .unwrap();
+        let own = fixture
+            .port
+            .project_prepared_message(&fixture.data_root, &prepared, Some(&session.token))
+            .unwrap();
+        assert_eq!(
+            delivery_poll(&fixture, &session.token, own.seq, now).own_delivery[0].state,
+            Sending
+        );
+        let old = fixture
+            .port
+            .prepare_message(
+                binding(&fixture, "unobserved-own", "unobserved original"),
+                "unobserved original",
+                &fixture.person_profile,
+                now + 1,
+            )
+            .unwrap();
+        fixture
+            .port
+            .project_prepared_message(&fixture.data_root, &old, None)
+            .unwrap();
+        let later = old.expires_at
+            + elastos_common::collaboration_protocol::MAX_COLLABORATION_CLOCK_SKEW_SECS
+            + 1;
+        fixture
+            .port
+            .prepare_message(
+                binding(&fixture, "after-unknown", "new intent"),
+                "new intent",
+                &fixture.person_profile,
+                later,
+            )
+            .unwrap();
+        let view = delivery_poll(&fixture, &session.token, 0, later);
+        assert_eq!(view.own_delivery.len(), 1);
+        assert_eq!(view.own_delivery[0].state, Unknown);
+        assert_eq!(view.objects[0].delivery_state, Some(Unknown));
+        assert_eq!(view.objects[1].delivery_state, None);
+        assert_eq!(view.objects.len(), 2);
+    }
+
+    #[test]
+    fn community_delivery_is_private_to_the_current_profile_and_original_scope() {
+        let fixture = fixture();
+        let now = now_secs();
+        let session = crate::room_service::start_local_runtime_session(
+            &fixture.data_root,
+            &fixture.person_profile.document().profile_did,
+            "Local",
+            "Profile test",
+        )
+        .unwrap();
+        let prepared = fixture
+            .port
+            .prepare_message(
+                binding(&fixture, "private-own", "private original"),
+                "private original",
+                &fixture.person_profile,
+                now,
+            )
+            .unwrap();
+        fixture
+            .port
+            .project_prepared_message(&fixture.data_root, &prepared, Some(&session.token))
+            .unwrap();
+        let other = fixture
+            .port
+            .test_person_profile("Another profile", Some("another"));
+        let other_session = crate::room_service::start_local_runtime_session(
+            &fixture.data_root,
+            &other.document().profile_did,
+            "Another profile",
+            "Profile test",
+        )
+        .unwrap();
+        let other_view = fixture
+            .port
+            .conversation_poll_with_read_intent(
+                &fixture.data_root,
+                &other_session.token,
+                0,
+                &other,
+                false,
+                now,
+            )
+            .unwrap();
+        assert!(other_view.own_delivery.is_empty());
+        assert_eq!(other_view.objects[0].delivery_state, None);
+        assert!(fixture
+            .port
+            .conversation_poll_with_read_intent(
+                &fixture.data_root,
+                &session.token,
+                0,
+                &other,
+                false,
+                now,
+            )
+            .is_err());
+        let snapshot = fixture
+            .core
+            .outgoing_chat_delivery(&fixture.person_profile.document().profile_did)
+            .unwrap();
+        let foreign_scope = crate::room_service::collaboration_room_poll_with_delivery(
+            &fixture.data_root,
+            &session.token,
+            ("foreign-network", "foreign-conversation"),
+            0,
+            &fixture.person_profile.document().profile_did,
+            &snapshot,
+            now,
+        )
+        .unwrap();
+        assert!(foreign_scope.objects.is_empty());
+        assert!(foreign_scope.own_delivery.is_empty());
     }
 
     #[test]

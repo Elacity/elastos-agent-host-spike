@@ -1055,6 +1055,8 @@ struct GatewayRoomPollView {
     objects: Vec<GatewayConversationObjectView>,
     #[serde(default)]
     transport: crate::room_service::RoomTransportView,
+    #[serde(default)]
+    own_delivery: Vec<crate::room_service::CommunityDeliveryView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1081,6 +1083,8 @@ struct GatewayConversationObjectView {
     #[serde(skip_serializing_if = "Option::is_none")]
     attachment: Option<crate::room_service::AttachmentView>,
     created_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delivery_state: Option<crate::room_service::CommunityDeliveryState>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1176,9 +1180,7 @@ impl GatewayRoomPollView {
                 continue;
             }
             if let Some(member_did) = object.sender_member_did.as_deref() {
-                object.sender_ref = Some(home_people_contact_id(
-                    member_did,
-                ));
+                object.sender_ref = Some(home_people_contact_id(member_did));
             }
         }
     }
@@ -1288,6 +1290,7 @@ impl From<crate::room_service::RoomPollView> for GatewayRoomPollView {
                 .map(GatewayConversationObjectView::from)
                 .collect(),
             transport: view.transport,
+            own_delivery: view.own_delivery,
         }
     }
 }
@@ -1307,6 +1310,7 @@ impl From<crate::room_service::ConversationObjectView> for GatewayConversationOb
             link: view.link,
             attachment: view.attachment,
             created_at: view.created_at,
+            delivery_state: view.delivery_state,
         }
     }
 }

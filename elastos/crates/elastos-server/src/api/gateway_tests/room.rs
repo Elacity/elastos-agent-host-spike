@@ -2424,6 +2424,7 @@ fn test_participant_cards_project_relationships_without_dids() {
         .insert("did:key:zVisible".to_string());
     directory.present.insert("did:key:zContact".to_string());
     let mut poll = GatewayRoomPollView {
+        own_delivery: Vec::new(),
         room_slug: "community".to_string(),
         display_name: "Community".to_string(),
         latest_seq: 0,
