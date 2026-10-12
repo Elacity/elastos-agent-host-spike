@@ -2854,6 +2854,15 @@ pub fn append_object_with_transport(
     })
 }
 
+/// Product direction is durable; the local session supplies only UI attribution.
+pub(crate) enum CollaborationTextOrigin<'a> {
+    Incoming,
+    Outgoing {
+        local_session_token: Option<&'a str>,
+    },
+}
+
+/// Outgoing rows keep delivery state independently of a local Chat session.
 pub(crate) fn project_collaboration_text(
     data_dir: &Path,
     scope: (&str, &str),
@@ -2861,8 +2870,14 @@ pub(crate) fn project_collaboration_text(
     sender_profile: &RoomProfileCardView,
     body: &str,
     issued_at: u64,
-    local_session_token: Option<&str>,
+    origin: CollaborationTextOrigin<'_>,
 ) -> anyhow::Result<ConversationObjectView> {
+    let (outgoing, local_session_token) = match origin {
+        CollaborationTextOrigin::Incoming => (false, None),
+        CollaborationTextOrigin::Outgoing {
+            local_session_token,
+        } => (true, local_session_token),
+    };
     let CollaborationTextProjection {
         scope,
         event_id,
@@ -2903,7 +2918,7 @@ pub(crate) fn project_collaboration_text(
             {
                 anyhow::bail!("collaboration projection event conflicts with stored Chat object");
             }
-            if local_session_token.is_some() && existing.delivery_state.is_none() {
+            if outgoing && existing.delivery_state.is_none() {
                 existing.delivery_state = Some(CommunityDeliveryState::Sending);
             }
             return Ok(object_view_from_record(
@@ -2915,7 +2930,7 @@ pub(crate) fn project_collaboration_text(
         let object = push_object(
             state,
             ConversationObjectRecord {
-                delivery_state: local_session_token.map(|_| CommunityDeliveryState::Sending),
+                delivery_state: outgoing.then_some(CommunityDeliveryState::Sending),
                 seq: 0,
                 event_id,
                 collaboration_scope: Some(scope),
@@ -3031,6 +3046,7 @@ pub(crate) fn collaboration_room_poll(
 
 /// Core records terminal outcomes before it prunes their signed evidence.
 /// Existing Chat rows keep those outcomes while Chat is closed or restarted.
+/// Matching Core originals also repair legacy rows with an empty delivery state.
 pub(crate) fn persist_collaboration_delivery(
     data_dir: &Path,
     scope: (&str, &str),
@@ -3062,7 +3078,6 @@ pub(crate) fn persist_collaboration_delivery(
             if object.collaboration_scope.as_ref() != Some(&scope)
                 || object.sender_member_did.as_deref() != Some(sender.as_str())
                 || verified_collaboration_sender_profile(object).is_none()
-                || object.delivery_state.is_none()
             {
                 continue;
             }
@@ -7651,7 +7666,7 @@ mod tests {
             &card(&remote),
             "remote",
             now_ts(),
-            None,
+            CollaborationTextOrigin::Incoming,
         )
         .unwrap();
         assert!(port
@@ -7782,7 +7797,9 @@ mod tests {
             &local_profile,
             "scoped local message",
             1_800_000_000,
-            Some(&session.token),
+            CollaborationTextOrigin::Outgoing {
+                local_session_token: Some(&session.token),
+            },
         )
         .unwrap();
         assert!(first.from_current_session);
@@ -7793,7 +7810,9 @@ mod tests {
             &local_profile,
             "scoped local message",
             1_800_000_000,
-            Some(&session.token),
+            CollaborationTextOrigin::Outgoing {
+                local_session_token: Some(&session.token),
+            },
         )
         .unwrap();
         assert_eq!(replay.seq, first.seq);
@@ -7805,7 +7824,7 @@ mod tests {
             &remote_profile,
             "other scoped message",
             1_800_000_001,
-            None,
+            CollaborationTextOrigin::Incoming,
         )
         .unwrap();
         assert!(!second.from_current_session);
@@ -7892,7 +7911,9 @@ mod tests {
             &local_profile,
             "changed",
             1_800_000_000,
-            Some(&session.token),
+            CollaborationTextOrigin::Outgoing {
+                local_session_token: Some(&session.token),
+            },
         )
         .is_err());
         assert!(project_collaboration_text(
@@ -7902,7 +7923,9 @@ mod tests {
             &local_profile,
             "scoped local message",
             1_800_000_000,
-            Some(&session.token),
+            CollaborationTextOrigin::Outgoing {
+                local_session_token: Some(&session.token),
+            },
         )
         .is_err());
         assert_eq!(
@@ -7969,7 +7992,7 @@ mod tests {
             &remote_profile,
             "remote first message",
             1_800_000_002,
-            None,
+            CollaborationTextOrigin::Incoming,
         )
         .unwrap();
         let empty_state = load_state(&storage_paths(empty.path()).unwrap()).unwrap();
@@ -8004,7 +8027,9 @@ mod tests {
             &profile,
             "configured message",
             now_ts(),
-            Some(&session.token),
+            CollaborationTextOrigin::Outgoing {
+                local_session_token: Some(&session.token),
+            },
         )
         .unwrap();
         let before = room_state_snapshot(tmp.path());
