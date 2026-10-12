@@ -2928,6 +2928,7 @@ pub(crate) fn lock_owner_only_file(path: &Path) -> anyhow::Result<FileLock> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     use elastos_common::collaboration_protocol::{
         canonical_collaboration_acceptance_receipt_bytes, canonical_collaboration_message_bytes,
