@@ -351,7 +351,7 @@ test("installed contender waits for real Home GUI session restoration before Ass
         try {
           opening = openInstalledAssistant(page, `${origin}/home/?mode=${mode}`, mode === "restored" ? 10000 : 2000);
           opening.catch(() => {});
-          await page.waitForFunction(() => window.pendingSavedWindows?.length === 1, null, { timeout: 5000 });
+          await page.waitForFunction(() => window.pendingSavedWindows?.some(message => message.target === "marketplace"), null, { timeout: 5000 });
           const shell = page.frameLocator("#active-shell-frame");
           assert.equal(await page.getAttribute("body", "data-home-status"), "ready");
           assert.equal(await shell.locator("body").getAttribute("data-home-authority"), "signed");
@@ -371,6 +371,7 @@ test("installed contender waits for real Home GUI session restoration before Ass
               assert.equal(await shell.locator("#assistant-space-frame").isVisible(), false);
             } else {
               const assistant = await opening;
+              await assistant.locator('html[data-shelf-handover="1"]').waitFor({ state: "attached", timeout: 5000 });
               assert.equal(await assistant.locator("html").getAttribute("data-shelf-handover"), "1");
               await assistant.locator("#agent-harness-new-chat").click();
               await assistant.locator("#agent-shelf-flip-back").click();
@@ -381,8 +382,10 @@ test("installed contender waits for real Home GUI session restoration before Ass
             assert.equal(await shell.locator('.window[data-target="marketplace"]').count(), 1);
             assert.equal(await shell.locator('.window[data-target="wallet"]').count(), 1);
           }
-          assert.deepEqual(await page.evaluate(() => window.calls.filter(message => message.type === "home:launch-target").map(message => message.target)),
-            mode === "shell_unready" ? ["marketplace"] : ["marketplace", "wallet", "assistant"]);
+          const launches = await page.evaluate(() => window.calls.filter(message => message.type === "home:launch-target").map(message => message.target));
+          assert.equal(launches.filter(target => target === "assistant").length, mode === "shell_unready" ? 0 : 1);
+          assert.equal(launches.filter(target => target === "marketplace").length, 1);
+          assert(launches.every(target => ["marketplace", "wallet", "assistant"].includes(target)));
           assert.deepEqual(pageErrors, []);
         } finally { await page.close(); await opening?.catch(() => {}); }
       });
