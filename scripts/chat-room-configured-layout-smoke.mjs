@@ -14,6 +14,7 @@ const homeClipboardProtocol = join(repoRoot, "capsules/home/browser/home-clipboa
 const homeLayoutRoot = join(repoRoot, "capsules/home-gui/browser");
 const homeNavigationClient = join(repoRoot, "capsules/home/browser/home-navigation-client.js");
 const sharedRenderMarker = "Shared message before metadata";
+const communityDeliveryMarker = "Own Community message awaiting delivery";
 const brave = process.env.BRAVE_BIN || "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
 const require = createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url));
 const playwrightModule = process.env.ELASTOS_PLAYWRIGHT_MODULE
@@ -137,6 +138,7 @@ function startServer(scenario) {
   const initialDirectRecovery = scenario.startsWith("direct-initial-401");
   const sharedRecovery = scenario === "shared-poll-401";
   const sharedRenderOrdering = scenario === "shared-poll-render-before-metadata";
+  const communityDeliveryScenario = scenario === "community-delivery-status";
   const contactAcceptance = scenario.startsWith("contact-acceptance");
   const historyScenario = scenario === "history-status-order-calendar";
   const unreadScenario = scenario === "direct-unread" || scenario === "visible-read";
@@ -175,6 +177,8 @@ function startServer(scenario) {
     rejectSharedPoll: false,
     sharedMarkerReady: false,
     sharedMarkerPolled: false,
+    communityDeliveryState: "sending",
+    communityDeliveryPolls: [],
     peerAccepted: false,
     contactRequested: false,
     contactRequests: 0,
@@ -196,6 +200,15 @@ function startServer(scenario) {
     if (sharedRenderOrdering && trace.sharedMarkerReady) {
       poll.objects = [historyMessage(1, sharedRenderMarker, "2026-03-09T12:00:00Z")];
       poll.latest_seq = 1;
+    }
+    if (communityDeliveryScenario) {
+      poll.latest_seq = 2;
+      poll.own_delivery = [{ seq: 1, state: trace.communityDeliveryState }];
+      poll.objects = trace.current.polls === 0 ? [
+        { ...historyMessage(1, communityDeliveryMarker, "2026-03-09T12:00:00Z"),
+          sender: "Configured User", from_current_session: true, delivery_state: "sending" },
+        historyMessage(2, "Another person's Community message", "2026-03-09T12:00:01Z"),
+      ] : [];
     }
     if (historyScenario) {
       const details = {
@@ -369,7 +382,12 @@ function startServer(scenario) {
           return json(response, { error: "invalid or expired session" }, 401);
         }
         if (sharedRenderOrdering && trace.sharedMarkerReady) trace.sharedMarkerPolled = true;
-        return json(response, pollView());
+        const poll = pollView();
+        if (communityDeliveryScenario) trace.communityDeliveryPolls.push({
+          since: input.since, latest_seq: poll.latest_seq, object_count: poll.objects.length,
+          state: poll.own_delivery[0].state,
+        });
+        return json(response, poll);
       }
       if (url.pathname === "/api/apps/chat-room/contacts/request" && contactAcceptance) {
         assert(request.method === "POST", "contact request method differs");
@@ -668,6 +686,37 @@ async function runScenario(scenario) {
       trace.directListUnavailable = false;
       await error.waitFor({ state: "hidden" });
       assert(await frame.locator("#message-input").inputValue() === draft, "second recovery changed the draft");
+      return;
+    }
+
+    if (scenario === "community-delivery-status") {
+      await waitForConfiguredChatWithoutLegacyFlash(frame, "Community delivery status");
+      const own = frame.locator('#message-list [data-seq="1"]');
+      const other = frame.locator('#message-list [data-seq="2"]');
+      await frame.waitForFunction(() =>
+        document.querySelector('#message-list [data-seq="1"] .message-meta span:last-child')?.textContent === "Sending");
+      assert(await own.locator(".message-body").innerText() === communityDeliveryMarker
+        && await own.locator(".message-meta span:first-child").innerText() === "You",
+        "initial own Community message or author differs");
+      const otherMeta = await other.locator(".message-meta").innerText();
+      assert(otherMeta.includes("Fixture Friend") && !/Sending|Expired/.test(otherMeta),
+        "another person's Community row acquired an own delivery label");
+      const draft = "Keep this draft while the own message expires";
+      await frame.locator("#message-input").fill(draft);
+      trace.communityDeliveryState = "expired";
+      await frame.waitForFunction(() =>
+        document.querySelector('#message-list [data-seq="1"] .message-meta span:last-child')?.textContent === "Expired");
+      assert(trace.communityDeliveryPolls.some(poll => poll.state === "expired"
+        && poll.since === 2 && poll.latest_seq === 2 && poll.object_count === 0),
+        "Expired was not observed through a status-only poll at the existing sequence", trace.communityDeliveryPolls);
+      assert(await own.count() === 1 && await own.locator(".message-body").innerText() === communityDeliveryMarker
+        && await frame.locator("#message-list [data-seq]").count() === 2,
+        "status-only poll replaced or duplicated Community history");
+      assert(await other.locator(".message-meta").innerText() === otherMeta,
+        "own expiry changed another person's Community label");
+      assert(await frame.locator("#message-input").inputValue() === draft
+        && await frame.locator("#message-input").isEnabled() && await frame.locator("#send-button").isEnabled(),
+        "own expiry changed the draft or live Community controls");
       return;
     }
 
@@ -1402,6 +1451,7 @@ async function main() {
     "summary-failure",
     "direct-list-unavailable",
     "shared-poll-render-before-metadata",
+    "community-delivery-status",
     "direct-switch",
     "direct-switch-hold-initial-conversations",
     "direct-switch-hold-bootstrap-messages",
