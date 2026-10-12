@@ -4084,18 +4084,25 @@ pub(crate) async fn install_first_party_component_via_carrier(
     require_component_not_model(name, dest)?;
     let release_path = required_release_path(name, platform_info)?;
     if name == browser_vm_image::NAME {
-        return browser_vm_image::install_via_carrier(
+        // The image transfer future is about 66 KiB; boxing keeps it out of every
+        // component download, and of setup's own future, which the caller holds.
+        return Box::pin(browser_vm_image::install_via_carrier(
             data_dir,
             platform_info,
             dest,
             &detect_platform(),
             context,
-        )
+        ))
         .await;
     }
     let cid = platform_info.cid.as_deref().filter(|cid| !cid.is_empty());
-    let bytes =
-        fetch_first_party_component_via_carrier(data_dir, cid, release_path, context).await?;
+    let bytes = Box::pin(fetch_first_party_component_via_carrier(
+        data_dir,
+        cid,
+        release_path,
+        context,
+    ))
+    .await?;
 
     verify_release_bytes(name, &bytes, platform_info)?;
 
