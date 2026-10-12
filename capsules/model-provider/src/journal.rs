@@ -116,6 +116,8 @@ impl StoredRun {
 pub struct RunJournal {
     runs_dir: PathBuf,
     request_floor_path: PathBuf,
+    recovery_dir: PathBuf,
+    recovery_ack_path: PathBuf,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -123,6 +125,14 @@ pub struct RunJournal {
 struct PrunedRequestFloor {
     schema: String,
     issued_ms: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryAcknowledgement {
+    schema: String,
+    archive_device: u64,
+    archive_inode: u64,
 }
 
 struct JournalEntry {
@@ -140,7 +150,7 @@ pub(crate) struct JournalUsage {
 fn run_charge(run: &StoredRun, bytes: u64) -> u64 {
     // The complete compact record reserves the already bounded terminal tail.
     // Terminal facts, including Unknown, are frozen and keep their actual
-    // bounded bytes. Their identities still count and Unknown never expires.
+    // bounded bytes. Every terminal identity has a bounded retention window.
     if !run.status.is_terminal() {
         bytes.max(MAX_NEW_RUN_JOURNAL_BYTES)
     } else {
@@ -167,8 +177,14 @@ impl RunJournal {
         let journal = Self {
             runs_dir,
             request_floor_path: root.join("pruned-request-floor.json"),
+            recovery_dir: root.join("recovery-runs"),
+            recovery_ack_path: root.join("recovery-complete.json"),
         };
         journal.pruned_issued_floor_ms()?;
+        journal.archive_recovery_pending()?;
+        if journal.recovery_census()?.is_none() {
+            journal.archive_legacy_runs()?;
+        }
         journal.recover_abandoned_transactions()?;
         journal.prune_expired_terminal_runs()?;
         Ok(journal)
@@ -237,6 +253,10 @@ impl RunJournal {
             // Retained legacy IDs cannot authorize a new request.
             return Ok(());
         };
+        self.record_pruned_issuance_ms(issued_ms)
+    }
+
+    fn record_pruned_issuance_ms(&self, issued_ms: u64) -> Result<(), ProviderFault> {
         let (previous, expected) = self.load_request_floor()?;
         if issued_ms <= previous {
             return Ok(());
@@ -270,8 +290,12 @@ impl RunJournal {
 
     pub fn load_run(&self, run_id: &str) -> Result<StoredRun, ProviderFault> {
         validate_run_id(run_id).map_err(|_| ProviderFault::invalid_request("invalid run_id"))?;
-        let path = hashed_path(&self.runs_dir, run_id);
-        load_verified_run_file(&path, &self.runs_dir, Some(run_id))
+        let directory = if self.is_archived_run(run_id)? {
+            &self.recovery_dir
+        } else {
+            &self.runs_dir
+        };
+        load_verified_run_file(&hashed_path(directory, run_id), directory, Some(run_id))
     }
 
     pub fn load_run_if_present(&self, run_id: &str) -> Result<Option<StoredRun>, ProviderFault> {
@@ -279,7 +303,13 @@ impl RunJournal {
         let path = hashed_path(&self.runs_dir, run_id);
         match fs::symlink_metadata(&path) {
             Ok(_) => self.load_run(run_id).map(Some),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                if self.is_archived_run(run_id)? {
+                    self.load_run(run_id).map(Some)
+                } else {
+                    Ok(None)
+                }
+            }
             Err(err) => Err(ProviderFault::corrupt_journal(format!(
                 "failed to inspect model run journal {}: {err}",
                 path.display()
@@ -390,7 +420,9 @@ impl RunJournal {
                 .ok_or_else(|| {
                     ProviderFault::corrupt_journal("request floor entry name is invalid")
                 })?;
-            if name.starts_with(".pruned-request-floor.json.tmp") {
+            if name.starts_with(".pruned-request-floor.json.tmp")
+                || name.starts_with(".recovery-complete.json.tmp")
+            {
                 let metadata = fs::symlink_metadata(&path).map_err(|_| {
                     ProviderFault::corrupt_journal("request floor transaction is unreadable")
                 })?;
@@ -555,6 +587,10 @@ impl RunJournal {
     }
 
     pub fn prune_expired_loaded_run(&self, run: &StoredRun) -> Result<bool, ProviderFault> {
+        // Recovery facts remain owner-readable. They never authorize dispatch.
+        if self.is_archived_run(&run.run_id)? {
+            return Ok(false);
+        }
         if !is_expired_terminal_run(run, now_ms()) {
             return Ok(false);
         }
@@ -567,6 +603,12 @@ impl RunJournal {
     }
 
     fn census(&self) -> Result<Vec<JournalEntry>, ProviderFault> {
+        self.recovery_census()?.ok_or_else(|| {
+            ProviderFault::corrupt_journal("model run journal recovery limit exceeded")
+        })
+    }
+
+    fn recovery_census(&self) -> Result<Option<Vec<JournalEntry>>, ProviderFault> {
         ensure_journal_dir_owner_only(&self.runs_dir)?;
         let entries = fs::read_dir(&self.runs_dir).map_err(|err| {
             ProviderFault::corrupt_journal(format!(
@@ -584,11 +626,6 @@ impl RunJournal {
                 ))
             })?;
             let path = entry.path();
-            if census.len() == MAX_RECOVERY_JOURNAL_ENTRIES {
-                return Err(ProviderFault::corrupt_journal(
-                    "model run journal recovery entry limit exceeded",
-                ));
-            }
             let metadata = fs::symlink_metadata(&path).map_err(|err| {
                 ProviderFault::corrupt_journal(format!(
                     "failed to inspect model run journal: {err}"
@@ -598,10 +635,17 @@ impl RunJournal {
             actual_bytes = actual_bytes.checked_add(metadata.len()).ok_or_else(|| {
                 ProviderFault::corrupt_journal("model run journal recovery byte limit exceeded")
             })?;
-            if metadata.len() > MAX_RUN_JOURNAL_BYTES || actual_bytes > MAX_RECOVERY_SCAN_BYTES {
+            if metadata.len() > MAX_RUN_JOURNAL_BYTES {
                 return Err(ProviderFault::corrupt_journal(
                     "model run journal recovery byte limit exceeded",
                 ));
+            }
+            if census.len() == MAX_RECOVERY_JOURNAL_ENTRIES
+                || actual_bytes > MAX_RECOVERY_SCAN_BYTES
+            {
+                // The protected archive is not execution authority. Unseen
+                // legacy files are validated only on bounded exact lookup.
+                return Ok(None);
             }
             census.push(JournalEntry {
                 transaction: is_transaction_temp_file(&path),
@@ -609,7 +653,176 @@ impl RunJournal {
                 metadata,
             });
         }
-        Ok(census)
+        Ok(Some(census))
+    }
+
+    pub(crate) fn is_archived_run(&self, run_id: &str) -> Result<bool, ProviderFault> {
+        validate_run_id(run_id).map_err(|_| ProviderFault::invalid_request("invalid run_id"))?;
+        match fs::symlink_metadata(hashed_path(&self.runs_dir, run_id)) {
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(ProviderFault::corrupt_journal("model run is unreadable")),
+        }
+        match fs::symlink_metadata(&self.recovery_dir) {
+            Ok(metadata) => validate_existing_directory(&self.recovery_dir, &metadata)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(_) => {
+                return Err(ProviderFault::corrupt_journal(
+                    "recovery archive is unreadable",
+                ))
+            }
+        }
+        match fs::symlink_metadata(hashed_path(&self.recovery_dir, run_id)) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(_) => Err(ProviderFault::corrupt_journal("recovery run is unreadable")),
+        }
+    }
+
+    pub(crate) fn archive_recovery_pending(&self) -> Result<bool, ProviderFault> {
+        let archive = match fs::symlink_metadata(&self.recovery_dir) {
+            Ok(metadata) => {
+                validate_existing_directory(&self.recovery_dir, &metadata)?;
+                metadata
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(_) => {
+                return Err(ProviderFault::corrupt_journal(
+                    "recovery archive is unreadable",
+                ))
+            }
+        };
+        let archive_handle = open_journal_directory(&self.recovery_dir)?;
+        if archive_identity(&archive)?
+            != archive_identity(
+                &archive_handle.metadata().map_err(|_| {
+                    ProviderFault::corrupt_journal("recovery archive is unreadable")
+                })?,
+            )?
+        {
+            return Err(ProviderFault::corrupt_journal(
+                "recovery archive changed before acknowledgement",
+            ));
+        }
+        match fs::symlink_metadata(&self.recovery_ack_path) {
+            Ok(metadata) => {
+                validate_existing_file(&self.recovery_ack_path, &metadata)?;
+                if metadata.len() > MAX_REQUEST_FLOOR_BYTES {
+                    return Err(ProviderFault::corrupt_journal(
+                        "recovery acknowledgement is invalid",
+                    ));
+                }
+                let mut file = open_run_readonly(&self.recovery_ack_path)?;
+                let opened = file.metadata().map_err(|_| {
+                    ProviderFault::corrupt_journal("recovery acknowledgement is unreadable")
+                })?;
+                validate_existing_file(&self.recovery_ack_path, &opened)?;
+                if !same_snapshot(&metadata, &opened) {
+                    return Err(ProviderFault::corrupt_journal(
+                        "recovery acknowledgement changed before read",
+                    ));
+                }
+                let bytes = read_bounded_record(&mut file, metadata.len())?;
+                let after = file.metadata().map_err(|_| {
+                    ProviderFault::corrupt_journal("recovery acknowledgement is unreadable")
+                })?;
+                if !same_snapshot(&opened, &after) {
+                    return Err(ProviderFault::corrupt_journal(
+                        "recovery acknowledgement changed during read",
+                    ));
+                }
+                verify_path_snapshot(&self.recovery_ack_path, &metadata)?;
+                let ack: RecoveryAcknowledgement =
+                    serde_json::from_slice(&bytes).map_err(|_| {
+                        ProviderFault::corrupt_journal("recovery acknowledgement is invalid")
+                    })?;
+                if ack.schema != "elastos.model.recovery-complete/v1" {
+                    return Err(ProviderFault::corrupt_journal(
+                        "recovery acknowledgement is invalid",
+                    ));
+                }
+                verify_journal_directory(&self.recovery_dir, &archive_handle)?;
+                Ok((ack.archive_device, ack.archive_inode) != archive_identity(&archive)?)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(_) => Err(ProviderFault::corrupt_journal(
+                "recovery acknowledgement is unreadable",
+            )),
+        }
+    }
+
+    pub(crate) fn acknowledge_archive_recovery(&self) -> Result<(), ProviderFault> {
+        if self.archive_recovery_pending()? {
+            let archive = fs::symlink_metadata(&self.recovery_dir)
+                .map_err(|_| ProviderFault::corrupt_journal("recovery archive is unreadable"))?;
+            validate_existing_directory(&self.recovery_dir, &archive)?;
+            let (archive_device, archive_inode) = archive_identity(&archive)?;
+            let bytes = encode_bounded(
+                &RecoveryAcknowledgement {
+                    schema: "elastos.model.recovery-complete/v1".into(),
+                    archive_device,
+                    archive_inode,
+                },
+                MAX_REQUEST_FLOOR_BYTES,
+            )?;
+            let expected = match fs::symlink_metadata(&self.recovery_ack_path) {
+                Ok(metadata) => Some(metadata),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => {
+                    return Err(ProviderFault::corrupt_journal(
+                        "recovery acknowledgement is unreadable",
+                    ))
+                }
+            };
+            let held = open_journal_directory(&self.recovery_dir)?;
+            verify_journal_directory(&self.recovery_dir, &held)?;
+            atomic_write_with_temp(
+                &self.recovery_ack_path,
+                &bytes,
+                expected.as_ref(),
+                self.recovery_ack_path.with_file_name(format!(
+                    ".recovery-complete.json.tmp-{}",
+                    std::process::id()
+                )),
+                |file, bytes| {
+                    file.write_all(bytes)?;
+                    file.sync_all()
+                },
+                |from, to| fs::rename(from, to),
+                sync_directory,
+            )?;
+            verify_journal_directory(&self.recovery_dir, &held)?;
+        }
+        Ok(())
+    }
+
+    fn archive_legacy_runs(&self) -> Result<(), ProviderFault> {
+        let root = self.runs_dir.parent().unwrap();
+        let root_handle = open_journal_directory(root)?;
+        let runs_handle = open_journal_directory(&self.runs_dir)?;
+        for path in [&self.recovery_dir, &self.recovery_ack_path] {
+            match fs::symlink_metadata(path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                _ => {
+                    return Err(ProviderFault::corrupt_journal(
+                        "protected recovery archive already exists",
+                    ))
+                }
+            }
+        }
+        // The floor protects clock rollback; direct archive lookup preserves
+        // every retained legacy and future-issued identity before validation.
+        self.record_pruned_issuance_ms(now_ms().max(1))?;
+        verify_journal_directory(root, &root_handle)?;
+        verify_journal_directory(&self.runs_dir, &runs_handle)?;
+        rename_directory_no_replace(&self.runs_dir, &self.recovery_dir)
+            .map_err(|_| ProviderFault::corrupt_journal("legacy journal archive failed"))?;
+        verify_journal_directory(&self.recovery_dir, &runs_handle)?;
+        root_handle
+            .sync_all()
+            .map_err(|_| ProviderFault::corrupt_journal("legacy journal archive sync failed"))?;
+        ensure_journal_dir_owner_only(&self.runs_dir)?;
+        sync_directory(root)
     }
 
     pub(crate) fn visit_runs(
@@ -669,7 +882,7 @@ impl RunJournal {
 
 fn journal_budget_fault() -> ProviderFault {
     ProviderFault::policy_limit(
-        "Model run history is full. Completed runs can expire; unresolved runs stay retained.",
+        "Model run history is full. Retained outcomes expire after their history window; then try again.",
         "model run journal admission or growth limit exceeded",
     )
 }
@@ -1683,9 +1896,8 @@ fn validate_stored_output(
 
 fn is_expired_terminal_run(run: &StoredRun, now_ms: u64) -> bool {
     run.status.is_terminal()
-        // An unresolved effect retains its execution binding across expiry and
-        // restart. A retention deadline is not a settlement receipt.
-        && run.status != RunStatus::SettlementUnknown
+        // Unknown remains truthful while retained. Expiry retires history,
+        // never proves settlement, and commits the replay floor first.
         && run
             .retention_until_ms
             .is_some_and(|retention_until_ms| {
@@ -1800,7 +2012,8 @@ fn is_transaction_temp_file(path: &Path) -> bool {
 fn transaction_creator(path: &Path, floor: bool) -> Option<i32> {
     let name = path.file_name()?.to_str()?;
     let suffix = if floor {
-        name.strip_prefix(".pruned-request-floor.json.tmp-")?
+        name.strip_prefix(".pruned-request-floor.json.tmp-")
+            .or_else(|| name.strip_prefix(".recovery-complete.json.tmp-"))?
     } else {
         let (hash, suffix) = name.strip_prefix(".sha256-")?.split_once(".json.tmp-")?;
         if hash.len() != 64
@@ -1869,6 +2082,55 @@ fn open_journal_directory(path: &Path) -> Result<fs::File, ProviderFault> {
         .map_err(|_| ProviderFault::corrupt_journal("journal recovery directory is unreadable"))?;
     verify_journal_directory(path, &file)?;
     Ok(file)
+}
+
+fn archive_identity(metadata: &fs::Metadata) -> Result<(u64, u64), ProviderFault> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        Err(ProviderFault::corrupt_journal(
+            "protected recovery archives require Unix directory identity",
+        ))
+    }
+}
+
+fn rename_directory_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let from = std::ffi::CString::new(from.as_os_str().as_bytes())?;
+        let to = std::ffi::CString::new(to.as_os_str().as_bytes())?;
+        #[cfg(target_os = "linux")]
+        let result = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        #[cfg(target_os = "macos")]
+        let result = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (from, to);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "protected recovery archive rename is unavailable",
+        ))
+    }
 }
 
 fn verify_journal_directory(path: &Path, held: &fs::File) -> Result<(), ProviderFault> {
@@ -3101,8 +3363,9 @@ mod tests {
         overwrite_run_file(&run_path(&root, &expired.run_id), &expired);
         let bytes = file_bytes(&run_path(&root, &expired.run_id));
         let restarted = RunJournal::open(root.clone()).unwrap();
-        assert!(!restarted.prune_expired_loaded_run(&expired).unwrap());
-        assert_eq!(file_bytes(&run_path(&root, &expired.run_id)), bytes);
+        assert!(!run_path(&root, &expired.run_id).exists());
+        assert!(!bytes.is_empty());
+        assert_eq!(restarted.census().unwrap().len(), 0);
     }
 
     #[test]
@@ -3463,7 +3726,7 @@ mod tests {
         assert!(!is_expired_terminal_run(&run, 401_100));
         assert!(is_expired_terminal_run(&run, 401_101));
         let unknown = settle_unknown(&prepared_run(&id));
-        assert!(!is_expired_terminal_run(&unknown, u64::MAX));
+        assert!(is_expired_terminal_run(&unknown, u64::MAX));
         let legacy = completed_run("legacy-retained", 1_000, 1_100, 1);
         assert!(is_expired_terminal_run(&legacy, 2_101));
         assert_eq!(legacy.runtime_binding.request_id, "legacy-retained");
@@ -3503,6 +3766,104 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(reopened.pruned_issued_floor_ms().unwrap(), issued);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_entry_and_byte_overflow_archive_once_with_exact_owner_access() {
+        for byte_overflow in [false, true] {
+            let root = temp_root("legacy-overflow-archive");
+            let journal = RunJournal::open(root.clone()).unwrap();
+            let id = crate::test_support::fixture_model_request_id_at(
+                "future-retained",
+                now_ms() + 60_000,
+            );
+            let run = settle_unknown(&prepared_run(&id));
+            journal.store_run(&run).unwrap();
+            let original = file_bytes(&run_path(&root, &run.run_id));
+            let count = if byte_overflow {
+                4
+            } else {
+                MAX_RECOVERY_JOURNAL_ENTRIES
+            };
+            for index in 0..count {
+                crash_transaction(
+                    &root,
+                    index,
+                    if byte_overflow {
+                        MAX_RUN_JOURNAL_BYTES
+                    } else {
+                        0
+                    },
+                );
+            }
+            drop(journal);
+            let journal = RunJournal::open(root.clone()).unwrap();
+            assert!(journal.census().unwrap().is_empty());
+            assert!(journal.archive_recovery_pending().unwrap());
+            let retained = journal.load_run_if_present(&run.run_id).unwrap().unwrap();
+            assert!(same_execution_identity(&run, &retained));
+            assert_eq!(retained.status, RunStatus::SettlementUnknown);
+            assert_eq!(
+                file_bytes(&hashed_path(&root.join("recovery-runs"), &run.run_id)),
+                original
+            );
+            assert!(journal.pruned_issued_floor_ms().unwrap() > 0);
+            assert_eq!(
+                journal.archive_legacy_runs().unwrap_err().code(),
+                "journal_corrupt"
+            );
+            journal.acknowledge_archive_recovery().unwrap();
+            let restarted = RunJournal::open(root.clone()).unwrap();
+            assert!(!restarted.archive_recovery_pending().unwrap());
+            assert_eq!(
+                restarted.load_run(&run.run_id).unwrap().runtime_binding,
+                run.runtime_binding
+            );
+            fs::rename(root.join("recovery-runs"), root.join("previous-recovery")).unwrap();
+            ensure_journal_dir_owner_only(&root.join("recovery-runs")).unwrap();
+            assert!(
+                restarted.archive_recovery_pending().unwrap(),
+                "a replacement archive cannot inherit acknowledgement"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_restart_after_rename_keeps_gate_and_rejects_unsafe_exact_record() {
+        let root = temp_root("archive-rename-crash");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let run = settle_unknown(&prepared_run("legacy-archive-owner"));
+        journal.store_run(&run).unwrap();
+        journal.record_pruned_issuance_ms(now_ms()).unwrap();
+        rename_directory_no_replace(&root.join("runs"), &root.join("recovery-runs")).unwrap();
+        let abandoned_ack = root.join(format!(
+            ".recovery-complete.json.tmp-{}",
+            abandoned_fixture_pid()
+        ));
+        open_temp_file_owner_only(&abandoned_ack)
+            .unwrap()
+            .write_all(b"{")
+            .unwrap();
+        let restarted = RunJournal::open(root.clone()).unwrap();
+        assert!(!abandoned_ack.exists());
+        assert!(restarted.archive_recovery_pending().unwrap());
+        assert_eq!(
+            restarted.load_run(&run.run_id).unwrap().status,
+            RunStatus::SettlementUnknown
+        );
+        let archived = hashed_path(&root.join("recovery-runs"), &run.run_id);
+        fs::rename(&archived, root.join("protected-original.json")).unwrap();
+        symlink_path(&root.join("protected-original.json"), &archived);
+        assert_eq!(
+            restarted.load_run(&run.run_id).unwrap_err().code(),
+            "journal_corrupt"
+        );
+        let other = root.join("other-owner-directory");
+        ensure_journal_dir_owner_only(&other).unwrap();
+        assert!(rename_directory_no_replace(&root.join("runs"), &other).is_err());
+        assert!(root.join("runs").exists());
     }
 
     #[test]
@@ -3751,6 +4112,23 @@ mod tests {
                         set_mode(&unsafe_path, 0o644);
                     }
                 }
+            }
+            if case == "count" {
+                let recovered = RunJournal::open(root.clone()).unwrap();
+                assert!(recovered.archive_recovery_pending().unwrap());
+                assert_eq!(
+                    recovered.load_run(&run.run_id).unwrap().status,
+                    RunStatus::SettlementUnknown
+                );
+                assert_eq!(
+                    file_bytes(&hashed_path(&root.join("recovery-runs"), &run.run_id)),
+                    before
+                );
+                assert!(root
+                    .join("recovery-runs")
+                    .join(valid.file_name().unwrap())
+                    .exists());
+                continue;
             }
             assert!(RunJournal::open(root.clone()).is_err(), "{case}");
             assert!(valid.exists(), "{case}");

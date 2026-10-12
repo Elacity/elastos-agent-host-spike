@@ -211,6 +211,9 @@ impl ProviderCoordinator {
                                 )
                             })?;
                     }
+                    let execution_owned = provider.adapters().retains_execution().await;
+                    let workers = provider.adapters().retained_worker_ids();
+                    provider.confirm_history_recovery(&refresh, execution_owned, &workers)?;
                     provider
                         .adapters()
                         .update_local_model_sockets(runtime_sockets.runtime_local_sockets)

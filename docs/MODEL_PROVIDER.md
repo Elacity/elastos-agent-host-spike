@@ -219,8 +219,11 @@ New model runs use compact journals of at most 1 MiB, with a 32 KiB header
 and 4 KiB backend state. Admission allows at most 256 journal entries and
 64 MiB of charged growth. Active runs reserve at least 1 MiB each. Frozen
 terminal records, including unresolved outcomes, use their actual bounded
-size and still count toward the entry limit. Unresolved identities stay
-retained. Crash transaction files count toward the limits. Runtime checks
+size and still count toward the entry limit. Every terminal outcome, including
+`settlement_unknown`, stays truthful through its configured history window and
+the complete request replay window. Runtime commits a monotonic refusal floor
+before expired history is removed, so clock rollback cannot dispatch it again.
+Crash transaction files count toward the limits. Runtime checks
 these limits before it records a new run or dispatches inference.
 
 Recovery reads one record at a time, with ceilings of 512 entries, 32 MiB
@@ -231,7 +234,24 @@ At startup, the coordinator validates the complete bounded journal and
 committed request floor before it removes an abandoned transaction. Removal
 requires the exact private file and parent identities and a confirmed absent
 creator PID. Files with a live or unproven creator, invalid metadata, or changed
-identity remain in place for operator recovery, as do records above the ceilings.
+identity remain in place for operator recovery.
+
+When legacy history exceeds the entry or aggregate ceiling, startup moves the
+exact private runs directory into one protected recovery archive and opens a
+fresh bounded journal. Startup preserves the archive without decoding every
+record. The existing run operations validate and read an exact archived record
+for its owner; an archived active run reports `settlement_unknown` without
+contacting its backend. Retained legacy and future-issued request identities
+still resolve before fresh request validation. Home starts with the archived
+facts available for owner inspection. Fresh inference stays gated while the
+owner uses Reclaim in System to retire the admitted local models, then uses them
+again. The active serialized coordinator saves an acknowledgement bound to the
+archive only after its owned execution, artifacts and workers are absent.
+Operator-configured hosted offers keep their configuration when an active
+coordinator receives trusted Init with the existing `owner_reclaim: true` flag;
+the same ownership checks apply. That provider operation remains an operator
+contract. A second recovery preserves the existing archive and requires operator
+recovery instead of replacing it.
 
 Cancellation is a request to stop backend work and settle the request as
 `cancelled`. The provider records the request before closing the backend stream.
@@ -430,7 +450,11 @@ artifact descriptor for the model provider. Source supports operator offers and
 admitted-content binding through the existing ProviderRegistry and run journal,
 while preserving other configured capabilities. An idle-safe provider refresh
 can expose the newly admitted local offer; a busy
-or unknown-settlement run prevents destructive reconfiguration and removal.
+run or retained unknown outcome prevents destructive reconfiguration and removal.
+The explicit owner Reclaim operation can retire a model while its unknown
+history stays retained, after owned execution closes. Expired history releases
+its model binding; live engine
+and worker ownership remain separate barriers.
 Content preparation status is distinct from a dispatched model run.
 
 Existing `offers_list`, `runs_create`, `runs_get`, `runs_events` and `runs_cancel`
