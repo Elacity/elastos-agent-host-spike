@@ -418,6 +418,7 @@ impl CollaborationTransportDriver {
                     .restore_held_frames(std::iter::once(frame).chain(held).collect());
                 return Ok(CollaborationIncomingOnceOutcome::RetryRequired(summary));
             }
+            self.core.complete_held_frame(frame);
         }
 
         let batch = self.network.peek().await?;

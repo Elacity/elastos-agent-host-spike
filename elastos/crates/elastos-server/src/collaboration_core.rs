@@ -1750,6 +1750,11 @@ impl CollaborationCore {
         self.held.restore(held);
     }
 
+    /// Release or requeue the reservation for one settled retry attempt.
+    pub(crate) fn complete_held_frame(&self, frame: HeldFrame) {
+        self.held.complete(frame);
+    }
+
     fn sender_backlog_full(
         &self,
         state: &CoreState,
