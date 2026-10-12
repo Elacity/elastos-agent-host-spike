@@ -12,6 +12,13 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   to end in `/elastos` and export `XDG_DATA_HOME` as its parent, because the
   Runtime reads `$XDG_DATA_HOME/elastos`; the seed script checks the saved
   publish state against the signed head's `prev_head_cid` before downloading.
+- CI's update journey starts from 0.8.0-alpha.15, the release users run now.
+  On Apple Silicon and Linux ARM64, alpha.14's `elastos update` refused
+  alpha.15 for its new `browser-vm-image` strategy; CI started from
+  0.8.0-alpha.8 and never ran that hop.
+  `scripts/release-publish.sh prepare` refuses, before any download, a source
+  whose `scripts/update-hop-previous-release.json` does not name the public
+  release head.
 - CI's `release-upstream-assets` job runs the release's upstream asset build
   (`scripts/release-upstream-assets.py`, including the Browser helper source
   builds) for Linux ARM64 and Apple Silicon on every pull request that changes

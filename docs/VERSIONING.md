@@ -244,7 +244,11 @@ a SHA-256 pin. It supports the attestation verification flags used by the signer
    and bundles. Candidate scripts and executables stay in the build jobs.
    The job summary records each native artifact's ID and digest.
 2. **Prepare.** On the operator Mac, from a clone of this repository, run
-   `scripts/release-publish.sh prepare RUN_ID VERSION`. It checks that the run
+   `scripts/release-publish.sh prepare RUN_ID VERSION`. Before it downloads
+   anything, it refuses unless `scripts/update-hop-previous-release.json` at
+   source H names the release head the origin serves now (its `head_cid`), so
+   H's CI update journey started from the release users run; step 5 moves that
+   pin. It checks that the run
    succeeded from approved W/ref/event and that source H is on `develop`, downloads
    and verifies all three platform artifacts with their native name suffixes
    and certificate-authenticated proof attempts. A retained native artifact from an earlier attempt can use its original
@@ -289,7 +293,8 @@ a SHA-256 pin. It supports the attestation verification flags used by the signer
 5. **Pin for CI.** Run `python3 scripts/update-hop-compare.py pin-previous-release`
    and merge the updated `scripts/update-hop-previous-release.json` into `develop`.
    It checks the signed head and release the seed now serves. Every pull
-   request's CI update journey then starts from this release.
+   request's CI update journey then starts from this release, and the next
+   `prepare` refuses a source without it.
 
 The seed only answers requests. It serves three Carrier ops: `release_head`
 (the signed head), `content_fetch` (any object by CID, from its Kubo pins) and

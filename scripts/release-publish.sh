@@ -86,6 +86,16 @@ checked_ci() {
     echo "$ci"
 }
 
+# CI's update journey at the source starts from its pinned release; that must be the head users run now.
+checked_update_pin() {
+    local commit="$1" pinned public
+    git -C "$ROOT" fetch -q origin "$commit"
+    pinned=$(git -C "$ROOT" show "$commit:scripts/update-hop-previous-release.json" | jq -er .head_cid) \
+        || die "source $commit has no update journey pin (scripts/update-hop-previous-release.json head_cid)"
+    public=$(curl -fsS --max-time 20 "$ORIGIN/release-head.json" | provenance head-cid) || die "cannot read the public release head"
+    [[ "$pinned" == "$public" ]] || die "the candidate's update journey did not start from the release users run now (pinned head $pinned, public head $public); bump the pin with scripts/update-hop-compare.py pin-previous-release and rerun CI"
+}
+
 # Print the same source and run identities at each operator handoff.
 publication_record() {
     local work="$1" commit run ci_id ci_url
@@ -125,6 +135,7 @@ prepare() {
     [[ "$seen" == *" aarch64-darwin "* ]] || die "operator Mac inputs must include aarch64-darwin"
     need_env RELEASE_SEED RELEASE_SEED_DATA
     approval_json=$(provenance approval) || die "independent approval refused"
+    checked_update_pin "$(jq -r .source.commit <<< "$approval_json")"
     run_attempt=$(provenance run --run "$run") || die "package producer refused"
     work=$(work_dir "$version")
     [[ ! -e "$work" ]] || die "$work exists; remove it to prepare again"
@@ -174,7 +185,6 @@ prepare() {
     ci_run=$(checked_ci "$commit")
     echo "# Develop CI run: $(jq -r '[(.id | tostring), .url] | join(" ")' <<< "$ci_run")"
     [[ ${#platforms[@]} -gt 1 ]] || args+=(--preview-platform aarch64-darwin)
-    git -C "$ROOT" fetch -q origin "$commit"
     git -C "$ROOT" worktree add -q --detach "$work/source" "$commit"
     [[ "$(git -C "$work/source" rev-parse 'HEAD^{tree}')" == "$tree" ]] || die "source tree differs"
     for platform in "${platforms[@]}"; do

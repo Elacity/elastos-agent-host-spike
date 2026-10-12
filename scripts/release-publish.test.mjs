@@ -29,6 +29,10 @@ const delivery = { MAINTAINER_DID: did, SOURCE_CONNECT_TICKET: ticket, PUBLISHER
 const packageRun = { id: 123, run_attempt: 1, head_sha: workflowCommit, head_branch: 'develop', event: 'workflow_dispatch',
   path: '.github/workflows/release-package.yml', status: 'completed', conclusion: 'success',
   head_repository: { id: 1234, full_name: 'Elacity/elastos-runtime' }, repository: { id: 1234, full_name: 'Elacity/elastos-runtime' } };
+// The CIDv0 of the release-head.json bytes the fixture origin serves (curl stub below).
+const publicHead = 'QmZ9v8LQsW12TgsHKE9KtL5F1Vm3wtBe4BCNP9X6mEHWEh';
+const updatePin = { schema: 'elastos.update-hop.previous-release/v1', version: '1.2.2', release_cid: 'Qm' + 'R'.repeat(44),
+  release_sha256: '9'.repeat(64), head_cid: publicHead, signer_did: did };
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' }, ...options });
@@ -50,7 +54,7 @@ function fixture(t, changes = {}) {
   cpSync(join(source, 'release-provenance-seal.py'), join(repo, 'scripts/release-provenance-seal.py'));
   const config = { root, repo, commit, tree, artifacts: {}, ciRuns: [ciRun], requiredJobs,
     ciJobs: requiredJobs.map(name => ({ name, status: 'completed', conclusion: 'success' })),
-    packageRun, workflowCommit, workflowTree, delivery, trees: {}, ...changes };
+    packageRun, workflowCommit, workflowTree, delivery, trees: {}, updatePin, ...changes };
   for (const [root, blob] of [[tree, '7'.repeat(40)], [config.workflowTree, changes.workflowBlob || '7'.repeat(40)]]) {
     const github = sha(root + '.github').slice(0, 40), workflows = sha(root + 'workflows').slice(0, 40);
     const entry = (path, type, sha) => ({ path, type, mode: type === 'tree' ? '040000' : '100644', sha });
@@ -184,7 +188,10 @@ if (command === 'gh') {
 } else if (command === 'git') {
   if (args.includes('add')) fs.cpSync(c.repo, args[args.indexOf('add') + 3], { recursive: true });
   else if (args.includes('rev-parse')) console.log(c.tree);
-  else if (!args.includes('fetch')) process.exit(91);
+  else if (args.includes('show')) {
+    if (args.at(-1) !== c.commit + ':scripts/update-hop-previous-release.json' || !c.updatePin) process.exit(91);
+    console.log(JSON.stringify(c.updatePin, null, 2));
+  } else if (!args.includes('fetch')) process.exit(91);
 } else if (command === 'curl') {
   const url = args.at(-1);
   if (url.endsWith('/zip')) {
@@ -329,6 +336,29 @@ for (const [label, changes, error] of [
   });
 }
 
+for (const [label, pin, error] of [
+  ['names the public release head', updatePin, null],
+  ['names an older release head', { ...updatePin, head_cid: 'QmUjzbkAaxa8StyyqL5qswtvFu2k6b6GqU552KkGLG8omY' },
+    /update journey did not start from the release users run now \(pinned head QmUjzbk\S+, public head QmZ9v8L\S+\)/],
+  ['is missing', null, /has no update journey pin/],
+]) {
+  test(`prepare ${error ? 'refuses before any download' : 'continues'} when the source's update journey pin ${label}`, t => {
+    const f = fixture(t, { updatePin: pin });
+    const result = f.prepare('1.2.3', ['aarch64-darwin']);
+    const calls = readFileSync(join(f.root, 'calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const downloads = calls.filter(c => c.command === 'gh' && c.args.some(arg => arg.endsWith('/zip')));
+    if (!error) {
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(downloads.length, 2);
+      return;
+    }
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, error);
+    assert.deepEqual(calls.filter(c => c.command === 'gh'), []);
+    assert.equal(existsSync(join(f.env.RELEASE_WORK, '1.2.3')), false);
+  });
+}
+
 test('prepare requires an independently owned approval outside the candidate work', t => {
   const f = fixture(t);
   const missing = f.prepare('1.2.3', ['aarch64-darwin'], { RELEASE_APPROVAL: '' });
@@ -409,7 +439,7 @@ for (const [label, changes, error] of [
     assert.match(result.stderr, error);
     assert.throws(() => f.args(), { code: 'ENOENT' });
     const calls = readFileSync(join(f.root, 'calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-    assert.equal(calls.some(c => c.command === 'git' || c.command === 'scp'), false);
+    assert.equal(calls.some(c => (c.command === 'git' && c.args.includes('worktree')) || c.command === 'scp'), false);
   });
 }
 

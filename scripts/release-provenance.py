@@ -106,7 +106,7 @@ def bind(approval_path, approval, digest, work):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("approval", "run", "artifact", "receipt", "seed", "bind"))
+    parser.add_argument("command", choices=("approval", "head-cid", "run", "artifact", "receipt", "seed", "bind"))
     parser.add_argument("--approval", required=True, type=Path)
     parser.add_argument("--work-root", required=True, type=Path)
     parser.add_argument("--run", type=int)
@@ -122,6 +122,10 @@ def main():
     approval, digest = S.approved_release(args.approval, input_root=work_root)
     if args.command == "approval":
         print(json.dumps({"sha256": digest, "source": approval["source"], "workflow": approval["workflow"], "delivery": approval["delivery"], "gh": approval["gh"]}))
+        return
+    if args.command == "head-cid":
+        # The CIDv0 the seed serves the release head bytes on stdin under, as update pins name it.
+        print(S.unixfs_metadata_cid(sys.stdin.buffer.read(256 * 1024 + 1)))
         return
     if args.command == "bind":
         bind(args.approval, approval, digest, args.work.resolve())
