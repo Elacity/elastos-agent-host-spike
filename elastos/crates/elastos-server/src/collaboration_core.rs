@@ -65,6 +65,8 @@ pub(crate) struct CollaborationCore {
     /// Counted from stored outgoing messages, so only a saved message counts.
     sends_per_window: usize,
     receive_rate: ProfileRateLimiter,
+    /// Serializes receive-rate admission through its durable commit and count.
+    receive_admission_mutex: Mutex<()>,
     held: HeldFrames,
     #[cfg(test)]
     write_fault: std::sync::atomic::AtomicU8,
@@ -358,6 +360,7 @@ impl CollaborationCore {
                 COMMUNITY_RECEIVES_PER_SENDER_PER_WINDOW,
                 COMMUNITY_RATE_WINDOW_SECS,
             ),
+            receive_admission_mutex: Mutex::new(()),
             held: HeldFrames::default(),
             #[cfg(test)]
             write_fault: std::sync::atomic::AtomicU8::new(0),
@@ -757,13 +760,19 @@ impl CollaborationCore {
                 ))
             }
         };
-        if authorize_default_conversation_transport_message(
+        let authorized = match authorize_default_conversation_transport_message(
             self.authority.grant(),
             &verified,
             source_endpoint_did,
-        )
-        .is_err()
-        {
+        ) {
+            Ok(authorized) => authorized,
+            Err(_) => {
+                return Ok(CollaborationTransportIngestion::Rejected(
+                    CollaborationTransportRejection::InvalidMessage,
+                ))
+            }
+        };
+        if validate_incoming_chat_payload(&authorized).is_err() {
             return Ok(CollaborationTransportIngestion::Rejected(
                 CollaborationTransportRejection::InvalidMessage,
             ));
@@ -774,11 +783,31 @@ impl CollaborationCore {
             ));
         }
 
+        let _receive_guard = self
+            .receive_admission_mutex
+            .lock()
+            .map_err(|_| CollaborationTransportRetryableError)?;
         let envelope_hash = verified.envelope_sha256().to_string();
         let mut state = self
             .load_state()
             .map_err(|_| CollaborationTransportRetryableError)?
             .unwrap_or_else(|| self.empty_state());
+        if self
+            .repair_malformed_chat_handoffs(&mut state)
+            .map_err(|_| CollaborationTransportRetryableError)?
+        {
+            self.with_mutation(None, |_| {
+                Ok(Mutation {
+                    value: (),
+                    changed: false,
+                })
+            })
+            .map_err(|_| CollaborationTransportRetryableError)?;
+            state = self
+                .load_state()
+                .map_err(|_| CollaborationTransportRetryableError)?
+                .unwrap_or_else(|| self.empty_state());
+        }
         if let Some(existing) = self
             .exact_incoming_replay(&state, frame, &envelope_hash, now)
             .map_err(|_| CollaborationTransportRetryableError)?
@@ -787,7 +816,8 @@ impl CollaborationCore {
                 transport_incoming_acceptance(existing),
             ));
         }
-        prune_terminal_state(&mut state, now).map_err(|_| CollaborationTransportRetryableError)?;
+        self.prune_terminal_state(&mut state, now)
+            .map_err(|_| CollaborationTransportRetryableError)?;
         let incoming = match self
             .authority
             .authorize_incoming(frame, source_endpoint_did, now)
@@ -883,7 +913,8 @@ impl CollaborationCore {
             .load_state()
             .map_err(|_| CollaborationTransportRetryableError)?
             .unwrap_or_else(|| self.empty_state());
-        prune_terminal_state(&mut state, now).map_err(|_| CollaborationTransportRetryableError)?;
+        self.prune_terminal_state(&mut state, now)
+            .map_err(|_| CollaborationTransportRetryableError)?;
         let Some(entry) = state.outgoing.iter().find(|entry| {
             collaboration_message_envelope_sha256(entry.envelope.as_bytes())
                 == receipt_payload.message_envelope_sha256
@@ -1266,6 +1297,8 @@ impl CollaborationCore {
         source_endpoint_did: &str,
         now: u64,
     ) -> anyhow::Result<DurableIncomingAcceptance> {
+        let authorized = self.authorize_stored_product_message(envelope_bytes)?;
+        validate_incoming_chat_payload(&authorized)?;
         let envelope_hash = collaboration_message_envelope_sha256(envelope_bytes);
         if let Some(state) = self.load_state()? {
             if let Some(existing) =
@@ -1333,15 +1366,44 @@ impl CollaborationCore {
     }
 
     pub(crate) fn pending_product_handoffs(&self) -> anyhow::Result<Vec<PendingProductHandoff>> {
-        let state = self.load_state()?.unwrap_or_else(|| self.empty_state());
-        state
-            .incoming
-            .iter()
-            .map(|entry| {
-                let authorized = self.verify_incoming_record(entry)?;
-                Ok(PendingProductHandoff { authorized })
+        self.with_mutation(None, |state| {
+            let value = state
+                .incoming
+                .iter()
+                .map(|entry| {
+                    let authorized = self.verify_incoming_record(entry)?;
+                    Ok(PendingProductHandoff { authorized })
+                })
+                .collect::<anyhow::Result<_>>()?;
+            Ok(Mutation {
+                value,
+                changed: false,
             })
-            .collect()
+        })
+    }
+
+    fn repair_malformed_chat_handoffs(&self, state: &mut CoreState) -> anyhow::Result<bool> {
+        let mut malformed = Vec::new();
+        for (index, entry) in state.incoming.iter().enumerate() {
+            let authorized = self.verify_incoming_record(entry)?;
+            if validate_incoming_chat_payload(&authorized).is_err() {
+                let receipt =
+                    verify_stored_acceptance_receipt_envelope(entry.acceptance_receipt.as_bytes())?;
+                malformed.push((
+                    index,
+                    tombstone_retention_deadline(receipt.envelope().payload.accepted_at),
+                ));
+            }
+        }
+        let changed = !malformed.is_empty();
+        for (index, retain_until) in malformed.into_iter().rev() {
+            let entry = state.incoming.remove(index);
+            state.incoming_tombstones.push(IncomingTombstone {
+                acceptance_receipt: entry.acceptance_receipt,
+                retain_until,
+            });
+        }
+        Ok(changed)
     }
 
     pub(crate) fn acknowledge_product_handoff(&self, envelope_hash: &str) -> anyhow::Result<()> {
@@ -1599,16 +1661,53 @@ impl CollaborationCore {
         self.ensure_state_directory()?;
         let _file_guard = lock_owner_only_file(&self.lock_path())?;
         let mut state = self.load_state()?.unwrap_or_else(|| self.empty_state());
+        let repaired = self.repair_malformed_chat_handoffs(&mut state)?;
         let pruned = prune_now
-            .map(|now| prune_terminal_state(&mut state, now))
+            .map(|now| self.prune_terminal_state(&mut state, now))
             .transpose()?
             .unwrap_or(false);
         let mutation = f(&mut state)?;
-        if mutation.changed || pruned {
+        if mutation.changed || pruned || repaired {
             self.validate_state(&state)?;
             self.write_state(&state)?;
         }
         Ok(mutation.value)
+    }
+
+    fn prune_terminal_state(&self, state: &mut CoreState, now: u64) -> anyhow::Result<bool> {
+        let mut delivery_by_profile = HashMap::<String, Vec<OutgoingChatDeliveryEvidence>>::new();
+        for entry in &state.outgoing {
+            let authorized = self.authorize_stored_product_message(entry.envelope.as_bytes())?;
+            let message = authorized.message();
+            let payload = &message.envelope().payload;
+            if entry.local_product_projection == OutgoingProductProjectionState::Complete
+                && payload.payload_type == COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE
+                && payload
+                    .expires_at
+                    .saturating_add(MAX_COLLABORATION_CLOCK_SKEW_SECS)
+                    < now
+            {
+                self.verify_outgoing_record(entry)?;
+                delivery_by_profile
+                    .entry(payload.sender_profile_did.clone())
+                    .or_default()
+                    .push(OutgoingChatDeliveryEvidence {
+                        envelope_sha256: message.envelope_sha256().to_string(),
+                        expires_at: payload.expires_at,
+                        accepted: !entry.remote_acceptance_receipts.is_empty(),
+                    });
+            }
+        }
+        for (profile, delivery) in delivery_by_profile {
+            crate::room_service::persist_collaboration_delivery(
+                &self.data_root,
+                self.conversation_scope(),
+                &profile,
+                &delivery,
+                now,
+            )?;
+        }
+        prune_terminal_state(state, now)
     }
 
     fn load_state(&self) -> anyhow::Result<Option<CoreState>> {
@@ -2088,6 +2187,15 @@ fn collaboration_transport_frame_kind(
         }
         _ => Err(CollaborationTransportRejection::UnsupportedSchema),
     }
+}
+
+fn validate_incoming_chat_payload(
+    authorized: &AuthorizedDefaultConversationMessage,
+) -> anyhow::Result<()> {
+    if authorized.message().envelope().payload.payload_type == COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE {
+        crate::collaboration_product::validate_chat_payload(authorized.product_payload())?;
+    }
+    Ok(())
 }
 
 fn transport_incoming_acceptance(
@@ -2844,7 +2952,7 @@ mod tests {
             .prepare_outgoing(
                 SERVICE,
                 "elastos.chat.message/v1",
-                serde_json::json!({"content":"remote"}),
+                serde_json::json!({"body":"remote"}),
                 now,
                 TTL,
             )
@@ -3198,6 +3306,210 @@ mod tests {
         );
     }
 
+    #[test]
+    fn chat_payload_is_validated_before_any_durable_acceptance() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let key = generate_keypair().0;
+        let remote = fixture.authority(key.clone());
+        for product in [
+            serde_json::json!({}),
+            serde_json::json!({"body":" "}),
+            serde_json::json!({"body":" leading"}),
+            serde_json::json!({"body":"valid","extra":true}),
+            serde_json::json!({"body":"x".repeat(crate::room_service::MAX_OBJECT_BODY_LEN + 1)}),
+        ] {
+            let original = remote
+                .prepare_outgoing(
+                    SERVICE,
+                    COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+                    product,
+                    NOW,
+                    TTL,
+                )
+                .unwrap();
+            let frame = remote
+                .prepare_transport_frame(original.envelope_bytes())
+                .unwrap();
+            assert_eq!(
+                transport_rejection(&core, &frame, NOW),
+                CollaborationTransportRejection::InvalidMessage
+            );
+            assert!(core
+                .accept_home_chat(&frame, &remote.local_device_did(), NOW)
+                .is_err());
+            assert!(core
+                .accept_incoming(original.envelope_bytes(), &remote.local_device_did(), NOW)
+                .is_err());
+            assert!(!core.state_path().exists());
+        }
+        let (_, valid) = remote_transport_message(&fixture, key, NOW);
+        core.accept_home_chat(&valid, &remote.local_device_did(), NOW)
+            .unwrap();
+        assert_eq!(core.pending_product_handoffs().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn restart_retires_only_verified_malformed_chat_handoffs_and_frees_slots() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let mut state = core.empty_state();
+        let mut malformed = Vec::new();
+        for _ in 0..4 {
+            let remote = fixture.authority(generate_keypair().0);
+            for _ in 0..MAX_PENDING_INCOMING_PER_SENDER {
+                let original = remote
+                    .prepare_outgoing(
+                        SERVICE,
+                        COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+                        serde_json::json!({}),
+                        NOW,
+                        TTL,
+                    )
+                    .unwrap();
+                let incoming = core
+                    .authority
+                    .authorize_incoming(original.envelope_bytes(), &remote.local_device_did(), NOW)
+                    .unwrap();
+                let receipt = core
+                    .authority
+                    .prepare_acceptance_receipt(&incoming, NOW)
+                    .unwrap();
+                malformed.push(
+                    remote
+                        .prepare_transport_frame(original.envelope_bytes())
+                        .unwrap(),
+                );
+                state.incoming.push(IncomingRecord {
+                    envelope: String::from_utf8(original.envelope_bytes().to_vec()).unwrap(),
+                    acceptance_receipt: String::from_utf8(receipt).unwrap(),
+                    product_handoff: ProductHandoffState::Pending,
+                });
+            }
+        }
+        assert_eq!(state.incoming.len(), MAX_PENDING_INCOMING);
+        core.validate_state(&state).unwrap();
+        core.ensure_state_directory().unwrap();
+        core.write_state(&state).unwrap();
+        let mut corrupted = state.clone();
+        let mut signed: SignedCollaborationMessage =
+            serde_json::from_str(&corrupted.incoming[0].envelope).unwrap();
+        signed.signature = "00".repeat(64);
+        corrupted.incoming[0].envelope =
+            String::from_utf8(canonical_signed_collaboration_message_bytes(&signed).unwrap())
+                .unwrap();
+        let corrupted_bytes = canonical_state_bytes(&corrupted).unwrap();
+        write_owner_only(&core.state_path(), &corrupted_bytes);
+        assert!(fixture.core().pending_product_handoffs().is_err());
+        assert_eq!(fs::read(core.state_path()).unwrap(), corrupted_bytes);
+        write_owner_only(&core.state_path(), &canonical_state_bytes(&state).unwrap());
+        let restarted = fixture.core();
+        assert!(restarted.pending_product_handoffs().unwrap().is_empty());
+        let repaired = restarted.load_state().unwrap().unwrap();
+        assert_eq!(repaired.incoming_tombstones.len(), MAX_PENDING_INCOMING);
+        for entry in &state.incoming {
+            assert!(repaired
+                .incoming_tombstones
+                .iter()
+                .any(|retired| retired.acceptance_receipt == entry.acceptance_receipt));
+        }
+        assert_eq!(
+            transport_rejection(&restarted, &malformed[0], NOW),
+            CollaborationTransportRejection::InvalidMessage
+        );
+        let after_expiry = NOW + TTL + MAX_COLLABORATION_CLOCK_SKEW_SECS + 1;
+        let (_, valid) = remote_transport_message(&fixture, generate_keypair().0, after_expiry);
+        transport_incoming(&restarted, &valid, after_expiry);
+        let presence = fixture.authority(generate_keypair().0);
+        let metadata = presence
+            .prepare_outgoing(
+                SERVICE,
+                crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+                serde_json::json!({}),
+                after_expiry,
+                45,
+            )
+            .unwrap();
+        restarted
+            .accept_incoming(
+                metadata.envelope_bytes(),
+                &presence.local_device_did(),
+                after_expiry,
+            )
+            .unwrap();
+        assert_eq!(fixture.core().pending_product_handoffs().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn concurrent_shared_admission_keeps_five_cap_and_counts_only_new_commits() {
+        use std::sync::{Arc, Barrier};
+        let fixture = Fixture::new();
+        let core = Arc::new(fixture.core());
+        let key = generate_keypair().0;
+        let remote = fixture.authority(key.clone());
+        let source = remote.local_device_did();
+        let (_, failed) = remote_transport_message(&fixture, key.clone(), NOW);
+        core.inject_write_fault(WriteFault::BeforeWrite);
+        assert!(core.accept_home_chat(&failed, &source, NOW).is_err());
+        let (_, duplicate) = remote_transport_message(&fixture, key.clone(), NOW);
+        let start = Arc::new(Barrier::new(9));
+        let workers = (0..8)
+            .map(|_| {
+                let core = core.clone();
+                let start = start.clone();
+                let frame = duplicate.clone();
+                let source = source.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    core.accept_home_chat(&frame, &source, NOW).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        start.wait();
+        let receipts = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert!(receipts.iter().all(|receipt| receipt == &receipts[0]));
+        for _ in 0..COMMUNITY_RECEIVES_PER_SENDER_PER_WINDOW - 2 {
+            let (_, frame) = remote_transport_message(&fixture, key.clone(), NOW);
+            core.accept_home_chat(&frame, &source, NOW).unwrap();
+        }
+        let start = Arc::new(Barrier::new(3));
+        let contenders = (0..2)
+            .map(|_| {
+                let core = core.clone();
+                let start = start.clone();
+                let source = source.clone();
+                let (_, frame) = remote_transport_message(&fixture, key.clone(), NOW);
+                std::thread::spawn(move || {
+                    start.wait();
+                    core.accept_home_chat(&frame, &source, NOW).is_ok()
+                })
+            })
+            .collect::<Vec<_>>();
+        start.wait();
+        assert_eq!(
+            contenders
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .filter(|accepted| *accepted)
+                .count(),
+            1
+        );
+        assert_eq!(
+            core.load_state().unwrap().unwrap().incoming.len(),
+            COMMUNITY_RECEIVES_PER_SENDER_PER_WINDOW
+        );
+        core.accept_home_chat(&duplicate, &source, NOW).unwrap();
+        let (_, other) = remote_transport_message(&fixture, generate_keypair().0, NOW);
+        transport_incoming(&core, &other, NOW);
+        assert_eq!(
+            core.pending_product_handoffs().unwrap().len(),
+            COMMUNITY_RECEIVES_PER_SENDER_PER_WINDOW + 1
+        );
+    }
+
     fn transport_rejection(
         core: &CollaborationCore,
         frame: &[u8],
@@ -3446,7 +3758,7 @@ mod tests {
             .prepare_outgoing(
                 SERVICE,
                 "elastos.chat.message/v1",
-                serde_json::json!({"content":"self"}),
+                serde_json::json!({"body":"self"}),
                 NOW,
                 TTL,
             )
@@ -3490,7 +3802,7 @@ mod tests {
 
         let mut conflict: SignedCollaborationMessage =
             serde_json::from_slice(&transport_frame_envelope_bytes(&message)).unwrap();
-        conflict.payload.payload["product"] = serde_json::json!({"content":"conflict"});
+        conflict.payload.payload["product"] = serde_json::json!({"body":"conflict"});
         conflict.payload.nonce = "00112233445566778899aabbccddeeff".to_string();
         let conflict = wrap_transport_frame(
             &fixture,
@@ -4289,7 +4601,7 @@ mod tests {
 
         let mut conflicting: SignedCollaborationMessage =
             serde_json::from_slice(&message_bytes).unwrap();
-        conflicting.payload.payload["product"] = serde_json::json!({"content":"conflict"});
+        conflicting.payload.payload["product"] = serde_json::json!({"body":"conflict"});
         conflicting.payload.nonce = "00112233445566778899aabbccddeeff".to_string();
         let conflicting = resign_message(&remote_key, conflicting.payload);
         assert!(fixture
@@ -4306,7 +4618,7 @@ mod tests {
         let mut nonce_conflict: SignedCollaborationMessage =
             serde_json::from_slice(&message_bytes).unwrap();
         nonce_conflict.payload.message_id = "ffeeddccbbaa99887766554433221100".to_string();
-        nonce_conflict.payload.payload["product"] = serde_json::json!({"content":"nonce conflict"});
+        nonce_conflict.payload.payload["product"] = serde_json::json!({"body":"nonce conflict"});
         let nonce_conflict = resign_message(&remote_key, nonce_conflict.payload);
         assert!(fixture
             .core()
@@ -4411,7 +4723,7 @@ mod tests {
             .prepare_outgoing(
                 SERVICE,
                 "elastos.chat.message/v1",
-                serde_json::json!({"content":"self"}),
+                serde_json::json!({"body":"self"}),
                 NOW,
                 TTL,
             )

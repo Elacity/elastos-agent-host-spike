@@ -4919,7 +4919,8 @@ fn apply_reconnect_failure(state: &mut AppState, error: String) {
 /// message only while Community is open: a response that arrives after they
 /// moved to a direct conversation leaves that conversation's reading place.
 fn record_own_shared_send(state: &mut AppState, sent: ConversationObjectView) {
-    state.latest_seq = state.latest_seq.max(sent.seq);
+    // A send response contains only this row. Polling still owns the cursor
+    // because peer rows can precede it and have not yet reached this view.
     state.objects.push(sent);
     dedupe_objects(&mut state.objects);
     if state.direct.selected_conversation_id.is_none() {
@@ -5789,7 +5790,46 @@ mod tests {
         commit_direct_selection(&mut state, "direct:sha256:b").unwrap();
         super::record_own_shared_send(&mut state, sent());
         assert!(!state.force_message_follow);
-        assert_eq!(state.latest_seq, 7);
+        assert_eq!(state.latest_seq, 0);
+    }
+
+    #[test]
+    fn a_shared_send_keeps_the_poll_cursor_until_intervening_peer_rows_arrive() {
+        let object = |seq, sender: &str| ConversationObjectView {
+            delivery_state: None,
+            seq,
+            sender: sender.into(),
+            sender_ref: None,
+            sender_profile_verified: Some(true),
+            from_current_session: sender == "Me",
+            kind: ConversationObjectKind::Text,
+            body: Some(sender.into()),
+            emoji: None,
+            link: None,
+            attachment: None,
+            created_at: 1,
+        };
+        let mut state = AppState::default();
+        apply_active_poll_state(&mut state, shared_poll(4));
+        let own = object(6, "Me");
+        super::record_own_shared_send(&mut state, own.clone());
+        assert_eq!(state.latest_seq, 4);
+        assert_eq!(state.objects.len(), 1);
+
+        // Runtime stored the peer row before our send; the next poll must
+        // request both rows even though the send response arrived first.
+        apply_active_poll_state(
+            &mut state,
+            RoomPollView {
+                objects: vec![object(5, "Peer"), own],
+                ..shared_poll(6)
+            },
+        );
+        assert_eq!(state.latest_seq, 6);
+        assert_eq!(state.objects.len(), 2);
+        assert_eq!(state.objects[0].seq, 5);
+        assert_eq!(state.objects[0].body.as_deref(), Some("Peer"));
+        assert_eq!(state.objects[1].seq, 6);
     }
 
     #[test]

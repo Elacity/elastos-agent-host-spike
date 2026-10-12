@@ -2987,6 +2987,65 @@ pub(crate) fn collaboration_room_poll(
     })
 }
 
+/// Core records terminal outcomes before it prunes their signed evidence.
+/// Existing Chat rows keep those outcomes while Chat is closed or restarted.
+pub(crate) fn persist_collaboration_delivery(
+    data_dir: &Path,
+    scope: (&str, &str),
+    sender_profile_did: &str,
+    delivery: &[crate::collaboration_core::OutgoingChatDeliveryEvidence],
+    now: u64,
+) -> anyhow::Result<()> {
+    let scope = collaboration_object_scope(scope.0, scope.1)?;
+    let sender = normalize_member_did(sender_profile_did)?;
+    let paths = storage_paths(data_dir)?;
+    let lockfile = match fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&paths.lock_path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.into()),
+    };
+    let lock = lock_state_file(lockfile)?;
+    let result = (|| {
+        let mut state = load_state(&paths)?;
+        let evidence = delivery
+            .iter()
+            .map(|entry| (entry.envelope_sha256.as_str(), entry))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut needs_sync = false;
+        for object in &mut state.objects {
+            if object.collaboration_scope.as_ref() != Some(&scope)
+                || object.sender_member_did.as_deref() != Some(sender.as_str())
+                || verified_collaboration_sender_profile(object).is_none()
+                || object.delivery_state.is_none()
+            {
+                continue;
+            }
+            let next = match evidence.get(object.event_id.as_str()) {
+                Some(entry) if entry.accepted => CommunityDeliveryState::Accepted,
+                Some(entry) if entry.expires_at <= now => match object.delivery_state {
+                    Some(CommunityDeliveryState::Accepted) => CommunityDeliveryState::Accepted,
+                    _ => CommunityDeliveryState::Expired,
+                },
+                _ => continue,
+            };
+            object.delivery_state = Some(next);
+            // A prior poll may have written this outcome without syncing it.
+            // Its matching snapshot still needs durability before Core prune.
+            needs_sync = true;
+        }
+        if needs_sync {
+            write_json_atomic_with_sync(&paths.objects_path, &state.objects, true)?;
+        }
+        Ok(())
+    })();
+    unlock_state_file(lock)?;
+    result
+}
+
 /// Refresh only this authenticated Profile's original rows. The snapshot is
 /// independent of the feed cursor, so receipt/expiry changes preserve seq.
 pub(crate) fn collaboration_room_poll_with_delivery(
@@ -4818,6 +4877,13 @@ fn write_json_atomic<T>(path: &Path, value: &T) -> anyhow::Result<()>
 where
     T: Serialize,
 {
+    write_json_atomic_with_sync(path, value, false)
+}
+
+fn write_json_atomic_with_sync<T>(path: &Path, value: &T, durable: bool) -> anyhow::Result<()>
+where
+    T: Serialize,
+{
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("path missing parent"))?;
@@ -4829,7 +4895,13 @@ where
             .unwrap_or("state")
     ));
     fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
+    if durable {
+        fs::File::open(&tmp)?.sync_all()?;
+    }
     fs::rename(&tmp, path)?;
+    if durable {
+        fs::File::open(parent)?.sync_all()?;
+    }
     Ok(())
 }
 

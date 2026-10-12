@@ -178,7 +178,7 @@ impl CollaborationChatProductPort {
     }
 
     /// Return only durable handoffs that exactly implement the current Chat payload.
-    /// Unknown or malformed product payloads remain pending in the core.
+    /// Core retires malformed legacy Chat handoffs and keeps their replay evidence.
     pub fn pending_messages(&self) -> anyhow::Result<Vec<CollaborationChatHandoff>> {
         Ok(self
             .core
@@ -709,6 +709,10 @@ fn room_profile_card(
     }
 }
 
+pub(crate) fn validate_chat_payload(payload: &serde_json::Value) -> anyhow::Result<()> {
+    exact_chat_payload(payload).map(|_| ())
+}
+
 fn exact_chat_payload(payload: &serde_json::Value) -> anyhow::Result<ChatPayload> {
     let payload: ChatPayload = serde_json::from_value(payload.clone())
         .context("collaboration Chat payload is malformed")?;
@@ -1151,6 +1155,145 @@ mod tests {
     }
 
     #[test]
+    fn community_delivery_terminal_outcomes_survive_closed_chat_and_restart() {
+        use crate::room_service::CommunityDeliveryState::{Accepted, Expired, Sending};
+        for accepted in [false, true] {
+            let fixture = fixture();
+            let now = now_secs();
+            let session = crate::room_service::start_local_runtime_session(
+                &fixture.data_root,
+                &fixture.person_profile.document().profile_did,
+                "Local",
+                "Closed Chat test",
+            )
+            .unwrap();
+            let prepared = fixture
+                .port
+                .prepare_message(
+                    binding(&fixture, "closed-chat-own", "retained original"),
+                    "retained original",
+                    &fixture.person_profile,
+                    now,
+                )
+                .unwrap();
+            let own = fixture
+                .port
+                .project_prepared_message(&fixture.data_root, &prepared, Some(&session.token))
+                .unwrap();
+            assert_eq!(own.delivery_state, Some(Sending));
+            if accepted {
+                let (remote, _) = remote_authority(&fixture);
+                let incoming = remote
+                    .authorize_incoming(
+                        &prepared.envelope_bytes,
+                        &fixture.core.local_device_did(),
+                        now + 1,
+                    )
+                    .unwrap();
+                fixture
+                    .core
+                    .record_home_chat_acceptance(
+                        &remote
+                            .prepare_acceptance_receipt(&incoming, now + 1)
+                            .unwrap(),
+                        &prepared.envelope_sha256,
+                        &remote.local_device_did(),
+                        now + 1,
+                    )
+                    .unwrap();
+            }
+            // Chat stays closed throughout receipt/expiry and Core pruning.
+            let later = prepared.expires_at
+                + elastos_common::collaboration_protocol::MAX_COLLABORATION_CLOCK_SKEW_SECS
+                + 1;
+            let objects = elastos_common::localhost::rooted_localhost_fs_path(
+                &fixture.data_root,
+                "localhost://Local/Shared/AppCapsules/chat-room",
+            )
+            .unwrap()
+            .join("room/objects.json");
+            let saved_objects = std::fs::read(&objects).unwrap();
+            std::fs::write(&objects, b"[").unwrap();
+            let failed = fixture.port.prepare_message(
+                binding(&fixture, "after-closed-chat", "next intent"),
+                "next intent",
+                &fixture.person_profile,
+                later,
+            );
+            std::fs::write(&objects, saved_objects).unwrap();
+            assert!(failed.is_err());
+            let retained = fixture
+                .core
+                .outgoing_chat_delivery(&fixture.person_profile.document().profile_did)
+                .unwrap();
+            assert_eq!(retained.len(), 1);
+            assert_eq!(retained[0].accepted, accepted);
+            assert_eq!(retained[0].envelope_sha256, prepared.envelope_sha256);
+            let blocked_temp = objects.with_file_name(".objects.json.tmp");
+            std::fs::create_dir(&blocked_temp).unwrap();
+            let failed = fixture.port.prepare_message(
+                binding(&fixture, "after-closed-chat", "next intent"),
+                "next intent",
+                &fixture.person_profile,
+                later,
+            );
+            std::fs::remove_dir(&blocked_temp).unwrap();
+            assert!(failed.is_err());
+            assert_eq!(
+                fixture
+                    .core
+                    .outgoing_chat_delivery(&fixture.person_profile.document().profile_did)
+                    .unwrap()[0]
+                    .envelope_sha256,
+                prepared.envelope_sha256
+            );
+            fixture
+                .port
+                .prepare_message(
+                    binding(&fixture, "after-closed-chat", "next intent"),
+                    "next intent",
+                    &fixture.person_profile,
+                    later,
+                )
+                .unwrap();
+            assert!(fixture
+                .core
+                .outgoing_chat_delivery(&fixture.person_profile.document().profile_did)
+                .unwrap()
+                .is_empty());
+            let restarted = CollaborationChatProductPort::new(Arc::new(
+                CollaborationCore::new(
+                    &fixture.data_root,
+                    fixture.device_key.clone(),
+                    fixture.profile.clone(),
+                    fixture.grant.clone(),
+                    CHAT_ROOM_CAPSULE,
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+            let reopened = restarted
+                .conversation_poll_with_read_intent(
+                    &fixture.data_root,
+                    &session.token,
+                    own.seq,
+                    &fixture.person_profile,
+                    false,
+                    later,
+                )
+                .unwrap();
+            assert!(reopened.objects.is_empty());
+            assert_eq!(reopened.latest_seq, own.seq);
+            assert_eq!(reopened.own_delivery.len(), 1);
+            assert_eq!(reopened.own_delivery[0].seq, own.seq);
+            assert_eq!(
+                reopened.own_delivery[0].state,
+                if accepted { Accepted } else { Expired }
+            );
+        }
+    }
+
+    #[test]
     fn community_delivery_observed_expiry_survives_core_pruning_and_restart() {
         use crate::room_service::CommunityDeliveryState::Expired;
         let fixture = fixture();
@@ -1182,6 +1325,22 @@ mod tests {
         let later = prepared.expires_at
             + elastos_common::collaboration_protocol::MAX_COLLABORATION_CLOCK_SKEW_SECS
             + 1;
+        let blocked_temp = elastos_common::localhost::rooted_localhost_fs_path(
+            &fixture.data_root,
+            "localhost://Local/Shared/AppCapsules/chat-room",
+        )
+        .unwrap()
+        .join("room/.objects.json.tmp");
+        std::fs::create_dir(&blocked_temp).unwrap();
+        let failed = fixture.port.prepare_message(
+            binding(&fixture, "after-expiry", "new intent"),
+            "new intent",
+            &fixture.person_profile,
+            later,
+        );
+        std::fs::remove_dir(&blocked_temp).unwrap();
+        // The existing Expired row also needs a durable write before prune.
+        assert!(failed.is_err());
         fixture
             .port
             .prepare_message(
@@ -1271,6 +1430,20 @@ mod tests {
         let later = old.expires_at
             + elastos_common::collaboration_protocol::MAX_COLLABORATION_CLOCK_SKEW_SECS
             + 1;
+        // Simulate genuinely missing evidence, rather than normal pruning,
+        // which records terminal outcomes even while Chat stays closed.
+        let namespace =
+            std::fs::read_dir(fixture.data_root.join("collaboration/default-conversation"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+        let path = namespace.join("state-v1.json");
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        state["outgoing"] = serde_json::json!([]);
+        std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
         fixture
             .port
             .prepare_message(
@@ -1803,11 +1976,15 @@ mod tests {
                 CHAT_MESSAGE_TTL_SECS,
             )
             .unwrap();
-        for envelope in [&known, &malformed, &extra_field, &oversized] {
-            fixture
+        fixture
+            .core
+            .accept_incoming_from_signed_source_for_test(known.envelope_bytes(), NOW + 1)
+            .unwrap();
+        for envelope in [&malformed, &extra_field, &oversized] {
+            assert!(fixture
                 .core
                 .accept_incoming_from_signed_source_for_test(envelope.envelope_bytes(), NOW + 1)
-                .unwrap();
+                .is_err());
         }
 
         let handoffs = fixture.port.pending_messages().unwrap();
@@ -1820,7 +1997,7 @@ mod tests {
             handoff.sender_profile_did(),
             remote_profile.document().profile_did
         );
-        assert_eq!(fixture.core.summary().unwrap().pending_product_handoffs, 4);
+        assert_eq!(fixture.core.summary().unwrap().pending_product_handoffs, 1);
 
         let other_temp = tempfile::tempdir().unwrap();
         let other_core = Arc::new(
@@ -1837,7 +2014,7 @@ mod tests {
         assert!(other_port
             .project_handoff(&fixture.data_root, handoff)
             .is_err());
-        assert_eq!(fixture.core.summary().unwrap().pending_product_handoffs, 4);
+        assert_eq!(fixture.core.summary().unwrap().pending_product_handoffs, 1);
 
         let restarted = Arc::new(
             CollaborationCore::new(
@@ -1864,7 +2041,7 @@ mod tests {
             .project_handoff(&fixture.data_root, restarted_handoff)
             .unwrap();
         assert!(restarted_port.pending_messages().unwrap().is_empty());
-        assert_eq!(restarted.summary().unwrap().pending_product_handoffs, 3);
+        assert_eq!(restarted.summary().unwrap().pending_product_handoffs, 0);
 
         let restarted_again = Arc::new(
             CollaborationCore::new(

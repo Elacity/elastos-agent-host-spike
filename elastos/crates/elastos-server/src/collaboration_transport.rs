@@ -818,7 +818,7 @@ mod tests {
             .prepare_outgoing(
                 SERVICE,
                 "elastos.chat.message/v1",
-                serde_json::json!({"content": content}),
+                serde_json::json!({"body": content}),
                 NOW,
                 TTL,
             )
@@ -1020,7 +1020,7 @@ mod tests {
         let outgoing = prepare_outgoing(
             &ac,
             "held-response",
-            serde_json::json!({"content":"one original"}),
+            serde_json::json!({"body":"one original"}),
         );
         ac.acknowledge_outgoing_product_projection(outgoing.envelope_sha256())
             .unwrap();
@@ -1093,7 +1093,7 @@ mod tests {
             .unwrap()
             .iter()
             .any(|message| message.envelope_sha256() == metadata.envelope_sha256()));
-        let outgoing = prepare_outgoing(&ac, "Chat", serde_json::json!({"content":"direct"}));
+        let outgoing = prepare_outgoing(&ac, "Chat", serde_json::json!({"body":"direct"}));
         ac.acknowledge_outgoing_product_projection(outgoing.envelope_sha256())
             .unwrap();
         let carrier = FakeCarrier::new();
@@ -1161,7 +1161,7 @@ mod tests {
             let out = prepare_outgoing(
                 &ac,
                 &format!("fair-{i}"),
-                serde_json::json!({"content":format!("m{i}")}),
+                serde_json::json!({"body":format!("m{i}")}),
             );
             ac.acknowledge_outgoing_product_projection(out.envelope_sha256())
                 .unwrap();
@@ -1290,7 +1290,7 @@ mod tests {
         let outgoing = prepare_outgoing(
             &core,
             "seed-refusal",
-            serde_json::json!({"content":"Home only"}),
+            serde_json::json!({"body":"Home only"}),
         );
         core.acknowledge_outgoing_product_projection(outgoing.envelope_sha256())
             .unwrap();
@@ -1691,7 +1691,7 @@ mod tests {
         let b = peer_fixture(&a);
         let ac = a.core();
         let bc = b.core();
-        let outgoing = prepare_outgoing(&ac, "cancel", serde_json::json!({"content":"pending"}));
+        let outgoing = prepare_outgoing(&ac, "cancel", serde_json::json!({"body":"pending"}));
         ac.acknowledge_outgoing_product_projection(outgoing.envelope_sha256())
             .unwrap();
         let (driver, plane) = home_driver(
