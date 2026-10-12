@@ -1592,6 +1592,11 @@ mod tests {
                     "journal transaction creator is live or its exit is unproven"
                 )
             )
+            || fault
+                == format!(
+                    "{:?}",
+                    ProviderFault::corrupt_journal("model run journal census changed during scan")
+                )
             || (fault.contains("filename mismatch") && fault.contains(".json.tmp-"))
     }
 
