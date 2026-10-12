@@ -414,7 +414,7 @@ impl LocalLlamaEngines {
                         // wait. Its close result below still owns settlement.
                         tokio::select! {
                             biased;
-                            _ = local_stop_requested(cancel.as_deref_mut()) => Err(LocalLlamaFault::Failed),
+                            _ = local_stop_requested(cancel) => Err(LocalLlamaFault::Failed),
                             healthy = wait_until_healthy(
                                 &mut running.child,
                                 running.guard_group,

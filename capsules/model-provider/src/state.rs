@@ -2362,7 +2362,7 @@ mod tests {
             }
             state.journal.store_run(&run).unwrap();
             let before =
-                serde_json::to_value(&state.journal.load_run(&run.run_id).unwrap()).unwrap();
+                serde_json::to_value(state.journal.load_run(&run.run_id).unwrap()).unwrap();
             let missing_local = if case == "hosted" {
                 let local = &state.offers["admitted"];
                 let binding =
@@ -2457,7 +2457,7 @@ mod tests {
                 match case {
                     "output" => *output = Some(json!({"text":"late"})),
                     "events" => events.push(crate::adapters::EventSeed {
-                        kind: "text_delta".into(),
+                        kind: "text_delta",
                         data: json!({"text":"late"}),
                     }),
                     "report" => *backend_report = Some(Box::new(BackendReport::unknown())),
