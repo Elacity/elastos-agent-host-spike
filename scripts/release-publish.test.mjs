@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -584,18 +584,26 @@ test('seed runs the Runtime with the data dir it resolves from XDG_DATA_HOME', t
   assert.match(lines[0], /^publish-release .* --preflight-only$/);
 });
 
-test('seed stops before any download when saved state does not precede the signed head', t => {
+test('seed downloads only when saved state precedes the signed head or holds this version', t => {
   const { f, env, stdout } = seedScript(t, { signer_did: did, payload: { prev_head_cid: 'bafy-signed-prev' } });
-  writeState(env.RELEASE_SEED_DATA, { last_head_cid: 'bafy-other' });
   const bin = join(f.root, 'download-bin');
   const downloads = join(f.root, 'downloads.log');
   mkdirSync(bin);
   writeFileSync(join(bin, 'curl'), `#!/bin/sh\necho "$*" >> '${downloads}'\nexit 1\n`, { mode: 0o755 });
   const seedSide = '#' + stdout.split('# On the seed as the service user,')[1];
-  const result = spawnSync('bash', ['-c', seedSide], { encoding: 'utf8', env: { ...env, GH_TOKEN: 'fixture', PATH: `${bin}:${env.PATH}` } });
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /prev_head_cid/);
-  assert.throws(() => readFileSync(downloads), { code: 'ENOENT' });
+  for (const [state, downloaded] of [
+    [{ last_head_cid: 'bafy-other', last_version: '1.2.2' }, false],
+    [{ last_head_cid: 'bafy-signed-prev', last_version: '1.2.2' }, true],
+    // A rerun after commit; the Runtime checks the exact head CID itself.
+    [{ last_head_cid: 'bafy-this-head', last_version: '1.2.3' }, true],
+  ]) {
+    rmSync(downloads, { force: true });
+    writeState(env.RELEASE_SEED_DATA, state);
+    const result = spawnSync('bash', ['-c', seedSide], { encoding: 'utf8', env: { ...env, GH_TOKEN: 'fixture', PATH: `${bin}:${env.PATH}` } });
+    assert.notEqual(result.status, 0);
+    assert.equal(/prev_head_cid/.test(result.stderr), !downloaded, result.stderr);
+    assert.equal(existsSync(downloads), downloaded, JSON.stringify(state));
+  }
 });
 
 for (const data of ['relative/elastos', '/srv/elastos-data', '/srv/elastos/']) {

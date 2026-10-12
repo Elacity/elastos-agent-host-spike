@@ -277,9 +277,11 @@ scp $work/signed.SHA256SUMS $RELEASE_SEED:$stage/
 EOF
     seed_preamble "$stage"
     # Same file the Runtime will read; fail in seconds, not after the downloads.
+    # A rerun of the committed version passes; the Runtime then checks its exact head CID.
     cat <<EOF
-[ "\$(jq -r '.last_head_cid // ""' $RELEASE_SEED_DATA/ElastOS/SystemServices/Publisher/publish-state.json)" = '$prev' ] \\
-    || { echo 'saved publish state does not match the signed head prev_head_cid; check RELEASE_SEED_DATA' >&2; exit 1; }
+jq -e --arg prev '$prev' --arg version '$version' '(.last_head_cid // "") == \$prev or .last_version == \$version' \\
+    $RELEASE_SEED_DATA/ElastOS/SystemServices/Publisher/publish-state.json > /dev/null \\
+    || { echo 'saved publish state neither precedes the signed head (prev_head_cid) nor holds this version; check RELEASE_SEED_DATA' >&2; exit 1; }
 EOF
     while read -r platform; do
         id=$(jq -er --arg platform "$platform" '.receipts[] | select(.platform == $platform) | .artifact.id' "$work/run.json")
