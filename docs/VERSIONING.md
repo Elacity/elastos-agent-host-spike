@@ -248,7 +248,9 @@ a SHA-256 pin. It supports the attestation verification flags used by the signer
    anything, it refuses unless `scripts/update-hop-previous-release.json` at
    source H names the release head the origin serves now (its `head_cid`), so
    H's CI update journey started from the release users run; step 5 moves that
-   pin. It checks that the run
+   pin. N+1 of a pair keeps N's source and so its pin; it passes once the public
+   head is the head this Mac signed for N from the same run and that head
+   follows the pin. It checks that the run
    succeeded from approved W/ref/event and that source H is on `develop`, downloads
    and verifies all three platform artifacts with their native name suffixes
    and certificate-authenticated proof attempts. A retained native artifact from an earlier attempt can use its original
@@ -334,7 +336,11 @@ Seed details come from `RELEASE_SEED`, `RELEASE_SEED_DATA`,
 service's `$XDG_DATA_HOME/elastos` (absolute, ending in `/elastos`); the seed
 scripts export its parent as `XDG_DATA_HOME`. Publish N first; after N is
 accepted on a real install, prepare N+1 from the same run before its artifacts
-expire (14 days).
+expire (14 days), with N's work directory (and the `signed` directory the policy
+command writes there) still in `RELEASE_WORK`. The printed seed commands carry
+every value as one shell word; `seed` refuses a signed head whose `signer_did`
+is not a `did:key` or whose `prev_head_cid` is not a canonical CID, and a first
+publication (no `prev_head_cid`) may start without saved publish state.
 
 ## Withdraw a bad release
 
