@@ -303,9 +303,7 @@ impl CollaborationChatProductPort {
     fn history_handoff(&self, bytes: &[u8], now: u64) -> anyhow::Result<CollaborationChatHandoff> {
         let authorized = self.core.authorize_history_message(bytes, now)?;
         let message = &authorized.message().envelope().payload;
-        if message.payload_type != CHAT_PAYLOAD_TYPE {
-            anyhow::bail!("collaboration history is not the current Chat product");
-        }
+        validate_chat_projection(&authorized)?;
         let payload = exact_chat_payload(authorized.product_payload())?;
         let profile = authorized.sender_profile().clone();
         Ok(CollaborationChatHandoff {
@@ -647,9 +645,7 @@ fn prepared_chat_message(
 ) -> anyhow::Result<PreparedCollaborationChatMessage> {
     let authorized = core.authorize_stored_product_message(prepared.envelope_bytes())?;
     let message = &authorized.message().envelope().payload;
-    if message.payload_type != CHAT_PAYLOAD_TYPE {
-        anyhow::bail!("collaboration outgoing payload is not the current Chat product");
-    }
+    validate_chat_projection(&authorized)?;
     let payload = exact_chat_payload(authorized.product_payload())?;
     let sender_profile = authorized.sender_profile().clone();
     let sender_profile_did = sender_profile.document().profile_did.clone();
@@ -673,9 +669,7 @@ fn chat_handoff(
 ) -> Option<CollaborationChatHandoff> {
     let message = pending.authorized_message().message();
     let payload = &message.envelope().payload;
-    if payload.payload_type != CHAT_PAYLOAD_TYPE {
-        return None;
-    }
+    validate_chat_projection(pending.authorized_message()).ok()?;
     let chat = exact_chat_payload(pending.authorized_message().product_payload()).ok()?;
     let sender_profile = pending.authorized_message().sender_profile().clone();
     let sender_profile_did = sender_profile.document().profile_did.clone();
@@ -712,9 +706,12 @@ fn room_profile_card(
 pub(crate) fn validate_chat_projection(
     authorized: &crate::collaboration_default_conversation::AuthorizedDefaultConversationMessage,
 ) -> anyhow::Result<()> {
-    let chat = exact_chat_payload(authorized.product_payload())?;
     let message = authorized.message();
     let payload = &message.envelope().payload;
+    if payload.payload_type != CHAT_PAYLOAD_TYPE {
+        anyhow::bail!("collaboration payload is not the current Chat product");
+    }
+    let chat = exact_chat_payload(authorized.product_payload())?;
     crate::room_service::validate_collaboration_text(
         (&payload.network_id, &payload.conversation_id),
         message.envelope_sha256(),
