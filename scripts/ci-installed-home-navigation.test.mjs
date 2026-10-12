@@ -102,7 +102,10 @@ test("installed recovery uses Assistant's visible Home control while Home's dock
 
 test("installed contender opens the real Assistant through a signed, ready Home", async t => {
   // Serve the real capsule entry, modules and styles; only Home and Runtime responses are fixtures.
-  const assistantRoot = new URL("../capsules/assistant/browser/", import.meta.url);
+  const capsuleRoots = {
+    assistant: new URL("../capsules/assistant/browser/", import.meta.url),
+    home: new URL("../capsules/home/browser/", import.meta.url),
+  };
   const schema = "elastos.assistant.workspace/v2";
   let workspace = { schema, revision: 0, document: {} };
   const errors = [];
@@ -164,9 +167,11 @@ test("installed contender opens the real Assistant through a signed, ready Home"
         throw new Error("unexpected fixture operation");
       }
       if (url.pathname === "/favicon.ico") { response.writeHead(204).end(); return; }
-      assert(url.pathname.startsWith("/apps/assistant/"));
-      const asset = new URL(url.pathname.slice("/apps/assistant/".length) || "index.html", assistantRoot);
-      assert(asset.href.startsWith(assistantRoot.href));
+      const path = /^\/apps\/(assistant|home)\/(.*)$/.exec(url.pathname);
+      assert(path, "fixture serves only Assistant and its Home dependencies");
+      const root = capsuleRoots[path[1]];
+      const asset = new URL(path[2] || "index.html", root);
+      assert(asset.href.startsWith(root.href));
       const bytes = await readFile(asset);
       response.writeHead(200, { ...headers, "content-type": ({ ".html": "text/html", ".js": "text/javascript", ".css": "text/css",
         ".mjs": "text/javascript", ".svg": "image/svg+xml", ".woff2": "font/woff2" })[extname(asset.pathname)] || "application/octet-stream" });
@@ -182,7 +187,7 @@ test("installed contender opens the real Assistant through a signed, ready Home"
       const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
       try {
         await page.goto(`${origin}/apps/assistant/#home_token=fixture`);
-        await page.waitForFunction(() => document.querySelector("#agent-harness-new-chat")?.dataset.boundNewChat === "1");
+        await page.waitForFunction(() => document.querySelector("#agent-harness-new-chat")?.dataset.boundNewChat === "1", null, { timeout: 5000 });
         await page.evaluate(() => window.postMessage({ type: "home-agent:open" }, "*"));
         await assert.rejects(page.locator("#agent-harness-new-chat").click({ timeout: 1000 }), error => error.name === "TimeoutError");
         assert.equal(await page.locator("#agent-harness").getAttribute("aria-hidden"), "true");
