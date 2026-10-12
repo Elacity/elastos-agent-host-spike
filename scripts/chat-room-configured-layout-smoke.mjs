@@ -1402,11 +1402,13 @@ async function runScenario(scenario) {
     );
 
     await frame.locator("#emoji-toggle").click();
+    await frame.locator("#emoji-popover").waitFor({ state: "visible", timeout: 3_000 });
     assert(
       await frame.locator("#emoji-popover").isVisible(),
       "emoji popover did not open from the compact composer",
     );
     await frame.locator("body").press("Escape");
+    await frame.locator("#emoji-popover").waitFor({ state: "hidden", timeout: 3_000 });
     assert(
       !(await frame.locator("#emoji-popover").isVisible()),
       "emoji popover did not close on Escape",
