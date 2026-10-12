@@ -5,6 +5,7 @@ import { appendFileSync, readFileSync, statfsSync, writeFileSync, renameSync } f
 import { join } from "node:path";
 import { applyRunEventsPage, terminalOutputText } from "../capsules/assistant/browser/model-contract.js";
 import { publicJourneyFailure } from "./ci-installed-home-failure.mjs";
+import { returnInstalledHome } from "./ci-installed-home-navigation.mjs";
 const require = createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url));
 const { chromium } = require("playwright");
 const [base, evidence, data, mode, resourceControl] = process.argv.slice(2);
@@ -139,14 +140,6 @@ async function resourceReply(assistant, offer, label) {
   await page.screenshot({ path: join(evidence, `finite-${label}.png`), fullPage: true });
   return turn;
 }
-async function returnHome() {
-  const shell = page.frameLocator("#active-shell-frame");
-  await shell.locator("#assistant-toggle").click();
-  await shell.locator("#assistant-space").waitFor({ state: "hidden", timeout: 10000 });
-  await shell.locator("#desktop").waitFor({ state: "visible" });
-  assert.equal(await page.getAttribute("body", "data-home-status"), "ready");
-  await page.screenshot({ path: join(evidence, "finite-home-recovery.png"), fullPage: true });
-}
 async function resourceLifecycle(assistant, offer, context) {
   stage = "finite_resource_lifecycle";
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -213,7 +206,8 @@ async function resourceLifecycle(assistant, offer, context) {
   const recovered = await resourceAction("engine_running");
   assert(doomed.engine_pid !== recovered.engine_pid || doomed.engine_start_ticks !== recovered.engine_start_ticks);
   results.model_crash_recovery = "passed";
-  await returnHome();
+  stage = "finite_home_recovery";
+  await returnInstalledHome(page, assistant, evidence);
   results.finite_home_recovery = "passed";
 }
 function observeDisk() {
@@ -383,7 +377,8 @@ try {
       await page.screenshot({ path: join(evidence, "finite-memory-refusal.png"), fullPage: true });
       resourceTurns.push({ stage: "memory_refusal", run_id: refused.run.run_id, status: terminal.status, code: terminal.error.code });
       results.memory_refusal = "passed";
-      await returnHome();
+      stage = "finite_home_recovery";
+      await returnInstalledHome(page, assistant, evidence);
       results.finite_home_recovery = "passed";
       writeFileSync(join(evidence, "home-journey.json"), JSON.stringify({
         results, disk, model_cid: cid, offer_id: offer, max_output_tokens: 16, resource_turns: resourceTurns,

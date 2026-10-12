@@ -1,6 +1,6 @@
 // Public proof uses fixed failure codes. Detailed browser errors belong to Home.
 export function publicJourneyFailure(error, stage, subcheck) {
-  const failure_stage = ["sign_in", "model_package_admission", "engine_absent_refusal", "installed_runtime_reply", "memory_refusal", "finite_resource_lifecycle"].includes(stage) ? stage : "journey";
+  const failure_stage = ["sign_in", "model_package_admission", "engine_absent_refusal", "installed_runtime_reply", "memory_refusal", "finite_resource_lifecycle", "finite_home_recovery"].includes(stage) ? stage : "journey";
   const failure = error?.message?.includes("ERR_BLOCKED_BY_RESPONSE") ? "frame_blocked" :
     error?.name === "TimeoutError" ? "timeout" :
     error?.name === "AssertionError" ? "assertion_failed" : "journey_failed";
