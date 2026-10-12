@@ -9,12 +9,16 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repoRoot = resolve(fileURLToPath(new URL("../", import.meta.url)));
 const browserRoot = join(repoRoot, "capsules/chat-room/browser");
+const uiArtifactRoot = process.env.CHAT_LAYOUT_UI_ARTIFACT_ROOT
+  ? resolve(process.env.CHAT_LAYOUT_UI_ARTIFACT_ROOT) : browserRoot;
 const homeClipboardClient = join(repoRoot, "capsules/home/browser/home-clipboard-client.js");
 const homeClipboardProtocol = join(repoRoot, "capsules/home/browser/home-clipboard-protocol.js");
 const homeLayoutRoot = join(repoRoot, "capsules/home-gui/browser");
 const homeNavigationClient = join(repoRoot, "capsules/home/browser/home-navigation-client.js");
 const sharedRenderMarker = "Shared message before metadata";
 const communityDeliveryMarker = "Own Community message awaiting delivery";
+const interveningPeerMarker = "Peer message before my send response";
+const cursorOwnMarker = "Own message after the unseen peer row";
 const brave = process.env.BRAVE_BIN || "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
 const require = createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url));
 const playwrightModule = process.env.ELASTOS_PLAYWRIGHT_MODULE
@@ -117,8 +121,10 @@ function createHold(label) {
 
 async function serveFile(response, pathname) {
   const relative = pathname === "/apps/chat-room/" ? "index.html" : pathname.slice("/apps/chat-room/".length);
-  const path = join(browserRoot, relative);
-  assert(path.startsWith(`${browserRoot}/`) || path === join(browserRoot, "index.html"), "invalid asset path");
+  const artifact = ["chat_room_ui.js", "chat_room_ui_bg.wasm"].includes(relative);
+  const path = join(artifact ? uiArtifactRoot : browserRoot, relative);
+  const root = artifact ? uiArtifactRoot : browserRoot;
+  assert(path.startsWith(`${root}/`), "invalid asset path");
   const body = await readFile(path);
   const contentType = {
     ".css": "text/css",
@@ -139,6 +145,7 @@ function startServer(scenario) {
   const sharedRecovery = scenario === "shared-poll-401";
   const sharedRenderOrdering = scenario === "shared-poll-render-before-metadata";
   const communityDeliveryScenario = scenario === "community-delivery-status";
+  const sharedCursorScenario = scenario === "shared-send-intervening-peer";
   const contactAcceptance = scenario.startsWith("contact-acceptance");
   const historyScenario = scenario === "history-status-order-calendar";
   const unreadScenario = scenario === "direct-unread" || scenario === "visible-read";
@@ -179,6 +186,8 @@ function startServer(scenario) {
     sharedMarkerPolled: false,
     communityDeliveryState: "sending",
     communityDeliveryPolls: [],
+    sharedCursorReady: false,
+    sharedCursorPolls: [],
     peerAccepted: false,
     contactRequested: false,
     contactRequests: 0,
@@ -209,6 +218,12 @@ function startServer(scenario) {
           sender: "Configured User", from_current_session: true, delivery_state: "sending" },
         historyMessage(2, "Another person's Community message", "2026-03-09T12:00:01Z"),
       ] : [];
+    }
+    if (sharedCursorScenario) {
+      // Keep pre-send/in-flight reads at N. The test releases N+1 only after
+      // the real generated UI has rendered its own send response at N+2.
+      poll.latest_seq = 10;
+      poll.objects = [historyMessage(10, "Initial Community row", "2026-03-09T12:00:00Z")];
     }
     if (historyScenario) {
       const details = {
@@ -383,6 +398,16 @@ function startServer(scenario) {
         }
         if (sharedRenderOrdering && trace.sharedMarkerReady) trace.sharedMarkerPolled = true;
         const poll = pollView();
+        if (sharedCursorScenario && trace.sharedCursorReady) {
+          trace.sharedCursorPolls.push(input.since);
+          poll.latest_seq = 12;
+          poll.objects = [
+            historyMessage(11, interveningPeerMarker, "2026-03-09T12:00:01Z"),
+            { ...historyMessage(12, cursorOwnMarker, "2026-03-09T12:00:02Z"),
+              sender: "Configured User", from_current_session: true, delivery_state: "sending" },
+          ].filter(object => object.seq > input.since);
+        }
+        if (sharedCursorScenario) poll.objects = poll.objects.filter(object => object.seq > input.since);
         if (communityDeliveryScenario) trace.communityDeliveryPolls.push({
           since: input.since, latest_seq: poll.latest_seq, object_count: poll.objects.length,
           state: poll.own_delivery[0].state,
@@ -407,6 +432,18 @@ function startServer(scenario) {
       if (url.pathname === "/api/apps/chat-room/send") {
         trace.current.sends += 1;
         return json(response, { error: "unexpected send" }, 500);
+      }
+      if (url.pathname === "/api/apps/chat-room/objects/send" && sharedCursorScenario) {
+        assert(request.method === "POST", "Community send method differs");
+        let body = "";
+        for await (const chunk of request) body += chunk;
+        const input = JSON.parse(body);
+        assert(input.body === cursorOwnMarker, "Community send lost its typed body");
+        trace.current.sends += 1;
+        return json(response, {
+          ...historyMessage(12, cursorOwnMarker, "2026-03-09T12:00:02Z"),
+          sender: "Configured User", from_current_session: true, delivery_state: "sending",
+        });
       }
       if (url.pathname === "/api/apps/chat-room/direct/conversations") {
         trace.directConversations += 1;
@@ -663,6 +700,30 @@ async function runScenario(scenario) {
     }
     await page.goto(url, { waitUntil: "domcontentloaded" });
     let frame = await chatFrame(page);
+
+    if (scenario === "shared-send-intervening-peer") {
+      await waitForConfiguredChatWithoutLegacyFlash(frame, "generated Chat cursor regression");
+      await frame.locator('#message-list [data-seq="10"]').waitFor({ state: "visible" });
+      await frame.locator("#message-input").fill(cursorOwnMarker);
+      // Exercise Chat's Enter-to-send control and its real form handler.
+      await frame.locator("#message-input").press("Enter");
+      const own = frame.locator('#message-list [data-seq="12"]');
+      await own.waitFor({ state: "visible", timeout: 5_000 });
+      assert(await own.locator(".message-body").innerText() === cursorOwnMarker,
+        "generated Chat did not render the send response");
+      trace.sharedCursorReady = true;
+      await waitFor(() => trace.sharedCursorPolls.length > 0);
+      assert(trace.sharedCursorPolls[0] === 10,
+        "own send skipped the unobserved peer cursor", trace.sharedCursorPolls);
+      const peer = frame.locator('#message-list [data-seq="11"]');
+      await peer.waitFor({ state: "visible", timeout: 5_000 });
+      assert(await peer.locator(".message-body").innerText() === interveningPeerMarker
+        && await peer.count() === 1 && await own.count() === 1,
+        "generated Chat lost or duplicated intervening history");
+      await waitFor(() => trace.sharedCursorPolls.includes(12));
+      assert(trace.current.sends === 1, "cursor recovery created another send");
+      return;
+    }
 
     if (scenario === "direct-list-unavailable") {
       await waitForConfiguredChatWithoutLegacyFlash(frame, "unavailable Direct list");
@@ -1454,6 +1515,7 @@ async function main() {
     "direct-list-unavailable",
     "shared-poll-render-before-metadata",
     "community-delivery-status",
+    "shared-send-intervening-peer",
     "direct-switch",
     "direct-switch-hold-initial-conversations",
     "direct-switch-hold-bootstrap-messages",
