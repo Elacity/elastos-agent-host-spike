@@ -37,10 +37,12 @@ import {
   assertFreshOwnerEnrollmentPrecondition,
   assertIdentityFrame,
   assertRestartTransition,
+  assertSignupEvidence,
   createAcceptanceReport,
   finalizeAcceptanceReport,
   loadAcceptanceConfig,
   loadRestartReceipt,
+  observeSignupInDocument,
   recordAcceptancePass,
 } from "./home-two-runtime-acceptance-core.mjs";
 
@@ -224,23 +226,23 @@ async function ensureAccount(side) {
       && response.url().endsWith("/api/auth/passkey/register/complete")
   ), { timeout: 30_000 });
   registered.catch(() => {});
+  await side.page.evaluate(observeSignupInDocument);
   await side.page.locator("#home-unlock-primary").click();
   const completion = await registered;
   assertOk(completion.ok(), `${side.prefix}: passkey registration failed`, {
     status: completion.status(),
   });
   const verified = await completion.json();
-  assertOk(verified?.schema === "elastos.auth.passkey.verify/v2"
-    && typeof verified.principal_id === "string" && verified.principal_id.length > 0
-    && verified.profile_readiness?.schema === "elastos.profile.readiness/v1"
-    && verified.profile_readiness.status === "ready",
-  `${side.prefix}: signup did not create a ready signed Profile`);
+  await side.page.waitForFunction(() => Number.isFinite(document.__elastosSignupTiming?.ready_ms),
+    null, { timeout: 30_000 });
+  const signup = assertSignupEvidence(
+    await side.page.evaluate(() => document.__elastosSignupTiming), verified,
+  );
   side.signupPrincipalId = verified.principal_id;
   const credentials = await persistCredentials(side);
   assertOk(credentials === 1, `${side.prefix}: fresh enrollment did not create exactly one passkey`, { credential_count: credentials });
   side.hasStoredCredential = true;
-  await signIn(side);
-  return { enrollment: "enrolled", credential_count: credentials };
+  return { enrollment: "enrolled", credential_count: credentials, ...signup };
 }
 
 async function signIn(side) {

@@ -62,6 +62,54 @@ export function assertFreshOwnerEnrollmentPrecondition(aStoredCredentials, bStor
   }
 }
 
+export function observeSignupInDocument({
+  document = globalThis.document,
+  performance = globalThis.performance,
+  MutationObserver = globalThis.MutationObserver,
+} = {}) {
+  const timing = { click_ms: null, ready_ms: null, click_count: 0 };
+  document.__elastosSignupTiming = timing;
+  document.addEventListener("click", (event) => {
+    if (!event.target?.closest?.("#home-unlock-primary")) return;
+    timing.click_count += 1;
+    if (timing.click_ms === null) timing.click_ms = performance.now();
+  }, true);
+  const observe = () => {
+    if (timing.click_ms !== null && timing.ready_ms === null
+      && document.body?.dataset?.homeAuthority === "signed"
+      && document.body?.dataset?.homeStatus === "ready") {
+      timing.ready_ms = performance.now();
+      observer.disconnect();
+    }
+  };
+  const observer = new MutationObserver(observe);
+  observer.observe(document, {
+    subtree: true, attributes: true, childList: true,
+  });
+}
+
+export function assertSignupEvidence(timing, verified) {
+  if (verified?.schema !== "elastos.auth.passkey.verify/v2"
+    || typeof verified.principal_id !== "string" || verified.principal_id.length === 0
+    || verified.profile_readiness?.schema !== "elastos.profile.readiness/v1"
+    || verified.profile_readiness.status !== "ready") {
+    throw new AcceptanceEvidenceError("signup did not create a ready signed Profile");
+  }
+  if (timing?.click_count !== 1 || !Number.isFinite(timing.click_ms)
+    || !Number.isFinite(timing.ready_ms) || timing.ready_ms < timing.click_ms) {
+    throw new AcceptanceEvidenceError("signup requires one actual primary click and signed-ready timing");
+  }
+  const elapsed_ms = timing.ready_ms - timing.click_ms;
+  if (elapsed_ms >= 30_000) {
+    throw new AcceptanceEvidenceError("signup click to signed-ready Home exceeded the 30-second limit");
+  }
+  return {
+    elapsed_ms,
+    measurement: "native_primary_click_to_signed_ready_same_document_monotonic_clock",
+    profile_status: "ready",
+  };
+}
+
 function exactObjectKeys(value, keys, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new AcceptanceEvidenceError(`${label} must be an object`);

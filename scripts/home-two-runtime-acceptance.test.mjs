@@ -24,10 +24,12 @@ import {
   assertRecoveryBundleEvidence,
   assertRecoverySetupEvidence,
   assertRestartTransition,
+  assertSignupEvidence,
   createAcceptanceReport,
   finalizeAcceptanceReport,
   loadAcceptanceConfig,
   loadRestartReceipt,
+  observeSignupInDocument,
   recordAcceptancePass,
 } from "./home-two-runtime-acceptance-core.mjs";
 
@@ -204,6 +206,67 @@ test("signup proof refuses a stored credential on either fixture before enrollme
   assert.doesNotThrow(() => assertFreshOwnerEnrollmentPrecondition(0, 0));
   for (const counts of [[1, 0], [0, 1], [1, 1], [undefined, 0], [0, "0"]]) {
     assert.throws(() => assertFreshOwnerEnrollmentPrecondition(...counts), /reset the issue-owned fixture Homes and browser profiles/);
+  }
+});
+
+test("signup timer starts at the actual primary click and stops only at signed-ready Home", () => {
+  let now = 10, click, mutation, disconnects = 0;
+  const document = {
+    body: { dataset: { homeAuthority: "unsigned", homeStatus: "ready" } },
+    addEventListener(type, listener, capture) {
+      assert.equal(type, "click");
+      assert.equal(capture, true);
+      click = listener;
+    },
+  };
+  observeSignupInDocument({ document, performance: { now: () => now },
+    MutationObserver: class {
+      constructor(listener) { mutation = listener; }
+      observe(target) { assert.equal(target, document); }
+      disconnect() { disconnects += 1; }
+    } });
+  mutation();
+  assert.deepEqual(document.__elastosSignupTiming, { click_ms: null, ready_ms: null, click_count: 0 });
+  click({ target: { closest: () => null } });
+  assert.equal(document.__elastosSignupTiming.click_ms, null);
+  now = 100;
+  const primary = { target: { closest: selector => selector === "#home-unlock-primary" } };
+  click(primary);
+  now = 200;
+  mutation();
+  assert.equal(document.__elastosSignupTiming.ready_ms, null);
+  document.body.dataset.homeAuthority = "signed";
+  document.body.dataset.homeStatus = "locked";
+  mutation();
+  assert.equal(document.__elastosSignupTiming.ready_ms, null);
+  now = 300;
+  document.body.dataset.homeStatus = "ready";
+  mutation();
+  assert.deepEqual(document.__elastosSignupTiming, { click_ms: 100, ready_ms: 300, click_count: 1 });
+  assert.equal(disconnects, 1);
+  now = 400;
+  mutation();
+  assert.equal(document.__elastosSignupTiming.ready_ms, 300);
+  assert.equal(disconnects, 1);
+  click(primary);
+  assert.equal(document.__elastosSignupTiming.click_ms, 100);
+  assert.equal(document.__elastosSignupTiming.click_count, 2);
+});
+
+test("signup timing requires one click, a ready signed Profile and strictly less than 30 seconds", () => {
+  const verified = { schema: "elastos.auth.passkey.verify/v2", principal_id: "principal:fixture",
+    profile_readiness: { schema: "elastos.profile.readiness/v1", status: "ready" } };
+  const timing = { click_ms: 100, ready_ms: 30_099, click_count: 1 };
+  assert.equal(assertSignupEvidence(timing, verified).elapsed_ms, 29_999);
+  assert.throws(() => assertSignupEvidence({ ...timing, ready_ms: 30_100 }, verified), /30-second limit/);
+  for (const invalid of [null, { ...timing, click_count: 0 }, { ...timing, click_count: 2 },
+    { ...timing, click_ms: null }, { ...timing, ready_ms: Infinity }, { ...timing, ready_ms: 99 }]) {
+    assert.throws(() => assertSignupEvidence(invalid, verified), /actual primary click/);
+  }
+  for (const invalid of [{ ...verified, principal_id: "" }, { ...verified, schema: "foreign" },
+    { ...verified, profile_readiness: { schema: "elastos.profile.readiness/v1", status: "unavailable" } },
+    { ...verified, profile_readiness: { schema: "foreign", status: "ready" } }]) {
+    assert.throws(() => assertSignupEvidence(timing, invalid), /ready signed Profile/);
   }
 });
 
