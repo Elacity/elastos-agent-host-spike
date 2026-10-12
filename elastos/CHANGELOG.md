@@ -8,6 +8,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Developer detail
 
+- `scripts/release-publish.sh seed` and `seed-upgrade` require `RELEASE_SEED_DATA`
+  to end in `/elastos` and export `XDG_DATA_HOME` as its parent, because the
+  Runtime reads `$XDG_DATA_HOME/elastos`; the seed script checks the saved
+  publish state against the signed head's `prev_head_cid` before downloading.
 - CI's `release-upstream-assets` job runs the release's upstream asset build
   (`scripts/release-upstream-assets.py`, including the Browser helper source
   builds) for Linux ARM64 and Apple Silicon on every pull request that changes

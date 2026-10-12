@@ -325,7 +325,9 @@ tools is an explicit new approval, rather than preparation-time discovery.
 
 Seed details come from `RELEASE_SEED`, `RELEASE_SEED_DATA`,
 `RELEASE_SEED_UNIT`, `RELEASE_SEED_STAGE`, `RELEASE_SEED_RUNTIME` and
-`RELEASE_SEED_USER`, not from this repository. Publish N first; after N is
+`RELEASE_SEED_USER`, not from this repository. `RELEASE_SEED_DATA` is the
+service's `$XDG_DATA_HOME/elastos` (absolute, ending in `/elastos`); the seed
+scripts export its parent as `XDG_DATA_HOME`. Publish N first; after N is
 accepted on a real install, prepare N+1 from the same run before its artifacts
 expire (14 days).
 

@@ -221,7 +221,7 @@ fs.writeFileSync(output + '/signing-input.json', JSON.stringify({ source: { comm
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, FIXTURE_CONFIG: join(root, 'config.json'),
     RELEASE_WORK: join(root, 'work'), RELEASE_ORIGIN: 'https://fixture.invalid',
     RELEASE_APPROVAL: approvalPath,
-    RELEASE_SEED: 'fixture.invalid', RELEASE_SEED_DATA: '/fixture/data',
+    RELEASE_SEED: 'fixture.invalid', RELEASE_SEED_DATA: join(root, 'xdg/elastos'),
     RELEASE_SEED_UNIT: 'fixture.service', RELEASE_SEED_STAGE: join(root, 'stage'),
     RELEASE_SEED_USER: 'fixture-user',
     RELEASE_SEED_RUNTIME: '/fixture/elastos', VERIFY_LOG: join(root, 'verify.jsonl'),
@@ -522,6 +522,7 @@ test('seed reconstructs all platform files and copies every other signed file fr
   cpSync(join(f.root, 'aarch64-darwin/inputs/N/artifacts/shared.tar.gz'), join(signed, 'shared.tar.gz'));
   // A signed file no native input carries.
   writeFileSync(join(signed, 'mac-only.bin'), 'mac only');
+  writeState(f.env.RELEASE_SEED_DATA, {});
   const result = run('bash', [f.script, 'seed', '1.2.3', signed], { env: f.env });
   assert.match(result.stdout, new RegExp(`Source commit: ${commit}`));
   assert.match(result.stdout, /Package run: 123 https:\/\/github.com\/Elacity\/elastos-runtime\/actions\/runs\/123/);
@@ -540,3 +541,70 @@ test('seed reconstructs all platform files and copies every other signed file fr
   for (const p of platforms) assert.equal(readFileSync(join(stage, 'signed', `elastos-${p}`), 'utf8'), `${p}-1.2.3`);
   assert.equal(readFileSync(join(stage, 'signed/mac-only.bin'), 'utf8'), 'mac only');
 });
+
+function writeState(data, state) {
+  const dir = join(data, 'ElastOS/SystemServices/Publisher');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'publish-state.json'), JSON.stringify(state));
+}
+
+function seedScript(t, head, extraEnv = {}) {
+  const f = fixture(t);
+  assert.equal(f.prepare().status, 0);
+  const signed = join(f.root, 'signed');
+  mkdirSync(signed);
+  writeFileSync(join(signed, 'release-head.json'), JSON.stringify(head));
+  const env = { ...f.env, ...extraEnv };
+  const stdout = run('bash', [f.script, 'seed', '1.2.3', signed], { env }).stdout;
+  return { f, env, stdout };
+}
+
+test('seed runs the Runtime with the data dir it resolves from XDG_DATA_HOME', t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'release-seed-xdg-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const runtime = join(root, 'elastos');
+  const calls = join(root, 'runtime.log');
+  const { env, stdout } = seedScript(t, { signer_did: did }, { RELEASE_SEED_RUNTIME: runtime });
+  const data = env.RELEASE_SEED_DATA;
+  // Like dirs::data_dir()/elastos: ELASTOS_DATA_DIR does not decide where publish state is read.
+  writeFileSync(runtime, `#!/bin/sh\n[ "\${XDG_DATA_HOME:-$HOME/.local/share}/elastos" = '${data}' ] || exit 7\necho "$*" >> '${calls}'\n`, { mode: 0o755 });
+  mkdirSync(join(data, 'bin'), { recursive: true });
+  writeFileSync(join(data, 'bin/ipfs-provider'), '', { mode: 0o755 });
+  const bin = join(root, 'bin');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'sudo'), '#!/bin/sh\n[ "$1" = -v ] || exec "$@"\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'systemctl'), '#!/bin/sh\n', { mode: 0o755 });
+  const publication = 'set -euo pipefail\nexport ELASTOS_DATA_DIR=' + stdout.split('export ELASTOS_DATA_DIR=')[1];
+  const runEnv = { ...env, PATH: `${bin}:${env.PATH}`, HOME: join(root, 'home') };
+  delete runEnv.XDG_DATA_HOME;
+  const result = spawnSync('bash', ['-c', publication], { encoding: 'utf8', cwd: root, env: runEnv });
+  assert.equal(result.status, 0, result.stderr);
+  const lines = readFileSync(calls, 'utf8').trim().split('\n');
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /^publish-release .* --preflight-only$/);
+});
+
+test('seed stops before any download when saved state does not precede the signed head', t => {
+  const { f, env, stdout } = seedScript(t, { signer_did: did, payload: { prev_head_cid: 'bafy-signed-prev' } });
+  writeState(env.RELEASE_SEED_DATA, { last_head_cid: 'bafy-other' });
+  const bin = join(f.root, 'download-bin');
+  const downloads = join(f.root, 'downloads.log');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'curl'), `#!/bin/sh\necho "$*" >> '${downloads}'\nexit 1\n`, { mode: 0o755 });
+  const seedSide = '#' + stdout.split('# On the seed as the service user,')[1];
+  const result = spawnSync('bash', ['-c', seedSide], { encoding: 'utf8', env: { ...env, GH_TOKEN: 'fixture', PATH: `${bin}:${env.PATH}` } });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /prev_head_cid/);
+  assert.throws(() => readFileSync(downloads), { code: 'ENOENT' });
+});
+
+for (const data of ['relative/elastos', '/srv/elastos-data', '/srv/elastos/']) {
+  test(`seed and seed-upgrade refuse RELEASE_SEED_DATA ${data}`, t => {
+    const f = fixture(t, { ciOnly: true, seedFixture: true });
+    for (const args of [['seed', '1.2.3', f.root], ['seed-upgrade', '123']]) {
+      const result = spawnSync('bash', [f.script, ...args], { encoding: 'utf8', env: { ...f.env, RELEASE_SEED_DATA: data } });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /RELEASE_SEED_DATA must be an absolute path ending in \/elastos/);
+    }
+  });
+}
