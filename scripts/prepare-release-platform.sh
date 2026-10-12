@@ -359,7 +359,9 @@ if [[ -f "$SOURCE_ROOT/model-catalog.json" ]]; then
 fi
 fi
 
-if [[ "$SETUP_PLATFORM" == linux-* && -f "$STAGING/artifacts/llama-server-$SETUP_PLATFORM.tar.gz" ]]; then
+if [[ "$SETUP_PLATFORM" == linux-* ]]; then
+    [[ -f "$STAGING/artifacts/llama-server-$SETUP_PLATFORM.tar.gz" ]] \
+        || die "Prepared Linux engine archive is missing: llama-server-$SETUP_PLATFORM.tar.gz"
     python3 scripts/verify-linux-engine.py --platform "$SETUP_PLATFORM" \
         --archive "$STAGING/artifacts/llama-server-$SETUP_PLATFORM.tar.gz"
 fi

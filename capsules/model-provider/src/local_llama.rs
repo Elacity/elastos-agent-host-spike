@@ -29,6 +29,8 @@ pub(crate) const INTERNAL_GUARD_ARG: &str = "--internal-local-llama-guard";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocalLlamaFault {
     Failed,
+    /// The engine could not be spawned or exited before it became ready.
+    StartFailed,
     Timeout,
     /// Free memory does not cover this model; nothing was started.
     MemoryUnavailable,
@@ -496,7 +498,7 @@ async fn spawn_managed_engine(
     {
         let mut command = Command::new(&engine.path);
         configure_tokio_engine_command(&mut command, &model.path, settings, target, alias);
-        let child = command.spawn().map_err(|_| LocalLlamaFault::Failed)?;
+        let child = command.spawn().map_err(|_| LocalLlamaFault::StartFailed)?;
         Ok((child, None, None))
     }
 
@@ -560,7 +562,7 @@ fn spawn_guarded_engine(
         use std::os::unix::process::CommandExt as _;
         command.as_std_mut().process_group(0);
     }
-    let mut child = command.spawn().map_err(|_| LocalLlamaFault::Failed)?;
+    let mut child = command.spawn().map_err(|_| LocalLlamaFault::StartFailed)?;
     let guard_group = child.id().map(|pid| pid as libc::pid_t);
     let liveness = child.stdin.take();
     Ok((child, liveness, guard_group))
@@ -755,7 +757,7 @@ async fn wait_until_healthy(
     };
     loop {
         if !managed_child_is_running(child, guard_group) {
-            return Err(LocalLlamaFault::Failed);
+            return Err(LocalLlamaFault::StartFailed);
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {

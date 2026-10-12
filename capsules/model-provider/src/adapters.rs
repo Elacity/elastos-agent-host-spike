@@ -2267,9 +2267,13 @@ fn map_local_llama_fault(fault: LocalLlamaFault) -> AdapterFault {
             "model backend timed out",
             "local llama engine health deadline expired",
         ),
+        LocalLlamaFault::StartFailed => AdapterFault::backend_failed(
+            "The local model engine could not start. Check its installation and try again.",
+            "local llama engine could not start",
+        ),
         LocalLlamaFault::Failed => AdapterFault::backend_failed(
-            "The local model engine is unavailable. Reinstall the engine, then try again.",
-            "local llama engine was unavailable",
+            "model backend failed",
+            "local llama engine failed",
         ),
     }
 }
@@ -3630,7 +3634,7 @@ mod tests {
         assert_eq!(error.code, "backend_failed");
         assert_eq!(
             error.message,
-            "The local model engine is unavailable. Reinstall the engine, then try again."
+            "The local model engine could not start. Check its installation and try again."
         );
         assert!(!error.message.contains("libgomp"));
         assert!(std::fs::read_to_string(events)
@@ -3639,6 +3643,21 @@ mod tests {
         assert!(update_rx.try_recv().is_err());
         engines.shutdown().await.unwrap();
         assert!(!engines.retains_artifacts().await);
+    }
+
+    #[test]
+    fn local_backend_failures_keep_install_recovery_specific_to_startup() {
+        let failure = map_local_llama_fault(LocalLlamaFault::Failed);
+        assert_eq!(failure.error.class, ErrorClass::BackendFailed);
+        assert_eq!(failure.error.code, "backend_failed");
+        assert_eq!(failure.error.message, "model backend failed");
+        let startup = map_local_llama_fault(LocalLlamaFault::StartFailed);
+        assert_eq!(startup.error.class, ErrorClass::BackendFailed);
+        assert_eq!(startup.error.code, "backend_failed");
+        assert_eq!(
+            startup.error.message,
+            "The local model engine could not start. Check its installation and try again."
+        );
     }
 
     #[derive(Clone)]
