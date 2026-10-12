@@ -709,8 +709,18 @@ fn room_profile_card(
     }
 }
 
-pub(crate) fn validate_chat_payload(payload: &serde_json::Value) -> anyhow::Result<()> {
-    exact_chat_payload(payload).map(|_| ())
+pub(crate) fn validate_chat_projection(
+    authorized: &crate::collaboration_default_conversation::AuthorizedDefaultConversationMessage,
+) -> anyhow::Result<()> {
+    let chat = exact_chat_payload(authorized.product_payload())?;
+    let message = authorized.message();
+    let payload = &message.envelope().payload;
+    crate::room_service::validate_collaboration_text(
+        (&payload.network_id, &payload.conversation_id),
+        message.envelope_sha256(),
+        &room_profile_card(authorized.sender_profile()),
+        &chat.body,
+    )
 }
 
 fn exact_chat_payload(payload: &serde_json::Value) -> anyhow::Result<ChatPayload> {
@@ -1289,6 +1299,144 @@ mod tests {
             assert_eq!(
                 reopened.own_delivery[0].state,
                 if accepted { Accepted } else { Expired }
+            );
+        }
+    }
+
+    #[test]
+    fn community_delivery_stale_poll_preserves_terminal_outcomes_after_core_pruning() {
+        use crate::room_service::CommunityDeliveryState::{Accepted, Expired, Sending};
+        for observe_expiry in [false, true] {
+            let fixture = fixture();
+            let now = now_secs();
+            let session = crate::room_service::start_local_runtime_session(
+                &fixture.data_root,
+                &fixture.person_profile.document().profile_did,
+                "Local",
+                "Stale delivery test",
+            )
+            .unwrap();
+            let prepared = fixture
+                .port
+                .prepare_message(
+                    binding(&fixture, "stale-poll-own", "retained original"),
+                    "retained original",
+                    &fixture.person_profile,
+                    now,
+                )
+                .unwrap();
+            let own = fixture
+                .port
+                .project_prepared_message(&fixture.data_root, &prepared, Some(&session.token))
+                .unwrap();
+            assert_eq!(own.delivery_state, Some(Sending));
+            // Pause the poll after its real Core snapshot, before the Room lock.
+            let stale_delivery = fixture
+                .core
+                .outgoing_chat_delivery(&fixture.person_profile.document().profile_did)
+                .unwrap();
+            assert_eq!(stale_delivery.len(), 1);
+            assert!(!stale_delivery[0].accepted);
+            let resume_stale_poll = |at| {
+                crate::room_service::collaboration_room_poll_with_delivery(
+                    &fixture.data_root,
+                    &session.token,
+                    fixture.core.conversation_scope(),
+                    own.seq,
+                    &fixture.person_profile.document().profile_did,
+                    &stale_delivery,
+                    at,
+                )
+                .unwrap()
+            };
+            if observe_expiry {
+                let expired = delivery_poll(&fixture, &session.token, own.seq, prepared.expires_at);
+                assert_eq!(expired.own_delivery[0].state, Expired);
+                assert_eq!(resume_stale_poll(now).own_delivery[0].state, Expired);
+            }
+
+            let (remote, _) = remote_authority(&fixture);
+            let incoming = remote
+                .authorize_incoming(
+                    &prepared.envelope_bytes,
+                    &fixture.core.local_device_did(),
+                    now + 1,
+                )
+                .unwrap();
+            fixture
+                .core
+                .record_home_chat_acceptance(
+                    &remote
+                        .prepare_acceptance_receipt(&incoming, now + 1)
+                        .unwrap(),
+                    &prepared.envelope_sha256,
+                    &remote.local_device_did(),
+                    prepared.expires_at,
+                )
+                .unwrap();
+            if observe_expiry {
+                // A verified delayed receipt promotes the saved Expired row.
+                let accepted =
+                    delivery_poll(&fixture, &session.token, own.seq, prepared.expires_at);
+                assert_eq!(accepted.own_delivery[0].state, Accepted);
+            }
+            let later = prepared.expires_at
+                + elastos_common::collaboration_protocol::MAX_COLLABORATION_CLOCK_SKEW_SECS
+                + 1;
+            fixture
+                .port
+                .prepare_message(
+                    binding(&fixture, "after-stale-poll", "next intent"),
+                    "next intent",
+                    &fixture.person_profile,
+                    later,
+                )
+                .unwrap();
+            assert!(fixture
+                .core
+                .outgoing_chat_delivery(&fixture.person_profile.document().profile_did)
+                .unwrap()
+                .is_empty());
+            let saved = fixture
+                .port
+                .conversation_poll(&fixture.data_root, &session.token, 0)
+                .unwrap();
+            assert_eq!(saved.objects[0].delivery_state, Some(Accepted));
+
+            // Core durably saved Accepted and pruned its signed receipt. The
+            // older unaccepted snapshot can imply either Expired or Sending.
+            for at in [later, now] {
+                let resumed = resume_stale_poll(at);
+                assert!(resumed.objects.is_empty());
+                assert_eq!(resumed.latest_seq, own.seq);
+                assert_eq!(resumed.own_delivery[0].state, Accepted);
+            }
+            let restarted = CollaborationChatProductPort::new(Arc::new(
+                CollaborationCore::new(
+                    &fixture.data_root,
+                    fixture.device_key.clone(),
+                    fixture.profile.clone(),
+                    fixture.grant.clone(),
+                    CHAT_ROOM_CAPSULE,
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+            let reopened = restarted
+                .conversation_poll_with_read_intent(
+                    &fixture.data_root,
+                    &session.token,
+                    0,
+                    &fixture.person_profile,
+                    false,
+                    later,
+                )
+                .unwrap();
+            assert_eq!(reopened.objects[0].delivery_state, Some(Accepted));
+            assert_eq!(reopened.objects[0].seq, own.seq);
+            assert_eq!(
+                reopened.objects[0].body.as_deref(),
+                Some("retained original")
             );
         }
     }
@@ -2055,6 +2203,91 @@ mod tests {
         );
         let restarted_again_port = CollaborationChatProductPort::new(restarted_again).unwrap();
         assert!(restarted_again_port.pending_messages().unwrap().is_empty());
+    }
+
+    #[test]
+    fn chat_accepts_full_profile_names_and_projects_every_handoff_after_restart() {
+        let fixture = fixture();
+        let now = now_secs();
+        let names = [
+            "a".repeat(49),
+            "b".repeat(64),
+            "é".repeat(32),
+            "c".repeat(63),
+        ];
+        for (profile_index, name) in names.iter().enumerate() {
+            let (remote_key, _) = generate_keypair();
+            let remote_did = crate::crypto::encode_signing_key_did(&remote_key);
+            let (person_key, _) = generate_keypair();
+            let profile = crate::collaboration_profile_authority::signed_profile_document_for_test(
+                &person_key,
+                name,
+                None,
+                1,
+                None,
+                now,
+                vec![remote_did],
+            )
+            .unwrap();
+            let authority = DefaultConversationDeviceAuthority::new(
+                remote_key,
+                fixture.profile.clone(),
+                fixture.grant.clone(),
+            )
+            .unwrap();
+            for post in 0..8 {
+                let prepared = authority
+                    .prepare_profile_outgoing(
+                        &profile,
+                        CHAT_SERVICE,
+                        CHAT_PAYLOAD_TYPE,
+                        serde_json::json!({"body": format!("post {profile_index}-{post}")}),
+                        now,
+                        CHAT_MESSAGE_TTL_SECS,
+                    )
+                    .unwrap();
+                fixture
+                    .core
+                    .accept_incoming_from_signed_source_for_test(prepared.envelope_bytes(), now)
+                    .unwrap();
+            }
+        }
+        assert_eq!(fixture.core.summary().unwrap().pending_product_handoffs, 32);
+        let restarted = Arc::new(
+            CollaborationCore::new(
+                &fixture.data_root,
+                fixture.device_key.clone(),
+                fixture.profile.clone(),
+                fixture.grant.clone(),
+                CHAT_ROOM_CAPSULE,
+            )
+            .unwrap(),
+        );
+        let port = CollaborationChatProductPort::new(restarted.clone()).unwrap();
+        let handoffs = port.pending_messages().unwrap();
+        assert_eq!(handoffs.len(), 32);
+        for handoff in &handoffs {
+            let projected = port.project_handoff(&fixture.data_root, handoff).unwrap();
+            assert!(names.contains(&projected.sender));
+        }
+        assert!(port.pending_messages().unwrap().is_empty());
+        assert_eq!(restarted.summary().unwrap().pending_product_handoffs, 0);
+        let session = crate::room_service::start_local_runtime_session(
+            &fixture.data_root,
+            &fixture.person_profile.document().profile_did,
+            &names[1],
+            "Long Profile name regression",
+        )
+        .unwrap();
+        let poll = port
+            .conversation_poll(&fixture.data_root, &session.token, 0)
+            .unwrap();
+        assert_eq!(poll.objects.len(), 32);
+        assert_eq!(poll.display_name, names[1]);
+        assert!(poll
+            .objects
+            .iter()
+            .all(|object| names.contains(&object.sender)));
     }
 
     #[test]

@@ -2863,25 +2863,14 @@ pub(crate) fn project_collaboration_text(
     issued_at: u64,
     local_session_token: Option<&str>,
 ) -> anyhow::Result<ConversationObjectView> {
-    let scope = collaboration_object_scope(scope.0, scope.1)?;
-    let event_id = normalize_collaboration_envelope_sha256(envelope_sha256)?;
-    let sender_member_did = normalize_member_did(&sender_profile.profile_id)?;
-    if sender_profile.profile_id != sender_member_did {
-        anyhow::bail!("collaboration sender Profile DID is not canonical");
-    }
-    let sender = normalize_display_name(&sender_profile.display_name)?;
-    let sender_profile = RoomProfileCardView {
-        schema: sender_profile.schema.clone(),
-        profile_id: sender_member_did.clone(),
-        display_name: sender.clone(),
-        handle: sender_profile.handle.clone(),
-        updated_at: sender_profile.updated_at,
-    };
-    let normalized_body = normalize_object_body(body)?;
-    if normalized_body != body {
-        anyhow::bail!("collaboration Chat body is not canonical");
-    }
-    let body = normalized_body;
+    let CollaborationTextProjection {
+        scope,
+        event_id,
+        sender_member_did,
+        sender,
+        sender_profile,
+        body,
+    } = collaboration_text_projection(scope, envelope_sha256, sender_profile, body)?;
     with_locked_state(data_dir, |_, state| {
         let current_session = match local_session_token {
             Some(token) => {
@@ -2946,6 +2935,59 @@ pub(crate) fn project_collaboration_text(
             },
         );
         Ok(object_view_from_record(object, current_session.as_ref()))
+    })
+}
+
+struct CollaborationTextProjection {
+    scope: CollaborationObjectScope,
+    event_id: String,
+    sender_member_did: String,
+    sender: String,
+    sender_profile: RoomProfileCardView,
+    body: String,
+}
+
+/// Admission and projection share every deterministic Room input check.
+pub(crate) fn validate_collaboration_text(
+    scope: (&str, &str),
+    envelope_sha256: &str,
+    sender_profile: &RoomProfileCardView,
+    body: &str,
+) -> anyhow::Result<()> {
+    collaboration_text_projection(scope, envelope_sha256, sender_profile, body).map(|_| ())
+}
+
+fn collaboration_text_projection(
+    scope: (&str, &str),
+    envelope_sha256: &str,
+    sender_profile: &RoomProfileCardView,
+    body: &str,
+) -> anyhow::Result<CollaborationTextProjection> {
+    let scope = collaboration_object_scope(scope.0, scope.1)?;
+    let event_id = normalize_collaboration_envelope_sha256(envelope_sha256)?;
+    let sender_member_did = normalize_member_did(&sender_profile.profile_id)?;
+    if sender_profile.profile_id != sender_member_did {
+        anyhow::bail!("collaboration sender Profile DID is not canonical");
+    }
+    let sender = normalize_display_name(&sender_profile.display_name)?;
+    let sender_profile = RoomProfileCardView {
+        schema: sender_profile.schema.clone(),
+        profile_id: sender_member_did.clone(),
+        display_name: sender.clone(),
+        handle: sender_profile.handle.clone(),
+        updated_at: sender_profile.updated_at,
+    };
+    let normalized_body = normalize_object_body(body)?;
+    if normalized_body != body {
+        anyhow::bail!("collaboration Chat body is not canonical");
+    }
+    Ok(CollaborationTextProjection {
+        scope,
+        event_id,
+        sender_member_did,
+        sender,
+        sender_profile,
+        body: normalized_body,
     })
 }
 
@@ -3086,6 +3128,16 @@ pub(crate) fn collaboration_room_poll_with_delivery(
             }
             let next = match evidence.get(object.event_id.as_str()) {
                 Some(entry) if entry.accepted => Some(CommunityDeliveryState::Accepted),
+                // Core evidence was read before this Room lock. Preserve the
+                // terminal outcome already saved by another poll or prune.
+                Some(_)
+                    if matches!(
+                        object.delivery_state,
+                        Some(CommunityDeliveryState::Accepted | CommunityDeliveryState::Expired)
+                    ) =>
+                {
+                    object.delivery_state
+                }
                 Some(entry) if entry.expires_at <= now => Some(CommunityDeliveryState::Expired),
                 Some(_) => Some(CommunityDeliveryState::Sending),
                 None if object.delivery_state == Some(CommunityDeliveryState::Sending) => {
@@ -4939,8 +4991,10 @@ fn normalize_display_name(input: &str) -> anyhow::Result<String> {
     if trimmed.is_empty() {
         anyhow::bail!("display name must not be empty");
     }
-    if trimmed.chars().count() > 48 {
-        anyhow::bail!("display name must be 48 characters or fewer");
+    // Signed Profile names allow 64 bytes. Keep existing Room names readable
+    // and accept every valid Profile name, including at the byte limit.
+    if trimmed.chars().count() > 64 {
+        anyhow::bail!("display name must be 64 characters or fewer");
     }
     Ok(trimmed.to_string())
 }

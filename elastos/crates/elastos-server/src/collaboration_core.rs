@@ -2393,7 +2393,7 @@ fn validate_incoming_chat_payload(
     authorized: &AuthorizedDefaultConversationMessage,
 ) -> anyhow::Result<()> {
     if authorized.message().envelope().payload.payload_type == COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE {
-        crate::collaboration_product::validate_chat_payload(authorized.product_payload())?;
+        crate::collaboration_product::validate_chat_projection(authorized)?;
     }
     Ok(())
 }
