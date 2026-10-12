@@ -201,6 +201,11 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
         self.offers.values().filter(|offer| offer.enabled).count()
     }
 
+    #[cfg(test)]
+    pub(crate) fn load_run_for_test(&self, run_id: &str) -> Result<StoredRun, ProviderFault> {
+        self.journal.load_run(run_id)
+    }
+
     /// Validate the complete proposal before the serialized coordinator closes
     /// any exact engine. Configuration and journal ownership remain unchanged.
     pub(crate) fn plan_refresh(

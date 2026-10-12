@@ -19,6 +19,11 @@ enum CoordinatorCommand {
         envelope: ProviderEnvelope,
         respond_to: oneshot::Sender<Value>,
     },
+    #[cfg(test)]
+    InspectStoredRun {
+        run_id: String,
+        respond_to: std::sync::mpsc::Sender<Result<crate::journal::StoredRun, ProviderFault>>,
+    },
     Eof,
 }
 
@@ -67,6 +72,42 @@ impl ProviderCoordinatorHandle {
             .map_err(|_| anyhow::anyhow!("provider coordinator response was dropped"))
     }
 
+    #[cfg(test)]
+    fn inspect_stored_run_for_test(
+        &self,
+        run_id: &str,
+        deadline: std::time::Instant,
+    ) -> Result<crate::journal::StoredRun, ProviderFault> {
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        let mut command = CoordinatorCommand::InspectStoredRun {
+            run_id: run_id.to_string(),
+            respond_to,
+        };
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(ProviderFault::internal("fixture run inspection timed out"));
+            }
+            match self.requests.try_send(command) {
+                Ok(()) => break,
+                Err(mpsc::error::TrySendError::Full(pending)) => {
+                    command = pending;
+                    thread::sleep(remaining.min(std::time::Duration::from_millis(5)));
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    return Err(ProviderFault::internal(
+                        "fixture provider coordinator is unavailable",
+                    ));
+                }
+            }
+        }
+        response_rx
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .map_err(|_| {
+                ProviderFault::internal("fixture run inspection response was not received")
+            })?
+    }
+
     pub fn shutdown_on_eof(&mut self) {
         let _ = self.requests.blocking_send(CoordinatorCommand::Eof);
         if let Some(join) = self.join.take() {
@@ -105,6 +146,16 @@ impl ProviderCoordinator {
 
     async fn handle_command(&mut self, command: CoordinatorCommand) -> bool {
         match command {
+            #[cfg(test)]
+            CoordinatorCommand::InspectStoredRun { run_id, respond_to } => {
+                let result = self
+                    .provider
+                    .as_ref()
+                    .ok_or_else(ProviderFault::not_initialized)
+                    .and_then(|provider| provider.load_run_for_test(&run_id));
+                let _ = respond_to.send(result);
+                false
+            }
             CoordinatorCommand::Request {
                 envelope,
                 respond_to,
@@ -1022,7 +1073,7 @@ mod tests {
         assert!(refreshed["status"] == "ok" || refreshed["code"] == "selection_unavailable");
         wait_for_flag(&started);
         let run_id = created["data"]["run_id"].as_str().unwrap();
-        let before = load_run(&root, run_id);
+        let before = load_run(&provider, run_id);
         assert_eq!(
             before.execution_binding_hash,
             offer.execution_binding_hash().unwrap()
@@ -1048,7 +1099,7 @@ mod tests {
             "ok"
         );
         assert_eq!(
-            load_run(&root, run_id).execution_binding_hash,
+            load_run(&provider, run_id).execution_binding_hash,
             before.execution_binding_hash
         );
         release.store(true, Ordering::Relaxed);
@@ -1578,55 +1629,15 @@ mod tests {
         }
     }
 
-    fn journal_transaction_in_progress(error: &ProviderFault) -> bool {
-        if error.code() != "journal_corrupt" {
-            return false;
-        }
-        // The private detail has no accessor. Compare the complete known fault
-        // so these fixture readers keep unrelated corruption as a failure.
-        let fault = format!("{error:?}");
-        fault
-            == format!(
-                "{:?}",
-                ProviderFault::corrupt_journal(
-                    "journal transaction creator is live or its exit is unproven"
-                )
-            )
-            || fault
-                == format!(
-                    "{:?}",
-                    ProviderFault::corrupt_journal("model run journal census changed during scan")
-                )
-            || (fault.contains("filename mismatch") && fault.contains(".json.tmp-"))
+    fn load_run(provider: &ProviderCoordinatorHandle, run_id: &str) -> StoredRun {
+        provider
+            .inspect_stored_run_for_test(run_id, Instant::now() + FIXTURE_EVENT_TIMEOUT)
+            .unwrap_or_else(|err| panic!("failed to inspect run {run_id}: {err:?}"))
     }
 
-    fn load_run(root: &str, run_id: &str) -> StoredRun {
-        let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
-        loop {
-            let journal = match RunJournal::open(crate::config::journal_root(root, None).unwrap()) {
-                Ok(journal) => journal,
-                Err(err) if journal_transaction_in_progress(&err) => {
-                    assert!(
-                        Instant::now() < deadline,
-                        "timed out loading run {run_id}; journal open never settled: {err:?}"
-                    );
-                    thread::sleep(Duration::from_millis(5));
-                    continue;
-                }
-                Err(err) => panic!("failed to open run journal for {run_id}: {err:?}"),
-            };
-            match journal.load_run(run_id) {
-                Ok(run) => return run,
-                Err(err) if journal_transaction_in_progress(&err) => {
-                    assert!(
-                        Instant::now() < deadline,
-                        "timed out loading run {run_id}; journal temp file never settled: {err:?}"
-                    );
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(err) => panic!("failed to load run {run_id}: {err:?}"),
-            }
-        }
+    fn load_run_after_shutdown(root: &str, run_id: &str) -> StoredRun {
+        let journal = RunJournal::open(crate::config::journal_root(root, None).unwrap()).unwrap();
+        journal.load_run(run_id).unwrap()
     }
 
     fn seed_active_artifact_run(
@@ -1774,37 +1785,16 @@ mod tests {
     }
 
     fn wait_for_run_state(
-        root: &str,
+        provider: &ProviderCoordinatorHandle,
         run_id: &str,
         description: &str,
         predicate: impl Fn(&StoredRun) -> bool,
     ) -> StoredRun {
         let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
         loop {
-            let journal = match RunJournal::open(crate::config::journal_root(root, None).unwrap()) {
-                Ok(journal) => journal,
-                Err(err) if journal_transaction_in_progress(&err) => {
-                    assert!(
-                        Instant::now() < deadline,
-                        "timed out waiting for {description}; journal open never settled: {err:?}"
-                    );
-                    thread::sleep(Duration::from_millis(5));
-                    continue;
-                }
-                Err(err) => panic!("timed out waiting for {description}; open failed: {err:?}"),
-            };
-            let run = match journal.load_run(run_id) {
-                Ok(run) => run,
-                Err(err) if journal_transaction_in_progress(&err) => {
-                    assert!(
-                        Instant::now() < deadline,
-                        "timed out waiting for {description}; journal temp file never settled: {err:?}"
-                    );
-                    thread::sleep(Duration::from_millis(5));
-                    continue;
-                }
-                Err(err) => panic!("timed out waiting for {description}; load failed: {err:?}"),
-            };
+            let run = provider
+                .inspect_stored_run_for_test(run_id, deadline)
+                .unwrap_or_else(|err| panic!("failed waiting for {description}: {err:?}"));
             if predicate(&run) {
                 return run;
             }
@@ -2091,6 +2081,44 @@ mod tests {
     }
 
     #[test]
+    fn stored_run_inspection_is_passive_and_rejects_corrupt_disk() {
+        let server = start_server(vec![]);
+        let offer = artifact_offer(&server.base_url);
+        let root = temp_root("stored-run-inspection");
+        let input = artifact_input("inspect");
+        let binding = create_binding("request:stored-run-inspection", &offer, &input);
+        let run_id = seed_active_artifact_run(&root, &offer, &binding, "job-inspect");
+        let mut provider = ProviderCoordinatorHandle::start();
+        init_provider(&provider, &root, vec![offer]);
+
+        let journal_root = crate::config::journal_root(&root, None).unwrap();
+        let path = crate::journal::hashed_path(&journal_root.join("runs"), &run_id);
+        let original = std::fs::read(&path).unwrap();
+        let expected: StoredRun = serde_json::from_slice(&original).unwrap();
+        let inspected = load_run(&provider, &run_id);
+        assert_eq!(
+            serde_json::to_value(inspected).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(!journal_root.join("pruned-request-floor.json").exists());
+        assert!(server.requests.lock().unwrap().is_empty());
+
+        let corrupt = b"not a stored run";
+        std::fs::write(&path, corrupt).unwrap();
+        let error = provider
+            .inspect_stored_run_for_test(&run_id, Instant::now() + FIXTURE_EVENT_TIMEOUT)
+            .unwrap_err();
+        assert_eq!(error.code(), "journal_corrupt");
+        assert_eq!(std::fs::read(&path).unwrap().as_slice(), corrupt);
+        assert!(!journal_root.join("pruned-request-floor.json").exists());
+        assert!(server.requests.lock().unwrap().is_empty());
+
+        std::fs::write(&path, original).unwrap();
+        provider.shutdown_on_eof();
+    }
+
+    #[test]
     fn stalled_text_run_returns_promptly_and_other_requests_continue() {
         let seed = sse_action(
             &[json!({"choices":[{"delta":{"content":"seed"}}]}).to_string()],
@@ -2122,7 +2150,7 @@ mod tests {
         assert_eq!(stalled_run["data"]["status"], "running");
         wait_for_flag(&stalled_started);
         assert_eq!(
-            load_run(&root, &stalled_run_id).status,
+            load_run(&provider, &stalled_run_id).status,
             crate::contract::RunStatus::Running
         );
 
@@ -2163,7 +2191,7 @@ mod tests {
             .to_string();
         assert_eq!(create_response["data"]["status"], "running");
         wait_for_flag(&stalled_started);
-        let stored = load_run(&root, &run_id);
+        let stored = load_run(&provider, &run_id);
         assert_eq!(stored.status, crate::contract::RunStatus::Running);
         assert_eq!(stored.events.len(), 1);
         assert_eq!(stored.events[0].kind, "prepared");
@@ -2246,14 +2274,19 @@ mod tests {
         assert_eq!(server.requests.lock().unwrap().len(), 1);
 
         release.store(true, Ordering::Relaxed);
-        let run = wait_for_run_state(&root, &run_id, "artifact status poll durability", |run| {
-            run.backend_state
-                .as_ref()
-                .and_then(|state| state.get("next_poll_at_ms"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-                > 0
-        });
+        let run = wait_for_run_state(
+            &provider,
+            &run_id,
+            "artifact status poll durability",
+            |run| {
+                run.backend_state
+                    .as_ref()
+                    .and_then(|state| state.get("next_poll_at_ms"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    > 0
+            },
+        );
         assert_eq!(run.status, crate::contract::RunStatus::Running);
         assert_eq!(run.events.len(), 2);
         assert_eq!(server.requests.lock().unwrap().len(), 1);
@@ -2285,7 +2318,7 @@ mod tests {
             started.elapsed()
         );
 
-        let run = load_run(&root, &run_id);
+        let run = load_run_after_shutdown(&root, &run_id);
         assert_eq!(run.status, crate::contract::RunStatus::Running);
         assert_eq!(
             run.backend_state
@@ -2330,7 +2363,7 @@ mod tests {
         assert_eq!(shutdown["data"]["shutdown"], json!(true));
 
         provider.shutdown_on_eof();
-        let run = load_run(&root, &run_id);
+        let run = load_run_after_shutdown(&root, &run_id);
         assert_eq!(run.status, crate::contract::RunStatus::Running);
         assert_eq!(
             run.backend_state
@@ -2373,7 +2406,7 @@ mod tests {
                 "uri": "elastos://object/object:artifact-output"
             })
         );
-        let run = load_run(&root, &run_id);
+        let run = load_run(&provider, &run_id);
         assert_eq!(run.status, crate::contract::RunStatus::Completed);
         assert_eq!(run.events.last().unwrap().kind, "output");
 
@@ -2400,9 +2433,12 @@ mod tests {
 
         let response = get_run(&provider, &run_id, &access_binding(&binding));
         assert_eq!(response["data"]["status"], "running");
-        let run = wait_for_run_state(&root, &run_id, "artifact status progress event", |run| {
-            run.events.len() == 3
-        });
+        let run = wait_for_run_state(
+            &provider,
+            &run_id,
+            "artifact status progress event",
+            |run| run.events.len() == 3,
+        );
         assert_eq!(run.status, crate::contract::RunStatus::Running);
         assert_eq!(run.events.last().unwrap().kind, "progress");
         assert_eq!(
@@ -2459,7 +2495,7 @@ mod tests {
         assert_eq!(initial["data"]["status"], "running");
         wait_for_retry_request(&provider, &server, &run_id, &access_binding(&binding), 2);
 
-        let run = load_run(&root, &run_id);
+        let run = load_run(&provider, &run_id);
         assert_eq!(run.status, crate::contract::RunStatus::Running);
         assert_eq!(run.events.len(), 2);
 
@@ -2513,7 +2549,7 @@ mod tests {
         release.store(true, Ordering::Relaxed);
 
         let run = wait_for_run_state(
-            &root,
+            &provider,
             &run_id,
             "cancel reservation survives stale status poll",
             |run| run.status == crate::contract::RunStatus::Reconciling,
@@ -2572,20 +2608,25 @@ mod tests {
 
         let initial = get_run(&provider, &run_id, &access_binding(&binding));
         assert_eq!(initial["data"]["status"], "running");
-        let spawned_next_poll = load_run(&root, &run_id)
+        let spawned_next_poll = load_run(&provider, &run_id)
             .backend_state
             .as_ref()
             .and_then(|state| state.get("next_poll_at_ms"))
             .and_then(Value::as_u64)
             .unwrap();
-        let run = wait_for_run_state(&root, &run_id, "redirect-preserved artifact state", |run| {
-            run.backend_state
-                .as_ref()
-                .and_then(|state| state.get("next_poll_at_ms"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-                > spawned_next_poll
-        });
+        let run = wait_for_run_state(
+            &provider,
+            &run_id,
+            "redirect-preserved artifact state",
+            |run| {
+                run.backend_state
+                    .as_ref()
+                    .and_then(|state| state.get("next_poll_at_ms"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    > spawned_next_poll
+            },
+        );
         assert_eq!(run.status, crate::contract::RunStatus::Running);
         let public = vec![
             serde_json::to_string(&get_run(&provider, &run_id, &access_binding(&binding))).unwrap(),
@@ -2627,7 +2668,7 @@ mod tests {
         assert_eq!(initial["data"]["status"], "running");
         wait_for_flag(&started);
         wait_for_request_count(&server, 1);
-        let run = load_run(&root, &run_id);
+        let run = load_run(&provider, &run_id);
         assert_eq!(run.status, crate::contract::RunStatus::Running);
         assert_eq!(run.events.len(), 2);
 
@@ -2679,7 +2720,7 @@ mod tests {
         release.store(true, Ordering::Relaxed);
         wait_for_retry_request(&provider, &server, &run_id, &access_binding(&binding), 2);
 
-        let run = load_run(&root, &run_id);
+        let run = load_run(&provider, &run_id);
         assert_eq!(run.status, crate::contract::RunStatus::Running);
         assert_eq!(
             run.backend_state
@@ -2733,7 +2774,7 @@ mod tests {
         assert_eq!(initial["data"]["status"], "running");
         wait_for_retry_request(&provider, &server, &run_id, &access_binding(&binding), 2);
 
-        let run = load_run(&root, &run_id);
+        let run = load_run(&provider, &run_id);
         assert_eq!(run.status, crate::contract::RunStatus::Running);
         assert_eq!(run.events.len(), 2);
 
@@ -2830,7 +2871,7 @@ mod tests {
         assert_eq!(second["data"]["status"], "reconciling");
         assert_eq!(server.requests.lock().unwrap().len(), 1);
 
-        let run = load_run(&root, &run_id);
+        let run = load_run(&provider, &run_id);
         assert_eq!(run.status, crate::contract::RunStatus::Reconciling);
         assert_eq!(
             run.backend_state.as_ref().unwrap()["cancel_requested"],
@@ -2874,7 +2915,7 @@ mod tests {
         assert!(!request.contains("/create"));
         drop(requests);
 
-        let run = load_run(&root, &run_id);
+        let run = load_run(&provider, &run_id);
         assert_eq!(run.status, crate::contract::RunStatus::Reconciling);
         assert_eq!(
             run.backend_state.as_ref().unwrap()["cancel_requested"],
@@ -2922,7 +2963,7 @@ mod tests {
 
         let terminal = wait_for_terminal(&provider, &run_id, &access_binding(&binding));
         assert_eq!(terminal["data"]["status"], "cancelled");
-        let run = load_run(&root, &run_id);
+        let run = load_run(&provider, &run_id);
         assert_eq!(run.status, crate::contract::RunStatus::Cancelled);
         assert_eq!(run.events.last().unwrap().kind, "cancelled");
 
@@ -2952,7 +2993,7 @@ mod tests {
         let cancel_response = cancel_run(&provider, &run_id, &access_binding(&binding));
         assert_eq!(cancel_response["data"]["status"], "reconciling");
 
-        let after_cancel = load_run(&root, &run_id);
+        let after_cancel = load_run(&provider, &run_id);
         let deadline = after_cancel
             .backend_state
             .as_ref()
@@ -2997,15 +3038,20 @@ mod tests {
 
         let response = cancel_run(&provider, &run_id, &access_binding(&binding));
         assert_eq!(response["data"]["status"], "reconciling");
-        let run = wait_for_run_state(&root, &run_id, "cancel redirect preserved state", |run| {
-            run.status == crate::contract::RunStatus::Reconciling
-                && run
-                    .backend_state
-                    .as_ref()
-                    .and_then(|state| state.get("cancel_requested"))
-                    .and_then(Value::as_bool)
-                    == Some(true)
-        });
+        let run = wait_for_run_state(
+            &provider,
+            &run_id,
+            "cancel redirect preserved state",
+            |run| {
+                run.status == crate::contract::RunStatus::Reconciling
+                    && run
+                        .backend_state
+                        .as_ref()
+                        .and_then(|state| state.get("cancel_requested"))
+                        .and_then(Value::as_bool)
+                        == Some(true)
+            },
+        );
         assert_eq!(run.status, crate::contract::RunStatus::Reconciling);
         let public = vec![
             serde_json::to_string(&get_run(&provider, &run_id, &access_binding(&binding))).unwrap(),
@@ -3055,7 +3101,7 @@ mod tests {
         assert!(requests[0].starts_with("POST /cancel "));
         assert!(requests[1].starts_with("GET /status?job_id=job-123 "));
 
-        let run = load_run(&root, &run_id);
+        let run = load_run(&provider, &run_id);
         assert_eq!(run.status, crate::contract::RunStatus::Reconciling);
         assert_eq!(
             run.backend_state
@@ -3113,7 +3159,7 @@ mod tests {
         assert_eq!(response["data"]["status"], "reconciling");
         wait_for_retry_request(&provider, &server, &run_id, &access_binding(&binding), 2);
 
-        let run = load_run(&root, &run_id);
+        let run = load_run(&provider, &run_id);
         assert_eq!(run.status, crate::contract::RunStatus::Reconciling);
         let public = vec![
             serde_json::to_string(&get_run(&provider, &run_id, &access_binding(&binding))).unwrap(),
@@ -3160,7 +3206,7 @@ mod tests {
         wait_for_flag(&started_flag);
         wait_for_retry_request(&provider, &server, &run_id, &access_binding(&binding), 2);
 
-        let run = load_run(&root, &run_id);
+        let run = load_run(&provider, &run_id);
         assert_eq!(run.status, crate::contract::RunStatus::Reconciling);
         let public = vec![
             serde_json::to_string(&get_run(&provider, &run_id, &access_binding(&binding))).unwrap(),
@@ -3209,7 +3255,7 @@ mod tests {
             "EOF shutdown must return promptly, took {:?}",
             elapsed
         );
-        let run = load_run(&root, &run_id);
+        let run = load_run_after_shutdown(&root, &run_id);
         assert_eq!(run.status, crate::contract::RunStatus::Reconciling);
         assert_eq!(
             run.backend_state.as_ref().unwrap()["cancel_requested"],
@@ -3248,7 +3294,7 @@ mod tests {
         );
         wait_for_provider_exit(&mut provider);
 
-        let run = load_run(&root, &run_id);
+        let run = load_run_after_shutdown(&root, &run_id);
         assert_eq!(run.status, crate::contract::RunStatus::Reconciling);
         assert_eq!(
             run.backend_state.as_ref().unwrap()["cancel_requested"],
@@ -3814,7 +3860,7 @@ mod tests {
         let terminal = wait_for_terminal(&provider, run_id, &access_binding(&binding));
         wait_for_fake_llama_event(&events, "term");
         assert_eq!(terminal["data"]["status"], "cancelled");
-        let run = load_run(&root, run_id);
+        let run = load_run(&provider, run_id);
         assert_eq!(run.status, crate::contract::RunStatus::Cancelled);
         assert_eq!(run.events.last().unwrap().kind, "cancelled");
         assert_eq!(
@@ -3914,7 +3960,9 @@ mod tests {
         let run_id = created["data"]["run_id"].as_str().unwrap();
         let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
         let run = loop {
-            let run = load_run(&root, run_id);
+            let run = provider
+                .inspect_stored_run_for_test(run_id, deadline)
+                .expect("failed to inspect deadline run");
             if run.status.is_terminal() {
                 break run;
             }
@@ -4691,7 +4739,7 @@ mod tests {
             assert!(server.request_active.load(Ordering::SeqCst));
             assert_eq!(server.requests.lock().unwrap().len(), 1);
             assert_eq!(terminal["data"]["status"], "settlement_unknown");
-            let run = load_run(&root, &run_id);
+            let run = load_run(&provider, &run_id);
             assert_eq!(run.status, crate::contract::RunStatus::SettlementUnknown);
             assert_eq!(run.events.last().unwrap().kind, "settlement_unknown");
             assert_eq!(
@@ -4766,7 +4814,7 @@ mod tests {
         assert_eq!(shutdown["data"]["shutdown"], json!(true));
 
         provider.shutdown_on_eof();
-        let run = load_run(&root, &run_id);
+        let run = load_run_after_shutdown(&root, &run_id);
         assert_eq!(run.status, crate::contract::RunStatus::SettlementUnknown);
 
         release.store(true, Ordering::Relaxed);
@@ -4798,7 +4846,7 @@ mod tests {
             started.elapsed()
         );
 
-        let run = load_run(&root, &run_id);
+        let run = load_run_after_shutdown(&root, &run_id);
         assert_eq!(run.status, crate::contract::RunStatus::SettlementUnknown);
 
         release.store(true, Ordering::Relaxed);
@@ -4830,7 +4878,7 @@ mod tests {
             started.elapsed()
         );
 
-        let run = load_run(&root, &run_id);
+        let run = load_run_after_shutdown(&root, &run_id);
         assert_eq!(run.status, crate::contract::RunStatus::SettlementUnknown);
         assert_eq!(run.events.last().unwrap().kind, "settlement_unknown");
 
@@ -4885,7 +4933,7 @@ mod tests {
         let retry = create_run(&provider, &offer, &binding, &input);
         assert_eq!(retry["data"]["run_id"], run_id);
         assert_eq!(retry["data"]["status"], "settlement_unknown");
-        let stored = load_run(&root, &run_id);
+        let stored = load_run(&provider, &run_id);
         assert_eq!(stored.runtime_binding, binding);
         assert_eq!(stored.input_hash, run.input_hash);
         assert!(stored.offer.input_schemas.is_empty());
@@ -5041,7 +5089,7 @@ mod tests {
         release.store(true, Ordering::Relaxed);
         let run_id = first["data"]["run_id"].as_str().unwrap().to_string();
         let run = wait_for_run_state(
-            &root,
+            &provider,
             &run_id,
             "artifact create dispatched receipt",
             |run| run.events.len() == 2,
@@ -5140,7 +5188,12 @@ mod tests {
             coordinator.handle_update(exited).await;
         });
 
-        let run = load_run(&root, &run_id);
+        let run = coordinator
+            .provider
+            .as_ref()
+            .unwrap()
+            .load_run_for_test(&run_id)
+            .unwrap();
         assert_eq!(run.status, crate::contract::RunStatus::SettlementUnknown);
         assert_eq!(
             run.events
@@ -5166,9 +5219,12 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        let run = wait_for_run_state(&root, &run_id, "artifact create durable receipt", |run| {
-            run.events.len() == 2 && run.status == crate::contract::RunStatus::Running
-        });
+        let run = wait_for_run_state(
+            &provider,
+            &run_id,
+            "artifact create durable receipt",
+            |run| run.events.len() == 2 && run.status == crate::contract::RunStatus::Running,
+        );
         let public_run =
             serde_json::to_string(&get_run(&provider, &run_id, &access_binding(&binding))).unwrap();
         let public_events = serde_json::to_string(&events_page(
@@ -5478,7 +5534,7 @@ mod tests {
             terminal["data"]["terminal"]["error"]["class"],
             "response_malformed"
         );
-        let run = load_run(&root, &run_id);
+        let run = load_run(&provider, &run_id);
         let kinds = run
             .events
             .iter()
@@ -5521,7 +5577,7 @@ mod tests {
         let terminal = wait_for_terminal(&provider, &run_id, &access_binding(&binding));
 
         assert_eq!(terminal["data"]["status"], "failed");
-        let run = load_run(&root, &run_id);
+        let run = load_run(&provider, &run_id);
         let kinds = run
             .events
             .iter()
@@ -5553,7 +5609,7 @@ mod tests {
         let terminal = wait_for_terminal(&provider, &run_id, &access_binding(&binding));
 
         assert_eq!(terminal["data"]["status"], "completed");
-        let run = load_run(&root, &run_id);
+        let run = load_run(&provider, &run_id);
         assert_eq!(
             run.output,
             Some(json!({
