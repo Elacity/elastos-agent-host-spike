@@ -1435,11 +1435,14 @@ fn is_public_ip(ip: std::net::IpAddr) -> bool {
         std::net::IpAddr::V4(v4) => is_public_ipv4(v4),
         std::net::IpAddr::V6(v6) => {
             let s = v6.segments();
-            // IPv4-mapped (::ffff:0:0/96), IPv4-compatible (::/96) and
-            // NAT64 (64:ff9b::/96) carry an IPv4 address.
+            // IPv4-mapped (::ffff:0:0/96) and NAT64 (64:ff9b::/96) carry an
+            // IPv4 address. IPv4-compatible (::/96) is deprecated: never public.
             let embedded = std::net::Ipv4Addr::from((u32::from(s[6]) << 16) | u32::from(s[7]));
-            if s[..5] == [0; 5] && (s[5] == 0xffff || (s[5] == 0 && !v6.is_loopback())) {
-                return !v6.is_unspecified() && is_public_ipv4(embedded);
+            if s[..5] == [0; 5] && s[5] == 0xffff {
+                return is_public_ipv4(embedded);
+            }
+            if s[..6] == [0; 6] {
+                return false;
             }
             if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
                 return is_public_ipv4(embedded);
@@ -16469,6 +16472,7 @@ pub(crate) mod tests {
             "203.0.113.9:4433",
             "224.0.0.1:4433",
             "[::ffff:77.42.19.31]:4433",
+            "[::77.42.19.31]:4433",
             "[2a01:4f9:c013:e725::1]:4433",
         ]);
         assert_eq!(
@@ -16485,6 +16489,8 @@ pub(crate) mod tests {
             ips(&["192.168.1.20:4433", "[2001:2::1]:4433", "[3fff::1]:4433"]).len(),
             3
         );
+        // IPv4-compatible is never public, so a LAN beside it keeps its route.
+        assert_eq!(ips(&["192.168.1.20:4433", "[::77.42.19.31]:4433"]).len(), 2);
         // Globally reachable: 6to4 of a public IPv4, AMT, and 2001:4860 (outside 2001::/23).
         assert_eq!(
             ips(&[
@@ -16508,11 +16514,6 @@ pub(crate) mod tests {
             return; // This host has no IPv6.
         };
         let port = occupied.local_addr().unwrap().port();
-        // A host with an IPv6 route has a routable IPv6 address to list
-        // (connecting a UDP socket sends nothing).
-        let host_has_ipv6 = std::net::UdpSocket::bind("[::]:0")
-            .and_then(|socket| socket.connect("[2001:4860:4860::8888]:53"))
-            .is_ok();
         let endpoint = bind_carrier_endpoint(
             SecretKey::from_bytes(&[72u8; 32]),
             CarrierNodeNetwork::Isolated,
@@ -16524,6 +16525,14 @@ pub(crate) mod tests {
         .expect("IPv4 binds the fixed port while IPv6 is taken");
         let sockets = endpoint.bound_sockets();
         let addr = super::tests::wait_for_direct_endpoint_addr(&endpoint).await;
+        let snapshot: Vec<std::net::SocketAddr> = addr
+            .addrs
+            .iter()
+            .filter_map(|transport| match transport {
+                iroh::TransportAddr::Ip(addr) => Some(*addr),
+                _ => None,
+            })
+            .collect();
         let ticket = {
             let json =
                 serde_json::json!({ "topic": null, "endpoints": [exported_endpoint_addr(addr)] });
@@ -16552,10 +16561,18 @@ pub(crate) mod tests {
             ips.iter().all(|ip| ip.is_ipv4() == (ip.port() == port)),
             "the ticket lists IPv4 on the fixed port and IPv6 on its own: {ips:?}"
         );
-        // A host whose interfaces carry IPv6 must still list it.
-        if host_has_ipv6 {
-            assert!(ips.iter().any(|ip| ip.is_ipv6()), "IPv6 kept: {ips:?}");
-        }
+        // The ticket lists exactly the snapshot's public addresses, or all of
+        // them on a host with none, so any IPv6 the host advertises stays.
+        let expected: Vec<_> = if snapshot.iter().any(|ip| is_public_ip(ip.ip())) {
+            snapshot
+                .iter()
+                .copied()
+                .filter(|ip| is_public_ip(ip.ip()))
+                .collect()
+        } else {
+            snapshot.clone()
+        };
+        assert_eq!(ips, expected, "snapshot {snapshot:?}");
     }
 
     #[test]
