@@ -1127,15 +1127,7 @@ impl Controller {
             if let Some(request) = self.request.as_ref() {
                 forget_refused_release(&self.directory, request)?;
             }
-            // The new release's own repair installs what this updater left to it.
-            self.publish(
-                "updated",
-                if crate::setup::deferred_support_pending(&self.receipt.data_dir) {
-                    "Home is up to date. It is installing the rest of this release's support."
-                } else {
-                    "Home is up to date."
-                },
-            )
+            self.publish("updated", "Home is up to date.")
         } else if self.host_ready
             && !InstallTransaction::has_pending_recovery(&self.receipt.binary)
             && status(&self.receipt.data_dir)?.is_some_and(|status| {
@@ -2043,8 +2035,19 @@ async fn finalize_after_start_attempt(data_dir: &Path) -> Result<Option<usize>> 
     if !crate::auth::principal_root_migration_cleanup_pending(data_dir).unwrap_or(true) {
         return Ok(Some(0));
     }
-    let binary = installed_runtime_binary(data_dir)?
-        .context("Migration backup cleanup needs an installed Runtime release.")?;
+    let binary =
+        crate::install_transaction::installed_binary(data_dir, installed_writer_binary(data_dir)?)?
+            .context("Migration backup cleanup needs an installed Runtime release.")?;
+    let binary = fs::canonicalize(
+        binary
+            .parent()
+            .context("installed Runtime parent is missing")?,
+    )?
+    .join(
+        binary
+            .file_name()
+            .context("installed Runtime name is missing")?,
+    );
     if InstallTransaction::has_pending_recovery(&binary) {
         return Ok(None);
     }
@@ -2063,84 +2066,6 @@ async fn finalize_after_start_attempt(data_dir: &Path) -> Result<Option<usize>> 
     )
     .await
     .map(Some)
-}
-
-/// The installed Runtime, with its parent resolved as the writer lock names it.
-fn installed_runtime_binary(data_dir: &Path) -> Result<Option<PathBuf>> {
-    let Some(binary) =
-        crate::install_transaction::installed_binary(data_dir, installed_writer_binary(data_dir)?)?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(
-        fs::canonicalize(
-            binary
-                .parent()
-                .context("installed Runtime parent is missing")?,
-        )?
-        .join(
-            binary
-                .file_name()
-                .context("installed Runtime name is missing")?,
-        ),
-    ))
-}
-
-/// Every Home gateway runs this beside its server. An older updater left support
-/// of a kind it did not know; this release's own repair installs it once the
-/// release transaction has settled and the installation writer is free.
-pub(crate) async fn repair_deferred_support_after_start(data_dir: PathBuf) {
-    let mut failures = 0;
-    loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        match repair_deferred_support_attempt(&data_dir).await {
-            Ok(true) => return,
-            Ok(false) => {}
-            Err(error) => {
-                failures += 1;
-                if failures == START_CLEANUP_ATTEMPTS {
-                    tracing::warn!(error = %error,
-                        "Deferred support not installed yet. Home repairs it at its next start or update.");
-                    return;
-                }
-            }
-        }
-    }
-}
-
-/// `false` while a release transaction still owns the rollback; it may yet record
-/// what it leaves to this release.
-async fn repair_deferred_support_attempt(data_dir: &Path) -> Result<bool> {
-    let installed = fs::canonicalize(data_dir)
-        .map_err(anyhow::Error::from)
-        .and_then(|data| Ok(installed_runtime_binary(&data)?.map(|binary| (data, binary))));
-    let (data_dir, binary) = match installed {
-        Ok(Some(installed)) => installed,
-        Ok(None) => return Ok(true),
-        // Without a readable installed release, only a recorded deferral is an error.
-        Err(_) if !crate::setup::deferred_support_pending(data_dir) => return Ok(true),
-        Err(error) => return Err(error),
-    };
-    let (data_dir, binary) = (data_dir.as_path(), binary.as_path());
-    if InstallTransaction::has_pending_recovery(binary) {
-        return Ok(false);
-    }
-    if !crate::setup::deferred_support_pending(data_dir) {
-        return Ok(true);
-    }
-    let Some(_writer) = crate::install_transaction::acquire_installed_writer(data_dir)? else {
-        return Ok(true);
-    };
-    crate::setup::repair_installed_support(
-        data_dir,
-        binary,
-        &installed_source(data_dir)?,
-        false,
-        crate::setup::CatalogueRepair::Optional,
-        crate::setup::FirstPartyCarrierContext::Runtime,
-    )
-    .await?;
-    Ok(true)
 }
 
 async fn finalize_principal_root_migrations_after_ready(

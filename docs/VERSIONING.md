@@ -346,31 +346,26 @@ publication (no `prev_head_cid`) may start without saved publish state.
 
 ## Skipped releases
 
-A Home may skip any number of releases. Its updater verifies the signed
-release as always (signer, channel, platform, version order and every signed
-hash), then installs the new Runtime and every component of a kind it knows.
-A component of a kind it does not know belongs to a newer release: the updater
-neither fetches nor installs it, names it in the update output and in
-`deferred-support.json` in the data directory, and the new Runtime's own
-repair installs it when Home starts and then removes that file. Its install
-paths are its alone: a release where a known component, a capsule, or an
-installed component removed or moved away shares such a path is refused before
-anything is fetched; a component may keep its path while changing kind. A signed
-release in a format the updater cannot read at all is not applied; System and
-`elastos update` say the install command is needed once and print it, from
-the publisher gateway the Home was installed from.
+A Home may skip any number of releases, as long as no release ships what the
+oldest supported updater refuses. An updater refuses a whole signed release
+whose components use a schema or a component kind (`strategy`) it does not
+know. `scripts/update-hop-oldest-release.json` names the oldest release that
+still updates in System, with the component kinds its signed releases ship.
+The source gate (`update-hop-compare.py check-oldest-start`, through its test)
+refuses a checkout whose `components.json` that release's updater cannot read
+or install, and `scripts/release-publish.sh prepare` refuses a source without
+the pin. When it and the previous pin name one release, CI's update journey
+runs that start in full. To ship such a change anyway, decide that Homes on the
+pinned release run install.sh once, say so in the release notes, and move the
+pin with `python3 scripts/update-hop-compare.py pin-oldest-release` (it takes
+the previous pin and reads that release's signed components from the origin).
 
-Updaters released before this rule (0.8.0-alpha.15 and older) refuse a release
-with a component kind they do not know. `scripts/update-hop-oldest-release.json`
-names the oldest release that still updates in System, with the component
-kinds its signed releases ship. The source gate
-(`update-hop-compare.py check-oldest-start`, through its test) refuses a
-checkout whose `components.json` that release's updater cannot read or install;
-when it and the previous pin name one release, CI's update journey runs that
-start in full. To ship such a change anyway, decide that Homes on the pinned
-release run install.sh once, say so in the release notes, and move the pin
-with `python3 scripts/update-hop-compare.py pin-oldest-release` (it takes the
-previous pin and reads that release's signed components from the origin).
+A Home that still meets such a release does not change. From the release after
+0.8.0-alpha.15, System and `elastos update` then say the install command is
+needed once and print it, `curl -fsSL '<publisher gateway>/install.sh' | bash`,
+with the URL built from the gateway the Home was installed from and quoted as
+one shell word. Older updaters (alpha.15 and earlier) say the publisher's signed
+release is not valid for this Home.
 
 ## Withdraw a bad release
 

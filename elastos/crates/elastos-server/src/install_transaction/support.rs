@@ -18,16 +18,11 @@ fn scratch(tx: &InstallTransaction, index: usize, candidate: bool) -> PathBuf {
     ))
 }
 
-/// The top-level files a release's support may replace: the signed model
-/// catalogue, and the record of what the release's own repair still installs.
-const TOP_LEVEL_FILES: [&str; 2] = ["model-catalog.json", "deferred-support.json"];
-
-fn top_level_file(path: &Path) -> bool {
-    TOP_LEVEL_FILES.iter().any(|name| path == Path::new(name))
-}
+/// The signed model catalogue is the one top-level file a release's support may replace.
+const MODEL_CATALOG: &str = "model-catalog.json";
 
 pub(crate) fn validate_support_path(path: &Path) -> anyhow::Result<()> {
-    if top_level_file(path) {
+    if path == Path::new(MODEL_CATALOG) {
         return Ok(());
     }
     let mut parts = path.components();
@@ -41,7 +36,7 @@ pub(super) fn validate_entries(tx: &InstallTransaction, entries: &[Entry]) -> an
         let path = &entry.path;
         validate_support_path(path)?;
         if path.components().count() == 1
-            && !top_level_file(path)
+            && path != Path::new(MODEL_CATALOG)
             && (entry.original.is_some() || entry.candidate.is_none())
             || tx
                 .destinations
@@ -182,7 +177,9 @@ pub(super) fn prepare(tx: &InstallTransaction, paths: &[(PathBuf, PathBuf)]) -> 
     for (relative, source) in paths {
         validate_support_path(relative)?;
         anyhow::ensure!(
-            relative.components().count() > 1 || top_level_file(relative) || source.is_dir(),
+            relative.components().count() > 1
+                || relative == Path::new(MODEL_CATALOG)
+                || source.is_dir(),
             "new support root must be a directory"
         );
         journal.support.push(Entry {

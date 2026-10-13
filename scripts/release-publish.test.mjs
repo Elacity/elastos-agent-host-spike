@@ -34,7 +34,7 @@ const publicHead = 'QmZ9v8LQsW12TgsHKE9KtL5F1Vm3wtBe4BCNP9X6mEHWEh';
 const updatePin = { schema: 'elastos.update-hop.previous-release/v1', version: '1.2.2', release_cid: 'Qm' + 'R'.repeat(44),
   release_sha256: '9'.repeat(64), head_cid: publicHead, signer_did: did };
 const oldestPin = { ...updatePin, schema: 'elastos.update-hop.oldest-release/v1', components_schema: 'elastos.components/v1',
-  component_kinds: [], defers_newer_kinds: false };
+  component_kinds: [] };
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' }, ...options });

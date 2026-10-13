@@ -1707,16 +1707,13 @@ CLI_OLDEST_PIN = Path(__file__).with_name("update-hop-oldest-release.json")
 # Strategies every release updater installs. Release preparation replaces source-build and
 # release admission refuses local-copy, so neither reaches an older updater.
 CLI_INSTALLED_KINDS = (None, "prebuilt", "source-build", "local-copy")
-# The record an updater writes when it leaves a kind it does not know to the new release's
-# own repair; a release whose source writes it never refuses a release for a newer kind.
-CLI_DEFERRED_SUPPORT_MARKER = b'"deferred-support.json"'
 
 
 def cli_oldest_pin(path=None):
     pin = cli_release_pin_fields(cli_json(path or CLI_OLDEST_PIN), "elastos.update-hop.oldest-release/v1",
-                                 ("components_schema", "component_kinds", "defers_newer_kinds"), "oldest release")
+                                 ("components_schema", "component_kinds"), "oldest release")
     kinds = pin["component_kinds"]
-    need(isinstance(pin["components_schema"], str) and isinstance(pin["defers_newer_kinds"], bool)
+    need(isinstance(pin["components_schema"], str)
          and isinstance(kinds, list) and all(isinstance(kind, str) for kind in kinds) and kinds == sorted(set(kinds)),
          "oldest release pin differs")
     return pin
@@ -1727,14 +1724,6 @@ def cli_component_kinds(manifest):
     return {info.get("strategy") for component in manifest.get("external", {}).values()
             for descriptor in (component, component.get("capsule_metadata") or {})
             for info in descriptor.get("platforms", {}).values()}
-
-
-def cli_source_defers_newer_kinds(commit):
-    """Whether the release built from this develop commit leaves a newer kind to its release."""
-    subprocess.run(["git", "fetch", "-q", "origin", commit], cwd=Path(__file__).parent, check=False, timeout=120)
-    source = subprocess.run(["git", "show", commit + ":elastos/crates/elastos-server/src/setup.rs"], cwd=Path(__file__).parent,
-                            capture_output=True, check=True, timeout=60).stdout
-    return CLI_DEFERRED_SUPPORT_MARKER in source
 
 
 def cli_pin_oldest_release(path=None, previous_path=None):
@@ -1755,17 +1744,16 @@ def cli_pin_oldest_release(path=None, previous_path=None):
         kinds |= cli_component_kinds(manifest)
     need(len(schemas) == 1 and isinstance(next(iter(schemas)), str), "oldest release components schemas differ")
     oldest = {**{key: pin[key] for key in CLI_PIN_FIELDS}, "schema": "elastos.update-hop.oldest-release/v1",
-              "components_schema": schemas.pop(), "component_kinds": sorted(kinds - set(CLI_INSTALLED_KINDS)),
-              "defers_newer_kinds": cli_source_defers_newer_kinds(release["source"]["commit"])}
+              "components_schema": schemas.pop(), "component_kinds": sorted(kinds - set(CLI_INSTALLED_KINDS))}
     write(path or CLI_OLDEST_PIN, oldest)
     return oldest
 
 
 def cli_check_oldest_start(manifest_path=None, oldest_path=None, previous_path=None):
     """The update journey from the oldest release that updates in System, as its admission
-    subset: this checkout's components must be readable by that release's updater, and use only
-    kinds it installs unless it leaves newer kinds to the new release. The full journey starts
-    from the previous pin, so when both pins name one release it runs this start completely."""
+    subset: this checkout's components must be readable by that release's updater and use only
+    kinds it installs. The full journey starts from the previous pin, so when both pins name one
+    release it runs this start completely."""
     oldest, previous = cli_oldest_pin(oldest_path), cli_previous_pin(previous_path)
     need(cli_version_order(oldest["version"]) <= cli_version_order(previous["version"]),
          "the oldest System-update release is newer than the release users run now")
@@ -1777,11 +1765,9 @@ def cli_check_oldest_start(manifest_path=None, oldest_path=None, previous_path=N
               " forward with pin-oldest-release and say so in the release notes, or ship this later.")
     need(manifest.get("schema") == oldest["components_schema"],
          "this release's components schema " + repr(manifest.get("schema")) + " is unreadable by " + oldest["version"] + "'s updater." + remedy)
-    unknown = [] if oldest["defers_newer_kinds"] else sorted(
-        cli_component_kinds(manifest) - set(CLI_INSTALLED_KINDS) - set(oldest["component_kinds"]))
+    unknown = sorted(cli_component_kinds(manifest) - set(CLI_INSTALLED_KINDS) - set(oldest["component_kinds"]))
     need(not unknown, oldest["version"] + "'s updater refuses the whole release for component kind(s) " + ", ".join(unknown) + "." + remedy)
-    return {"status": "passed", "oldest": oldest["version"], "previous": previous["version"],
-            "full_journey": same, "defers_newer_kinds": oldest["defers_newer_kinds"]}
+    return {"status": "passed", "oldest": oldest["version"], "previous": previous["version"], "full_journey": same}
 
 
 def cli_platform_entry(descriptor, platform_name):

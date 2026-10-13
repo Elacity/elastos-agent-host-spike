@@ -731,8 +731,9 @@ release_check_marker!(
     mismatched
 );
 release_check_marker!(
-    /// A signed, verified release in a format this updater cannot read. The
-    /// publisher's install command applies it once; retrying here never succeeds.
+    /// A signed, verified release this updater cannot apply: a newer components
+    /// format or kind. The publisher's install command applies it once; retrying
+    /// here never succeeds.
     InstallerRequired,
     installer_marked
 );
@@ -1357,7 +1358,8 @@ async fn run_upgrade_with_restart(
         );
         Ok(serde_json::from_slice(&comp_data)?)
     })())?;
-    // A signed manifest this Runtime cannot read is a newer release format.
+    // A signed format or component kind this Runtime does not know is a newer
+    // release's; only the publisher's install command applies it.
     let manifest: crate::setup::ComponentsManifest = installer_required(
         source,
         version,
@@ -1367,30 +1369,20 @@ async fn run_upgrade_with_restart(
                 "release components use schema {}",
                 value["schema"]
             );
-            Ok(serde_json::from_value(value)?)
+            let manifest = serde_json::from_value(value)?;
+            let unknown = crate::setup::unknown_kind_components(&manifest, &component_platform);
+            anyhow::ensure!(
+                unknown.is_empty(),
+                "release components of a kind this Runtime does not know: {}",
+                unknown.join(", ")
+            );
+            Ok(manifest)
         })(),
     )?;
-    // A kind this Runtime does not know is left to the new release's own repair;
-    // its paths may not be shared with what this release or the installed one owns.
-    let installed: Option<crate::setup::ComponentsManifest> =
-        match std::fs::read(data_dir.join("components.json")) {
-            Ok(bytes) => Some(serde_json::from_slice(&bytes)?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
-    let deferred = refused(crate::setup::admit_release_components(
+    refused(crate::setup::admit_release_components(
         &manifest,
-        installed.as_ref(),
         &component_platform,
     ))?;
-    drop(installed);
-    drop(manifest);
-    if !deferred.is_empty() {
-        println!(
-            "  Left for ElastOS {version} to install after it starts: {}",
-            deferred.join(", ")
-        );
-    }
 
     if apply_mode == ApplyMode::Normal {
         // 10. Atomic replace binary
@@ -1438,15 +1430,6 @@ async fn run_upgrade_with_restart(
             )
         })
         .await?;
-        let support: Vec<_> = catalog
-            .into_iter()
-            .chain(crate::setup::stage_deferred_support(
-                data_dir,
-                catalog_stage.path(),
-                version,
-                &deferred,
-            )?)
-            .collect();
         // Prepare all five original backups before the first live artifact changes.
         let mut sources = load_trusted_sources(data_dir)?;
         if let Some(stored_source) = sources.source_named_mut(Some(&source.name)) {
@@ -1484,9 +1467,11 @@ async fn run_upgrade_with_restart(
             repair_version,
         )?;
         transaction.prepare(&files)?;
-        if let Err(error) = transaction.prepare_support(&support) {
-            transaction.abort()?;
-            return Err(error);
+        if let Some(entry) = &catalog {
+            if let Err(error) = transaction.prepare_support(std::slice::from_ref(entry)) {
+                transaction.abort()?;
+                return Err(error);
+            }
         }
         let activation = transaction.activate_artifacts_for_support()?;
         println!("  Installed binary: {}", bin_path.display());
@@ -1673,21 +1658,12 @@ async fn run_upgrade_with_restart(
         transaction.writer_guard(),
         repair_version,
     )?;
-    let deferral_stage = tempfile::tempdir_in(data_dir)?;
-    let staged: Vec<_> = staged_support
-        .iter()
-        .flat_map(|(_, paths)| paths.iter().cloned())
-        .chain(crate::setup::stage_deferred_support(
-            data_dir,
-            deferral_stage.path(),
-            version,
-            &deferred,
-        )?)
-        .collect();
     transaction.prepare(&files)?;
-    if let Err(error) = transaction.prepare_support(&staged) {
-        transaction.abort()?;
-        return Err(error);
+    if let Some((_, paths)) = &staged_support {
+        if let Err(error) = transaction.prepare_support(paths) {
+            transaction.abort()?;
+            return Err(error);
+        }
     }
     let prepared = (|| {
         let support = support_snapshot(
@@ -3435,186 +3411,140 @@ mod tests {
         }
     }
 
-    /// A release adding a Home component of a kind this updater does not know.
+    /// A signed release this updater cannot apply, a newer components format or a
+    /// component kind it does not know, needs the install command; tampered bytes,
+    /// another signer, another platform and an older release keep their refusals.
+    /// None of them changes an owner file.
     #[cfg(unix)]
-    fn newer_kind_components() -> Vec<u8> {
-        serde_json::to_vec(&serde_json::json!({
+    #[tokio::test]
+    async fn release_this_updater_cannot_apply_needs_the_installer_and_changes_nothing() {
+        use sha2::Digest;
+        let empty =
+            br#"{"schema":"elastos.components/v1","external":{},"profiles":{},"capsules":{}}"#;
+        let newer_kind = serde_json::json!({
             "schema":"elastos.components/v1", "capsules":{},
             "profiles":{"home":{"components":["future"]}},
             "external":{"future":{"install_path":"tools/future","platforms":{"*":{
                 "strategy":"future-kind","cid":raw_cid(b"future")}}}}
-        }))
-        .unwrap()
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn newer_component_kind_updates_and_is_left_to_the_new_release() {
-        let empty =
-            br#"{"schema":"elastos.components/v1","external":{},"profiles":{},"capsules":{}}"#;
-        let (_fixture, data, binary, source) = default_apply_fixture(empty);
-        let components = newer_kind_components();
-        let executable = b"#!/bin/sh\nprintf 'elastos 0.7.1\\n'\n";
-        // The source serves no bytes for the newer kind; fetching it would fail.
-        apply_signed_fixture_with_mode(&data, &source, executable, &components, ApplyMode::Normal)
-            .await
-            .unwrap();
-        assert_eq!(std::fs::read(&binary).unwrap(), executable);
-        assert_eq!(
-            std::fs::read(data.join("components.json")).unwrap(),
-            components
-        );
-        assert!(!data.join("tools/future").exists());
-        let record: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(data.join(crate::setup::DEFERRED_SUPPORT_FILE)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            record,
-            serde_json::json!({"schema":"elastos.deferred-support/v1",
-                "version":"0.7.1", "components":["future"]})
-        );
-        // The new release's admission follows its own repair, which knows the kind.
-        assert_eq!(
-            load_trusted_sources(&data)
-                .unwrap()
-                .default_source()
-                .unwrap()
-                .installed_version,
-            "0.7.1"
-        );
-        assert!(!InstallTransaction::has_pending_recovery(&binary));
-    }
-
-    /// Leaving a newer kind to its release relaxes nothing else: a tampered
-    /// download, another signer, another platform and an older release still stop
-    /// the update before any owner file changes; a newer format needs the installer.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn newer_component_kind_keeps_every_release_refusal() {
-        use sha2::Digest;
-        let empty =
-            br#"{"schema":"elastos.components/v1","external":{},"profiles":{},"capsules":{}}"#;
+        });
         let executable = b"#!/bin/sh\nprintf 'elastos 0.7.1\\n'\n".to_vec();
         for case in [
+            "newer kind",
+            "newer format",
             "tampered",
             "other signer",
             "other platform",
             "older",
-            "newer format",
         ] {
-            let (_fixture, data, binary, _source) = default_apply_fixture(empty);
-            let before: Vec<_> = [
-                binary.clone(),
-                data.join("components.json"),
-                data.join("sources.json"),
-            ]
-            .iter()
-            .map(|path| std::fs::read(path).unwrap())
-            .collect();
-            let components = if case == "newer format" {
-                let mut value: serde_json::Value =
-                    serde_json::from_slice(&newer_kind_components()).unwrap();
-                value["schema"] = serde_json::json!("elastos.components/v2");
-                serde_json::to_vec(&value).unwrap()
-            } else {
-                newer_kind_components()
-            };
-            let version = if case == "older" { "0.5.0" } else { "0.7.1" };
-            let platform = if case == "other platform" {
-                "riscv64-linux"
-            } else {
-                detect_release_platform()
-            };
-            let descriptor = |bytes: &[u8]| {
-                serde_json::json!({"cid":raw_cid(bytes),
-                    "sha256":hex::encode(sha2::Sha256::digest(bytes)), "size":bytes.len()})
-            };
-            let release = binding_envelope(
-                serde_json::json!({
-                    "schema":"elastos.release/v1", "version":version, "channel":"stable",
-                    "platforms":{(platform):{"binary":descriptor(&executable),
-                        "components":descriptor(&components)}}
-                }),
-                "elastos.release.v1",
-            );
-            let mut head = binding_head(&release);
-            head["version"] = serde_json::json!(version);
-            let head = signed_envelope(
-                if case == "other signer" { 8 } else { 7 },
-                head,
-                "elastos.release.head.v1",
-            );
-            let head_cid = raw_cid(&head);
-            let served = if case == "tampered" {
-                b"{\"schema\":\"elastos.components/v1\"}".to_vec()
-            } else {
-                components.clone()
-            };
-            let artifacts = std::collections::HashMap::from([
-                (head_cid.clone(), head),
-                (raw_cid(&release), release),
-                (raw_cid(&executable), executable.clone()),
-                (raw_cid(&components), served),
-            ]);
-            let fetch: FetchFn = Box::new(move |cid| {
-                let bytes = artifacts
-                    .get(&cid)
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("source unavailable for {cid}"));
-                Box::pin(async move { bytes })
-            });
-            let error = run_update_for_data_dir_with_mode(
-                &data,
-                &fetch,
-                None,
-                false,
-                Some(head_cid),
-                "0.6.0",
-                true,
-                false,
-                false,
-                crate::setup::FirstPartyCarrierContext::Setup,
-                ApplyMode::Normal,
-            )
-            .await
-            .unwrap_err();
-            let message = format!("{error:#}");
-            let has =
-                |marker: fn(&(dyn std::error::Error + 'static)) -> bool| error.chain().any(marker);
-            match case {
-                "tampered" => assert!(has(|cause| cause.is::<DownloadMismatch>()), "{message}"),
-                "other signer" | "older" => {
-                    assert!(has(|cause| cause.is::<ReleaseRefused>()), "{message}")
+            for mode in [ApplyMode::Normal, ApplyMode::FrozenOffline] {
+                let (_fixture, data, binary, source) = default_apply_fixture(empty);
+                let mut sources = load_trusted_sources(&data).unwrap();
+                let mut gateway = source.clone();
+                gateway.gateways = vec!["https://publisher.example/".into()];
+                sources.upsert_source(gateway);
+                save_trusted_sources(&data, &sources).unwrap();
+                let paths = [
+                    binary.clone(),
+                    data.join("components.json"),
+                    data.join("sources.json"),
+                ];
+                let before: Vec<_> = paths
+                    .iter()
+                    .map(|path| std::fs::read(path).unwrap())
+                    .collect();
+                let mut value = newer_kind.clone();
+                if case == "newer format" {
+                    value["schema"] = serde_json::json!("elastos.components/v2");
+                    value["external"] = serde_json::json!({});
                 }
-                "other platform" => {
-                    assert!(message.contains("No binary CID for platform"), "{message}")
+                let components = serde_json::to_vec(&value).unwrap();
+                let version = if case == "older" { "0.5.0" } else { "0.7.1" };
+                let platform = if case == "other platform" {
+                    "riscv64-linux"
+                } else {
+                    detect_release_platform()
+                };
+                let descriptor = |bytes: &[u8]| {
+                    serde_json::json!({"cid":raw_cid(bytes),
+                        "sha256":hex::encode(sha2::Sha256::digest(bytes)), "size":bytes.len()})
+                };
+                let release = binding_envelope(
+                    serde_json::json!({
+                        "schema":"elastos.release/v1", "version":version, "channel":"stable",
+                        "platforms":{(platform):{"binary":descriptor(&executable),
+                            "components":descriptor(&components)}}
+                    }),
+                    "elastos.release.v1",
+                );
+                let mut head = binding_head(&release);
+                head["version"] = serde_json::json!(version);
+                let head = signed_envelope(
+                    if case == "other signer" { 8 } else { 7 },
+                    head,
+                    "elastos.release.head.v1",
+                );
+                let head_cid = raw_cid(&head);
+                let served = if case == "tampered" {
+                    empty.to_vec()
+                } else {
+                    components.clone()
+                };
+                let artifacts = std::collections::HashMap::from([
+                    (head_cid.clone(), head),
+                    (raw_cid(&release), release),
+                    (raw_cid(&executable), executable.clone()),
+                    (raw_cid(&components), served),
+                ]);
+                let fetch: FetchFn = Box::new(move |cid| {
+                    let bytes = artifacts
+                        .get(&cid)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("source unavailable for {cid}"));
+                    Box::pin(async move { bytes })
+                });
+                let error = run_update_for_data_dir_with_mode(
+                    &data,
+                    &fetch,
+                    None,
+                    false,
+                    Some(head_cid),
+                    "0.6.0",
+                    true,
+                    false,
+                    false,
+                    crate::setup::FirstPartyCarrierContext::Setup,
+                    mode,
+                )
+                .await
+                .unwrap_err();
+                let message = format!("{error:#}");
+                let is = |marker: fn(&(dyn std::error::Error + 'static)) -> bool| {
+                    error.chain().any(marker)
+                };
+                match case {
+                    "newer kind" | "newer format" => {
+                        assert!(is(|cause| cause.is::<InstallerRequired>()), "{message}");
+                        assert_eq!(
+                            error.to_string(),
+                            "ElastOS 0.7.1 needs the install command once; this Home cannot apply it itself. Your current version is unchanged. Run this once: curl -fsSL 'https://publisher.example/install.sh' | bash"
+                        );
+                        assert!(!message.contains("not valid"), "{message}");
+                    }
+                    "tampered" => assert!(is(|cause| cause.is::<DownloadMismatch>()), "{message}"),
+                    "other signer" | "older" => {
+                        assert!(is(|cause| cause.is::<ReleaseRefused>()), "{message}");
+                        assert!(!is(|cause| cause.is::<InstallerRequired>()), "{message}");
+                    }
+                    _ => assert!(message.contains("No binary CID for platform"), "{message}"),
                 }
-                _ => {
-                    assert!(has(|cause| cause.is::<InstallerRequired>()), "{message}");
-                    assert!(
-                        error
-                            .to_string()
-                            .starts_with("ElastOS 0.7.1 needs the install command once"),
-                        "{error}"
-                    );
-                    assert!(!message.contains("not valid"), "{message}");
-                }
+                let after: Vec<_> = paths
+                    .iter()
+                    .map(|path| std::fs::read(path).unwrap())
+                    .collect();
+                assert_eq!(after, before, "{case}");
+                assert!(!data.join("tools/future").exists(), "{case}");
+                assert!(!InstallTransaction::has_pending_recovery(&binary), "{case}");
             }
-            let after: Vec<_> = [
-                binary.clone(),
-                data.join("components.json"),
-                data.join("sources.json"),
-            ]
-            .iter()
-            .map(|path| std::fs::read(path).unwrap())
-            .collect();
-            assert_eq!(after, before, "{case}");
-            assert!(
-                !data.join(crate::setup::DEFERRED_SUPPORT_FILE).exists(),
-                "{case}"
-            );
-            assert!(!InstallTransaction::has_pending_recovery(&binary), "{case}");
         }
     }
 
@@ -4341,138 +4271,6 @@ mod tests {
             b"Publisher publication sentinel"
         );
         assert!(!InstallTransaction::has_pending_recovery(&binary));
-    }
-
-    /// An update that leaves a newer kind and then fails after activation restores
-    /// the previous release's deferral state exactly, present or absent.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn failed_update_restores_the_previous_deferral_state() {
-        let empty =
-            br#"{"schema":"elastos.components/v1","external":{},"profiles":{},"capsules":{}}"#;
-        let newer = newer_kind_components();
-        for previous in [None, Some(&b"{\"previous\":\"deferral\"}"[..])] {
-            // A previous record stands only while the installed release itself still
-            // names a kind it leaves to a newer one; otherwise its repair removes it.
-            let installed = if previous.is_some() {
-                &newer[..]
-            } else {
-                &empty[..]
-            };
-            let (_fixture, data, binary, source) = default_apply_fixture(installed);
-            let record = data.join(crate::setup::DEFERRED_SUPPORT_FILE);
-            if let Some(bytes) = previous {
-                std::fs::write(&record, bytes).unwrap();
-            }
-            // Invalid owner state refuses the update after its files are active.
-            let auth = crate::auth::auth_state_path(&data).unwrap();
-            std::fs::create_dir_all(auth.parent().unwrap()).unwrap();
-            std::fs::write(&auth, b"invalid owner state").unwrap();
-            let error = apply_signed_fixture_with_mode(
-                &data,
-                &source,
-                b"#!/bin/sh\nprintf 'elastos 0.7.1\\n'\n",
-                &newer_kind_components(),
-                ApplyMode::Normal,
-            )
-            .await
-            .unwrap_err();
-            assert!(
-                format!("{error:#}").contains("original release files restored"),
-                "{error:#}"
-            );
-            assert_eq!(std::fs::read(&record).ok().as_deref(), previous);
-            assert!(!InstallTransaction::has_pending_recovery(&binary));
-        }
-    }
-
-    /// A newer kind's path that this release or the installed one also owns is
-    /// refused in the one admission every apply mode runs, before any fetch or
-    /// change: a known component inside it, an installed component removed or moved
-    /// out of it. FrozenOffline is the branch System's restart update takes.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn newer_kind_sharing_a_path_is_refused_in_every_apply_mode() {
-        use sha2::Digest;
-        let engine = b"installed engine".to_vec();
-        let file = |path: &str, bytes: &[u8]| {
-            serde_json::json!({"install_path":path,"platforms":{"*":{"release_path":path,
-                "checksum":format!("sha256:{}", hex::encode(sha2::Sha256::digest(bytes))),
-                "size":bytes.len(),"cid":raw_cid(bytes)}}})
-        };
-        let future = |path: &str| serde_json::json!({"install_path":path,"platforms":{"*":{"strategy":"future-kind"}}});
-        let manifest = |external: serde_json::Value| {
-            serde_json::to_vec(&serde_json::json!({"schema":"elastos.components/v1",
-                "profiles":{},"capsules":{},"external":external}))
-            .unwrap()
-        };
-        let installed = manifest(serde_json::json!({"engine": file("tools/engine", &engine)}));
-        for (case, candidate) in [
-            (
-                "shared",
-                manifest(
-                    serde_json::json!({"engine": file("tools/engine/inner", b"x"),
-                    "future": future("tools/engine")}),
-                ),
-            ),
-            (
-                "replaced",
-                manifest(serde_json::json!({"future": future("tools/engine")})),
-            ),
-            (
-                "moved",
-                manifest(serde_json::json!({"engine": file("tools/moved", b"x"),
-                    "future": future("tools/engine")})),
-            ),
-        ] {
-            for mode in [ApplyMode::Normal, ApplyMode::FrozenOffline] {
-                let (_fixture, data, binary, source) = default_apply_fixture(&installed);
-                std::fs::create_dir_all(data.join("tools")).unwrap();
-                std::fs::write(data.join("tools/engine"), &engine).unwrap();
-                let paths = [
-                    binary.clone(),
-                    data.join("components.json"),
-                    data.join("sources.json"),
-                    data.join("tools/engine"),
-                ];
-                let before: Vec<_> = paths
-                    .iter()
-                    .map(|path| std::fs::read(path).unwrap())
-                    .collect();
-                let error = apply_signed_fixture_with_mode(
-                    &data,
-                    &source,
-                    b"#!/bin/sh\nprintf 'elastos 0.7.1\\n'\n",
-                    &candidate,
-                    mode,
-                )
-                .await
-                .unwrap_err();
-                assert!(
-                    error.chain().any(|cause| cause.is::<ReleaseRefused>()),
-                    "{case}: {error:#}"
-                );
-                assert!(
-                    format!("{error:#}").contains(
-                        "at tools/engine shares an install path with component 'future' of a newer kind"
-                    ) || format!("{error:#}").contains(
-                        "at tools/engine/inner shares an install path with component 'future' of a newer kind"
-                    ),
-                    "{case}: {error:#}"
-                );
-                let after: Vec<_> = paths
-                    .iter()
-                    .map(|path| std::fs::read(path).unwrap())
-                    .collect();
-                assert_eq!(after, before, "{case}");
-                assert!(!data.join("tools/moved").exists(), "{case}");
-                assert!(
-                    !data.join(crate::setup::DEFERRED_SUPPORT_FILE).exists(),
-                    "{case}"
-                );
-                assert!(!InstallTransaction::has_pending_recovery(&binary), "{case}");
-            }
-        }
     }
 
     #[cfg(unix)]

@@ -2930,15 +2930,6 @@ pub(crate) async fn repair_installed_support(
             repaired.join(", ")
         );
     }
-    // This release knows every kind it ships, so what an older updater left is done.
-    let platform = detect_platform();
-    if !manifest
-        .external
-        .values()
-        .any(|component| newer_kind(component, &platform))
-    {
-        clear_deferred_support(data_dir)?;
-    }
     Ok(())
 }
 
@@ -3282,131 +3273,53 @@ fn valid_release_artifact_checksum<'a>(
     }
 }
 
-/// Strategies this Runtime knows: release kinds it installs, Browser's image
-/// (Engine selection installs it) and the development strategies setup keeps.
-fn known_strategy(info: &PlatformInfo) -> bool {
-    matches!(
-        info.strategy.as_deref(),
-        None | Some("prebuilt" | "source-build" | "local-copy" | browser_vm_image::NAME)
-    )
-}
-
-/// A component of a kind this Runtime does not know comes from a newer release.
-/// Updates leave it to that release's own repair and admission, which know the kind.
-pub(crate) fn newer_kind(component: &Component, platform: &str) -> bool {
-    resolve_platform_info(component, platform)
-        .into_iter()
-        .chain(component.capsule_metadata.as_ref().and_then(|metadata| {
-            resolve_component_capsule_metadata_platform_info(metadata, platform)
-        }))
-        .any(|info| !known_strategy(info))
-}
-
-/// The installed paths a component owns on `platform`: artifact and capsule metadata.
-fn component_paths<'a>(component: &'a Component, platform: &str) -> Vec<&'a str> {
-    resolve_install_path(component, resolve_platform_info(component, platform))
-        .into_iter()
-        .chain(component.capsule_metadata.as_ref().and_then(|metadata| {
-            resolve_component_capsule_metadata_install_path(
-                metadata,
-                resolve_component_capsule_metadata_platform_info(metadata, platform),
-            )
-        }))
-        .collect()
-}
-
-/// Every path a newer kind owns must belong to it alone: no known component of
-/// this release or of the installed one, and no capsule, may write, move or
-/// remove there. Otherwise an older updater would change what the new release's
-/// own repair installs. A component that keeps its path while changing kind is
-/// the same owner.
-fn refuse_shared_newer_kind_paths(
+/// Components, sorted, whose artifact or capsule metadata on `platform` uses a
+/// strategy this Runtime does not know: a newer release's kind, which this
+/// updater cannot install. Only the publisher's install command applies it.
+pub(crate) fn unknown_kind_components(
     manifest: &ComponentsManifest,
-    installed: Option<&ComponentsManifest>,
     platform: &str,
-) -> anyhow::Result<()> {
-    let newer: Vec<(&str, &str)> = manifest
+) -> Vec<String> {
+    let platform = RELEASE_PLATFORM_PAIRS
+        .iter()
+        .find_map(|(release, setup)| (setup == platform).then_some(release.as_str()))
+        .unwrap_or(platform);
+    let mut unknown: Vec<String> = manifest
         .external
         .iter()
-        .filter(|(_, component)| newer_kind(component, platform))
-        .flat_map(|(name, component)| {
-            component_paths(component, platform)
+        .filter(|(_, component)| {
+            resolve_platform_info(component, platform)
                 .into_iter()
-                .map(move |path| (name.as_str(), path))
+                .chain(component.capsule_metadata.as_ref().and_then(|metadata| {
+                    resolve_component_capsule_metadata_platform_info(metadata, platform)
+                }))
+                .any(|info| {
+                    !matches!(
+                        info.strategy.as_deref(),
+                        None | Some(
+                            "prebuilt" | "source-build" | "local-copy" | browser_vm_image::NAME
+                        )
+                    )
+                })
         })
+        .map(|(name, _)| name.clone())
         .collect();
-    for (_, path) in &newer {
-        anyhow::ensure!(
-            !path.is_empty()
-                && Path::new(path)
-                    .components()
-                    .all(|part| matches!(part, std::path::Component::Normal(_))),
-            "install path {path} of a newer component kind is unsafe"
-        );
-    }
-    if newer.is_empty() {
-        return Ok(());
-    }
-    let mut owners: Vec<(String, String)> = Vec::new();
-    for (name, component) in &manifest.external {
-        if !newer_kind(component, platform) {
-            for path in component_paths(component, platform) {
-                owners.push((format!("component '{name}'"), path.to_owned()));
-            }
-        }
-    }
-    for manifest in std::iter::once(manifest).chain(installed) {
-        for name in manifest.capsules.keys() {
-            owners.push((format!("capsule '{name}'"), format!("capsules/{name}")));
-        }
-    }
-    for (name, component) in installed.iter().flat_map(|installed| &installed.external) {
-        let kept = manifest
-            .external
-            .get(name)
-            .filter(|next| newer_kind(next, platform))
-            .map(|next| component_paths(next, platform))
-            .unwrap_or_default();
-        for path in component_paths(component, platform) {
-            if !kept.contains(&path) {
-                owners.push((format!("installed component '{name}'"), path.to_owned()));
-            }
-        }
-    }
-    for (owner, path) in &owners {
-        for (name, newer_path) in &newer {
-            anyhow::ensure!(
-                !(Path::new(path).starts_with(newer_path)
-                    || Path::new(newer_path).starts_with(path)),
-                "{owner} at {path} shares an install path with component '{name}' of a newer kind at {newer_path}"
-            );
-        }
-    }
-    Ok(())
+    unknown.sort();
+    unknown
 }
 
-/// Admit all applicable release components before downloads or installation;
-/// every update mode calls this once, with the installed components. Returns,
-/// sorted, the components of a kind this Runtime does not know: the update
-/// neither fetches nor installs them, and the new release's own repair does after
-/// restart. Their known assets are still admitted, and their paths belong to them
-/// alone. Setup retains its explicit development strategies outside release admission.
+/// Admit all applicable release components before downloads or installation.
+/// Setup retains its explicit development strategies outside release admission.
 pub(crate) fn admit_release_components(
     manifest: &ComponentsManifest,
-    installed: Option<&ComponentsManifest>,
     platform: &str,
-) -> anyhow::Result<Vec<String>> {
+) -> anyhow::Result<()> {
     let platform = RELEASE_PLATFORM_PAIRS
         .iter()
         .find_map(|(release, setup)| (setup == platform).then_some(release.as_str()))
         .unwrap_or(platform);
     refuse_reserved_install_targets(manifest, platform)?;
-    refuse_shared_newer_kind_paths(manifest, installed, platform)?;
-    let mut deferred = Vec::new();
     for (name, component) in &manifest.external {
-        if newer_kind(component, platform) {
-            deferred.push(name.clone());
-        }
         let assets = [
             resolve_platform_info(component, platform),
             component.capsule_metadata.as_ref().and_then(|metadata| {
@@ -3414,9 +3327,7 @@ pub(crate) fn admit_release_components(
             }),
         ];
         for (index, info) in assets.into_iter().enumerate() {
-            let Some(info) = info.filter(|info| known_strategy(info)) else {
-                continue;
-            };
+            let Some(info) = info else { continue };
             let image = index == 0 && name == browser_vm_image::NAME;
             if image {
                 browser_vm_image::component_info(manifest, platform)?;
@@ -3429,87 +3340,7 @@ pub(crate) fn admit_release_components(
             valid_release_artifact_checksum(name, info.checksum.as_deref())?;
         }
     }
-    deferred.sort();
-    Ok(deferred)
-}
-
-/// Names what an update left to the new release's own repair. Every Runtime's
-/// repair removes it once that repair completes; readers only test its presence.
-pub(crate) const DEFERRED_SUPPORT_FILE: &str = "deferred-support.json";
-
-/// Records the components the update left to `version`'s own repair; with none,
-/// clears an earlier record. The caller holds the installation writer.
-pub(crate) fn record_deferred_support(
-    data_dir: &Path,
-    version: &str,
-    components: &[String],
-) -> anyhow::Result<()> {
-    let path = data_dir.join(DEFERRED_SUPPORT_FILE);
-    let partial = data_dir.join(format!(".{DEFERRED_SUPPORT_FILE}.partial"));
-    // Both names are files this writer owns; a link is removed, never followed.
-    let mut changed = !components.is_empty();
-    for name in [&partial, &path] {
-        match fs::symlink_metadata(name) {
-            Ok(metadata) if metadata.is_dir() => {
-                anyhow::bail!("{} is a directory", name.display())
-            }
-            Ok(_) if name == &partial || components.is_empty() => {
-                fs::remove_file(name)?;
-                changed = true;
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    if !components.is_empty() {
-        let bytes = serde_json::to_vec_pretty(&serde_json::json!({
-            "schema": "elastos.deferred-support/v1",
-            "version": version,
-            "components": components,
-        }))?;
-        use std::os::unix::fs::OpenOptionsExt as _;
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&partial)?
-            .write_all(&bytes)?;
-        fs::rename(&partial, &path)?;
-    }
-    if changed {
-        sync_path(data_dir)?;
-    }
     Ok(())
-}
-
-/// The new release's repair owns no deferral once it has run.
-pub(crate) fn clear_deferred_support(data_dir: &Path) -> anyhow::Result<()> {
-    record_deferred_support(data_dir, "", &[])
-}
-
-/// The update's deferral record joins its staged support, so activation installs
-/// it and rollback or crash recovery restores the previous release's record
-/// exactly. With nothing deferred, a present record is removed the same way.
-pub(crate) fn stage_deferred_support(
-    data_dir: &Path,
-    stage: &Path,
-    version: &str,
-    components: &[String],
-) -> anyhow::Result<Option<(PathBuf, PathBuf)>> {
-    let relative = PathBuf::from(DEFERRED_SUPPORT_FILE);
-    if components.is_empty() {
-        return Ok(fs::symlink_metadata(data_dir.join(&relative))
-            .is_ok()
-            .then(|| (relative, PathBuf::new())));
-    }
-    record_deferred_support(stage, version, components)?;
-    Ok(Some((relative, stage.join(DEFERRED_SUPPORT_FILE))))
-}
-
-/// Whether an update left components to this release's own repair.
-pub(crate) fn deferred_support_pending(data_dir: &Path) -> bool {
-    fs::symlink_metadata(data_dir.join(DEFERRED_SUPPORT_FILE)).is_ok()
 }
 
 /// One support component an update installs or refreshes.
@@ -3537,13 +3368,12 @@ fn plan_update_support<'a>(
 ) -> Vec<SupportUpdate<'a>> {
     let mut plan = Vec::new();
     for (name, component) in &new.external {
+        if name == browser_vm_image::NAME {
+            continue;
+        }
         let Some(info) = resolve_platform_info(component, platform) else {
             continue;
         };
-        // Engine selection installs Browser's image; a newer kind waits for its release.
-        if name == browser_vm_image::NAME || newer_kind(component, platform) {
-            continue;
-        }
         let old_component = old.external.get(name);
         let required = home
             && new
@@ -4718,7 +4548,7 @@ pub(crate) mod tests {
             );
             assert!(installed.is_dir(), "{collides}");
             assert!(
-                admit_release_components(&manifest, None, &detect_platform())
+                admit_release_components(&manifest, &detect_platform())
                     .unwrap_err()
                     .to_string()
                     .contains("reserved"),
@@ -7478,7 +7308,7 @@ pub(crate) mod tests {
             let refusal =
                 "component 'fixture' must come from the signed release: release_path is required";
             assert_eq!(
-                admit_release_components(&manifest, None, "linux-arm64")
+                admit_release_components(&manifest, "linux-arm64")
                     .unwrap_err()
                     .to_string(),
                 refusal
@@ -7518,8 +7348,7 @@ pub(crate) mod tests {
                 false,
             ),
             (serde_json::json!({}), false),
-            (serde_json::json!({"strategy":"source-build"}), false),
-            (serde_json::json!({"strategy":"local-copy"}), false),
+            (serde_json::json!({"strategy":"unknown"}), false),
         ] {
             info["release_path"] = "fixture".into();
             for (key, platform) in [
@@ -7532,108 +7361,17 @@ pub(crate) mod tests {
                 }))
                 .unwrap();
                 assert_eq!(
-                    admit_release_components(&manifest, None, platform).is_ok(),
+                    admit_release_components(&manifest, platform).is_ok(),
                     accepted,
                     "{platform}"
                 );
-                assert!(admit_release_components(&manifest, None, "linux-amd64").is_ok());
+                assert!(admit_release_components(&manifest, "linux-amd64").is_ok());
             }
         }
     }
 
-    /// The deferral record replaces links instead of writing through them, and a
-    /// directory in its place is refused, not removed.
-    #[test]
-    fn deferral_record_replaces_links_and_refuses_directories() {
-        let temp = tempfile::tempdir().unwrap();
-        let data = temp.path();
-        let outside = data.join("outside");
-        fs::write(&outside, b"outside").unwrap();
-        let record = data.join(DEFERRED_SUPPORT_FILE);
-        for link in [data.join(".deferred-support.json.partial"), record.clone()] {
-            std::os::unix::fs::symlink(&outside, link).unwrap();
-        }
-        record_deferred_support(data, "0.9.0", &["future".to_string()]).unwrap();
-        assert_eq!(fs::read(&outside).unwrap(), b"outside");
-        assert!(fs::symlink_metadata(&record).unwrap().is_file());
-        assert!(!data.join(".deferred-support.json.partial").exists());
-        assert!(deferred_support_pending(data));
-        clear_deferred_support(data).unwrap();
-        clear_deferred_support(data).unwrap();
-        assert!(!deferred_support_pending(data));
-        fs::create_dir(&record).unwrap();
-        assert!(clear_deferred_support(data).is_err());
-        assert!(record.is_dir());
-    }
-
-    /// A newer release's component kind is left to that release; every check on
-    /// what this updater installs, and on the deferred component's path, remains.
-    #[test]
-    fn release_admission_defers_components_of_a_newer_kind() {
-        let checksum = format!("sha256:{}", "a".repeat(64));
-        let manifest = |extra: serde_json::Value| -> ComponentsManifest {
-            let mut value = serde_json::json!({"profiles":{}, "external":{
-                "known":{"install_path":"bin/known","platforms":{"darwin-arm64":{
-                    "release_path":"known","checksum":checksum}}},
-                "zeta":{"install_path":"tools/zeta","platforms":{"darwin-arm64":{
-                    "strategy":"future-kind"}}},
-                "alpha":{"install_path":"bin/alpha","platforms":{"darwin-arm64":{
-                    "release_path":"alpha","checksum":checksum}},
-                    "capsule_metadata":{"install_path":"capsules/alpha","platforms":{"darwin-arm64":{
-                        "strategy":"future-metadata"}}}}
-            }});
-            value["external"]["extra"] = extra;
-            serde_json::from_value(value).unwrap()
-        };
-        let admitted = manifest(serde_json::json!({"platforms":{}}));
-        for platform in ["darwin-arm64", "aarch64-darwin"] {
-            assert_eq!(
-                admit_release_components(&admitted, None, platform).unwrap(),
-                ["alpha", "zeta"],
-                "{platform}"
-            );
-        }
-        for (extra, refusal) in [
-            (
-                serde_json::json!({"install_path":"../outside","platforms":{"darwin-arm64":{"strategy":"future-kind"}}}),
-                "install path ../outside of a newer component kind is unsafe",
-            ),
-            (
-                serde_json::json!({"platforms":{"darwin-arm64":{"strategy":"future-kind"}},
-                    "capsule_metadata":{"install_path":"../meta","platforms":{"darwin-arm64":{"strategy":"future-kind"}}}}),
-                "install path ../meta of a newer component kind is unsafe",
-            ),
-            (
-                serde_json::json!({"platforms":{"darwin-arm64":{"strategy":"local-copy","release_path":"x","checksum":checksum}},
-                    "capsule_metadata":{"platforms":{"darwin-arm64":{"strategy":"future-kind"}}}}),
-                "development or unsupported release strategy",
-            ),
-            (
-                serde_json::json!({"install_path":"tools/x.elastos-replace","platforms":{"darwin-arm64":{"strategy":"future-kind"}}}),
-                "reserved replacement suffix",
-            ),
-            (
-                serde_json::json!({"platforms":{"darwin-arm64":{"strategy":"local-copy","release_path":"x","checksum":checksum}}}),
-                "development or unsupported release strategy",
-            ),
-            (
-                serde_json::json!({"platforms":{"darwin-arm64":{"strategy":browser_vm_image::NAME,"release_path":"x","checksum":checksum}}}),
-                "development or unsupported release strategy",
-            ),
-            (
-                serde_json::json!({"platforms":{"darwin-arm64":{"release_path":"x"}}}),
-                "missing checksum",
-            ),
-        ] {
-            let error = admit_release_components(&manifest(extra), None, "darwin-arm64")
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains(refusal), "{error}");
-        }
-    }
-
     #[tokio::test]
-    async fn runtime_support_update_defers_browser_image_and_newer_kinds() {
+    async fn runtime_support_update_defers_installed_browser_image_to_engine_selection() {
         struct UnusedOwner;
         impl crate::update::RestartOwner for UnusedOwner {
             fn progress(&self, _: &str, _: &str) -> anyhow::Result<()> {
@@ -7704,117 +7442,6 @@ pub(crate) mod tests {
         .unwrap()
         .is_empty());
         assert_eq!(fs::read(retained).unwrap(), b"previous image");
-
-        // A newer release's kind, new to the Home profile or replacing an installed
-        // component, is neither fetched nor touched; that release's repair owns it.
-        let platform = detect_platform();
-        let installed = temp.path().join("tools/changed");
-        fs::create_dir_all(installed.parent().unwrap()).unwrap();
-        fs::write(&installed, b"previous release bytes").unwrap();
-        let release = |changed: serde_json::Value| {
-            serde_json::to_vec(&serde_json::json!({
-                "schema": "elastos.components/v1",
-                "profiles": {"home": {"components": ["future", "changed"]}},
-                "external": {
-                    "future": {"install_path": "tools/future",
-                        "platforms": {(platform.as_str()): {"strategy": "future-kind"}}},
-                    "changed": {"install_path": "tools/changed",
-                        "platforms": {(platform.as_str()): changed}}}}))
-            .unwrap()
-        };
-        let old = release(serde_json::json!({"release_path": "changed",
-            "checksum": format!("sha256:{}", hex::encode(sha2::Sha256::digest(b"previous release bytes")))}));
-        let new = release(serde_json::json!({"strategy": "future-kind"}));
-        let fetch: crate::update::FetchFn =
-            Box::new(|cid| Box::pin(async move { panic!("a newer kind was fetched: {cid}") }));
-        let (_, paths) =
-            stage_update_support(temp.path(), &old, &new, &platform, &fetch, &mut UnusedOwner)
-                .await
-                .unwrap();
-        assert!(paths.is_empty());
-        assert!(
-            refresh_installed_components_for_update(temp.path(), Some(&old), &new, &platform)
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(fs::read(&installed).unwrap(), b"previous release bytes");
-        assert!(!temp.path().join("tools/future").exists());
-    }
-
-    /// A newer kind's paths belong to it alone: admission refuses a known component,
-    /// a capsule, or an installed component removed or moved out of the path, and
-    /// admits a component that keeps its path while changing kind.
-    #[test]
-    fn admission_refuses_paths_shared_with_a_newer_kind() {
-        let checksum = format!("sha256:{}", "a".repeat(64));
-        let file = |path: &str| {
-            serde_json::json!({"install_path": path, "platforms": {"darwin-arm64": {
-                "release_path": path, "checksum": checksum}}})
-        };
-        let future = |path: &str| {
-            serde_json::json!({"install_path": path, "platforms": {"darwin-arm64": {
-                "strategy": "future-kind"}}})
-        };
-        let manifest = |external: serde_json::Value, capsules: serde_json::Value| {
-            serde_json::from_value::<ComponentsManifest>(serde_json::json!({
-                "profiles": {}, "external": external, "capsules": capsules}))
-            .unwrap()
-        };
-        let none = serde_json::json!({});
-        let installed = manifest(
-            serde_json::json!({"engine": file("tools/engine")}),
-            none.clone(),
-        );
-        for (case, new, installed, refusal) in [
-            (
-                "kind change keeps its path",
-                manifest(serde_json::json!({"engine": future("tools/engine")}), none.clone()),
-                Some(&installed),
-                None,
-            ),
-            (
-                "known component inside it",
-                manifest(
-                    serde_json::json!({"known": file("tools/engine/inner"), "future": future("tools/engine")}),
-                    none.clone(),
-                ),
-                None,
-                Some("component 'known' at tools/engine/inner shares an install path with component 'future' of a newer kind at tools/engine"),
-            ),
-            (
-                "installed component replaced",
-                manifest(serde_json::json!({"future": future("tools/engine")}), none.clone()),
-                Some(&installed),
-                Some("installed component 'engine' at tools/engine shares an install path with component 'future' of a newer kind at tools/engine"),
-            ),
-            (
-                "installed component moved",
-                manifest(
-                    serde_json::json!({"engine": file("tools/moved"), "future": future("tools/engine")}),
-                    none.clone(),
-                ),
-                Some(&installed),
-                Some("installed component 'engine' at tools/engine shares an install path with component 'future' of a newer kind at tools/engine"),
-            ),
-            (
-                "capsule inside it",
-                manifest(
-                    serde_json::json!({"future": future("capsules")}),
-                    serde_json::json!({"app": {"cid": "c", "sha256": "s"}}),
-                ),
-                None,
-                Some("capsule 'app' at capsules/app shares an install path with component 'future' of a newer kind at capsules"),
-            ),
-        ] {
-            let result = admit_release_components(&new, installed, "darwin-arm64");
-            match refusal {
-                None => assert!(result.is_ok(), "{case}"),
-                Some(refusal) => {
-                    assert_eq!(result.unwrap_err().to_string(), refusal, "{case}")
-                }
-            }
-        }
     }
 
     #[test]
@@ -7835,7 +7462,7 @@ pub(crate) mod tests {
                 Some(browser_vm_image::INSTALL_PATH)
             );
             assert!(info.release_path.as_ref().unwrap().ends_with(".tar.gz"));
-            assert!(admit_release_components(&manifest, None, platform).is_err());
+            assert!(admit_release_components(&manifest, platform).is_err());
         }
     }
 
@@ -7871,13 +7498,8 @@ pub(crate) mod tests {
             "x86_64-linux",
             "aarch64-linux",
         ] {
-            // The release's own kinds are all known to the Runtime it ships.
-            assert_eq!(
-                admit_release_components(&manifest, None, platform)
-                    .unwrap_or_else(|error| panic!("{platform}: {error:#}")),
-                Vec::<String>::new(),
-                "{platform}"
-            );
+            admit_release_components(&manifest, platform)
+                .unwrap_or_else(|error| panic!("{platform}: {error:#}"));
         }
         // Home obtains Browser VM helpers when it prepares the local Engine.
         // ARM Linux receives crosvm; the guest archive owns its kernel.
