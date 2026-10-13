@@ -904,20 +904,20 @@ const runtimeCalls = f => existsSync(join(f.root, 'runtime.jsonl'))
 
 test('prepare names no Community network when neither the source nor the operator names one', t => {
   const f = fixture(t);
-  const result = f.prepare('1.2.3', ['aarch64-darwin']);
+  const result = f.prepare('1.2.3-alpha.1', ['aarch64-darwin']);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Community: this release names no network\./);
-  assert.equal(existsSync(join(f.root, 'work/1.2.3/unsigned/collaboration-network-release-v1.json')), false);
+  assert.equal(existsSync(join(f.root, 'work/1.2.3-alpha.1/unsigned/collaboration-network-release-v1.json')), false);
   assert.deepEqual(runtimeCalls(f), []);
 });
 
 test('prepare admits the custodian Community output the approved source pins and verifies it with the release Runtime', t => {
   const output = communityOutput();
   const f = fixture(t, { network: output });
-  const result = f.prepare('1.2.3', [], { RELEASE_COMMUNITY_DIR: custodianDir(f, output) });
+  const result = f.prepare('1.2.3-alpha.1', [], { RELEASE_COMMUNITY_DIR: custodianDir(f, output) });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, new RegExp(`names network fixture-community \\(head ${output.pin.head_cid}\\), profile signer ${did}, verified by the release Runtime`));
-  const unsigned = join(f.root, 'work/1.2.3/unsigned');
+  const unsigned = join(f.root, 'work/1.2.3-alpha.1/unsigned');
   assert.equal(readFileSync(join(unsigned, 'collaboration-network-release-v1.json'), 'utf8'), output.file);
   for (const platform of platforms) {
     assert.deepEqual(JSON.parse(readFileSync(join(unsigned, `components-${platform}.json`))).collaboration_network, output.pin);
@@ -925,18 +925,18 @@ test('prepare admits the custodian Community output the approved source pins and
   const calls = runtimeCalls(f);
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].args.slice(0, 3), ['collaboration-config', 'verify', '--input']);
-  assert.equal(calls[0].home, join(f.root, 'work/1.2.3/community/home'));
+  assert.equal(calls[0].home, join(f.root, 'work/1.2.3-alpha.1/community/home'));
   assert.equal(readFileSync(calls[0].args[3], 'utf8'), output.file);
 });
 
 // A refused admission leaves the input without package provenance, which the signer refuses, and policy stops.
 function assertUnsignable(f) {
-  const manifest = JSON.parse(readFileSync(join(f.root, 'work/1.2.3/unsigned/signing-input.json')));
+  const manifest = JSON.parse(readFileSync(join(f.root, 'work/1.2.3-alpha.1/unsigned/signing-input.json')));
   assert.equal('provenance' in manifest, false);
-  const policy = spawnSync('bash', [f.script, 'policy', '1.2.3', '/fixture/signer.py', '/fixture/key', '/fixture/openssl'],
+  const policy = spawnSync('bash', [f.script, 'policy', '1.2.3-alpha.1', '/fixture/signer.py', '/fixture/key', '/fixture/openssl'],
     { encoding: 'utf8', env: f.env });
   assert.notEqual(policy.status, 0);
-  assert.match(policy.stderr, /prepare 1\.2\.3 did not finish/);
+  assert.match(policy.stderr, /prepare 1\.2\.3-alpha\.1 did not finish/);
 }
 
 for (const [label, source, custodian, changes, error, verified] of [
@@ -960,7 +960,7 @@ for (const [label, source, custodian, changes, error, verified] of [
 ]) {
   test(`prepare refuses Community admission when ${label}`, t => {
     const f = fixture(t, { ...(source ? { network: source } : {}), ...changes });
-    const result = f.prepare('1.2.3', ['aarch64-darwin'], custodian ? { RELEASE_COMMUNITY_DIR: custodianDir(f, custodian) } : {});
+    const result = f.prepare('1.2.3-alpha.1', ['aarch64-darwin'], custodian ? { RELEASE_COMMUNITY_DIR: custodianDir(f, custodian) } : {});
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, error);
     assert.match(result.stderr, /Community network admission refused/);
@@ -973,7 +973,7 @@ for (const [label, source, custodian, changes, error, verified] of [
 test('prepare refuses a custodian directory that holds other files', t => {
   const output = communityOutput();
   const f = fixture(t, { network: output });
-  const result = f.prepare('1.2.3', ['aarch64-darwin'], { RELEASE_COMMUNITY_DIR: custodianDir(f, output, true) });
+  const result = f.prepare('1.2.3-alpha.1', ['aarch64-darwin'], { RELEASE_COMMUNITY_DIR: custodianDir(f, output, true) });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /holding exactly collaboration-network-release-v1.json and collaboration-network-release-pin-v1.json/);
   assert.deepEqual(runtimeCalls(f), []);
