@@ -1438,6 +1438,14 @@ async fn run_upgrade_with_restart(
         let unknown = crate::setup::admit_release_components(&manifest, &component_platform)?;
         Ok((manifest, unknown))
     })())?;
+    // Every row of the next release, replaced or kept, has exactly its record.
+    // This is an understood check too, so its refusal wins over the installer.
+    let (_, next_admission) = refused(crate::capsule_record::admit_release(
+        &release_bytes,
+        &source.publisher_dids,
+        &comp_data,
+        release_platform,
+    ))?;
     installer_required(
         source,
         version,
@@ -1450,13 +1458,6 @@ async fn run_upgrade_with_restart(
             ))
         },
     )?;
-    // Every row of the next release, replaced or kept, has exactly its record.
-    let (_, next_admission) = refused(crate::capsule_record::admit_release(
-        &release_bytes,
-        &source.publisher_dids,
-        &comp_data,
-        release_platform,
-    ))?;
 
     // 9b. Fetch and verify the release-pinned Community network while Home
     // still runs and before the binary changes.
@@ -3709,8 +3710,9 @@ mod tests {
 
     /// A signed release this updater cannot apply, a newer components format or a
     /// component kind it does not know, needs the install command; tampered bytes,
-    /// another signer, another platform and an older release keep their refusals.
-    /// None of them changes an owner file.
+    /// another signer, another platform, an older release and a known component
+    /// whose capsule record is missing or differs keep their refusals, even beside
+    /// an unknown kind. None of them changes an owner file.
     #[cfg(unix)]
     #[tokio::test]
     async fn release_this_updater_cannot_apply_needs_the_installer_and_changes_nothing() {
@@ -3737,6 +3739,8 @@ mod tests {
             "other signer",
             "other platform",
             "older",
+            "newer kind beside a known component without its record",
+            "newer kind beside a known component with another record",
         ] {
             for mode in [ApplyMode::Normal, ApplyMode::FrozenOffline] {
                 let (_fixture, data, binary, source) = default_apply_fixture(empty);
@@ -3766,6 +3770,29 @@ mod tests {
                     value["external"]["known"] = serde_json::json!({"install_path":"bin/known",
                         "platforms":{"*":{"release_path":"known","cid":raw_cid(b"known")}}});
                 }
+                // A known component every other check admits; only its record differs.
+                let records = if case.starts_with("newer kind beside a known component") {
+                    value["external"]["known"] = serde_json::json!({"install_path":"tools/known",
+                        "platforms":{"*":{"release_path":"known.tar.gz","cid":raw_cid(b"known"),
+                            "checksum":format!("sha256:{}", hex::encode(sha2::Sha256::digest(b"known"))),
+                            "size":5}}});
+                    let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+                    let did = crate::crypto::encode_signing_key_did(&key);
+                    let record = crate::capsule_record::signed_record(
+                        &key,
+                        serde_json::json!({"schema":"elastos.capsule.record/v1", "name":"known",
+                            "platform":"*", "capsule_version":null,
+                            "sha256":hex::encode(sha2::Sha256::digest(b"other")), "size":5,
+                            "cid":raw_cid(b"known"), "release_path":"known.tar.gz", "signer_did":did}),
+                    );
+                    Some(if case.ends_with("without its record") {
+                        serde_json::json!([])
+                    } else {
+                        serde_json::json!([record])
+                    })
+                } else {
+                    None
+                };
                 match case {
                     "null components" => value = serde_json::Value::Null,
                     "array components" => value = serde_json::json!([]),
@@ -3788,14 +3815,15 @@ mod tests {
                     serde_json::json!({"cid":raw_cid(bytes),
                         "sha256":hex::encode(sha2::Sha256::digest(bytes)), "size":bytes.len()})
                 };
-                let release = binding_envelope(
-                    serde_json::json!({
-                        "schema":"elastos.release/v1", "version":version, "channel":"stable",
-                        "platforms":{(platform):{"binary":descriptor(&executable),
-                            "components":descriptor(&components)}}
-                    }),
-                    "elastos.release.v1",
-                );
+                let mut payload = serde_json::json!({
+                    "schema":"elastos.release/v1", "version":version, "channel":"stable",
+                    "platforms":{(platform):{"binary":descriptor(&executable),
+                        "components":descriptor(&components)}}
+                });
+                if let Some(records) = records {
+                    payload["capsule_records"] = records;
+                }
+                let release = binding_envelope(payload, "elastos.release.v1");
                 let mut head = binding_head(&release);
                 head["version"] = serde_json::json!(version);
                 let head = signed_envelope(
@@ -3858,11 +3886,16 @@ mod tests {
                     | "array components"
                     | "schemaless components"
                     | "unrelated schema"
-                    | "newer kind beside a refused known component" => {
+                    | "newer kind beside a refused known component"
+                    | "newer kind beside a known component without its record"
+                    | "newer kind beside a known component with another record" => {
                         assert!(is(|cause| cause.is::<ReleaseRefused>()), "{message}");
                         assert!(!is(|cause| cause.is::<InstallerRequired>()), "{message}");
                     }
                     _ => assert!(message.contains("No binary CID for platform"), "{message}"),
+                }
+                if case.starts_with("newer kind beside a known component") {
+                    assert!(message.contains("capsule record for known"), "{message}");
                 }
                 let after: Vec<_> = paths
                     .iter()
