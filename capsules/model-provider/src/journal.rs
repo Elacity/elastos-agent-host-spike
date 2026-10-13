@@ -257,6 +257,20 @@ impl RunJournal {
     }
 
     fn record_pruned_issuance_ms(&self, issued_ms: u64) -> Result<(), ProviderFault> {
+        #[cfg(unix)]
+        let directories = lock_transaction_directories(&self.request_floor_path)?;
+        self.record_pruned_issuance_ms_with_locks(
+            issued_ms,
+            #[cfg(unix)]
+            &directories,
+        )
+    }
+
+    fn record_pruned_issuance_ms_with_locks(
+        &self,
+        issued_ms: u64,
+        #[cfg(unix)] directories: &[(PathBuf, fs::File)],
+    ) -> Result<(), ProviderFault> {
         let (previous, expected) = self.load_request_floor()?;
         if issued_ms <= previous {
             return Ok(());
@@ -269,22 +283,23 @@ impl RunJournal {
             MAX_REQUEST_FLOOR_BYTES,
         )?;
         // One deterministic transaction per serialized writer. Init can recover
-        // a partial write after its creator exits, without trusting partial JSON.
+        // an unlocked partial write without trusting partial JSON or its PID.
         let temp = self.request_floor_path.with_file_name(format!(
             ".pruned-request-floor.json.tmp-{}",
             std::process::id()
         ));
-        atomic_write_with_temp(
-            &self.request_floor_path,
+        atomic_write_with_temp_with_locks(
+            (&self.request_floor_path, temp),
             &bytes,
             expected.as_ref(),
-            temp,
             |file, bytes| {
                 file.write_all(bytes)?;
                 file.sync_all()
             },
             |from, to| fs::rename(from, to),
             sync_directory,
+            #[cfg(unix)]
+            directories,
         )
     }
 
@@ -448,8 +463,9 @@ impl RunJournal {
         self.recover_abandoned_transactions_with(|| Ok(()))
     }
 
-    // Init runs before this serialized coordinator starts journal work. No
-    // pathname or partial payload grants deletion of a committed binding.
+    // Init and atomic writes share the same protected directory locks. A PID
+    // in a crash filename does not prove that a writer still owns the file.
+    // No pathname or partial payload grants deletion of a committed binding.
     fn recover_abandoned_transactions_with(
         &self,
         before_remove: impl FnOnce() -> Result<(), ProviderFault>,
@@ -459,13 +475,16 @@ impl RunJournal {
             .map_err(|_| ProviderFault::corrupt_journal("journal root is unreadable"))?;
         let runs_snapshot = fs::symlink_metadata(&self.runs_dir)
             .map_err(|_| ProviderFault::corrupt_journal("journal runs directory is unreadable"))?;
-        let census = self.census()?;
-        let floor_transactions = self.floor_transactions()?;
-        if !census.iter().any(|entry| entry.transaction) && floor_transactions.is_empty() {
+        #[cfg(not(unix))]
+        if !self.census()?.iter().any(|entry| entry.transaction)
+            && self.floor_transactions()?.is_empty()
+        {
             return Ok(());
         }
         let root_dir = open_journal_directory(root)?;
+        lock_journal_directory(&root_dir)?;
         let runs_dir = open_journal_directory(&self.runs_dir)?;
+        lock_journal_directory(&runs_dir)?;
         if !same_snapshot(
             &root_snapshot,
             &root_dir
@@ -481,6 +500,11 @@ impl RunJournal {
                 "journal directory changed before recovery",
             ));
         }
+        let census = self.census()?;
+        let floor_transactions = self.floor_transactions()?;
+        if !census.iter().any(|entry| entry.transaction) && floor_transactions.is_empty() {
+            return Ok(());
+        }
         let (floor, floor_snapshot) = self.load_request_floor()?;
         let mut transactions = Vec::new();
         let mut actual_bytes = census.iter().map(|entry| entry.metadata.len()).sum::<u64>();
@@ -495,10 +519,9 @@ impl RunJournal {
             .chain(&floor_transactions)
         {
             let floor_temp = entry.path.parent() == Some(root);
-            let pid = transaction_creator(&entry.path, floor_temp).ok_or_else(|| {
+            transaction_creator(&entry.path, floor_temp).ok_or_else(|| {
                 ProviderFault::corrupt_journal("journal transaction name is invalid")
             })?;
-            require_absent_creator(pid)?;
             if floor_temp {
                 actual_bytes += entry.metadata.len();
             }
@@ -518,7 +541,7 @@ impl RunJournal {
                 ));
             }
             verify_path_snapshot(&entry.path, &opened)?;
-            transactions.push((entry, pid));
+            transactions.push(entry);
         }
         // Every committed record and every candidate is verified before the
         // first mutation. A bad later record preserves all crash transactions.
@@ -546,8 +569,7 @@ impl RunJournal {
                 "request floor transactions changed during recovery",
             ));
         }
-        for (entry, pid) in transactions {
-            require_absent_creator(pid)?;
+        for entry in transactions {
             verify_journal_directory(root, &root_dir)?;
             verify_journal_directory(&self.runs_dir, &runs_dir)?;
             let parent = if entry.path.parent() == Some(root) {
@@ -799,7 +821,15 @@ impl RunJournal {
     fn archive_legacy_runs(&self) -> Result<(), ProviderFault> {
         let root = self.runs_dir.parent().unwrap();
         let root_handle = open_journal_directory(root)?;
+        lock_journal_directory(&root_handle)?;
         let runs_handle = open_journal_directory(&self.runs_dir)?;
+        lock_journal_directory(&runs_handle)?;
+        let directories = [
+            (root.to_path_buf(), root_handle),
+            (self.runs_dir.clone(), runs_handle),
+        ];
+        let root_handle = &directories[0].1;
+        let runs_handle = &directories[1].1;
         for path in [&self.recovery_dir, &self.recovery_ack_path] {
             match fs::symlink_metadata(path) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -812,17 +842,23 @@ impl RunJournal {
         }
         // The floor protects clock rollback; direct archive lookup preserves
         // every retained legacy and future-issued identity before validation.
-        self.record_pruned_issuance_ms(now_ms().max(1))?;
-        verify_journal_directory(root, &root_handle)?;
-        verify_journal_directory(&self.runs_dir, &runs_handle)?;
+        self.record_pruned_issuance_ms_with_locks(
+            now_ms().max(1),
+            #[cfg(unix)]
+            &directories,
+        )?;
+        verify_journal_directory(root, root_handle)?;
+        verify_journal_directory(&self.runs_dir, runs_handle)?;
         rename_directory_no_replace(&self.runs_dir, &self.recovery_dir)
             .map_err(|_| ProviderFault::corrupt_journal("legacy journal archive failed"))?;
-        verify_journal_directory(&self.recovery_dir, &runs_handle)?;
+        verify_journal_directory(&self.recovery_dir, runs_handle)?;
         root_handle
             .sync_all()
             .map_err(|_| ProviderFault::corrupt_journal("legacy journal archive sync failed"))?;
         ensure_journal_dir_owner_only(&self.runs_dir)?;
-        sync_directory(root)
+        sync_directory(root)?;
+        verify_journal_directory(root, root_handle)?;
+        verify_journal_directory(&self.recovery_dir, runs_handle)
     }
 
     pub(crate) fn visit_runs(
@@ -1079,6 +1115,36 @@ fn atomic_write_with_temp(
         ensure_journal_dir_owner_only(parent)?;
     }
     validate_run_path_target(path)?;
+    #[cfg(unix)]
+    let directories = lock_transaction_directories(path)?;
+    atomic_write_with_temp_with_locks(
+        (path, tmp),
+        bytes,
+        expected,
+        write,
+        rename,
+        sync_parent,
+        #[cfg(unix)]
+        &directories,
+    )
+}
+
+fn atomic_write_with_temp_with_locks(
+    paths: (&Path, PathBuf),
+    bytes: &[u8],
+    expected: Option<&fs::Metadata>,
+    write: impl FnOnce(&mut fs::File, &[u8]) -> std::io::Result<()>,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    sync_parent: impl FnOnce(&Path) -> Result<(), ProviderFault>,
+    #[cfg(unix)] directories: &[(PathBuf, fs::File)],
+) -> Result<(), ProviderFault> {
+    let (path, tmp) = paths;
+    if let Some(parent) = path.parent() {
+        ensure_journal_dir_owner_only(parent)?;
+    }
+    validate_run_path_target(path)?;
+    #[cfg(unix)]
+    verify_transaction_directories(directories)?;
     let file = open_temp_file_owner_only(&tmp)?;
     let mut transaction = OwnedTransaction {
         path: tmp,
@@ -1096,6 +1162,8 @@ fn atomic_write_with_temp(
     write(&mut transaction.file, bytes).map_err(|err| {
         ProviderFault::corrupt_journal(format!("failed to write or sync temporary journal: {err}"))
     })?;
+    #[cfg(unix)]
+    verify_transaction_directories(directories)?;
     verify_path_snapshot(
         &transaction.path,
         &transaction.file.metadata().map_err(|err| {
@@ -1124,6 +1192,8 @@ fn atomic_write_with_temp(
         path.parent()
             .ok_or_else(|| ProviderFault::corrupt_journal("run journal file missing parent"))?,
     )?;
+    #[cfg(unix)]
+    verify_transaction_directories(directories)?;
     Ok(())
 }
 
@@ -2047,6 +2117,7 @@ fn transaction_creator(path: &Path, floor: bool) -> Option<i32> {
     Some(pid)
 }
 
+#[cfg(test)]
 fn require_absent_creator(pid: i32) -> Result<(), ProviderFault> {
     #[cfg(unix)]
     if unsafe { libc::kill(pid, 0) } == -1
@@ -2082,6 +2153,65 @@ fn open_journal_directory(path: &Path) -> Result<fs::File, ProviderFault> {
         .map_err(|_| ProviderFault::corrupt_journal("journal recovery directory is unreadable"))?;
     verify_journal_directory(path, &file)?;
     Ok(file)
+}
+
+fn lock_journal_directory(directory: &fs::File) -> Result<(), ProviderFault> {
+    #[cfg(unix)]
+    {
+        match directory.try_lock() {
+            Ok(()) => Ok(()),
+            Err(fs::TryLockError::WouldBlock) => Err(ProviderFault::selection_unavailable(
+                "journal transaction pending",
+            )),
+            Err(_) => Err(ProviderFault::corrupt_journal(
+                "journal transaction lock is unavailable",
+            )),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = directory;
+        Err(ProviderFault::corrupt_journal(
+            "journal transaction recovery lock is unavailable",
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn lock_transaction_directories(path: &Path) -> Result<Vec<(PathBuf, fs::File)>, ProviderFault> {
+    let parent = path.parent().ok_or_else(|| {
+        ProviderFault::corrupt_journal("journal transaction parent is unavailable")
+    })?;
+    let root = if path
+        .file_name()
+        .is_some_and(|name| name == "pruned-request-floor.json" || name == "recovery-complete.json")
+    {
+        parent
+    } else {
+        parent.parent().ok_or_else(|| {
+            ProviderFault::corrupt_journal("journal transaction root is unavailable")
+        })?
+    };
+    let mut held = Vec::with_capacity(2);
+    for directory in [root, parent] {
+        if held.iter().any(|(path, _)| path == directory) {
+            continue;
+        }
+        let file = open_journal_directory(directory)?;
+        lock_journal_directory(&file)?;
+        held.push((directory.to_path_buf(), file));
+    }
+    Ok(held)
+}
+
+#[cfg(unix)]
+fn verify_transaction_directories(
+    directories: &[(PathBuf, fs::File)],
+) -> Result<(), ProviderFault> {
+    for (path, directory) in directories {
+        verify_journal_directory(path, directory)?;
+    }
+    Ok(())
 }
 
 fn archive_identity(metadata: &fs::Metadata) -> Result<(u64, u64), ProviderFault> {
@@ -3770,6 +3900,66 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn held_writer_locks_block_oversized_init_archive_and_preserve_journals() {
+        for hold_root in [false, true] {
+            let root = temp_root("held-writer-overflow-archive");
+            let journal = RunJournal::open(root.clone()).unwrap();
+            let unknown = settle_unknown(&prepared_run("held-writer-archive-unknown"));
+            journal.store_run(&unknown).unwrap();
+            let path = run_path(&root, &unknown.run_id);
+            let before = file_bytes(&path);
+            // A future committed floor makes the old archive floor write a
+            // no-op, so the writer lock must protect the rename itself.
+            let issued = now_ms() + 60_000;
+            journal.record_pruned_issuance_ms(issued).unwrap();
+            let floor_before = file_bytes(&journal.request_floor_path);
+            let mut temps = Vec::new();
+            for index in 0..MAX_RECOVERY_JOURNAL_ENTRIES {
+                temps.push(crash_transaction(&root, index, 1));
+            }
+            let root_writer = if hold_root {
+                let held = open_journal_directory(&root).unwrap();
+                held.try_lock().unwrap();
+                Some(held)
+            } else {
+                None
+            };
+            let runs_writer = open_journal_directory(&root.join("runs")).unwrap();
+            runs_writer.try_lock().unwrap();
+            assert_eq!(
+                RunJournal::open(root.clone()).err().unwrap().code(),
+                "selection_unavailable"
+            );
+            assert_eq!(file_bytes(&path), before);
+            assert_eq!(file_bytes(&journal.request_floor_path), floor_before);
+            assert!(temps.iter().all(|temp| file_bytes(temp) == vec![0]));
+            assert_eq!(
+                fs::read_dir(root.join("runs")).unwrap().count(),
+                MAX_RECOVERY_JOURNAL_ENTRIES + 1
+            );
+            assert!(!root.join("recovery-runs").exists());
+            assert!(!root.join("recovery-complete.json").exists());
+            drop(runs_writer);
+            drop(root_writer);
+            let reopened = RunJournal::open(root.clone()).unwrap();
+            assert!(reopened.census().unwrap().is_empty());
+            assert!(reopened.archive_recovery_pending().unwrap());
+            assert!(!root.join("recovery-complete.json").exists());
+            assert_eq!(file_bytes(&reopened.request_floor_path), floor_before);
+            assert_eq!(reopened.pruned_issued_floor_ms().unwrap(), issued);
+            assert_eq!(
+                file_bytes(&hashed_path(&root.join("recovery-runs"), &unknown.run_id)),
+                before
+            );
+            assert_eq!(
+                reopened.load_run(&unknown.run_id).unwrap().status,
+                RunStatus::SettlementUnknown
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn legacy_entry_and_byte_overflow_archive_once_with_exact_owner_access() {
         for byte_overflow in [false, true] {
             let root = temp_root("legacy-overflow-archive");
@@ -3923,6 +4113,122 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn unlocked_reused_creator_pid_recovers_transactions_and_preserves_unknown_and_floor() {
+        let root = temp_root("reused-transaction-creator");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let unknown = settle_unknown(&prepared_run("reused-pid-retained-unknown"));
+        journal.store_run(&unknown).unwrap();
+        let path = run_path(&root, &unknown.run_id);
+        let before = file_bytes(&path);
+        let issued = now_ms().saturating_sub(10_000);
+        journal.record_pruned_issuance_ms(issued).unwrap();
+        let floor_before = file_bytes(&journal.request_floor_path);
+        let pid = std::process::id();
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0);
+        let transactions = [
+            root.join(format!(".pruned-request-floor.json.tmp-{pid}")),
+            root.join(format!(".recovery-complete.json.tmp-{pid}")),
+            root.join("runs")
+                .join(format!(".sha256-{}.json.tmp-{pid}-1000-0", "a".repeat(64))),
+        ];
+        for temp in &transactions {
+            open_temp_file_owner_only(temp)
+                .unwrap()
+                .write_all(b"{")
+                .unwrap();
+        }
+        let reopened = RunJournal::open(root).unwrap();
+        assert!(transactions.iter().all(|path| !path.exists()));
+        assert_eq!(file_bytes(&path), before);
+        assert_eq!(file_bytes(&reopened.request_floor_path), floor_before);
+        assert_eq!(reopened.pruned_issued_floor_ms().unwrap(), issued);
+        assert_eq!(
+            reopened.load_run(&unknown.run_id).unwrap().status,
+            RunStatus::SettlementUnknown
+        );
+        assert!(!reopened.archive_recovery_pending().unwrap());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn transaction_locks_preserve_a_custom_journal_root_named_runs() {
+        let root = temp_root("journal-root-named-runs").join("runs");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let run = prepared_run("custom-journal-root");
+        journal.store_run(&run).unwrap();
+        let issued = now_ms();
+        journal.record_pruned_issuance_ms(issued).unwrap();
+        let reopened = RunJournal::open(root).unwrap();
+        assert_eq!(reopened.load_run(&run.run_id).unwrap().run_id, run.run_id);
+        assert_eq!(reopened.pruned_issued_floor_ms().unwrap(), issued);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn held_transaction_directory_lock_blocks_recovery_and_atomic_writes() {
+        for floor in [false, true] {
+            let root = temp_root(if floor {
+                "held-floor-writer"
+            } else {
+                "held-run-writer"
+            });
+            let journal = RunJournal::open(root.clone()).unwrap();
+            let unknown = settle_unknown(&prepared_run("held-writer-retained-unknown"));
+            journal.store_run(&unknown).unwrap();
+            let path = run_path(&root, &unknown.run_id);
+            let before = file_bytes(&path);
+            let directory = if floor {
+                root.clone()
+            } else {
+                root.join("runs")
+            };
+            let temp = if floor {
+                root.join(format!(
+                    ".pruned-request-floor.json.tmp-{}",
+                    abandoned_fixture_pid()
+                ))
+            } else {
+                crash_transaction(&root, 0, 1)
+            };
+            if floor {
+                open_temp_file_owner_only(&temp)
+                    .unwrap()
+                    .write_all(b"{")
+                    .unwrap();
+            }
+            let temp_before = file_bytes(&temp);
+            let writer = open_journal_directory(&directory).unwrap();
+            writer.try_lock().unwrap();
+            assert_eq!(
+                RunJournal::open(root.clone()).err().unwrap().code(),
+                "selection_unavailable"
+            );
+            assert_eq!(file_bytes(&temp), temp_before);
+            assert_eq!(file_bytes(&path), before);
+            let fresh = prepared_run("fresh-during-held-writer");
+            assert_eq!(
+                journal.store_run(&fresh).unwrap_err().code(),
+                "selection_unavailable"
+            );
+            if floor {
+                assert_eq!(
+                    journal
+                        .record_pruned_issuance_ms(now_ms())
+                        .unwrap_err()
+                        .code(),
+                    "selection_unavailable"
+                );
+            }
+            drop(writer);
+            let reopened = RunJournal::open(root).unwrap();
+            assert!(!temp.exists());
+            assert_eq!(file_bytes(&path), before);
+            reopened.store_run(&fresh).unwrap();
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn interrupted_run_transaction_recovery_preserves_committed_floor_and_unknown() {
         let root = temp_root("run-transaction-interruption");
         let journal = RunJournal::open(root.clone()).unwrap();
@@ -3980,6 +4286,12 @@ mod tests {
                 .unwrap()
                 .write_all(b"{")
                 .unwrap();
+            #[cfg(unix)]
+            let _writer = {
+                let writer = open_journal_directory(temp.parent().unwrap()).unwrap();
+                writer.try_lock().unwrap();
+                writer
+            };
             assert!(RunJournal::open(root).is_err());
             assert_eq!(file_bytes(&temp), b"{");
             assert_eq!(file_bytes(&path), before);
