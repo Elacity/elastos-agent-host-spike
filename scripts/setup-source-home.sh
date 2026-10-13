@@ -22,6 +22,8 @@ Configure tool paths with:
   ELASTOS_COLLABORATION_STARTUP_MODE (configured|isolated)
   ELASTOS_COLLABORATION_STARTUP_CONFIG_INPUT
   ELASTOS_BROWSER_VM_ARTIFACT_DATA_DIR
+  SETUP_SOURCE_HOME_INSTALL_LLAMA_SERVER (0|1)
+  ELASTOS_LLAMA_AMD64_BUNDLE / ELASTOS_LLAMA_ARM64_BUNDLE (qualified Linux engine archive)
 
 To target a non-default runtime root, set HOME or XDG_DATA_HOME before running.
 ELASTOS_DATA_DIR is intentionally not accepted as a gateway data-root override.
@@ -49,6 +51,30 @@ detect_platform() {
             exit 1
             ;;
     esac
+}
+
+require_source_engine_bundle() {
+    [[ "${SETUP_SOURCE_HOME_CONFIG_ONLY:-0}" != "1" ]] || return
+    case "${SETUP_SOURCE_HOME_INSTALL_LLAMA_SERVER:-0}" in
+        0) return ;;
+        1) ;;
+        *) echo "SETUP_SOURCE_HOME_INSTALL_LLAMA_SERVER accepts 0 or 1." >&2; exit 1 ;;
+    esac
+    local variable bundle
+    case "$PLATFORM" in
+        linux-amd64) variable=ELASTOS_LLAMA_AMD64_BUNDLE ;;
+        linux-arm64) variable=ELASTOS_LLAMA_ARM64_BUNDLE ;;
+        *) return ;;
+    esac
+    bundle="${!variable:-}"
+    if [[ -z "$bundle" || ! -f "$bundle" || -L "$bundle" ]]; then
+        echo "${variable} must name the qualified Linux engine archive." >&2
+        echo "On a matching Ubuntu 22.04 host, build the pinned source with GGML_OPENMP=OFF:" >&2
+        echo "  bash scripts/build/build-llama-server-bundle.sh --platform ${PLATFORM} NEW_OUTPUT_DIRECTORY" >&2
+        echo "Set ${variable} to the generated .tar.gz archive, then rerun:" >&2
+        echo "  SETUP_SOURCE_HOME_INSTALL_LLAMA_SERVER=1 scripts/setup-source-home.sh" >&2
+        exit 1
+    fi
 }
 
 default_data_dir() {
@@ -459,6 +485,7 @@ if [[ -n "${ELASTOS_DATA_DIR:-}" && "${ELASTOS_DATA_DIR}" != "${DEFAULT_DATA_DIR
 fi
 DATA_DIR="${DEFAULT_DATA_DIR}"
 PLATFORM="$(detect_platform)"
+require_source_engine_bundle
 CARGO_BIN="$(find_cargo)"
 NODE_BIN="$(find_node)"
 SOURCE_HOME_KUBO_INSTALLED="0"
@@ -1244,7 +1271,13 @@ if len(selected) != 1:
 recipe = selected[0]
 if recipe['source'].get('path') in ('@llama-arm64-bundle', '@llama-amd64-bundle'):
     architecture = platform.removeprefix('linux-').upper()
-    recipe['source']['path'] = str(Path(os.environ['ELASTOS_LLAMA_' + architecture + '_BUNDLE']).absolute())
+    variable = 'ELASTOS_LLAMA_' + architecture + '_BUNDLE'
+    bundle = os.environ.get(variable)
+    if not bundle:
+        raise SystemExit(f'{variable} is required. Build the qualified Ubuntu 22.04 bundle with '
+                         f'scripts/build/build-llama-server-bundle.sh --platform {platform} NEW_OUTPUT_DIRECTORY, '
+                         'then rerun source setup with that archive.')
+    recipe['source']['path'] = str(Path(bundle).absolute())
 cache = upstream.directory(cache)
 with tempfile.TemporaryDirectory(prefix='.llama-package-', dir=cache) as temporary:
     receipt = upstream.package(recipe, cache, Path(temporary))

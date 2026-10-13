@@ -566,6 +566,41 @@ def validate_release_builds_are_hermetic(source):
 
 
 class ReleasePolicyTests(unittest.TestCase):
+    def test_source_home_missing_linux_engine_bundle_refuses_before_tools_or_writes(self):
+        for arch, platform, variable in (("x86_64", "linux-amd64", "ELASTOS_LLAMA_AMD64_BUNDLE"),
+                                          ("aarch64", "linux-arm64", "ELASTOS_LLAMA_ARM64_BUNDLE")):
+            for value in (None, "missing.tar.gz"):
+                with self.subTest(platform=platform, bundle=value), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory).resolve()
+                    tools = root / "tools"
+                    tools.mkdir()
+                    (tools / "dirname").symlink_to(shutil.which("dirname"))
+                    (tools / "uname").write_text(f'#!/bin/bash\nif [[ "$1" == -s ]]; then echo Linux; else echo {arch}; fi\n')
+                    for name in ("cargo", "node", "rustc", "python3"):
+                        (tools / name).write_text('#!/bin/bash\necho "$0" >> "$TOOL_LOG"\nexit 91\n')
+                    for path in tools.iterdir():
+                        if not path.is_symlink():
+                            path.chmod(0o700)
+                    environment = {**os.environ, "HOME": str(root / "home"), "XDG_DATA_HOME": str(root / "data"),
+                                   "PATH": str(tools), "TOOL_LOG": str(root / "tools-called"),
+                                   "ELASTOS_CARGO_BIN": str(tools / "cargo"), "ELASTOS_NODE_BIN": str(tools / "node"),
+                                   "SETUP_SOURCE_HOME_CONFIG_ONLY": "0", "SETUP_SOURCE_HOME_INSTALL_LLAMA_SERVER": "1"}
+                    for name in ("ELASTOS_DATA_DIR", "ELASTOS_LLAMA_AMD64_BUNDLE", "ELASTOS_LLAMA_ARM64_BUNDLE"):
+                        environment.pop(name, None)
+                    if value:
+                        environment[variable] = str(root / value)
+                    result = subprocess.run(["/bin/bash", str(WORKFLOW.parents[2] / "scripts/setup-source-home.sh")],
+                                            env=environment, capture_output=True, text=True, timeout=10)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(variable + " must name the qualified Linux engine archive", result.stderr)
+                    self.assertIn("GGML_OPENMP=OFF", result.stderr)
+                    self.assertIn("build-llama-server-bundle.sh --platform " + platform, result.stderr)
+                    self.assertIn("SETUP_SOURCE_HOME_INSTALL_LLAMA_SERVER=1 scripts/setup-source-home.sh", result.stderr)
+                    self.assertNotIn("KeyError", result.stderr)
+                    self.assertFalse((root / "tools-called").exists())
+                    self.assertFalse((root / "home").exists())
+                    self.assertFalse((root / "data").exists())
+
     def test_source_home_callers_bind_executable_tools_before_isolating_home(self):
         for job in sorted(SOURCE_HOME_CACHE_JOBS):
             setup, = [step for step in steps(job) if step.startswith("name: source-home into isolated")]
