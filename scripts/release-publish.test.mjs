@@ -48,9 +48,13 @@ function fixture(t, changes = {}) {
   cpSync(join(source, 'release-signer.py'), join(repo, 'scripts/release-signer.py'));
   cpSync(join(source, 'release-provenance.py'), join(repo, 'scripts/release-provenance.py'));
   cpSync(join(source, 'release-provenance-seal.py'), join(repo, 'scripts/release-provenance-seal.py'));
+  const [installVersion, updateVersion] = changes.versions || ['1.2.3-alpha.1', '1.2.3-alpha.2'];
+  mkdirSync(join(repo, 'elastos'));
+  writeFileSync(join(repo, 'elastos/Cargo.toml'), `[workspace.package]\nversion = "${changes.cargoVersion || installVersion}"\n`);
   const config = { root, repo, commit, tree, artifacts: {}, ciRuns: [ciRun], requiredJobs,
     ciJobs: requiredJobs.map(name => ({ name, status: 'completed', conclusion: 'success' })),
-    packageRun, workflowCommit, workflowTree, delivery, trees: {}, ...changes };
+    packageRun, workflowCommit, workflowTree, delivery, trees: {},
+    tagOid: 'e'.repeat(40), mainOid: 'd'.repeat(40), ...changes };
   for (const [root, blob] of [[tree, '7'.repeat(40)], [config.workflowTree, changes.workflowBlob || '7'.repeat(40)]]) {
     const github = sha(root + '.github').slice(0, 40), workflows = sha(root + 'workflows').slice(0, 40);
     const entry = (path, type, sha) => ({ path, type, mode: type === 'tree' ? '040000' : '100644', sha });
@@ -61,7 +65,7 @@ function fixture(t, changes = {}) {
   for (const [index, platform] of (changes.ciOnly ? [] : platforms.entries())) {
     const input = join(root, platform, 'inputs');
     mkdirSync(input, { recursive: true });
-    for (const [name, version] of [['N', '1.2.3'], ['N1', '1.2.4']]) {
+    for (const [name, version] of [['N', installVersion], ['N1', updateVersion]]) {
       const dir = join(input, name);
       mkdirSync(join(dir, 'artifacts'), { recursive: true });
       const receipt = { schema: 'elastos.release-platform-input/v1', platform, version, source: { commit, tree, clean: true }, ...changes[platform] };
@@ -99,7 +103,7 @@ function fixture(t, changes = {}) {
       files[name] = { sha256: sha(bytes), size: bytes.length };
     }
     writeFileSync(join(parts, 'seed-input.json'), JSON.stringify({ schema: 'elastos.release-seed-input/v1',
-      source: { commit, tree }, version: '1.2.3', files }));
+      source: { commit, tree }, version: '1.2.3-alpha.1', files }));
     writeFileSync(join(parts, 'provenance.jsonl'), '{}');
     const names = ['elastos', 'ipfs-provider', 'source.tar.gz', 'seed-input.json', 'provenance.jsonl'];
     writeFileSync(join(parts, 'SHA256SUMS'), names.map(name => `${sha(readFileSync(join(parts, name)))}  ${name}\n`).join(''));
@@ -160,10 +164,15 @@ if (command === 'gh') {
   else if (endpoint.includes('/runs/456/jobs?')) payload = { jobs: c.ciJobs };
   else if (endpoint.endsWith('/actions/runs/123')) payload = c.packageRun;
   else if (endpoint.endsWith('/git/ref/heads/develop')) payload = { ref: 'refs/heads/develop', object: { type: 'commit', sha: c.commit } };
+  else if (endpoint.endsWith('/git/ref/heads/main')) payload = { ref: 'refs/heads/main', object: { type: 'commit', sha: c.mainOid } };
+  else if (endpoint.includes('/git/ref/tags/')) {
+    if (c.noTag) process.exit(1);
+    payload = { ref: 'refs/tags/' + endpoint.split('/').at(-1), object: { type: 'tag', sha: c.tagOid } };
+  } else if (endpoint.includes('/git/tags/')) payload = { sha: c.tagOid, tag: c.tagName || 'v1.2.3', object: { type: 'commit', sha: c.tagTarget || c.commit } };
   else if (endpoint.includes('/git/trees/')) payload = c.trees[endpoint.split('/').at(-1)];
   else if (endpoint.includes('/git/commits/')) {
     const oid = endpoint.split('/').at(-1);
-    payload = { sha: oid, tree: { sha: oid === c.workflowCommit ? c.workflowTree : c.tree } };
+    payload = { sha: oid, tree: { sha: oid === c.workflowCommit ? c.workflowTree : oid === c.mainOid ? (c.mainTree || c.tree) : c.tree } };
   } else if (endpoint.includes('/runs/123/artifacts?')) payload = { artifacts: Object.entries(c.artifacts).map(([prefix,a]) => ({
     id: Number(a.id), digest: 'sha256:' + a.digest, name: prefix + '-' + c.commit + '-' + a.attempt, expired: false,
     workflow_run: { id: 123, head_sha: c.workflowCommit, head_branch: 'develop' }
@@ -179,7 +188,7 @@ if (command === 'gh') {
     const prefix = Object.keys(c.artifacts).find(p => args.at(-1).includes('^' + p + '-'));
     const a = c.artifacts[prefix];
     console.log(a.id + ' ' + a.digest + ' ' + prefix + '-' + c.commit + '-1');
-  } else if (endpoint.includes('/compare/')) console.log(c.compareStatus || 'ahead');
+  } else if (endpoint.includes('/compare/')) console.log((endpoint.endsWith('...main') ? c.mainCompareStatus : c.compareStatus) || 'ahead');
   else console.log('.github/workflows/release-package.yml success');
 } else if (command === 'git') {
   if (args.includes('add')) fs.cpSync(c.repo, args[args.indexOf('add') + 3], { recursive: true });
@@ -216,7 +225,7 @@ fs.writeFileSync(process.env.ARGUMENT_LOG, JSON.stringify(args));
 fs.writeFileSync(process.env.ARGUMENT_LOG + '.delivery', JSON.stringify({ gateway: process.env.ELASTOS_PUBLISHER_GATEWAY, ipns: process.env.ELASTOS_IPNS_NAME }));
 const output = args[args.indexOf('--prepare-only') + 1];
 fs.mkdirSync(output, { recursive: true });
-fs.writeFileSync(output + '/signing-input.json', JSON.stringify({ source: { commit: '${commit}', tree: '${tree}' }, files: [{ size: 1 }], installer: { stamps: ${JSON.stringify(delivery)} } }));
+fs.writeFileSync(output + '/signing-input.json', JSON.stringify({ source: { commit: '${commit}', tree: '${tree}' }, version: args[args.indexOf('--version') + 1], channel: args[args.indexOf('--channel') + 1], files: [{ size: 1 }], installer: { stamps: ${JSON.stringify(delivery)} } }));
 `, { mode: 0o755 });
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, FIXTURE_CONFIG: join(root, 'config.json'),
     RELEASE_WORK: join(root, 'work'), RELEASE_ORIGIN: 'https://fixture.invalid',
@@ -230,7 +239,7 @@ fs.writeFileSync(output + '/signing-input.json', JSON.stringify({ source: { comm
   writeFileSync(ciScript, readFileSync(join(repo, 'scripts/release-publish.sh'), 'utf8')
     .split('\npublication_record() {')[0] + '\nchecked_ci "$1"\n');
   return { root, env, script: join(repo, 'scripts/release-publish.sh'),
-    prepare(version = '1.2.3', selected = [], extraEnv = {}) {
+    prepare(version = '1.2.3-alpha.1', selected = [], extraEnv = {}) {
       return spawnSync('bash', [this.script, 'prepare', '123', version, ...selected],
         { encoding: 'utf8', env: { ...env, ...extraEnv } });
     },
@@ -242,15 +251,15 @@ fs.writeFileSync(output + '/signing-input.json', JSON.stringify({ source: { comm
 for (const selected of [[], ['aarch64-darwin', 'x86_64-linux'], ['aarch64-darwin']]) {
   test(`prepare passes each platform once: ${selected.join(',') || 'all'}`, t => {
     const f = fixture(t);
-    const result = f.prepare('1.2.4', selected);
+    const result = f.prepare('1.2.3-alpha.2', selected);
     assert.equal(result.status, 0, result.stderr);
     const expected = selected.length ? selected : platforms;
     const args = f.args();
     const inputs = args.flatMap((arg, i) => arg === '--platform-input' ? [args[i + 1]] : []);
-    assert.deepEqual(inputs, expected.map(p => `${p}=${f.root}/work/1.2.4/inputs/${p}/N1`));
+    assert.deepEqual(inputs, expected.map(p => `${p}=${f.root}/work/1.2.3-alpha.2/inputs/${p}/N1`));
     assert.equal(args.includes('--preview-platform'), expected.length === 1);
     assert.equal(readFileSync(f.env.VERIFY_LOG, 'utf8').trim().split('\n').length, expected.length);
-    const record = JSON.parse(readFileSync(join(f.root, 'work/1.2.4/run.json')));
+    const record = JSON.parse(readFileSync(join(f.root, 'work/1.2.3-alpha.2/run.json')));
     assert.deepEqual(record.ci_run, { id: ciRun.id, url: ciRun.html_url });
     assert.match(result.stdout, /Develop CI run: 456 https:\/\/github.com\/Elacity\/elastos-runtime\/actions\/runs\/456/);
   });
@@ -260,7 +269,7 @@ test('prepare accepts an exact source develop queue run and retains consumer rec
   const f = fixture(t, { ciRuns: [queueRun] });
   const result = f.prepare();
   assert.equal(result.status, 0, result.stderr);
-  const record = JSON.parse(readFileSync(join(f.root, 'work/1.2.3/run.json')));
+  const record = JSON.parse(readFileSync(join(f.root, 'work/1.2.3-alpha.1/run.json')));
   assert.deepEqual(record.ci_run, { id: ciRun.id, url: ciRun.html_url });
   const verified = readFileSync(f.env.VERIFY_LOG, 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(verified.length, platforms.length);
@@ -269,9 +278,9 @@ test('prepare accepts an exact source develop queue run and retains consumer rec
 
 test('prepare retains distinct approved builder/source identities and receipt proof for the signer', t => {
   const f = fixture(t);
-  const result = f.prepare('1.2.3', ['aarch64-darwin']);
+  const result = f.prepare('1.2.3-alpha.1', ['aarch64-darwin']);
   assert.equal(result.status, 0, result.stderr);
-  const manifest = JSON.parse(readFileSync(join(f.root, 'work/1.2.3/unsigned/signing-input.json')));
+  const manifest = JSON.parse(readFileSync(join(f.root, 'work/1.2.3-alpha.1/unsigned/signing-input.json')));
   assert.equal(manifest.source.commit, commit);
   assert.notEqual(workflowCommit, commit);
   assert.equal(manifest.provenance.run_id, packageRun.id);
@@ -279,15 +288,15 @@ test('prepare retains distinct approved builder/source identities and receipt pr
   assert.equal(manifest.provenance.receipts.length, 1);
   const proof = manifest.provenance.receipts[0];
   assert.equal(proof.artifact.name, `release-mac-${commit}-1`);
-  assert.ok(readFileSync(join(f.root, 'work/1.2.3/unsigned', proof.receipt)).length);
-  assert.ok(readFileSync(join(f.root, 'work/1.2.3/unsigned', proof.bundle)).length);
+  assert.ok(readFileSync(join(f.root, 'work/1.2.3-alpha.1/unsigned', proof.receipt)).length);
+  assert.ok(readFileSync(join(f.root, 'work/1.2.3-alpha.1/unsigned', proof.bundle)).length);
 });
 
 test('prepare preserves accepted native and proof artifacts from earlier attempts', t => {
   const f = fixture(t, { packageRun: { ...packageRun, run_attempt: 3 }, nativeAttempt: 1, proofAttempt: 2 });
-  const result = f.prepare('1.2.3', ['aarch64-darwin']);
+  const result = f.prepare('1.2.3-alpha.1', ['aarch64-darwin']);
   assert.equal(result.status, 0, result.stderr);
-  const record = JSON.parse(readFileSync(join(f.root, 'work/1.2.3/run.json')));
+  const record = JSON.parse(readFileSync(join(f.root, 'work/1.2.3-alpha.1/run.json')));
   assert.equal(record.run_attempt, 3);
   assert.equal(record.receipts[0].artifact.attempt, 1);
   assert.equal(record.receipts[0].proof_artifact.attempt, 2);
@@ -297,7 +306,7 @@ test('prepare preserves accepted native and proof artifacts from earlier attempt
 
 test('prepare refuses receipt producer attempt mismatch before source execution', t => {
   const f = fixture(t, { producer: { attestation_attempt: 2 } });
-  const result = f.prepare('1.2.3', ['aarch64-darwin']);
+  const result = f.prepare('1.2.3-alpha.1', ['aarch64-darwin']);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /artifact.run.attempt differs/);
   assert.throws(() => f.args(), { code: 'ENOENT' });
@@ -322,7 +331,7 @@ for (const [label, changes, error] of [
 ]) {
   test(`prepare refuses ${label} before unsigned preparation`, t => {
     const f = fixture(t, changes);
-    const result = f.prepare('1.2.3', ['aarch64-darwin']);
+    const result = f.prepare('1.2.3-alpha.1', ['aarch64-darwin']);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, error);
     assert.throws(() => f.args(), { code: 'ENOENT' });
@@ -331,13 +340,13 @@ for (const [label, changes, error] of [
 
 test('prepare requires an independently owned approval outside the candidate work', t => {
   const f = fixture(t);
-  const missing = f.prepare('1.2.3', ['aarch64-darwin'], { RELEASE_APPROVAL: '' });
+  const missing = f.prepare('1.2.3-alpha.1', ['aarch64-darwin'], { RELEASE_APPROVAL: '' });
   assert.notEqual(missing.status, 0);
   assert.match(missing.stderr, /set RELEASE_APPROVAL/);
   mkdirSync(f.env.RELEASE_WORK);
   const candidate = join(f.env.RELEASE_WORK, 'approval.json');
   cpSync(f.env.RELEASE_APPROVAL, candidate);
-  const result = f.prepare('1.2.3', ['aarch64-darwin'], { RELEASE_APPROVAL: candidate });
+  const result = f.prepare('1.2.3-alpha.1', ['aarch64-darwin'], { RELEASE_APPROVAL: candidate });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /outside candidate inputs/);
 });
@@ -453,24 +462,102 @@ test('prepare refuses an exact queue source outside develop before unsigned prep
   assert.throws(() => f.args(), { code: 'ENOENT' });
 });
 
-test('policy prints the prepared source, package run and develop CI run', t => {
-  const f = fixture(t);
-  assert.equal(f.prepare().status, 0);
+function policy(f, version) {
   const signer = join(f.root, 'signer.py');
   const key = join(f.root, 'fixture-key');
   writeFileSync(signer, '# fixture signer');
   writeFileSync(key, 'fixture key');
   const openssl = run('which', ['openssl']).stdout.trim();
-  const result = run('bash', [f.script, 'policy', '1.2.3', signer, key, openssl], { env: f.env });
+  return spawnSync('bash', [f.script, 'policy', version, signer, key, openssl], { encoding: 'utf8', env: f.env });
+}
+
+test('policy prints the prepared source, package run and develop CI run', t => {
+  const f = fixture(t);
+  assert.equal(f.prepare().status, 0);
+  const result = policy(f, '1.2.3-alpha.1');
+  assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, new RegExp(`Source commit: ${commit}`));
   assert.match(result.stdout, /Package run: 123 https:\/\/github.com\/Elacity\/elastos-runtime\/actions\/runs\/123/);
   assert.match(result.stdout, /Develop CI run: 456 https:\/\/github.com\/Elacity\/elastos-runtime\/actions\/runs\/456/);
+  const pinned = JSON.parse(readFileSync(join(f.root, 'work/1.2.3-alpha.1/policy.json')));
+  assert.deepEqual([pinned.channel, pinned.develop_oid, pinned.tag], ['canary', commit, undefined]);
+});
+
+// A final version is one stable head: canary Homes accept it, so nothing else is signed.
+const stable = { versions: ['1.2.3', '1.2.4-alpha.1'] };
+
+test('a final version prepares on stable from its tag on main and pins that tag for the signer', t => {
+  const f = fixture(t, stable);
+  const result = f.prepare('1.2.3');
+  assert.equal(result.status, 0, result.stderr);
+  const args = f.args();
+  assert.equal(args[args.indexOf('--channel') + 1], 'stable');
+  assert.ok(!args.includes('--preview-platform'));
+  assert.match(result.stdout, new RegExp(`Stable tag: v1\\.2\\.3 ${'e'.repeat(40)} on main`));
+  const record = JSON.parse(readFileSync(join(f.root, 'work/1.2.3/run.json')));
+  assert.deepEqual([record.channel, record.tag], ['stable', { name: 'v1.2.3', oid: 'e'.repeat(40) }]);
+  const signed = policy(f, '1.2.3');
+  assert.equal(signed.status, 0, signed.stderr);
+  const pinned = JSON.parse(readFileSync(join(f.root, 'work/1.2.3/policy.json')));
+  assert.deepEqual([pinned.channel, pinned.version, pinned.tag, pinned.tag_oid, pinned.develop_oid],
+    ['stable', '1.2.3', 'v1.2.3', 'e'.repeat(40), undefined]);
+  const signedDir = join(f.root, 'signed');
+  mkdirSync(signedDir);
+  writeFileSync(join(signedDir, 'release-head.json'), JSON.stringify({ signer_did: did }));
+  const seed = run('bash', [f.script, 'seed', '1.2.3', signedDir], { env: f.env });
+  assert.match(seed.stdout, /publish-release --version 1\.2\.3 --channel stable --signed-publication signed/);
+});
+
+for (const [label, changes, selected] of [
+  ['a missing tag', { noTag: true }, []],
+  ['a tag naming another commit', { tagTarget: 'c'.repeat(40) }, []],
+  ['a tag object for another name', { tagName: 'v9.9.9' }, []],
+  ['a source outside main', { mainCompareStatus: 'diverged' }, []],
+  ['main with other changes', { mainTree: 'c'.repeat(40) }, []],
+  ['another elastos/Cargo.toml version', { cargoVersion: '0.7.1' }, []],
+  ['a single platform', {}, ['aarch64-darwin']],
+]) {
+  test(`stable prepare refuses ${label} before unsigned preparation`, t => {
+    const f = fixture(t, { ...stable, ...changes });
+    const result = f.prepare('1.2.3', selected);
+    assert.notEqual(result.status, 0, result.stdout);
+    assert.throws(() => f.args(), { code: 'ENOENT' });
+  });
+}
+
+test('the channel follows the SemVer prerelease, not hyphens in build metadata', t => {
+  const f = fixture(t, { ciOnly: true });
+  const script = join(f.root, 'release-channel.sh');
+  writeFileSync(script, readFileSync(f.script, 'utf8').split('\npublication_record() {')[0] + '\nrelease_channel "$1"\n');
+  for (const [version, channel] of [
+    ['1.2.3', 'stable'], ['1.2.3+build-1', 'stable'], ['1.2.3+build.1-x', 'stable'],
+    ['1.2.3-alpha.1', 'canary'], ['1.2.3-rc.1', 'canary'], ['1.2.3-alpha.1+build-1', 'canary'],
+  ]) assert.equal(run('bash', [script, version], { env: f.env }).stdout.trim(), channel, version);
+});
+
+test('a final version with hyphenated build metadata keeps every stable gate', t => {
+  const f = fixture(t, { versions: ['1.2.3+build-1', '1.2.4-alpha.1'], noTag: true });
+  const result = f.prepare('1.2.3+build-1');
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /tag v1\.2\.3\+build-1 is missing/);
+  assert.throws(() => f.args(), { code: 'ENOENT' });
+});
+
+test('stable policy refuses a tag moved after preparation', t => {
+  const f = fixture(t, stable);
+  assert.equal(f.prepare('1.2.3').status, 0);
+  const configPath = join(f.root, 'config.json');
+  writeFileSync(configPath, JSON.stringify({ ...JSON.parse(readFileSync(configPath)), tagOid: 'f'.repeat(40) }));
+  const result = policy(f, '1.2.3');
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /tag v1\.2\.3 moved after preparation/);
+  assert.throws(() => readFileSync(join(f.root, 'work/1.2.3/policy.json')), { code: 'ENOENT' });
 });
 
 for (const selected of [['x86_64-linux'], ['aarch64-darwin', 'aarch64-darwin'], ['unknown']]) {
   test(`prepare refuses invalid platform selection: ${selected.join(',')}`, t => {
     const f = fixture(t);
-    assert.notEqual(f.prepare('1.2.3', selected).status, 0);
+    assert.notEqual(f.prepare('1.2.3-alpha.1', selected).status, 0);
   });
 }
 
@@ -484,14 +571,14 @@ for (const [label, changes, extraEnv] of [
 ]) {
   test(`prepare refuses ${label} before unsigned preparation`, t => {
     const f = fixture(t, changes);
-    assert.notEqual(f.prepare('1.2.3', [], extraEnv).status, 0);
+    assert.notEqual(f.prepare('1.2.3-alpha.1', [], extraEnv).status, 0);
     assert.throws(() => f.args(), { code: 'ENOENT' });
   });
 }
 
 test('seed refuses a rerun artifact that differs from the prepared signed candidate', t => {
   const f = fixture(t);
-  const prepared = f.prepare('1.2.3', ['aarch64-darwin']);
+  const prepared = f.prepare('1.2.3-alpha.1', ['aarch64-darwin']);
   assert.equal(prepared.status, 0, prepared.stderr);
   const configPath = join(f.root, 'config.json');
   const config = JSON.parse(readFileSync(configPath));
@@ -501,7 +588,7 @@ test('seed refuses a rerun artifact that differs from the prepared signed candid
   const signed = join(f.root, 'signed');
   mkdirSync(signed);
   writeFileSync(join(signed, 'release-head.json'), JSON.stringify({ signer_did: did }));
-  const result = spawnSync('bash', [f.script, 'seed', '1.2.3', signed], { encoding: 'utf8', env: f.env });
+  const result = spawnSync('bash', [f.script, 'seed', '1.2.3-alpha.1', signed], { encoding: 'utf8', env: f.env });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /changed after preparation/);
   assert.doesNotMatch(result.stdout, /systemctl|scp |get seed|On the seed/);
@@ -522,21 +609,21 @@ test('seed reconstructs all platform files and copies every other signed file fr
   cpSync(join(f.root, 'aarch64-darwin/inputs/N/artifacts/shared.tar.gz'), join(signed, 'shared.tar.gz'));
   // A signed file no native input carries.
   writeFileSync(join(signed, 'mac-only.bin'), 'mac only');
-  const result = run('bash', [f.script, 'seed', '1.2.3', signed], { env: f.env });
+  const result = run('bash', [f.script, 'seed', '1.2.3-alpha.1', signed], { env: f.env });
   assert.match(result.stdout, new RegExp(`Source commit: ${commit}`));
   assert.match(result.stdout, /Package run: 123 https:\/\/github.com\/Elacity\/elastos-runtime\/actions\/runs\/123/);
   assert.match(result.stdout, /Develop CI run: 456 https:\/\/github.com\/Elacity\/elastos-runtime\/actions\/runs\/456/);
   run('bash', ['-n'], { input: result.stdout });
-  const stage = join(f.root, 'stage/1.2.3');
+  const stage = join(f.root, 'stage/1.2.3-alpha.1');
   mkdirSync(join(stage, 'signed'), { recursive: true });
   // Copy exactly what the printed Mac scp line names.
   const copied = result.stdout.match(/^scp (.+) \S+:\S+\/signed\/$/m)[1].split(' ');
   for (const file of copied) cpSync(file, join(stage, 'signed', file.split('/').at(-1)));
   assert.ok(copied.every(file => !/elastos-|shared/.test(file.split('/').at(-1))), 'native artifacts come from the run');
-  cpSync(join(f.root, 'work/1.2.3/signed.SHA256SUMS'), join(stage, 'signed.SHA256SUMS'));
+  cpSync(join(f.root, 'work/1.2.3-alpha.1/signed.SHA256SUMS'), join(stage, 'signed.SHA256SUMS'));
   // Run only artifact reconstruction. Service and publication commands stay printed.
   const reconstruction = result.stdout.split('# On the seed as the service user,')[1].split('export ELASTOS_DATA_DIR=')[0];
   run('bash', ['-c', '#' + reconstruction], { env: { ...f.env, GH_TOKEN: 'fixture' } });
-  for (const p of platforms) assert.equal(readFileSync(join(stage, 'signed', `elastos-${p}`), 'utf8'), `${p}-1.2.3`);
+  for (const p of platforms) assert.equal(readFileSync(join(stage, 'signed', `elastos-${p}`), 'utf8'), `${p}-1.2.3-alpha.1`);
   assert.equal(readFileSync(join(stage, 'signed/mac-only.bin'), 'utf8'), 'mac only');
 });

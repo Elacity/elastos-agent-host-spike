@@ -115,7 +115,8 @@ class SignerTests(unittest.TestCase):
             f"{prefix}/git/commits/{WORKFLOW}": {"sha": WORKFLOW, "tree": {"sha": WORKFLOW_TREE}},
             f"{prefix}/actions/runs/123": self.package_run,
             f"{prefix}/git/ref/heads/main": {"ref": "refs/heads/main", "object": {"type": "commit", "sha": MAIN}},
-            f"{prefix}/git/commits/{MAIN}": {"sha": MAIN, "tree": {"sha": DEVELOP_TREE}},
+            # The release PR's merge commit: main carries exactly the tagged source tree.
+            f"{prefix}/git/commits/{MAIN}": {"sha": MAIN, "tree": {"sha": TREE}},
             f"{prefix}/git/ref/heads/develop": {"ref": "refs/heads/develop", "object": {"type": "commit", "sha": DEVELOP}},
             f"{prefix}/git/commits/{DEVELOP}": {"sha": DEVELOP, "tree": {"sha": DEVELOP_TREE}},
             f"{prefix}/compare/{COMMIT}...{MAIN}?per_page=1": {"status": "ahead", "behind_by": 0, "ahead_by": 1,
@@ -571,6 +572,20 @@ class SignerTests(unittest.TestCase):
         original["object"]["sha"] = MAIN
         with self.assertRaisesRegex(ValueError, "tag moved"):
             self.prepare()
+
+    def test_main_must_carry_the_approved_tree_before_and_after_confirmation(self):
+        prefix = f"/repos/{S.REPOSITORY}"
+        S.verify_source(self.policy, self.fetch)
+        self.prepare()
+        # Main advances to another tree between the policy and the typed DID.
+        self.api[f"{prefix}/git/commits/{MAIN}"]["tree"]["sha"] = DEVELOP_TREE
+        with self.assertRaisesRegex(ValueError, "main tree differs"):
+            S.verify_source(self.policy, self.fetch)
+        with self.assertRaisesRegex(ValueError, "main tree differs"):
+            self.prepare()
+        # Canary admission follows develop, whose tree moves with every merge.
+        self.canary_policy()
+        S.verify_source(self.policy, self.fetch)
 
     def canary_policy(self):
         self.policy["channel"] = "canary"

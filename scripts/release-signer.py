@@ -7,7 +7,8 @@ Only api.github.com supplies source authority, authenticated with GH_TOKEN when
 the launch passes one (env -i GH_TOKEN=...), else anonymously. Network, outage
 and rate-limit failures refuse with a distinct retry message. The operator-owned
 policy (outside the input root) pins repository/commit/tree/version/channel and
-either a canary develop_oid or a remote version tag/tag_oid for main admission,
+either a canary develop_oid or a remote version tag/tag_oid for main admission
+(main must contain the tagged commit and carry exactly its tree),
 publisher_did, manifest_sha256 and tool/python/openssl {path, sha256}, plus a
 custodian-owned key_path and max_file_bytes/max_snapshot_bytes quotas. The key
 is an Ed25519 PEM readable by OpenSSL only.
@@ -382,6 +383,9 @@ def verify_source(policy, fetch):
     require(head_commit.get("sha") == head["sha"] and type(head_commit.get("tree")) is dict,
             "typed " + branch + " commit required")
     oid(head_commit["tree"].get("sha"))
+    if not canary:
+        # A stable release is main itself: main carries exactly the approved tree.
+        require(head_commit["tree"]["sha"] == policy["tree"], "main tree differs from the approved source tree")
     compare = fetch(f"{prefix}/compare/{policy['commit']}...{head['sha']}?per_page=1")
     require(compare.get("status") in ("ahead", "identical")
             and type(compare.get("behind_by")) is int and compare["behind_by"] == 0

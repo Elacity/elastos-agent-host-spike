@@ -154,7 +154,7 @@ That matches the coordinated runtime release train better than per-crate changel
 
 ## Publishing a release
 
-A canary release moves through three places: GitHub builds it without keys, the
+A release moves through three places: GitHub builds it without keys, the
 operator Mac prepares and signs it, and the seed imports and serves it. Choose
 the version by the contract change (see Meaning) and update the changelog first;
 `scripts/publish-release.sh` checks the version format with
@@ -290,6 +290,22 @@ a SHA-256 pin. It supports the attestation verification flags used by the signer
    and merge the updated `scripts/update-hop-previous-release.json` into `develop`.
    It checks the signed head and release the seed now serves. Every pull
    request's CI update journey then starts from this release.
+
+**A final release** (`X.Y.Z`) uses the same steps and is published on
+`stable`; prereleases are published on `canary`. The seed serves one head, and
+a Home subscribed to `canary` also accepts a newer `stable` head from its
+trusted signer, so one signed stable head reaches canary Homes in System, and
+stable Homes and fresh installs through `install.sh`. A stable Home never
+accepts a canary head, and running `install.sh` again moves a canary Home to
+`stable`. Before step 1, merge the version change (`elastos/Cargo.toml` and the
+changelog) into `develop`, merge the release pull request from `develop` into
+`main`, and tag its `develop` commit `vX.Y.Z`. Build that commit in step 1.
+Prepare refuses unless the tag names the source commit, `main` contains it and
+has the same tree, `elastos/Cargo.toml` has that version and all three
+platforms are selected. The policy pins the tag for the signer, which checks
+again, before and after the DID is typed, that the tag names the source and
+that `main` contains it with the same tree; the stable release needs a signer
+copy installed from this source.
 
 The seed only answers requests. It serves three Carrier ops: `release_head`
 (the signed head), `content_fetch` (any object by CID, from its Kubo pins) and

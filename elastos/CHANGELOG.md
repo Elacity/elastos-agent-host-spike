@@ -14,6 +14,8 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Developer detail
 
+- `scripts/release-publish.sh` publishes a final version `X.Y.Z` on `stable`
+  from its tag `vX.Y.Z` on `main` (#335). See docs/VERSIONING.md.
 - CI's `release-upstream-assets` job runs the release's upstream asset build
   (`scripts/release-upstream-assets.py`, including the Browser helper source
   builds) for Linux ARM64 and Apple Silicon on every pull request that changes
