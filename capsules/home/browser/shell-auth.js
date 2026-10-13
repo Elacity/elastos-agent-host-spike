@@ -18,6 +18,7 @@ const unlockMonogram = document.querySelector("#home-unlock-monogram");
 const unlockPrimary = document.querySelector("#home-unlock-primary");
 const unlockSecondary = document.querySelector("#home-unlock-secondary");
 const unlockStatus = document.querySelector("#home-unlock-status");
+const unlockFaceStatus = document.querySelector("#home-unlock-face-status");
 const unlockName = document.querySelector("#home-unlock-name");
 const ownerToken = document.querySelector("#home-owner-token");
 const ownerTokenLabel = document.querySelector("#home-owner-token-label");
@@ -114,7 +115,7 @@ export async function showHomeUnlock(onUnlocked, options = {}) {
   } catch (error) {
     unlockMode = "signin";
     renderUnlockMode({ registered: true, guestRegistrationEnabled: false });
-    setUnlockStatus(String(error.message || error), "error");
+    setUnlockStatus(signInFailure("start", error).message, "error");
   }
 }
 
@@ -324,6 +325,84 @@ export async function requestPasskeyStepUp(appToken, operation, request) {
     }
     throw error;
   }
+}
+
+// Adds another passkey to the signed-in account: a fresh approval with the
+// current passkey (the step-up System updates use), then the new passkey.
+// Home bound both to the System launch that asked; the server accepts only an
+// owner (admin) and gives the new passkey that account. Errors are one plain
+// sentence.
+export async function addAccountPasskey(appToken) {
+  if (!window.PublicKeyCredential) {
+    throw new Error("Passkeys are not available in this browser.");
+  }
+  let stage = "approve";
+  try {
+    const stepUpToken = await requestPasskeyStepUp(appToken, "auth.passkey.add", {
+      schema: "elastos.auth.passkey.add.intent/v1",
+    });
+    stage = "begin";
+    const begin = await fetchJson("/api/auth/passkey/add/begin", {
+      method: "POST",
+      body: JSON.stringify({
+        schema: "elastos.auth.passkey.add.begin.request/v1",
+        app_token: appToken,
+        step_up_token: stepUpToken,
+      }),
+    });
+    if (
+      begin?.schema !== "elastos.auth.passkey.add.begin/v1"
+      || !boundedString(begin.ceremony_id, 128)
+      || !begin.options?.publicKey?.user
+    ) {
+      throw new Error("invalid passkey add challenge");
+    }
+    begin.options.publicKey.user.name = "ElastOS Home";
+    begin.options.publicKey.user.displayName = "ElastOS Home";
+    stage = "create";
+    const credential = await navigator.credentials.create(toCreationOptions(begin.options));
+    if (!credential) {
+      throw Object.assign(new Error("Passkey creation was cancelled."), { name: "NotAllowedError" });
+    }
+    stage = "complete";
+    const response = await fetchJson("/api/auth/passkey/add/complete", {
+      method: "POST",
+      body: JSON.stringify({
+        schema: "elastos.auth.passkey.add.complete.request/v1",
+        app_token: appToken,
+        ceremony_id: begin.ceremony_id,
+        response: serializeCreatedCredential(credential),
+      }),
+    });
+    if (response?.schema !== "elastos.auth.passkey.add.result/v1" || !readText(response.role)) {
+      throw new Error("invalid passkey add result");
+    }
+    return { role: readText(response.role) };
+  } catch (error) {
+    throw new Error(passkeyAddFailure(stage, error));
+  }
+}
+
+function passkeyAddFailure(stage, error) {
+  const status = Number(error && error.status) || 0;
+  const name = String(error && error.name || "");
+  const cancelled = name === "NotAllowedError" || name === "AbortError";
+  if (stage === "approve") {
+    return cancelled
+      ? "Your current passkey was not confirmed. Select Add passkey to try again."
+      : "Home could not confirm your current passkey. Select Add passkey to try again.";
+  }
+  if (stage === "create") {
+    if (cancelled) return "No new passkey was created. Select Add passkey to try again.";
+    if (name === "InvalidStateError") {
+      return "This device already has this passkey. Use another device or security key.";
+    }
+    return "This browser could not create a passkey. Try another browser or security key.";
+  }
+  if (!status && error instanceof TypeError) {
+    return "Home is not responding. Check that ElastOS is running, then try again.";
+  }
+  return "Home did not add the passkey. Select Add passkey to try again.";
 }
 
 function renderUnlockChecking() {
@@ -856,13 +935,16 @@ async function runPasskeySignIn() {
   busy = true;
   setButtonsDisabled(true);
   setUnlockStatus("Choose your passkey.", "muted");
+  let stage = "start";
   try {
     const begin = await fetchJson("/api/auth/passkey/authenticate/begin", { method: "POST" });
     const request = toRequestOptions(begin.options);
+    stage = "passkey";
     const credential = await navigator.credentials.get(request);
     if (!credential) {
-      throw new Error("Passkey sign-in was cancelled.");
+      throw Object.assign(new Error("Passkey sign-in was cancelled."), { name: "NotAllowedError" });
     }
+    stage = "verify";
     const response = await fetchJson("/api/auth/passkey/authenticate/complete", {
       method: "POST",
       body: JSON.stringify({
@@ -871,11 +953,45 @@ async function runPasskeySignIn() {
       }),
     });
     setHomeAuthorityToken(response?.home_token);
+    stage = "open";
     await unlockComplete(response);
+  } catch (error) {
+    throw signInFailure(stage, error);
   } finally {
     busy = false;
     setButtonsDisabled(false);
   }
+}
+
+// One plain reason and one next step per failed sign-in; never a status code
+// or server text. Stages: start (begin or status), passkey (the browser),
+// verify (Home checks the passkey), open (Home opens after sign-in).
+function signInFailure(stage, error) {
+  const status = Number(error && error.status) || 0;
+  const name = String(error && error.name || "");
+  let message;
+  let tone = "error";
+  if (stage === "open") {
+    message = "Home could not open after sign-in. Reload this page.";
+  } else if (status === 429) {
+    message = "Sign-in is busy right now. Wait a minute, then try again.";
+  } else if (stage === "passkey") {
+    if (name === "NotAllowedError" || name === "AbortError") {
+      message = "No passkey was used. Select your account to try again.";
+      tone = "muted";
+    } else if (name === "SecurityError") {
+      message = "Passkeys do not work at this address. Open Home at the address where you created your passkey.";
+    } else {
+      message = "This browser could not use your passkey. Try again in the browser where you created it.";
+    }
+  } else if (!status) {
+    message = "Home is not responding. Check that ElastOS is running, then try again.";
+  } else if (stage === "verify") {
+    message = "Home did not accept this passkey. Use the passkey you created for this Home.";
+  } else {
+    message = "Home could not start sign-in. Try again in a moment.";
+  }
+  return Object.assign(new Error(message), { signInFailure: true, tone });
 }
 
 async function unlockComplete(response, flow = null) {
@@ -898,9 +1014,8 @@ export function profileReadinessActionTarget(response) {
 }
 
 function reportUnlockError(error) {
-  if (isPasskeyNotSelected(error) && unlockMode === "signin_guest_enabled") {
-    renderUnlockMode({ registered: true, guestRegistrationEnabled: true });
-    setUnlockStatus("No passkey selected.", "muted");
+  if (error?.signInFailure) {
+    setUnlockStatus(error.message, error.tone);
     return;
   }
   setUnlockStatus(String(error.message || error), "error");
@@ -917,14 +1032,6 @@ function setButtonsDisabled(disabled) {
     unlockSecondary.disabled = disabled;
   }
   if (enrollmentDismiss) enrollmentDismiss.disabled = disabled;
-}
-
-function isPasskeyNotSelected(error) {
-  const name = String(error && error.name || "");
-  const message = String(error && error.message || error || "");
-  return name === "NotAllowedError"
-    || message.includes("timed out or was not allowed")
-    || message.includes("Passkey sign-in was cancelled");
 }
 
 function setUnlockNameVisible(visible) {
@@ -950,12 +1057,13 @@ function readUnlockName() {
 }
 
 function setUnlockStatus(message, tone) {
-  if (!unlockStatus) {
-    return;
+  // The card and the lock face each show the same one line.
+  for (const node of [unlockStatus, unlockFaceStatus]) {
+    if (!node) continue;
+    node.textContent = message;
+    node.hidden = !message;
+    node.dataset.tone = tone || "muted";
   }
-  unlockStatus.textContent = message;
-  unlockStatus.hidden = !message;
-  unlockStatus.dataset.tone = tone || "muted";
 }
 
 function readUnlockPersonLabel(value) {

@@ -20,6 +20,7 @@ import {
   targetById,
 } from "./shell-core.js?v=home-update-20261003a";
 import {
+  addAccountPasskey,
   bindHomeUnlock,
   hideHomeUnlock,
   isHomeAuthError,
@@ -1730,6 +1731,36 @@ window.addEventListener("message", (event) => {
       .then((stepUpToken) => reply({ stepUpToken }))
       .catch((error) => reply({
         error: error instanceof Error ? error.message : "Passkey verification failed.",
+      }));
+    return;
+  }
+  if (data.type === "elastos.home.passkey-add.request/v1") {
+    const requestId = typeof data.requestId === "string" ? data.requestId.trim() : "";
+    if (
+      context.kind !== "app-frame"
+      || context.targetId !== SYSTEM_APP_ID
+      || !hasExactMessageKeys(data, ["type", "requestId", "homeToken"])
+      || !requestId
+      || requestId.length > 128
+    ) {
+      console.warn("home ignored unauthorized passkey add request", context.targetId);
+      return;
+    }
+    const reply = (payload) => {
+      try {
+        event.source?.postMessage({
+          type: "elastos.home.passkey-add.result/v1",
+          requestId,
+          ...payload,
+        }, OPAQUE_FRAME_TARGET);
+      } catch (error) {
+        console.error("home could not return passkey add result", error);
+      }
+    };
+    addAccountPasskey(context.homeToken)
+      .then(({ role }) => reply({ role }))
+      .catch((error) => reply({
+        error: error instanceof Error ? error.message : "Home did not add the passkey.",
       }));
     return;
   }

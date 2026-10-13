@@ -616,7 +616,7 @@ pub(crate) fn issue_passkey_step_up_token_at_for_test(
     .map(|issued| issued.token)
 }
 
-fn require_hosted_step_up_launch(
+pub(in crate::api) fn require_hosted_step_up_launch(
     host_context: &HomeLaunchTokenContext,
     launch: &RequiredHomeLaunchToken,
 ) -> anyhow::Result<()> {

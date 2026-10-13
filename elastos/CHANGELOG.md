@@ -6,6 +6,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Added
+
+- An owner (admin) can add another passkey, such as a second device or a security key, in System → Accounts → Add passkey. You confirm with your current passkey first, and the new passkey opens the same account as an admin (#338).
+
 ### Changed
 
 - When an update cannot be applied from this version (the release uses a
@@ -16,6 +20,11 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - Homes on the test channel also accept the final release, so they update to
   0.8.0 in System. Running the install command again moves them to the stable
   channel (#335).
+- Make admin and Make guest in System → Accounts change every passkey of that account together (#338).
+
+### Fixed
+
+- When sign-in fails, the lock screen now says why in one line and what to do next, instead of showing nothing (#338).
 
 ### Developer detail
 
