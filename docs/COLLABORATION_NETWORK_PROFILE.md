@@ -258,12 +258,15 @@ The output contains `collaboration-network-release-v1.json` and
 `collaboration_network` fragment for the components manifest, with the exact
 startup-file CID, network ID and signer set. The tool checks ticket bounds,
 canonical encoding and node binding. The reviewed, key-free Runtime verifier
-checks complete transport semantics before release preparation admits the
-output:
+checks complete transport semantics before the output goes into the source.
+It reads only owner-only files, and the signer writes read-only (`0444`)
+outputs, so check an owner-only copy:
 
 ```text
+install -d -m 700 /path/to/check
+install -m 600 /path/to/new-community-output/collaboration-network-release-v1.json /path/to/check/
 elastos collaboration-config verify \
-  --input /path/to/new-community-output/collaboration-network-release-v1.json
+  --input /path/to/check/collaboration-network-release-v1.json
 ```
 
 The release then carries the output like `model-catalog.json`: a reviewed
