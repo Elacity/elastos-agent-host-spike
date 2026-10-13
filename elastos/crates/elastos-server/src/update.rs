@@ -1358,9 +1358,9 @@ async fn run_upgrade_with_restart(
         );
         Ok(serde_json::from_slice(&comp_data)?)
     })())?;
-    // A signed format or component kind this Runtime does not know is a newer
-    // release's; only the publisher's install command applies it.
-    let manifest: crate::setup::ComponentsManifest = installer_required(
+    // Only a schema this Runtime does not know is a newer release format; a
+    // malformed manifest of the known schema is the publisher's refusal.
+    installer_required(
         source,
         version,
         (|| {
@@ -1369,20 +1369,27 @@ async fn run_upgrade_with_restart(
                 "release components use schema {}",
                 value["schema"]
             );
-            let manifest = serde_json::from_value(value)?;
-            let unknown = crate::setup::unknown_kind_components(&manifest, &component_platform);
-            anyhow::ensure!(
-                unknown.is_empty(),
-                "release components of a kind this Runtime does not know: {}",
-                unknown.join(", ")
-            );
-            Ok(manifest)
+            Ok(())
         })(),
     )?;
-    refused(crate::setup::admit_release_components(
-        &manifest,
-        &component_platform,
-    ))?;
+    // Every understood check runs on the known components first; a newer kind
+    // left over is a newer release's, which only the install command applies.
+    let unknown = refused((|| {
+        let manifest: crate::setup::ComponentsManifest = serde_json::from_value(value)?;
+        crate::setup::admit_release_components(&manifest, &component_platform)
+    })())?;
+    installer_required(
+        source,
+        version,
+        if unknown.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "release components of a kind this Runtime does not know: {}",
+                unknown.join(", ")
+            ))
+        },
+    )?;
 
     if apply_mode == ApplyMode::Normal {
         // 10. Atomic replace binary
@@ -3431,6 +3438,8 @@ mod tests {
         for case in [
             "newer kind",
             "newer format",
+            "malformed known format",
+            "newer kind beside a refused known component",
             "tampered",
             "other signer",
             "other platform",
@@ -3456,6 +3465,13 @@ mod tests {
                 if case == "newer format" {
                     value["schema"] = serde_json::json!("elastos.components/v2");
                     value["external"] = serde_json::json!({});
+                }
+                if case == "malformed known format" {
+                    value["external"] = serde_json::Value::Null;
+                }
+                if case == "newer kind beside a refused known component" {
+                    value["external"]["known"] = serde_json::json!({"install_path":"bin/known",
+                        "platforms":{"*":{"release_path":"known","cid":raw_cid(b"known")}}});
                 }
                 let components = serde_json::to_vec(&value).unwrap();
                 let version = if case == "older" { "0.5.0" } else { "0.7.1" };
@@ -3531,7 +3547,10 @@ mod tests {
                         assert!(!message.contains("not valid"), "{message}");
                     }
                     "tampered" => assert!(is(|cause| cause.is::<DownloadMismatch>()), "{message}"),
-                    "other signer" | "older" => {
+                    "other signer"
+                    | "older"
+                    | "malformed known format"
+                    | "newer kind beside a refused known component" => {
                         assert!(is(|cause| cause.is::<ReleaseRefused>()), "{message}");
                         assert!(!is(|cause| cause.is::<InstallerRequired>()), "{message}");
                     }

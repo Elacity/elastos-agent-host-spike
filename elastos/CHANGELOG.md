@@ -16,9 +16,11 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Developer detail
 
-- A signed components manifest whose schema or component kind (`strategy`)
-  this Runtime does not know is `InstallerRequired` (`unknown_kind_components`);
-  other admission refusals stay `ReleaseRefused`. System's status and
+- A signed components manifest whose schema this Runtime does not know, or
+  whose known components pass every check but which also names a component
+  kind (`strategy`) this Runtime does not know, is `InstallerRequired`; a
+  malformed manifest of the known schema and every other admission refusal stay
+  `ReleaseRefused`. System's status and
   `elastos update` print `curl -fsSL '<publisher gateway>/install.sh' | bash`,
   the URL built with URL operations (no query, fragment or credentials) and
   single-quoted as one shell word.

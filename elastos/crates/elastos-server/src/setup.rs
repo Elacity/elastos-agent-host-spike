@@ -3273,52 +3273,30 @@ fn valid_release_artifact_checksum<'a>(
     }
 }
 
-/// Components, sorted, whose artifact or capsule metadata on `platform` uses a
-/// strategy this Runtime does not know: a newer release's kind, which this
-/// updater cannot install. Only the publisher's install command applies it.
-pub(crate) fn unknown_kind_components(
-    manifest: &ComponentsManifest,
-    platform: &str,
-) -> Vec<String> {
-    let platform = RELEASE_PLATFORM_PAIRS
-        .iter()
-        .find_map(|(release, setup)| (setup == platform).then_some(release.as_str()))
-        .unwrap_or(platform);
-    let mut unknown: Vec<String> = manifest
-        .external
-        .iter()
-        .filter(|(_, component)| {
-            resolve_platform_info(component, platform)
-                .into_iter()
-                .chain(component.capsule_metadata.as_ref().and_then(|metadata| {
-                    resolve_component_capsule_metadata_platform_info(metadata, platform)
-                }))
-                .any(|info| {
-                    !matches!(
-                        info.strategy.as_deref(),
-                        None | Some(
-                            "prebuilt" | "source-build" | "local-copy" | browser_vm_image::NAME
-                        )
-                    )
-                })
-        })
-        .map(|(name, _)| name.clone())
-        .collect();
-    unknown.sort();
-    unknown
+/// Strategies this Runtime knows: release kinds, Browser's image and the
+/// development strategies setup keeps (which release admission still refuses).
+fn known_strategy(info: &PlatformInfo) -> bool {
+    matches!(
+        info.strategy.as_deref(),
+        None | Some("prebuilt" | "source-build" | "local-copy" | browser_vm_image::NAME)
+    )
 }
 
 /// Admit all applicable release components before downloads or installation.
-/// Setup retains its explicit development strategies outside release admission.
+/// Every check this Runtime understands runs on every known asset first; then
+/// the components, sorted, with an asset of a strategy it does not know (a newer
+/// release's kind, which only the publisher's install command applies) are
+/// returned. Setup retains its explicit development strategies outside release admission.
 pub(crate) fn admit_release_components(
     manifest: &ComponentsManifest,
     platform: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<String>> {
     let platform = RELEASE_PLATFORM_PAIRS
         .iter()
         .find_map(|(release, setup)| (setup == platform).then_some(release.as_str()))
         .unwrap_or(platform);
     refuse_reserved_install_targets(manifest, platform)?;
+    let mut unknown = Vec::new();
     for (name, component) in &manifest.external {
         let assets = [
             resolve_platform_info(component, platform),
@@ -3328,6 +3306,10 @@ pub(crate) fn admit_release_components(
         ];
         for (index, info) in assets.into_iter().enumerate() {
             let Some(info) = info else { continue };
+            if !known_strategy(info) {
+                unknown.push(name.clone());
+                continue;
+            }
             let image = index == 0 && name == browser_vm_image::NAME;
             if image {
                 browser_vm_image::component_info(manifest, platform)?;
@@ -3340,7 +3322,9 @@ pub(crate) fn admit_release_components(
             valid_release_artifact_checksum(name, info.checksum.as_deref())?;
         }
     }
-    Ok(())
+    unknown.sort();
+    unknown.dedup();
+    Ok(unknown)
 }
 
 /// One support component an update installs or refreshes.
@@ -7348,7 +7332,6 @@ pub(crate) mod tests {
                 false,
             ),
             (serde_json::json!({}), false),
-            (serde_json::json!({"strategy":"unknown"}), false),
         ] {
             info["release_path"] = "fixture".into();
             for (key, platform) in [
@@ -7367,6 +7350,51 @@ pub(crate) mod tests {
                 );
                 assert!(admit_release_components(&manifest, "linux-amd64").is_ok());
             }
+        }
+    }
+
+    /// A newer kind is named for the install command only after every check this
+    /// Runtime understands passed on the known components beside it.
+    #[test]
+    fn release_admission_names_newer_kinds_after_checking_known_components() {
+        let checksum = format!("sha256:{}", "a".repeat(64));
+        let manifest = |known: serde_json::Value| -> ComponentsManifest {
+            serde_json::from_value(serde_json::json!({"profiles":{}, "external":{
+                "zeta":{"install_path":"tools/zeta","platforms":{"darwin-arm64":{"strategy":"future-kind"}}},
+                "alpha":{"install_path":"bin/alpha","platforms":{"darwin-arm64":{
+                    "release_path":"alpha","checksum":checksum}},
+                    "capsule_metadata":{"platforms":{"darwin-arm64":{"strategy":"future-metadata"}}}},
+                "known":known}}))
+            .unwrap()
+        };
+        let good = serde_json::json!({"install_path":"bin/known","platforms":{"darwin-arm64":{
+            "release_path":"known","checksum":checksum}}});
+        for platform in ["darwin-arm64", "aarch64-darwin"] {
+            assert_eq!(
+                admit_release_components(&manifest(good.clone()), platform).unwrap(),
+                ["alpha", "zeta"]
+            );
+        }
+        for (known, refusal) in [
+            (
+                serde_json::json!({"install_path":"bin/known","platforms":{"darwin-arm64":{"release_path":"known"}}}),
+                "missing checksum",
+            ),
+            (
+                serde_json::json!({"install_path":"tools/x.elastos-replace","platforms":{"darwin-arm64":{
+                    "release_path":"known","checksum":checksum}}}),
+                "reserved replacement suffix",
+            ),
+            (
+                serde_json::json!({"install_path":"bin/known","platforms":{"darwin-arm64":{
+                    "strategy":"local-copy","release_path":"known","checksum":checksum}}}),
+                "development or unsupported release strategy",
+            ),
+        ] {
+            let error = admit_release_components(&manifest(known), "darwin-arm64")
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(refusal), "{error}");
         }
     }
 
@@ -7498,8 +7526,12 @@ pub(crate) mod tests {
             "x86_64-linux",
             "aarch64-linux",
         ] {
-            admit_release_components(&manifest, platform)
-                .unwrap_or_else(|error| panic!("{platform}: {error:#}"));
+            assert_eq!(
+                admit_release_components(&manifest, platform)
+                    .unwrap_or_else(|error| panic!("{platform}: {error:#}")),
+                Vec::<String>::new(),
+                "{platform}"
+            );
         }
         // Home obtains Browser VM helpers when it prepares the local Engine.
         // ARM Linux receives crosvm; the guest archive owns its kernel.
