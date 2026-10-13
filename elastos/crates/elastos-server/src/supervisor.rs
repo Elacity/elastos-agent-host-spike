@@ -2491,6 +2491,7 @@ mod tests {
         let data = tempfile::tempdir().unwrap().keep();
         let registry = ComponentsManifest {
             model_catalog: None,
+            collaboration_network: None,
             external: std::collections::HashMap::new(),
             capsules: std::collections::HashMap::from([("fixture-app".to_string(), entry)]),
             profiles: std::collections::HashMap::new(),
