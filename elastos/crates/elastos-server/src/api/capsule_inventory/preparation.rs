@@ -30,6 +30,7 @@ const TERMINAL_HISTORY_SECONDS: u64 = 3600;
 const MAX_PACKAGE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const CAPACITY_WINDOW_BYTES: u64 = 1024 * 1024;
 const ADMITTED_MODEL_CONTEXT_SIZE: u32 = 4096;
+const ACTIVATION_RETRY_SECONDS: u64 = 30;
 
 // Static checkpoints retain a useful cause after cleanup without retaining
 // provider text, host paths, credentials or media bytes in the inventory.
@@ -1272,6 +1273,8 @@ pub(in crate::api) struct PreparationOwner {
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     stopping: Arc<AtomicBool>,
     read_memory: MemoryReader,
+    activation_retry_after: Arc<Mutex<std::collections::BTreeMap<String, tokio::time::Instant>>>,
+    verified_packages: Arc<tokio::sync::Mutex<Vec<VerifiedModelPackage>>>,
 }
 
 impl Default for PreparationOwner {
@@ -1294,6 +1297,8 @@ impl PreparationOwner {
             worker: Mutex::new(None),
             stopping: Arc::new(AtomicBool::new(false)),
             read_memory,
+            activation_retry_after: Arc::new(Mutex::new(Default::default())),
+            verified_packages: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -1366,7 +1371,9 @@ impl PreparationOwner {
             value["kept"] = serde_json::json!(kept);
             value
         };
-        let starting = record.pre_dispatch() && caller.method.operation.as_deref() == Some("use");
+        let starting = record.pre_dispatch()
+            && registry.is_some()
+            && matches!(caller.method.operation.as_deref(), Some("use" | "status"));
         let capacity_resume = record.state == PreparationState::CapacityPending;
         let activation_retry = record.state == PreparationState::Admitted
             && (caller.method.operation.as_deref() == Some("use")
@@ -1383,10 +1390,31 @@ impl PreparationOwner {
         if worker.as_ref().is_some_and(|worker| !worker.is_finished()) {
             return Ok(project(&record));
         }
+        // Status observes a refusal without starting another multi-GB check
+        // on each poll. Explicit Use remains an immediate owner retry.
+        if activation_retry
+            && caller.method.operation.as_deref() == Some("status")
+            && self
+                .activation_retry_after
+                .lock()
+                .map_err(|_| anyhow::anyhow!("preparation retry unavailable"))?
+                .get(&record.admission_id)
+                .is_some_and(|after| tokio::time::Instant::now() < *after)
+        {
+            return Ok(project(&record));
+        }
         let registry = registry.context("preparation backend unavailable")?;
         let inventory = Inventory::open(data_dir, false)?;
         let worker_lock = inventory.worker_lock()?;
         let mut snapshot = inventory.load()?;
+        self.activation_retry_after
+            .lock()
+            .map_err(|_| anyhow::anyhow!("preparation retry unavailable"))?
+            .retain(|admission, _| {
+                snapshot.records.iter().any(|record| {
+                    record.state == PreparationState::Admitted && record.admission_id == *admission
+                })
+            });
         if starting || capacity_resume {
             current_entry(data_dir, &record)?;
         }
@@ -1488,6 +1516,9 @@ impl PreparationOwner {
         let data = data_dir.to_path_buf();
         let stopping = self.stopping.clone();
         let operation = current.operation_id.clone();
+        let admission = current.admission_id.clone();
+        let retry_after = self.activation_retry_after.clone();
+        let verified_packages = self.verified_packages.clone();
         *worker = Some(tokio::spawn(async move {
             let starting = if capacity_pending {
                 match prepare_capacity(
@@ -1569,16 +1600,30 @@ impl PreparationOwner {
             }
             // Admission and activation share this exact inventory worker guard.
             // Short snapshot locks remain available during provider I/O.
-            if let Err(error) = activate_admitted_model(
+            let mut verified = verified_packages.lock().await;
+            let activation = activate_admitted_model_cached(
                 &data,
                 &registry,
                 &operation,
                 &stopping,
                 &revalidate,
                 &worker_lock,
+                Some(&mut *verified),
             )
-            .await
-            {
+            .await;
+            drop(verified);
+            if let Ok(mut retries) = retry_after.lock() {
+                if activation.is_err() {
+                    retries.insert(
+                        admission,
+                        tokio::time::Instant::now()
+                            + std::time::Duration::from_secs(ACTIVATION_RETRY_SECONDS),
+                    );
+                } else {
+                    retries.remove(&admission);
+                }
+            }
+            if let Err(error) = activation {
                 let phase = match error.downcast_ref::<PreparationBudgetRefusal>() {
                     Some(PreparationBudgetRefusal::Cache) => PreparationFailurePhase::CacheBudget,
                     Some(PreparationBudgetRefusal::Memory) => PreparationFailurePhase::MemoryBudget,
@@ -1599,6 +1644,7 @@ impl PreparationOwner {
     }
 }
 
+#[cfg(test)]
 async fn activate_admitted_model(
     data_dir: &Path,
     registry: &elastos_runtime::provider::ProviderRegistry,
@@ -1606,6 +1652,21 @@ async fn activate_admitted_model(
     stopping: &AtomicBool,
     revalidate: &Revalidate,
     worker: &FileLock,
+) -> anyhow::Result<()> {
+    activate_admitted_model_cached(
+        data_dir, registry, operation, stopping, revalidate, worker, None,
+    )
+    .await
+}
+
+async fn activate_admitted_model_cached(
+    data_dir: &Path,
+    registry: &elastos_runtime::provider::ProviderRegistry,
+    operation: &str,
+    stopping: &AtomicBool,
+    revalidate: &Revalidate,
+    worker: &FileLock,
+    verified: Option<&mut Vec<VerifiedModelPackage>>,
 ) -> anyhow::Result<()> {
     let record = load_operation(data_dir, operation)?;
     if record.state != PreparationState::Admitted {
@@ -1620,7 +1681,7 @@ async fn activate_admitted_model(
     );
     current_entry(data_dir, &record)?;
     let mut config = crate::api::model_provider_bridge_config(data_dir)?;
-    append_admitted_model_offers_locked(data_dir, registry, &mut config, worker).await?;
+    append_admitted_model_offers_cached(data_dir, registry, &mut config, worker, verified).await?;
     preserve_active_model_offers(data_dir, registry, &mut config).await?;
     revalidate()?;
     ensure!(
@@ -3828,13 +3889,73 @@ pub async fn complete_admitted_model_startup(
     Ok(())
 }
 
+/// An owner-local verification receipt. Restart creates an empty cache. Reuse
+/// reopens private owned files and checks stamps and the exact index. Changed
+/// files require verification; unsafe paths and ownership remain refused.
+#[derive(PartialEq)]
+struct VerifiedModelPackage {
+    path: std::path::PathBuf,
+    admission_id: String,
+    package_cid: String,
+    entrypoint: String,
+    index: Vec<u8>,
+    files: Vec<storage::Stamp>,
+}
+
+impl VerifiedModelPackage {
+    fn inspect(
+        stage: &storage::Stage,
+        record: &PreparationRecord,
+        entry: &super::VerifiedModelCatalogEntry,
+        closure: &crate::content::ContentObjectManifest,
+    ) -> anyhow::Result<Self> {
+        let index = stage.read_index()?;
+        ensure!(
+            index.len() as u64 == record.index_bytes
+                && serde_json::from_slice::<serde_json::Value>(&index)? == entry.object_manifest,
+            "stored index differs from signed catalog"
+        );
+        Ok(Self {
+            path: stage.path.clone(),
+            admission_id: record.admission_id.clone(),
+            package_cid: record.package_cid.clone(),
+            entrypoint: entry.manifest.entrypoint.clone(),
+            index,
+            files: closure
+                .files
+                .iter()
+                .map(|file| stage.file_stamp(file))
+                .collect::<anyhow::Result<_>>()?,
+        })
+    }
+}
+
 async fn append_admitted_model_offers_locked(
     data_dir: &Path,
     registry: &elastos_runtime::provider::ProviderRegistry,
     config: &mut elastos_runtime::provider::BridgeProviderConfig,
+    worker: &FileLock,
+) -> anyhow::Result<()> {
+    append_admitted_model_offers_cached(data_dir, registry, config, worker, None).await
+}
+
+async fn append_admitted_model_offers_cached(
+    data_dir: &Path,
+    registry: &elastos_runtime::provider::ProviderRegistry,
+    config: &mut elastos_runtime::provider::BridgeProviderConfig,
     _worker: &FileLock,
+    mut verified: Option<&mut Vec<VerifiedModelPackage>>,
 ) -> anyhow::Result<()> {
     let snapshot = Inventory::open(data_dir, false)?.load()?;
+    if let Some(cache) = &mut verified {
+        cache.retain(|package| {
+            snapshot.records.iter().any(|record| {
+                record.state == PreparationState::Admitted
+                    && record.admission_id == package.admission_id
+                    && record.package_cid == package.package_cid
+            })
+        });
+    }
     if !snapshot
         .records
         .iter()
@@ -3878,12 +3999,33 @@ async fn append_admitted_model_offers_locked(
             &entry.cid,
             &serde_json::to_vec(&entry.object_manifest)?,
         )?;
-        for file in &closure.files {
-            stage.verify_model_file(file, file.path == entry.manifest.entrypoint)?;
+        let observed = VerifiedModelPackage::inspect(&stage, record, &entry, &closure)?;
+        let reused = verified
+            .as_ref()
+            .is_some_and(|cache| cache.contains(&observed));
+        if !reused {
+            for file in &closure.files {
+                stage.verify_model_file(file, file.path == entry.manifest.entrypoint)?;
+            }
         }
         // The local verifier is lazy and may be cold after Runtime restart.
         registry.prepare_local_ipfs_backend().await?;
-        verify_package_identity(registry, &stage, record, &entry, &closure).await?;
+        if !reused {
+            verify_package_identity(registry, &stage, record, &entry, &closure).await?;
+        }
+        ensure!(
+            VerifiedModelPackage::inspect(&stage, record, &entry, &closure)? == observed,
+            "admitted package changed during activation verification"
+        );
+        if !reused {
+            if let Some(cache) = &mut verified {
+                cache.retain(|package| {
+                    package.path != observed.path || package.admission_id != observed.admission_id
+                });
+                ensure!(cache.len() < MAX_RECORDS, "activation cache exceeds bound");
+                cache.push(observed);
+            }
+        }
         current_entry(data_dir, record)?;
         ensure!(
             super::read_model_catalog_file(data_dir, "components.json", 4 * 1024 * 1024)?
@@ -7040,6 +7182,36 @@ mod tests {
                 .iter()
                 .filter(|op| *op == "cat")
                 .count();
+            let hashes = || {
+                backend
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|op| *op == "runtime_hash_staged_directory")
+                    .count()
+            };
+            let verified = hashes();
+            assert_eq!(model.calls.lock().unwrap().len(), 1);
+            tokio::time::pause();
+            for _ in 0..10 {
+                let status = owner
+                    .invoke_fixture(
+                        root.path(),
+                        Some(registry.clone()),
+                        caller(&context(), &method("status")),
+                        "poll-refused-activation",
+                        &serde_json::json!({"operation_id":operation}),
+                        Arc::new(|| Ok(())),
+                    )
+                    .unwrap();
+                assert_eq!(status["failure_class"], "activation_unavailable");
+                assert!(owner.worker.lock().unwrap().is_none());
+                tokio::time::advance(std::time::Duration::from_millis(1500)).await;
+            }
+            assert_eq!(model.calls.lock().unwrap().len(), 1);
+            assert_eq!(hashes(), verified);
+            tokio::time::advance(std::time::Duration::from_secs(30)).await;
             let pending_status = owner
                 .invoke_fixture(
                     root.path(),
@@ -7052,12 +7224,15 @@ mod tests {
                 .unwrap();
             assert_eq!(pending_status["failure_class"], "activation_unavailable");
             join_worker(&owner).await;
+            assert_eq!(model.calls.lock().unwrap().len(), 2);
+            assert_eq!(hashes(), verified, "unchanged verified files are reused");
             assert!(
                 load_operation(root.path(), operation)
                     .unwrap()
                     .activation_pending
             );
             model.busy.store(false, Ordering::Release);
+            tokio::time::advance(std::time::Duration::from_secs(30)).await;
             owner
                 .invoke_fixture(
                     root.path(),
@@ -7087,6 +7262,202 @@ mod tests {
                 reads
             );
             assert!(model.configured.lock().unwrap().is_some());
+            assert_eq!(model.calls.lock().unwrap().len(), 3);
+            assert_eq!(hashes(), verified);
+        }
+
+        #[tokio::test]
+        async fn model_activation_cached_verification_rehashes_replaced_or_changed_files() {
+            let (root, record, backend, registry) = staged_fixture(now().unwrap(), true).await;
+            admit(root.path(), &record);
+            let _engine = install_engine(root.path());
+            let model = Arc::new(ModelActivationFixture::default());
+            model.busy.store(true, Ordering::Release);
+            registry
+                .register_sub_provider("model", model.clone())
+                .await
+                .unwrap();
+            let owner = test_owner();
+            owner
+                .invoke_fixture(
+                    root.path(),
+                    Some(registry.clone()),
+                    caller(&context(), &method("status")),
+                    "first-activation",
+                    &serde_json::json!({"operation_id":record.operation_id}),
+                    Arc::new(|| Ok(())),
+                )
+                .unwrap();
+            join_worker(&owner).await;
+            let hashes = || {
+                backend
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|op| *op == "runtime_hash_staged_directory")
+                    .count()
+            };
+            assert_eq!(hashes(), 1);
+            let stage = Inventory::open(root.path(), false)
+                .unwrap()
+                .admitted(&record.admission_id)
+                .unwrap();
+            let weights = stage.path.join("weights.gguf");
+            let original = std::fs::read(&weights).unwrap();
+            let replacement = root.path().join("weights-replacement");
+            std::fs::write(&replacement, &original).unwrap();
+            std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::rename(&replacement, &weights).unwrap();
+            let retry = || {
+                owner
+                    .invoke_fixture(
+                        root.path(),
+                        Some(registry.clone()),
+                        caller(&context(), &method("use")),
+                        &record.request_binding.request_id,
+                        &serde_json::json!({"cid":record.package_cid}),
+                        Arc::new(|| Ok(())),
+                    )
+                    .unwrap()
+            };
+            retry();
+            join_worker(&owner).await;
+            assert_eq!(hashes(), 2, "a new inode requires full verification");
+            assert_eq!(model.calls.lock().unwrap().len(), 2);
+            let mut corrupt = original.clone();
+            *corrupt.last_mut().unwrap() ^= 1;
+            std::fs::write(&weights, corrupt).unwrap();
+            retry();
+            join_worker(&owner).await;
+            assert_eq!(hashes(), 2, "invalid bytes refuse before the CID verifier");
+            assert_eq!(
+                model.calls.lock().unwrap().len(),
+                2,
+                "invalid bytes never reach Init"
+            );
+            let refused = load_operation(root.path(), &record.operation_id).unwrap();
+            assert!(refused.activation_pending);
+            assert_eq!(
+                refused.failure_phase,
+                Some(PreparationFailurePhase::Activation)
+            );
+            std::fs::write(&weights, &original).unwrap();
+            model.busy.store(false, Ordering::Release);
+            retry();
+            join_worker(&owner).await;
+            assert_eq!(hashes(), 3, "restored bytes require fresh verification");
+            let ready = load_operation(root.path(), &record.operation_id).unwrap();
+            assert!(!ready.activation_pending);
+            assert_eq!(ready.admission_id, record.admission_id);
+            assert_eq!(std::fs::read(&weights).unwrap(), original);
+        }
+
+        #[tokio::test]
+        async fn model_reserved_status_starts_after_the_activation_worker_drains() {
+            let root = tempfile::tempdir().unwrap();
+            let second_cid = cid::Cid::new_v1(
+                0x70,
+                cid::multihash::Multihash::<64>::wrap(0x12, &Sha256::digest(b"waiting model"))
+                    .unwrap(),
+            )
+            .to_string();
+            let (mut payload, primary) = package_fixture(b"GGUF\x03\0\0\0fixture".to_vec());
+            let (second, files) = package_fixture_named(
+                b"GGUF\x03\0\0\0second".to_vec(),
+                b"second provenance",
+                "waiting-model-fixture",
+                &second_cid,
+            );
+            payload["entries"]
+                .as_array_mut()
+                .unwrap()
+                .push(second["entries"][0].clone());
+            write_preparation_catalog(root.path(), &payload);
+            let first_cid = payload["entries"][0]["cid"].as_str().unwrap();
+            let mut backend = PreparationBackend::new(primary, first_cid.into());
+            backend.extra_packages.insert(second_cid.clone(), files);
+            let registry = Arc::new(elastos_runtime::provider::ProviderRegistry::new());
+            registry
+                .register_sub_provider("ipfs", Arc::new(backend))
+                .await
+                .unwrap();
+            register_content(&registry, root.path()).await;
+            let _engine = install_engine(root.path());
+            let model = Arc::new(ModelActivationFixture::default());
+            model.hold.store(true, Ordering::Release);
+            registry
+                .register_sub_provider("model", model.clone())
+                .await
+                .unwrap();
+            let owner = test_owner();
+            let first = owner
+                .invoke_fixture(
+                    root.path(),
+                    Some(registry.clone()),
+                    caller(&context(), &method("use")),
+                    "first-model",
+                    &serde_json::json!({"cid":first_cid}),
+                    Arc::new(|| Ok(())),
+                )
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), model.entered.notified())
+                .await
+                .unwrap();
+            assert_eq!(
+                load_operation(root.path(), first["operation_id"].as_str().unwrap())
+                    .unwrap()
+                    .state,
+                PreparationState::Admitted
+            );
+            let waiting = owner
+                .invoke_fixture(
+                    root.path(),
+                    Some(registry.clone()),
+                    caller(&context(), &method("use")),
+                    "waiting-model",
+                    &serde_json::json!({"cid":second_cid}),
+                    Arc::new(|| Ok(())),
+                )
+                .unwrap();
+            assert_eq!(waiting["state"], "reserved");
+            let operation = waiting["operation_id"].as_str().unwrap();
+            let status = || {
+                owner
+                    .invoke_fixture(
+                        root.path(),
+                        Some(registry.clone()),
+                        caller(&context(), &method("status")),
+                        "waiting-status",
+                        &serde_json::json!({"operation_id":operation}),
+                        Arc::new(|| Ok(())),
+                    )
+                    .unwrap()
+            };
+            assert_eq!(status()["state"], "reserved");
+            assert_eq!(model.calls.lock().unwrap().len(), 1);
+            model.hold.store(false, Ordering::Release);
+            model.release.notify_one();
+            join_worker(&owner).await;
+            assert_eq!(status()["state"], "preparing");
+            join_worker(&owner).await;
+            let ready = load_operation(root.path(), operation).unwrap();
+            assert_eq!(ready.state, PreparationState::Admitted);
+            assert!(!ready.activation_pending);
+            assert_eq!(ready.operation_id, operation);
+            assert_eq!(ready.package_cid, second_cid);
+            assert_eq!(model.calls.lock().unwrap().len(), 2);
+            assert_eq!(
+                model_runtime_projection(
+                    root.path(),
+                    Some(&registry),
+                    &context(),
+                    &second_cid,
+                    Some(operation)
+                )
+                .await["dispatch_ready"],
+                true
+            );
         }
 
         #[tokio::test]
