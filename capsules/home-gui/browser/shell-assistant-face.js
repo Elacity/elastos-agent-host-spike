@@ -64,6 +64,9 @@ let idleDockWidth = 0;
 let spaceEl = null;
 let frame = null;
 let frameReady = false;
+/* Each capsule document sends one ready and fires one load, in either order. */
+let frameReadyCount = 0;
+let frameLoadCount = 0;
 let launching = false;
 let launchQuery = {};
 let authorizedLaunch = null;
@@ -224,13 +227,19 @@ function onAssistantFrameDocumentLoad() {
     return;
   }
   /* Home keeps dataset.route across a capsule document reload. The new
-     document must handshake ready again, or the room stays empty. */
+     document must handshake ready again, or the room stays empty. A ready
+     that arrived before this load belongs to this document: keep it. */
+  frameLoadCount += 1;
+  if (frameReadyCount >= frameLoadCount) {
+    return;
+  }
   frameReady = false;
   frame.classList.remove("is-ready");
 }
 
 function markFrameReady() {
   frameReady = true;
+  frameReadyCount += 1;
   frame?.classList.add("is-ready");
   deps.pushUiPreferencesToFrameWindow(frame?.contentWindow);
   if (assistantSpaceActive()) {
@@ -290,6 +299,8 @@ async function mountAssistantFrame() {
     frame.setAttribute("allow", deps.iframeAllowForLaunch(launched));
     frame.title = deps.escapeHtml(launched.title || "Assistant");
     const route = new URL(String(launched.route || ""), window.location.origin);
+    frameReadyCount = 0;
+    frameLoadCount = 0;
     frame.src = route.href;
     frame.dataset.route = route.href;
   } catch (error) {
@@ -355,6 +366,8 @@ export function retireAssistantSpace() {
     clearFaceGeometry(taskbar);
   }
   frameReady = false;
+  frameReadyCount = 0;
+  frameLoadCount = 0;
   if (frame) {
     frame.removeAttribute("src");
     delete frame.dataset.route;
