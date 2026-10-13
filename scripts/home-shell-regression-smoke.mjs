@@ -2430,7 +2430,26 @@ shellCore.shellState.activeWindowId = null;
   };
   await restoreWithVisibleWindow();
   assert(roomCloses === 0, "session restore closed an Assistant room opened while it ran");
+  // Opening -> restore -> close before the ring entered Agent: restored windows sit on their own Desktops.
+  shellCore.shellState.homeBrowserState.session = {
+    root_shell: "home-gui", browser_context_id: shellCore.shellState.browserContextId, active_stage: "desktop",
+    desktops: ["desk-restore-2"],
+    windows: [
+      { target: "browser", active: true, query: { url: "https://example.invalid/here" } },
+      { target: "browser", desktopSpaceId: "desk-restore-2", query: { url: "https://example.invalid/elsewhere" } },
+    ],
+  };
+  await shellWindows.restoreShellSession();
   engaged = false;
+  const restoredBySpace = Object.fromEntries([...shellCore.shellState.windows.values()]
+    .map((entry) => [entry.desktopSpaceId === "desk-restore-2" ? "other" : "current", entry.node.dataset.spaceVisible]));
+  assert(shellStages.getActiveStageId() === shellStages.desktopStageId() && roomCloses === 0,
+    "restore during an opening room changed the Space or closed the room", shellStages.getActiveStageId());
+  assert(restoredBySpace.current === "true" && restoredBySpace.other === "false",
+    "restored windows were not placed on their Desktops while the room was opening", restoredBySpace);
+  shellCore.shellState.windows.clear();
+  shellCore.shellState.activeWindowId = null;
+  shellStages.restoreExtraDesktops([]);
   await restoreWithVisibleWindow();
   assert(roomCloses === 1, "session restore must still apply the saved Space when no room is open");
   shellStages.bindAgentSpace(undefined);
