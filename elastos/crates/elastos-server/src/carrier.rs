@@ -1429,25 +1429,43 @@ fn exported_endpoint_addr(addr: iroh::EndpointAddr) -> iroh::EndpointAddr {
     next
 }
 
+/// Global unicast, excluding the IANA special-use ranges.
 fn is_public_ip(ip: std::net::IpAddr) -> bool {
-    match ip.to_canonical() {
-        std::net::IpAddr::V4(v4) => {
-            let shared = v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64;
-            !(v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || shared)
-        }
+    match ip {
+        std::net::IpAddr::V4(v4) => is_public_ipv4(v4),
         std::net::IpAddr::V6(v6) => {
-            let first = v6.segments()[0];
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                || (first & 0xfe00) == 0xfc00
-                || (first & 0xffc0) == 0xfe80)
+            let s = v6.segments();
+            // IPv4-mapped (::ffff:0:0/96), IPv4-compatible (::/96) and
+            // NAT64 (64:ff9b::/96) carry an IPv4 address.
+            let embedded = std::net::Ipv4Addr::from((u32::from(s[6]) << 16) | u32::from(s[7]));
+            if s[..5] == [0; 5] && (s[5] == 0xffff || (s[5] == 0 && !v6.is_loopback())) {
+                return !v6.is_unspecified() && is_public_ipv4(embedded);
+            }
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                return is_public_ipv4(embedded);
+            }
+            // Global unicast is 2000::/3; this excludes ::, ::1, fc00::/7,
+            // fe80::/10 and multicast. Documentation is 2001:db8::/32.
+            (s[0] & 0xe000) == 0x2000 && !(s[0] == 0x2001 && s[1] == 0x0db8)
         }
     }
+}
+
+fn is_public_ipv4(v4: std::net::Ipv4Addr) -> bool {
+    let [a, b, c, _] = v4.octets();
+    !(a == 0
+        || a == 10
+        || (a == 100 && (b & 0xc0) == 64)
+        || a == 127
+        || (a == 169 && b == 254)
+        || (a == 172 && (b & 0xf0) == 16)
+        || (a == 192 && b == 0 && (c == 0 || c == 2))
+        || (a == 192 && b == 88 && c == 99)
+        || (a == 192 && b == 168)
+        || (a == 198 && (b & 0xfe) == 18)
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
+        || a >= 224)
 }
 
 fn direct_only_relay_only_error(endpoints: &[iroh::EndpointAddr]) -> Option<serde_json::Value> {
@@ -1547,33 +1565,48 @@ async fn bind_carrier_endpoint(
     allow_ephemeral_fallback: bool,
 ) -> anyhow::Result<Endpoint> {
     let builder = || short_lived_endpoint_builder(secret_key.clone(), network, approved_relay);
-    let requested = builder()?;
-    // Iroh retains the other address family's default wildcard listener.
-    // A configured loopback endpoint uses only its requested IP transport.
-    // Its local-only address has no external router port to map.
-    let requested = if requested_bind_addr.ip().is_loopback() {
-        requested
-            .clear_ip_transports()
-            .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
-    } else {
-        requested
+    let requested = || -> anyhow::Result<iroh::endpoint::Builder> {
+        let requested = builder()?;
+        // Iroh retains the other address family's default wildcard listener.
+        // A configured loopback endpoint uses only its requested IP transport.
+        // Its local-only address has no external router port to map.
+        let requested = if requested_bind_addr.ip().is_loopback() {
+            requested
+                .clear_ip_transports()
+                .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
+        } else {
+            requested
+        };
+        requested.bind_addr(requested_bind_addr).map_err(|error| {
+            anyhow::anyhow!("Invalid Carrier address {requested_bind_addr}: {error}")
+        })
     };
-    let bound = requested.bind_addr(requested_bind_addr).map_err(|error| {
-        anyhow::anyhow!("Invalid Carrier address {requested_bind_addr}: {error}")
-    })?;
     // An IPv4 wildcard on a fixed port also listens on the same IPv6 port, so
     // a published ticket keeps one address per family across restarts (#336).
-    // A host without IPv6 still starts.
-    let bound = match requested_bind_addr {
-        std::net::SocketAddr::V4(v4) if v4.ip().is_unspecified() && v4.port() != 0 => bound
-            .bind_addr_with_opts(
-                std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, v4.port())),
-                iroh::endpoint::BindOpts::default().set_is_required(false),
-            )
-            .map_err(|error| anyhow::anyhow!("Invalid Carrier IPv6 address: {error}"))?,
-        _ => bound,
+    // If that IPv6 port is taken or the host has no IPv6, the Runtime keeps
+    // iroh's default ephemeral IPv6 listener instead.
+    let fixed_v6 = match requested_bind_addr {
+        std::net::SocketAddr::V4(v4) if v4.ip().is_unspecified() && v4.port() != 0 => Some(
+            std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, v4.port())),
+        ),
+        _ => None,
     };
-    match bound.bind().await {
+    let first = match fixed_v6 {
+        Some(v6) => {
+            let bound = requested()?
+                .bind_addr(v6)
+                .map_err(|error| anyhow::anyhow!("Invalid Carrier IPv6 address {v6}: {error}"))?;
+            match bound.bind().await {
+                Ok(endpoint) => return Ok(endpoint),
+                Err(error) => {
+                    warn!("carrier: cannot listen on {v6} ({error}); IPv6 uses a random port");
+                    requested()?.bind().await
+                }
+            }
+        }
+        None => requested()?.bind().await,
+    };
+    match first {
         Ok(endpoint) => Ok(endpoint),
         Err(error) if !allow_ephemeral_fallback => Err(error).with_context(|| {
             format!("Failed to bind requested Carrier address {requested_bind_addr}")
@@ -16372,10 +16405,12 @@ pub(crate) mod tests {
                 })
                 .collect::<Vec<_>>()
         };
+        // The seed: public IPv4 beside Docker bridges, benchmarking and loopback.
         let seed = ips(&[
             "127.0.0.1:4433",
             "172.17.0.1:4433",
             "172.19.0.1:4433",
+            "198.18.0.1:4433",
             "77.42.19.31:4433",
         ]);
         assert_eq!(seed, ["77.42.19.31:4433"]);
@@ -16383,13 +16418,75 @@ pub(crate) mod tests {
             "[::1]:4433",
             "[fe80::1]:4433",
             "[fd00::1]:4433",
+            "[2001:db8::1]:4433",
+            "[ff02::1]:4433",
+            "[::ffff:10.0.0.1]:4433",
+            "[64:ff9b::c000:201]:4433",
             "169.254.1.1:4433",
             "100.64.0.1:4433",
+            "192.0.2.1:4433",
+            "203.0.113.9:4433",
+            "224.0.0.1:4433",
+            "[::ffff:77.42.19.31]:4433",
             "[2a01:4f9:c013:e725::1]:4433",
         ]);
-        assert_eq!(mixed, ["[2a01:4f9:c013:e725::1]:4433"]);
-        // A host with no public address keeps what it has.
-        assert_eq!(ips(&["192.168.1.20:4433", "127.0.0.1:4433"]).len(), 2);
+        assert_eq!(
+            mixed,
+            ["[::ffff:77.42.19.31]:4433", "[2a01:4f9:c013:e725::1]:4433"]
+        );
+        // A host with only private and special-use addresses keeps them (a LAN).
+        assert_eq!(
+            ips(&["192.168.1.20:4433", "198.18.0.1:4433", "127.0.0.1:4433"]).len(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn a_taken_ipv6_carrier_port_keeps_a_random_ipv6_listener() {
+        // Another service holds the Carrier port on IPv6.
+        let Ok(occupied) = std::net::UdpSocket::bind("[::1]:0") else {
+            return; // This host has no IPv6.
+        };
+        let port = occupied.local_addr().unwrap().port();
+        let endpoint = bind_carrier_endpoint(
+            SecretKey::from_bytes(&[72u8; 32]),
+            CarrierNodeNetwork::Isolated,
+            None,
+            format!("0.0.0.0:{port}").parse().unwrap(),
+            false,
+        )
+        .await
+        .expect("IPv4 binds the fixed port while IPv6 is taken");
+        let sockets = endpoint.bound_sockets();
+        let addr = super::tests::wait_for_direct_endpoint_addr(&endpoint).await;
+        let ticket = {
+            let json =
+                serde_json::json!({ "topic": null, "endpoints": [exported_endpoint_addr(addr)] });
+            data_encoding::BASE32_NOPAD.encode(&serde_json::to_vec(&json).unwrap())
+        };
+        endpoint.close().await;
+        drop(occupied);
+        assert!(
+            sockets.iter().any(|s| s.is_ipv4() && s.port() == port),
+            "IPv4 keeps the fixed port: {sockets:?}"
+        );
+        assert!(
+            sockets.iter().any(|s| s.is_ipv6() && s.port() != port),
+            "IPv6 falls back to a random port: {sockets:?}"
+        );
+        let decoded = decode_ticket_endpoints(&ticket);
+        let ips: Vec<std::net::SocketAddr> = decoded[0]
+            .addrs
+            .iter()
+            .filter_map(|transport| match transport {
+                iroh::TransportAddr::Ip(addr) => Some(*addr),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            ips.iter().all(|ip| ip.is_ipv4() == (ip.port() == port)),
+            "the ticket lists IPv4 on the fixed port and IPv6 on its own: {ips:?}"
+        );
     }
 
     #[test]
