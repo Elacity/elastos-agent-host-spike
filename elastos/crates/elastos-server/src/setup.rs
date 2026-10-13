@@ -3836,6 +3836,21 @@ pub(crate) async fn stage_update_support(
     {
         paths.insert(relative, source);
     }
+    // A newer release's artifact and metadata paths belong to its own repair:
+    // removals of what an older component left there wait for that repair, and
+    // support this update installs may not share them.
+    let deferred = |relative: &Path| {
+        newer
+            .iter()
+            .any(|path| relative.starts_with(path) || Path::new(path).starts_with(relative))
+    };
+    paths.retain(|relative, source| !(source.as_os_str().is_empty() && deferred(relative)));
+    if let Some(relative) = paths.keys().find(|relative| deferred(relative)) {
+        anyhow::bail!(
+            "support at {} shares an install path with a newer component kind",
+            relative.display()
+        );
+    }
     // Journal the first absent parent as one tree. Recovery then removes a new
     // bundle's directories as well as its files, preserving the old support set.
     let mut complete = std::collections::BTreeMap::new();
@@ -7693,6 +7708,103 @@ pub(crate) mod tests {
         );
         assert_eq!(fs::read(&installed).unwrap(), b"previous release bytes");
         assert!(!temp.path().join("tools/future").exists());
+    }
+
+    /// Staged removals and writes never touch a newer kind's paths: a replaced or
+    /// moved component's old path stays for the new release's repair, and support
+    /// that would share such a path is refused before anything is journaled.
+    #[tokio::test]
+    async fn staged_support_keeps_newer_kind_paths_for_their_release() {
+        use std::{future::Future, pin::Pin};
+        struct Owner;
+        impl crate::update::RestartOwner for Owner {
+            fn progress(&self, _: &str, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn plan(
+                &self,
+                _: String,
+                _: &str,
+                _: &str,
+            ) -> anyhow::Result<crate::install_transaction::RestartPlan> {
+                unreachable!()
+            }
+            fn start<'a>(
+                &'a mut self,
+                _: &'a crate::install_transaction::InstallTransaction,
+                _: crate::install_transaction::RestartRecord,
+            ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
+                unreachable!()
+            }
+            fn stop<'a>(
+                &'a mut self,
+            ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
+                unreachable!()
+            }
+        }
+        let platform = detect_platform();
+        let sha = |bytes: &[u8]| format!("sha256:{}", hex::encode(sha2::Sha256::digest(bytes)));
+        let (old_bytes, moved_bytes) = (b"previous engine".as_slice(), b"moved engine".as_slice());
+        let file = |path: &str, bytes: &[u8]| {
+            serde_json::json!({"install_path": path, "platforms": {(platform.as_str()): {
+                "release_path": path, "checksum": sha(bytes), "size": bytes.len()}}})
+        };
+        let future = |path: &str| {
+            serde_json::json!({"install_path": path, "platforms": {(platform.as_str()): {
+                "strategy": "future-kind"}}})
+        };
+        let manifest = |external: serde_json::Value| {
+            serde_json::to_vec(&serde_json::json!({"schema": "elastos.components/v1",
+                "profiles": {"home": {"components": ["engine"]}}, "external": external}))
+            .unwrap()
+        };
+        let old = manifest(serde_json::json!({"engine": file("tools/engine", old_bytes)}));
+        for (case, new, staged) in [
+            // Another component of a newer kind takes the removed component's path.
+            (
+                "replaced",
+                manifest(serde_json::json!({"future": future("tools/engine")})),
+                Ok(vec![]),
+            ),
+            // The known component moves; a newer kind takes its old path.
+            (
+                "moved",
+                manifest(serde_json::json!({"engine": file("tools/moved", moved_bytes),
+                    "future": future("tools/engine")})),
+                Ok(vec![PathBuf::from("tools/moved")]),
+            ),
+            // Known support inside a newer kind's path is refused.
+            (
+                "shared",
+                manifest(serde_json::json!({"engine": file("tools/engine/inner", moved_bytes),
+                    "future": future("tools/engine")})),
+                Err("support at tools/engine/inner shares an install path with a newer component kind"),
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            fs::create_dir_all(temp.path().join("tools")).unwrap();
+            fs::write(temp.path().join("tools/engine"), old_bytes).unwrap();
+            let fetch: crate::update::FetchFn = Box::new(move |_| {
+                Box::pin(async move { Ok(moved_bytes.to_vec()) })
+            });
+            let result =
+                stage_update_support(temp.path(), &old, &new, &platform, &fetch, &mut Owner).await;
+            match staged {
+                Ok(expected) => {
+                    let (_stage, paths) = result.unwrap();
+                    let paths: Vec<_> = paths.into_iter().map(|(path, _)| path).collect();
+                    assert_eq!(paths, expected, "{case}");
+                }
+                Err(message) => {
+                    assert_eq!(result.unwrap_err().to_string(), message, "{case}")
+                }
+            }
+            assert_eq!(
+                fs::read(temp.path().join("tools/engine")).unwrap(),
+                old_bytes,
+                "{case}"
+            );
+        }
     }
 
     #[test]
