@@ -1444,12 +1444,44 @@ fn is_public_ip(ip: std::net::IpAddr) -> bool {
             if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
                 return is_public_ipv4(embedded);
             }
-            // Global unicast is 2000::/3; this excludes ::, ::1, fc00::/7,
-            // fe80::/10 and multicast. Documentation is 2001:db8::/32.
-            (s[0] & 0xe000) == 0x2000 && !(s[0] == 0x2001 && s[1] == 0x0db8)
+            // 6to4 (2002::/16) carries an IPv4 address in bits 16..48.
+            if s[0] == 0x2002 {
+                return is_public_ipv4(std::net::Ipv4Addr::from(
+                    (u32::from(s[1]) << 16) | u32::from(s[2]),
+                ));
+            }
+            let bits = u128::from(v6);
+            let within =
+                |net: &(u128, u32)| bits & !u128::MAX.checked_shr(net.1).unwrap_or(0) == net.0;
+            // Globally reachable blocks inside the IETF 2001::/23 assignment.
+            if GLOBAL_IPV6_IN_IETF.iter().any(within) {
+                return true;
+            }
+            (bits >> 125) == 1 && !SPECIAL_USE_IPV6.iter().any(within)
         }
     }
 }
+
+/// IANA IPv6 Special-Purpose Address Registry entries inside 2000::/3 that
+/// are not globally reachable, as (prefix, length). Everything outside
+/// 2000::/3 (::, ::1, 100::/64, fc00::/7, fe80::/10, multicast) is excluded
+/// by the 2000::/3 check; mapped, compatible, NAT64 and 6to4 are judged by
+/// their IPv4 address above.
+const SPECIAL_USE_IPV6: [(u128, u32); 3] = [
+    (0x2001_0000 << 96, 23), // IETF assignments: Teredo, benchmarking, ORCHID
+    (0x2001_0db8 << 96, 32), // documentation
+    (0x3fff_0000 << 96, 20), // documentation
+];
+
+/// Globally reachable sub-blocks of 2001::/23 (PCP, TURN and DNS-SD anycast,
+/// AMT, AS112-v6).
+const GLOBAL_IPV6_IN_IETF: [(u128, u32); 5] = [
+    ((0x2001_0001 << 96) | 1, 128),
+    ((0x2001_0001 << 96) | 2, 128),
+    ((0x2001_0001 << 96) | 3, 128),
+    (0x2001_0003 << 96, 32),
+    (0x2001_0004_0112 << 80, 48),
+];
 
 fn is_public_ipv4(v4: std::net::Ipv4Addr) -> bool {
     let [a, b, c, _] = v4.octets();
@@ -16419,6 +16451,15 @@ pub(crate) mod tests {
             "[fe80::1]:4433",
             "[fd00::1]:4433",
             "[2001:db8::1]:4433",
+            "[2001:2::1]:4433",
+            "[2001:10::1]:4433",
+            "[2001:20::1]:4433",
+            "[2001::1]:4433",
+            "[3fff::1]:4433",
+            "[100::1]:4433",
+            "[5f00::1]:4433",
+            "[2002:c0a8:101::1]:4433",
+            "[64:ff9b:1::1]:4433",
             "[ff02::1]:4433",
             "[::ffff:10.0.0.1]:4433",
             "[64:ff9b::c000:201]:4433",
@@ -16439,6 +16480,25 @@ pub(crate) mod tests {
             ips(&["192.168.1.20:4433", "198.18.0.1:4433", "127.0.0.1:4433"]).len(),
             3
         );
+        // Each IPv6 special-use range counts as private, so a LAN keeps its route.
+        assert_eq!(
+            ips(&["192.168.1.20:4433", "[2001:2::1]:4433", "[3fff::1]:4433"]).len(),
+            3
+        );
+        // Globally reachable: 6to4 of a public IPv4, AMT, and 2001:4860 (outside 2001::/23).
+        assert_eq!(
+            ips(&[
+                "[2002:4d2a:131f::1]:4433",
+                "[2001:3::1]:4433",
+                "[2001:4860::8888]:4433",
+                "10.0.0.2:4433",
+            ]),
+            [
+                "[2001:3::1]:4433",
+                "[2001:4860::8888]:4433",
+                "[2002:4d2a:131f::1]:4433"
+            ]
+        );
     }
 
     #[tokio::test]
@@ -16448,6 +16508,11 @@ pub(crate) mod tests {
             return; // This host has no IPv6.
         };
         let port = occupied.local_addr().unwrap().port();
+        // A host with an IPv6 route has a routable IPv6 address to list
+        // (connecting a UDP socket sends nothing).
+        let host_has_ipv6 = std::net::UdpSocket::bind("[::]:0")
+            .and_then(|socket| socket.connect("[2001:4860:4860::8888]:53"))
+            .is_ok();
         let endpoint = bind_carrier_endpoint(
             SecretKey::from_bytes(&[72u8; 32]),
             CarrierNodeNetwork::Isolated,
@@ -16487,6 +16552,10 @@ pub(crate) mod tests {
             ips.iter().all(|ip| ip.is_ipv4() == (ip.port() == port)),
             "the ticket lists IPv4 on the fixed port and IPv6 on its own: {ips:?}"
         );
+        // A host whose interfaces carry IPv6 must still list it.
+        if host_has_ipv6 {
+            assert!(ips.iter().any(|ip| ip.is_ipv6()), "IPv6 kept: {ips:?}");
+        }
     }
 
     #[test]
