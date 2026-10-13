@@ -8312,6 +8312,8 @@ fn carrier_endpoint_matches_peer(endpoint: &iroh::EndpointAddr, peer_did: &str) 
     did_to_public_key(peer_did).is_some_and(|public_key| endpoint.id == public_key)
 }
 
+// Its raw fetch methods are still crate-visible; component bytes go through
+// AdmittedRow functions. Restricting these methods is #369.
 pub struct CarrierClient {
     conn: iroh::endpoint::Connection,
     _endpoint: Endpoint,
