@@ -1358,20 +1358,34 @@ async fn run_upgrade_with_restart(
         );
         Ok(serde_json::from_slice(&comp_data)?)
     })())?;
-    // Only a schema this Runtime does not know is a newer release format; a
-    // malformed manifest of the known schema is the publisher's refusal.
-    installer_required(
-        source,
-        version,
-        (|| {
-            anyhow::ensure!(
-                value["schema"] == "elastos.components/v1",
+    // Only an object naming a newer components schema is a newer release format;
+    // anything else that is not this Runtime's schema is the publisher's refusal.
+    let schema = value
+        .as_object()
+        .and_then(|object| object.get("schema"))
+        .and_then(serde_json::Value::as_str);
+    let newer_schema = schema
+        .and_then(|schema| schema.strip_prefix("elastos.components/v"))
+        .filter(|number| !number.starts_with('0') && number.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|number| number.parse::<u64>().ok())
+        .is_some_and(|number| number > 1);
+    if newer_schema {
+        return installer_required(
+            source,
+            version,
+            Err(anyhow::anyhow!(
                 "release components use schema {}",
-                value["schema"]
-            );
-            Ok(())
-        })(),
-    )?;
+                schema.unwrap_or_default()
+            )),
+        );
+    }
+    refused((|| {
+        anyhow::ensure!(
+            schema == Some("elastos.components/v1"),
+            "release components schema is not elastos.components/v1"
+        );
+        Ok(())
+    })())?;
     // Every understood check runs on the known components first; a newer kind
     // left over is a newer release's, which only the install command applies.
     let unknown = refused((|| {
@@ -3439,6 +3453,10 @@ mod tests {
             "newer kind",
             "newer format",
             "malformed known format",
+            "null components",
+            "array components",
+            "schemaless components",
+            "unrelated schema",
             "newer kind beside a refused known component",
             "tampered",
             "other signer",
@@ -3472,6 +3490,17 @@ mod tests {
                 if case == "newer kind beside a refused known component" {
                     value["external"]["known"] = serde_json::json!({"install_path":"bin/known",
                         "platforms":{"*":{"release_path":"known","cid":raw_cid(b"known")}}});
+                }
+                match case {
+                    "null components" => value = serde_json::Value::Null,
+                    "array components" => value = serde_json::json!([]),
+                    "schemaless components" => {
+                        value = serde_json::json!({"external":null,"profiles":{}})
+                    }
+                    "unrelated schema" => {
+                        value["schema"] = serde_json::json!("elastos.components/v01")
+                    }
+                    _ => {}
                 }
                 let components = serde_json::to_vec(&value).unwrap();
                 let version = if case == "older" { "0.5.0" } else { "0.7.1" };
@@ -3550,6 +3579,10 @@ mod tests {
                     "other signer"
                     | "older"
                     | "malformed known format"
+                    | "null components"
+                    | "array components"
+                    | "schemaless components"
+                    | "unrelated schema"
                     | "newer kind beside a refused known component" => {
                         assert!(is(|cause| cause.is::<ReleaseRefused>()), "{message}");
                         assert!(!is(|cause| cause.is::<InstallerRequired>()), "{message}");
