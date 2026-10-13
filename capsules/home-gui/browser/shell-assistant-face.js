@@ -57,6 +57,11 @@ const RETURN_MS = 160;
 const ROOM_MS = 720;
 const FACE_MIN_W = 320;
 const FACE_MAX_W = 720;
+/* A loaded Assistant that never answers (a broken or unexpected document)
+   still gets its room after this long instead of staying black. The current
+   Assistant answers right after one local workspace read; 5 s leaves a slow
+   device room for that read without leaving a stuck room black for long. */
+const READY_RECOVERY_MS = 5_000;
 
 let deps = null;
 let generation = 0;
@@ -67,6 +72,7 @@ let spaceEl = null;
 let frame = null;
 let frameReady = false;
 const frameHandshake = createAssistantFrameHandshake();
+let readyRecoveryTimer = 0;
 let launching = false;
 let launchQuery = {};
 let authorizedLaunch = null;
@@ -231,12 +237,26 @@ function onAssistantFrameDocumentLoad() {
      stale ready never counts. */
   frameReady = false;
   frame.classList.remove("is-ready");
-  frame.contentWindow?.postMessage(frameHandshake.hello(), "*");
+  window.clearTimeout(readyRecoveryTimer);
+  const { hello, ready } = frameHandshake.load();
+  frame.contentWindow?.postMessage(hello, "*");
+  if (ready) {
+    markFrameReady();
+    return;
+  }
+  readyRecoveryTimer = window.setTimeout(() => {
+    if (frameHandshake.recover()) markFrameReady();
+  }, READY_RECOVERY_MS);
+}
+
+function resetFrameHandshake() {
+  window.clearTimeout(readyRecoveryTimer);
+  frameHandshake.reset();
 }
 
 function markFrameReady() {
   frameReady = true;
-  frameHandshake.reset();
+  window.clearTimeout(readyRecoveryTimer);
   frame?.classList.add("is-ready");
   deps.pushUiPreferencesToFrameWindow(frame?.contentWindow);
   if (assistantSpaceActive()) {
@@ -296,6 +316,7 @@ async function mountAssistantFrame() {
     frame.setAttribute("allow", deps.iframeAllowForLaunch(launched));
     frame.title = deps.escapeHtml(launched.title || "Assistant");
     const route = new URL(String(launched.route || ""), window.location.origin);
+    resetFrameHandshake();
     frame.src = route.href;
     frame.dataset.route = route.href;
   } catch (error) {
@@ -361,7 +382,7 @@ export function retireAssistantSpace() {
     clearFaceGeometry(taskbar);
   }
   frameReady = false;
-  frameHandshake.reset();
+  resetFrameHandshake();
   if (frame) {
     frame.removeAttribute("src");
     delete frame.dataset.route;

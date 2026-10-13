@@ -86,23 +86,52 @@ export function normalizeHomeAgentBrowserUrl(message) {
 }
 
 /* Home sends a fresh hello after each Assistant document loads; the room shows
-   only for the ready that echoes the current nonce, so a ready sent before the
-   load, by a document that has since been replaced, or twice, never counts. */
+   once per load, for the ready that echoes the current nonce. A ready sent
+   before the load, by a replaced document, or twice never counts.
+   An Assistant from an earlier release (kept running after Undo with the Home
+   tab open) ignores hello and sends one {type} ready per document, before or
+   after its load event; that ready counts for the load it belongs to. */
 export function createAssistantFrameHandshake() {
   let sequence = 0;
   let nonce = "";
+  let shown = false;
+  let legacyPending = false;
   return Object.freeze({
-    hello() {
+    /* A frame document loaded: returns the hello to send, and whether a
+       legacy ready already received for this document shows the room now. */
+    load() {
       sequence += 1;
       nonce = `assistant-${sequence}`;
-      return { type: "home-agent:hello", nonce };
+      shown = legacyPending;
+      legacyPending = false;
+      return { hello: { type: "home-agent:hello", nonce }, ready: shown };
     },
+    /* A ready from the frame: true when it shows the room for this load. */
     acceptReady(message) {
-      return nonce !== "" && hasExactKeys(message, ["type", "nonce"]) &&
-        message.type === "home-agent:ready" && message.nonce === nonce;
+      if (hasExactKeys(message, ["type", "nonce"])) {
+        if (nonce === "" || shown || message.type !== "home-agent:ready" || message.nonce !== nonce) return false;
+        shown = true;
+        return true;
+      }
+      if (!hasExactKeys(message, ["type"]) || message.type !== "home-agent:ready") return false;
+      if (nonce !== "" && !shown) {
+        shown = true;
+        return true;
+      }
+      // Before this document's load event (or the next document's): hold it for that load.
+      legacyPending = true;
+      return false;
+    },
+    /* No ready within the recovery bound after load: show the room anyway. */
+    recover() {
+      if (nonce === "" || shown) return false;
+      shown = true;
+      return true;
     },
     reset() {
       nonce = "";
+      shown = false;
+      legacyPending = false;
     },
   });
 }
