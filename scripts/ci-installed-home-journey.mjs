@@ -261,6 +261,20 @@ async function repairJourney(assistant, offer) {
   await selectModel(nextAssistant, second.model_runtime.offer_id, other.cid);
   subcheck = "other_model_reply";
   const replied = await resourceReply(nextAssistant, second.model_runtime.offer_id, "qwen-reply");
+  const previous = await nextAssistant.evaluate(async runId => {
+    const token = new URLSearchParams(location.hash.slice(1)).get("home_token");
+    const response = await fetch("/api/provider/model/runs_get", { method: "POST", headers: {
+      "x-elastos-home-token": token, "Content-Type": "application/json",
+    }, signal: AbortSignal.timeout(35000), body: JSON.stringify({ run_id: runId, request_id: `model-v1:${Date.now()}:${crypto.randomUUID()}` }) });
+    return { ok: response.ok, payload: await response.json() };
+  }, owner.run.run_id);
+  assert(previous.ok && previous.payload.status === "ok");
+  assert.equal(previous.payload.data.run_id, owner.run.run_id);
+  assert.equal(previous.payload.data.offer_id, offer);
+  assert.equal(previous.payload.data.status, "cancelled");
+  assert.equal(previous.payload.data.terminal?.status, "cancelled");
+  assert(previous.payload.data.terminal.output == null);
+  modelRepair.stop.journal_after_different_reply = "cancelled";
   modelRepair.different_model = { cid: other.cid, model_sha256: other.model_sha256, offer_id: second.model_runtime.offer_id,
     run_id: replied.run.run_id, status: "completed", runtime_restart_before_get: false };
   results.model_stop_get_different = "passed";
