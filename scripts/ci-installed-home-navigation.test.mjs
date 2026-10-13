@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import http from "node:http";
 import { extname } from "node:path";
 import test from "node:test";
-import { openInstalledAssistant, returnInstalledHome } from "./ci-installed-home-navigation.mjs";
+import { openInstalledApp, openInstalledAssistant, returnInstalledHome } from "./ci-installed-home-navigation.mjs";
 import { publicJourneyFailure } from "./ci-installed-home-failure.mjs";
 
 const require = createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url));
@@ -228,7 +228,7 @@ test("installed contender opens the real Assistant through a signed, ready Home"
   }
 });
 
-test("installed contender waits for real Home GUI session restoration before Assistant", async t => {
+test("installed navigation waits for real Home GUI restoration and preserves app windows", async t => {
   // Runtime responses are controlled; Shell restoration and the Assistant handoff use their real modules.
   const capsuleRoots = Object.fromEntries(["home-gui", "assistant", "home"]
     .map(name => [name, new URL(`../capsules/${name}/browser/`, import.meta.url)]));
@@ -280,7 +280,7 @@ test("installed contender waits for real Home GUI session restoration before Ass
               }
               reply({type:'home:shell-response',requestId:message.requestId,result:{target:message.target,title:message.target,
                 attach_kind:'iframe',route:message.target==='assistant'?'/apps/assistant/?home_origin=${encodeURIComponent(origin)}#home_token=fixture'
-                  :'/restored-app?target='+message.target+'#home_token=fixture'}});
+                  :'/apps/'+message.target+'/?fixture_window=true#home_token=fixture'}});
             };
             window.releaseSavedWindows=()=>{released=true;window.pendingSavedWindows.splice(0).forEach(launch);};
             addEventListener('message',event=>{
@@ -298,7 +298,7 @@ test("installed contender waits for real Home GUI session restoration before Ass
           </script>`);
         return;
       }
-      if (url.pathname === "/restored-app") {
+      if (["/apps/marketplace/", "/apps/wallet/"].includes(url.pathname) && url.searchParams.get("fixture_window") === "true") {
         response.writeHead(200, { ...headers, "content-type": "text/html" }); response.end("<!doctype html><p>Restored app</p>"); return;
       }
       if (url.pathname.startsWith("/api/")) {
@@ -335,13 +335,15 @@ test("installed contender waits for real Home GUI session restoration before Ass
     browser = await chromium.launch({ headless: true });
     const origin = `http://127.0.0.1:${server.address().port}`;
     for (const mode of ["restored", "shell_unready", "launch_refused"]) {
-      await t.test(mode, async () => {
+      await t.test(mode, async navigation => {
         const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
         const pageErrors = [];
         page.on("pageerror", error => pageErrors.push(error));
         await page.addInitScript(() => {
           window.assistantClicks = [];
+          window.marketplaceClicks = 0;
           document.addEventListener("click", event => {
+            if (event.target.closest?.('.taskbar-item[data-target="marketplace"]')) window.marketplaceClicks++;
             if (event.target.closest?.("#assistant-toggle")) window.assistantClicks.push({
               status: document.body.dataset.homeStatus, authority: document.body.dataset.homeAuthority,
             });
@@ -377,6 +379,87 @@ test("installed contender waits for real Home GUI session restoration before Ass
               await assistant.locator("#agent-shelf-flip-back").click();
               await shell.locator("#assistant-space").waitFor({ state: "hidden", timeout: 5000 });
               assert.equal(await shell.locator("#desktop").isVisible(), true);
+              const marketplaceWindow = shell.locator('section.window[data-target="marketplace"]');
+              const marketplaceFrame = marketplaceWindow.locator("iframe.window-frame");
+              const shellFrame = await (await shell.locator("body").elementHandle()).ownerFrame();
+              const waitForWindowControls = () => shellFrame.waitForFunction(() => performance.now() >= Number(
+                document.querySelector('section.window[data-target="marketplace"]').dataset.controlGuardUntil), null, { timeout: 1500 });
+              const readTaskbarAction = () => shellFrame.evaluate(async () => {
+                const { shellState } = await import("/apps/home-gui/shell-core.js?v=home-20260813a");
+                const windowNode = document.querySelector('section.window[data-target="marketplace"]');
+                if (shellState.windows.get(windowNode.dataset.windowId)?.node !== windowNode) throw new Error("fixture requires the active Shell module");
+                return { ...shellState.recentUiAction, now: performance.now(),
+                  window_id: windowNode.dataset.windowId, active_window_id: shellState.activeWindowId };
+              });
+              const waitForTaskbarAction = async () => {
+                const action = await readTaskbarAction();
+                if (action.key === "taskbar-target:marketplace") {
+                  await shellFrame.waitForFunction(at => performance.now() - at >= 350, action.at, { timeout: 1500 });
+                }
+                const current = await readTaskbarAction();
+                assert(current.key !== "taskbar-target:marketplace" || current.now - current.at >= 350, "real Shell taskbar guard has elapsed");
+              };
+              await waitForTaskbarAction();
+              if (!await marketplaceFrame.isVisible()) await shell.locator('.taskbar-item[data-target="marketplace"]').click({ timeout: 5000 });
+              await marketplaceFrame.waitFor({ state: "visible", timeout: 5000 });
+              await waitForWindowControls();
+              // Marketplace hides the title text; its visible drag handle focuses the real window.
+              await marketplaceWindow.locator(".window-head-draggable").click({ timeout: 1500 });
+              await shell.locator("body").evaluate(() => { window.marketplaceClicks = 0; });
+              await navigation.test("keeps the active Marketplace visible after Assistant returns Home", async () => {
+                await waitForTaskbarAction();
+                const marketplace = await openInstalledApp(page, "marketplace", 1500);
+                assert.equal(await marketplaceFrame.isVisible(), true);
+                assert.equal(await marketplaceWindow.getAttribute("aria-hidden"), "false");
+                assert.equal(await marketplace.locator("p").textContent(), "Restored app");
+                assert.equal(await shell.locator("body").evaluate(() => window.marketplaceClicks), 0);
+              });
+              // Restore the same precondition if the active-window regression failed.
+              await waitForTaskbarAction();
+              if (!await marketplaceFrame.isVisible()) await shell.locator('.taskbar-item[data-target="marketplace"]').click({ timeout: 1500 });
+              await marketplaceFrame.waitFor({ state: "visible", timeout: 1500 });
+              await waitForWindowControls();
+              await shell.locator("body").evaluate(() => { window.marketplaceClicks = 0; });
+              await navigation.test("brings visible Marketplace forward from the Wallet window", async () => {
+                const walletWindow = shell.locator('section.window[data-target="wallet"]');
+                await walletWindow.locator(".window-head-draggable").click({ timeout: 1500 });
+                assert.equal(await marketplaceFrame.isVisible(), true);
+                assert.equal(await marketplaceWindow.evaluate(node => node.classList.contains("window-active")), false);
+                assert.equal(await walletWindow.evaluate(node => node.classList.contains("window-active")), true);
+                await waitForTaskbarAction();
+                await openInstalledApp(page, "marketplace", 1500);
+                assert.equal(await marketplaceWindow.evaluate(node => node.classList.contains("window-active")), true);
+                assert.equal(await walletWindow.evaluate(node => node.classList.contains("window-active")), false);
+                assert.equal(await shell.locator("body").evaluate(() => window.marketplaceClicks), 1);
+              });
+              await navigation.test("restores Marketplace through its normal dock control", async () => {
+                await waitForWindowControls();
+                await marketplaceWindow.locator('[data-action="minimize"]').click({ timeout: 1500 });
+                await marketplaceFrame.waitFor({ state: "hidden", timeout: 1500 });
+                assert.equal(await marketplaceWindow.evaluate(node => node.classList.contains("hidden")), true);
+                assert.equal(await marketplaceWindow.getAttribute("aria-hidden"), "true");
+                assert.equal(await marketplaceWindow.evaluate(node => node.classList.contains("window-active")), false);
+                const minimized = await readTaskbarAction();
+                assert.notEqual(minimized.active_window_id, minimized.window_id);
+                await waitForTaskbarAction();
+                await openInstalledApp(page, "marketplace", 1500);
+                assert.equal(await marketplaceFrame.isVisible(), true);
+                assert.equal(await shell.locator("body").evaluate(() => window.marketplaceClicks), 2);
+              });
+              await navigation.test("launches Marketplace through its normal dock control", async () => {
+                await waitForTaskbarAction();
+                if (!await marketplaceFrame.isVisible()) await shell.locator('.taskbar-item[data-target="marketplace"]').click({ timeout: 1500 });
+                await marketplaceFrame.waitFor({ state: "visible", timeout: 1500 });
+                await waitForWindowControls();
+                const previousClicks = await shell.locator("body").evaluate(() => window.marketplaceClicks);
+                await marketplaceWindow.locator('[data-action="close"]').click({ timeout: 1500 });
+                await marketplaceWindow.waitFor({ state: "detached", timeout: 3000 });
+                // The last dock action was checked before closing the window removes its state binding.
+                const marketplace = await openInstalledApp(page, "marketplace", 1500);
+                assert.equal(await marketplaceFrame.isVisible(), true);
+                assert.equal(await marketplace.locator("p").textContent(), "Restored app");
+                assert.equal(await shell.locator("body").evaluate(() => window.marketplaceClicks), previousClicks + 1);
+              });
             }
             assert.deepEqual(await shell.locator("body").evaluate(() => window.assistantClicks), [{ status: "ready", authority: "signed" }]);
             assert.equal(await shell.locator('.window[data-target="marketplace"]').count(), 1);
@@ -384,7 +467,7 @@ test("installed contender waits for real Home GUI session restoration before Ass
           }
           const launches = await page.evaluate(() => window.calls.filter(message => message.type === "home:launch-target").map(message => message.target));
           assert.equal(launches.filter(target => target === "assistant").length, mode === "shell_unready" ? 0 : 1);
-          assert.equal(launches.filter(target => target === "marketplace").length, 1);
+          assert.equal(launches.filter(target => target === "marketplace").length, mode === "restored" ? 2 : 1);
           assert(launches.every(target => ["marketplace", "wallet", "assistant"].includes(target)));
           assert.deepEqual(pageErrors, []);
         } finally { await page.close(); await opening?.catch(() => {}); }

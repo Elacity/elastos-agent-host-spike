@@ -5,7 +5,7 @@ import { appendFileSync, readFileSync, statfsSync, writeFileSync, renameSync } f
 import { join } from "node:path";
 import { applyRunEventsPage, terminalOutputText } from "../capsules/assistant/browser/model-contract.js";
 import { publicJourneyFailure } from "./ci-installed-home-failure.mjs";
-import { openInstalledAssistant, returnInstalledHome } from "./ci-installed-home-navigation.mjs";
+import { openInstalledApp, openInstalledAssistant, returnInstalledHome } from "./ci-installed-home-navigation.mjs";
 const require = createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url));
 const { chromium } = require("playwright");
 const [base, evidence, data, mode, resourceControl] = process.argv.slice(2);
@@ -248,10 +248,10 @@ async function repairJourney(assistant, offer) {
   assert(closed.whole_engine_exit && closed.runtime_unchanged);
   modelRepair.stop = { run_id: owner.run.run_id, status: "cancelled", production_guard: true, whole_engine_exit: true };
   await page.screenshot({ path: join(evidence, "repair-stop.png"), fullPage: true });
+  subcheck = "get_other_model";
   await returnInstalledHome(page, assistant, evidence);
   let marketplace = await app("marketplace");
   await showModelDetail(marketplace, other.cid);
-  subcheck = "get_other_model";
   await clickModelUse(marketplace, other.cid, "Get");
   const second = await readyModel(marketplace, other.cid);
   assert.notEqual(second.model_runtime.offer_id, offer);
@@ -371,17 +371,7 @@ function observeDisk() {
   return { capacity_bytes: usage.blocks * usage.bsize, available_bytes: usage.bavail * usage.bsize };
 }
 async function app(target) {
-  const shell = page.frameLocator("#active-shell-frame");
-  const [control, surface] = {
-    marketplace: ['.taskbar-item[data-target="marketplace"]', 'section.window[data-target="marketplace"] iframe.window-frame'],
-    assistant: ["#assistant-toggle", "#assistant-space-frame"],
-  }[target];
-  await shell.locator(control).click();
-  const iframe = shell.locator(surface).last();
-  await iframe.waitFor({ state: "visible", timeout: 30000 });
-  const frame = await (await iframe.elementHandle()).contentFrame();
-  await frame.waitForURL(url => url.pathname.startsWith(`/apps/${target}/`));
-  return frame;
+  return openInstalledApp(page, target);
 }
 async function projection(frame, path) {
   return frame.evaluate(async path => {

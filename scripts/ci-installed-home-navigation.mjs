@@ -1,6 +1,25 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 
+export async function openInstalledApp(page, target, timeout = 30000) {
+  const shell = page.frameLocator("#active-shell-frame");
+  const [control, surface] = {
+    marketplace: ['.taskbar-item[data-target="marketplace"]', 'section.window[data-target="marketplace"] iframe.window-frame'],
+    assistant: ["#assistant-toggle", "#assistant-space-frame"],
+  }[target];
+  await shell.locator('body[data-home-status="ready"][data-home-authority="signed"]').waitFor({ state: "visible", timeout });
+  const iframe = shell.locator(surface).last();
+  // The dock hides an active window and brings an inactive window forward.
+  const activeMarketplace = shell.locator('section.window.window-active[data-target="marketplace"] iframe.window-frame').last();
+  if (!await iframe.isVisible() || (target === "marketplace" && !await activeMarketplace.isVisible())) {
+    await shell.locator(control).click({ timeout });
+  }
+  await iframe.waitFor({ state: "visible", timeout });
+  const frame = await (await iframe.elementHandle()).contentFrame();
+  await frame.waitForURL(url => url.pathname.startsWith(`/apps/${target}/`), { timeout });
+  return frame;
+}
+
 export async function openInstalledAssistant(page, homeUrl, timeout = 60000) {
   assert((await page.goto(homeUrl, { waitUntil: "domcontentloaded", timeout })).ok(), "installed Home frontdoor responds successfully");
   await page.waitForFunction(() =>
