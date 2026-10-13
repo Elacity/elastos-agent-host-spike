@@ -19,7 +19,8 @@
    Contract with the frame (event.source pins the sender; the frame is
    opaque-sandboxed so target origin is "*"):
      Home → capsule   home-agent:open | home-agent:shelf-handover {on} | home-agent:close
-     capsule → Home   home-agent:ready | home-agent:shelf-metrics {width,height,radius}
+     capsule → Home   home-agent:hello {docId} (document started) |
+                      home-agent:ready {docId} (workspace loaded) | home-agent:shelf-metrics {width,height,radius}
                       home-agent:close | home-agent:open-viewer {request}
                       home-agent:open-browser {url} */
 
@@ -35,6 +36,7 @@ import {
   setActiveStage,
 } from "./shell-stages.js?v=home-20260813a";
 import {
+  createAssistantFrameReadiness,
   normalizeHomeAgentBrowserUrl,
   normalizeHomeAgentViewerPayload,
 } from "./home-agent-message-contract.js?v=home-20260813a";
@@ -64,6 +66,7 @@ let idleDockWidth = 0;
 let spaceEl = null;
 let frame = null;
 let frameReady = false;
+const frameReadiness = createAssistantFrameReadiness();
 let launching = false;
 let launchQuery = {};
 let authorizedLaunch = null;
@@ -219,14 +222,9 @@ function postToFrame(message) {
   target.postMessage(message, "*");
 }
 
-function onAssistantFrameDocumentLoad() {
-  if (!frame?.dataset.route) {
-    return;
-  }
-  /* Home keeps dataset.route across a capsule document reload. The new
-     document must handshake ready again, or the room stays empty. */
+function hideFrameUntilReady() {
   frameReady = false;
-  frame.classList.remove("is-ready");
+  frame?.classList.remove("is-ready");
 }
 
 function markFrameReady() {
@@ -290,6 +288,7 @@ async function mountAssistantFrame() {
     frame.setAttribute("allow", deps.iframeAllowForLaunch(launched));
     frame.title = deps.escapeHtml(launched.title || "Assistant");
     const route = new URL(String(launched.route || ""), window.location.origin);
+    frameReadiness.reset();
     frame.src = route.href;
     frame.dataset.route = route.href;
   } catch (error) {
@@ -355,6 +354,7 @@ export function retireAssistantSpace() {
     clearFaceGeometry(taskbar);
   }
   frameReady = false;
+  frameReadiness.reset();
   if (frame) {
     frame.removeAttribute("src");
     delete frame.dataset.route;
@@ -372,9 +372,13 @@ function onFrameMessage(event) {
     return;
   }
   switch (message.type) {
-    case "home-agent:ready":
-      markFrameReady();
+    case "home-agent:hello":
+    case "home-agent:ready": {
+      const change = frameReadiness.receive(message);
+      if (change === "hide") hideFrameUntilReady();
+      if (change === "show") markFrameReady();
       break;
+    }
     case "home-agent:shelf-metrics":
       applyFaceMetrics(message);
       break;
@@ -582,7 +586,6 @@ export function bindAssistantFace(dependencies) {
   deps = dependencies;
   spaceEl = document.querySelector("#assistant-space");
   frame = document.querySelector("#assistant-space-frame");
-  frame?.addEventListener("load", onAssistantFrameDocumentLoad);
   registerShellPopover(FACE_ID, () => hideAssistantFace({ instant: true }));
   bindAgentSpace({
     available: () => Boolean(toggleEl()) && !toggleEl().hidden,

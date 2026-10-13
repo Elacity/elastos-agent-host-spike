@@ -19,6 +19,7 @@ let recoveryButton = null;
 let recoveryBody = null;
 let recoveryStep = null;
 let closeButton = null;
+let goalSteps = [];
 let bound = false;
 let dismissedThisSession = false;
 let recoveryActBusy = false;
@@ -37,6 +38,7 @@ export function bindSetupSheet() {
   recoveryBody = document.querySelector("#setup-sheet-recovery-body");
   recoveryStep = document.querySelector("#setup-sheet-step-recovery");
   closeButton = document.querySelector("#setup-sheet-close");
+  goalSteps = [...document.querySelectorAll("#setup-sheet [data-setup-goal]")];
   if (!sheet) {
     return;
   }
@@ -44,6 +46,9 @@ export function bindSetupSheet() {
   closeButton?.addEventListener("click", () => hideSetupSheet());
   document.querySelector("#setup-sheet-later")?.addEventListener("click", () => hideSetupSheet());
   recoveryButton?.addEventListener("click", () => openRecoveryAct());
+  for (const step of goalSteps) {
+    step.querySelector("button")?.addEventListener("click", () => openGoal(step.dataset.setupGoal));
+  }
   setHomeSetupNotificationHandler(() => {
     dismissedThisSession = false;
     showSetupSheet();
@@ -223,6 +228,22 @@ function renderSetupSheet(summary) {
     recoveryButton.setAttribute("aria-busy", String(recoveryActBusy));
     recoveryButton.classList.toggle("el-button-primary", !complete);
   }
+  let index = 1;
+  for (const step of goalSteps) {
+    const targetId = step.dataset.setupGoal;
+    step.hidden = !targetById(summary, targetId);
+    if (step.hidden) continue;
+    index += 1;
+    step.querySelector(".setup-sheet-step-index").textContent = String(index);
+    // Chat waits for the Profile (SETUP_HOLD_TARGETS).
+    step.querySelector("button").disabled = SETUP_HOLD_TARGETS.has(targetId) && !profileReady;
+  }
+}
+
+function openGoal(targetId) {
+  if (!targetById(shellState.currentSummary, targetId)) return;
+  hideSetupSheet({ restoreFocus: false });
+  openTarget(targetId);
 }
 
 async function openRecoveryAct() {

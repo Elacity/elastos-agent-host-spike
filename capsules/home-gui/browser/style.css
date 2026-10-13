@@ -1601,6 +1601,24 @@ img {
   transform: scale(0.96);
 }
 
+/* After setup: one row per 0.8.0 goal, in the website's order. */
+.setup-sheet-goal {
+  grid-template-columns: 28px 1fr auto;
+  grid-template-rows: auto;
+  align-items: center;
+  padding: 10px 14px;
+}
+
+.setup-sheet-goal .el-button {
+  grid-column: auto;
+  min-height: 34px;
+}
+
+.setup-sheet-goal[hidden],
+.setup-sheet.is-yielded .setup-sheet-goal {
+  display: none;
+}
+
 @keyframes setup-sheet-enter {
   from {
     opacity: 0;

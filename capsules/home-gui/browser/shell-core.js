@@ -685,14 +685,16 @@ function normalizeTaskbarLayout(taskbar, summary) {
   return normalized;
 }
 
+/* New Homes pin the 0.8.0 goals first (Community, Browser where the platform
+   has it, System for updates); the Assistant pill and Apps lead the Dock. */
 const DEFAULT_TASKBAR_PINS = [
+  "chat-room",
   "browser",
+  "system",
   "library",
   "marketplace",
   "wallet",
   "documents",
-  "chat-room",
-  "system",
 ];
 
 function defaultTaskbarPins(summary) {
