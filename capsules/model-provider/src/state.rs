@@ -325,7 +325,7 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
         let addition = offers.keys().any(|id| !self.offers.contains_key(id));
         // A warm local engine owns its artifacts, but an independent hosted
         // connection does not replace or consume them. Active workers and
-        // unresolved runs still keep every addition behind the activation gate.
+        // nonterminal runs still keep every addition behind the activation gate.
         let hosted_additions_only = offers
             .values()
             .filter(|offer| !self.offers.contains_key(&offer.id))
@@ -349,6 +349,10 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
             }
         } else if addition {
             require_retained_run_bindings(&self.journal, &offers)?;
+            let local_additions_only = offers
+                .values()
+                .filter(|offer| !self.offers.contains_key(&offer.id))
+                .all(|offer| matches!(offer.adapter, AdapterConfig::LocalLlamaCppText { .. }));
             let mut unresolved = false;
             self.journal.visit_runs(|_, run, _| {
                 unresolved |= !run.status.is_terminal();
@@ -361,7 +365,15 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
                             // The serialized owner must close its exact engine
                             // before activating an independent model.
                             activation_close_offers.push(offer.id.clone());
-                        } else {
+                        } else if !local_additions_only
+                            || run.offer.hosted.is_none()
+                            || !matches!(
+                                &offer.adapter,
+                                AdapterConfig::OpenAiCompatibleText { .. }
+                                    | AdapterConfig::OpenAiResponsesText { .. }
+                                    | AdapterConfig::OpenRouterDecisions { .. }
+                            )
+                        {
                             unresolved = true;
                         }
                     }
@@ -6226,6 +6238,154 @@ mod tests {
         active.backend_state = Some(serialize_local_text_backend_state(false).unwrap());
         state.journal.store_run(&active).unwrap();
         assert!(state.plan_refresh(desired, false, &[]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hosted_unknown_allows_local_activation_but_protects_its_own_retirement() {
+        let fixture = retirement_state();
+        let local = fixture.offers["admitted"].clone();
+        let hosted = home_owned_hosted_offer(
+            "model:hosted",
+            "https://openrouter.ai/api/v1/chat/completions",
+            "fixture-key",
+        );
+        let mut initial = fixture.config.clone();
+        initial.extra["offers"] = json!([hosted.clone()]);
+        initial.extra["runtime_admitted_offers"] = json!([]);
+        drop(fixture);
+        let adapters = FakeAdapters {
+            dispatch_results: Arc::new(Mutex::new(
+                (0..2)
+                    .map(|_| {
+                        Ok(DispatchResult::Terminal {
+                            events: vec![],
+                            status: RunStatus::Completed,
+                            output: Some(json!({
+                                "schema": RUN_OUTPUT_TEXT_SCHEMA,
+                                "text": "local reply after hosted unknown",
+                            })),
+                            error: None,
+                            backend_report: None,
+                        })
+                    })
+                    .collect(),
+            )),
+            ..FakeAdapters::default()
+        };
+        let mut state = ModelProviderState::from_init(initial.clone(), adapters.clone()).unwrap();
+        let input = json!({"schema": "elastos.model.input.text/v1", "prompt": "fixture"});
+        let binding = create_binding("hosted-unknown-before-local", &hosted.id, &input);
+        let mut unknown = prepared_run_for_offer(binding.clone(), &hosted, now_ms());
+        transition_terminal(
+            &hosted,
+            &mut unknown,
+            RunStatus::SettlementUnknown,
+            None,
+            Some(RunError {
+                class: ErrorClass::SettlementUnknown,
+                code: "settlement_unknown".into(),
+                message: "Hosted settlement remains unknown.".into(),
+            }),
+        )
+        .unwrap();
+        state.journal.store_run(&unknown).unwrap();
+        let path = run_path(&initial.base_path, &unknown.run_id);
+        let saved = std::fs::read(&path).unwrap();
+        for attempt in 0..2 {
+            if attempt != 0 {
+                state = ModelProviderState::from_init(initial.clone(), adapters.clone()).unwrap();
+            }
+            let mut desired = state.config.clone();
+            desired.extra["offers"] = json!([hosted.clone(), local.clone()]);
+            desired.extra["runtime_admitted_offers"] = json!([{"offer_id": local.id}]);
+            let other_hosted = home_owned_hosted_offer(
+                "model:other-hosted",
+                "https://openrouter.ai/api/v1/chat/completions",
+                "fixture-key",
+            );
+            let mut hosted_addition = state.config.clone();
+            hosted_addition.extra["offers"] = json!([hosted.clone(), other_hosted.clone()]);
+            let mut mixed_addition = desired.clone();
+            mixed_addition.extra["offers"] = json!([hosted.clone(), local.clone(), other_hosted]);
+            for addition in [hosted_addition, mixed_addition] {
+                assert_eq!(
+                    state
+                        .plan_refresh(addition, false, &[])
+                        .err()
+                        .unwrap()
+                        .code(),
+                    "selection_unavailable"
+                );
+            }
+            for worker in [unknown.run_id.clone(), "unbound-worker".into()] {
+                assert!(state
+                    .plan_refresh(desired.clone(), false, &[worker])
+                    .is_err());
+            }
+            let mut retirement = state.config.clone();
+            retirement.extra["offers"] = json!([]);
+            assert_eq!(
+                state
+                    .plan_refresh(retirement, false, &[])
+                    .err()
+                    .unwrap()
+                    .code(),
+                "selection_unavailable"
+            );
+            let mut drift = desired.clone();
+            drift.extra["offers"][0]["adapter"]["model"] = json!("changed-model");
+            assert!(state.plan_refresh(drift, false, &[]).is_err());
+            let mut active = prepared_run_for_offer(
+                create_binding(&format!("hosted-prepared-{attempt}"), &hosted.id, &input),
+                &hosted,
+                now_ms(),
+            );
+            state.journal.store_run(&active).unwrap();
+            assert!(state.plan_refresh(desired.clone(), false, &[]).is_err());
+            transition_terminal(
+                &hosted,
+                &mut active,
+                RunStatus::Completed,
+                Some(json!({"schema": RUN_OUTPUT_TEXT_SCHEMA, "text": "hosted finished"})),
+                None,
+            )
+            .unwrap();
+            state.journal.store_run(&active).unwrap();
+            let refresh = state.plan_refresh(desired, false, &[]).unwrap();
+            assert!(refresh.activation_close_offers.is_empty());
+            state.apply_refresh(refresh);
+            let response = state
+                .handle_runs_create(RunsCreateRequest {
+                    op: "runs_create".into(),
+                    offer_id: local.id.clone(),
+                    operation: local.operation.clone(),
+                    input: input.clone(),
+                    runtime_binding: create_binding(
+                        &format!("local-after-hosted-unknown-{attempt}"),
+                        &local.id,
+                        &input,
+                    ),
+                    expected_execution_binding_hash: None,
+                })
+                .unwrap();
+            assert_eq!(response["data"]["status"], "completed");
+            assert_eq!(std::fs::read(&path).unwrap(), saved);
+            assert_eq!(
+                state
+                    .journal
+                    .load_run(&unknown.run_id)
+                    .unwrap()
+                    .runtime_binding,
+                binding
+            );
+            assert_eq!(
+                state.journal.load_run(&unknown.run_id).unwrap().status,
+                RunStatus::SettlementUnknown
+            );
+        }
+        assert_eq!(*adapters.dispatch_calls.lock().unwrap(), 2);
+        assert_eq!(*adapters.reconcile_calls.lock().unwrap(), 0);
     }
 
     #[cfg(unix)]
