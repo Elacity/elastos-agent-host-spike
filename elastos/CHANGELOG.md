@@ -25,6 +25,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 ### Fixed
 
 - When sign-in fails, the lock screen now says why in one line and what to do next, instead of showing nothing (#338).
+- The publisher's Carrier ticket lists only its public addresses when it has
+  one (no container bridge, LAN or loopback addresses), and a Runtime on a
+  fixed Carrier port also listens on that port over IPv6, so its ticket stays
+  the same across restarts (#336).
 
 ### Developer detail
 
