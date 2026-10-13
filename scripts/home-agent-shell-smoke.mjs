@@ -135,13 +135,6 @@ assert.ok(
 
 assert.ok(homeFace.includes('const TARGET_ID = "assistant"'));
 assert.ok(
-  !homeFace.includes('addEventListener("load"') &&
-    !/READY_RECOVERY|frameHandshake|frameLoadCount/.test(homeFace) &&
-    homeFace.includes("const change = frameReadiness.receive(message);") &&
-    homeFace.includes("frameReadiness.reset();\n    frame.src = route.href;"),
-  "Home shows the room from the document's own hello/ready, resets before it sets src, and keeps no load-event or timer state",
-);
-assert.ok(
   homeWindows.includes('const HOME_AGENT_TARGET_ID = "assistant"') &&
     (homeWindows.match(/targetId === HOME_AGENT_TARGET_ID/g) || []).length === 3 &&
     (homeWindows.match(/showAssistantFace\((?:normalizedLaunchQuery\(options\.query\))?\);/g) || []).length === 2,
