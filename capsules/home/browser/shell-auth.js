@@ -329,8 +329,9 @@ export async function requestPasskeyStepUp(appToken, operation, request) {
 
 // Adds another passkey to the signed-in account: a fresh approval with the
 // current passkey (the step-up System updates use), then the new passkey.
-// Home bound both to the System launch that asked; the new passkey gets the
-// account's own role on the server. Errors are one plain sentence.
+// Home bound both to the System launch that asked; the server accepts only an
+// owner (admin) and gives the new passkey that account. Errors are one plain
+// sentence.
 export async function addAccountPasskey(appToken) {
   if (!window.PublicKeyCredential) {
     throw new Error("Passkeys are not available in this browser.");

@@ -716,7 +716,9 @@ pub async fn passkey_add_complete(
 }
 
 /// Home signs the request with its session; the carried System launch must be
-/// the one Home hosts for that same session and passkey.
+/// the one Home hosts for that same session and passkey. Only an admin (an
+/// owner of this Home) adds passkeys; guests are refused before any approval
+/// is spent.
 fn require_passkey_add_launch(
     state: &GatewayState,
     headers: &HeaderMap,
@@ -733,6 +735,9 @@ fn require_passkey_add_launch(
     )?;
     super::gateway::require_hosted_step_up_launch(&host_context, &launch)?;
     let principal = require_active_passkey_principal_for_context(state, &launch.context)?;
+    if !crate::auth::is_admin(&principal) {
+        anyhow::bail!("admin passkey required to add a passkey");
+    }
     Ok((launch, principal))
 }
 
@@ -1041,7 +1046,6 @@ async fn passkey_list_inner(
         .iter()
         .map(|record| (record.proof_binding_id.as_str(), record))
         .collect();
-    // Admins see every passkey; anyone else sees the passkeys of their own account.
     let manager = state.identity_manager()?;
     let manager = manager.lock().await;
     let credentials = manager
@@ -1049,18 +1053,18 @@ async fn passkey_list_inner(
         .into_iter()
         .filter(|credential| {
             actor_is_admin
-                || principals_by_proof
-                    .get(passkey_proof_binding_id(credential).as_str())
-                    .is_some_and(|record| record.principal_id == actor.principal_id)
+                || current_proof_binding_id == Some(passkey_proof_binding_id(credential).as_str())
         })
         .collect::<Vec<_>>();
     drop(manager);
     let mut passkeys = Vec::with_capacity(credentials.len());
     for credential in credentials {
         let proof_binding_id = passkey_proof_binding_id(&credential);
-        let principal = principals_by_proof
-            .get(proof_binding_id.as_str())
-            .ok_or_else(|| anyhow::anyhow!("passkey credential missing runtime proof binding"))?;
+        // A credential whose auth write never landed (an interrupted add or
+        // enrollment) has no account and cannot sign in; it is not listed.
+        let Some(principal) = principals_by_proof.get(proof_binding_id.as_str()) else {
+            continue;
+        };
         let passkey = principal
             .proof_binding
             .passkey
@@ -1093,37 +1097,39 @@ async fn passkey_revoke_inner(
 ) -> anyhow::Result<(PasskeyRevokeResponse, bool)> {
     let context = require_auth_home_or_system_context(state, headers)?;
     validate_passkey_proof_binding_id(&proof_binding_id)?;
-    let actor = require_active_principal_for_context(state, &context)?;
-    let target = crate::auth::load_principal_for_proof_binding(&state.data_dir, &proof_binding_id)?;
-    let own_account = actor.principal_id == target.principal_id;
-    if !own_account && !crate::auth::is_admin(&actor) {
-        anyhow::bail!("admin passkey required to remove another passkey");
-    }
-    if crate::auth::is_admin(&target)
-        && crate::auth::active_admin_passkey_principal_count(&state.data_dir)? <= 1
-        && crate::auth::active_passkey_principal_count(&state.data_dir)? > 1
-    {
-        anyhow::bail!("last admin passkey cannot be removed while guest passkeys remain");
-    }
-
+    let actor_proof_binding_id = context
+        .proof_binding_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("missing proof-bound auth session"))?;
+    // The identity lock serializes every credential-store change with the one
+    // auth write that checks and revokes.
     let manager = state.identity_manager()?;
     let mut manager = manager.lock().await;
-    let credential_id = manager
+    let now = crate::auth::now_ts();
+    crate::auth::revoke_passkey_for_actor(
+        &state.data_dir,
+        &context.principal_id,
+        actor_proof_binding_id,
+        &proof_binding_id,
+        now,
+    )?;
+    // The credential follows the committed revocation; when an earlier
+    // attempt already removed it, there is nothing left to do.
+    if let Some(credential_id) = manager
         .credentials()
         .into_iter()
         .find(|credential| passkey_proof_binding_id(credential) == proof_binding_id)
         .map(|credential| credential.credential_id)
-        .ok_or_else(|| anyhow::anyhow!("passkey credential not found"))?;
-    manager.revoke_credential(&credential_id)?;
+    {
+        manager.revoke_credential(&credential_id)?;
+    }
     drop(manager);
-
-    let now = crate::auth::now_ts();
-    crate::auth::revoke_passkey_binding(&state.data_dir, &proof_binding_id, now)?;
+    let actor = context.principal_id.clone();
     crate::auth::append_audit_event(
         &state.data_dir,
         audit_event(AuditEventInput {
             event_type: "auth.passkey.revoked",
-            principal_id: Some(actor.principal_id),
+            principal_id: Some(actor),
             proof_binding_id: Some(proof_binding_id.clone()),
             session_id: Some(context.session_id.clone()),
             result: "ok",
@@ -10335,8 +10341,31 @@ mod tests {
             .all(|record| record.role == crate::auth::RuntimePrincipalRole::Guest));
     }
 
+    /// Every credential in this Home's identity store.
+    async fn stored_credentials(state: &GatewayState) -> Vec<StoredCredential> {
+        state.identity_manager().unwrap().lock().await.credentials()
+    }
+
+    fn sign_in_with(
+        data_dir: &std::path::Path,
+        credential: &StoredCredential,
+    ) -> anyhow::Result<AuthSessionGrantV1> {
+        crate::auth::grant_passkey_session(
+            data_dir,
+            crate::auth::PasskeySessionRequest {
+                credential,
+                origin: "http://localhost:61180",
+                user_verified: true,
+                display_name: None,
+                profile_display_name: None,
+                reason: "test sign-in",
+                purpose: crate::auth::PasskeySessionPurpose::SignIn,
+            },
+        )
+    }
+
     #[tokio::test]
-    async fn guest_added_passkey_stays_guest() {
+    async fn guest_cannot_add_a_passkey() {
         let temp = tempfile::tempdir().unwrap();
         let state = test_gateway_state(temp.path());
         let _owner = passkey_add_account(
@@ -10349,37 +10378,162 @@ mod tests {
             "guest-passkey",
             crate::auth::RuntimePrincipalRole::Guest,
         );
-        let begin =
-            begin_passkey_add_for(&state, &guest, passkey_add_approval(temp.path(), &guest))
-                .await
-                .unwrap();
-        let added = complete_passkey_add_for(&state, &guest, &begin, b"guest-second-passkey")
+        let approval = passkey_add_approval(temp.path(), &guest);
+        let err = begin_passkey_add_for(&state, &guest, approval)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("admin passkey required"), "{err}");
+        assert_eq!(records_for(temp.path(), &guest.principal_id).len(), 1);
+        assert_eq!(
+            crate::auth::active_admin_passkey_principal_count(temp.path()).unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn only_the_starting_owner_still_admin_can_finish_adding() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_gateway_state(temp.path());
+        let owner = passkey_add_account(
+            temp.path(),
+            "owner-passkey",
+            crate::auth::RuntimePrincipalRole::Admin,
+        );
+        let other_admin = passkey_add_account(
+            temp.path(),
+            "other-admin-passkey",
+            crate::auth::RuntimePrincipalRole::Admin,
+        );
+        let approval = passkey_add_approval(temp.path(), &owner);
+        let begin = begin_passkey_add_for(&state, &owner, approval)
             .await
             .unwrap();
-        assert_eq!(added.role, "guest");
-        let records = records_for(temp.path(), &guest.principal_id);
-        assert_eq!(records.len(), 2);
-        // The guest sees both of their own passkeys, and nobody else's.
-        let listed = passkey_list_inner(&state, &guest.host_headers)
+        // Another admin's session cannot finish the owner's ceremony.
+        let err = complete_passkey_add_for(&state, &other_admin, &begin, b"stolen-ceremony")
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("binding mismatch"), "{err}");
+        // An owner demoted after starting cannot finish.
+        let owner_binding = records_for(temp.path(), &owner.principal_id)[0]
+            .proof_binding_id
+            .clone();
+        crate::auth::demote_passkey_to_guest(temp.path(), &owner_binding, crate::auth::now_ts())
+            .unwrap();
+        let err = complete_passkey_add_for(&state, &owner, &begin, b"late-passkey")
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("admin passkey required"), "{err}");
+        assert_eq!(records_for(temp.path(), &owner.principal_id).len(), 1);
+        assert_eq!(records_for(temp.path(), &other_admin.principal_id).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_auth_write_after_credential_leaves_no_account_and_retry_finishes() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_gateway_state(temp.path());
+        let owner = passkey_add_account(
+            temp.path(),
+            "owner-passkey",
+            crate::auth::RuntimePrincipalRole::Admin,
+        );
+        let approval = passkey_add_approval(temp.path(), &owner);
+        let begin = begin_passkey_add_for(&state, &owner, approval)
             .await
             .unwrap();
-        assert_eq!(listed.passkeys.len(), 2);
-        assert!(listed
-            .passkeys
-            .iter()
-            .all(|passkey| passkey.principal_id == guest.principal_id && passkey.role == "guest"));
-        let (_, cleared_current) =
-            passkey_revoke_inner(&state, &guest.host_headers, added.proof_binding_id.clone())
+        crate::auth::fail_owner_enrollment_once_for_test(
+            temp.path(),
+            crate::auth::OwnerEnrollmentTestFault::AfterCredential,
+        );
+        assert!(
+            complete_passkey_add_for(&state, &owner, &begin, b"interrupted-passkey")
                 .await
-                .unwrap();
-        assert!(!cleared_current);
-        let listed = passkey_list_inner(&state, &guest.host_headers)
+                .is_err()
+        );
+        // The credential was written, its account was not.
+        let orphan = stored_credentials(&state)
+            .await
+            .into_iter()
+            .find(|credential| credential.credential_id != "owner-passkey")
+            .unwrap();
+        assert_eq!(records_for(temp.path(), &owner.principal_id).len(), 1);
+        assert!(sign_in_with(temp.path(), &orphan).is_err());
+        // Passkey management keeps working and does not show it.
+        let listed = passkey_list_inner(&state, &owner.host_headers)
             .await
             .unwrap();
         assert_eq!(listed.passkeys.len(), 1);
-        assert!(records
-            .iter()
-            .all(|record| record.role == crate::auth::RuntimePrincipalRole::Guest));
+
+        // The same response, retried, finishes and reuses that credential.
+        let added = complete_passkey_add_for(&state, &owner, &begin, b"interrupted-passkey")
+            .await
+            .unwrap();
+        assert_eq!(added.role, "admin");
+        assert_eq!(passkey_proof_binding_id(&orphan), added.proof_binding_id);
+        let listed = passkey_list_inner(&state, &owner.host_headers)
+            .await
+            .unwrap();
+        assert_eq!(listed.passkeys.len(), 2);
+        assert_eq!(
+            sign_in_with(temp.path(), &orphan).unwrap().principal_id,
+            owner.principal_id
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_removals_of_an_owners_two_passkeys_keep_one_admin() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_gateway_state(temp.path());
+        let owner = passkey_add_account(
+            temp.path(),
+            "owner-passkey",
+            crate::auth::RuntimePrincipalRole::Admin,
+        );
+        let _guest = passkey_add_account(
+            temp.path(),
+            "guest-passkey",
+            crate::auth::RuntimePrincipalRole::Guest,
+        );
+        let approval = passkey_add_approval(temp.path(), &owner);
+        let begin = begin_passkey_add_for(&state, &owner, approval)
+            .await
+            .unwrap();
+        let added = complete_passkey_add_for(&state, &owner, &begin, b"owner-second-passkey")
+            .await
+            .unwrap();
+        let first = records_for(temp.path(), &owner.principal_id)
+            .into_iter()
+            .find(|record| record.proof_binding_id != added.proof_binding_id)
+            .unwrap()
+            .proof_binding_id;
+        let second = added.proof_binding_id;
+
+        // Each owner passkey removes the other at the same moment.
+        let barrier = std::sync::Barrier::new(2);
+        let results = std::thread::scope(|scope| {
+            let attempts = [(&first, &second), (&second, &first)].map(|(actor, target)| {
+                let barrier = &barrier;
+                let data_dir = temp.path();
+                let principal_id = owner.principal_id.as_str();
+                scope.spawn(move || {
+                    barrier.wait();
+                    crate::auth::revoke_passkey_for_actor(
+                        data_dir,
+                        principal_id,
+                        actor,
+                        target,
+                        crate::auth::now_ts(),
+                    )
+                })
+            });
+            attempts.map(|attempt| attempt.join().unwrap())
+        });
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
         assert_eq!(
             crate::auth::active_admin_passkey_principal_count(temp.path()).unwrap(),
             1

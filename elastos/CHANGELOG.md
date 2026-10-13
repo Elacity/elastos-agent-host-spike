@@ -8,7 +8,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Added
 
-- System → Accounts has Add passkey: add another passkey (a second device or a security key) to your own account. You confirm with your current passkey first, and the new passkey opens the same account with the same role (#338).
+- An owner (admin) can add another passkey, such as a second device or a security key, in System → Accounts → Add passkey. You confirm with your current passkey first, and the new passkey opens the same account as an admin (#338).
 
 ### Changed
 

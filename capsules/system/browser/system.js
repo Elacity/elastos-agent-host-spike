@@ -1179,10 +1179,7 @@ function configurePasskeyAccess() {
   if (accountListNode) {
     accountListNode.addEventListener("click", onAccountListClick);
   }
-  if (passkeyAddButton) {
-    passkeyAddButton.hidden = !hasShellAccess();
-    passkeyAddButton.addEventListener("click", onPasskeyAdd);
-  }
+  passkeyAddButton?.addEventListener("click", onPasskeyAdd);
 }
 
 function configureRecoveryAccess() {
@@ -3701,6 +3698,10 @@ function setAccessPolicy(access) {
     guest_registration_enabled: access && access.guest_registration_enabled === true,
   };
   setGuestRegistrationControlState();
+  // Only an owner (admin) adds passkeys; the server refuses anyone else.
+  if (passkeyAddButton) {
+    passkeyAddButton.hidden = !hasShellAccess() || currentAccess.role !== "admin";
+  }
 }
 
 function setGuestRegistrationControlState() {

@@ -1653,10 +1653,10 @@ pub(crate) fn begin_passkey_add(
     identity.begin_bound_principal_registration(ceremony_id, client.rp_id, client.origin, binding)
 }
 
-/// Adds the new passkey to the signer's own account: same principal, same
-/// root, same role. The role is copied from the stored record of the passkey
-/// that signed in, so a guest's new passkey is a guest and an admin's is an
-/// admin. Nothing else on this Home changes.
+/// Adds the new passkey to the signing owner's own account: same principal,
+/// same root, admin role. Only an admin passkey that is still active when
+/// the auth write runs can add one, so the new passkey is never a guest and
+/// never admin for anyone else. Nothing else on this Home changes.
 pub(crate) fn complete_passkey_add(
     data_dir: &Path,
     identity: &mut elastos_identity::IdentityManager,
@@ -1674,7 +1674,7 @@ pub(crate) fn complete_passkey_add(
         return enrollment_denied();
     }
     let binding = passkey_add_binding(client)?;
-    mutate_auth_state(data_dir, |state| {
+    let record = mutate_auth_state(data_dir, |state| {
         let now = now_ts();
         normalize_principal_records(state);
         let signer = state
@@ -1687,6 +1687,9 @@ pub(crate) fn complete_passkey_add(
             .cloned()
             .ok_or(OwnerEnrollmentDenied)?;
         ensure_proof_binding_not_revoked(&signer)?;
+        if signer.role != RuntimePrincipalRole::Admin {
+            anyhow::bail!("admin passkey required to add a passkey");
+        }
         if signer
             .proof_binding
             .passkey
@@ -1753,18 +1756,23 @@ pub(crate) fn complete_passkey_add(
             proof_binding,
             display_name: signer.display_name.clone(),
             initial_profile_display_name: None,
-            role: signer.role,
+            role: RuntimePrincipalRole::Admin,
             created_at: now,
             updated_at: now,
         };
         state.principals.push(record.clone());
         push_audit_event(data_dir, state, event)?;
-        // Last effect before the single auth write, as in owner recovery: a
-        // crash between the two leaves only an orphan credential.
+        // Last effect before the single auth write, as in owner recovery. If
+        // the write fails, the credential has no account: it cannot sign in
+        // and is not listed, and the challenge stays open so a retry with the
+        // same response reconciles this credential instead of refusing it.
         identity.persist_guest_candidate(&candidate, &previous_history)?;
-        identity.cancel_challenge(ceremony_id);
+        #[cfg(test)]
+        owner_enrollment_test_fault(data_dir, OwnerEnrollmentTestFault::AfterCredential)?;
         Ok(record)
-    })
+    })?;
+    identity.cancel_challenge(ceremony_id);
+    Ok(record)
 }
 
 pub(crate) fn random_secret_hex() -> String {
@@ -5620,29 +5628,101 @@ pub fn ensure_proof_binding_not_revoked(record: &PrincipalRecord) -> anyhow::Res
     Ok(())
 }
 
+fn revoke_binding_in_state(
+    state: &mut AuthState,
+    proof_binding_id: &str,
+    revoked_at: u64,
+) -> anyhow::Result<PrincipalRecord> {
+    let principal = state
+        .principals
+        .iter_mut()
+        .find(|principal| principal.proof_binding_id == proof_binding_id)
+        .ok_or_else(|| anyhow!("passkey proof binding not found"))?;
+    let Some(passkey) = principal.proof_binding.passkey.as_mut() else {
+        anyhow::bail!("proof binding is not a passkey");
+    };
+    passkey.revoked_at = Some(revoked_at);
+    principal.updated_at = revoked_at;
+    let record = principal.clone();
+    for stored in &mut state.sessions {
+        if stored.grant.proof_binding_id == proof_binding_id {
+            stored.revoked_at = Some(revoked_at);
+        }
+    }
+    Ok(record)
+}
+
+/// Unchecked revocation for test fixtures; requests use
+/// `revoke_passkey_for_actor`.
+#[cfg(test)]
 pub fn revoke_passkey_binding(
     data_dir: &Path,
     proof_binding_id: &str,
     revoked_at: u64,
 ) -> anyhow::Result<PrincipalRecord> {
     mutate_auth_state(data_dir, |state| {
-        let principal = state
+        revoke_binding_in_state(state, proof_binding_id, revoked_at)
+    })
+}
+
+fn active_passkey(principal: &PrincipalRecord) -> bool {
+    principal
+        .proof_binding
+        .passkey
+        .as_ref()
+        .is_some_and(|passkey| passkey.revoked_at.is_none())
+}
+
+/// Removes one passkey in one auth write. The actor's passkey, the permission
+/// and the last-admin rule are checked under the same lock as the
+/// revocation, so two concurrent removals cannot both pass and leave guests
+/// without an admin. A passkey already revoked returns its record unchanged,
+/// so a retry can finish removing its credential.
+pub fn revoke_passkey_for_actor(
+    data_dir: &Path,
+    actor_principal_id: &str,
+    actor_proof_binding_id: &str,
+    proof_binding_id: &str,
+    revoked_at: u64,
+) -> anyhow::Result<PrincipalRecord> {
+    mutate_auth_state(data_dir, |state| {
+        let actor = state
             .principals
-            .iter_mut()
+            .iter()
+            .find(|principal| {
+                principal.proof_binding_id == actor_proof_binding_id
+                    && principal.principal_id == actor_principal_id
+            })
+            .ok_or_else(|| anyhow!("auth session principal mismatch"))?;
+        ensure_proof_binding_not_revoked(actor)?;
+        if actor_proof_binding_id != proof_binding_id && actor.role != RuntimePrincipalRole::Admin {
+            anyhow::bail!("admin passkey required to remove another passkey");
+        }
+        let target = state
+            .principals
+            .iter()
             .find(|principal| principal.proof_binding_id == proof_binding_id)
             .ok_or_else(|| anyhow!("passkey proof binding not found"))?;
-        let Some(passkey) = principal.proof_binding.passkey.as_mut() else {
+        if target.proof_binding.passkey.is_none() {
             anyhow::bail!("proof binding is not a passkey");
-        };
-        passkey.revoked_at = Some(revoked_at);
-        principal.updated_at = revoked_at;
-        let record = principal.clone();
-        for stored in &mut state.sessions {
-            if stored.grant.proof_binding_id == proof_binding_id {
-                stored.revoked_at = Some(revoked_at);
-            }
         }
-        Ok(record)
+        if !active_passkey(target) {
+            return Ok(target.clone());
+        }
+        let others = || {
+            state
+                .principals
+                .iter()
+                .filter(|principal| principal.proof_binding_id != proof_binding_id)
+                .filter(|principal| active_passkey(principal))
+        };
+        if target.role == RuntimePrincipalRole::Admin
+            && !others().any(|principal| principal.role == RuntimePrincipalRole::Admin)
+            && others().next().is_some()
+        {
+            anyhow::bail!("last admin passkey cannot be removed while guest passkeys remain");
+        }
+        revoke_binding_in_state(state, proof_binding_id, revoked_at)
     })
 }
 
