@@ -19,11 +19,14 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 - `admit_release_components` returns the components of a kind this Runtime
   does not know; the update neither fetches nor installs them, prints them and
-  records them in `deferred-support.json`, and every Home start (and every
-  repair) runs the new release's own repair, which installs them and removes
-  the file. Release publication still refuses such kinds. A signed components
-  manifest this Runtime cannot read is `InstallerRequired`: System's status and
-  `elastos update` print `curl -fsSL <publisher gateway>/install.sh | bash`.
+  stages `deferred-support.json` naming them as release support, so activation
+  installs it and rollback or crash recovery restores the previous release's
+  record. Every Home start (and every repair) runs the new release's own repair,
+  which installs them and removes the file. Release publication still refuses
+  such kinds. A signed components manifest this Runtime cannot read is
+  `InstallerRequired`: System's status and `elastos update` print
+  `curl -fsSL '<publisher gateway>/install.sh' | bash`, the URL built with URL
+  operations and single-quoted as one shell word.
 - `scripts/update-hop-oldest-release.json` pins 0.8.0-alpha.15, the oldest
   release that still updates in System (alpha.13 and alpha.14 Homes run
   install.sh once). `update-hop-compare.py check-oldest-start`, run by its test

@@ -4472,7 +4472,7 @@ fn apply_failures_are_classified_only_from_typed_evidence() {
             )
             .unwrap_err()
             .context("staging"),
-            ApplyFailure::InstallerRequired("ElastOS 0.9.0 needs the install command once; this Home cannot apply it itself. Your current version is unchanged. Run this once: curl -fsSL https://publisher.example/install.sh | bash".into()),
+            ApplyFailure::InstallerRequired("ElastOS 0.9.0 needs the install command once; this Home cannot apply it itself. Your current version is unchanged. Run this once: curl -fsSL 'https://publisher.example/install.sh' | bash".into()),
         ),
         (
             anyhow::anyhow!("Binary SHA-256 mismatch!"),

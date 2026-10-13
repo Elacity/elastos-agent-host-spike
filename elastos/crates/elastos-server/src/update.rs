@@ -738,16 +738,27 @@ release_check_marker!(
 );
 
 /// The command that installs the publisher's current release over this Home:
-/// install.sh from the publisher gateway this Home was installed from.
+/// install.sh under the publisher gateway this Home was installed from. The URL
+/// is built with URL operations (no query, fragment or credentials) and passed
+/// to the shell as one single-quoted word, whatever the gateway text holds.
 pub(crate) fn install_command(source: &TrustedSource) -> Option<String> {
     source.gateways.iter().find_map(|gateway| {
-        let url = url::Url::parse(gateway.trim()).ok()?;
-        (url.scheme() == "https" && url.host_str().is_some()).then(|| {
-            format!(
-                "curl -fsSL {}/install.sh | bash",
-                url.as_str().trim_end_matches('/')
-            )
-        })
+        let mut url = url::Url::parse(gateway.trim()).ok()?;
+        if url.scheme() != "https" || url.host_str().is_none() {
+            return None;
+        }
+        url.set_query(None);
+        url.set_fragment(None);
+        url.set_username("").ok()?;
+        url.set_password(None).ok()?;
+        url.path_segments_mut()
+            .ok()?
+            .pop_if_empty()
+            .push("install.sh");
+        Some(format!(
+            "curl -fsSL '{}' | bash",
+            url.as_str().replace('\'', r"'\''")
+        ))
     })
 }
 
@@ -1429,6 +1440,15 @@ async fn run_upgrade_with_restart(
             )
         })
         .await?;
+        let support: Vec<_> = catalog
+            .into_iter()
+            .chain(crate::setup::stage_deferred_support(
+                data_dir,
+                catalog_stage.path(),
+                version,
+                &deferred,
+            )?)
+            .collect();
         // Prepare all five original backups before the first live artifact changes.
         let mut sources = load_trusted_sources(data_dir)?;
         if let Some(stored_source) = sources.source_named_mut(Some(&source.name)) {
@@ -1466,11 +1486,9 @@ async fn run_upgrade_with_restart(
             repair_version,
         )?;
         transaction.prepare(&files)?;
-        if let Some(entry) = &catalog {
-            if let Err(error) = transaction.prepare_support(std::slice::from_ref(entry)) {
-                transaction.abort()?;
-                return Err(error);
-            }
+        if let Err(error) = transaction.prepare_support(&support) {
+            transaction.abort()?;
+            return Err(error);
         }
         let activation = transaction.activate_artifacts_for_support()?;
         println!("  Installed binary: {}", bin_path.display());
@@ -1532,7 +1550,6 @@ async fn run_upgrade_with_restart(
                 "  Principal-root readiness: {} ({} object(s))",
                 principal_root_receipt.status, principal_root_receipt.object_count
             );
-            crate::setup::record_deferred_support(data_dir, version, &deferred)?;
 
             Ok(())
         }
@@ -1658,12 +1675,21 @@ async fn run_upgrade_with_restart(
         transaction.writer_guard(),
         repair_version,
     )?;
+    let deferral_stage = tempfile::tempdir_in(data_dir)?;
+    let staged: Vec<_> = staged_support
+        .iter()
+        .flat_map(|(_, paths)| paths.iter().cloned())
+        .chain(crate::setup::stage_deferred_support(
+            data_dir,
+            deferral_stage.path(),
+            version,
+            &deferred,
+        )?)
+        .collect();
     transaction.prepare(&files)?;
-    if let Some((_, paths)) = &staged_support {
-        if let Err(error) = transaction.prepare_support(paths) {
-            transaction.abort()?;
-            return Err(error);
-        }
+    if let Err(error) = transaction.prepare_support(&staged) {
+        transaction.abort()?;
+        return Err(error);
     }
     let prepared = (|| {
         let support = support_snapshot(
@@ -1719,10 +1745,6 @@ async fn run_upgrade_with_restart(
         }
         Ok(())
     });
-    // The candidate's own repair installs what this update left to it, once the
-    // transaction settles.
-    let activation = activation
-        .and_then(|()| crate::setup::record_deferred_support(data_dir, version, &deferred));
     if let Some(owner) = restart_owner.as_mut() {
         drop(offline);
         let candidate = match activation {
@@ -1743,7 +1765,6 @@ async fn run_upgrade_with_restart(
                 "offline",
             )?;
             transaction.restore_for_restart()?;
-            crate::setup::clear_deferred_support(data_dir)?;
             verify_restart_support(&transaction)?;
             drop(offline);
             let previous = transaction.claim_start(true)?;
@@ -3610,7 +3631,7 @@ mod tests {
         for (gateways, command) in [
             (
                 serde_json::json!(["https://elastos.elacitylabs.com/"]),
-                "Run this once: curl -fsSL https://elastos.elacitylabs.com/install.sh | bash",
+                "Run this once: curl -fsSL 'https://elastos.elacitylabs.com/install.sh' | bash",
             ),
             (
                 serde_json::json!([
@@ -3618,7 +3639,7 @@ mod tests {
                     "http://plain.example",
                     "https://publisher.example"
                 ]),
-                "Run this once: curl -fsSL https://publisher.example/install.sh | bash",
+                "Run this once: curl -fsSL 'https://publisher.example/install.sh' | bash",
             ),
             (
                 serde_json::json!([]),
@@ -3637,6 +3658,52 @@ mod tests {
                 format!("ElastOS 0.9.0 needs the install command once; this Home cannot apply it itself. Your current version is unchanged. {command}")
             );
             assert!(format!("{error:#}").ends_with("release components use schema v2"));
+        }
+    }
+
+    /// Whatever text a gateway holds, the shell receives the install URL as one
+    /// word and runs nothing from it; query, fragment and credentials are dropped.
+    #[test]
+    fn install_command_passes_the_gateway_url_as_one_shell_word() {
+        for (gateway, url) in [
+            (
+                "https://publisher.example/base/?ref=$(id)&x=1#frag",
+                "https://publisher.example/base/install.sh",
+            ),
+            (
+                "https://user:secret@publisher.example/$(id);touch x&y|z`w`",
+                "https://publisher.example/$(id);touch%20x&y|z%60w%60/install.sh",
+            ),
+            (
+                "https://publisher.example/a'b;$(id)",
+                "https://publisher.example/a'b;$(id)/install.sh",
+            ),
+        ] {
+            let source: TrustedSource = serde_json::from_value(serde_json::json!({
+                "name":"fixture", "publisher_dids":["did:key:fixture"], "gateways":[gateway]
+            }))
+            .unwrap();
+            let command = install_command(&source).unwrap();
+            let word = command
+                .strip_prefix("curl -fsSL ")
+                .and_then(|rest| rest.strip_suffix(" | bash"))
+                .unwrap();
+            // The shell's own parse of the printed word is exactly the URL.
+            let parsed = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("printf '%s\\n' {word}"))
+                .output()
+                .unwrap();
+            assert!(parsed.status.success(), "{command}");
+            assert_eq!(
+                String::from_utf8(parsed.stdout).unwrap(),
+                format!("{url}\n"),
+                "{command}"
+            );
+            assert!(
+                !command.contains("secret") && !command.contains("ref="),
+                "{command}"
+            );
         }
     }
 
@@ -4276,6 +4343,49 @@ mod tests {
             b"Publisher publication sentinel"
         );
         assert!(!InstallTransaction::has_pending_recovery(&binary));
+    }
+
+    /// An update that leaves a newer kind and then fails after activation restores
+    /// the previous release's deferral state exactly, present or absent.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_update_restores_the_previous_deferral_state() {
+        let empty =
+            br#"{"schema":"elastos.components/v1","external":{},"profiles":{},"capsules":{}}"#;
+        let newer = newer_kind_components();
+        for previous in [None, Some(&b"{\"previous\":\"deferral\"}"[..])] {
+            // A previous record stands only while the installed release itself still
+            // names a kind it leaves to a newer one; otherwise its repair removes it.
+            let installed = if previous.is_some() {
+                &newer[..]
+            } else {
+                &empty[..]
+            };
+            let (_fixture, data, binary, source) = default_apply_fixture(installed);
+            let record = data.join(crate::setup::DEFERRED_SUPPORT_FILE);
+            if let Some(bytes) = previous {
+                std::fs::write(&record, bytes).unwrap();
+            }
+            // Invalid owner state refuses the update after its files are active.
+            let auth = crate::auth::auth_state_path(&data).unwrap();
+            std::fs::create_dir_all(auth.parent().unwrap()).unwrap();
+            std::fs::write(&auth, b"invalid owner state").unwrap();
+            let error = apply_signed_fixture_with_mode(
+                &data,
+                &source,
+                b"#!/bin/sh\nprintf 'elastos 0.7.1\\n'\n",
+                &newer_kind_components(),
+                ApplyMode::Normal,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("original release files restored"),
+                "{error:#}"
+            );
+            assert_eq!(std::fs::read(&record).ok().as_deref(), previous);
+            assert!(!InstallTransaction::has_pending_recovery(&binary));
+        }
     }
 
     #[cfg(unix)]

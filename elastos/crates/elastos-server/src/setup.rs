@@ -3417,9 +3417,11 @@ pub(crate) fn record_deferred_support(
             "version": version,
             "components": components,
         }))?;
+        use std::os::unix::fs::OpenOptionsExt as _;
         fs::OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .open(&partial)?
             .write_all(&bytes)?;
         fs::rename(&partial, &path)?;
@@ -3430,9 +3432,28 @@ pub(crate) fn record_deferred_support(
     Ok(())
 }
 
-/// The new release's repair, or a restored previous release, owns no deferral.
+/// The new release's repair owns no deferral once it has run.
 pub(crate) fn clear_deferred_support(data_dir: &Path) -> anyhow::Result<()> {
     record_deferred_support(data_dir, "", &[])
+}
+
+/// The update's deferral record joins its staged support, so activation installs
+/// it and rollback or crash recovery restores the previous release's record
+/// exactly. With nothing deferred, a present record is removed the same way.
+pub(crate) fn stage_deferred_support(
+    data_dir: &Path,
+    stage: &Path,
+    version: &str,
+    components: &[String],
+) -> anyhow::Result<Option<(PathBuf, PathBuf)>> {
+    let relative = PathBuf::from(DEFERRED_SUPPORT_FILE);
+    if components.is_empty() {
+        return Ok(fs::symlink_metadata(data_dir.join(&relative))
+            .is_ok()
+            .then(|| (relative, PathBuf::new())));
+    }
+    record_deferred_support(stage, version, components)?;
+    Ok(Some((relative, stage.join(DEFERRED_SUPPORT_FILE))))
 }
 
 /// Whether an update left components to this release's own repair.
