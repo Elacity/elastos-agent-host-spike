@@ -1370,11 +1370,20 @@ async fn run_upgrade_with_restart(
             Ok(serde_json::from_value(value)?)
         })(),
     )?;
-    // A kind this Runtime does not know is left to the new release's own repair.
+    // A kind this Runtime does not know is left to the new release's own repair;
+    // its paths may not be shared with what this release or the installed one owns.
+    let installed: Option<crate::setup::ComponentsManifest> =
+        match std::fs::read(data_dir.join("components.json")) {
+            Ok(bytes) => Some(serde_json::from_slice(&bytes)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
     let deferred = refused(crate::setup::admit_release_components(
         &manifest,
+        installed.as_ref(),
         &component_platform,
     ))?;
+    drop(installed);
     drop(manifest);
     if !deferred.is_empty() {
         println!(
@@ -1416,20 +1425,9 @@ async fn run_upgrade_with_restart(
         let data_dir = transaction.data_dir();
         let bin_path = transaction.binary_path().to_path_buf();
         let old_components = std::fs::read(data_dir.join("components.json")).ok();
+        let changed_capsules =
+            changed_capsule_names(old_components.as_deref(), &comp_data).unwrap_or_default();
         let new_manifest: crate::setup::ComponentsManifest = serde_json::from_slice(&comp_data)?;
-        // A newer release's own paths are not a capsule cache to clear.
-        let newer = crate::setup::newer_kind_paths(&new_manifest, &component_platform);
-        let changed_capsules: Vec<String> =
-            changed_capsule_names(old_components.as_deref(), &comp_data)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|name| {
-                    let relative = Path::new("capsules").join(name);
-                    !newer.iter().any(|path| {
-                        Path::new(path).starts_with(&relative) || relative.starts_with(path)
-                    })
-                })
-                .collect();
         let catalog_stage = tempfile::tempdir_in(data_dir)?;
         let catalog = on_heap(|| {
             crate::setup::stage_model_catalog(
@@ -4385,6 +4383,95 @@ mod tests {
             );
             assert_eq!(std::fs::read(&record).ok().as_deref(), previous);
             assert!(!InstallTransaction::has_pending_recovery(&binary));
+        }
+    }
+
+    /// A newer kind's path that this release or the installed one also owns is
+    /// refused in the one admission every apply mode runs, before any fetch or
+    /// change: a known component inside it, an installed component removed or moved
+    /// out of it. FrozenOffline is the branch System's restart update takes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn newer_kind_sharing_a_path_is_refused_in_every_apply_mode() {
+        use sha2::Digest;
+        let engine = b"installed engine".to_vec();
+        let file = |path: &str, bytes: &[u8]| {
+            serde_json::json!({"install_path":path,"platforms":{"*":{"release_path":path,
+                "checksum":format!("sha256:{}", hex::encode(sha2::Sha256::digest(bytes))),
+                "size":bytes.len(),"cid":raw_cid(bytes)}}})
+        };
+        let future = |path: &str| serde_json::json!({"install_path":path,"platforms":{"*":{"strategy":"future-kind"}}});
+        let manifest = |external: serde_json::Value| {
+            serde_json::to_vec(&serde_json::json!({"schema":"elastos.components/v1",
+                "profiles":{},"capsules":{},"external":external}))
+            .unwrap()
+        };
+        let installed = manifest(serde_json::json!({"engine": file("tools/engine", &engine)}));
+        for (case, candidate) in [
+            (
+                "shared",
+                manifest(
+                    serde_json::json!({"engine": file("tools/engine/inner", b"x"),
+                    "future": future("tools/engine")}),
+                ),
+            ),
+            (
+                "replaced",
+                manifest(serde_json::json!({"future": future("tools/engine")})),
+            ),
+            (
+                "moved",
+                manifest(serde_json::json!({"engine": file("tools/moved", b"x"),
+                    "future": future("tools/engine")})),
+            ),
+        ] {
+            for mode in [ApplyMode::Normal, ApplyMode::FrozenOffline] {
+                let (_fixture, data, binary, source) = default_apply_fixture(&installed);
+                std::fs::create_dir_all(data.join("tools")).unwrap();
+                std::fs::write(data.join("tools/engine"), &engine).unwrap();
+                let paths = [
+                    binary.clone(),
+                    data.join("components.json"),
+                    data.join("sources.json"),
+                    data.join("tools/engine"),
+                ];
+                let before: Vec<_> = paths
+                    .iter()
+                    .map(|path| std::fs::read(path).unwrap())
+                    .collect();
+                let error = apply_signed_fixture_with_mode(
+                    &data,
+                    &source,
+                    b"#!/bin/sh\nprintf 'elastos 0.7.1\\n'\n",
+                    &candidate,
+                    mode,
+                )
+                .await
+                .unwrap_err();
+                assert!(
+                    error.chain().any(|cause| cause.is::<ReleaseRefused>()),
+                    "{case}: {error:#}"
+                );
+                assert!(
+                    format!("{error:#}").contains(
+                        "at tools/engine shares an install path with component 'future' of a newer kind"
+                    ) || format!("{error:#}").contains(
+                        "at tools/engine/inner shares an install path with component 'future' of a newer kind"
+                    ),
+                    "{case}: {error:#}"
+                );
+                let after: Vec<_> = paths
+                    .iter()
+                    .map(|path| std::fs::read(path).unwrap())
+                    .collect();
+                assert_eq!(after, before, "{case}");
+                assert!(!data.join("tools/moved").exists(), "{case}");
+                assert!(
+                    !data.join(crate::setup::DEFERRED_SUPPORT_FILE).exists(),
+                    "{case}"
+                );
+                assert!(!InstallTransaction::has_pending_recovery(&binary), "{case}");
+            }
         }
     }
 

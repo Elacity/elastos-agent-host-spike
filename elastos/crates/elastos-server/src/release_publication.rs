@@ -209,7 +209,7 @@ impl Publication {
             {
                 let manifest = serde_json::from_value(component.clone())?;
                 // The publishing Runtime is the newest; it knows every kind it ships.
-                let unknown = crate::setup::admit_release_components(&manifest, platform)?;
+                let unknown = crate::setup::admit_release_components(&manifest, None, platform)?;
                 ensure!(
                     unknown.is_empty(),
                     "component(s) {} have a development or unsupported release strategy",

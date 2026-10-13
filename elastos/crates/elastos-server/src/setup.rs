@@ -3302,47 +3302,40 @@ pub(crate) fn newer_kind(component: &Component, platform: &str) -> bool {
         .any(|info| !known_strategy(info))
 }
 
-/// The installed paths, artifact and capsule metadata, of the components an
-/// update leaves to the newer release; nothing else this update stages may touch them.
-pub(crate) fn newer_kind_paths<'a>(
-    manifest: &'a ComponentsManifest,
-    platform: &str,
-) -> Vec<&'a str> {
-    let mut paths = Vec::new();
-    for component in manifest.external.values() {
-        if !newer_kind(component, platform) {
-            continue;
-        }
-        paths.extend(resolve_install_path(
-            component,
-            resolve_platform_info(component, platform),
-        ));
-        paths.extend(component.capsule_metadata.as_ref().and_then(|metadata| {
+/// The installed paths a component owns on `platform`: artifact and capsule metadata.
+fn component_paths<'a>(component: &'a Component, platform: &str) -> Vec<&'a str> {
+    resolve_install_path(component, resolve_platform_info(component, platform))
+        .into_iter()
+        .chain(component.capsule_metadata.as_ref().and_then(|metadata| {
             resolve_component_capsule_metadata_install_path(
                 metadata,
                 resolve_component_capsule_metadata_platform_info(metadata, platform),
             )
-        }));
-    }
-    paths
+        }))
+        .collect()
 }
 
-/// Admit all applicable release components before downloads or installation.
-/// Returns, sorted, the components of a kind this Runtime does not know: the
-/// update neither fetches nor installs them, and the new release's own repair
-/// does after restart. Their known assets and every path are still admitted.
-/// Setup retains its explicit development strategies outside release admission.
-pub(crate) fn admit_release_components(
+/// Every path a newer kind owns must belong to it alone: no known component of
+/// this release or of the installed one, and no capsule, may write, move or
+/// remove there. Otherwise an older updater would change what the new release's
+/// own repair installs. A component that keeps its path while changing kind is
+/// the same owner.
+fn refuse_shared_newer_kind_paths(
     manifest: &ComponentsManifest,
+    installed: Option<&ComponentsManifest>,
     platform: &str,
-) -> anyhow::Result<Vec<String>> {
-    let platform = RELEASE_PLATFORM_PAIRS
+) -> anyhow::Result<()> {
+    let newer: Vec<(&str, &str)> = manifest
+        .external
         .iter()
-        .find_map(|(release, setup)| (setup == platform).then_some(release.as_str()))
-        .unwrap_or(platform);
-    refuse_reserved_install_targets(manifest, platform)?;
-    // Their bytes stay untouched here, but their paths join the support snapshot.
-    for path in newer_kind_paths(manifest, platform) {
+        .filter(|(_, component)| newer_kind(component, platform))
+        .flat_map(|(name, component)| {
+            component_paths(component, platform)
+                .into_iter()
+                .map(move |path| (name.as_str(), path))
+        })
+        .collect();
+    for (_, path) in &newer {
         anyhow::ensure!(
             !path.is_empty()
                 && Path::new(path)
@@ -3351,6 +3344,64 @@ pub(crate) fn admit_release_components(
             "install path {path} of a newer component kind is unsafe"
         );
     }
+    if newer.is_empty() {
+        return Ok(());
+    }
+    let mut owners: Vec<(String, String)> = Vec::new();
+    for (name, component) in &manifest.external {
+        if !newer_kind(component, platform) {
+            for path in component_paths(component, platform) {
+                owners.push((format!("component '{name}'"), path.to_owned()));
+            }
+        }
+    }
+    for manifest in std::iter::once(manifest).chain(installed) {
+        for name in manifest.capsules.keys() {
+            owners.push((format!("capsule '{name}'"), format!("capsules/{name}")));
+        }
+    }
+    for (name, component) in installed.iter().flat_map(|installed| &installed.external) {
+        let kept = manifest
+            .external
+            .get(name)
+            .filter(|next| newer_kind(next, platform))
+            .map(|next| component_paths(next, platform))
+            .unwrap_or_default();
+        for path in component_paths(component, platform) {
+            if !kept.contains(&path) {
+                owners.push((format!("installed component '{name}'"), path.to_owned()));
+            }
+        }
+    }
+    for (owner, path) in &owners {
+        for (name, newer_path) in &newer {
+            anyhow::ensure!(
+                !(Path::new(path).starts_with(newer_path)
+                    || Path::new(newer_path).starts_with(path)),
+                "{owner} at {path} shares an install path with component '{name}' of a newer kind at {newer_path}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Admit all applicable release components before downloads or installation;
+/// every update mode calls this once, with the installed components. Returns,
+/// sorted, the components of a kind this Runtime does not know: the update
+/// neither fetches nor installs them, and the new release's own repair does after
+/// restart. Their known assets are still admitted, and their paths belong to them
+/// alone. Setup retains its explicit development strategies outside release admission.
+pub(crate) fn admit_release_components(
+    manifest: &ComponentsManifest,
+    installed: Option<&ComponentsManifest>,
+    platform: &str,
+) -> anyhow::Result<Vec<String>> {
+    let platform = RELEASE_PLATFORM_PAIRS
+        .iter()
+        .find_map(|(release, setup)| (setup == platform).then_some(release.as_str()))
+        .unwrap_or(platform);
+    refuse_reserved_install_targets(manifest, platform)?;
+    refuse_shared_newer_kind_paths(manifest, installed, platform)?;
     let mut deferred = Vec::new();
     for (name, component) in &manifest.external {
         if newer_kind(component, platform) {
@@ -3777,7 +3828,6 @@ pub(crate) async fn stage_update_support(
             }
         }
     }
-    let newer = newer_kind_paths(&new, platform);
     for name in old.capsules.keys().chain(new.capsules.keys()) {
         let relative = PathBuf::from("capsules").join(name);
         crate::install_transaction::validate_support_path(&relative)?;
@@ -3785,12 +3835,9 @@ pub(crate) async fn stage_update_support(
             (Some(old), Some(new)) => old.cid != new.cid || old.sha256 != new.sha256,
             _ => true,
         };
-        // Staged support, and a newer release's own paths, are not this capsule's.
         if !changed
             || paths
                 .keys()
-                .map(PathBuf::as_path)
-                .chain(newer.iter().map(Path::new))
                 .any(|path| path.starts_with(&relative) || relative.starts_with(path))
         {
             continue;
@@ -3835,21 +3882,6 @@ pub(crate) async fn stage_update_support(
         stage_model_catalog(data_dir, &new, stage.path(), fetch).await?
     {
         paths.insert(relative, source);
-    }
-    // A newer release's artifact and metadata paths belong to its own repair:
-    // removals of what an older component left there wait for that repair, and
-    // support this update installs may not share them.
-    let deferred = |relative: &Path| {
-        newer
-            .iter()
-            .any(|path| relative.starts_with(path) || Path::new(path).starts_with(relative))
-    };
-    paths.retain(|relative, source| !(source.as_os_str().is_empty() && deferred(relative)));
-    if let Some(relative) = paths.keys().find(|relative| deferred(relative)) {
-        anyhow::bail!(
-            "support at {} shares an install path with a newer component kind",
-            relative.display()
-        );
     }
     // Journal the first absent parent as one tree. Recovery then removes a new
     // bundle's directories as well as its files, preserving the old support set.
@@ -4686,7 +4718,7 @@ pub(crate) mod tests {
             );
             assert!(installed.is_dir(), "{collides}");
             assert!(
-                admit_release_components(&manifest, &detect_platform())
+                admit_release_components(&manifest, None, &detect_platform())
                     .unwrap_err()
                     .to_string()
                     .contains("reserved"),
@@ -7446,7 +7478,7 @@ pub(crate) mod tests {
             let refusal =
                 "component 'fixture' must come from the signed release: release_path is required";
             assert_eq!(
-                admit_release_components(&manifest, "linux-arm64")
+                admit_release_components(&manifest, None, "linux-arm64")
                     .unwrap_err()
                     .to_string(),
                 refusal
@@ -7500,11 +7532,11 @@ pub(crate) mod tests {
                 }))
                 .unwrap();
                 assert_eq!(
-                    admit_release_components(&manifest, platform).is_ok(),
+                    admit_release_components(&manifest, None, platform).is_ok(),
                     accepted,
                     "{platform}"
                 );
-                assert!(admit_release_components(&manifest, "linux-amd64").is_ok());
+                assert!(admit_release_components(&manifest, None, "linux-amd64").is_ok());
             }
         }
     }
@@ -7556,7 +7588,7 @@ pub(crate) mod tests {
         let admitted = manifest(serde_json::json!({"platforms":{}}));
         for platform in ["darwin-arm64", "aarch64-darwin"] {
             assert_eq!(
-                admit_release_components(&admitted, platform).unwrap(),
+                admit_release_components(&admitted, None, platform).unwrap(),
                 ["alpha", "zeta"],
                 "{platform}"
             );
@@ -7593,7 +7625,7 @@ pub(crate) mod tests {
                 "missing checksum",
             ),
         ] {
-            let error = admit_release_components(&manifest(extra), "darwin-arm64")
+            let error = admit_release_components(&manifest(extra), None, "darwin-arm64")
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(refusal), "{error}");
@@ -7710,100 +7742,78 @@ pub(crate) mod tests {
         assert!(!temp.path().join("tools/future").exists());
     }
 
-    /// Staged removals and writes never touch a newer kind's paths: a replaced or
-    /// moved component's old path stays for the new release's repair, and support
-    /// that would share such a path is refused before anything is journaled.
-    #[tokio::test]
-    async fn staged_support_keeps_newer_kind_paths_for_their_release() {
-        use std::{future::Future, pin::Pin};
-        struct Owner;
-        impl crate::update::RestartOwner for Owner {
-            fn progress(&self, _: &str, _: &str) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn plan(
-                &self,
-                _: String,
-                _: &str,
-                _: &str,
-            ) -> anyhow::Result<crate::install_transaction::RestartPlan> {
-                unreachable!()
-            }
-            fn start<'a>(
-                &'a mut self,
-                _: &'a crate::install_transaction::InstallTransaction,
-                _: crate::install_transaction::RestartRecord,
-            ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
-                unreachable!()
-            }
-            fn stop<'a>(
-                &'a mut self,
-            ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
-                unreachable!()
-            }
-        }
-        let platform = detect_platform();
-        let sha = |bytes: &[u8]| format!("sha256:{}", hex::encode(sha2::Sha256::digest(bytes)));
-        let (old_bytes, moved_bytes) = (b"previous engine".as_slice(), b"moved engine".as_slice());
-        let file = |path: &str, bytes: &[u8]| {
-            serde_json::json!({"install_path": path, "platforms": {(platform.as_str()): {
-                "release_path": path, "checksum": sha(bytes), "size": bytes.len()}}})
+    /// A newer kind's paths belong to it alone: admission refuses a known component,
+    /// a capsule, or an installed component removed or moved out of the path, and
+    /// admits a component that keeps its path while changing kind.
+    #[test]
+    fn admission_refuses_paths_shared_with_a_newer_kind() {
+        let checksum = format!("sha256:{}", "a".repeat(64));
+        let file = |path: &str| {
+            serde_json::json!({"install_path": path, "platforms": {"darwin-arm64": {
+                "release_path": path, "checksum": checksum}}})
         };
         let future = |path: &str| {
-            serde_json::json!({"install_path": path, "platforms": {(platform.as_str()): {
+            serde_json::json!({"install_path": path, "platforms": {"darwin-arm64": {
                 "strategy": "future-kind"}}})
         };
-        let manifest = |external: serde_json::Value| {
-            serde_json::to_vec(&serde_json::json!({"schema": "elastos.components/v1",
-                "profiles": {"home": {"components": ["engine"]}}, "external": external}))
+        let manifest = |external: serde_json::Value, capsules: serde_json::Value| {
+            serde_json::from_value::<ComponentsManifest>(serde_json::json!({
+                "profiles": {}, "external": external, "capsules": capsules}))
             .unwrap()
         };
-        let old = manifest(serde_json::json!({"engine": file("tools/engine", old_bytes)}));
-        for (case, new, staged) in [
-            // Another component of a newer kind takes the removed component's path.
+        let none = serde_json::json!({});
+        let installed = manifest(
+            serde_json::json!({"engine": file("tools/engine")}),
+            none.clone(),
+        );
+        for (case, new, installed, refusal) in [
             (
-                "replaced",
-                manifest(serde_json::json!({"future": future("tools/engine")})),
-                Ok(vec![]),
+                "kind change keeps its path",
+                manifest(serde_json::json!({"engine": future("tools/engine")}), none.clone()),
+                Some(&installed),
+                None,
             ),
-            // The known component moves; a newer kind takes its old path.
             (
-                "moved",
-                manifest(serde_json::json!({"engine": file("tools/moved", moved_bytes),
-                    "future": future("tools/engine")})),
-                Ok(vec![PathBuf::from("tools/moved")]),
+                "known component inside it",
+                manifest(
+                    serde_json::json!({"known": file("tools/engine/inner"), "future": future("tools/engine")}),
+                    none.clone(),
+                ),
+                None,
+                Some("component 'known' at tools/engine/inner shares an install path with component 'future' of a newer kind at tools/engine"),
             ),
-            // Known support inside a newer kind's path is refused.
             (
-                "shared",
-                manifest(serde_json::json!({"engine": file("tools/engine/inner", moved_bytes),
-                    "future": future("tools/engine")})),
-                Err("support at tools/engine/inner shares an install path with a newer component kind"),
+                "installed component replaced",
+                manifest(serde_json::json!({"future": future("tools/engine")}), none.clone()),
+                Some(&installed),
+                Some("installed component 'engine' at tools/engine shares an install path with component 'future' of a newer kind at tools/engine"),
+            ),
+            (
+                "installed component moved",
+                manifest(
+                    serde_json::json!({"engine": file("tools/moved"), "future": future("tools/engine")}),
+                    none.clone(),
+                ),
+                Some(&installed),
+                Some("installed component 'engine' at tools/engine shares an install path with component 'future' of a newer kind at tools/engine"),
+            ),
+            (
+                "capsule inside it",
+                manifest(
+                    serde_json::json!({"future": future("capsules")}),
+                    serde_json::json!({"app": {"cid": "c", "sha256": "s"}}),
+                ),
+                None,
+                Some("capsule 'app' at capsules/app shares an install path with component 'future' of a newer kind at capsules"),
             ),
         ] {
-            let temp = tempfile::tempdir().unwrap();
-            fs::create_dir_all(temp.path().join("tools")).unwrap();
-            fs::write(temp.path().join("tools/engine"), old_bytes).unwrap();
-            let fetch: crate::update::FetchFn = Box::new(move |_| {
-                Box::pin(async move { Ok(moved_bytes.to_vec()) })
-            });
-            let result =
-                stage_update_support(temp.path(), &old, &new, &platform, &fetch, &mut Owner).await;
-            match staged {
-                Ok(expected) => {
-                    let (_stage, paths) = result.unwrap();
-                    let paths: Vec<_> = paths.into_iter().map(|(path, _)| path).collect();
-                    assert_eq!(paths, expected, "{case}");
-                }
-                Err(message) => {
-                    assert_eq!(result.unwrap_err().to_string(), message, "{case}")
+            let result = admit_release_components(&new, installed, "darwin-arm64");
+            match refusal {
+                None => assert!(result.is_ok(), "{case}"),
+                Some(refusal) => {
+                    assert_eq!(result.unwrap_err().to_string(), refusal, "{case}")
                 }
             }
-            assert_eq!(
-                fs::read(temp.path().join("tools/engine")).unwrap(),
-                old_bytes,
-                "{case}"
-            );
         }
     }
 
@@ -7825,7 +7835,7 @@ pub(crate) mod tests {
                 Some(browser_vm_image::INSTALL_PATH)
             );
             assert!(info.release_path.as_ref().unwrap().ends_with(".tar.gz"));
-            assert!(admit_release_components(&manifest, platform).is_err());
+            assert!(admit_release_components(&manifest, None, platform).is_err());
         }
     }
 
@@ -7863,7 +7873,7 @@ pub(crate) mod tests {
         ] {
             // The release's own kinds are all known to the Runtime it ships.
             assert_eq!(
-                admit_release_components(&manifest, platform)
+                admit_release_components(&manifest, None, platform)
                     .unwrap_or_else(|error| panic!("{platform}: {error:#}")),
                 Vec::<String>::new(),
                 "{platform}"

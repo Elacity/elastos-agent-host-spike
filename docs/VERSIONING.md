@@ -352,7 +352,10 @@ hash), then installs the new Runtime and every component of a kind it knows.
 A component of a kind it does not know belongs to a newer release: the updater
 neither fetches nor installs it, names it in the update output and in
 `deferred-support.json` in the data directory, and the new Runtime's own
-repair installs it when Home starts and then removes that file. A signed
+repair installs it when Home starts and then removes that file. Its install
+paths are its alone: a release where a known component, a capsule, or an
+installed component removed or moved away shares such a path is refused before
+anything is fetched; a component may keep its path while changing kind. A signed
 release in a format the updater cannot read at all is not applied; System and
 `elastos update` say the install command is needed once and print it, from
 the publisher gateway the Home was installed from.
