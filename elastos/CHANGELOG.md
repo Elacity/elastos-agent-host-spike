@@ -6,6 +6,18 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Added
+
+- System → Accounts has Add passkey: add another passkey (a second device or a security key) to your own account. You confirm with your current passkey first, and the new passkey opens the same account with the same role (#338).
+
+### Changed
+
+- Make admin and Make guest in System → Accounts change every passkey of that account together (#338).
+
+### Fixed
+
+- When sign-in fails, the lock screen now says why in one line and what to do next, instead of showing nothing (#338).
+
 ### Developer detail
 
 - CI's `release-upstream-assets` job runs the release's upstream asset build

@@ -181,6 +181,7 @@ use gateway_origin::*;
 use gateway_passkey_step_up::*;
 pub(super) use gateway_passkey_step_up::{
     consume_or_recover_passkey_step_up_effect, consume_passkey_step_up_token,
+    require_hosted_step_up_launch,
 };
 #[cfg(test)]
 pub(crate) use gateway_passkey_step_up::{
@@ -637,6 +638,14 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
             "/api/auth/passkey/register/complete",
             post(super::auth_gateway::passkey_register_complete)
                 .layer(DefaultBodyLimit::max(96 * 1024)),
+        )
+        .route(
+            "/api/auth/passkey/add/begin",
+            post(super::auth_gateway::passkey_add_begin).layer(DefaultBodyLimit::max(96 * 1024)),
+        )
+        .route(
+            "/api/auth/passkey/add/complete",
+            post(super::auth_gateway::passkey_add_complete).layer(DefaultBodyLimit::max(96 * 1024)),
         )
         .route(
             "/api/auth/owner-recovery/begin",

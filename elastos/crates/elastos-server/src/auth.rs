@@ -1621,6 +1621,152 @@ pub(crate) fn complete_owner_recovery(
     })
 }
 
+/// A signed-in person adding another passkey to their own account. Every
+/// field comes from the verified launch, never from the request body.
+pub(crate) struct PasskeyAddClient<'a> {
+    pub origin: &'a str,
+    pub rp_id: &'a str,
+    pub principal_id: &'a str,
+    pub proof_binding_id: &'a str,
+    pub session_id: &'a str,
+}
+
+fn passkey_add_binding(client: &PasskeyAddClient<'_>) -> anyhow::Result<[u8; 32]> {
+    Ok(Sha256::digest(serde_json::to_vec(&(
+        "passkey-add",
+        client.origin,
+        client.rp_id,
+        client.principal_id,
+        client.proof_binding_id,
+        client.session_id,
+    ))?)
+    .into())
+}
+
+/// Starts a registration only this session can complete.
+pub(crate) fn begin_passkey_add(
+    identity: &mut elastos_identity::IdentityManager,
+    client: &PasskeyAddClient<'_>,
+    ceremony_id: &str,
+) -> anyhow::Result<elastos_identity::CreationOptions> {
+    let binding = passkey_add_binding(client)?;
+    identity.begin_bound_principal_registration(ceremony_id, client.rp_id, client.origin, binding)
+}
+
+/// Adds the new passkey to the signer's own account: same principal, same
+/// root, same role. The role is copied from the stored record of the passkey
+/// that signed in, so a guest's new passkey is a guest and an admin's is an
+/// admin. Nothing else on this Home changes.
+pub(crate) fn complete_passkey_add(
+    data_dir: &Path,
+    identity: &mut elastos_identity::IdentityManager,
+    client: &PasskeyAddClient<'_>,
+    ceremony_id: &str,
+    response: &elastos_identity::RegistrationResponse,
+) -> anyhow::Result<PrincipalRecord> {
+    if ceremony_id.len() > 128
+        || response._id.len() > 8192
+        || response._raw_id.len() > 8192
+        || response._type != "public-key"
+        || response.response.client_data_json.len() > 4096
+        || response.response.attestation_object.len() > 32768
+    {
+        return enrollment_denied();
+    }
+    let binding = passkey_add_binding(client)?;
+    mutate_auth_state(data_dir, |state| {
+        let now = now_ts();
+        normalize_principal_records(state);
+        let signer = state
+            .principals
+            .iter()
+            .find(|principal| {
+                principal.proof_binding_id == client.proof_binding_id
+                    && principal.principal_id == client.principal_id
+            })
+            .cloned()
+            .ok_or(OwnerEnrollmentDenied)?;
+        ensure_proof_binding_not_revoked(&signer)?;
+        if signer
+            .proof_binding
+            .passkey
+            .as_ref()
+            .is_none_or(|passkey| passkey.rp_id != client.rp_id)
+        {
+            return enrollment_denied();
+        }
+        identity.reload_credentials()?;
+        let candidate = identity.verify_bound_registration(
+            ceremony_id,
+            response,
+            client.rp_id,
+            client.origin,
+            binding,
+        )?;
+        if !candidate.user_verified
+            || state.principals.iter().any(|principal| {
+                principal
+                    .proof_binding
+                    .passkey
+                    .as_ref()
+                    .is_some_and(|key| key.credential_id == candidate.credential.credential_id)
+            })
+        {
+            return enrollment_denied();
+        }
+        let previous_history = identity.guest_credential_history()?;
+        let proof_binding =
+            ProofBinding::passkey_webauthn(elastos_runtime::auth::PasskeyWebAuthnBinding {
+                credential_id: candidate.credential.credential_id.clone(),
+                public_key: candidate.credential.public_key.clone(),
+                sign_count: candidate.credential.sign_count,
+                user_verified: true,
+                origin: candidate.origin.clone(),
+                rp_id: candidate.credential.rp_id.clone(),
+                created_at: now,
+                last_used_at: now,
+                revoked_at: None,
+            });
+        let event = sign_audit_event(
+            data_dir,
+            RuntimeAuditEventV1 {
+                schema: RuntimeAuditEventV1::SCHEMA.into(),
+                event_id: format!("audit:{}", random_secret_hex()),
+                event_type: "auth.passkey.added".into(),
+                principal_id: Some(signer.principal_id.clone()),
+                proof_binding_id: Some(proof_binding.id()),
+                session_id: Some(client.session_id.into()),
+                challenge_id: None,
+                capsule_id: None,
+                result: "ok".into(),
+                reason: "passkey added to the signed-in account after fresh passkey approval"
+                    .into(),
+                occurred_at: now,
+                signer_did: None,
+                signature: None,
+            },
+        )?;
+        let record = PrincipalRecord {
+            principal_id: signer.principal_id.clone(),
+            localhost_root: signer.localhost_root.clone(),
+            proof_binding_id: proof_binding.id(),
+            proof_binding,
+            display_name: signer.display_name.clone(),
+            initial_profile_display_name: None,
+            role: signer.role,
+            created_at: now,
+            updated_at: now,
+        };
+        state.principals.push(record.clone());
+        push_audit_event(data_dir, state, event)?;
+        // Last effect before the single auth write, as in owner recovery: a
+        // crash between the two leaves only an orphan credential.
+        identity.persist_guest_candidate(&candidate, &previous_history)?;
+        identity.cancel_challenge(ceremony_id);
+        Ok(record)
+    })
+}
+
 pub(crate) fn random_secret_hex() -> String {
     let mut bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
@@ -5500,27 +5646,54 @@ pub fn revoke_passkey_binding(
     })
 }
 
+/// A role belongs to the account, not to one of its passkeys: every passkey
+/// of the same principal gets the new role together.
+fn set_account_role(
+    state: &mut AuthState,
+    index: usize,
+    role: RuntimePrincipalRole,
+    updated_at: u64,
+) -> PrincipalRecord {
+    let principal_id = state.principals[index].principal_id.clone();
+    for principal in &mut state.principals {
+        if principal.principal_id == principal_id {
+            principal.role = role;
+            principal.updated_at = updated_at;
+        }
+    }
+    state.principals[index].clone()
+}
+
+fn active_passkey_role_target(state: &AuthState, proof_binding_id: &str) -> anyhow::Result<usize> {
+    let index = state
+        .principals
+        .iter()
+        .position(|principal| principal.proof_binding_id == proof_binding_id)
+        .ok_or_else(|| anyhow!("passkey proof binding not found"))?;
+    let target = &state.principals[index];
+    ensure_proof_binding_not_revoked(target)?;
+    if target.proof_binding.passkey.is_none() {
+        anyhow::bail!("proof binding is not a passkey");
+    }
+    Ok(index)
+}
+
 pub fn promote_passkey_to_admin(
     data_dir: &Path,
     proof_binding_id: &str,
     updated_at: u64,
 ) -> anyhow::Result<PrincipalRecord> {
     mutate_auth_state(data_dir, |state| {
-        let principal = state
-            .principals
-            .iter_mut()
-            .find(|principal| principal.proof_binding_id == proof_binding_id)
-            .ok_or_else(|| anyhow!("passkey proof binding not found"))?;
-        ensure_proof_binding_not_revoked(principal)?;
-        if principal.proof_binding.passkey.is_none() {
-            anyhow::bail!("proof binding is not a passkey");
-        }
-        if principal.role == RuntimePrincipalRole::Admin {
+        let index = active_passkey_role_target(state, proof_binding_id)?;
+        if state.principals[index].role == RuntimePrincipalRole::Admin {
             anyhow::bail!("passkey is already admin");
         }
-        principal.role = RuntimePrincipalRole::Admin;
-        principal.updated_at = updated_at;
-        Ok(principal.clone())
+        Ok(set_account_role(
+            state,
+            index,
+            RuntimePrincipalRole::Admin,
+            updated_at,
+        ))
     })
 }
 
@@ -5530,38 +5703,29 @@ pub fn demote_passkey_to_guest(
     updated_at: u64,
 ) -> anyhow::Result<PrincipalRecord> {
     mutate_auth_state(data_dir, |state| {
-        let index = state
-            .principals
-            .iter()
-            .position(|principal| principal.proof_binding_id == proof_binding_id)
-            .ok_or_else(|| anyhow!("passkey proof binding not found"))?;
+        let index = active_passkey_role_target(state, proof_binding_id)?;
         let target = &state.principals[index];
-        ensure_proof_binding_not_revoked(target)?;
-        if target.proof_binding.passkey.is_none() {
-            anyhow::bail!("proof binding is not a passkey");
-        }
         if target.role != RuntimePrincipalRole::Admin {
             anyhow::bail!("passkey is already guest");
         }
-        let active_admin_count = state
-            .principals
-            .iter()
-            .filter(|principal| {
-                principal.role == RuntimePrincipalRole::Admin
-                    && principal
-                        .proof_binding
-                        .passkey
-                        .as_ref()
-                        .is_some_and(|passkey| passkey.revoked_at.is_none())
-            })
-            .count();
-        if active_admin_count <= 1 {
+        // Another account must keep an active admin passkey.
+        if !state.principals.iter().any(|principal| {
+            principal.principal_id != target.principal_id
+                && principal.role == RuntimePrincipalRole::Admin
+                && principal
+                    .proof_binding
+                    .passkey
+                    .as_ref()
+                    .is_some_and(|passkey| passkey.revoked_at.is_none())
+        }) {
             anyhow::bail!("last admin passkey cannot be demoted");
         }
-        let principal = &mut state.principals[index];
-        principal.role = RuntimePrincipalRole::Guest;
-        principal.updated_at = updated_at;
-        Ok(principal.clone())
+        Ok(set_account_role(
+            state,
+            index,
+            RuntimePrincipalRole::Guest,
+            updated_at,
+        ))
     })
 }
 
