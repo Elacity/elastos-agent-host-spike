@@ -6,7 +6,8 @@ mod test_support;
 use test_support::FIXTURE_EVENT_TIMEOUT;
 
 use elastos_model_contract::{
-    model_input_hash, RUNTIME_ACCESS_BINDING_SCHEMA, RUNTIME_CREATE_BINDING_SCHEMA,
+    model_input_hash, model_run_id, RuntimeAccessBinding, RuntimeCreateBinding,
+    RUNTIME_ACCESS_BINDING_SCHEMA, RUNTIME_CREATE_BINDING_SCHEMA,
 };
 use serde_json::{json, Value};
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
@@ -229,14 +230,19 @@ fn start_local_llama_fixture(
 }
 
 fn access_binding(create: &Value) -> Value {
-    let binding = &create["runtime_binding"];
-    json!({
-        "schema": RUNTIME_ACCESS_BINDING_SCHEMA,
-        "principal_id": binding["principal_id"],
-        "session_id": binding["session_id"],
-        "capsule_id": binding["capsule_id"],
-        "grant_id": binding["grant_id"],
-    })
+    let create: RuntimeCreateBinding =
+        serde_json::from_value(create["runtime_binding"].clone()).unwrap();
+    let binding = RuntimeAccessBinding {
+        schema: RUNTIME_ACCESS_BINDING_SCHEMA.into(),
+        run_id: model_run_id(&create),
+        principal_id: create.principal_id,
+        session_id: create.session_id,
+        capsule_id: create.capsule_id,
+        grant_id: create.grant_id,
+        request_id: create.request_id,
+    };
+    binding.validate(&binding.run_id).unwrap();
+    serde_json::to_value(binding).unwrap()
 }
 
 fn wait_for_run_terminal(provider: &mut ProviderProcess, run_id: &str, binding: &Value) -> Value {
@@ -244,6 +250,7 @@ fn wait_for_run_terminal(provider: &mut ProviderProcess, run_id: &str, binding: 
     loop {
         let run =
             provider.request(json!({"op":"runs_get", "run_id":run_id, "runtime_binding":binding}));
+        assert_eq!(run["status"], "ok", "unexpected run response: {run}");
         if run["data"]["terminal"].is_object() {
             return run;
         }
@@ -403,9 +410,11 @@ fn managed_streaming_stop_switch(label: &str, mode: &str) {
         .unwrap()
         .to_string();
     let binding = access_binding(&create);
+    assert_eq!(binding["run_id"], run_id);
     let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
     loop {
         let page = provider.request(json!({"op":"runs_events", "run_id":run_id, "runtime_binding":binding, "after_sequence":0}));
+        assert_eq!(page["status"], "ok", "unexpected events response: {page}");
         if page["data"]["events"]
             .as_array()
             .unwrap()
