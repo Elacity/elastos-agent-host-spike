@@ -6,8 +6,46 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Changed
+
+- When an update cannot be applied from this version (the release uses a
+  newer format or a kind of component this version does not know), System and
+  `elastos update` say that the install command is needed once and show it,
+  instead of saying the publisher's release is not valid. Your current version
+  stays unchanged.
+
 ### Developer detail
 
+- A signed components manifest whose schema this Runtime does not know, or
+  whose known components pass every check but which also names a component
+  kind (`strategy`) this Runtime does not know, is `InstallerRequired`; a
+  malformed manifest of the known schema and every other admission refusal stay
+  `ReleaseRefused`. System's status and
+  `elastos update` print `curl -fsSL '<publisher gateway>/install.sh' | bash`,
+  the URL built with URL operations (no query, fragment or credentials) and
+  single-quoted as one shell word.
+- `scripts/update-hop-oldest-release.json` pins 0.8.0-alpha.15, the oldest
+  release that still updates in System (alpha.13 and alpha.14 Homes run
+  install.sh once). `update-hop-compare.py check-oldest-start`, run by its test
+  in the source gate, refuses a `components.json` that release's updater cannot
+  read or install; while both pins name one release the update journey covers
+  that start in full. `scripts/release-publish.sh prepare` refuses a source
+  without the pin.
+- `scripts/release-publish.sh seed` and `seed-upgrade` require `RELEASE_SEED_DATA`
+  to end in `/elastos` and export `XDG_DATA_HOME` as its parent, because the
+  Runtime reads `$XDG_DATA_HOME/elastos`; the seed script checks the saved
+  publish state against the signed head's `prev_head_cid` before downloading
+  (a first publication may have none). `seed` refuses a signed head whose
+  `signer_did` or `prev_head_cid` is not plain data, and its printed commands
+  carry every value as one shell word.
+- CI's update journey starts from 0.8.0-alpha.15, the release users run now.
+  On Apple Silicon and Linux ARM64, alpha.14's `elastos update` refused
+  alpha.15 for its new `browser-vm-image` strategy; CI started from
+  0.8.0-alpha.8 and never ran that hop.
+  `scripts/release-publish.sh prepare` refuses, before any download, a source
+  whose `scripts/update-hop-previous-release.json` does not name the public
+  release head; N+1 of a pair passes once the public head is the N this Mac
+  signed from the same run.
 - CI's `release-upstream-assets` job runs the release's upstream asset build
   (`scripts/release-upstream-assets.py`, including the Browser helper source
   builds) for Linux ARM64 and Apple Silicon on every pull request that changes

@@ -4427,6 +4427,19 @@ fn apply_failures_are_classified_only_from_typed_evidence() {
             ApplyFailure::Refused,
         ),
         (
+            // A newer signed format or kind: plain words and the command, never "not valid".
+            crate::update::installer_required::<()>(
+                &serde_json::from_value(json!({"name":"fixture", "publisher_dids":["did:key:fixture"],
+                    "gateways":["https://publisher.example"]}))
+                .unwrap(),
+                "0.9.0",
+                crate::update::refused(Err(anyhow::anyhow!("release components use schema v2"))),
+            )
+            .unwrap_err()
+            .context("staging"),
+            ApplyFailure::InstallerRequired("ElastOS 0.9.0 needs the install command once; this Home cannot apply it itself. Your current version is unchanged. Run this once: curl -fsSL 'https://publisher.example/install.sh' | bash".into()),
+        ),
+        (
             anyhow::anyhow!("Binary SHA-256 mismatch!"),
             ApplyFailure::Unknown,
         ),

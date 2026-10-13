@@ -730,6 +730,54 @@ release_check_marker!(
     DownloadMismatch,
     mismatched
 );
+release_check_marker!(
+    /// A signed, verified release this updater cannot apply: a newer components
+    /// format or kind. The publisher's install command applies it once; retrying
+    /// here never succeeds.
+    InstallerRequired,
+    installer_marked
+);
+
+/// The command that installs the publisher's current release over this Home:
+/// install.sh under the publisher gateway this Home was installed from. The URL
+/// is built with URL operations (no query, fragment or credentials) and passed
+/// to the shell as one single-quoted word, whatever the gateway text holds.
+pub(crate) fn install_command(source: &TrustedSource) -> Option<String> {
+    source.gateways.iter().find_map(|gateway| {
+        let mut url = url::Url::parse(gateway.trim()).ok()?;
+        if url.scheme() != "https" || url.host_str().is_none() {
+            return None;
+        }
+        url.set_query(None);
+        url.set_fragment(None);
+        url.set_username("").ok()?;
+        url.set_password(None).ok()?;
+        url.path_segments_mut()
+            .ok()?
+            .pop_if_empty()
+            .push("install.sh");
+        Some(format!(
+            "curl -fsSL '{}' | bash",
+            url.as_str().replace('\'', r"'\''")
+        ))
+    })
+}
+
+/// Says plainly that `version` needs the install command once, and prints it.
+pub(crate) fn installer_required<T>(
+    source: &TrustedSource,
+    version: &str,
+    result: anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let command = install_command(source)
+        .map(|command| format!("Run this once: {command}"))
+        .unwrap_or_else(|| "Run the publisher's install command (install.sh) once.".into());
+    installer_marked(result.map_err(|error| {
+        error.context(format!(
+            "ElastOS {version} needs the install command once; this Home cannot apply it itself. Your current version is unchanged. {command}"
+        ))
+    }))
+}
 
 pub(crate) fn download_message(size: Option<u64>) -> String {
     let size = size
@@ -1303,14 +1351,59 @@ async fn run_upgrade_with_restart(
         crate::installed_release::admit_descriptor(comp_info, comp_sha256, comp_data.len() as u64)
     })())?;
     // These bytes already match the signed digest, so a refusal here is the publisher's.
-    refused((|| {
+    let value: serde_json::Value = refused((|| {
         anyhow::ensure!(
             comp_data.len() <= 4 * 1024 * 1024,
             "Installed components exceed their byte bound"
         );
-        let manifest: crate::setup::ComponentsManifest = serde_json::from_slice(&comp_data)?;
+        Ok(serde_json::from_slice(&comp_data)?)
+    })())?;
+    // Only an object naming a newer components schema is a newer release format;
+    // anything else that is not this Runtime's schema is the publisher's refusal.
+    let schema = value
+        .as_object()
+        .and_then(|object| object.get("schema"))
+        .and_then(serde_json::Value::as_str);
+    let newer_schema = schema
+        .and_then(|schema| schema.strip_prefix("elastos.components/v"))
+        .filter(|number| !number.starts_with('0') && number.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|number| number.parse::<u64>().ok())
+        .is_some_and(|number| number > 1);
+    if newer_schema {
+        return installer_required(
+            source,
+            version,
+            Err(anyhow::anyhow!(
+                "release components use schema {}",
+                schema.unwrap_or_default()
+            )),
+        );
+    }
+    refused((|| {
+        anyhow::ensure!(
+            schema == Some("elastos.components/v1"),
+            "release components schema is not elastos.components/v1"
+        );
+        Ok(())
+    })())?;
+    // Every understood check runs on the known components first; a newer kind
+    // left over is a newer release's, which only the install command applies.
+    let unknown = refused((|| {
+        let manifest: crate::setup::ComponentsManifest = serde_json::from_value(value)?;
         crate::setup::admit_release_components(&manifest, &component_platform)
     })())?;
+    installer_required(
+        source,
+        version,
+        if unknown.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "release components of a kind this Runtime does not know: {}",
+                unknown.join(", ")
+            ))
+        },
+    )?;
 
     if apply_mode == ApplyMode::Normal {
         // 10. Atomic replace binary
@@ -2122,8 +2215,12 @@ mod tests {
     }
 
     fn binding_envelope(payload: serde_json::Value, domain: &str) -> Vec<u8> {
+        signed_envelope(7, payload, domain)
+    }
+
+    fn signed_envelope(seed: u8, payload: serde_json::Value, domain: &str) -> Vec<u8> {
         // Disposable deterministic identity; never a live publisher key.
-        let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
         let (signature, signer_did) = crate::crypto::domain_separated_sign(
             &key,
             domain,
@@ -3332,6 +3429,261 @@ mod tests {
                 assert_eq!(std::fs::read(data.join("components.json")).unwrap(), empty);
                 assert!(!InstallTransaction::has_pending_recovery(&binary));
             }
+        }
+    }
+
+    /// A signed release this updater cannot apply, a newer components format or a
+    /// component kind it does not know, needs the install command; tampered bytes,
+    /// another signer, another platform and an older release keep their refusals.
+    /// None of them changes an owner file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn release_this_updater_cannot_apply_needs_the_installer_and_changes_nothing() {
+        use sha2::Digest;
+        let empty =
+            br#"{"schema":"elastos.components/v1","external":{},"profiles":{},"capsules":{}}"#;
+        let newer_kind = serde_json::json!({
+            "schema":"elastos.components/v1", "capsules":{},
+            "profiles":{"home":{"components":["future"]}},
+            "external":{"future":{"install_path":"tools/future","platforms":{"*":{
+                "strategy":"future-kind","cid":raw_cid(b"future")}}}}
+        });
+        let executable = b"#!/bin/sh\nprintf 'elastos 0.7.1\\n'\n".to_vec();
+        for case in [
+            "newer kind",
+            "newer format",
+            "malformed known format",
+            "null components",
+            "array components",
+            "schemaless components",
+            "unrelated schema",
+            "newer kind beside a refused known component",
+            "tampered",
+            "other signer",
+            "other platform",
+            "older",
+        ] {
+            for mode in [ApplyMode::Normal, ApplyMode::FrozenOffline] {
+                let (_fixture, data, binary, source) = default_apply_fixture(empty);
+                let mut sources = load_trusted_sources(&data).unwrap();
+                let mut gateway = source.clone();
+                gateway.gateways = vec!["https://publisher.example/".into()];
+                sources.upsert_source(gateway);
+                save_trusted_sources(&data, &sources).unwrap();
+                let paths = [
+                    binary.clone(),
+                    data.join("components.json"),
+                    data.join("sources.json"),
+                ];
+                let before: Vec<_> = paths
+                    .iter()
+                    .map(|path| std::fs::read(path).unwrap())
+                    .collect();
+                let mut value = newer_kind.clone();
+                if case == "newer format" {
+                    value["schema"] = serde_json::json!("elastos.components/v2");
+                    value["external"] = serde_json::json!({});
+                }
+                if case == "malformed known format" {
+                    value["external"] = serde_json::Value::Null;
+                }
+                if case == "newer kind beside a refused known component" {
+                    value["external"]["known"] = serde_json::json!({"install_path":"bin/known",
+                        "platforms":{"*":{"release_path":"known","cid":raw_cid(b"known")}}});
+                }
+                match case {
+                    "null components" => value = serde_json::Value::Null,
+                    "array components" => value = serde_json::json!([]),
+                    "schemaless components" => {
+                        value = serde_json::json!({"external":null,"profiles":{}})
+                    }
+                    "unrelated schema" => {
+                        value["schema"] = serde_json::json!("elastos.components/v01")
+                    }
+                    _ => {}
+                }
+                let components = serde_json::to_vec(&value).unwrap();
+                let version = if case == "older" { "0.5.0" } else { "0.7.1" };
+                let platform = if case == "other platform" {
+                    "riscv64-linux"
+                } else {
+                    detect_release_platform()
+                };
+                let descriptor = |bytes: &[u8]| {
+                    serde_json::json!({"cid":raw_cid(bytes),
+                        "sha256":hex::encode(sha2::Sha256::digest(bytes)), "size":bytes.len()})
+                };
+                let release = binding_envelope(
+                    serde_json::json!({
+                        "schema":"elastos.release/v1", "version":version, "channel":"stable",
+                        "platforms":{(platform):{"binary":descriptor(&executable),
+                            "components":descriptor(&components)}}
+                    }),
+                    "elastos.release.v1",
+                );
+                let mut head = binding_head(&release);
+                head["version"] = serde_json::json!(version);
+                let head = signed_envelope(
+                    if case == "other signer" { 8 } else { 7 },
+                    head,
+                    "elastos.release.head.v1",
+                );
+                let head_cid = raw_cid(&head);
+                let served = if case == "tampered" {
+                    empty.to_vec()
+                } else {
+                    components.clone()
+                };
+                let artifacts = std::collections::HashMap::from([
+                    (head_cid.clone(), head),
+                    (raw_cid(&release), release),
+                    (raw_cid(&executable), executable.clone()),
+                    (raw_cid(&components), served),
+                ]);
+                let fetch: FetchFn = Box::new(move |cid| {
+                    let bytes = artifacts
+                        .get(&cid)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("source unavailable for {cid}"));
+                    Box::pin(async move { bytes })
+                });
+                let error = run_update_for_data_dir_with_mode(
+                    &data,
+                    &fetch,
+                    None,
+                    false,
+                    Some(head_cid),
+                    "0.6.0",
+                    true,
+                    false,
+                    false,
+                    crate::setup::FirstPartyCarrierContext::Setup,
+                    mode,
+                )
+                .await
+                .unwrap_err();
+                let message = format!("{error:#}");
+                let is = |marker: fn(&(dyn std::error::Error + 'static)) -> bool| {
+                    error.chain().any(marker)
+                };
+                match case {
+                    "newer kind" | "newer format" => {
+                        assert!(is(|cause| cause.is::<InstallerRequired>()), "{message}");
+                        assert_eq!(
+                            error.to_string(),
+                            "ElastOS 0.7.1 needs the install command once; this Home cannot apply it itself. Your current version is unchanged. Run this once: curl -fsSL 'https://publisher.example/install.sh' | bash"
+                        );
+                        assert!(!message.contains("not valid"), "{message}");
+                    }
+                    "tampered" => assert!(is(|cause| cause.is::<DownloadMismatch>()), "{message}"),
+                    "other signer"
+                    | "older"
+                    | "malformed known format"
+                    | "null components"
+                    | "array components"
+                    | "schemaless components"
+                    | "unrelated schema"
+                    | "newer kind beside a refused known component" => {
+                        assert!(is(|cause| cause.is::<ReleaseRefused>()), "{message}");
+                        assert!(!is(|cause| cause.is::<InstallerRequired>()), "{message}");
+                    }
+                    _ => assert!(message.contains("No binary CID for platform"), "{message}"),
+                }
+                let after: Vec<_> = paths
+                    .iter()
+                    .map(|path| std::fs::read(path).unwrap())
+                    .collect();
+                assert_eq!(after, before, "{case}");
+                assert!(!data.join("tools/future").exists(), "{case}");
+                assert!(!InstallTransaction::has_pending_recovery(&binary), "{case}");
+            }
+        }
+    }
+
+    #[test]
+    fn installer_required_prints_the_publisher_install_command() {
+        let source = |gateways: serde_json::Value| -> TrustedSource {
+            serde_json::from_value(serde_json::json!({
+                "name":"fixture", "publisher_dids":["did:key:fixture"], "gateways":gateways
+            }))
+            .unwrap()
+        };
+        for (gateways, command) in [
+            (
+                serde_json::json!(["https://elastos.elacitylabs.com/"]),
+                "Run this once: curl -fsSL 'https://elastos.elacitylabs.com/install.sh' | bash",
+            ),
+            (
+                serde_json::json!([
+                    "not a url",
+                    "http://plain.example",
+                    "https://publisher.example"
+                ]),
+                "Run this once: curl -fsSL 'https://publisher.example/install.sh' | bash",
+            ),
+            (
+                serde_json::json!([]),
+                "Run the publisher's install command (install.sh) once.",
+            ),
+        ] {
+            let error = installer_required::<()>(
+                &source(gateways),
+                "0.9.0",
+                Err(anyhow::anyhow!("release components use schema v2")),
+            )
+            .unwrap_err();
+            assert!(error.is::<InstallerRequired>());
+            assert_eq!(
+                error.to_string(),
+                format!("ElastOS 0.9.0 needs the install command once; this Home cannot apply it itself. Your current version is unchanged. {command}")
+            );
+            assert!(format!("{error:#}").ends_with("release components use schema v2"));
+        }
+    }
+
+    /// Whatever text a gateway holds, the shell receives the install URL as one
+    /// word and runs nothing from it; query, fragment and credentials are dropped.
+    #[test]
+    fn install_command_passes_the_gateway_url_as_one_shell_word() {
+        for (gateway, url) in [
+            (
+                "https://publisher.example/base/?ref=$(id)&x=1#frag",
+                "https://publisher.example/base/install.sh",
+            ),
+            (
+                "https://user:secret@publisher.example/$(id);touch x&y|z`w`",
+                "https://publisher.example/$(id);touch%20x&y|z%60w%60/install.sh",
+            ),
+            (
+                "https://publisher.example/a'b;$(id)",
+                "https://publisher.example/a'b;$(id)/install.sh",
+            ),
+        ] {
+            let source: TrustedSource = serde_json::from_value(serde_json::json!({
+                "name":"fixture", "publisher_dids":["did:key:fixture"], "gateways":[gateway]
+            }))
+            .unwrap();
+            let command = install_command(&source).unwrap();
+            let word = command
+                .strip_prefix("curl -fsSL ")
+                .and_then(|rest| rest.strip_suffix(" | bash"))
+                .unwrap();
+            // The shell's own parse of the printed word is exactly the URL.
+            let parsed = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("printf '%s\\n' {word}"))
+                .output()
+                .unwrap();
+            assert!(parsed.status.success(), "{command}");
+            assert_eq!(
+                String::from_utf8(parsed.stdout).unwrap(),
+                format!("{url}\n"),
+                "{command}"
+            );
+            assert!(
+                !command.contains("secret") && !command.contains("ref="),
+                "{command}"
+            );
         }
     }
 

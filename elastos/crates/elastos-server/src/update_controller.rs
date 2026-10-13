@@ -1583,22 +1583,25 @@ fn controller_file_digest(path: &Path) -> Result<Option<String>> {
 
 pub(crate) const REFUSED_MESSAGE: &str = "This update was refused because the publisher's signed release is not valid for this Home. Your current version is unchanged.";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ApplyFailure {
     SourceUnavailable,
     NotEnoughSpace,
     DownloadMismatch,
     Refused,
+    /// The updater's own plain words, with the install command to run once.
+    InstallerRequired(String),
     Unknown,
 }
 
 impl ApplyFailure {
-    fn message(self) -> &'static str {
+    fn message(&self) -> &str {
         match self {
             Self::SourceUnavailable => "Home could not reach the update source. Your current version is unchanged. Connect to the internet and select Update again.",
             Self::NotEnoughSpace => "There is not enough free disk space for this update. Your current version is unchanged. Free some space and select Update again.",
             Self::DownloadMismatch => "The downloaded update did not match what the publisher signed. Your current version is unchanged. Select Update again.",
             Self::Refused => REFUSED_MESSAGE,
+            Self::InstallerRequired(message) => message,
             Self::Unknown => "The update could not be completed. Your current version is unchanged. Select Update again.",
         }
     }
@@ -1615,6 +1618,11 @@ fn classify_apply_failure(error: &anyhow::Error) -> ApplyFailure {
         .any(|cause| cause.is::<crate::update::DownloadMismatch>())
     {
         ApplyFailure::DownloadMismatch
+    } else if let Some(installer) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<crate::update::InstallerRequired>())
+    {
+        ApplyFailure::InstallerRequired(installer.to_string())
     } else if error
         .chain()
         .any(|cause| cause.is::<crate::update::ReleaseRefused>())
