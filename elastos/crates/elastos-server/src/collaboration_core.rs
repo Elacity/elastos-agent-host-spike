@@ -4877,7 +4877,7 @@ mod tests {
         corrected.payload.payload["product"] = serde_json::json!({"body":"corrected"});
         let corrected = resign_message(&key, corrected.payload);
         assert!(reopened
-            .history_projection_candidates(&[corrected.clone()], NOW)
+            .history_projection_candidates(std::slice::from_ref(&corrected), NOW)
             .is_err());
         assert!(reopened.retain_history_message(&corrected, NOW).is_err());
         assert_eq!(fs::read(core.history_path()).unwrap(), saved);
