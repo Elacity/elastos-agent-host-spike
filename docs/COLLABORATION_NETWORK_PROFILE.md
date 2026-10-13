@@ -127,7 +127,8 @@ configuration with the same validator Runtime startup uses. Runtime startup
 itself still reads only `collaboration-network-v1.json`.
 
 The release delivers that file the same way it delivers `model-catalog.json`.
-Release staging and the custodian signer bind it to the pin, and release
+Release staging binds it to the pin, the custodian signer also requires the
+pin's network ID and signer set to equal the file's, and release
 publication admits it only when its bytes match the pin and pass the startup
 validator. Installed setup fetches the exact pinned CID from the trusted source
 over Carrier, with the startup configuration's 3 MiB byte bound checked before
@@ -265,10 +266,15 @@ elastos collaboration-config verify \
   --input /path/to/new-community-output/collaboration-network-release-v1.json
 ```
 
-After that check, release preparation requires the separately reviewed
-Community network-pin support to bind the exact startup file and pin into
-the signed release. Profile signing creates inert files; publication and
-activation use their own explicit operator approval.
+The release then carries the output like `model-catalog.json`: a reviewed
+pull request puts the startup file at the repository root and the pin
+fragment's `collaboration_network` object in `components.json`, and release
+preparation binds that source pin to this exact output through
+`RELEASE_COMMUNITY_DIR` and runs the package's own Runtime verifier
+([Publishing a release](VERSIONING.md#publishing-a-release)). Profile signing
+creates inert files; publication and activation use their own explicit
+operator approval.
+
 For an isolated test fixture, create a disposable authority key as a separate
 explicit action. Give the fixture an owner and cleanup condition, keep its trust
 store separate from real Homes, and keep its private key out of source and logs:

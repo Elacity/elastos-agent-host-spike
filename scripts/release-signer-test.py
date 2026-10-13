@@ -1058,14 +1058,15 @@ class SignerTests(unittest.TestCase):
 
     def test_pinned_community_network_is_bound_like_the_catalog(self):
         name = "collaboration-network-release-v1.json"
-        network = S.json_bytes({"expected_network_id": "fixture-network"})
+        network = S.json_bytes({"schema": S.COMMUNITY_STARTUP_SCHEMA, "expected_network_id": "fixture-network",
+                                "trusted_profile_signer_dids": [DID]})
         def clear_snapshot():
             for path in self.snapshot.iterdir():
                 path.unlink()
-        def pin(components, data):
+        def pin(components, data, **changes):
             components = copy.deepcopy(components)
             components["collaboration_network"] = {"head_cid": S.raw_cid(data), "expected_network_id": "fixture-network",
-                                                   "trusted_profile_signer_dids": [DID]}
+                                                   "trusted_profile_signer_dids": [DID], **changes}
             return components
         def approve_source_components(components):
             template = S.parse_json(self.source_components)
@@ -1088,10 +1089,19 @@ class SignerTests(unittest.TestCase):
         approve_source_components(approved)
         prepared = self.prepare()
         self.assertEqual(len(prepared.files), 7)
+        self.assertEqual(dict(prepared.files)[name].read_bytes(), network)
         self.assertEqual(S.parse_json(dict(prepared.files)["components-x86_64-linux.json"].read_bytes())["collaboration_network"],
                          approved["collaboration_network"])
         self.assertFalse(self.marker.exists())
+        other_did = S.public_did(bytes.fromhex("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"))
         for components, message in ((pin(original, b"other network"), "Community network head differs"),
+                                    (pin(original, network, expected_network_id="other-network"),
+                                     "Community network ID differs from the release pin"),
+                                    (pin(original, network, trusted_profile_signer_dids=[other_did]),
+                                     "Community signer set differs from the release pin"),
+                                    (pin(original, network, trusted_profile_signer_dids=[DID, other_did]),
+                                     "Community signer set differs from the release pin"),
+                                    (pin(original, network, revision=1), "Community network pin fields refused"),
                                     (original, "unbound artifact")):
             clear_snapshot()
             approve_source_components(components)
@@ -1145,6 +1155,8 @@ class SignerTests(unittest.TestCase):
         pin = S.parse_json(publication["collaboration-network-release-pin-v1.json"])["collaboration_network"]
         self.assertEqual(pin, {"head_cid": S.raw_cid(publication["collaboration-network-release-v1.json"]),
                                "expected_network_id": "fixture-community", "trusted_profile_signer_dids": [DID]})
+        # The release signer admits exactly this output pair.
+        S.check_collaboration_network_pin(pin, publication["collaboration-network-release-v1.json"])
         digest = hashlib.sha256(b"elastos.collaboration-network.profile.v1\0" + prepared.profile).digest()
         self.assertEqual([call for call in backend.calls if isinstance(call, tuple) and call[0] == "sign"], [("sign", digest)])
         self.assertIn(("verify", digest, bytes(64)), backend.calls)

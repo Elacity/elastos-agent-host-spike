@@ -942,6 +942,23 @@ def community_profile_publication(prepared, envelope):
     return (("collaboration-network-release-v1.json", config), ("collaboration-network-release-pin-v1.json", pin))
 
 
+def check_collaboration_network_pin(pin, data):
+    """The Runtime's release-pin checks (verify_release_network_bytes) before any key use:
+    the pin names these exact bytes, their network and their complete signer set."""
+    require(type(pin) is dict and set(pin) == {"head_cid", "expected_network_id", "trusted_profile_signer_dids"},
+            "Community network pin fields refused")
+    require(pin["head_cid"] == raw_cid(data), "Community network head differs from its file")
+    config = parse_json(data)
+    require(type(config) is dict and config.get("schema") == COMMUNITY_STARTUP_SCHEMA,
+            "Community network file is not a startup configuration")
+    require(type(pin["expected_network_id"]) is str and config.get("expected_network_id") == pin["expected_network_id"],
+            "Community network ID differs from the release pin")
+    signers = (pin["trusted_profile_signer_dids"], config.get("trusted_profile_signer_dids"))
+    require(all(type(dids) is list and dids and all(type(did) is str for did in dids) and len(set(dids)) == len(dids)
+                for dids in signers) and sorted(signers[0]) == sorted(signers[1]),
+            "Community signer set differs from the release pin")
+
+
 def prepare(policy, root, manifest_name, fetch, snapshot_root):
     held_root = directory_fd(root)
     try:
@@ -1070,8 +1087,10 @@ def prepare_from_root(policy, root, manifest_name, fetch, snapshot_root, held_ro
                 require(type(pin) is dict and type(pin.get("head_cid")) is str, f"{subject} pin refused")
                 record = records.get(name)
                 require(type(record) is dict, f"{subject} snapshot required")
-                require(pin["head_cid"] == raw_cid(regular_bytes(snapshot_root / name, MAX_JSON)),
-                        f"{subject} head differs from snapshot")
+                data = regular_bytes(snapshot_root / name, MAX_JSON)
+                require(pin["head_cid"] == raw_cid(data), f"{subject} head differs from snapshot")
+                if field == "collaboration_network":
+                    check_collaboration_network_pin(pin, data)
                 admit_ref(record["cid"], record["sha256"], record["size"], name)
     require(advertised == approved_refs, "unbound artifact in approved snapshot")
     head = manifest["head"]
