@@ -1308,16 +1308,20 @@ async fn run_upgrade_with_restart(
         crate::installed_release::admit_descriptor(comp_info, comp_sha256, comp_data.len() as u64)
     })())?;
     // These bytes already match the signed digest, so a refusal here is the publisher's.
-    refused((|| {
+    let next_manifest = refused((|| {
         anyhow::ensure!(
             comp_data.len() <= 4 * 1024 * 1024,
             "Installed components exceed their byte bound"
         );
         let manifest: crate::setup::ComponentsManifest = serde_json::from_slice(&comp_data)?;
         crate::setup::admit_release_components(&manifest, &component_platform)?;
-        // Every row of the next release, replaced or kept, has exactly its record.
-        crate::capsule_record::admit_components(next_records.as_ref(), &manifest)
+        Ok(manifest)
     })())?;
+    // Every row of the next release, replaced or kept, has exactly its record.
+    let next_admission = refused(crate::capsule_record::admit_components(
+        next_records,
+        &next_manifest,
+    ))?;
 
     if apply_mode == ApplyMode::Normal {
         // 10. Atomic replace binary
@@ -1354,7 +1358,7 @@ async fn run_upgrade_with_restart(
         let old_components = std::fs::read(data_dir.join("components.json")).ok();
         let records = crate::capsule_record::UpdateRecords::new(
             &previous.release,
-            next_records,
+            next_admission,
             &source.publisher_dids,
         );
         let changed_capsules =
@@ -1542,7 +1546,7 @@ async fn run_upgrade_with_restart(
     let old_components = std::fs::read(data_dir.join("components.json"))?;
     let records = crate::capsule_record::UpdateRecords::new(
         &previous.release,
-        next_records,
+        next_admission,
         &source.publisher_dids,
     );
     let staged_support = if let Some(owner) = restart_owner.as_mut() {

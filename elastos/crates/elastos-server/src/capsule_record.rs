@@ -101,6 +101,12 @@ impl CapsuleRecords {
     /// Every released row of a components manifest has exactly the record the
     /// release signer derives from it, and every record belongs to a row.
     pub(crate) fn admit_manifest(&self, manifest: &crate::setup::ComponentsManifest) -> Result<()> {
+        // The signer lists records for `external` rows only and publishes an empty
+        // capsule registry; a registry entry would be a fetchable row without one.
+        anyhow::ensure!(
+            manifest.capsules.is_empty(),
+            "The release lists capsule records, so its capsule registry must be empty"
+        );
         let mut used = std::collections::BTreeSet::new();
         for (name, component) in &manifest.external {
             let metadata = component
@@ -174,20 +180,156 @@ fn verify(envelope: &serde_json::Value, publisher_dids: &[String]) -> Result<Cap
     Ok(record)
 }
 
-/// Records of the installed release and of the release an update installs.
-#[derive(Default)]
+/// The admission of one release's components: every row a Home may fetch from
+/// it is checked here. Only this module constructs an `Admission`.
+pub(crate) struct Admission {
+    records: Option<CapsuleRecords>,
+    signed: bool,
+}
+
+/// One release row a caller may fetch and install. Only an `Admission`
+/// constructs it, and every download and fetch of component bytes takes one,
+/// so no acquisition path can skip admission.
+#[derive(Clone)]
+pub(crate) struct AdmittedRow {
+    name: String,
+    info: PlatformInfo,
+}
+
+impl AdmittedRow {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn info(&self) -> &PlatformInfo {
+        &self.info
+    }
+
+    /// A row for transport tests that exercise the fetch path itself.
+    #[cfg(test)]
+    pub(crate) fn for_test(name: &str, info: &PlatformInfo) -> Self {
+        Self {
+            name: name.to_owned(),
+            info: info.clone(),
+        }
+    }
+}
+
+impl Admission {
+    /// A Home without an installed signed release (a source or CI Home): its
+    /// local manifest carries no records to check.
+    pub(crate) fn unsigned_home() -> Self {
+        Self {
+            records: None,
+            signed: false,
+        }
+    }
+
+    /// A signed release's admission with these records, for tests that
+    /// exercise planning and staging.
+    #[cfg(test)]
+    pub(crate) fn listing(records: Option<CapsuleRecords>) -> Self {
+        Self {
+            records,
+            signed: true,
+        }
+    }
+
+    pub(crate) fn records(&self) -> Option<&CapsuleRecords> {
+        self.records.as_ref()
+    }
+
+    /// Admit one row of the admitted manifest before any of its bytes are
+    /// fetched or written.
+    pub(crate) fn row(&self, name: &str, info: &PlatformInfo) -> Result<AdmittedRow> {
+        match &self.records {
+            Some(records) => records.admit(name, info)?,
+            None if REQUIRED && self.signed => {
+                anyhow::bail!("The release lists no capsule records")
+            }
+            None => {}
+        }
+        Ok(AdmittedRow {
+            name: name.to_owned(),
+            info: info.clone(),
+        })
+    }
+
+    /// Admit a capsule registry entry. Only a release without records (before
+    /// 0.8.0) or a Home without a signed release can carry registry downloads.
+    pub(crate) fn registry_entry(
+        &self,
+        name: &str,
+        entry: &crate::setup::CapsuleEntry,
+    ) -> Result<AdmittedRow> {
+        anyhow::ensure!(
+            self.records.is_none() && !(REQUIRED && self.signed),
+            "The release lists capsule records, so its capsule registry must be empty"
+        );
+        anyhow::ensure!(
+            entry.sha256.len() == 64
+                && entry
+                    .sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "No sha256 checksum for capsule '{name}'. Integrity verification is mandatory."
+        );
+        let info = serde_json::from_value(serde_json::json!({
+            "cid": entry.cid, "checksum": format!("sha256:{}", entry.sha256),
+            // Older registries leave size unset (0); the checksum still binds the bytes.
+            "size": (entry.size > 0).then_some(entry.size),
+        }))?;
+        Ok(AdmittedRow {
+            name: name.to_owned(),
+            info,
+        })
+    }
+}
+
+/// Admit a release's whole components manifest against its records before any
+/// capsule of it is written: every row the release can serve, replaced or kept,
+/// has exactly its signed record. A release without records is admitted only
+/// while records are optional.
+pub(crate) fn admit_components(
+    records: Option<CapsuleRecords>,
+    manifest: &crate::setup::ComponentsManifest,
+) -> Result<Admission> {
+    match &records {
+        Some(records) => records.admit_manifest(manifest)?,
+        None if REQUIRED => anyhow::bail!("The release lists no capsule records"),
+        None => {}
+    }
+    Ok(Admission {
+        records,
+        signed: true,
+    })
+}
+
+/// Records of the installed release and the admission of the release an
+/// update installs.
 pub(crate) struct UpdateRecords {
     pub(crate) installed: Option<CapsuleRecords>,
-    pub(crate) next: Option<CapsuleRecords>,
+    pub(crate) next: Admission,
+}
+
+#[cfg(test)]
+impl Default for UpdateRecords {
+    /// A signed release without records on both sides (before 0.8.0).
+    fn default() -> Self {
+        Self {
+            installed: None,
+            next: Admission::listing(None),
+        }
+    }
 }
 
 impl UpdateRecords {
-    /// `next` holds the verified records of the release being installed. The
-    /// installed release's records are read only to compare, so an unreadable
-    /// installed list makes every row count as changed by its description alone.
+    /// `next` is the admission of the release being installed. The installed
+    /// release's records are read only to compare, so an unreadable installed
+    /// list makes every row count as changed by its description alone.
     pub(crate) fn new(
         installed_release: &[u8],
-        next: Option<CapsuleRecords>,
+        next: Admission,
         publisher_dids: &[String],
     ) -> Self {
         let installed = serde_json::from_slice::<serde_json::Value>(installed_release)
@@ -208,46 +350,13 @@ impl UpdateRecords {
         installed: Option<&PlatformInfo>,
         next: &PlatformInfo,
     ) -> bool {
-        let (Some(old), Some(new)) = (&self.installed, &self.next) else {
+        let (Some(old), Some(new)) = (&self.installed, self.next.records()) else {
             return false;
         };
         old.get(
             name,
             installed.and_then(|info| info.release_path.as_deref()),
         ) != new.get(name, next.release_path.as_deref())
-    }
-
-    /// Admit a row before any of its bytes are fetched or written.
-    pub(crate) fn admit(&self, name: &str, info: &PlatformInfo) -> Result<()> {
-        admit(self.next.as_ref(), name, info)
-    }
-}
-
-/// Admit a release row against the release's records; a release without
-/// records is admitted only while records are optional.
-pub(crate) fn admit(
-    records: Option<&CapsuleRecords>,
-    name: &str,
-    info: &PlatformInfo,
-) -> Result<()> {
-    match records {
-        Some(records) => records.admit(name, info),
-        None if REQUIRED => anyhow::bail!("The release lists no capsule records"),
-        None => Ok(()),
-    }
-}
-
-/// Admit a release's whole components manifest against its records before any
-/// capsule of it is written: every released row has exactly its signed record,
-/// including rows an update leaves in place.
-pub(crate) fn admit_components(
-    records: Option<&CapsuleRecords>,
-    manifest: &crate::setup::ComponentsManifest,
-) -> Result<()> {
-    match records {
-        Some(records) => records.admit_manifest(manifest),
-        None if REQUIRED => anyhow::bail!("The release lists no capsule records"),
-        None => Ok(()),
     }
 }
 
@@ -438,11 +547,11 @@ mod tests {
             serde_json::from_value(serde_json::json!({"profiles": {}, "external": external}))
                 .unwrap()
         };
-        admit_components(
-            Some(&records),
-            &manifest(serde_json::json!({"system": {"platforms": {"*": row}}})),
-        )
-        .unwrap();
+        records
+            .admit_manifest(&manifest(
+                serde_json::json!({"system": {"platforms": {"*": row}}}),
+            ))
+            .unwrap();
         let mut sized = row.clone();
         sized["size"] = serde_json::json!(38);
         let other = serde_json::json!({"platforms": {"*": {
@@ -475,9 +584,46 @@ mod tests {
                 "no component row uses",
             ),
         ] {
-            let error = admit_components(Some(&records), &manifest(external)).unwrap_err();
+            let error = records.admit_manifest(&manifest(external)).unwrap_err();
             assert!(error.to_string().contains(refusal), "{case}: {error:#}");
         }
+    }
+
+    #[test]
+    fn a_release_listing_records_admits_no_capsule_registry_download() {
+        let (envelope, did) = fixture();
+        let entry: crate::setup::CapsuleEntry = serde_json::from_value(serde_json::json!({
+            "cid": "bafkreid46p2l75p47opclbxhh56vvq2355cg3ohh7ruypnygjuy2p52ibu",
+            "sha256": "1".repeat(64), "size": 1
+        }))
+        .unwrap();
+        let registry: crate::setup::ComponentsManifest =
+            serde_json::from_value(serde_json::json!({
+                "profiles": {}, "external": {}, "capsules": {"fixture-app": entry}
+            }))
+            .unwrap();
+        // An empty record list with a registry entry and no external rows is refused.
+        let empty =
+            CapsuleRecords::from_release(&listed(vec![]), std::slice::from_ref(&did)).unwrap();
+        let error = admit_components(empty, &registry).err().unwrap();
+        assert!(error.to_string().contains("capsule registry must be empty"));
+        let listing = CapsuleRecords::from_release(&listed(vec![envelope]), &[did]).unwrap();
+        let error = Admission::listing(listing)
+            .registry_entry("fixture-app", &entry)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("capsule registry must be empty"));
+        // A release before records, or a Home without a signed release, keeps
+        // registry downloads, each with its signed checksum.
+        assert!(admit_components(None, &registry)
+            .unwrap()
+            .registry_entry("fixture-app", &entry)
+            .is_ok());
+        let mut unsigned = entry.clone();
+        unsigned.sha256.clear();
+        assert!(Admission::unsigned_home()
+            .registry_entry("fixture-app", &unsigned)
+            .is_err());
     }
 
     #[test]
@@ -488,6 +634,76 @@ mod tests {
             CapsuleRecords::from_release(&release, &[did]).unwrap(),
             None
         );
-        assert!(admit(None, "system", &row(&envelope["payload"])).is_ok());
+        let manifest: crate::setup::ComponentsManifest =
+            serde_json::from_value(serde_json::json!({"profiles": {}, "external": {}})).unwrap();
+        assert!(admit_components(None, &manifest)
+            .unwrap()
+            .row("system", &row(&envelope["payload"]))
+            .is_ok());
+    }
+
+    /// Release artifact bytes reach a Home only through these transport calls.
+    /// Each listed caller takes an `AdmittedRow`, which only admission builds,
+    /// except where noted. A new caller fails here until it does the same.
+    #[test]
+    fn release_artifact_transport_is_called_only_from_admitted_row_paths() {
+        const PRIMITIVES: [&str; 3] = [
+            "fetch_file_from_trusted_source_bound(",
+            "fetch_file_from_trusted_source_to_bound(",
+            "content_fetch_via_provider(",
+        ];
+        let allowed = BTreeMap::from([
+            // fetch_first_party_component_via_carrier(&AdmittedRow), and the
+            // model catalogue pinned by raw CID with its own signed envelope.
+            (("setup.rs".to_owned(), PRIMITIVES[0]), 2),
+            // browser_vm_image::install_via_carrier(&AdmittedRow).
+            (("setup/browser_vm_image.rs".to_owned(), PRIMITIVES[1]), 1),
+            // The operator's `source fetch-file` writes to a file it names; it
+            // installs nothing.
+            (("sources.rs".to_owned(), PRIMITIVES[1]), 1),
+            // try_download_capsule_via_content_provider(&AdmittedRow).
+            (("supervisor.rs".to_owned(), PRIMITIVES[2]), 1),
+        ]);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found = BTreeMap::new();
+        let mut pending = vec![root.clone()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let relative = path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                if path.extension().is_none_or(|extension| extension != "rs")
+                    || relative.ends_with("tests.rs")
+                    || relative.contains("/tests/")
+                {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                // Production code precedes the file's test module.
+                let production = [
+                    "\n#[cfg(test)]\nmod tests",
+                    "\n#[cfg(test)]\npub(crate) mod tests",
+                ]
+                .iter()
+                .filter_map(|marker| text.find(marker))
+                .min()
+                .map_or(text.as_str(), |end| &text[..end]);
+                for primitive in PRIMITIVES {
+                    let calls = production.matches(primitive).count()
+                        - production.matches(&format!("fn {primitive}")).count();
+                    if calls > 0 {
+                        found.insert((relative.clone(), primitive), calls);
+                    }
+                }
+            }
+        }
+        assert_eq!(found, allowed);
     }
 }

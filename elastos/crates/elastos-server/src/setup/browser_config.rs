@@ -37,14 +37,9 @@ pub(super) async fn ensure_host_components(
         };
         for row in &admitted_rows {
             if row.missing(data) {
-                super::download_component(
-                    data,
-                    row.name,
-                    row.info,
-                    &data.join(row.relative),
-                    context,
-                )
-                .await?;
+                let admitted_row = super::admitted_row(admitted.as_ref(), row.name, row.info)?;
+                super::download_component(data, &admitted_row, &data.join(row.relative), context)
+                    .await?;
             }
             super::ensure_bundle_executable_link(data, row.name, row.info)?;
         }

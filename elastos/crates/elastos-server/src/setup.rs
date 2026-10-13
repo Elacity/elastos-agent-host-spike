@@ -336,6 +336,11 @@ async fn run_with_data_dir(
         metadata.install(&data_dir)?;
     }
 
+    // A Home without a signed release installs from its local manifest.
+    let unsigned = crate::capsule_record::Admission::unsigned_home();
+    let admission = signed_setup
+        .as_ref()
+        .map_or(&unsigned, |metadata| &metadata.admission);
     prepare_selected_component_prerequisites(
         &data_dir,
         &manifest,
@@ -343,6 +348,7 @@ async fn run_with_data_dir(
         &components,
         media_tools_dir.as_deref(),
         signed_setup.is_some(),
+        admission,
     )
     .await?;
     if prerequisites_only {
@@ -529,15 +535,9 @@ async fn run_with_data_dir(
                 }
             };
             let dest = data_dir.join(install_path);
+            let row = admission.row(name, platform_info)?;
             line.track(async {
-                download_component(
-                    &data_dir,
-                    name,
-                    platform_info,
-                    &dest,
-                    FirstPartyCarrierContext::Setup,
-                )
-                .await?;
+                download_component(&data_dir, &row, &dest, FirstPartyCarrierContext::Setup).await?;
                 write_cache_metadata(&manifest, Some(platform_info), &platform, name, &dest)
             })
             .await?;
@@ -553,6 +553,7 @@ async fn run_with_data_dir(
                 name,
                 comp,
                 &platform,
+                admission,
                 FirstPartyCarrierContext::Setup,
             ))
             .await?;
@@ -674,6 +675,8 @@ const COMPONENTS_MANIFEST_ENV: &str = "ELASTOS_COMPONENTS_MANIFEST";
 struct SignedSetupMetadata {
     components: Vec<u8>,
     catalog: Option<Vec<u8>>,
+    /// The signed components admitted against the release's capsule records.
+    admission: crate::capsule_record::Admission,
 }
 
 impl SignedSetupMetadata {
@@ -719,12 +722,11 @@ async fn admit_installed_setup_metadata(
         )?;
         let manifest: ComponentsManifest = serde_json::from_slice(&components)?;
         // Each capsule record verifies and matches its row before setup writes.
-        crate::capsule_record::admit_components(
+        let admission = crate::capsule_record::admit_components(
             crate::capsule_record::CapsuleRecords::from_release(
                 &release["payload"],
                 &source.publisher_dids,
-            )?
-            .as_ref(),
+            )?,
             &manifest,
         )?;
         let catalog = if let Some(trust) = &manifest.model_catalog {
@@ -741,6 +743,7 @@ async fn admit_installed_setup_metadata(
             SignedSetupMetadata {
                 components,
                 catalog,
+                admission,
             },
         ))
     }
@@ -1236,18 +1239,18 @@ async fn ensure_browser_vm_image_in_context(
     // Runtime caller holds the writer until the image is written.
     let platform = detect_platform();
     let admitted = admit_installed_components(data_dir, context)?;
-    let info = match &admitted {
+    let row = match &admitted {
         Some(admitted) => {
             let info = browser_vm_image::component_info(&admitted.manifest, &platform)?;
             if browser_vm_image::verify_installed(data_dir, info, &platform).is_ok() {
                 return Ok(());
             }
-            info.clone()
+            admitted.admission.row(browser_vm_image::NAME, info)?
         }
-        None => pending,
+        None => admitted_row(None, browser_vm_image::NAME, &pending)?,
     };
     let dest = data_dir.join(browser_vm_image::INSTALL_PATH);
-    download_component(data_dir, browser_vm_image::NAME, &info, &dest, context).await
+    download_component(data_dir, &row, &dest, context).await
 }
 
 /// The installed signed release's components after every capsule record it lists
@@ -1257,6 +1260,7 @@ async fn ensure_browser_vm_image_in_context(
 pub(crate) struct AdmittedComponents {
     pub(crate) bytes: Vec<u8>,
     pub(crate) manifest: ComponentsManifest,
+    pub(crate) admission: crate::capsule_record::Admission,
     _writer: Option<crate::install_transaction::InstallationGuard>,
 }
 
@@ -1284,12 +1288,26 @@ pub(crate) fn admit_installed_components(
         &release["payload"],
         &source.publisher_dids,
     )?;
-    crate::capsule_record::admit_components(records.as_ref(), &manifest)?;
+    let admission = crate::capsule_record::admit_components(records, &manifest)?;
     Ok(Some(AdmittedComponents {
         bytes,
         manifest,
+        admission,
         _writer: writer,
     }))
+}
+
+/// The admitted row `name`/`info` of `admitted`, or of this Home's local
+/// manifest when it has no signed release.
+pub(crate) fn admitted_row(
+    admitted: Option<&AdmittedComponents>,
+    name: &str,
+    info: &PlatformInfo,
+) -> anyhow::Result<crate::capsule_record::AdmittedRow> {
+    match admitted {
+        Some(admitted) => admitted.admission.row(name, info),
+        None => crate::capsule_record::Admission::unsigned_home().row(name, info),
+    }
 }
 
 pub(crate) async fn ensure_capsule_component_for_home_launch(
@@ -1371,15 +1389,9 @@ pub(crate) async fn ensure_capsule_component_for_home_launch(
         "installed components differ from the signed release; run the installer again"
     );
 
+    let row = admitted_row(admitted.as_ref(), name, platform_info)?;
     let dest = data_dir.join(install_path);
-    download_component(
-        data_dir,
-        name,
-        platform_info,
-        &dest,
-        FirstPartyCarrierContext::Runtime,
-    )
-    .await?;
+    download_component(data_dir, &row, &dest, FirstPartyCarrierContext::Runtime).await?;
     write_cache_metadata(&manifest, Some(platform_info), &platform, name, &dest)?;
     drop(admitted);
 
@@ -1427,6 +1439,7 @@ async fn ensure_component_capsule_metadata(
     name: &str,
     component: &Component,
     platform: &str,
+    admission: &crate::capsule_record::Admission,
     carrier_context: FirstPartyCarrierContext,
 ) -> anyhow::Result<()> {
     let Some(metadata) = component.capsule_metadata.as_ref() else {
@@ -1456,7 +1469,8 @@ async fn ensure_component_capsule_metadata(
     if !progress::reporting() {
         println!("[install] {} capsule metadata ...", name);
     }
-    download_component(data_dir, name, platform_info, &dest, carrier_context).await?;
+    let row = admission.row(name, platform_info)?;
+    download_component(data_dir, &row, &dest, carrier_context).await?;
     write_platform_cache_metadata(platform_info, &dest)?;
     write_archive_executable_receipt(component, platform, platform_info, &dest)?;
     if let Some(reason) = installed_component_capsule_metadata_stale_reason(name, component, &dest)
@@ -2410,20 +2424,18 @@ pub(crate) async fn ensure_local_model_engine(
             manifest_bytes.len() as u64,
         )?;
         // The engine row, like every row, has exactly its signed capsule record.
-        crate::capsule_record::admit_components(
+        let admission = crate::capsule_record::admit_components(
             crate::capsule_record::CapsuleRecords::from_release(
                 &release["payload"],
                 &source.publisher_dids,
-            )?
-            .as_ref(),
+            )?,
             &manifest,
         )?;
-        Some((source, binary, admitted))
+        Some((source, binary, admitted, admission))
     } else {
         None
     };
-    let release_path = info
-        .release_path
+    info.release_path
         .as_deref()
         .filter(|path| !path.trim().is_empty())
         .ok_or_else(|| {
@@ -2440,27 +2452,17 @@ pub(crate) async fn ensure_local_model_engine(
         matches!(info.strategy.as_deref(), None | Some("prebuilt")) && info.extract_path.is_some(),
         "on-demand llama-server requires a signed prebuilt bundle"
     );
-    let (source, binary, admitted) = installed.ok_or_else(|| {
+    let (source, binary, admitted, admission) = installed.ok_or_else(|| {
         anyhow::anyhow!("engine acquisition requires an installed signed release")
     })?;
     let guard = writer.as_ref().unwrap();
     let bundle = local_model_engine_confinement_bundle(data_dir, &manifest)?
         .ok_or_else(|| anyhow::anyhow!("local model engine is unavailable"))?;
     verify_arm64_model_host(&platform)?;
-    let bytes = fetch_first_party_component_via_carrier(
-        data_dir,
-        info.cid.as_deref().filter(|cid| !cid.is_empty()),
-        release_path,
-        FirstPartyCarrierContext::Runtime,
-    )
-    .await?;
-    verify_checksum("llama-server", &bytes, info)?;
-    if let Some(size) = info.size {
-        anyhow::ensure!(
-            bytes.len() as u64 == size,
-            "llama-server bundle size differs"
-        );
-    }
+    let row = admission.row("llama-server", info)?;
+    let bytes =
+        fetch_first_party_component_via_carrier(data_dir, &row, FirstPartyCarrierContext::Runtime)
+            .await?;
     let current = crate::installed_release::read_for_setup(data_dir, &binary, &source, guard)?;
     anyhow::ensure!(
         current.head == admitted.head
@@ -3093,15 +3095,17 @@ pub(crate) async fn repair_installed_support(
     let (release, components) =
         crate::installed_release::read_signed_release(data_dir, binary, source, repair_version)?;
     // Repair restores rows of the installed release, checked against its own records.
+    let manifest: ComponentsManifest = serde_json::from_slice(&components)?;
     let records = crate::capsule_record::UpdateRecords {
         installed: None,
-        next: crate::capsule_record::CapsuleRecords::from_release(
-            &release["payload"],
-            &source.publisher_dids,
+        next: crate::capsule_record::admit_components(
+            crate::capsule_record::CapsuleRecords::from_release(
+                &release["payload"],
+                &source.publisher_dids,
+            )?,
+            &manifest,
         )?,
     };
-    let manifest: ComponentsManifest = serde_json::from_slice(&components)?;
-    crate::capsule_record::admit_components(records.next.as_ref(), &manifest)?;
     remove_replacement_leftovers(data_dir, &manifest, &detect_platform())?;
     if let Some(trust) = &manifest.model_catalog {
         let dest = data_dir.join(MODEL_CATALOG_FILE);
@@ -3287,6 +3291,7 @@ async fn prepare_selected_component_prerequisites(
     components: &[String],
     supplied_tools: Option<&Path>,
     signed_release: bool,
+    admission: &crate::capsule_record::Admission,
 ) -> anyhow::Result<()> {
     use crate::protected_content_runtime::{
         prepare_runtime_media_provider_prerequisite, runtime_media_import_differs, MediaToolsTrust,
@@ -3340,9 +3345,9 @@ async fn prepare_selected_component_prerequisites(
                 name.chars().count(),
                 info.size,
             );
+            let row = admission.row(name, info)?;
             line.track(async {
-                download_component(data_dir, name, info, &dest, FirstPartyCarrierContext::Setup)
-                    .await?;
+                download_component(data_dir, &row, &dest, FirstPartyCarrierContext::Setup).await?;
                 write_cache_metadata(manifest, Some(info), platform, name, &dest)
             })
             .await?;
@@ -3355,16 +3360,12 @@ async fn prepare_selected_component_prerequisites(
         // Only the installed signed release may replace a differing private
         // pair, and only with bytes hashed from an archive verified just now.
         let trust = if signed_release && runtime_media_import_differs(data_dir, &managed_tools)? {
-            let release_path = info.release_path.as_deref().unwrap_or_default();
-            let cid = info.cid.as_deref().filter(|cid| !cid.is_empty());
             let archive = fetch_first_party_component_via_carrier(
                 data_dir,
-                cid,
-                release_path,
+                &admission.row(name, info)?,
                 FirstPartyCarrierContext::Setup,
             )
             .await?;
-            verify_checksum(name, &archive, info)?;
             MediaToolsTrust::SignedRelease(signed_media_tool_digests(&archive, "media-tools")?)
         } else {
             MediaToolsTrust::MustMatch
@@ -3679,7 +3680,7 @@ fn admit_planned_records(
 ) -> anyhow::Result<()> {
     for item in plan {
         if item.artifact && matches!(item.info.strategy.as_deref(), None | Some("prebuilt")) {
-            records.admit(item.name, item.info)?;
+            records.next.row(item.name, item.info)?;
         }
         if let Some(info) = item
             .component
@@ -3690,7 +3691,7 @@ fn admit_planned_records(
                 resolve_component_capsule_metadata_platform_info(metadata, platform)
             })
         {
-            records.admit(item.name, info)?;
+            records.next.row(item.name, info)?;
         }
     }
     Ok(())
@@ -3742,14 +3743,22 @@ async fn refresh_support(
                 atomic_copy_file(&source, &dest)?;
                 set_local_copy_permissions(&source, &dest);
             } else {
-                download_component(data_dir, name, info, &dest, carrier_context).await?;
+                let row = records.next.row(name, info)?;
+                download_component(data_dir, &row, &dest, carrier_context).await?;
                 write_cache_metadata(new_manifest, Some(info), platform, name, &dest)?;
             }
             refreshed.push(name.to_string());
         }
         if item.metadata {
-            ensure_component_capsule_metadata(data_dir, name, component, platform, carrier_context)
-                .await?;
+            ensure_component_capsule_metadata(
+                data_dir,
+                name,
+                component,
+                platform,
+                &records.next,
+                carrier_context,
+            )
+            .await?;
             refreshed.push(name.to_string());
         }
     }
@@ -3819,27 +3828,7 @@ pub(crate) async fn stage_update_support(
         }
         for (relative, asset, metadata) in assets {
             crate::install_transaction::validate_support_path(&relative)?;
-            required_release_artifact_checksum(name, asset)?
-                .ok_or_else(|| anyhow::anyhow!("signed support checksum missing"))?;
-            // A signed CID names exact bytes; a release name may serve newer ones.
-            let key = if let Some(cid) = asset.cid.as_ref().filter(|cid| !cid.is_empty()) {
-                cid::Cid::try_from(cid.as_str())?;
-                cid.clone()
-            } else {
-                let path = asset
-                    .release_path
-                    .as_ref()
-                    .filter(|path| !path.is_empty())
-                    .ok_or_else(|| anyhow::anyhow!("signed support source missing"))?;
-                anyhow::ensure!(
-                    !Path::new(path).is_absolute()
-                        && Path::new(path)
-                            .components()
-                            .all(|part| matches!(part, std::path::Component::Normal(_))),
-                    "unsafe signed support release path"
-                );
-                format!("release-path:{path}")
-            };
+            let row = records.next.row(name, asset)?;
             // One line per fetched asset; unchanged support is never named here.
             println!(
                 "  Downloading support asset {name} ({}){}...",
@@ -3849,13 +3838,7 @@ pub(crate) async fn stage_update_support(
                     .map(|size| format!(" [{}]", crate::update::format_bytes(size as usize)))
                     .unwrap_or_default()
             );
-            owner.progress("downloading", &crate::update::download_message(asset.size))?;
-            let bytes = fetch(key).await?;
-            owner.progress(
-                "verifying",
-                "Verifying the update. Home restarts when the update is ready.",
-            )?;
-            verify_release_bytes(name, &bytes, asset)?;
+            let bytes = fetch_admitted_row(fetch, &row, &mut *owner).await?;
             let dest = stage.path().join(&relative);
             if asset.extract_path.is_some() {
                 extract_from_tarball(&bytes, &dest, asset)?;
@@ -3940,22 +3923,8 @@ pub(crate) async fn stage_update_support(
         if !data_dir.join(&relative).exists() {
             continue;
         }
-        cid::Cid::try_from(entry.cid.as_str())?;
-        anyhow::ensure!(!entry.sha256.is_empty(), "signed capsule checksum missing");
-        owner.progress(
-            "downloading",
-            &crate::update::download_message(Some(entry.size)),
-        )?;
-        let bytes = fetch(entry.cid.clone()).await?;
-        owner.progress(
-            "verifying",
-            "Verifying the update. Home restarts when the update is ready.",
-        )?;
-        anyhow::ensure!(
-            hex::encode(sha2::Sha256::digest(&bytes)) == entry.sha256
-                && bytes.len() as u64 == entry.size,
-            "capsule artifact verification failed"
-        );
+        let row = records.next.registry_entry(name, entry)?;
+        let bytes = fetch_admitted_row(fetch, &row, &mut *owner).await?;
         let dest = stage.path().join(&relative);
         fs::create_dir_all(&dest)?;
         tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice())).unpack(&dest)?;
@@ -3997,6 +3966,45 @@ pub(crate) async fn stage_update_support(
             .any(|root| root != path && path.starts_with(root))
     });
     Ok((stage, complete.into_iter().collect()))
+}
+
+/// The bytes of one admitted release row through an update's fetcher, checked
+/// against the row's signed checksum and size before they are used.
+async fn fetch_admitted_row(
+    fetch: &crate::update::FetchFn,
+    row: &crate::capsule_record::AdmittedRow,
+    owner: &mut dyn crate::update::RestartOwner,
+) -> anyhow::Result<Vec<u8>> {
+    let (name, asset) = (row.name(), row.info());
+    required_release_artifact_checksum(name, asset)?
+        .ok_or_else(|| anyhow::anyhow!("signed support checksum missing"))?;
+    // A signed CID names exact bytes; a release name may serve newer ones.
+    let key = if let Some(cid) = asset.cid.as_ref().filter(|cid| !cid.is_empty()) {
+        cid::Cid::try_from(cid.as_str())?;
+        cid.clone()
+    } else {
+        let path = asset
+            .release_path
+            .as_ref()
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("signed support source missing"))?;
+        anyhow::ensure!(
+            !Path::new(path).is_absolute()
+                && Path::new(path)
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_))),
+            "unsafe signed support release path"
+        );
+        format!("release-path:{path}")
+    };
+    owner.progress("downloading", &crate::update::download_message(asset.size))?;
+    let bytes = fetch(key).await?;
+    owner.progress(
+        "verifying",
+        "Verifying the update. Home restarts when the update is ready.",
+    )?;
+    verify_release_bytes(name, &bytes, asset)?;
+    Ok(bytes)
 }
 
 fn component_signature(component: Option<&Component>, platform: &str) -> Option<String> {
@@ -4074,26 +4082,32 @@ fn first_party_carrier_bind_addr(
     )
 }
 
+/// The bytes of one admitted release row from the trusted source over Carrier,
+/// checked against the row's signed checksum and size. Component bytes are
+/// fetched only through an admitted row.
 pub(crate) async fn fetch_first_party_component_via_carrier(
     data_dir: &Path,
-    cid: Option<&str>,
-    release_path: &str,
+    row: &crate::capsule_record::AdmittedRow,
     context: FirstPartyCarrierContext,
 ) -> anyhow::Result<Vec<u8>> {
+    let (name, info) = (row.name(), row.info());
+    let release_path = required_release_path(name, info)?;
     let source = crate::sources::load_trusted_sources(data_dir)?
         .default_source()
         .cloned()
         .ok_or_else(missing_trusted_source_error)?;
     let bind_addr = first_party_carrier_bind_addr(data_dir, context)?;
-    crate::carrier::fetch_file_from_trusted_source_bound(
+    let bytes = crate::carrier::fetch_file_from_trusted_source_bound(
         &source,
-        cid,
+        info.cid.as_deref().filter(|cid| !cid.is_empty()),
         release_path,
         15,
         bind_addr,
         crate::carrier::MAX_DOWNLOAD_BYTES,
     )
-    .await
+    .await?;
+    verify_release_bytes(name, &bytes, info)?;
+    Ok(bytes)
 }
 
 /// The whole catalogue fetch, every transport attempt included.
@@ -4136,11 +4150,11 @@ fn require_component_not_model(name: &str, dest: &Path) -> anyhow::Result<()> {
 
 pub(crate) async fn install_first_party_component_via_carrier(
     data_dir: &Path,
-    name: &str,
-    platform_info: &PlatformInfo,
+    row: &crate::capsule_record::AdmittedRow,
     dest: &Path,
     context: FirstPartyCarrierContext,
 ) -> anyhow::Result<()> {
+    let (name, platform_info) = (row.name(), row.info());
     require_component_not_model(name, dest)?;
     let release_path = required_release_path(name, platform_info)?;
     if name == browser_vm_image::NAME {
@@ -4148,23 +4162,17 @@ pub(crate) async fn install_first_party_component_via_carrier(
         // component download, and of setup's own future, which the caller holds.
         return Box::pin(browser_vm_image::install_via_carrier(
             data_dir,
-            platform_info,
+            row,
             dest,
             &detect_platform(),
             context,
         ))
         .await;
     }
-    let cid = platform_info.cid.as_deref().filter(|cid| !cid.is_empty());
     let bytes = Box::pin(fetch_first_party_component_via_carrier(
-        data_dir,
-        cid,
-        release_path,
-        context,
+        data_dir, row, context,
     ))
     .await?;
-
-    verify_release_bytes(name, &bytes, platform_info)?;
 
     let is_model = dest.extension().map(|e| e == "gguf").unwrap_or(false);
     let is_tarball = release_path.ends_with(".tar.gz")
@@ -4189,11 +4197,11 @@ pub(crate) async fn install_first_party_component_via_carrier(
 
 async fn download_component(
     data_dir: &Path,
-    name: &str,
-    platform_info: &PlatformInfo,
+    row: &crate::capsule_record::AdmittedRow,
     dest: &Path,
     carrier_context: FirstPartyCarrierContext,
 ) -> anyhow::Result<()> {
+    let (name, platform_info) = (row.name(), row.info());
     require_component_not_model(name, dest)?;
     if name == browser_vm_image::NAME {
         browser_vm_image::validate_request(data_dir, platform_info, dest, &detect_platform())?;
@@ -4216,7 +4224,7 @@ async fn download_component(
             elastos_url
         );
     }
-    install_first_party_component_via_carrier(data_dir, name, platform_info, dest, carrier_context)
+    install_first_party_component_via_carrier(data_dir, row, dest, carrier_context)
         .await
         .map_err(|err| {
             anyhow::anyhow!(
@@ -4234,7 +4242,7 @@ async fn download_component(
 }
 
 /// Fetched release bytes match the row's signed checksum and, when signed, its size.
-fn verify_release_bytes(
+pub(crate) fn verify_release_bytes(
     name: &str,
     data: &[u8],
     platform_info: &PlatformInfo,
@@ -5115,6 +5123,7 @@ pub(crate) mod tests {
             &["shell".to_string()],
             None,
             false,
+            &crate::capsule_record::Admission::unsigned_home(),
         )
         .await
         .unwrap();
@@ -5232,7 +5241,13 @@ pub(crate) mod tests {
         let selected = vec!["media-provider".to_owned()];
         let data = temp.path().join("fresh-data");
         let error = prepare_selected_component_prerequisites(
-            &data, &manifest, &platform, &selected, None, false,
+            &data,
+            &manifest,
+            &platform,
+            &selected,
+            None,
+            false,
+            &crate::capsule_record::Admission::unsigned_home(),
         )
         .await
         .unwrap_err();
@@ -5251,7 +5266,13 @@ pub(crate) mod tests {
         fs::set_permissions(&existing, fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(existing.join("retained"), "existing installation").unwrap();
         let error = prepare_selected_component_prerequisites(
-            &existing, &manifest, &platform, &selected, None, false,
+            &existing,
+            &manifest,
+            &platform,
+            &selected,
+            None,
+            false,
+            &crate::capsule_record::Admission::unsigned_home(),
         )
         .await
         .unwrap_err();
@@ -5268,7 +5289,13 @@ pub(crate) mod tests {
         let linked = temp.path().join("linked-data");
         symlink(&existing, &linked).unwrap();
         assert!(prepare_selected_component_prerequisites(
-            &linked, &manifest, &platform, &selected, None, false,
+            &linked,
+            &manifest,
+            &platform,
+            &selected,
+            None,
+            false,
+            &crate::capsule_record::Admission::unsigned_home(),
         )
         .await
         .is_err());
@@ -5322,7 +5349,13 @@ pub(crate) mod tests {
         let manifest = load_manifest_from_path(&manifest_path).unwrap();
         let selected = vec!["media-provider".to_owned()];
         let error = prepare_selected_component_prerequisites(
-            &data, &manifest, &platform, &selected, None, false,
+            &data,
+            &manifest,
+            &platform,
+            &selected,
+            None,
+            false,
+            &crate::capsule_record::Admission::unsigned_home(),
         )
         .await
         .unwrap_err();
@@ -5419,7 +5452,13 @@ pub(crate) mod tests {
         fs::set_permissions(dest.join("bin/ffprobe"), fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(dest.join("bin/ffprobe"), b"altered ffprobe").unwrap();
         let error = prepare_selected_component_prerequisites(
-            &data, &manifest, &platform, &selected, None, false,
+            &data,
+            &manifest,
+            &platform,
+            &selected,
+            None,
+            false,
+            &crate::capsule_record::Admission::unsigned_home(),
         )
         .await
         .unwrap_err();
@@ -7674,8 +7713,7 @@ pub(crate) mod tests {
             let info = &manifest.external["fixture"].platforms["linux-arm64"];
             let error = download_component(
                 tmp.path(),
-                "fixture",
-                info,
+                &crate::capsule_record::AdmittedRow::for_test("fixture", info),
                 &tmp.path().join("bin/fixture"),
                 FirstPartyCarrierContext::Setup,
             )
@@ -7887,13 +7925,13 @@ pub(crate) mod tests {
         // An unchanged record and description: nothing is fetched or written.
         let unchanged = UpdateRecords {
             installed: records(&current, None),
-            next: records(&current, None),
+            next: crate::capsule_record::Admission::listing(records(&current, None)),
         };
         assert!(plan(&unchanged).is_empty());
         // The same description under a newly signed record replaces the capsule.
         let resigned = UpdateRecords {
             installed: records(&current, None),
-            next: records(&current, Some("2")),
+            next: crate::capsule_record::Admission::listing(records(&current, Some("2"))),
         };
         assert_eq!(plan(&resigned), ["fixture-provider"]);
 
@@ -7925,7 +7963,7 @@ pub(crate) mod tests {
         for (next_records, refusal) in refusals {
             let update = UpdateRecords {
                 installed: records(&current, None),
-                next: next_records,
+                next: crate::capsule_record::Admission::listing(next_records),
             };
             let error = stage_update_support(
                 temp.path(),
@@ -7973,7 +8011,7 @@ pub(crate) mod tests {
 
         let update = UpdateRecords {
             installed: records(&current, None),
-            next: records(&next, None),
+            next: crate::capsule_record::Admission::listing(records(&next, None)),
         };
         let (_stage, paths) = stage_update_support(
             temp.path(),
@@ -7990,6 +8028,38 @@ pub(crate) mod tests {
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].0, Path::new("bin/fixture-provider"));
         assert_eq!(fs::read(&paths[0].1).unwrap(), b"next provider bytes");
+
+        // A release listing records carries no capsule registry downloads: a
+        // changed cached registry capsule is refused before it is fetched.
+        let registry = |cid: &str| {
+            serde_json::to_vec(&serde_json::json!({"schema": "elastos.components/v1",
+                "profiles": {}, "external": {}, "capsules": {"fixture-app": {
+                    "cid": cid, "sha256": "1".repeat(64), "size": 1}}}))
+            .unwrap()
+        };
+        fs::create_dir_all(temp.path().join("capsules/fixture-app")).unwrap();
+        let empty = CapsuleRecords::from_release(
+            &serde_json::json!({"capsule_records": []}),
+            std::slice::from_ref(&did),
+        )
+        .unwrap();
+        let update = UpdateRecords {
+            installed: None,
+            next: crate::capsule_record::Admission::listing(empty),
+        };
+        let error = stage_update_support(
+            temp.path(),
+            &registry("bafkreid46p2l75p47opclbxhh56vvq2355cg3ohh7ruypnygjuy2p52ibu"),
+            &registry(next["cid"].as_str().unwrap()),
+            "darwin-arm64",
+            &update,
+            &fetch,
+            &mut Owner,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("capsule registry must be empty"));
+        assert_eq!(fetched.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -8172,8 +8242,7 @@ pub(crate) mod tests {
 
         let err = download_component(
             tmp.path(),
-            "shell",
-            &info,
+            &crate::capsule_record::AdmittedRow::for_test("shell", &info),
             &tmp.path().join("bin/shell"),
             FirstPartyCarrierContext::Setup,
         )
@@ -8220,8 +8289,7 @@ pub(crate) mod tests {
             let dest = tmp.path().join("bin/kubo");
             let result = download_component(
                 tmp.path(),
-                "kubo",
-                &info,
+                &crate::capsule_record::AdmittedRow::for_test("kubo", &info),
                 &dest,
                 FirstPartyCarrierContext::Setup,
             )
@@ -8495,8 +8563,7 @@ pub(crate) mod tests {
             let dest = root.path().join(path);
             let result = download_component(
                 root.path(),
-                name,
-                &info,
+                &crate::capsule_record::AdmittedRow::for_test(name, &info),
                 &dest,
                 FirstPartyCarrierContext::Runtime,
             )
@@ -9035,8 +9102,7 @@ pub(crate) mod tests {
         let dest = tmp.path().join("bin/kubo");
         let result = download_component(
             tmp.path(),
-            "kubo",
-            &info,
+            &crate::capsule_record::AdmittedRow::for_test("kubo", &info),
             &dest,
             FirstPartyCarrierContext::Setup,
         )
@@ -9063,8 +9129,7 @@ pub(crate) mod tests {
         fs::write(&dest, b"installed fixture").unwrap();
         let result = download_component(
             tmp.path(),
-            "kubo",
-            &info,
+            &crate::capsule_record::AdmittedRow::for_test("kubo", &info),
             &dest,
             FirstPartyCarrierContext::Setup,
         )

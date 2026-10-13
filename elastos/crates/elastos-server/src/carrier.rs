@@ -11042,12 +11042,20 @@ pub(crate) mod tests {
         sources.default_source = source.name.clone();
         sources.sources.push(source);
         crate::sources::save_trusted_sources(dir.path(), &sources).unwrap();
+        // The fixture row names the bytes the source serves.
+        let row = crate::capsule_record::AdmittedRow::for_test(
+            "artifact",
+            &serde_json::from_value(serde_json::json!({
+                "release_path": "artifact", "size": 7,
+                "checksum": format!("sha256:{:x}", Sha256::digest(b"fixture")),
+            }))
+            .unwrap(),
+        );
         let refused = tokio::time::timeout(
             Duration::from_secs(5),
             crate::setup::fetch_first_party_component_via_carrier(
                 dir.path(),
-                None,
-                "artifact",
+                &row,
                 crate::setup::FirstPartyCarrierContext::Setup,
             ),
         )
@@ -11079,8 +11087,7 @@ pub(crate) mod tests {
         for _ in 0..2 {
             let bytes = crate::setup::fetch_first_party_component_via_carrier(
                 dir.path(),
-                None,
-                "artifact",
+                &row,
                 crate::setup::FirstPartyCarrierContext::Setup,
             )
             .await
@@ -11179,8 +11186,7 @@ pub(crate) mod tests {
                 Duration::from_secs(10),
                 crate::setup::install_first_party_component_via_carrier(
                     dir.path(),
-                    "fixture-tool",
-                    &info,
+                    &crate::capsule_record::AdmittedRow::for_test("fixture-tool", &info),
                     &dest,
                     crate::setup::FirstPartyCarrierContext::Setup,
                 ),
