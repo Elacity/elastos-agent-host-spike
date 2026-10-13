@@ -2410,6 +2410,31 @@ assert(restoredBrowserLaunches.at(-1).query.url === "https://example.invalid/vis
   "session restore launched a hidden leftover Browser");
 shellCore.shellState.windows.clear();
 shellCore.shellState.activeWindowId = null;
+{
+  // A restore that finishes after the person opened the Assistant keeps the room.
+  const shellStages = await import(`../capsules/home-gui/browser/shell-stages.js?v=${moduleVersion}`);
+  let engaged = true;
+  let roomCloses = 0;
+  shellStages.bindAgentSpace({
+    available: () => true, busy: () => false, engaged: () => engaged,
+    open() {}, close() { roomCloses += 1; },
+  });
+  const restoreWithVisibleWindow = async () => {
+    shellCore.shellState.homeBrowserState.session = {
+      root_shell: "home-gui", browser_context_id: shellCore.shellState.browserContextId, active_stage: "desktop",
+      windows: [{ target: "browser", active: true, query: { url: "https://example.invalid/restored" } }],
+    };
+    await shellWindows.restoreShellSession();
+    shellCore.shellState.windows.clear();
+    shellCore.shellState.activeWindowId = null;
+  };
+  await restoreWithVisibleWindow();
+  assert(roomCloses === 0, "session restore closed an Assistant room opened while it ran");
+  engaged = false;
+  await restoreWithVisibleWindow();
+  assert(roomCloses === 1, "session restore must still apply the saved Space when no room is open");
+  shellStages.bindAgentSpace(undefined);
+}
 const shellMenubar = await import(`../capsules/home-gui/browser/shell-menubar.js?v=${moduleVersion}`);
 const menuLaunches = [];
 shellMenubar.bindMenubar({
