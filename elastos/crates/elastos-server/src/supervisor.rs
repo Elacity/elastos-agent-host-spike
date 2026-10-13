@@ -858,11 +858,13 @@ impl Supervisor {
         if cached_capsule_matches(&capsule_dir, entry) {
             return Ok(capsule_dir);
         }
-        let unsigned = crate::capsule_record::Admission::unsigned_home();
-        let row = admitted
-            .as_ref()
-            .map_or(&unsigned, |admitted| &admitted.admission)
-            .registry_entry(name, entry)?;
+        let row = match &admitted {
+            Some(admitted) => admitted.admission.registry_entry(name, entry)?,
+            None => {
+                crate::capsule_record::Admission::unsigned_home(&self.data_dir, &self.registry)?
+                    .registry_entry(name, entry)?
+            }
+        };
         if capsule_dir.exists() {
             eprintln!(
                 "  Refreshing cached capsule '{}' (registry CID changed or cache metadata missing)...",
@@ -1505,7 +1507,13 @@ impl Supervisor {
             .map_or(&self.registry, |admitted| &admitted.manifest))?;
         crate::setup::install_first_party_component_via_carrier(
             &self.data_dir,
-            &crate::setup::admitted_row(admitted.as_ref(), name, &platform_info)?,
+            &crate::setup::admitted_row(
+                &self.data_dir,
+                admitted.as_ref(),
+                &self.registry,
+                name,
+                &platform_info,
+            )?,
             &dest,
             crate::setup::FirstPartyCarrierContext::Runtime,
         )
@@ -2414,6 +2422,45 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("kubo not found"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn signed_home_supervisor_admits_records_before_any_acquisition() {
+        let root = tempfile::tempdir().unwrap();
+        // The installed signed release lists records and also a registry capsule.
+        std::fs::write(
+            root.path().join("components.json"),
+            serde_json::to_vec(&serde_json::json!({"external": {}, "profiles": {},
+                "capsules": {"fixture-app": {"cid": TEST_SUPERVISOR_CID,
+                    "sha256": "1".repeat(64), "size": 1}}}))
+            .unwrap(),
+        )
+        .unwrap();
+        let (server, serving, bundle) =
+            crate::setup::tests::signed_engine_fixture(root.path(), "record-size").await;
+        let data = root.path().canonicalize().unwrap();
+        let registry: ComponentsManifest =
+            serde_json::from_slice(&std::fs::read(data.join("components.json")).unwrap()).unwrap();
+        let supervisor = Supervisor::new(data.clone(), registry);
+        // Neither a registry capsule nor an external tool is fetched or written.
+        let error = supervisor.ensure_capsule("fixture-app").await.unwrap_err();
+        assert!(
+            format!("{error:#}").contains("capsule registry must be empty"),
+            "{error:#}"
+        );
+        assert!(!data.join("capsules/fixture-app").exists());
+        let error = supervisor
+            .download_external("llama-server", &crate::setup::detect_platform())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("capsule registry must be empty"),
+            "{error:#}"
+        );
+        assert!(!bundle.exists());
+        server.close().await;
+        assert_eq!(serving.await.unwrap(), 0);
     }
 
     #[tokio::test]

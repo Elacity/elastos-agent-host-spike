@@ -181,10 +181,45 @@ fn verify(envelope: &serde_json::Value, publisher_dids: &[String]) -> Result<Cap
 }
 
 /// The admission of one release's components: every row a Home may fetch from
-/// it is checked here. Only this module constructs an `Admission`.
+/// it is checked here, and only rows of the admitted manifest are admitted.
+/// Only this module constructs an `Admission`.
 pub(crate) struct Admission {
     records: Option<CapsuleRecords>,
     signed: bool,
+    /// The admitted manifest's fetchable rows; tests of planning may leave it unbound.
+    rows: Option<ManifestRows>,
+}
+
+/// Every fetchable row of one manifest, as signed: `external` rows, their
+/// capsule metadata rows, and capsule registry entries.
+struct ManifestRows {
+    external: BTreeMap<String, Vec<serde_json::Value>>,
+    registry: BTreeMap<String, serde_json::Value>,
+}
+
+impl ManifestRows {
+    fn of(manifest: &crate::setup::ComponentsManifest) -> Result<Self> {
+        let mut external = BTreeMap::new();
+        for (name, component) in &manifest.external {
+            let metadata = component
+                .capsule_metadata
+                .iter()
+                .flat_map(|metadata| metadata.platforms.values());
+            let rows = component
+                .platforms
+                .values()
+                .chain(metadata)
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()?;
+            external.insert(name.clone(), rows);
+        }
+        let registry = manifest
+            .capsules
+            .iter()
+            .map(|(name, entry)| Ok((name.clone(), serde_json::to_value(entry)?)))
+            .collect::<Result<_>>()?;
+        Ok(Self { external, registry })
+    }
 }
 
 /// One release row a caller may fetch and install. Only an `Admission`
@@ -217,12 +252,21 @@ impl AdmittedRow {
 
 impl Admission {
     /// A Home without an installed signed release (a source or CI Home): its
-    /// local manifest carries no records to check.
-    pub(crate) fn unsigned_home() -> Self {
-        Self {
+    /// local manifest carries no records to check. Refused on a Home that has
+    /// a signed release, which must admit that release's records instead.
+    pub(crate) fn unsigned_home(
+        data_dir: &std::path::Path,
+        manifest: &crate::setup::ComponentsManifest,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            crate::setup::installed_release_source(data_dir)?.is_none(),
+            "This Home has an installed signed release; its capsule records must be admitted"
+        );
+        Ok(Self {
             records: None,
             signed: false,
-        }
+            rows: Some(ManifestRows::of(manifest)?),
+        })
     }
 
     /// A signed release's admission with these records, for tests that
@@ -232,6 +276,7 @@ impl Admission {
         Self {
             records,
             signed: true,
+            rows: None,
         }
     }
 
@@ -242,6 +287,15 @@ impl Admission {
     /// Admit one row of the admitted manifest before any of its bytes are
     /// fetched or written.
     pub(crate) fn row(&self, name: &str, info: &PlatformInfo) -> Result<AdmittedRow> {
+        if let Some(rows) = &self.rows {
+            let value = serde_json::to_value(info)?;
+            anyhow::ensure!(
+                rows.external
+                    .get(name)
+                    .is_some_and(|rows| rows.contains(&value)),
+                "'{name}' is not a row of the admitted release"
+            );
+        }
         match &self.records {
             Some(records) => records.admit(name, info)?,
             None if REQUIRED && self.signed => {
@@ -266,6 +320,12 @@ impl Admission {
             self.records.is_none() && !(REQUIRED && self.signed),
             "The release lists capsule records, so its capsule registry must be empty"
         );
+        if let Some(rows) = &self.rows {
+            anyhow::ensure!(
+                rows.registry.get(name) == Some(&serde_json::to_value(entry)?),
+                "'{name}' is not a registry entry of the admitted release"
+            );
+        }
         anyhow::ensure!(
             entry.sha256.len() == 64
                 && entry
@@ -302,6 +362,7 @@ pub(crate) fn admit_components(
     Ok(Admission {
         records,
         signed: true,
+        rows: Some(ManifestRows::of(manifest)?),
     })
 }
 
@@ -621,9 +682,32 @@ mod tests {
             .is_ok());
         let mut unsigned = entry.clone();
         unsigned.sha256.clear();
-        assert!(Admission::unsigned_home()
+        let local: crate::setup::ComponentsManifest = serde_json::from_value(serde_json::json!({
+            "profiles": {}, "external": {}, "capsules": {"fixture-app": unsigned}
+        }))
+        .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let admission = Admission::unsigned_home(home.path(), &local).unwrap();
+        assert!(admission.registry_entry("fixture-app", &unsigned).is_err());
+        // Only rows of the admitted manifest are admitted.
+        let error = admit_components(None, &registry)
+            .unwrap()
             .registry_entry("fixture-app", &unsigned)
-            .is_err());
+            .err()
+            .unwrap();
+        assert!(error
+            .to_string()
+            .contains("not a registry entry of the admitted release"));
+        let error = admission
+            .row(
+                "fixture-app",
+                &serde_json::from_value(serde_json::json!({})).unwrap(),
+            )
+            .err()
+            .unwrap();
+        assert!(error
+            .to_string()
+            .contains("not a row of the admitted release"));
     }
 
     #[test]
@@ -634,38 +718,113 @@ mod tests {
             CapsuleRecords::from_release(&release, &[did]).unwrap(),
             None
         );
-        let manifest: crate::setup::ComponentsManifest =
-            serde_json::from_value(serde_json::json!({"profiles": {}, "external": {}})).unwrap();
+        let manifest: crate::setup::ComponentsManifest = serde_json::from_value(serde_json::json!({
+            "profiles": {}, "external": {"system": {"platforms": {"*": row(&envelope["payload"])}}}
+        }))
+        .unwrap();
         assert!(admit_components(None, &manifest)
             .unwrap()
             .row("system", &row(&envelope["payload"]))
             .is_ok());
     }
 
-    /// Release artifact bytes reach a Home only through these transport calls.
-    /// Each listed caller takes an `AdmittedRow`, which only admission builds,
-    /// except where noted. A new caller fails here until it does the same.
-    #[test]
-    fn release_artifact_transport_is_called_only_from_admitted_row_paths() {
-        const PRIMITIVES: [&str; 3] = [
-            "fetch_file_from_trusted_source_bound(",
-            "fetch_file_from_trusted_source_to_bound(",
-            "content_fetch_via_provider(",
-        ];
-        let allowed = BTreeMap::from([
-            // fetch_first_party_component_via_carrier(&AdmittedRow), and the
-            // model catalogue pinned by raw CID with its own signed envelope.
-            (("setup.rs".to_owned(), PRIMITIVES[0]), 2),
-            // browser_vm_image::install_via_carrier(&AdmittedRow).
-            (("setup/browser_vm_image.rs".to_owned(), PRIMITIVES[1]), 1),
-            // The operator's `source fetch-file` writes to a file it names; it
+    /// Every raw transport and extraction entry point. Bytes a Home installs as a
+    /// release component pass one of these.
+    const TRANSPORT: [&str; 9] = [
+        "fetch_file_from_trusted_source_bound(",
+        "fetch_file_from_trusted_source_to_bound(",
+        "content_fetch_via_provider(",
+        "fetch_content_bounded(",
+        "fetch_content(",
+        "fetch_bytes_via_provider(",
+        "extract_from_tarball(",
+        "Archive::new(",
+        "FetchFn",
+    ];
+
+    /// The one list of production uses of `TRANSPORT`, each with why it is not
+    /// an unadmitted component acquisition. A component download or extraction
+    /// takes an `AdmittedRow`; everything else here is signed release metadata,
+    /// the transport itself, or user content that installs no component.
+    fn transport_allowlist() -> BTreeMap<(String, &'static str), usize> {
+        let [bound, to_bound, provider_row, content_bounded, content, provider, extract, archive, fetcher] =
+            TRANSPORT;
+        [
+            // Published sites, namespaces, shares and libraries: user content.
+            ("api/gateway_site.rs", provider, 1),
+            ("api/handlers/namespace.rs", content, 1),
+            ("content.rs", provider, 5),
+            ("library.rs", archive, 8),
+            ("main.rs", provider, 1),
+            ("share_cmd.rs", provider, 4),
+            ("shares_cmd.rs", provider, 1),
+            ("trust_cmd.rs", provider, 2),
+            // The Carrier trusted-source file stream itself.
+            ("carrier.rs", content_bounded, 1),
+            // Signed release head, release and components by CID; each is checked
+            // against its signed digest before any row of it is admitted.
+            ("operator_control.rs", content, 2),
+            ("operator_control.rs", fetcher, 1),
+            ("release_cmd.rs", content, 1),
+            ("release_cmd.rs", fetcher, 1),
+            ("update.rs", content, 1),
+            ("update.rs", fetcher, 11),
+            ("update_controller.rs", content, 1),
+            ("update_controller.rs", fetcher, 2),
+            // Setup: fetch_first_party_component_via_carrier(&AdmittedRow) and the
+            // model catalogue pinned by raw CID with its own signed envelope; signed
+            // components and catalogue by CID; extraction of admitted bytes
+            // (install, staged support, engine, media tools); the update fetcher
+            // reaches support only through fetch_admitted_row(&AdmittedRow).
+            ("setup.rs", bound, 2),
+            ("setup.rs", content_bounded, 2),
+            ("setup.rs", extract, 3),
+            ("setup.rs", archive, 3),
+            ("setup.rs", fetcher, 5),
+            // browser_vm_image::install_via_carrier(&AdmittedRow) and its extractor.
+            ("setup/browser_vm_image.rs", to_bound, 1),
+            ("setup/browser_vm_image.rs", archive, 1),
+            // The operator's `source fetch-file` writes a file it names and
             // installs nothing.
-            (("sources.rs".to_owned(), PRIMITIVES[1]), 1),
-            // try_download_capsule_via_content_provider(&AdmittedRow).
-            (("supervisor.rs".to_owned(), PRIMITIVES[2]), 1),
-        ]);
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+            ("sources.rs", to_bound, 1),
+            // try_download_capsule_via_content_provider(&AdmittedRow), its
+            // provider call and its extractor.
+            ("supervisor.rs", provider_row, 1),
+            ("supervisor.rs", provider, 1),
+            ("supervisor.rs", archive, 1),
+        ]
+        .into_iter()
+        .map(|(file, primitive, count)| ((file.to_owned(), primitive), count))
+        .collect()
+    }
+
+    /// Production uses of each transport entry point per source file.
+    fn transport_calls(files: &[(String, String)]) -> BTreeMap<(String, &'static str), usize> {
         let mut found = BTreeMap::new();
+        for (relative, text) in files {
+            // Production code precedes the file's test module.
+            let production = [
+                "\n#[cfg(test)]\nmod tests",
+                "\n#[cfg(test)]\npub(crate) mod tests",
+            ]
+            .iter()
+            .filter_map(|marker| text.find(marker))
+            .min()
+            .map_or(text.as_str(), |end| &text[..end]);
+            for primitive in TRANSPORT {
+                let calls = production.matches(primitive).count()
+                    - production.matches(&format!("fn {primitive}")).count();
+                if calls > 0 {
+                    found.insert((relative.clone(), primitive), calls);
+                }
+            }
+        }
+        found
+    }
+
+    fn production_sources() -> Vec<(String, String)> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
         let mut pending = vec![root.clone()];
         while let Some(dir) = pending.pop() {
             for entry in std::fs::read_dir(&dir).unwrap() {
@@ -682,28 +841,51 @@ mod tests {
                 if path.extension().is_none_or(|extension| extension != "rs")
                     || relative.ends_with("tests.rs")
                     || relative.contains("/tests/")
+                    || relative.contains("_tests/")
                 {
                     continue;
                 }
-                let text = std::fs::read_to_string(&path).unwrap();
-                // Production code precedes the file's test module.
-                let production = [
-                    "\n#[cfg(test)]\nmod tests",
-                    "\n#[cfg(test)]\npub(crate) mod tests",
-                ]
-                .iter()
-                .filter_map(|marker| text.find(marker))
-                .min()
-                .map_or(text.as_str(), |end| &text[..end]);
-                for primitive in PRIMITIVES {
-                    let calls = production.matches(primitive).count()
-                        - production.matches(&format!("fn {primitive}")).count();
-                    if calls > 0 {
-                        found.insert((relative.clone(), primitive), calls);
-                    }
-                }
+                files.push((relative, std::fs::read_to_string(&path).unwrap()));
             }
         }
-        assert_eq!(found, allowed);
+        files
+    }
+
+    #[test]
+    fn release_artifact_transport_is_used_only_where_listed() {
+        assert_eq!(
+            transport_calls(&production_sources()),
+            transport_allowlist()
+        );
+    }
+
+    #[test]
+    fn a_new_unadmitted_acquisition_fails_the_transport_list() {
+        let mut files = production_sources();
+        // Each mutation adds one acquisition that takes no AdmittedRow.
+        for (file, mutation) in [
+            (
+                "setup.rs",
+                "let _ = client.fetch_content_bounded(cid, size);",
+            ),
+            (
+                "supervisor.rs",
+                "let _ = fetch_bytes_via_provider(registry, cid, None);",
+            ),
+            (
+                "update.rs",
+                "let _ = extract_from_tarball(&bytes, &dest, info);",
+            ),
+            ("new_path.rs", "let fetch: crate::update::FetchFn = todo;"),
+        ] {
+            let saved = files.clone();
+            match files.iter_mut().find(|(relative, _)| relative == file) {
+                Some((_, text)) => text.insert_str(0, mutation),
+                None => files.push((file.to_owned(), mutation.to_owned())),
+            }
+            assert_ne!(transport_calls(&files), transport_allowlist(), "{file}");
+            files = saved;
+        }
+        assert_eq!(transport_calls(&files), transport_allowlist());
     }
 }

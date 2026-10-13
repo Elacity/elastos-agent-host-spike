@@ -37,7 +37,8 @@ pub(super) async fn ensure_host_components(
         };
         for row in &admitted_rows {
             if row.missing(data) {
-                let admitted_row = super::admitted_row(admitted.as_ref(), row.name, row.info)?;
+                let admitted_row =
+                    super::admitted_row(data, admitted.as_ref(), manifest, row.name, row.info)?;
                 super::download_component(data, &admitted_row, &data.join(row.relative), context)
                     .await?;
             }

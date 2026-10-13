@@ -337,10 +337,14 @@ async fn run_with_data_dir(
     }
 
     // A Home without a signed release installs from its local manifest.
-    let unsigned = crate::capsule_record::Admission::unsigned_home();
-    let admission = signed_setup
-        .as_ref()
-        .map_or(&unsigned, |metadata| &metadata.admission);
+    let unsigned;
+    let admission = match &signed_setup {
+        Some(metadata) => &metadata.admission,
+        None => {
+            unsigned = crate::capsule_record::Admission::unsigned_home(&data_dir, &manifest)?;
+            &unsigned
+        }
+    };
     prepare_selected_component_prerequisites(
         &data_dir,
         &manifest,
@@ -1212,43 +1216,45 @@ async fn ensure_browser_vm_image_in_context(
     context: FirstPartyCarrierContext,
 ) -> anyhow::Result<()> {
     let check_dir = data_dir.to_path_buf();
-    let pending = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<PlatformInfo>> {
-        let platform = detect_platform();
-        let manifest_path = check_dir.join("components.json");
-        if !manifest_path.exists() {
-            browser_vm_image::verify_legacy_or_missing_release(&check_dir, &platform)?;
-            return Ok(None);
-        }
-        let manifest = load_manifest_from_path(&manifest_path)?;
-        if !manifest.external.contains_key(browser_vm_image::NAME) {
-            browser_vm_image::verify_legacy_or_missing_release(&check_dir, &platform)?;
-            return Ok(None);
-        }
-        let info = browser_vm_image::component_info(&manifest, &platform)?;
-        Ok(
-            browser_vm_image::verify_installed(&check_dir, info, &platform)
-                .is_err()
-                .then(|| info.clone()),
-        )
-    })
-    .await??;
-    let Some(pending) = pending else {
+    let pending =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Option<ComponentsManifest>> {
+            let platform = detect_platform();
+            let manifest_path = check_dir.join("components.json");
+            if !manifest_path.exists() {
+                browser_vm_image::verify_legacy_or_missing_release(&check_dir, &platform)?;
+                return Ok(None);
+            }
+            let manifest = load_manifest_from_path(&manifest_path)?;
+            if !manifest.external.contains_key(browser_vm_image::NAME) {
+                browser_vm_image::verify_legacy_or_missing_release(&check_dir, &platform)?;
+                return Ok(None);
+            }
+            let info = browser_vm_image::component_info(&manifest, &platform)?;
+            let missing = browser_vm_image::verify_installed(&check_dir, info, &platform).is_err();
+            Ok(missing.then_some(manifest))
+        })
+        .await??;
+    let Some(local) = pending else {
         return Ok(());
     };
     // The image row comes from the admitted release, not the earlier read; a
     // Runtime caller holds the writer until the image is written.
     let platform = detect_platform();
     let admitted = admit_installed_components(data_dir, context)?;
-    let row = match &admitted {
-        Some(admitted) => {
-            let info = browser_vm_image::component_info(&admitted.manifest, &platform)?;
-            if browser_vm_image::verify_installed(data_dir, info, &platform).is_ok() {
-                return Ok(());
-            }
-            admitted.admission.row(browser_vm_image::NAME, info)?
-        }
-        None => admitted_row(None, browser_vm_image::NAME, &pending)?,
-    };
+    let manifest = admitted
+        .as_ref()
+        .map_or(&local, |admitted| &admitted.manifest);
+    let info = browser_vm_image::component_info(manifest, &platform)?;
+    if browser_vm_image::verify_installed(data_dir, info, &platform).is_ok() {
+        return Ok(());
+    }
+    let row = admitted_row(
+        data_dir,
+        admitted.as_ref(),
+        &local,
+        browser_vm_image::NAME,
+        info,
+    )?;
     let dest = data_dir.join(browser_vm_image::INSTALL_PATH);
     download_component(data_dir, &row, &dest, context).await
 }
@@ -1297,16 +1303,18 @@ pub(crate) fn admit_installed_components(
     }))
 }
 
-/// The admitted row `name`/`info` of `admitted`, or of this Home's local
-/// manifest when it has no signed release.
+/// The admitted row `name`/`info` of `admitted`, or, on a Home shown to have no
+/// signed release, of its local manifest `local`.
 pub(crate) fn admitted_row(
+    data_dir: &Path,
     admitted: Option<&AdmittedComponents>,
+    local: &ComponentsManifest,
     name: &str,
     info: &PlatformInfo,
 ) -> anyhow::Result<crate::capsule_record::AdmittedRow> {
     match admitted {
         Some(admitted) => admitted.admission.row(name, info),
-        None => crate::capsule_record::Admission::unsigned_home().row(name, info),
+        None => crate::capsule_record::Admission::unsigned_home(data_dir, local)?.row(name, info),
     }
 }
 
@@ -1389,7 +1397,7 @@ pub(crate) async fn ensure_capsule_component_for_home_launch(
         "installed components differ from the signed release; run the installer again"
     );
 
-    let row = admitted_row(admitted.as_ref(), name, platform_info)?;
+    let row = admitted_row(data_dir, admitted.as_ref(), &manifest, name, platform_info)?;
     let dest = data_dir.join(install_path);
     download_component(data_dir, &row, &dest, FirstPartyCarrierContext::Runtime).await?;
     write_cache_metadata(&manifest, Some(platform_info), &platform, name, &dest)?;
@@ -5123,7 +5131,7 @@ pub(crate) mod tests {
             &["shell".to_string()],
             None,
             false,
-            &crate::capsule_record::Admission::unsigned_home(),
+            &crate::capsule_record::Admission::unsigned_home(temp.path(), &manifest).unwrap(),
         )
         .await
         .unwrap();
@@ -5247,7 +5255,7 @@ pub(crate) mod tests {
             &selected,
             None,
             false,
-            &crate::capsule_record::Admission::unsigned_home(),
+            &crate::capsule_record::Admission::unsigned_home(&data, &manifest).unwrap(),
         )
         .await
         .unwrap_err();
@@ -5272,7 +5280,7 @@ pub(crate) mod tests {
             &selected,
             None,
             false,
-            &crate::capsule_record::Admission::unsigned_home(),
+            &crate::capsule_record::Admission::unsigned_home(&existing, &manifest).unwrap(),
         )
         .await
         .unwrap_err();
@@ -5295,7 +5303,7 @@ pub(crate) mod tests {
             &selected,
             None,
             false,
-            &crate::capsule_record::Admission::unsigned_home(),
+            &crate::capsule_record::Admission::unsigned_home(&existing, &manifest).unwrap(),
         )
         .await
         .is_err());
@@ -5355,7 +5363,7 @@ pub(crate) mod tests {
             &selected,
             None,
             false,
-            &crate::capsule_record::Admission::unsigned_home(),
+            &crate::capsule_record::Admission::unsigned_home(&data, &manifest).unwrap(),
         )
         .await
         .unwrap_err();
@@ -5458,7 +5466,7 @@ pub(crate) mod tests {
             &selected,
             None,
             false,
-            &crate::capsule_record::Admission::unsigned_home(),
+            &crate::capsule_record::Admission::unsigned_home(&data, &manifest).unwrap(),
         )
         .await
         .unwrap_err();
@@ -8635,6 +8643,49 @@ pub(crate) mod tests {
             server.close().await;
             assert_eq!(serving.await.unwrap(), fetches, "{fault}");
         }
+    }
+
+    #[tokio::test]
+    async fn browser_image_downloads_only_the_admitted_release_row() {
+        let platform = detect_platform();
+        if platform != "darwin-arm64" && platform != "linux-arm64" {
+            return; // Other hosts select a remote Engine and have no image row.
+        }
+        let image = |digest: char| {
+            serde_json::json!({"install_path": browser_vm_image::INSTALL_PATH,
+                "extract_path": browser_vm_image::NAME, "strategy": browser_vm_image::NAME,
+                "release_path": "browser-image.tar.gz",
+                "checksum": format!("sha256:{}", digest.to_string().repeat(64)), "size": 1})
+        };
+        let components = |digest: char| {
+            serde_json::to_vec(&serde_json::json!({"external": {browser_vm_image::NAME: {
+                "install_path": browser_vm_image::INSTALL_PATH,
+                "platforms": {platform.clone(): image(digest)}}}, "profiles": {}}))
+            .unwrap()
+        };
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("components.json"), components('a')).unwrap();
+        let (server, serving, _bundle) = signed_engine_fixture(root.path(), "none").await;
+        let data = root.path().canonicalize().unwrap();
+        // A manifest that differs from the signed release names another image.
+        let mut stale: serde_json::Value =
+            serde_json::from_slice(&fs::read(data.join("components.json")).unwrap()).unwrap();
+        stale["external"][browser_vm_image::NAME]["platforms"][&platform] = image('b');
+        fs::write(
+            data.join("components.json"),
+            serde_json::to_vec(&stale).unwrap(),
+        )
+        .unwrap();
+        let error = ensure_browser_vm_image_in_context(&data, FirstPartyCarrierContext::Runtime)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("Installed release inputs require repair"),
+            "{error:#}"
+        );
+        assert!(!data.join(browser_vm_image::INSTALL_PATH).exists());
+        server.close().await;
+        assert_eq!(serving.await.unwrap(), 0);
     }
 
     #[tokio::test]
