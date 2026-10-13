@@ -4613,6 +4613,276 @@ mod tests {
     }
 
     #[test]
+    fn generated_shared_products_cannot_fill_handoffs_and_consumers_work_after_restart() {
+        fn next(seed: &mut u64) -> u64 {
+            *seed ^= *seed << 13;
+            *seed ^= *seed >> 7;
+            *seed ^= *seed << 17;
+            *seed
+        }
+
+        const ROUNDS: usize = 512;
+        const CONSUMERS: [&str; 2] = [
+            COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+            crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+        ];
+        const OTHER_DELEGATIONS: [&str; 6] = [
+            "elastos.chat.direct-message/v1",
+            "elastos.chat.unregistered/v1",
+            "elastos.collaboration.acceptance-receipt/v1",
+            "elastos.room.accept.v1",
+            "elastos.room.invite.v1",
+            "elastos.room.join-invite.v1",
+        ];
+        let fixture = Fixture::new();
+        let mut core = fixture.core();
+        let local_profile = shared_test_profile(&core.authority, &fixture.device_key);
+        // Adding a delegated type requires an explicit consumer/generator decision.
+        let delegated: Vec<_> = local_profile
+            .document()
+            .collaboration_signers
+            .iter()
+            .filter(|signer| signer.service == SERVICE)
+            .flat_map(|signer| &signer.delegations)
+            .flat_map(|delegation| delegation.object_types.iter().map(String::as_str))
+            .collect();
+        let mut expected = Vec::from(CONSUMERS);
+        expected.extend(OTHER_DELEGATIONS);
+        expected.sort_unstable();
+        assert_eq!(delegated, expected);
+        let mut seed = 0x8c7d_41ae_b395_206fu64;
+        let authors: Vec<_> = (0..4)
+            .map(|_| {
+                let mut bytes = [0u8; 32];
+                for chunk in bytes.chunks_exact_mut(8) {
+                    chunk.copy_from_slice(&next(&mut seed).to_le_bytes());
+                }
+                let key = SigningKey::from_bytes(&bytes);
+                let authority = fixture.authority(key.clone());
+                let profile = shared_test_profile(&authority, &key);
+                (key, authority, profile)
+            })
+            .collect();
+        let mut coverage = [[0usize; 8]; CONSUMERS.len()];
+        let mut other_coverage = [0usize; OTHER_DELEGATIONS.len()];
+        let mut routes = [0usize; 3];
+        let mut attempts = 0;
+        for round in 0..ROUNDS {
+            for consumer in 0..=CONSUMERS.len() {
+                let (key, remote, profile) = &authors[(next(&mut seed) % 4) as usize];
+                let variant = (next(&mut seed) % 8) as usize;
+                let length = (next(&mut seed) % 128) as usize;
+                let field = format!("extra_{:x}", next(&mut seed));
+                let text = format!("message {:x}", next(&mut seed));
+                let wrong_type = match next(&mut seed) % 5 {
+                    0 => serde_json::Value::Null,
+                    1 => serde_json::json!(false),
+                    2 => serde_json::json!(next(&mut seed)),
+                    3 => serde_json::json!([text]),
+                    _ => serde_json::json!({"nested":text}),
+                };
+                let (kind, product, bad_name) = if consumer < CONSUMERS.len() {
+                    coverage[consumer][variant] += 1;
+                    let product = if consumer == 0 {
+                        match variant {
+                            0 => serde_json::json!({"body":text, (field):wrong_type}),
+                            1 => serde_json::json!({"body":wrong_type}),
+                            2 => serde_json::json!({}),
+                            3 => serde_json::json!({"body":"x".repeat(
+                                crate::room_service::MAX_OBJECT_BODY_LEN + 1 + length)}),
+                            4 => serde_json::json!({"body":" \n\t".repeat(1 + length)}),
+                            5 => serde_json::json!([{"body":text}]),
+                            6 => serde_json::json!({"body":text}),
+                            _ => serde_json::json!({"body":format!(" {text} ")}),
+                        }
+                    } else {
+                        match variant {
+                            0 => serde_json::json!({(field):wrong_type}),
+                            1 => wrong_type,
+                            2 => serde_json::json!({"body":text}),
+                            3 => serde_json::json!({"body":"x".repeat(
+                                crate::room_service::MAX_OBJECT_BODY_LEN + 1 + length)}),
+                            4 => serde_json::json!(" \n\t".repeat(1 + length)),
+                            5 => serde_json::json!([{}]),
+                            6 => serde_json::json!({}),
+                            _ => serde_json::json!({"display_name":"n".repeat(65 + length)}),
+                        }
+                    };
+                    (CONSUMERS[consumer], product, variant == 6)
+                } else {
+                    let other = (next(&mut seed) % OTHER_DELEGATIONS.len() as u64) as usize;
+                    other_coverage[other] += 1;
+                    (
+                        OTHER_DELEGATIONS[other],
+                        serde_json::json!({"body":text}),
+                        false,
+                    )
+                };
+                let prepared = remote
+                    .prepare_profile_outgoing(profile, SERVICE, kind, product.clone(), NOW, TTL)
+                    .unwrap();
+                let mut signed: SignedCollaborationMessage =
+                    serde_json::from_slice(prepared.envelope_bytes()).unwrap();
+                // Keep signed identity and generated cases reproducible, including
+                // the malformed Profile carried inside an otherwise valid envelope.
+                signed.payload.message_id = format!("{:032x}", round * 3 + consumer + 1);
+                signed.payload.nonce = format!("{:032x}", next(&mut seed));
+                if bad_name {
+                    let mut document = profile.document().clone();
+                    document.display_name = "n".repeat(65 + length);
+                    signed.payload.payload["signed_profile"] =
+                        serde_json::to_value(resign_test_profile(key, &document)).unwrap();
+                }
+                let original = resign_message(key, signed.payload);
+                verify_stored_collaboration_message(&original, &fixture.profile, SERVICE).unwrap();
+                let frame = remote.prepare_transport_frame(&original).unwrap();
+                // Rotate real signed ingress paths rather than repeating every
+                // cryptographic path for every generated envelope.
+                let route = (next(&mut seed) % routes.len() as u64) as usize;
+                routes[route] += 1;
+                match route {
+                    0 => assert_eq!(
+                        transport_rejection(&core, &frame, NOW),
+                        CollaborationTransportRejection::InvalidMessage
+                    ),
+                    1 => assert!(core
+                        .accept_home_chat(&frame, &remote.local_device_did(), NOW)
+                        .is_err()),
+                    _ => assert!(core
+                        .accept_incoming(&original, &remote.local_device_did(), NOW)
+                        .is_err()),
+                }
+                if !bad_name {
+                    let operation = profile_operation(
+                        &format!("generated:{round}:{consumer}"),
+                        &local_profile,
+                        kind,
+                        &product,
+                    );
+                    assert!(core
+                        .prepare_profile_outgoing(
+                            operation,
+                            &local_profile,
+                            kind,
+                            product,
+                            NOW,
+                            TTL
+                        )
+                        .is_err());
+                }
+                attempts += 1;
+                assert!(core.pending_product_handoffs().unwrap().is_empty());
+                assert_eq!(core.summary().unwrap().pending_product_handoffs, 0);
+                assert!(!core.state_path().exists());
+                assert!(!core.history_path().exists());
+                if attempts % MAX_PENDING_INCOMING == 0 {
+                    core = fixture.core();
+                    assert!(core.pending_product_handoffs().unwrap().is_empty());
+                }
+            }
+        }
+        assert_eq!(attempts, ROUNDS * (CONSUMERS.len() + 1));
+        assert!(attempts > MAX_PENDING_INCOMING * 32);
+        assert!(coverage.iter().flatten().all(|count| *count > 0));
+        assert!(other_coverage.iter().all(|count| *count > 0));
+        assert!(routes.iter().all(|count| *count > 0));
+
+        // Valid signed names above the old Room limit still reach both consumers,
+        // including the Profile maximum. Use Chat's actual history wall clock.
+        let chat_now = now_secs();
+        let restarted = fixture.core();
+        for name_length in [49, 56, 64] {
+            let key = SigningKey::from_bytes(&[name_length as u8; 32]);
+            let remote = fixture.authority(key.clone());
+            let mut document = shared_test_profile(&remote, &key).document().clone();
+            document.display_name = "n".repeat(name_length);
+            let profile = crate::collaboration_profile_authority::verify_signed_profile_document(
+                &resign_test_profile(&key, &document),
+            )
+            .unwrap();
+            for kind in CONSUMERS {
+                let product = if kind == COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE {
+                    serde_json::json!({"body":format!("healthy {name_length}")})
+                } else {
+                    serde_json::json!({})
+                };
+                let now = if kind == COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE {
+                    chat_now
+                } else {
+                    NOW
+                };
+                let original = remote
+                    .prepare_profile_outgoing(&profile, SERVICE, kind, product, now, 45)
+                    .unwrap();
+                restarted
+                    .accept_incoming(original.envelope_bytes(), &remote.local_device_did(), now)
+                    .unwrap();
+            }
+        }
+        let projection_core = Arc::new(fixture.core());
+        let chat_port = crate::collaboration_product::CollaborationChatProductPort::new(
+            projection_core.clone(),
+        )
+        .unwrap();
+        let presence_port = crate::collaboration_presence::CollaborationPresenceProductPort::new(
+            projection_core.clone(),
+        )
+        .unwrap();
+        assert_eq!(projection_core.pending_product_handoffs().unwrap().len(), 6);
+        let handoffs = chat_port.pending_messages().unwrap();
+        assert_eq!(handoffs.len(), 3);
+        let mut objects = Vec::new();
+        for handoff in &handoffs {
+            let object = chat_port
+                .project_handoff(&fixture.data_root, handoff)
+                .unwrap();
+            assert_eq!(object.sender_profile_verified, Some(true));
+            objects.push(object);
+        }
+        for handoff in presence_port.pending_presences().unwrap() {
+            assert_eq!(
+                presence_port.project_handoff(&handoff, NOW).unwrap(),
+                crate::collaboration_presence::CollaborationPresenceProjectionOutcome::Applied
+            );
+        }
+        let snapshot = presence_port.snapshot(NOW).unwrap();
+        assert_eq!(snapshot.records().len(), 3);
+        let session = crate::room_service::start_local_runtime_session(
+            &fixture.data_root,
+            &projection_core.local_device_did(),
+            "Reader",
+            "generated consumer test",
+        )
+        .unwrap();
+        let final_core = Arc::new(fixture.core());
+        let final_chat =
+            crate::collaboration_product::CollaborationChatProductPort::new(final_core.clone())
+                .unwrap();
+        let final_presence = crate::collaboration_presence::CollaborationPresenceProductPort::new(
+            final_core.clone(),
+        )
+        .unwrap();
+        let poll = final_chat
+            .conversation_poll(&fixture.data_root, &session.token, 0)
+            .unwrap();
+        assert_eq!(poll.objects.len(), objects.len());
+        for object in objects {
+            let retained = poll
+                .objects
+                .iter()
+                .find(|row| row.seq == object.seq)
+                .unwrap();
+            assert_eq!(retained.body, object.body);
+            assert_eq!(retained.sender, object.sender);
+            assert_eq!(retained.sender_profile_verified, Some(true));
+        }
+        assert_eq!(final_presence.snapshot(NOW).unwrap(), snapshot);
+        assert!(final_core.pending_product_handoffs().unwrap().is_empty());
+        assert!(final_chat.pending_messages().unwrap().is_empty());
+        assert!(final_presence.pending_presences().unwrap().is_empty());
+    }
+
+    #[test]
     fn legacy_unconsumable_outgoing_is_retired_without_losing_request_replay_protection() {
         let fixture = Fixture::new();
         let core = fixture.core();
