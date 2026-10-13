@@ -2754,8 +2754,19 @@ mod tests {
         else {
             panic!("expected configured default conversation");
         };
+        // The real Chat projection retains history at the current wall clock.
+        let now = now_secs();
         let (device_key, _) = generate_keypair();
         let local_profile = profile_for_endpoint(&device_key, "Local");
+        let local_did = local_profile.document().profile_did.clone();
+        crate::room_service::seed_room_owner(
+            temp.path(),
+            &local_profile,
+            crate::room_service::RoomOwnerSeedInput {
+                title: "Chat".to_string(),
+            },
+        )
+        .unwrap();
         let core = Arc::new(
             CollaborationCore::new(
                 temp.path(),
@@ -2766,67 +2777,78 @@ mod tests {
             )
             .unwrap(),
         );
-        let payload = serde_json::json!({"text":"outgoing"});
-        let payload_type = "elastos.chat.message/v1";
-        let authenticated_payload =
-            crate::collaboration_default_conversation::profile_authenticated_conversation_payload(
-                &local_profile,
-                payload.clone(),
-            )
-            .unwrap();
-        let intent = serde_json::json!({
-            "payload_type": payload_type,
-            "payload": authenticated_payload,
-            "ttl_secs": TTL,
-        });
-        let outgoing = core
-            .prepare_profile_outgoing(
-                esp_request_binding(
-                    "startup-worker-request",
-                    "runtime-principal",
-                    CHAT_ROOM_CAPSULE,
-                    Some("elastos.chat.room"),
-                    "message.send",
-                    ["elastos://chat/message".to_string()],
-                    &intent,
-                ),
-                &local_profile,
-                payload_type,
-                payload,
-                NOW,
-                TTL,
-            )
-            .unwrap();
-        let unknown_payload = serde_json::json!({"text":"future outgoing"});
-        let unknown_payload_type = "elastos.chat.message/v1";
-        let authenticated_unknown_payload =
-            crate::collaboration_default_conversation::profile_authenticated_conversation_payload(
-                &local_profile,
-                unknown_payload.clone(),
-            )
-            .unwrap();
-        let unknown_intent = serde_json::json!({
-            "payload_type": unknown_payload_type,
-            "payload": authenticated_unknown_payload,
-            "ttl_secs": TTL,
-        });
-        core.prepare_profile_outgoing(
+        let binding = |request_id: &str, payload_type: &str, payload: &serde_json::Value| {
+            let authenticated_payload = crate::collaboration_default_conversation::
+                profile_authenticated_conversation_payload(&local_profile, payload.clone())
+                    .unwrap();
+            let intent = serde_json::json!({
+                "payload_type": payload_type,
+                "payload": authenticated_payload,
+                "ttl_secs": TTL,
+            });
             esp_request_binding(
-                "startup-worker-future-request",
+                request_id,
                 "runtime-principal",
                 CHAT_ROOM_CAPSULE,
                 Some("elastos.chat.room"),
                 "message.send",
                 ["elastos://chat/message".to_string()],
-                &unknown_intent,
+                &intent,
+            )
+        };
+        let payload_type = "elastos.chat.message/v1";
+        let payload = serde_json::json!({"body":"outgoing"});
+        let outgoing = core
+            .prepare_profile_outgoing(
+                binding("startup-worker-request", payload_type, &payload),
+                &local_profile,
+                payload_type,
+                payload,
+                now,
+                TTL,
+            )
+            .unwrap();
+        for (kind, payload) in [
+            (payload_type, serde_json::json!({"text":"future outgoing"})),
+            (
+                "elastos.chat.future/v1",
+                serde_json::json!({"body":"unsupported outgoing"}),
             ),
-            &local_profile,
-            unknown_payload_type,
-            unknown_payload,
-            NOW,
-            TTL,
-        )
-        .unwrap();
+        ] {
+            assert!(core
+                .prepare_profile_outgoing(
+                    binding("startup-worker-refused-request", kind, &payload),
+                    &local_profile,
+                    kind,
+                    payload,
+                    now,
+                    TTL,
+                )
+                .is_err());
+        }
+        assert_eq!(
+            core.pending_outgoing_product_projections(now)
+                .unwrap()
+                .len(),
+            1
+        );
+        let product_port = CollaborationChatProductPort::new(core.clone()).unwrap();
+        let presence_port = CollaborationPresenceProductPort::new(core.clone()).unwrap();
+        let presence = presence_port
+            .prepare_presence(
+                presence_request_binding(
+                    "startup-worker-presence",
+                    "runtime-principal",
+                    &local_profile,
+                )
+                .unwrap(),
+                &local_profile,
+                now,
+            )
+            .unwrap();
+        let presence_frame = core
+            .prepare_transport_frame(presence.test_envelope_bytes())
+            .unwrap();
         let (remote_key, _) = generate_keypair();
         let remote_profile = profile_for_endpoint(&remote_key, "Remote");
         let remote_authority =
@@ -2835,26 +2857,27 @@ mod tests {
             .prepare_profile_outgoing(
                 &remote_profile,
                 SERVICE,
-                "elastos.chat.message/v1",
-                serde_json::json!({"text":"incoming"}),
-                NOW,
+                payload_type,
+                serde_json::json!({"body":"incoming"}),
+                now,
                 TTL,
             )
             .unwrap();
         let outgoing_authorized = remote_authority
-            .authorize_incoming(
-                outgoing.envelope_bytes(),
-                serde_json::from_slice::<
-                    elastos_common::collaboration_protocol::SignedCollaborationMessage,
-                >(outgoing.envelope_bytes())
-                .unwrap()
-                .signer_did
-                .as_str(),
-                NOW + 1,
-            )
+            .authorize_incoming(outgoing.envelope_bytes(), &core.local_device_did(), now + 1)
             .unwrap();
         let remote_receipt = remote_authority
-            .prepare_acceptance_receipt(&outgoing_authorized, NOW + 1)
+            .prepare_acceptance_receipt(&outgoing_authorized, now + 1)
+            .unwrap();
+        let presence_authorized = remote_authority
+            .authorize_incoming(
+                presence.test_envelope_bytes(),
+                &core.local_device_did(),
+                now + 1,
+            )
+            .unwrap();
+        let presence_receipt = remote_authority
+            .prepare_acceptance_receipt(&presence_authorized, now + 1)
             .unwrap();
 
         let carrier = FakeCarrier::new([FakeReply::JoinEcho]);
@@ -2862,60 +2885,109 @@ mod tests {
             .await
             .unwrap();
         let driver = CollaborationTransportDriver::new(core.clone(), joined);
-        let product_port = CollaborationChatProductPort::new(core.clone()).unwrap();
-
-        carrier.push([FakeReply::Error("peek failed")]);
-        run_collaboration_worker_cycle(&driver, &product_port, temp.path(), NOW + 1).await;
-        assert!(core.pending_outgoing(NOW + 1).unwrap().is_empty());
-        assert_eq!(
-            core.pending_outgoing_product_projections(NOW + 1)
-                .unwrap()
-                .len(),
-            2
-        );
-        assert!(product_port
-            .pending_outgoing_messages(NOW + 1)
+        carrier.push_for("gossip_send", [FakeReply::Error("send failed")]);
+        carrier.push_for("gossip_peek", [FakeReply::Error("peek failed")]);
+        run_collaboration_worker_cycle(&driver, &product_port, temp.path(), now + 1).await;
+        assert_eq!(core.pending_outgoing(now + 1).unwrap().len(), 2);
+        assert!(core
+            .pending_outgoing_product_projections(now + 1)
             .unwrap()
             .is_empty());
-        assert_eq!(request_ops(&carrier), ["gossip_join_exact", "gossip_peek"]);
+        assert!(product_port
+            .pending_outgoing_messages(now + 1)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            request_ops(&carrier),
+            ["gossip_join_exact", "gossip_send", "gossip_peek"]
+        );
 
         core.inject_write_fault(WriteFault::BeforeWrite);
         assert!(
-            accept_shared(&core, &remote_authority, incoming.envelope_bytes(), NOW + 1).is_err()
+            accept_shared(&core, &remote_authority, incoming.envelope_bytes(), now + 1).is_err()
         );
-        assert!(core.pending_outgoing(NOW + 1).unwrap().is_empty());
+        assert_eq!(core.pending_outgoing(now + 1).unwrap().len(), 2);
         assert_eq!(core.summary().unwrap().pending_product_handoffs, 0);
-
         let receipt =
-            accept_shared(&core, &remote_authority, incoming.envelope_bytes(), NOW + 1).unwrap();
-        carrier.push([peek(0, 0, Vec::new()), FakeReply::Error("ack failed")]);
-        run_collaboration_worker_cycle(&driver, &product_port, temp.path(), NOW + 1).await;
-        assert_eq!(core.summary().unwrap().pending_product_handoffs, 1);
-        assert!(core.pending_outgoing(NOW + 1).unwrap().is_empty());
+            accept_shared(&core, &remote_authority, incoming.envelope_bytes(), now + 1).unwrap();
+        carrier.push([
+            send_remote(),
+            peek(0, 0, Vec::new()),
+            FakeReply::Error("ack failed"),
+        ]);
+        run_collaboration_worker_cycle(&driver, &product_port, temp.path(), now + 1).await;
+        assert_eq!(core.summary().unwrap().pending_product_handoffs, 0);
+        assert_eq!(core.summary().unwrap().remotely_accepted_outgoing, 0);
+        assert_eq!(core.pending_outgoing(now + 1).unwrap().len(), 2);
+        let session = crate::room_service::start_local_runtime_session(
+            temp.path(),
+            &local_did,
+            "Local runtime",
+            "ElastOS shell",
+        )
+        .unwrap();
+        let poll = product_port
+            .conversation_poll(temp.path(), &session.token, 0)
+            .unwrap();
+        assert_eq!(poll.objects.len(), 2);
+        assert_eq!(poll.objects[0].body.as_deref(), Some("outgoing"));
+        assert_eq!(poll.objects[1].body.as_deref(), Some("incoming"));
 
         assert_eq!(
-            accept_shared(&core, &remote_authority, incoming.envelope_bytes(), NOW + 1).unwrap(),
+            accept_shared(&core, &remote_authority, incoming.envelope_bytes(), now + 1).unwrap(),
             receipt,
         );
-        carrier.push([peek(0, 0, Vec::new()), ack(0, 0, false)]);
-        run_collaboration_worker_cycle(&driver, &product_port, temp.path(), NOW + 1).await;
-        assert_eq!(core.summary().unwrap().pending_product_handoffs, 1);
+        carrier.push([send_remote(), peek(0, 0, Vec::new()), ack(0, 0, false)]);
+        run_collaboration_worker_cycle(&driver, &product_port, temp.path(), now + 1).await;
+        assert_eq!(core.summary().unwrap().pending_product_handoffs, 0);
+        assert_eq!(core.pending_outgoing(now + 1).unwrap().len(), 2);
+        assert_eq!(
+            product_port
+                .conversation_poll(temp.path(), &session.token, 0)
+                .unwrap()
+                .latest_seq,
+            poll.latest_seq,
+        );
 
         carrier.push([
-            peek(1, 2, vec![gossip_frame(&remote_authority, &remote_receipt)]),
-            ack(1, 2, true),
+            send_remote(),
+            peek(
+                0,
+                2,
+                vec![
+                    gossip_frame(&remote_authority, &remote_receipt),
+                    gossip_frame(&remote_authority, &presence_receipt),
+                ],
+            ),
+            ack(0, 2, true),
         ]);
-        run_collaboration_worker_cycle(&driver, &product_port, temp.path(), NOW + 1).await;
-        assert!(core.pending_outgoing(NOW + 1).unwrap().is_empty());
-        assert_eq!(core.summary().unwrap().remotely_accepted_outgoing, 0);
-        assert_eq!(
-            core.pending_outgoing_product_projections(NOW + 1)
-                .unwrap()
-                .len(),
-            2
-        );
-        assert_eq!(core.summary().unwrap().pending_product_handoffs, 1);
+        run_collaboration_worker_cycle(&driver, &product_port, temp.path(), now + 1).await;
+        let pending = core.pending_outgoing(now + 1).unwrap();
+        // Shared still owes other Homes, while this peer's receipt is durable.
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].envelope_bytes(), outgoing.envelope_bytes());
+        assert!(pending[0].accepted_by(&remote_authority.local_device_did()));
+        assert_eq!(core.summary().unwrap().remotely_accepted_outgoing, 2);
+        assert!(core
+            .pending_outgoing_product_projections(now + 1)
+            .unwrap()
+            .is_empty());
+        assert_eq!(core.summary().unwrap().pending_product_handoffs, 0);
         assert!(product_port.pending_messages().unwrap().is_empty());
+        let before_settled = request_ops(&carrier).len();
+        carrier.push([peek(2, 2, Vec::new()), ack(2, 2, false)]);
+        run_collaboration_worker_cycle(&driver, &product_port, temp.path(), now + 1).await;
+        assert_eq!(
+            &request_ops(&carrier)[before_settled..],
+            &["gossip_peek", "gossip_ack"]
+        );
+        assert!(carrier
+            .requests()
+            .iter()
+            .filter(|request| request["op"] == "gossip_send")
+            .all(
+                |request| request["message"].as_str() == std::str::from_utf8(&presence_frame).ok()
+            ));
         assert_eq!(
             collaboration_message_envelope_sha256(outgoing.envelope_bytes()),
             outgoing.envelope_sha256()
