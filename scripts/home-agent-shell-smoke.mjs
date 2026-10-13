@@ -98,10 +98,10 @@ assert.ok(harnessHost.includes("error?.status === 409"), "a revision conflict re
 assert.ok(harnessHost.includes("if (workspaceRevision === null) {"), "no write before the read");
 assert.ok(entry.includes("loadAgentWorkspace()"), "the entry reads the workspace on boot");
 assert.ok(
-  entry.indexOf("loadAgentWorkspace()") < entry.indexOf("booted = true;") &&
-    (entry.match(/booted = true;/g) || []).length === 1 &&
-    entry.includes("if (booted) postReady();"),
-  "ready is posted after the workspace is read, and a hello before then waits for it",
+  entry.indexOf('postToHome({ type: "home-agent:hello", docId: DOC_ID });') <
+    entry.indexOf("loadAgentWorkspace()") &&
+    entry.indexOf("loadAgentWorkspace()") < entry.indexOf('postToHome({ type: "home-agent:ready", docId: DOC_ID });'),
+  "each document says hello when its script starts and ready after its workspace is read",
 );
 assert.equal(
   (gateway.match(/\/api\/apps\/assistant\/workspace-v2/g) || []).length,
@@ -135,13 +135,11 @@ assert.ok(
 
 assert.ok(homeFace.includes('const TARGET_ID = "assistant"'));
 assert.ok(
-  homeFace.includes("function onAssistantFrameDocumentLoad(") &&
-    homeFace.includes('frame?.addEventListener("load", onAssistantFrameDocumentLoad)') &&
-    homeFace.includes("const { hello, ready } = frameHandshake.load();") &&
-    homeFace.includes("frame.contentWindow?.postMessage(hello, \"*\");") &&
-    homeFace.includes("if (frameHandshake.acceptReady(message)) markFrameReady();") &&
-    homeFace.includes("if (frameHandshake.recover()) markFrameReady();"),
-  "each loaded Assistant document must answer Home's hello before Home raises the room",
+  !homeFace.includes('addEventListener("load"') &&
+    !/READY_RECOVERY|frameHandshake|frameLoadCount/.test(homeFace) &&
+    homeFace.includes("const change = frameReadiness.receive(message);") &&
+    homeFace.includes("frameReadiness.reset();\n    frame.src = route.href;"),
+  "Home shows the room from the document's own hello/ready, resets before it sets src, and keeps no load-event or timer state",
 );
 assert.ok(
   homeWindows.includes('const HOME_AGENT_TARGET_ID = "assistant"') &&
@@ -331,62 +329,47 @@ for (const invalid of [
   assert.equal(homeMessageContract.normalizeHomeAgentBrowserUrl(invalid), "");
 }
 
-/* Ready handshake: the room shows once per load, for the answer to the current
-   document's hello, a legacy (nonce-less) ready, or the recovery bound. */
+/* Readiness: each document announces hello {docId} then ready {docId}. The
+   contract takes no load event, so the frame's load timing cannot matter. */
 {
-  const create = () => homeMessageContract.createAssistantFrameHandshake();
-  const ready = (nonce) => ({ type: "home-agent:ready", nonce });
+  const create = () => homeMessageContract.createAssistantFrameReadiness();
+  const id = (n) => n.toString(16).padStart(32, "0");
+  const hello = (docId) => ({ type: "home-agent:hello", docId });
+  const ready = (docId) => ({ type: "home-agent:ready", docId });
   const legacy = { type: "home-agent:ready" };
-  // Ready before load: the boot ready carries no hello yet; the load's hello is answered.
-  let handshake = create();
-  assert.equal(handshake.acceptReady(ready("")), false, "a current ready before any hello never counts");
-  let loaded = handshake.load();
-  assert.equal(loaded.hello.type, "home-agent:hello");
-  assert.equal(loaded.ready, false, "a current ready before load is not held");
-  assert.equal(handshake.acceptReady(ready(loaded.hello.nonce)), true, "the answer to the hello counts");
-  assert.equal(handshake.acceptReady(ready(loaded.hello.nonce)), false, "a second ready for the same load is ignored");
-  // Load before ready: the hello waits for the boot, which echoes it.
-  handshake = create();
-  loaded = handshake.load();
-  assert.equal(handshake.acceptReady(ready(loaded.hello.nonce)), true, "a boot that finishes after the load counts");
-  // A failed load that never answers, then a good reload.
-  handshake = create();
-  const failed = handshake.load().hello;
-  const reloaded = handshake.load().hello;
-  assert.notEqual(failed.nonce, reloaded.nonce);
-  assert.equal(handshake.acceptReady(ready("")), false, "the reload's early boot ready does not count");
-  assert.equal(handshake.acceptReady(ready(failed.nonce)), false, "the failed document's ready does not count");
-  assert.equal(handshake.acceptReady(ready(reloaded.nonce)), true, "the reload recovers after a failed load");
-  // A delayed ready from the previous document.
-  handshake = create();
-  const previous = handshake.load().hello;
-  const current = handshake.load().hello;
-  assert.equal(handshake.acceptReady(ready(previous.nonce)), false, "a delayed ready from the replaced document is ignored");
-  assert.equal(handshake.acceptReady({ ...ready(current.nonce), extra: true }), false, "the ready shape is exact");
-  assert.equal(handshake.acceptReady(ready(current.nonce)), true);
-  // Legacy Assistant (after Undo with the new Home tab open): ready after load.
-  handshake = create();
-  handshake.load();
-  assert.equal(handshake.acceptReady(legacy), true, "a legacy ready after load shows the room");
-  // Legacy ready before load, then a reload resets it.
-  handshake = create();
-  assert.equal(handshake.acceptReady(legacy), false, "a legacy ready before load waits for that load");
-  assert.equal(handshake.load().ready, true, "the load it belongs to shows the room");
-  assert.equal(handshake.load().ready, false, "a later load resets legacy readiness");
-  assert.equal(handshake.acceptReady(legacy), true, "the reloaded legacy document's own ready shows the room");
-  // Legacy reload whose ready beats its load event.
-  assert.equal(handshake.acceptReady(legacy), false, "a ready while shown belongs to the next document");
-  assert.equal(handshake.load().ready, true, "that next load shows the room at once");
-  // Recovery: a load nobody answers shows once; nothing before a load or after a reset.
-  handshake = create();
-  assert.equal(handshake.recover(), false, "no recovery before a load");
-  handshake.load();
-  assert.equal(handshake.recover(), true, "a load nobody answers recovers");
-  assert.equal(handshake.recover(), false, "recovery shows the room once");
-  handshake.load();
-  handshake.reset();
-  assert.equal(handshake.recover(), false, "a retired frame never recovers");
-  assert.equal(handshake.acceptReady(legacy), false, "a retired frame holds a stray legacy ready only for its next load");
+  // A document's hello hides, its ready shows once (whenever the load event fired).
+  let readiness = create();
+  assert.equal(readiness.receive(ready(id(1))), "", "a ready before its document's hello is ignored");
+  assert.equal(readiness.receive(hello(id(1))), "hide");
+  assert.equal(readiness.receive(ready(id(1))), "show", "the document's own ready shows the room");
+  assert.equal(readiness.receive(ready(id(1))), "", "a duplicate ready is ignored");
+  // In-frame reload: the new hello hides; the old document's late ready is ignored; the new ready shows.
+  assert.equal(readiness.receive(hello(id(2))), "hide", "a new document's hello hides the room");
+  assert.equal(readiness.receive(ready(id(1))), "", "a stale ready from the replaced document is ignored");
+  assert.equal(readiness.receive(ready(id(2))), "show", "the reloaded document's ready shows the room");
+  // A document that never gets ready, replaced by one that does.
+  assert.equal(readiness.receive(hello(id(3))), "hide");
+  assert.equal(readiness.receive(hello(id(4))), "hide");
+  assert.equal(readiness.receive(ready(id(3))), "", "the abandoned document's ready is ignored");
+  assert.equal(readiness.receive(ready(id(4))), "show");
+  // Home sets or changes src: nothing is current until the new document says hello.
+  readiness.reset();
+  assert.equal(readiness.receive(ready(id(4))), "", "a ready from before Home changed src is ignored");
+  assert.equal(readiness.receive(hello(id(5))), "hide");
+  assert.equal(readiness.receive(ready(id(5))), "show");
+  // Wrong shapes never count.
+  for (const bad of [{ ...ready(id(5)), extra: true }, ready("not-an-id"), ready(5), hello(""),
+    { type: "home-agent:ready", nonce: "x" }, { type: "home-agent:other", docId: id(6) }, null, "home-agent:ready"]) {
+    assert.equal(readiness.receive(bad), "", JSON.stringify(bad));
+  }
+  // Legacy Assistant after Undo (only {type} ready, no hello): shows as before, before or after load.
+  readiness = create();
+  assert.equal(readiness.receive(legacy), "show", "a legacy ready shows the room");
+  assert.equal(readiness.receive(legacy), "show", "a legacy reload's ready shows the room again");
+  readiness.reset();
+  assert.equal(readiness.receive(legacy), "show", "after Home changes src, a legacy ready still shows");
+  readiness.receive(hello(id(7)));
+  assert.equal(readiness.receive(legacy), "", "a legacy-shaped ready never shows a current document");
 }
 
 const offersPayload = {

@@ -7,8 +7,6 @@ import { bindAssistantModes } from "./assistant-modes.js";
    Boots the harness exactly as Home GUI did (bind Shelf, bind harness) and
    speaks the small contract with the Home GUI frame that hosts it:
 
-     Home → capsule   home-agent:hello {nonce}     sent after each frame load; answered with
-                                                   ready {nonce} once the module has booted
      Home → capsule   home-agent:open              the Shelf morph began; raise the room
                       home-agent:shelf-handover    Home's pill reached composer geometry (on)
                                                    or the leave began: the composer fades on
@@ -17,7 +15,8 @@ import { bindAssistantModes } from "./assistant-modes.js";
                                                    Sent on every leave, also one this capsule
                                                    asked for — the room never lowers on its
                                                    own request, so both paths are one morph
-     capsule → Home   home-agent:ready {nonce}     module booted, frame can be shown
+     capsule → Home   home-agent:hello {docId}     this document started (sent first)
+                      home-agent:ready {docId}     workspace loaded, frame can be shown
                       home-agent:shelf-metrics     composer pill size, so Home's pill matches
                       home-agent:close             user asks to leave from inside (Home, Esc)
                       home-agent:open-viewer       artifact to show in Documents
@@ -34,13 +33,11 @@ import {
 import { handleShellEscape } from "./shell-popovers.js";
 import { postToHome, loadAgentWorkspace, bindWorkspaceApply, scheduleAgentWorkspacePersist } from "./harness-host.js";
 
-const HOME_MESSAGE_TYPES = new Set(["home-agent:hello", "home-agent:open", "home-agent:shelf-handover", "home-agent:close"]);
-let booted = false;
-let helloNonce = "";
-
-function postReady() {
-  postToHome({ type: "home-agent:ready", nonce: helloNonce });
-}
+const HOME_MESSAGE_TYPES = new Set(["home-agent:open", "home-agent:shelf-handover", "home-agent:close"]);
+/* One id per document, so Home can tell this document's ready from one sent
+   by the document it replaced. */
+const DOC_ID = Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+postToHome({ type: "home-agent:hello", docId: DOC_ID });
 
 function fromHome(event) {
   return event.source === window.parent && event.source !== window;
@@ -137,11 +134,6 @@ window.addEventListener("message", (event) => {
   if (!message || typeof message !== "object" || !HOME_MESSAGE_TYPES.has(message.type)) {
     return;
   }
-  if (message.type === "home-agent:hello") {
-    helloNonce = typeof message.nonce === "string" ? message.nonce : "";
-    if (booted) postReady();
-    return;
-  }
   if (message.type === "home-agent:open") {
     applyLaunchQuery(message.query);
     if (!agentShelfFaceActive() || !agentHarnessActive()) {
@@ -208,6 +200,5 @@ loadAgentWorkspace()
     notice.textContent = "Your workspace could not be loaded. Reload to retry; existing work is unchanged.";
   })
   .finally(() => {
-    booted = true;
-    postReady();
+    postToHome({ type: "home-agent:ready", docId: DOC_ID });
   });

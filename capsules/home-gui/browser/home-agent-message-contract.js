@@ -85,53 +85,43 @@ export function normalizeHomeAgentBrowserUrl(message) {
   }
 }
 
-/* Home sends a fresh hello after each Assistant document loads; the room shows
-   once per load, for the ready that echoes the current nonce. A ready sent
-   before the load, by a replaced document, or twice never counts.
-   An Assistant from an earlier release (kept running after Undo with the Home
-   tab open) ignores hello and sends one {type} ready per document, before or
-   after its load event; that ready counts for the load it belongs to. */
-export function createAssistantFrameHandshake() {
-  let sequence = 0;
-  let nonce = "";
+const ASSISTANT_DOC_ID = /^[0-9a-f]{32}$/;
+
+/* Each Assistant document announces itself: hello {docId} when its script
+   starts, ready {docId} once its workspace has loaded. Messages from one
+   source arrive in order, so a document's hello always precedes its ready.
+   A hello means a new document started (also an in-frame reload): hide until
+   that document's ready. A ready from any other document is ignored.
+   An Assistant from an earlier release (kept after Undo with the Home tab
+   open) sends only {type} ready; that shows the room as it always did.
+   receive() returns "hide", "show" or "" (no change). */
+export function createAssistantFrameReadiness() {
+  let current = null;
   let shown = false;
-  let legacyPending = false;
   return Object.freeze({
-    /* A frame document loaded: returns the hello to send, and whether a
-       legacy ready already received for this document shows the room now. */
-    load() {
-      sequence += 1;
-      nonce = `assistant-${sequence}`;
-      shown = legacyPending;
-      legacyPending = false;
-      return { hello: { type: "home-agent:hello", nonce }, ready: shown };
-    },
-    /* A ready from the frame: true when it shows the room for this load. */
-    acceptReady(message) {
-      if (hasExactKeys(message, ["type", "nonce"])) {
-        if (nonce === "" || shown || message.type !== "home-agent:ready" || message.nonce !== nonce) return false;
-        shown = true;
-        return true;
+    receive(message) {
+      if (hasExactKeys(message, ["type", "docId"]) &&
+        typeof message.docId === "string" && ASSISTANT_DOC_ID.test(message.docId)) {
+        if (message.type === "home-agent:hello") {
+          current = message.docId;
+          shown = false;
+          return "hide";
+        }
+        if (message.type === "home-agent:ready" && message.docId === current && !shown) {
+          shown = true;
+          return "show";
+        }
+        return "";
       }
-      if (!hasExactKeys(message, ["type"]) || message.type !== "home-agent:ready") return false;
-      if (nonce !== "" && !shown) {
-        shown = true;
-        return true;
+      if (hasExactKeys(message, ["type"]) && message.type === "home-agent:ready" && current === null) {
+        return "show";
       }
-      // Before this document's load event (or the next document's): hold it for that load.
-      legacyPending = true;
-      return false;
+      return "";
     },
-    /* No ready within the recovery bound after load: show the room anyway. */
-    recover() {
-      if (nonce === "" || shown) return false;
-      shown = true;
-      return true;
-    },
+    /* Home is about to set or change the frame src: no document is current. */
     reset() {
-      nonce = "";
+      current = null;
       shown = false;
-      legacyPending = false;
     },
   });
 }
