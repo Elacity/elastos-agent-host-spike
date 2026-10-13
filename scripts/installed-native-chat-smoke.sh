@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Disposable test Homes never join the Community network a release pins (setup and update skip it).
+export ELASTOS_COLLABORATION_STARTUP_MODE=isolated
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/runtime-cleanup.sh"
 
