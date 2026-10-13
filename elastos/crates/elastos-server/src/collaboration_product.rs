@@ -2296,7 +2296,21 @@ mod tests {
             .project_prepared_message(&fixture.data_root, &recovered, None)
             .unwrap();
         assert_eq!(completed.seq, reopened.objects[0].seq);
-        assert_eq!(completed.delivery_state, Some(Sending));
+        // Sessionless recovery shows no viewer's delivery; the owner still sees Sending.
+        assert_eq!(completed.delivery_state, None);
+        let after_recovery = restarted
+            .conversation_poll_with_read_intent(
+                &fixture.data_root,
+                &session.token,
+                0,
+                &fixture.person_profile,
+                false,
+                now,
+            )
+            .unwrap();
+        assert_eq!(after_recovery.objects.len(), 1);
+        assert_eq!(after_recovery.objects[0].delivery_state, Some(Sending));
+        assert_eq!(after_recovery.own_delivery[0].state, Sending);
         assert!(restarted.pending_outgoing_messages(now).unwrap().is_empty());
         assert_eq!(
             restarted.retained_history(now).unwrap(),

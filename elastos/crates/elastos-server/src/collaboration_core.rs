@@ -6756,6 +6756,9 @@ mod tests {
         .unwrap()
         .join("room/objects.json");
         let before_live = fs::read(core.state_path()).unwrap();
+        // The session's "joined" system row also takes a Room seq outside this
+        // collaboration namespace, so pin the catch-up row's own seq instead.
+        let mut catch_up_seq = None;
         for conflict in conflicts {
             assert!(core
                 .accept_incoming_from_signed_source_for_test(&conflict, now)
@@ -6779,7 +6782,13 @@ mod tests {
                 after_poll.objects[1].body.as_deref(),
                 Some("otherwise valid catch-up")
             );
-            assert_eq!(after_poll.latest_seq, before_poll.latest_seq + 1);
+            assert!(after_poll.objects[1].seq > before_poll.latest_seq);
+            assert_eq!(after_poll.latest_seq, after_poll.objects[1].seq);
+            // The second conflict's batch must not re-project the catch-up row.
+            assert_eq!(
+                *catch_up_seq.get_or_insert(after_poll.objects[1].seq),
+                after_poll.objects[1].seq
+            );
             let saved = fs::read(&room_path).unwrap();
             product
                 .project_history(

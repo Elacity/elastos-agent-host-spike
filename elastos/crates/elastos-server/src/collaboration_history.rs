@@ -674,15 +674,6 @@ mod tests {
             .test_core()
             .authorize_history_message(&conflicting, now)
             .is_ok());
-        let mut conflict_batch = valid.clone();
-        conflict_batch["envelopes"] = serde_json::json!([
-            valid["envelopes"][0].clone(),
-            String::from_utf8(conflicting).unwrap()
-        ]);
-        assert!(a
-            .service
-            .apply_response(conflict_batch, &b.product.local_device_did(), now)
-            .is_err());
         let mut presence_batch = valid.clone();
         presence_batch["envelopes"] =
             serde_json::json!([valid["envelopes"][0].clone(), b.own_presence]);
@@ -696,19 +687,42 @@ mod tests {
             .service
             .apply_response(oversized, &b.product.local_device_did(), now)
             .is_err());
-        let mut too_many = valid;
+        let mut too_many = valid.clone();
         too_many["envelopes"] = serde_json::json!(vec![""; MAX_CONVERSATION_HISTORY_MESSAGES + 1]);
         assert!(a
             .service
             .apply_response(too_many, &b.product.local_device_did(), now)
             .is_err());
         assert!(a.product.retained_history(now).unwrap().is_empty());
-        let room_root = elastos_common::localhost::rooted_localhost_fs_path(
+        let room_objects = elastos_common::localhost::rooted_localhost_fs_path(
             a.root.path(),
             crate::room_service::room_root_uri(),
         )
-        .unwrap();
-        assert!(!room_root.join("room/objects.json").exists());
+        .unwrap()
+        .join("room/objects.json");
+        assert!(!room_objects.exists());
+        // A signed identity conflict drops only that envelope, in either order;
+        // the unrelated original in the same batch still projects once.
+        let original = valid["envelopes"][0].clone();
+        let conflicting = String::from_utf8(conflicting).unwrap();
+        for envelopes in [
+            serde_json::json!([original.clone(), conflicting.clone()]),
+            serde_json::json!([conflicting.clone(), original.clone()]),
+        ] {
+            let mut conflict_batch = valid.clone();
+            conflict_batch["envelopes"] = envelopes;
+            a.service
+                .apply_response(conflict_batch, &b.product.local_device_did(), now)
+                .unwrap();
+            assert_eq!(
+                a.product.retained_history(now).unwrap(),
+                vec![original.as_str().unwrap().as_bytes().to_vec()]
+            );
+            let rows: Vec<serde_json::Value> =
+                serde_json::from_slice(&std::fs::read(&room_objects).unwrap()).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["body"], "valid");
+        }
     }
 
     #[tokio::test]
