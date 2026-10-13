@@ -1089,7 +1089,7 @@ async fn run_upgrade_with_restart(
     )?;
     refused(verify_release_binding(head, &release_bytes, &release))?;
     // Each capsule record is verified on its own before any download or write.
-    let next_records = refused(crate::capsule_record::CapsuleRecords::from_release(
+    refused(crate::capsule_record::CapsuleRecords::from_release(
         &release["payload"],
         &source.publisher_dids,
     ))?;
@@ -1308,19 +1308,20 @@ async fn run_upgrade_with_restart(
         crate::installed_release::admit_descriptor(comp_info, comp_sha256, comp_data.len() as u64)
     })())?;
     // These bytes already match the signed digest, so a refusal here is the publisher's.
-    let next_manifest = refused((|| {
+    refused((|| {
         anyhow::ensure!(
             comp_data.len() <= 4 * 1024 * 1024,
             "Installed components exceed their byte bound"
         );
         let manifest: crate::setup::ComponentsManifest = serde_json::from_slice(&comp_data)?;
-        crate::setup::admit_release_components(&manifest, &component_platform)?;
-        Ok(manifest)
+        crate::setup::admit_release_components(&manifest, &component_platform)
     })())?;
     // Every row of the next release, replaced or kept, has exactly its record.
-    let next_admission = refused(crate::capsule_record::admit_components(
-        next_records,
-        &next_manifest,
+    let (_, next_admission) = refused(crate::capsule_record::admit_release(
+        &release_bytes,
+        &source.publisher_dids,
+        &comp_data,
+        release_platform,
     ))?;
 
     if apply_mode == ApplyMode::Normal {

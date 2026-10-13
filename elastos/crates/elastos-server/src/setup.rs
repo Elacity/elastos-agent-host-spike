@@ -719,19 +719,13 @@ async fn admit_installed_setup_metadata(
     let client = crate::carrier::CarrierClient::connect_trusted_source(source, 15).await?;
     let result = async {
         let components = client.fetch_content_bounded(cid, size as usize).await?;
-        crate::installed_release::admit_descriptor(
-            descriptor,
-            &hex::encode(sha2::Sha256::digest(&components)),
-            components.len() as u64,
-        )?;
-        let manifest: ComponentsManifest = serde_json::from_slice(&components)?;
-        // Each capsule record verifies and matches its row before setup writes.
-        let admission = crate::capsule_record::admit_components(
-            crate::capsule_record::CapsuleRecords::from_release(
-                &release["payload"],
-                &source.publisher_dids,
-            )?,
-            &manifest,
+        // The release verifies, binds these components, and each capsule record
+        // verifies and matches its row before setup writes.
+        let (manifest, admission) = crate::capsule_record::admit_release(
+            &admitted.release,
+            &source.publisher_dids,
+            &components,
+            crate::update::detect_release_platform(),
         )?;
         let catalog = if let Some(trust) = &manifest.model_catalog {
             let bytes = client
@@ -1289,12 +1283,12 @@ pub(crate) fn admit_installed_components(
     let binary = fs::canonicalize(&source.install_path)?;
     let (release, bytes) =
         crate::installed_release::read_signed_release(data_dir, &binary, &source, false)?;
-    let manifest: ComponentsManifest = serde_json::from_slice(&bytes)?;
-    let records = crate::capsule_record::CapsuleRecords::from_release(
-        &release["payload"],
+    let (manifest, admission) = crate::capsule_record::admit_release(
+        &release,
         &source.publisher_dids,
+        &bytes,
+        crate::update::detect_release_platform(),
     )?;
-    let admission = crate::capsule_record::admit_components(records, &manifest)?;
     Ok(Some(AdmittedComponents {
         bytes,
         manifest,
@@ -2424,20 +2418,12 @@ pub(crate) async fn ensure_local_model_engine(
         })?;
         let binary = fs::canonicalize(&source.install_path)?;
         let admitted = crate::installed_release::read_for_setup(data_dir, &binary, &source, guard)?;
-        let release: serde_json::Value = serde_json::from_slice(&admitted.release)?;
-        crate::installed_release::admit_descriptor(
-            &release["payload"]["platforms"][crate::update::detect_release_platform()]
-                ["components"],
-            &hex::encode(sha2::Sha256::digest(manifest_bytes)),
-            manifest_bytes.len() as u64,
-        )?;
         // The engine row, like every row, has exactly its signed capsule record.
-        let admission = crate::capsule_record::admit_components(
-            crate::capsule_record::CapsuleRecords::from_release(
-                &release["payload"],
-                &source.publisher_dids,
-            )?,
-            &manifest,
+        let (_, admission) = crate::capsule_record::admit_release(
+            &admitted.release,
+            &source.publisher_dids,
+            manifest_bytes,
+            crate::update::detect_release_platform(),
         )?;
         Some((source, binary, admitted, admission))
     } else {
@@ -2500,7 +2486,7 @@ pub(crate) async fn ensure_local_model_engine(
             "model engine parent is not protected"
         );
     }
-    extract_from_tarball(&bytes, &bundle, info)?;
+    extract_from_tarball(&bytes, &bundle, &row)?;
     write_cache_metadata(&manifest, Some(info), &platform, "llama-server", &bundle)?;
     verified_local_model_engine(data_dir, &manifest)
 }
@@ -3103,16 +3089,15 @@ pub(crate) async fn repair_installed_support(
     let (release, components) =
         crate::installed_release::read_signed_release(data_dir, binary, source, repair_version)?;
     // Repair restores rows of the installed release, checked against its own records.
-    let manifest: ComponentsManifest = serde_json::from_slice(&components)?;
+    let (manifest, admission) = crate::capsule_record::admit_release(
+        &release,
+        &source.publisher_dids,
+        &components,
+        crate::update::detect_release_platform(),
+    )?;
     let records = crate::capsule_record::UpdateRecords {
         installed: None,
-        next: crate::capsule_record::admit_components(
-            crate::capsule_record::CapsuleRecords::from_release(
-                &release["payload"],
-                &source.publisher_dids,
-            )?,
-            &manifest,
-        )?,
+        next: admission,
     };
     remove_replacement_leftovers(data_dir, &manifest, &detect_platform())?;
     if let Some(trust) = &manifest.model_catalog {
@@ -3849,7 +3834,7 @@ pub(crate) async fn stage_update_support(
             let bytes = fetch_admitted_row(fetch, &row, &mut *owner).await?;
             let dest = stage.path().join(&relative);
             if asset.extract_path.is_some() {
-                extract_from_tarball(&bytes, &dest, asset)?;
+                extract_from_tarball(&bytes, &dest, &row)?;
             } else {
                 atomic_write_file(&dest, &bytes)?;
                 fs::set_permissions(&dest, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
@@ -4189,7 +4174,7 @@ pub(crate) async fn install_first_party_component_via_carrier(
 
     require_component_space(dest, &bytes, is_tarball)?;
     if is_tarball {
-        extract_from_tarball(&bytes, dest, platform_info)?;
+        extract_from_tarball(&bytes, dest, row)?;
     } else {
         atomic_write_file(dest, &bytes)?;
     }
@@ -4345,11 +4330,14 @@ fn component_space_fits(
     Ok(elastos_common::require_free_space(dest.1, unpacked)?)
 }
 
+/// Extract the bytes of one admitted row; component archives are extracted only
+/// for admitted rows.
 fn extract_from_tarball(
     data: &[u8],
     dest: &Path,
-    platform_info: &PlatformInfo,
+    row: &crate::capsule_record::AdmittedRow,
 ) -> anyhow::Result<()> {
+    let platform_info = row.info();
     let extract_path = platform_info
         .extract_path
         .as_deref()
@@ -5006,7 +4994,12 @@ pub(crate) mod tests {
         verify_checksum("home-cli", &bytes, &info).unwrap();
         let temp = tempfile::tempdir().unwrap();
         let installed = temp.path().join("capsules/home-cli");
-        extract_from_tarball(&bytes, &installed, &info).unwrap();
+        extract_from_tarball(
+            &bytes,
+            &installed,
+            &crate::capsule_record::AdmittedRow::for_test("fixture", &info),
+        )
+        .unwrap();
         let renderer = installed.join("bin/home-cli");
         assert_eq!(fs::read(&renderer).unwrap(), native);
         assert_ne!(
@@ -5090,7 +5083,12 @@ pub(crate) mod tests {
         }))
         .unwrap();
         let dest = temp.path().join("libexec/llama.cpp/b10516/darwin-arm64");
-        extract_from_tarball(&bytes, &dest, &info).unwrap();
+        extract_from_tarball(
+            &bytes,
+            &dest,
+            &crate::capsule_record::AdmittedRow::for_test("fixture", &info),
+        )
+        .unwrap();
         let link = dest.join("lib.dylib");
         assert!(
             fs::symlink_metadata(&link)
@@ -5382,7 +5380,12 @@ pub(crate) mod tests {
         let info = resolve_platform_info(&manifest.external["media-tools"], &platform).unwrap();
         verify_checksum("media-tools", &archive_bytes, info).unwrap();
         let dest = data.join("tools/media-tools");
-        extract_from_tarball(&archive_bytes, &dest, info).unwrap();
+        extract_from_tarball(
+            &archive_bytes,
+            &dest,
+            &crate::capsule_record::AdmittedRow::for_test("fixture", info),
+        )
+        .unwrap();
         write_cache_metadata(&manifest, Some(info), &platform, "media-tools", &dest).unwrap();
         for path in [&dest, &dest.join("bin")] {
             assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o022, 0);
@@ -7427,9 +7430,19 @@ pub(crate) mod tests {
             resolve_component_capsule_metadata_platform_info(metadata, &platform).unwrap();
         let binary = data_dir.join("bin/kubo");
         let capsule = data_dir.join("capsules/kubo");
-        extract_from_tarball(&bytes, &binary, info).unwrap();
+        extract_from_tarball(
+            &bytes,
+            &binary,
+            &crate::capsule_record::AdmittedRow::for_test("fixture", info),
+        )
+        .unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
-        extract_from_tarball(&bytes, &capsule, metadata_info).unwrap();
+        extract_from_tarball(
+            &bytes,
+            &capsule,
+            &crate::capsule_record::AdmittedRow::for_test("fixture", metadata_info),
+        )
+        .unwrap();
         write_platform_cache_metadata(metadata_info, &capsule).unwrap();
         (tmp, data_dir, bytes, manifest)
     }
@@ -7461,7 +7474,12 @@ pub(crate) mod tests {
             Some(InstallState::Stale(_))
         ));
         // A fresh install binds the record from the same verified archive.
-        extract_from_tarball(&bytes, &capsule, metadata_info).unwrap();
+        extract_from_tarball(
+            &bytes,
+            &capsule,
+            &crate::capsule_record::AdmittedRow::for_test("fixture", metadata_info),
+        )
+        .unwrap();
         write_platform_cache_metadata(metadata_info, &capsule).unwrap();
         write_archive_executable_receipt(component, &platform, metadata_info, &capsule).unwrap();
         assert!(matches!(

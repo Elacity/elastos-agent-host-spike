@@ -346,11 +346,42 @@ impl Admission {
     }
 }
 
+/// Admit a signed release's components for acquisition. The release envelope
+/// must verify against an accepted publisher DID, `components` must be the exact
+/// bytes its `release_platform` descriptor binds, and every row the release can
+/// serve must have exactly its signed record (optional before records are
+/// required). This is the only way to admit rows of a signed release.
+pub(crate) fn admit_release(
+    release: &[u8],
+    publisher_dids: &[String],
+    components: &[u8],
+    release_platform: &str,
+) -> Result<(crate::setup::ComponentsManifest, Admission)> {
+    use sha2::Digest as _;
+    let (envelope, _) = crate::crypto::verify_release_envelope_against_dids(
+        release,
+        "elastos.release.v1",
+        publisher_dids,
+    )?;
+    let payload = &envelope["payload"];
+    crate::installed_release::admit_descriptor(
+        &payload["platforms"][release_platform]["components"],
+        &hex::encode(sha2::Sha256::digest(components)),
+        components.len() as u64,
+    )?;
+    let manifest: crate::setup::ComponentsManifest = serde_json::from_slice(components)?;
+    let admission = admit_components(
+        CapsuleRecords::from_release(payload, publisher_dids)?,
+        &manifest,
+    )?;
+    Ok((manifest, admission))
+}
+
 /// Admit a release's whole components manifest against its records before any
 /// capsule of it is written: every row the release can serve, replaced or kept,
 /// has exactly its signed record. A release without records is admitted only
 /// while records are optional.
-pub(crate) fn admit_components(
+fn admit_components(
     records: Option<CapsuleRecords>,
     manifest: &crate::setup::ComponentsManifest,
 ) -> Result<Admission> {
@@ -849,6 +880,46 @@ mod tests {
             }
         }
         files
+    }
+
+    #[test]
+    fn rows_are_admitted_only_from_a_verified_release_and_the_components_it_binds() {
+        use sha2::Digest as _;
+        let (key, _) = elastos_runtime::signature::generate_keypair();
+        let did = crate::crypto::encode_signing_key_did(&key);
+        let components = br#"{"profiles":{},"external":{}}"#.to_vec();
+        let multihash =
+            cid::multihash::Multihash::<64>::wrap(0x12, &sha2::Sha256::digest(&components))
+                .unwrap();
+        let payload = serde_json::json!({"schema": "elastos.release/v1", "capsule_records": [],
+            "platforms": {"aarch64-darwin": {"components": {
+                "cid": cid::Cid::new_v1(0x55, multihash).to_string(),
+                "sha256": hex::encode(sha2::Sha256::digest(&components)),
+                "size": components.len()}}}});
+        let sign = |key: &elastos_runtime::signature::SigningKey, payload: &serde_json::Value| {
+            let (signature, signer_did) = crate::crypto::domain_separated_sign(
+                key,
+                "elastos.release.v1",
+                &serde_json::to_vec(payload).unwrap(),
+            );
+            serde_json::to_vec(
+                &serde_json::json!({"payload": payload, "signature": signature, "signer_did": signer_did}),
+            )
+            .unwrap()
+        };
+        let release = sign(&key, &payload);
+        let dids = std::slice::from_ref(&did);
+        assert!(admit_release(&release, dids, &components, "aarch64-darwin").is_ok());
+        // Another publisher's release, other components bytes, or another
+        // platform's descriptor admit nothing.
+        let (other, _) = elastos_runtime::signature::generate_keypair();
+        assert!(
+            admit_release(&sign(&other, &payload), dids, &components, "aarch64-darwin").is_err()
+        );
+        let mut altered = components.clone();
+        altered.push(b'\n');
+        assert!(admit_release(&release, dids, &altered, "aarch64-darwin").is_err());
+        assert!(admit_release(&release, dids, &components, "x86_64-linux").is_err());
     }
 
     #[test]
