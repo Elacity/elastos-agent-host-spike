@@ -6,6 +6,13 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Fixed
+
+- The publisher's Carrier ticket lists only its public addresses when it has
+  one (no container bridge, LAN or loopback addresses), and a Runtime on a
+  fixed Carrier port also listens on that port over IPv6, so its ticket stays
+  the same across restarts (#336).
+
 ### Developer detail
 
 - CI's `release-upstream-assets` job runs the release's upstream asset build
