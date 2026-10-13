@@ -6266,7 +6266,6 @@ mod tests {
                                 "text": "local reply after hosted unknown",
                             })),
                             error: None,
-                            backend_report: None,
                         })
                     })
                     .collect(),
