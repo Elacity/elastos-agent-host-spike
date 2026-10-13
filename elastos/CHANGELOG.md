@@ -8,7 +8,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Security
 
-- Isolation status: the first stage of the isolation plan (#173) is done, except that the seed does not yet run under its own account (#174, in 0.8.1). Web pages and shared files open in a separate sandbox; the web Terminal is off by default; Home checks allowed hosts and accepts requests only from its own origin or from sandboxed apps with valid tokens; releases are signed with a new key kept off the public server.
+- Isolation status: the first stage of the isolation plan (#173) is done, except that the seed does not yet run under its own account (#174, in 0.8.1). Web pages and shared files open in a separate sandbox; the web Terminal is off by default; Home checks allowed hosts and rejects requests from other websites; sandboxed apps need valid tokens to reach private data; releases are signed with a new key kept off the public server.
 - Isolation status, not done yet: Home can still get every app's permissions, providers run as normal programs with your account's rights (only the model provider is partly limited), and approvals are not yet shown on a screen that only the Runtime controls. These stages (S1 and S2 of #173) are planned for 0.8.1.
 
 ### Changed
