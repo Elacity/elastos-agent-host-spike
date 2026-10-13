@@ -830,6 +830,16 @@ test('prepare admits the custodian Community output the approved source pins and
   assert.equal(readFileSync(calls[0].args[3], 'utf8'), output.file);
 });
 
+// A refused admission leaves the input without package provenance, which the signer refuses, and policy stops.
+function assertUnsignable(f) {
+  const manifest = JSON.parse(readFileSync(join(f.root, 'work/1.2.3/unsigned/signing-input.json')));
+  assert.equal('provenance' in manifest, false);
+  const policy = spawnSync('bash', [f.script, 'policy', '1.2.3', '/fixture/signer.py', '/fixture/key', '/fixture/openssl'],
+    { encoding: 'utf8', env: f.env });
+  assert.notEqual(policy.status, 0);
+  assert.match(policy.stderr, /prepare 1\.2\.3 did not finish/);
+}
+
 for (const [label, source, custodian, changes, error, verified] of [
   ['the source pins a network but no custodian output is named', communityOutput(), null, {}, /set RELEASE_COMMUNITY_DIR/, false],
   ['custodian output is named but the source pins no network', null, communityOutput(), {}, /pins no Community network/, false],
@@ -857,6 +867,7 @@ for (const [label, source, custodian, changes, error, verified] of [
     assert.match(result.stderr, /Community network admission refused/);
     assert.equal(runtimeCalls(f).length, verified ? 1 : 0);
     assert.doesNotMatch(result.stdout, /Unsigned input:/);
+    assertUnsignable(f);
   });
 }
 
@@ -867,4 +878,5 @@ test('prepare refuses a custodian directory that holds other files', t => {
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /holding exactly collaboration-network-release-v1.json and collaboration-network-release-pin-v1.json/);
   assert.deepEqual(runtimeCalls(f), []);
+  assertUnsignable(f);
 });

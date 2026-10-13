@@ -303,7 +303,11 @@ a SHA-256 pin. It supports the attestation verification flags used by the signer
    hash, stop the service, run the preflight, import, and start the service.
    The import sends no gossip. Older seed Runtimes still print `No running
    runtime found` after the commit; that is expected, and the sequence accepts
-   only that error.
+   only that error. The seed's Runtime admits only release files it knows: the
+   first release that carries `collaboration-network-release-v1.json` needs a
+   seed Runtime with Community network admission, so run `seed-upgrade` from a
+   package that has it before this import; an older seed Runtime's preflight
+   refuses the file before it imports anything.
 5. **Pin for CI.** Run `python3 scripts/update-hop-compare.py pin-previous-release`
    and merge the updated `scripts/update-hop-previous-release.json` into `develop`.
    It checks the signed head and release the seed now serves. Every pull

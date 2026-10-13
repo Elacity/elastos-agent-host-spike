@@ -227,11 +227,12 @@ prepare() {
         scripts/publish-release.sh --version "$version" --channel canary \
         --prepare-only "$work/unsigned" --publisher-did "$did" \
         "${args[@]}")
-    provenance bind --work "$work" || die "unsigned input differs from approved source/delivery"
     # The release names the Community network the source pins only with its signed custodian output.
+    # This runs before bind: the signer refuses an input without bound package provenance.
     provenance community --work "$work" ${community[@]+"${community[@]}"} \
         --runtime "$work/inputs/aarch64-darwin/$name/artifacts/elastos-aarch64-darwin" \
         || die "Community network admission refused"
+    provenance bind --work "$work" || die "unsigned input differs from approved source/delivery"
     echo "Unsigned input: $work/unsigned (signing-input.json sha256 $(sha "$work/unsigned/signing-input.json"))"
 }
 
@@ -240,6 +241,8 @@ policy() {
     local work input python signer key openssl develop approval_json approval_sha256
     work=$(work_dir "$1") input="$(work_dir "$1")/unsigned"
     [[ -f "$input/signing-input.json" ]] || die "prepare $1 first"
+    # Bind is prepare's last step; an unbound input means prepare refused or stopped.
+    jq -e '.provenance' "$input/signing-input.json" > /dev/null || die "prepare $1 did not finish; remove $work and prepare again"
     approval_json=$(provenance approval) || die "independent approval refused"
     approval_sha256=$(jq -r .sha256 <<< "$approval_json")
     [[ "$(jq -r '[.approval.path, .approval.sha256] | join(" ")' "$work/run.json")" == "$RELEASE_APPROVAL $approval_sha256" ]] \
