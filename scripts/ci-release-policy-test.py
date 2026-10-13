@@ -2366,6 +2366,82 @@ class InstalledJourneyTests(unittest.TestCase):
         self.assertIn("source-home-journeys/**/*.png", upload)
 
 
+class ModelRepairJourneyTests(unittest.TestCase):
+    def test_engine_pidfd_binding_rejects_process_reuse_and_closes_descriptor(self):
+        journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
+        owner = journey["RepairRuntime"].__new__(journey["RepairRuntime"])
+        owner.data, owner.child, owner.stop = Path("/fixture/data"), mock.Mock(pid=100), mock.Mock()
+        owner.stop.is_set.return_value = False
+        owner.engine_fds, owner.record = {}, {}
+        identities = [dict(pid=103, uid=os.getuid(), start_ticks=ticks, executable="/fixture/engine", device=1, inode=1)
+                      for ticks in (71, 72)]
+        rows = {103: {"role": "llama_server", "ppid": 102},
+                102: {"role": "guard", "ppid": 101}, 101: {"role": "model_provider", "ppid": 100}}
+        with mock.patch.dict(owner.engine_running.__globals__, {"process_rows": lambda: [],
+                "owned_processes": lambda *_: rows, "linux_process_identity": mock.Mock(side_effect=identities),
+                "pidfd_exited": lambda _: False}), \
+                mock.patch.object(os, "pidfd_open", return_value=77, create=True), \
+                mock.patch.object(os, "close") as closed:
+            with self.assertRaisesRegex(RuntimeError, "changed during pidfd binding"):
+                owner.engine_running()
+        closed.assert_called_once_with(77)
+        self.assertEqual(owner.engine_fds, {})
+
+    def test_stopped_owner_cannot_launch_a_runtime_after_cleanup(self):
+        journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
+        owner = journey["RepairRuntime"].__new__(journey["RepairRuntime"])
+        owner.stop, owner.launch_lock = journey["threading"].Event(), journey["threading"].Lock()
+        owner.stop.set()
+        with mock.patch.object(subprocess, "Popen") as launched:
+            with self.assertRaisesRegex(RuntimeError, "owner is stopping"):
+                owner.launch()
+        launched.assert_not_called()
+
+    def fixture(self, root):
+        journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
+        owner = journey["RepairRuntime"].__new__(journey["RepairRuntime"])
+        owner.home, owner.data = root / "home", root / "home/data"
+        operation = "a" * 64
+        admitted = owner.data / ("model-preparation/admitted-" + operation)
+        admitted.mkdir(parents=True)
+        weights = b"GGUF" + b"pinned-fixture" * 20000
+        (admitted / "weights.gguf").write_bytes(weights)
+        whole = 2 * 65536
+        owner.kept = {"weights_bytes": whole, "weights_prefix_sha256": hashlib.sha256(weights[:whole]).hexdigest(),
+                      "interrupted_process_cleanup": {"status": "passed"}}
+        (owner.data / "model-preparation/state.json").write_text(json.dumps({"records": [{
+            "operation_id": operation, "admission_id": operation, "state": "admitted"}]}))
+        log = owner.home / "journey-runtime.private.log"
+        log.write_text(f"timestamp target: private model preparation resumed operation_id={operation} completed_bytes={whole + 100}\n"
+                       f"timestamp target: private model preparation remaining weights read operation_id={operation} completed_bytes={whole + 100} weights_offset={whole}\n")
+        return owner, {"model_repair": {"retry_operation_id": operation}}, hashlib.sha256(weights).hexdigest(), log
+
+    def test_retry_receipt_binds_retained_prefix_and_first_actual_remaining_read(self):
+        with tempfile.TemporaryDirectory() as temp:
+            owner, ui, digest, log = self.fixture(Path(temp))
+            log.write_text("\x1b[32m" + log.read_text() + "\x1b[0m")
+            result = owner.retry_receipt(ui, digest)
+            self.assertEqual(result["first_remaining_weights_offset"], owner.kept["weights_bytes"])
+            self.assertGreater(result["remaining_weights_bytes"], 0)
+            self.assertTrue(result["retained_prefix_matches_admitted"])
+
+    def test_retry_receipt_refuses_missing_duplicate_wrong_binding_and_zero_offset(self):
+        for fault in ("missing", "duplicate", "foreign", "zero", "count", "field", "prefix", "final"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temp:
+                owner, ui, digest, log = self.fixture(Path(temp))
+                text = log.read_text()
+                if fault == "missing": text = text.splitlines()[0] + "\n"
+                elif fault == "duplicate": text += text
+                elif fault == "foreign": text = text.replace("operation_id=" + "a" * 64, "operation_id=" + "b" * 64)
+                elif fault == "zero": text = text.replace("weights_offset=131072", "weights_offset=0")
+                elif fault == "count": text = text.replace("completed_bytes=131172", "completed_bytes=0", 1)
+                elif fault == "field": text = text.replace("weights_offset=131072", "weights_offset=unknown")
+                elif fault == "prefix": owner.kept["weights_prefix_sha256"] = "0" * 64
+                elif fault == "final": digest = "0" * 64
+                log.write_text(text)
+                with self.assertRaises(RuntimeError): owner.retry_receipt(ui, digest)
+
+
 class FiniteInstalledJourneyTests(unittest.TestCase):
     """Exercise the actual finite owner with explicit kernel/service observations."""
     def setUp(self):

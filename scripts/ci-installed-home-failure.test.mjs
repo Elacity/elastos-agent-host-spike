@@ -57,3 +57,21 @@ test("lifecycle subchecks locate the blocked UI phase without disclosing launch 
       { failure_stage: "finite_resource_lifecycle", failure: "timeout" });
   }
 });
+
+test("model repair failures retain only the fixed journey phase", () => {
+  const secret = "home_token=fixture-secret /private/operator/home";
+  const stages = {
+    model_stop_get_different: ["stop_real_stream", "get_other_model", "other_model_reply"],
+    model_interrupted_get_retry: ["fresh_get_precondition", "partial_get", "restarted_home", "retry_retained_get"],
+  };
+  for (const [stage, checks] of Object.entries(stages)) {
+    for (const check of checks) {
+      assert.deepEqual(publicJourneyFailure({ name: "TimeoutError", message: secret }, stage, check),
+        { failure_stage: stage, failure: "timeout", failure_check: check });
+    }
+    for (const check of [secret, "reply_display", "constructor", "__proto__"]) {
+      assert.deepEqual(publicJourneyFailure({ name: "Error", message: secret }, stage, check),
+        { failure_stage: stage, failure: "journey_failed" });
+    }
+  }
+});

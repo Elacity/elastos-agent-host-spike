@@ -9,8 +9,8 @@ import { openInstalledAssistant, returnInstalledHome } from "./ci-installed-home
 const require = createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url));
 const { chromium } = require("playwright");
 const [base, evidence, data, mode, resourceControl] = process.argv.slice(2);
-assert(!mode || ["--home-only", "--memory-refusal", "--resource-lifecycle"].includes(mode), "supported installed journey mode required");
-assert(Boolean(resourceControl) === ["--memory-refusal", "--resource-lifecycle"].includes(mode));
+assert(!mode || ["--home-only", "--memory-refusal", "--resource-lifecycle", "--model-repair"].includes(mode), "supported installed journey mode required");
+assert(Boolean(resourceControl) === ["--memory-refusal", "--resource-lifecycle", "--model-repair"].includes(mode));
 const fixture = JSON.parse(readFileSync(join(evidence, "package.json")));
 const cid = fixture.cid;
 // A holder Get reads the package over Carrier in 64 KiB bounded reads; a same-Home Get is local.
@@ -36,12 +36,13 @@ const results = {};
 const disk = {};
 let resourceSequence = 0;
 const resourceTurns = [];
+const modelRepair = {};
 async function resourceAction(action) {
   const id = ++resourceSequence;
   const path = join(resourceControl, "request.json");
   writeFileSync(path + ".next", JSON.stringify({ id, action }), { flag: "wx", mode: 0o600 });
   renameSync(path + ".next", path);
-  const deadline = Date.now() + (action === "idle_stopped" ? 100000 : 25000);
+  const deadline = Date.now() + (action === "restart_get" ? 150000 : action === "idle_stopped" ? 100000 : 25000);
   while (Date.now() < deadline) {
     let response;
     try { response = JSON.parse(readFileSync(join(resourceControl, "response.json"), "utf8")); }
@@ -67,10 +68,10 @@ async function visibleFailure(assistant, message) {
     document.querySelector("[data-agent-stream-status]")?.textContent === message,
   message, { timeout: 10000 });
 }
-async function selectModel(assistant, offer) {
+async function selectModel(assistant, offer, modelCid = cid) {
   await assistant.locator("#agent-model-picker").waitFor({ state: "visible", timeout: 30000 });
   await assistant.locator("#agent-model-picker").click();
-  const option = assistant.locator(`#agent-model-menu [role="option"][data-model-cid="${cid}"]`);
+  const option = assistant.locator(`#agent-model-menu [role="option"][data-model-cid="${modelCid}"]`);
   await option.waitFor({ state: "visible", timeout: 30000 });
   assert.equal(await option.getAttribute("data-live-offer-id"), offer);
   await option.click();
@@ -137,7 +138,7 @@ async function resourceReply(assistant, offer, label) {
     return body?.closest(".agent-msg-agent")?.dataset.streamPhase === "presentation_done" && /\S/.test(body?.innerText ?? "");
   }, null, { timeout: 10000 });
   resourceTurns.push({ stage: label, run_id: turn.run.run_id, status: final.status });
-  await page.screenshot({ path: join(evidence, `finite-${label}.png`), fullPage: true });
+  await page.screenshot({ path: join(evidence, `${mode === "--model-repair" ? "repair" : "finite"}-${label}.png`), fullPage: true });
   return turn;
 }
 async function resourceLifecycle(assistant, offer, context) {
@@ -220,6 +221,136 @@ async function resourceLifecycle(assistant, offer, context) {
   subcheck = null;
   await returnInstalledHome(page, assistant, evidence);
   results.finite_home_recovery = "passed";
+}
+
+async function repairJourney(assistant, offer) {
+  assert(fixture.model_repair && fixture.carrier_holder && fixture.models.length === 2);
+  const other = fixture.models[1];
+  assert.notEqual(other.cid, cid);
+  assert.notEqual(other.model_sha256, fixture.model_sha256);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  stage = "model_stop_get_different";
+  subcheck = "stop_real_stream";
+  await assistant.locator("#agent-harness-new-chat").click();
+  await configureTokens(assistant, 1024);
+  const owner = await startResourceTurn(assistant, offer,
+    "Write a numbered list from 1 to 1000. Each item must say hello and give one detail. Continue the list without an introduction or conclusion.", 1024);
+  assert(!owner.run.terminal);
+  await resourceAction("engine_running");
+  await assistant.waitForFunction(() => /\S/.test([...document.querySelectorAll(".agent-msg-agent .agent-msg-body")].at(-1)?.innerText ?? ""), null, { timeout: 60000 });
+  const cancelled = page.waitForResponse(response => response.url().endsWith("/api/provider/model/runs_cancel") &&
+    response.request().frame() === assistant && response.request().postDataJSON()?.run_id === owner.run.run_id, { timeout: 30000 });
+  cancelled.catch(() => {});
+  await assistant.locator('#agent-composer-send[data-mode="stop"]').click();
+  assert((await cancelled).ok());
+  assert.equal((await owner.terminal).status, "cancelled");
+  const closed = await resourceAction("engine_stopped");
+  assert(closed.whole_engine_exit && closed.runtime_unchanged);
+  modelRepair.stop = { run_id: owner.run.run_id, status: "cancelled", production_guard: true, whole_engine_exit: true };
+  await page.screenshot({ path: join(evidence, "repair-stop.png"), fullPage: true });
+  await returnInstalledHome(page, assistant, evidence);
+  let marketplace = await app("marketplace");
+  await showModelDetail(marketplace, other.cid);
+  subcheck = "get_other_model";
+  await clickModelUse(marketplace, other.cid, "Get");
+  const second = await readyModel(marketplace, other.cid);
+  assert.notEqual(second.model_runtime.offer_id, offer);
+  await page.screenshot({ path: join(evidence, "repair-qwen-ready.png"), fullPage: true });
+  const nextAssistant = await openInstalledAssistant(page, `${base}/home/`);
+  await nextAssistant.locator("#agent-harness-new-chat").click();
+  await selectModel(nextAssistant, second.model_runtime.offer_id, other.cid);
+  subcheck = "other_model_reply";
+  const replied = await resourceReply(nextAssistant, second.model_runtime.offer_id, "qwen-reply");
+  modelRepair.different_model = { cid: other.cid, model_sha256: other.model_sha256, offer_id: second.model_runtime.offer_id,
+    run_id: replied.run.run_id, status: "completed", runtime_restart_before_get: false };
+  results.model_stop_get_different = "passed";
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: join(evidence, "repair-qwen-reply-phone.png"), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await returnInstalledHome(page, nextAssistant, evidence);
+  marketplace = await app("marketplace");
+  stage = "model_interrupted_get_retry";
+  subcheck = "fresh_get_precondition";
+  // Reset only this isolated model through Runtime's normal scoped reclaim.
+  // The two user-facing Get/Retry actions below still use Marketplace controls.
+  const reclaimed = await marketplace.evaluate(async modelCid => {
+    const token = new URLSearchParams(location.hash.slice(1)).get("home_token");
+    const headers = { "x-elastos-home-token": token, "Content-Type": "application/json" };
+    const registry = await (await fetch("/api/capsules/interfaces", { headers, signal: AbortSignal.timeout(35000) })).json();
+    const entry = registry.interfaces.find(entry => entry.capsule === "marketplace" && entry.interface.methods.some(method => method.id === "content.reclaim"));
+    if (!entry) throw new Error("scoped reclaim interface unavailable");
+    const response = await fetch("/api/capsules/interfaces/invoke", { method: "POST", headers, signal: AbortSignal.timeout(35000), body: JSON.stringify({
+      capsule: "marketplace", interface: entry.interface.id, method: "content.reclaim", request_id: `model-v1:${Date.now()}:${crypto.randomUUID()}`, input: { cid: modelCid },
+    }) });
+    return { ok: response.ok, status: (await response.json()).status };
+  }, other.cid);
+  assert(reclaimed.ok && reclaimed.status === "ok");
+  await showModelDetail(marketplace, other.cid);
+  subcheck = "partial_get";
+  await clickModelUse(marketplace, other.cid, "Get");
+  await marketplace.waitForFunction(() => {
+    const progress = document.querySelector('progress[aria-label="Preparation progress"]');
+    return progress && progress.value > 0 && progress.value < progress.max;
+  }, null, { timeout: 60000 });
+  await page.screenshot({ path: join(evidence, "repair-partial-get.png"), fullPage: true });
+  const restarted = await resourceAction("restart_get");
+  assert(restarted.home_restarted && restarted.weights_bytes > 0);
+  modelRepair.interrupted_get = { kept_weights_bytes: restarted.weights_bytes, kept_weights_prefix_sha256: restarted.weights_prefix_sha256 };
+  subcheck = "restarted_home";
+  assert((await page.goto(`${base}/home/`, { waitUntil: "domcontentloaded" })).ok());
+  await page.waitForFunction(() => document.body.dataset.homeStatus === "ready" || document.querySelector("#home-unlock")?.hidden === false, null, { timeout: 60000 });
+  if (await page.locator("#home-unlock").isVisible()) await page.locator("#home-unlock-primary").click();
+  await page.waitForFunction(() => document.body.dataset.homeStatus === "ready" && document.body.dataset.homeAuthority === "signed", null, { timeout: 60000 });
+  const shell = page.frameLocator("#active-shell-frame");
+  await shell.locator("#desktop").waitFor({ state: "visible", timeout: 60000 });
+  marketplace = await app("marketplace");
+  await showModelDetail(marketplace, other.cid);
+  await marketplace.getByText("The download stopped before it finished. Retry.", { exact: true }).waitFor({ state: "visible", timeout: 60000 });
+  await page.screenshot({ path: join(evidence, "repair-restart-retry.png"), fullPage: true });
+  subcheck = "retry_retained_get";
+  const retry = await clickModelUse(marketplace, other.cid, "Retry");
+  modelRepair.retry_operation_id = retry.output.operation_id;
+  await marketplace.waitForFunction(kept => {
+    const progress = document.querySelector('progress[aria-label="Preparation progress"]');
+    return progress?.value >= kept || Boolean(document.querySelector('[data-model-control="open-assistant"]'));
+  }, restarted.weights_bytes, { timeout: 60000 });
+  await page.screenshot({ path: join(evidence, "repair-resumed-get.png"), fullPage: true });
+  const final = await readyModel(marketplace, other.cid);
+  assert(final.model_runtime.dispatch_ready);
+  await page.screenshot({ path: join(evidence, "repair-retry-ready.png"), fullPage: true });
+  results.model_interrupted_get_retry = "passed";
+}
+
+async function showModelDetail(marketplace, modelCid) {
+  const close = marketplace.locator('[data-action="close-detail"]').first();
+  if (await close.isVisible()) await close.click();
+  await marketplace.locator(`[data-action="model-detail"][data-app="model:${modelCid}"]`).click();
+  await marketplace.locator('[data-model-control="refresh"]').click();
+}
+
+async function clickModelUse(marketplace, modelCid, label) {
+  const use = marketplace.locator('[data-model-control="use"]');
+  await use.waitFor({ state: "visible", timeout: 30000 });
+  assert.equal((await use.textContent()).trim(), label);
+  const response = page.waitForResponse(response => {
+    if (!response.url().endsWith("/api/capsules/interfaces/invoke") || response.request().frame() !== marketplace) return false;
+    const body = response.request().postDataJSON();
+    return body?.capsule === "marketplace" && body?.method === "content.use" && body?.input?.cid === modelCid;
+  }, { timeout: 60000 });
+  response.catch(() => {});
+  await use.click();
+  const accepted = await response;
+  assert(accepted.ok());
+  const value = await accepted.json();
+  assert.equal(value.status, "ok");
+  return value;
+}
+
+async function readyModel(marketplace, modelCid) {
+  await marketplace.locator('[data-model-control="open-assistant"]').waitFor({ state: "visible", timeout: readyMs });
+  const model = (await projection(marketplace, "/api/capsules/catalog")).capsules.find(row => row.cid === modelCid);
+  assert.equal(model?.model_runtime?.dispatch_ready, true);
+  return model;
 }
 function observeDisk() {
   const usage = statfsSync(data);
@@ -462,10 +593,12 @@ try {
     await page.screenshot({ path: join(evidence, "assistant-reply-phone.png"), fullPage: true });
     subcheck = null;
     if (mode === "--resource-lifecycle") await resourceLifecycle(assistant, offer, context);
+    if (mode === "--model-repair") await repairJourney(assistant, offer);
     writeFileSync(join(evidence, "home-journey.json"), JSON.stringify({
       results, disk, reply_characters: text.length, model_cid: cid, offer_id: offer,
-      max_output_tokens: request.input.max_output_tokens, resource_turns: resourceTurns,
-      journey: mode === "--resource-lifecycle" ? "Marketplace Get, reply, Busy, Stop, idle closure and crash recovery" : "Marketplace Get to visible Assistant reply",
+      max_output_tokens: request.input.max_output_tokens, resource_turns: resourceTurns, ...(mode === "--model-repair" ? { model_repair: modelRepair } : {}),
+      journey: mode === "--model-repair" ? "Real reply, Stop, Get a different pinned model and reply; interrupted Get, Home restart and retained-prefix Retry"
+        : mode === "--resource-lifecycle" ? "Marketplace Get, reply, Busy, Stop, idle closure and crash recovery" : "Marketplace Get to visible Assistant reply",
     }, null, 2));
     }
   }
@@ -475,7 +608,7 @@ try {
   disk.at_failure = observeDisk();
   const failure = publicJourneyFailure(error, stage, subcheck);
   writeFileSync(join(data, "journey-browser.private.log"), String(error?.stack ?? error), { mode: 0o600 });
-  writeFileSync(join(evidence, "home-journey.json"), JSON.stringify({ results, disk, resource_turns: resourceTurns, ...failure }, null, 2));
+  writeFileSync(join(evidence, "home-journey.json"), JSON.stringify({ results, disk, resource_turns: resourceTurns, ...(mode === "--model-repair" ? { model_repair: modelRepair } : {}), ...failure }, null, 2));
   await page?.screenshot({ path: join(evidence, "home-failure.png"), fullPage: true }).catch(() => {});
   throw new Error(`Installed Home journey failed: stage=${failure.failure_stage} code=${failure.failure}${failure.failure_check ? ` check=${failure.failure_check}` : ""}`);
 } finally {

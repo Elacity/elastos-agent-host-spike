@@ -32,6 +32,12 @@ assert journey["engine_receipt"](data)["platform"] == sys.argv[2]
 PY
         # The existing verifier owns the pinned weight and license identities.
         scripts/pinned-model-consumer-proof.sh "${CI_HOME}/model-inputs" --fetch --check-inputs
+        if [[ "${CI_MODEL_REPAIR_JOURNEY:-false}" == true ]]; then
+            timeout --kill-after=30 1200 node scripts/ci-model-package.mjs repair-inputs "${CI_HOME}/model-inputs/qwen-inputs"
+        fi
+        ;;
+    model-repair)
+        python3 scripts/ci-installed-journeys.py "$CI_HOME" "$DATA" "$EVIDENCE/model-repair" --model-repair
         ;;
     home)
         python3 scripts/ci-installed-journeys.py "$CI_HOME" "$DATA" "$EVIDENCE/engine-absent-home" --home-only
@@ -154,5 +160,5 @@ if spread["status"] == "incomplete" or any(result != "passed" for result in resu
     raise SystemExit("installed journey acceptance is incomplete")
 PY
         ;;
-    *) echo "Usage: $0 prepare|home|home-repeat|summary" >&2; exit 2 ;;
+    *) echo "Usage: $0 prepare|home|home-repeat|model-repair|summary" >&2; exit 2 ;;
 esac

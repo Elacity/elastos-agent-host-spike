@@ -862,9 +862,9 @@ def free_port(kind=socket.SOCK_STREAM):
         return probe.getsockname()[1]
 
 
-def wait_healthy(child, address, label):
+def wait_healthy(child, address, label, stop=None):
     deadline = time.monotonic() + 120
-    while time.monotonic() < deadline:
+    while time.monotonic() < deadline and not (stop and stop.is_set()):
         assert child.poll() is None, f"installed {label} exited before health"
         try:
             with urllib.request.urlopen(f"http://{address}/healthz", timeout=1) as response:
@@ -932,7 +932,220 @@ def consumer_root_block(data, cid):
     return "present" if (blocks / key[-3:-1] / f"{key}.data").exists() else "absent"
 
 
-def run(home, data, evidence, model=True, carrier=False, memory_gib=0):
+class RepairRuntime:
+    """Own the installed Home and its one deliberate interrupted-Get restart."""
+    def __init__(self, home, data, address, environment):
+        self.home, self.data, self.address, self.environment = home, data, address, environment
+        self.control = home / "repair-control"
+        self.control.mkdir(mode=0o700)
+        self.log = (home / "journey-runtime.private.log").open("wb")
+        self.engine_fds = {}
+        self.stop = threading.Event()
+        self.launch_lock = threading.Lock()
+        self.error = None
+        try:
+            self.launch()
+            self.record = {"runtime_episodes": [self.identity()], "actions": []}
+        except BaseException:
+            if hasattr(self, "child"):
+                cleanup_runtime(self.child, self.data)
+            self.log.close()
+            raise
+        self.thread = threading.Thread(target=self.observe, daemon=True)
+        self.thread.start()
+
+    @property
+    def pid(self):
+        return self.child.pid
+
+    def poll(self):
+        return self.child.poll()
+
+    def wait(self, timeout=None):
+        return self.child.wait(timeout=timeout)
+
+    def launch(self):
+        with self.launch_lock:
+            if self.stop.is_set():
+                raise RuntimeError("repair journey owner is stopping")
+            self.child = subprocess.Popen([str(self.data / "bin/elastos"), "gateway", "--addr", self.address],
+                                          env=self.environment, stdout=self.log, stderr=self.log, start_new_session=True)
+            return self.child
+
+    def identity(self):
+        row = linux_process_identity(self.child.pid)
+        return {"pid": row["pid"], "start_ticks": row["start_ticks"], "exe_sha256": digest(Path(row["executable"]))}
+
+    def engine_running(self):
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not self.stop.is_set():
+            rows = owned_processes(process_rows(), self.pid, self.data)
+            engines = [(pid, row) for pid, row in rows.items() if row["role"] == "llama_server"]
+            if len(engines) == 1:
+                pid, engine = engines[0]
+                guard = rows.get(engine["ppid"])
+                provider = rows.get(guard["ppid"]) if guard else None
+                if not guard or guard["role"] != "guard" or not provider or provider["role"] != "model_provider" or provider["ppid"] != self.pid:
+                    raise RuntimeError("repair journey requires the production guard chain")
+                native, fds = [], {}
+                try:
+                    for member, role in ((pid, "llama_server"), (engine["ppid"], "guard"), (guard["ppid"], "model_provider")):
+                        row = linux_process_identity(member)
+                        if member != guard["ppid"]:
+                            fds[member] = os.pidfd_open(member, 0)
+                            if pidfd_exited(fds[member]) or not same_process(row, linux_process_identity(member)):
+                                raise RuntimeError("repair journey native process changed during pidfd binding")
+                        expected = digest(self.data / "bin/model-provider") if member != pid else engine_receipt(self.data)["executable_sha256"]
+                        if digest(Path(row["executable"])) != expected or not same_process(row, linux_process_identity(member)):
+                            raise RuntimeError("repair journey native artifact binding differs")
+                        native.append({"role": role, "pid": member, "start_ticks": row["start_ticks"], "exe_sha256": expected})
+                except BaseException:
+                    for fd in fds.values():
+                        os.close(fd)
+                    raise
+                self.engine_fds = fds
+                self.record["native_processes"] = native
+                return {"engine_pid": pid, "engine_start_ticks": native[0]["start_ticks"], "production_guard": True}
+            time.sleep(.05)
+        raise RuntimeError("repair journey engine deadline")
+
+    def engine_stopped(self):
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not self.stop.is_set():
+            if self.engine_fds and all(pidfd_exited(fd) for fd in self.engine_fds.values()):
+                for fd in self.engine_fds.values():
+                    os.close(fd)
+                self.engine_fds.clear()
+                return {"whole_engine_exit": True, "runtime_unchanged": self.child.poll() is None and self.identity() == self.record["runtime_episodes"][0]}
+            time.sleep(.05)
+        raise RuntimeError("repair journey Stop closure deadline")
+
+    def restart_get(self):
+        weights = self.data / "model-preparation/stage/weights.gguf"
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and not self.stop.is_set():
+            try:
+                size = weights.lstat().st_size
+                if size >= 8 * 1024 ** 2:
+                    break
+            except FileNotFoundError:
+                pass
+            time.sleep(.02)
+        else:
+            raise RuntimeError("repair journey partial Get deadline")
+        # Popen is the direct reap owner. Only this installed Runtime is killed.
+        self.child.kill()
+        self.child.wait(timeout=5)
+        cleanup = cleanup_runtime(self.child, self.data)
+        if cleanup["status"] != "passed":
+            raise RuntimeError("repair journey interrupted Home cleanup failed")
+        fd = os.open(weights, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as source:
+            metadata = os.fstat(source.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_nlink != 1:
+                raise RuntimeError("repair journey kept weights ownership differs")
+            whole = metadata.st_size - metadata.st_size % 65536
+            if not 0 < whole < 1117320736:
+                raise RuntimeError("repair journey requires partial pinned Qwen weights")
+            value = hashlib.sha256()
+            remaining = whole
+            while remaining:
+                if self.stop.is_set():
+                    raise RuntimeError("repair journey owner stopped during prefix binding")
+                part = source.read(min(1024 ** 2, remaining))
+                if not part:
+                    raise RuntimeError("repair journey kept prefix changed")
+                value.update(part)
+                remaining -= len(part)
+        self.kept = {"weights_bytes": whole, "weights_prefix_sha256": value.hexdigest(), "interrupted_process_cleanup": cleanup}
+        self.launch()
+        wait_healthy(self.child, self.address, "restarted Runtime", self.stop)
+        self.record["runtime_episodes"].append(self.identity())
+        if weights.lstat().st_size < whole:
+            raise RuntimeError("repair journey restart lost its kept prefix")
+        return {**self.kept, "home_restarted": True}
+
+    def observe(self):
+        previous = 0
+        try:
+            while not self.stop.wait(.05):
+                try:
+                    request = private_json(self.control / "request.json")
+                except FileNotFoundError:
+                    continue
+                if request.get("id") == previous:
+                    continue
+                if set(request) != {"id", "action"} or request["id"] != previous + 1 or len(self.record["actions"]) >= 4:
+                    raise RuntimeError("repair journey control binding differs")
+                action = request["action"]
+                if action not in ("engine_running", "engine_stopped", "restart_get") or action in self.record["actions"]:
+                    raise RuntimeError("repair journey control action differs")
+                response = getattr(self, action)()
+                previous = request["id"]
+                self.record["actions"].append(action)
+                private_json(self.control / "response.json", {"id": previous, "status": "passed", **response})
+        except BaseException:
+            self.error = "installed_model_repair_control_failed"
+            private_json(self.control / "response.json", {"id": previous + 1, "status": "failed"})
+
+    def finish(self):
+        self.stop.set()
+        self.thread.join(timeout=125)
+        for fd in self.engine_fds.values():
+            os.close(fd)
+        self.engine_fds.clear()
+        with self.launch_lock:
+            result = cleanup_runtime(self.child, self.data)
+            self.log.close()
+        if self.thread.is_alive() or self.error:
+            result["status"] = "failed"
+        self.record["process_cleanup"] = result
+        return result
+
+    def retry_receipt(self, ui, expected_sha):
+        operation = ui["model_repair"]["retry_operation_id"]
+        if not re.fullmatch("[0-9a-f]{64}", operation):
+            raise RuntimeError("repair journey Retry binding differs")
+        text = bounded_text(self.home / "journey-runtime.private.log", 16 * 1024 ** 2)
+        text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+        rows = {}
+        for message, fields in (("resumed", ("completed_bytes",)), ("remaining weights read", ("completed_bytes", "weights_offset"))):
+            lines = [line for line in text.splitlines() if "private model preparation " + message in line and "operation_id=" + operation in line]
+            if len(lines) != 1:
+                raise RuntimeError("repair journey remaining fetch evidence is incomplete")
+            rows[message] = {}
+            for field in fields:
+                value = re.search(r"\b" + field + r"=([0-9]+)\b", lines[0])
+                if value is None:
+                    raise RuntimeError("repair journey remaining fetch field is incomplete")
+                rows[message][field] = int(value[1])
+        if (rows["remaining weights read"]["weights_offset"] != self.kept["weights_bytes"]
+                or rows["resumed"]["completed_bytes"] < self.kept["weights_bytes"]
+                or rows["remaining weights read"]["completed_bytes"] != rows["resumed"]["completed_bytes"]):
+            raise RuntimeError("repair journey Retry restarted its retained weights")
+        state = json.loads(bounded_text(self.data / "model-preparation/state.json", 8 * 1024 ** 2))
+        record = next(row for row in state["records"] if row["operation_id"] == operation)
+        if record["state"] != "admitted" or not re.fullmatch("[0-9a-f]{64}", record["admission_id"]):
+            raise RuntimeError("repair journey final admission binding differs")
+        admitted = self.data / ("model-preparation/admitted-" + record["admission_id"]) / "weights.gguf"
+        value = hashlib.sha256()
+        with admitted.open("rb") as source:
+            remaining = self.kept["weights_bytes"]
+            while remaining:
+                part = source.read(min(1024 ** 2, remaining))
+                if not part:
+                    raise RuntimeError("repair journey admitted prefix is incomplete")
+                value.update(part)
+                remaining -= len(part)
+        if value.hexdigest() != self.kept["weights_prefix_sha256"] or digest(admitted) != expected_sha:
+            raise RuntimeError("repair journey retained or final pinned weights differ")
+        return {**self.kept, "operation_id": operation, "resumed_completed_bytes": rows["resumed"]["completed_bytes"],
+                "first_remaining_weights_offset": rows["remaining weights read"]["weights_offset"],
+                "remaining_weights_bytes": admitted.stat().st_size - self.kept["weights_bytes"],
+                "admitted_weights_sha256": expected_sha, "retained_prefix_matches_admitted": True}
+
+
+def run(home, data, evidence, model=True, carrier=False, memory_gib=0, repair=False):
     if (evidence / "home-journey.json").exists() or (evidence / "home-journey.json").is_symlink():
         raise RuntimeError("installed journey requires fresh UI evidence")
     preparation_started = time.monotonic()
@@ -971,6 +1184,8 @@ def run(home, data, evidence, model=True, carrier=False, memory_gib=0):
     inputs = Path(os.environ.get("CI_MODEL_INPUTS", str(home / "model-inputs/inputs")))
     # Package, its Kubo blocks and the admitted model cache can each own a copy.
     needed = 3 * sum(path.stat().st_size for path in inputs.iterdir() if path.is_file())
+    if repair:
+        needed += 3 * sum(path.stat().st_size for path in (inputs.parent / "qwen-inputs").iterdir() if path.is_file())
     require_disk_space(data, needed)
     holder = holder_data = None
     package_data = data
@@ -982,7 +1197,7 @@ def run(home, data, evidence, model=True, carrier=False, memory_gib=0):
         for owner in (holder_data, data):
             with (owner / "config.toml").open("a") as config:
                 config.write(f'carrier_bind_addr = "127.0.0.1:{free_port(socket.SOCK_DGRAM)}"\n')
-    subprocess.run(["node", "scripts/ci-model-package.mjs", str(package_data), str(data), str(inputs), str(evidence)],
+    subprocess.run(["node", "scripts/ci-model-package.mjs", str(package_data), str(data), str(inputs), str(evidence), *(["--model-repair"] if repair else [])],
                    env=environment, check=True)
     record["fixture_package_receipt_sha256"] = digest(evidence / "package.json")
     record["fixture_components_sha256"] = digest(data / "components.json")
@@ -1001,9 +1216,13 @@ def run(home, data, evidence, model=True, carrier=False, memory_gib=0):
     record["fixture_preparation_seconds"] = round(started - preparation_started, 2)
     # Runtime logs stay private in the isolated Home; upload receipts/screenshots only.
     finite = None
+    repair_runtime = None
     log = None
     try:
-        if memory_gib:
+        if repair:
+            repair_runtime = RepairRuntime(home, data, f"127.0.0.1:{number}", environment)
+            child = repair_runtime
+        elif memory_gib:
             finite = FiniteRuntime(home, data, f"127.0.0.1:{number}", environment, memory_gib)
             if holder:
                 finite.outside.append(holder.pid)
@@ -1025,6 +1244,8 @@ def run(home, data, evidence, model=True, carrier=False, memory_gib=0):
         command = ["node", "scripts/ci-installed-home-journey.mjs", f"http://{address}", str(evidence), str(data)]
         if finite:
             command += ["--memory-refusal" if memory_gib == 1 else "--resource-lifecycle", str(finite.control)]
+        elif repair:
+            command += ["--model-repair", str(repair_runtime.control)]
         if model:
             observer = TIMING["ModelTimingObserver"](child, data, started)
             try:
@@ -1055,6 +1276,11 @@ def run(home, data, evidence, model=True, carrier=False, memory_gib=0):
             subprocess.run([*command, "--home-only"], env=environment, check=True)
         ui = json.loads((evidence / "home-journey.json").read_text())
         record["results"].update(ui["results"])
+        if repair:
+            fixture = json.loads((evidence / "package.json").read_text())
+            record["model_repair"] = {**ui["model_repair"], **repair_runtime.record,
+                                      "retry": repair_runtime.retry_receipt(ui, fixture["models"][1]["model_sha256"])}
+            record["results"]["model_remaining_fetch"] = "passed"
         if not model:
             assert ui.get("dispatch_unavailable_reason") == "source_engine_required"
             record["dispatch_unavailable_reason"] = "source_engine_required"
@@ -1066,7 +1292,10 @@ def run(home, data, evidence, model=True, carrier=False, memory_gib=0):
     finally:
         try:
             observer_complete = not model or record.get("model_timing", {}).get("observer_complete") is True
-            if finite:
+            if repair_runtime:
+                record["process_cleanup"] = repair_runtime.finish()
+                record.setdefault("model_repair", {}).update(repair_runtime.record)
+            elif finite:
                 record["finite_memory"] = finite.finish()
                 try:
                     record["finite_memory"]["browser_closed"] = private_json(finite.control / "browser-stopped.json") == {"closed": True}
@@ -1135,6 +1364,8 @@ def run(home, data, evidence, model=True, carrier=False, memory_gib=0):
         raise RuntimeError("installed timing observer did not stop")
     if memory_gib and not finite_receipt_valid(record, memory_gib):
         raise RuntimeError("installed finite-memory journey proof is incomplete")
+    if repair and any(record["results"].get(name) != "passed" for name in ("model_stop_get_different", "model_interrupted_get_retry", "model_remaining_fetch")):
+        raise RuntimeError("installed model repair journey proof is incomplete")
     require_disk_space(data)
     if model and sys.platform == "darwin" and record["model_timing"]["durations"]["status"] != "complete":
         raise RuntimeError("installed reply timing evidence is incomplete")
@@ -1201,7 +1432,10 @@ if __name__ == "__main__":
     # One reply Get from a separate holder Home over Carrier; other runs use a same-Home package.
     parser.add_argument("--carrier-get", action="store_true")
     parser.add_argument("--finite-memory", type=int, choices=[1, 4])
+    parser.add_argument("--model-repair", action="store_true", help="real Stop, Get different model and interrupted Get/Home restart/Retry")
     args = parser.parse_args()
+    if args.model_repair and (sys.platform != "linux" or args.home_only or args.repeat or args.finite_memory):
+        parser.error("--model-repair proves one production Linux Home with two signed models")
     if args.home_only and args.repeat:
         parser.error("--home-only has one engine-absent Home")
     if args.carrier_get and (args.home_only or args.repeat):
@@ -1219,6 +1453,6 @@ if __name__ == "__main__":
         arguments = [destination, fresh_fixture(home, data, destination, include_engine=False), evidence, False]
     else:
         home, data, evidence = arguments
-        destination = home.parent / ("memory-refusal-home" if args.finite_memory == 1 else "reply-home")
-        arguments = [destination, fresh_fixture(home, data, destination), evidence, True, args.carrier_get, args.finite_memory or 0]
+        destination = home.parent / ("model-repair-home" if args.model_repair else "memory-refusal-home" if args.finite_memory == 1 else "reply-home")
+        arguments = [destination, fresh_fixture(home, data, destination), evidence, True, args.carrier_get or args.model_repair, args.finite_memory or 0, args.model_repair]
     operation(*arguments)
