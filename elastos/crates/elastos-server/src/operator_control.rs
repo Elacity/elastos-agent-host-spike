@@ -2110,13 +2110,33 @@ mod tests {
         release.push(b' ');
         assert!(verified_update_check(&source, &head, &release).is_err());
         let mut source = source;
-        source.channel = "canary".into();
+        source.channel = "jetson-test".into();
         assert!(verified_update_check(&source, &head, &release[..release.len() - 1]).is_err());
+        source.channel = "canary".into();
+        let release = &release[..release.len() - 1];
+        let offered = verified_update_check(&source, &head, release).unwrap();
+        assert_eq!(
+            (offered.channel.as_str(), offered.update_available),
+            ("stable", true)
+        );
+        // System never offers a canary Home an unsigned or wrong-signer stable head.
+        let mut unsigned: serde_json::Value = serde_json::from_slice(&head.bytes).unwrap();
+        unsigned.as_object_mut().unwrap().remove("signature");
+        let unsigned = crate::update::DiscoveredHead {
+            head_cid: None,
+            bytes: serde_json::to_vec(&unsigned).unwrap(),
+        };
+        assert!(verified_update_check(&source, &unsigned, release).is_err());
+        let mut canary = source.clone();
+        canary.publisher_dids = vec![crate::crypto::encode_signing_key_did(
+            &ed25519_dalek::SigningKey::from_bytes(&[8; 32]),
+        )];
+        assert!(verified_update_check(&canary, &head, release).is_err());
         source.channel = "stable".into();
         source.publisher_dids = vec![crate::crypto::encode_signing_key_did(
             &ed25519_dalek::SigningKey::from_bytes(&[8; 32]),
         )];
-        assert!(verified_update_check(&source, &head, &release[..release.len() - 1]).is_err());
+        assert!(verified_update_check(&source, &head, release).is_err());
     }
 
     #[test]

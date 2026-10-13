@@ -271,6 +271,78 @@ fn system_update_completed_offer_is_bound_to_captured_source_fields_and_signers(
 }
 
 #[tokio::test]
+async fn system_offers_a_canary_home_its_signers_stable_release_and_binds_that_choice() {
+    let dir = tempfile::tempdir().unwrap();
+    let _state = test_state(dir.path());
+    let owner = passkey_authority_with_name(dir.path(), Some("owner"));
+    let context = HomeLaunchTokenContext {
+        principal_id: owner.principal_id,
+        session_id: owner.session_id,
+        proof_binding_id: Some(owner.proof_binding_id),
+        grant_id: owner.grant_id,
+    };
+    configure_update_summary(dir.path());
+    let mut sources = crate::sources::load_trusted_sources(dir.path()).unwrap();
+    sources.sources[0].channel = "canary".into();
+    crate::sources::save_trusted_sources(dir.path(), &sources).unwrap();
+    let source = sources.default_source().unwrap().clone();
+    let offer = cached_offer();
+    assert_eq!(offer.channel, "stable");
+    // The summary keeps a canary Home's signed stable offer.
+    assert!(check_matches_source(&source, &offer));
+    let mut stable = source.clone();
+    stable.channel = "stable".into();
+    let mut canary_offer = offer.clone();
+    canary_offer.channel = "canary".into();
+    assert!(!check_matches_source(&stable, &canary_offer));
+    let mut jetson = source.clone();
+    jetson.channel = "jetson-test".into();
+    assert!(!check_matches_source(&jetson, &offer));
+
+    let cache = tokio::sync::Mutex::new(UpdateCheckCache::default());
+    let mut pending = Some(offer.clone());
+    let summary = loop {
+        let next = pending.take();
+        let summary = system_runtime_update_summary_with_cache(
+            dir.path(),
+            &context,
+            &cache,
+            |_, _, _| async move { next },
+        )
+        .await
+        .unwrap();
+        if summary["checking"] == false {
+            break summary;
+        }
+        tokio::task::yield_now().await;
+    };
+    assert_eq!(summary["available"], true);
+    assert_eq!(summary["can_apply"], true);
+    assert_eq!(summary["channel"], "stable");
+    assert_eq!(summary["new_version"], offer.latest_version);
+
+    // System posts the summary's fields; the route and the controller admit them.
+    let field = |name: &str| summary[name].as_str().unwrap().to_owned();
+    let request = crate::update_controller::UpdateRequest {
+        id: "c".repeat(32),
+        source_name: field("source_name"),
+        channel: field("channel"),
+        publisher_did: field("publisher_did"),
+        current_version: field("current_version"),
+        new_version: field("new_version"),
+        head_cid: field("head_cid"),
+        release_cid: field("release_cid"),
+    };
+    assert!(choice_matches(&request, &offer));
+    assert!(crate::update_controller::owner_choice_matches_source(
+        &request, &source
+    ));
+    assert!(!crate::update_controller::owner_choice_matches_source(
+        &request, &jetson
+    ));
+}
+
+#[tokio::test]
 async fn system_update_summary_refuses_invalid_installed_version_with_local_repair_hint() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(dir.path());

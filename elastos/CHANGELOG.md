@@ -6,6 +6,12 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Changed
+
+- Homes on the test channel also accept the final release, so they update to
+  0.8.0 in System. Running the install command again moves them to the stable
+  channel (#335).
+
 ### Developer detail
 
 - CI's `release-upstream-assets` job runs the release's upstream asset build

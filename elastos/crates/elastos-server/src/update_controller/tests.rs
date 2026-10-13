@@ -696,6 +696,14 @@ fn installed_controller_admission_binds_signature_channel_version_platform_and_b
         admit_installed_release(&envelope, &source, &fixture.binary).unwrap(),
         expected
     );
+    let canary = TrustedSource {
+        channel: "canary".into(),
+        ..source.clone()
+    };
+    assert_eq!(
+        admit_installed_release(&envelope, &canary, &fixture.binary).unwrap(),
+        expected
+    );
     for refusal in [
         "binary",
         "version",
@@ -717,7 +725,7 @@ fn installed_controller_admission_binds_signature_channel_version_platform_and_b
                 envelope.clone()
             }
             "channel" => {
-                source.channel = "canary".into();
+                source.channel = "jetson-test".into();
                 envelope.clone()
             }
             "publisher" => {
@@ -811,6 +819,61 @@ fn signed_update_choice_requires_the_exact_head_release_publisher_version_and_ch
             verify_update_choice(&bytes, &choice, &source).is_err(),
             "{refusal}"
         );
+    }
+}
+
+#[test]
+fn canary_update_choice_accepts_only_the_trusted_signers_stable_head() {
+    let (mut source, choice, head) = choice_fixture();
+    source.channel = "canary".into();
+    // The owner approves the offered stable channel; the canary source admits it.
+    assert_eq!(choice.channel, "stable");
+    assert!(owner_choice_matches_source(&choice, &source));
+    verify_update_choice(&head, &choice, &source).unwrap();
+    let mut subscription = choice.clone();
+    subscription.channel = "canary".into();
+    assert!(owner_choice_matches_source(&subscription, &source));
+    assert!(verify_update_choice(&head, &subscription, &source).is_err());
+    let mut stable = source.clone();
+    stable.channel = "stable".into();
+    assert!(!owner_choice_matches_source(&subscription, &stable));
+    for (field, value) in [
+        ("source_name", "another source"),
+        ("channel", "jetson-test"),
+        ("publisher_did", "did:key:another"),
+        ("current_version", "0.6.9"),
+    ] {
+        let mut changed = serde_json::to_value(&choice).unwrap();
+        changed[field] = json!(value);
+        let changed: UpdateRequest = serde_json::from_value(changed).unwrap();
+        assert!(!owner_choice_matches_source(&changed, &source), "{field}");
+    }
+    let value: Value = serde_json::from_slice(&head).unwrap();
+    let mut unsigned = value.clone();
+    unsigned.as_object_mut().unwrap().remove("signature");
+    let other_key = ed25519_dalek::SigningKey::from_bytes(&[44; 32]);
+    let (signature, other_did) = crate::crypto::domain_separated_sign(
+        &other_key,
+        "elastos.release.head.v1",
+        &serde_json::to_vec(&value["payload"]).unwrap(),
+    );
+    let wrong_signer =
+        json!({"payload": value["payload"], "signature": signature, "signer_did": other_did});
+    let forged = json!({"payload": value["payload"], "signature": signature, "signer_did": value["signer_did"]});
+    for (case, envelope, expected) in [
+        ("unsigned", unsigned, "Missing signature in envelope"),
+        ("wrong signer", wrong_signer, "Signer DID mismatch"),
+        (
+            "forged",
+            forged,
+            "Signed envelope signature verification failed",
+        ),
+    ] {
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let mut choice = choice.clone();
+        choice.head_cid = raw_cid(&bytes);
+        let error = verify_update_choice(&bytes, &choice, &source).unwrap_err();
+        assert!(error.to_string().contains(expected), "{case}: {error:#}");
     }
 }
 
@@ -3975,6 +4038,7 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
         "catalogue",
         "catalogue restored",
         "catalogue fetch",
+        "canary updated",
     ] {
         let fixture = PrivateFixture::new();
         fs::create_dir(fixture.data.join("bin")).unwrap();
@@ -4132,6 +4196,17 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
         let (_, mut request, _) = choice_fixture();
         request.head_cid = raw_cid(&head);
         request.release_cid = raw_cid(&release);
+        if outcome == "canary updated" {
+            // A canary Home: the owner approved the offered stable head, and the
+            // controller admits that choice as `apply` does before staging it.
+            let mut sources = crate::sources::load_trusted_sources(&fixture.data).unwrap();
+            sources.sources[0].channel = "canary".into();
+            crate::sources::save_trusted_sources(&fixture.data, &sources).unwrap();
+            let source = installed_source(&fixture.data).unwrap();
+            assert_eq!(request.channel, "stable");
+            assert!(owner_choice_matches_source(&request, &source));
+            verify_update_choice(&head, &request, &source).unwrap();
+        }
         let mut command = tokio::process::Command::new("/bin/sh");
         command.args(["-c", "exec sleep 60"]);
         let child = child::OwnedChild::spawn(&mut command).unwrap();
@@ -4259,7 +4334,14 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
         .await;
         owner.controller.publish_apply_result(&result).unwrap();
         let status = status(&fixture.data).unwrap().unwrap();
-        let updated = ["updated", "support path", "moved", "bundle", "catalogue"];
+        let updated = [
+            "updated",
+            "support path",
+            "moved",
+            "bundle",
+            "catalogue",
+            "canary updated",
+        ];
         if updated.contains(&outcome) {
             result.unwrap();
             assert_eq!(
@@ -4273,6 +4355,20 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
                 fs::read(fixture.data.join(&candidate_support)).unwrap(),
                 b"new support"
             );
+            if outcome == "canary updated" {
+                // The Home runs the stable release and keeps its canary subscription.
+                let source = installed_source(&fixture.data).unwrap();
+                assert_eq!(
+                    (source.channel.as_str(), source.installed_version.as_str()),
+                    ("canary", "0.7.1")
+                );
+                crate::installed_release::read_without_migration(
+                    &fixture.data,
+                    &fixture.binary,
+                    &source,
+                )
+                .unwrap();
+            }
         } else if outcome.ends_with("restored") {
             assert!(result.is_err());
             assert_eq!((owner.stops, owner.starts), (2, 2));
