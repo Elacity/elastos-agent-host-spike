@@ -21,6 +21,11 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   0.8.0 in System. Running the install command again moves them to the stable
   channel (#335).
 - Make admin and Make guest in System → Accounts change every passkey of that account together (#338).
+- Spam limits for Chat: 5 Community messages per Profile every 10 seconds (Chat
+  shows "Slow down"), 5 per sender on receiving Homes without holding up other
+  senders, and Discovery relay caps of 4 listings per Home, 8 contact requests
+  per sender and 16 per Home. The relay admits only the signing Home's own
+  submissions.
 
 ### Fixed
 
@@ -49,6 +54,12 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   read or install; while both pins name one release the update journey covers
   that start in full. `scripts/release-publish.sh prepare` refuses a source
   without the pin.
+- A release names the Community network only when the approved source pins it
+  and `scripts/release-publish.sh prepare` gets `RELEASE_COMMUNITY_DIR`, the
+  custodian's `community-profile` output for exactly that pin; the package's
+  own Runtime verifies the file before signing, and prepare refuses a source
+  pin without that output. The release signer refuses a Community pin whose
+  network ID or signer set differ from its file.
 - `scripts/release-publish.sh seed` and `seed-upgrade` require `RELEASE_SEED_DATA`
   to end in `/elastos` and export `XDG_DATA_HOME` as its parent, because the
   Runtime reads `$XDG_DATA_HOME/elastos`; the seed script checks the saved

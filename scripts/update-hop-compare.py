@@ -631,8 +631,10 @@ def cli_json(path):
 
 
 def cli_environment(home_path):
+    # Fixture Homes never join a Community network a release pins; setup and update skip it.
     return {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home_path),
-            "ELASTOS_CARRIER_NETWORK": "direct", "ELASTOS_QUIET_RUNTIME_NOTICES": "1"}
+            "ELASTOS_CARRIER_NETWORK": "direct", "ELASTOS_QUIET_RUNTIME_NOTICES": "1",
+            "ELASTOS_COLLABORATION_STARTUP_MODE": "isolated"}
 
 
 def cli_installer_metadata(installer, env):
@@ -1945,7 +1947,8 @@ def cli_install_previous_release(home_path, output, pin_path=None):
     for argv, timeout in ((["/bin/bash", "install.sh", "--install-only"], 900),
                           ([str(runtime), "setup", "--profile", "home", "--with", "custody-provider"], 1800),
                           ([str(runtime), "update", "--rollback-to", pin["head_cid"], "--yes"], 1800)):
-        proc = subprocess.Popen(argv, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home_path)}, cwd=home_path,
+        proc = subprocess.Popen(argv, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home_path),
+                                           "ELASTOS_COLLABORATION_STARTUP_MODE": "isolated"}, cwd=home_path,
                                 stdin=subprocess.DEVNULL, stdout=sys.stderr, stderr=sys.stderr, start_new_session=True)
         try:
             code = proc.wait(timeout=timeout)
