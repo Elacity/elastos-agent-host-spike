@@ -1405,9 +1405,20 @@ async fn run_upgrade_with_restart(
         let data_dir = transaction.data_dir();
         let bin_path = transaction.binary_path().to_path_buf();
         let old_components = std::fs::read(data_dir.join("components.json")).ok();
-        let changed_capsules =
-            changed_capsule_names(old_components.as_deref(), &comp_data).unwrap_or_default();
         let new_manifest: crate::setup::ComponentsManifest = serde_json::from_slice(&comp_data)?;
+        // A newer release's own paths are not a capsule cache to clear.
+        let newer = crate::setup::newer_kind_paths(&new_manifest, &component_platform);
+        let changed_capsules: Vec<String> =
+            changed_capsule_names(old_components.as_deref(), &comp_data)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|name| {
+                    let relative = Path::new("capsules").join(name);
+                    !newer.iter().any(|path| {
+                        Path::new(path).starts_with(&relative) || relative.starts_with(path)
+                    })
+                })
+                .collect();
         let catalog_stage = tempfile::tempdir_in(data_dir)?;
         let catalog = on_heap(|| {
             crate::setup::stage_model_catalog(

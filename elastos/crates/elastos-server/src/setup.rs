@@ -3292,8 +3292,8 @@ fn known_strategy(info: &PlatformInfo) -> bool {
 }
 
 /// A component of a kind this Runtime does not know comes from a newer release.
-/// Updates leave it to that release's own repair, which knows the kind.
-fn newer_kind(component: &Component, platform: &str) -> bool {
+/// Updates leave it to that release's own repair and admission, which know the kind.
+pub(crate) fn newer_kind(component: &Component, platform: &str) -> bool {
     resolve_platform_info(component, platform)
         .into_iter()
         .chain(component.capsule_metadata.as_ref().and_then(|metadata| {
@@ -3302,11 +3302,36 @@ fn newer_kind(component: &Component, platform: &str) -> bool {
         .any(|info| !known_strategy(info))
 }
 
+/// The installed paths, artifact and capsule metadata, of the components an
+/// update leaves to the newer release; nothing else this update stages may touch them.
+pub(crate) fn newer_kind_paths<'a>(
+    manifest: &'a ComponentsManifest,
+    platform: &str,
+) -> Vec<&'a str> {
+    let mut paths = Vec::new();
+    for component in manifest.external.values() {
+        if !newer_kind(component, platform) {
+            continue;
+        }
+        paths.extend(resolve_install_path(
+            component,
+            resolve_platform_info(component, platform),
+        ));
+        paths.extend(component.capsule_metadata.as_ref().and_then(|metadata| {
+            resolve_component_capsule_metadata_install_path(
+                metadata,
+                resolve_component_capsule_metadata_platform_info(metadata, platform),
+            )
+        }));
+    }
+    paths
+}
+
 /// Admit all applicable release components before downloads or installation.
 /// Returns, sorted, the components of a kind this Runtime does not know: the
 /// update neither fetches nor installs them, and the new release's own repair
-/// does after restart. Setup retains its explicit development strategies
-/// outside release admission.
+/// does after restart. Their known assets and every path are still admitted.
+/// Setup retains its explicit development strategies outside release admission.
 pub(crate) fn admit_release_components(
     manifest: &ComponentsManifest,
     platform: &str,
@@ -3316,23 +3341,20 @@ pub(crate) fn admit_release_components(
         .find_map(|(release, setup)| (setup == platform).then_some(release.as_str()))
         .unwrap_or(platform);
     refuse_reserved_install_targets(manifest, platform)?;
+    // Their bytes stay untouched here, but their paths join the support snapshot.
+    for path in newer_kind_paths(manifest, platform) {
+        anyhow::ensure!(
+            !path.is_empty()
+                && Path::new(path)
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_))),
+            "install path {path} of a newer component kind is unsafe"
+        );
+    }
     let mut deferred = Vec::new();
     for (name, component) in &manifest.external {
         if newer_kind(component, platform) {
-            // Its bytes stay untouched here, but its path joins the support snapshot.
-            if let Some(path) =
-                resolve_install_path(component, resolve_platform_info(component, platform))
-            {
-                anyhow::ensure!(
-                    !path.is_empty()
-                        && Path::new(path)
-                            .components()
-                            .all(|part| matches!(part, std::path::Component::Normal(_))),
-                    "component '{name}' has an unsafe install path"
-                );
-            }
             deferred.push(name.clone());
-            continue;
         }
         let assets = [
             resolve_platform_info(component, platform),
@@ -3341,7 +3363,9 @@ pub(crate) fn admit_release_components(
             }),
         ];
         for (index, info) in assets.into_iter().enumerate() {
-            let Some(info) = info else { continue };
+            let Some(info) = info.filter(|info| known_strategy(info)) else {
+                continue;
+            };
             let image = index == 0 && name == browser_vm_image::NAME;
             if image {
                 browser_vm_image::component_info(manifest, platform)?;
@@ -3732,6 +3756,7 @@ pub(crate) async fn stage_update_support(
             }
         }
     }
+    let newer = newer_kind_paths(&new, platform);
     for name in old.capsules.keys().chain(new.capsules.keys()) {
         let relative = PathBuf::from("capsules").join(name);
         crate::install_transaction::validate_support_path(&relative)?;
@@ -3739,9 +3764,12 @@ pub(crate) async fn stage_update_support(
             (Some(old), Some(new)) => old.cid != new.cid || old.sha256 != new.sha256,
             _ => true,
         };
+        // Staged support, and a newer release's own paths, are not this capsule's.
         if !changed
             || paths
                 .keys()
+                .map(PathBuf::as_path)
+                .chain(newer.iter().map(Path::new))
                 .any(|path| path.starts_with(&relative) || relative.starts_with(path))
         {
             continue;
@@ -7500,7 +7528,17 @@ pub(crate) mod tests {
         for (extra, refusal) in [
             (
                 serde_json::json!({"install_path":"../outside","platforms":{"darwin-arm64":{"strategy":"future-kind"}}}),
-                "component 'extra' has an unsafe install path",
+                "install path ../outside of a newer component kind is unsafe",
+            ),
+            (
+                serde_json::json!({"platforms":{"darwin-arm64":{"strategy":"future-kind"}},
+                    "capsule_metadata":{"install_path":"../meta","platforms":{"darwin-arm64":{"strategy":"future-kind"}}}}),
+                "install path ../meta of a newer component kind is unsafe",
+            ),
+            (
+                serde_json::json!({"platforms":{"darwin-arm64":{"strategy":"local-copy","release_path":"x","checksum":checksum}},
+                    "capsule_metadata":{"platforms":{"darwin-arm64":{"strategy":"future-kind"}}}}),
+                "development or unsupported release strategy",
             ),
             (
                 serde_json::json!({"install_path":"tools/x.elastos-replace","platforms":{"darwin-arm64":{"strategy":"future-kind"}}}),

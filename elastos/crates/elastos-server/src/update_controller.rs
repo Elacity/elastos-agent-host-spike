@@ -2108,24 +2108,32 @@ pub(crate) async fn repair_deferred_support_after_start(data_dir: PathBuf) {
     }
 }
 
-/// `false` while a release transaction still owns the rollback.
+/// `false` while a release transaction still owns the rollback; it may yet record
+/// what it leaves to this release.
 async fn repair_deferred_support_attempt(data_dir: &Path) -> Result<bool> {
+    let installed = fs::canonicalize(data_dir)
+        .map_err(anyhow::Error::from)
+        .and_then(|data| Ok(installed_runtime_binary(&data)?.map(|binary| (data, binary))));
+    let (data_dir, binary) = match installed {
+        Ok(Some(installed)) => installed,
+        Ok(None) => return Ok(true),
+        // Without a readable installed release, only a recorded deferral is an error.
+        Err(_) if !crate::setup::deferred_support_pending(data_dir) => return Ok(true),
+        Err(error) => return Err(error),
+    };
+    let (data_dir, binary) = (data_dir.as_path(), binary.as_path());
+    if InstallTransaction::has_pending_recovery(binary) {
+        return Ok(false);
+    }
     if !crate::setup::deferred_support_pending(data_dir) {
         return Ok(true);
-    }
-    let data_dir = &fs::canonicalize(data_dir)?;
-    let Some(binary) = installed_runtime_binary(data_dir)? else {
-        return Ok(true);
-    };
-    if InstallTransaction::has_pending_recovery(&binary) {
-        return Ok(false);
     }
     let Some(_writer) = crate::install_transaction::acquire_installed_writer(data_dir)? else {
         return Ok(true);
     };
     crate::setup::repair_installed_support(
         data_dir,
-        &binary,
+        binary,
         &installed_source(data_dir)?,
         false,
         crate::setup::CatalogueRepair::Optional,
