@@ -221,9 +221,13 @@ Prepare inert `community-profile-input.json` with these exact fields:
 (`commit`, `tree`), `domain` (`elastos.collaboration-network.profile.v1`),
 `profile` (the unsigned profile schema above), `default_conversation_grant`
 (the canonical grant), and `trusted_profile_signer_dids` (the approved set).
-The profile names the existing maintainer DID, the approved bootstrap receipts,
-and the raw CID of that grant. The grant names the same network, the approved
-conversation, sender service `chat`, and policy `profile_scoped_signer`.
+The profile names the existing maintainer DID, exactly one approved bootstrap
+receipt (release preparation verifies the file with the Runtime's operator
+receipt, which names one peer), and the raw CID of that grant. The grant names
+the same network, the approved conversation, sender service `chat`, and policy
+`profile_scoped_signer`. Before the DID prompt the signer shows the network,
+conversation, revision, signer set, bootstrap node and its ticket addresses,
+and the payload and grant hashes.
 The bootstrap Runtime and its placement are explicit operator inputs; an
 artifact host has its own installation role.
 

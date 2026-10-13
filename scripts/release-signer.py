@@ -881,7 +881,10 @@ def prepare_community_profile(policy, root, manifest_name, fetch):
             and type(profile["revision"]) is int and profile["revision"] == 1
             and profile["signer_did"] == policy["publisher_did"], "Community profile identity differs")
     peers = profile["bootstrap_peers"]
-    require(type(peers) is list and 0 < len(peers) <= 16, "Community bootstrap count refused")
+    # Release preparation verifies the file with the Runtime's operator receipt, which names exactly
+    # one bootstrap peer; a profile it cannot verify must not be signed. More peers come later (0.8.1).
+    require(type(peers) is list and len(peers) == 1,
+            "a Community profile needs exactly one bootstrap peer (release preparation verifies one)")
     for peer in peers:
         check_community_bootstrap_peer(peer)
     require(len({peer["node_id"] for peer in peers}) == len(peers)
@@ -903,6 +906,21 @@ def prepare_community_profile(policy, root, manifest_name, fetch):
     require(all(len(data) <= policy["max_file_bytes"] for _, data in publication)
             and sum(len(data) for _, data in publication) <= policy["max_snapshot_bytes"], "Community snapshot exceeds quota")
     return prepared
+
+
+def community_profile_summary(prepared):
+    """What the custodian signs, shown before the DID is typed."""
+    profile, grant = parse_json(prepared.profile), parse_json(prepared.grant)
+    lines = ["approved initial Community profile",
+             f"  network {profile['network_id']}, conversation {grant['conversation_id']}, revision {profile['revision']}",
+             f"  trusted profile signers {', '.join(prepared.signer_dids)}"]
+    for peer in profile["bootstrap_peers"]:
+        encoded = peer["connect_ticket"]
+        ticket = parse_json(base64.b32decode(encoded.upper() + "=" * ((-len(encoded)) % 8)))
+        addrs = [json.dumps(addr, sort_keys=True, separators=(",", ":")) for endpoint in ticket["endpoints"] for addr in endpoint["addrs"]]
+        lines.append(f"  bootstrap node {peer['node_id']} at {', '.join(addrs) or 'no direct address'}")
+    lines += [f"  profile payload sha256 {sha256(prepared.profile)}", f"  grant sha256 {sha256(prepared.grant)}\n"]
+    return "\n".join(lines)
 
 
 def community_profile_digest(payload):
@@ -1377,7 +1395,7 @@ def main():
             return
         if args.operation == "community-profile":
             prepared = prepare_community_profile(policy, args.input_root, args.manifest, github_json)
-            require(confirmed(prepared.publisher_did, "approved initial Community profile", sys.stdin, sys.stderr),
+            require(confirmed(prepared.publisher_did, community_profile_summary(prepared), sys.stdin, sys.stderr),
                     "signing cancelled")
         else:
             prepared = prepare(policy, args.input_root, args.manifest, github_json, Path(scratch))

@@ -1246,19 +1246,51 @@ class SignerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "quota"):
             self.prepare_community()
 
-    def test_community_accepts_multiple_exact_approved_bootstrap_peers(self):
+    def test_community_refuses_a_second_bootstrap_peer_even_when_approved(self):
         self.community_input()
         node = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
         ticket = S.json_bytes({"endpoints": [{"id": node, "addrs": []}], "topic": None})
         self.community_manifest["profile"]["bootstrap_peers"].append({
             "node_id": node, "connect_ticket": base64.b32encode(ticket).decode().lower().rstrip("="),
         })
-        self.approve_community_input()
-        with self.assertRaisesRegex(ValueError, "payload hash differs"):
-            self.prepare_community()
         self.policy["community_profile"]["profile_payload_sha256"] = S.sha256(S.json_bytes(self.community_manifest["profile"]))
-        prepared = self.prepare_community()
-        self.assertEqual(len(S.parse_json(prepared.profile)["bootstrap_peers"]), 2)
+        self.approve_community_input()
+        # Release preparation's Runtime verifier names exactly one peer, so the signer refuses what prepare would block.
+        with self.assertRaisesRegex(ValueError, "exactly one bootstrap peer"):
+            self.prepare_community()
+
+    def test_community_prompt_names_what_is_signed_and_cancel_precedes_key_use(self):
+        prompts = []
+        for conversation in ("community-room", "other-room"):
+            self.community_input()
+            grant = self.community_manifest["default_conversation_grant"]
+            grant["conversation_id"] = conversation
+            self.community_manifest["profile"]["default_conversation"] = {"grant_cid": S.raw_cid(S.json_bytes(grant))}
+            self.policy["community_profile"].update(
+                conversation_id=conversation, default_conversation_grant_sha256=S.sha256(S.json_bytes(grant)),
+                profile_payload_sha256=S.sha256(S.json_bytes(self.community_manifest["profile"])))
+            self.approve_community_input()
+            policy_path = self.base / f"policy-{conversation}.json"
+            policy_path.write_bytes(S.json_bytes(self.policy))
+            output = self.base / f"output-{conversation}"
+            argv = [str(SOURCE), "--operation", "community-profile", "--manifest", "community-profile-input.json",
+                    "--policy", str(policy_path), "--input-root", str(self.root), "--output-root", str(output)]
+            prompt = io.StringIO()
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(S, "pinned_tools"), \
+                 mock.patch.object(S, "github_json", side_effect=self.fetch), \
+                 mock.patch.object(sys, "stdin", io.StringIO("\n")), mock.patch.object(sys, "stderr", prompt), \
+                 mock.patch.object(S, "OpenSSLBackend") as backend:
+                with self.assertRaisesRegex(ValueError, "signing cancelled"):
+                    S.main()
+            backend.assert_not_called()
+            self.assertFalse(output.exists())
+            text = prompt.getvalue()
+            profile = self.community_manifest["profile"]
+            for fact in ("network fixture-community", f"conversation {conversation}", "revision 1", DID,
+                         f"bootstrap node {PUBLIC.hex()}", S.sha256(S.json_bytes(profile)), S.sha256(S.json_bytes(grant))):
+                self.assertIn(fact, text)
+            prompts.append(text)
+        self.assertNotEqual(prompts[0], prompts[1])
 
     def test_community_foreign_custody_and_input_refusals_use_no_backend(self):
         self.community_input()
