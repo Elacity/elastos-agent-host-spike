@@ -2095,7 +2095,7 @@ impl std::fmt::Display for LocalModelExecutionUnavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::UnsupportedHost => "admitted model host profile is unavailable",
-            Self::SourceEngineRequired => "This source-checkout Home has no local AI engine. Rerun scripts/setup-source-home.sh with SETUP_SOURCE_HOME_INSTALL_LLAMA_SERVER=1 to build it.",
+            Self::SourceEngineRequired => "This source-checkout Home has no local AI engine. On Linux, first build the qualified Ubuntu 22.04 bundle and set ELASTOS_LLAMA_AMD64_BUNDLE or ELASTOS_LLAMA_ARM64_BUNDLE to its archive. Then rerun scripts/setup-source-home.sh with SETUP_SOURCE_HOME_INSTALL_LLAMA_SERVER=1 to install it. The script prints the exact build command when the archive is missing.",
             Self::CatalogUpdated => "catalog changed during preparation",
         })
     }
@@ -8816,6 +8816,11 @@ pub(crate) mod tests {
                     error.downcast_ref::<LocalModelExecutionUnavailable>(),
                     Some(&LocalModelExecutionUnavailable::SourceEngineRequired)
                 );
+                let message = error.to_string();
+                assert!(message.contains("qualified Ubuntu 22.04 bundle"));
+                assert!(message.contains("ELASTOS_LLAMA_AMD64_BUNDLE"));
+                assert!(message.contains("ELASTOS_LLAMA_ARM64_BUNDLE"));
+                assert!(message.contains("SETUP_SOURCE_HOME_INSTALL_LLAMA_SERVER=1 to install it"));
             }
             assert!(
                 !bundle.exists(),
