@@ -191,6 +191,7 @@ struct Receipt {
 pub struct UpdateRequest {
     pub id: String,
     pub source_name: String,
+    /// The signed head's channel the owner approved; the source policy admits it.
     pub channel: String,
     pub publisher_did: String,
     pub current_version: String,
@@ -1200,10 +1201,7 @@ impl Controller {
             .clone();
         let source = installed_source(&self.receipt.data_dir)?;
         anyhow::ensure!(
-            request.source_name == source.name
-                && request.channel == normalized_channel(&source)
-                && source.publisher_dids.first() == Some(&request.publisher_did)
-                && request.current_version == source.installed_version,
+            owner_choice_matches_source(&request, &source),
             "Update choice changed. Check the update again."
         );
         let client = Arc::new(
@@ -1440,7 +1438,16 @@ impl crate::update::RestartOwner for Controller {
     }
 }
 
-fn verify_update_choice(
+/// The owner's choice still names this Home's source, signer and version, and
+/// the source's channel policy admits the offered channel.
+pub(crate) fn owner_choice_matches_source(request: &UpdateRequest, source: &TrustedSource) -> bool {
+    request.source_name == source.name
+        && crate::update::verify_source_channel(source, &request.channel).is_ok()
+        && source.publisher_dids.first() == Some(&request.publisher_did)
+        && request.current_version == source.installed_version
+}
+
+pub(crate) fn verify_update_choice(
     bytes: &[u8],
     choice: &UpdateRequest,
     source: &TrustedSource,
@@ -1454,10 +1461,11 @@ fn verify_update_choice(
     anyhow::ensure!(
         signer == choice.publisher_did
             && head["payload"]["latest_release_cid"].as_str() == Some(choice.release_cid.as_str())
-            && head["payload"]["version"].as_str() == Some(choice.new_version.as_str()),
+            && head["payload"]["version"].as_str() == Some(choice.new_version.as_str())
+            && head["payload"]["channel"].as_str() == Some(choice.channel.as_str()),
         "Signed release differs from the owner update choice."
     );
-    crate::update::verify_source_channel(source, head["payload"]["channel"].as_str().unwrap_or(""))
+    crate::update::verify_source_channel(source, &choice.channel)
 }
 
 fn path_present(path: &Path) -> Result<bool> {
@@ -1473,14 +1481,6 @@ fn installed_source(data_dir: &Path) -> Result<TrustedSource> {
         .default_source()
         .cloned()
         .context("Installed trusted source is unavailable.")
-}
-
-fn normalized_channel(source: &TrustedSource) -> &str {
-    if source.channel.trim().is_empty() {
-        "stable"
-    } else {
-        source.channel.trim()
-    }
 }
 
 #[cfg(test)]

@@ -13,9 +13,14 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   `elastos update` say that the install command is needed once and show it,
   instead of saying the publisher's release is not valid. Your current version
   stays unchanged.
+- Homes on the test channel also accept the final release, so they update to
+  0.8.0 in System. Running the install command again moves them to the stable
+  channel (#335).
 
 ### Developer detail
 
+- `scripts/release-publish.sh` publishes a final version `X.Y.Z` on `stable`
+  from its tag `vX.Y.Z` on `main` (#335). See docs/VERSIONING.md.
 - A signed components manifest whose schema this Runtime does not know, or
   whose known components pass every check but which also names a component
   kind (`strategy`) this Runtime does not know, is `InstallerRequired`; a

@@ -4,6 +4,10 @@
 #   scripts/release-publish.sh prepare RUN_ID VERSION [PLATFORM ...]
 #       Verify the run's native inputs and write unsigned signing input for
 #       VERSION. Defaults to all three platforms; include aarch64-darwin.
+#       A prerelease (X.Y.Z-alpha.N) publishes on canary. A final X.Y.Z
+#       publishes on stable, needs all three platforms, tag vX.Y.Z on the
+#       source, the source on main with main's tree, and that version in
+#       elastos/Cargo.toml. Canary Homes accept the stable head too.
 #   scripts/release-publish.sh policy VERSION SIGNER KEY OPENSSL
 #       Write the exact signer policy for that unsigned input and print the
 #       signing command. SIGNER is the installed release-signer.py copy.
@@ -105,6 +109,31 @@ checked_update_pin() (
         || die "cannot read the public release head"
     provenance update-pin --run "$run" --version "$version" --pin "$scratch/pin.json" --head "$scratch/head.json" || exit 1
 )
+# Echo the channel VERSION publishes on: final versions are stable releases.
+# A SemVer prerelease is a hyphen before any +build metadata.
+release_channel() { [[ "${1%%+*}" == *-* ]] && echo canary || echo stable; }
+
+# A stable release comes from its tag: vVERSION names the exact source commit,
+# main contains it and main's tree is the source tree. Echoes the tag ref oid.
+checked_tag() {
+    local version="$1" commit="$2" tree="$3" ref tag_oid type target main
+    ref=$(gh api "repos/$REPO/git/ref/tags/v$version" --jq '.object.type + " " + .object.sha') \
+        || die "tag v$version is missing"
+    read -r type tag_oid <<< "$ref"
+    target="$tag_oid"
+    if [[ "$type" == tag ]]; then
+        ref=$(gh api "repos/$REPO/git/tags/$tag_oid" --jq 'select(.tag == "v'"$version"'") | .object.type + " " + .object.sha') \
+            || die "tag v$version object refused"
+        read -r type target <<< "$ref"
+    fi
+    [[ "$type" == commit && "$target" == "$commit" ]] || die "tag v$version does not name source $commit"
+    [[ "$(gh api "repos/$REPO/compare/$commit...main" --jq .status)" =~ ^(ahead|identical)$ ]] \
+        || die "source $commit is not on main"
+    main=$(gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha) || die "cannot read main"
+    [[ "$(gh api "repos/$REPO/git/commits/$main" --jq .tree.sha)" == "$tree" ]] \
+        || die "main $main differs from source tree $tree"
+    echo "$tag_oid"
+}
 
 # Print the same source and run identities at each operator handoff.
 publication_record() {
@@ -133,7 +162,8 @@ work_dir() { printf '%s/%s\n' "$WORK_ROOT" "$1"; }
 
 prepare() {
     [[ $# -ge 2 && "$1" =~ ^[1-9][0-9]*$ ]] || die "usage: prepare RUN_ID VERSION [PLATFORM ...]"
-    local run="$1" version="$2" work id digest name commit="" tree="" did state platform input artifact_commit pair="" ci_run approval_json run_attempt artifact_attempt proof_id proof_digest proof_attempt receipts='[]'
+    local run="$1" version="$2" work id digest name commit="" tree="" did state platform input artifact_commit pair="" ci_run approval_json run_attempt artifact_attempt proof_id proof_digest proof_attempt receipts='[]' channel tag='null'
+    channel=$(release_channel "$version")
     shift 2
     local platforms=("$@") args=() seen=" "
     [[ ${#platforms[@]} -gt 0 ]] || platforms=(aarch64-darwin x86_64-linux aarch64-linux)
@@ -143,6 +173,7 @@ prepare() {
         seen+="$platform "
     done
     [[ "$seen" == *" aarch64-darwin "* ]] || die "operator Mac inputs must include aarch64-darwin"
+    [[ "$channel" == canary || ${#platforms[@]} == 3 ]] || die "stable $version needs all three platforms"
     need_env RELEASE_SEED RELEASE_SEED_DATA
     approval_json=$(provenance approval) || die "independent approval refused"
     checked_update_pin "$run" "$version" "$(jq -r .source.commit <<< "$approval_json")"
@@ -203,10 +234,17 @@ prepare() {
     name="$pair"
     ci_run=$(checked_ci "$commit")
     echo "# Develop CI run: $(jq -r '[(.id | tostring), .url] | join(" ")' <<< "$ci_run")"
+    if [[ "$channel" == stable ]]; then
+        tag=$(checked_tag "$version" "$commit" "$tree")
+        tag=$(jq -n --arg name "v$version" --arg oid "$tag" '{name: $name, oid: $oid}')
+        echo "# Stable tag: v$version $(jq -r .oid <<< "$tag") on main"
+    fi
     [[ ${#platforms[@]} -gt 1 ]] || args+=(--preview-platform aarch64-darwin)
     git -C "$ROOT" worktree prune  # a removed earlier work folder must not block the add
     git -C "$ROOT" worktree add -q --detach "$work/source" "$commit"
     [[ "$(git -C "$work/source" rev-parse 'HEAD^{tree}')" == "$tree" ]] || die "source tree differs"
+    [[ "$channel" == canary || "$(grep -m1 '^version = ' "$work/source/elastos/Cargo.toml")" == "version = \"$version\"" ]] \
+        || die "elastos/Cargo.toml version is not $version"
     for platform in "${platforms[@]}"; do
         (cd "$work/source" && python3 -I -S scripts/release-platform-input.py verify "$work/inputs/$platform/$name" > /dev/null)
     done
@@ -215,16 +253,16 @@ prepare() {
     scp -q "$RELEASE_SEED:$state" "$work/state/publish-state.json"
     printf '%s\n' "${platforms[@]}" | jq -Rn --arg run "$run" --arg name "$name" --argjson ci_run "$ci_run" \
         --argjson run_attempt "$run_attempt" --arg approval "$RELEASE_APPROVAL" --arg approval_sha256 "$(jq -r .sha256 <<< "$approval_json")" \
-        --argjson receipts "$receipts" \
+        --argjson receipts "$receipts" --arg channel "$channel" --argjson tag "$tag" \
         '{run: $run, run_attempt: $run_attempt, approval: {path: $approval, sha256: $approval_sha256}, receipts: $receipts,
-          ci_run: $ci_run, input: $name, platforms: [inputs]}' > "$work/run.json"
+          ci_run: $ci_run, input: $name, platforms: [inputs], channel: $channel, tag: $tag}' > "$work/run.json"
     (cd "$work/source" && env ELASTOS_DATA_DIR="$work/data" ELASTOS_PUBLISH_STATE_DIR="$work/state" \
         ELASTOS_IPFS_KUBO_PATH="$work/kubo/ipfs" \
         ELASTOS_SOURCE_CONNECT_TICKET="$(jq -er .ticket "$work/bootstrap.json")" \
         ELASTOS_PUBLISHER_NODE_ID="$(jq -er .node_id "$work/bootstrap.json")" \
         ELASTOS_PUBLISHER_GATEWAY="$(jq -er .delivery.PUBLISHER_GATEWAY <<< "$approval_json")" \
         ELASTOS_IPNS_NAME="$(jq -r .delivery.IPNS_NAME <<< "$approval_json")" \
-        scripts/publish-release.sh --version "$version" --channel canary \
+        scripts/publish-release.sh --version "$version" --channel "$channel" \
         --prepare-only "$work/unsigned" --publisher-did "$did" \
         "${args[@]}")
     provenance bind --work "$work" || die "unsigned input differs from approved source/delivery"
@@ -233,7 +271,7 @@ prepare() {
 
 policy() {
     [[ $# == 4 ]] || die "usage: policy VERSION SIGNER KEY OPENSSL"
-    local work input python signer key openssl develop approval_json approval_sha256
+    local work input python signer key openssl develop approval_json approval_sha256 tag
     work=$(work_dir "$1") input="$(work_dir "$1")/unsigned"
     [[ -f "$input/signing-input.json" ]] || die "prepare $1 first"
     approval_json=$(provenance approval) || die "independent approval refused"
@@ -245,7 +283,14 @@ policy() {
     signer=$(realpath "$2") key=$(realpath "$3") openssl=$(realpath "$4")
     [[ "$signer" == "$2" && "$key" == "$3" ]] || die "SIGNER and KEY must be canonical absolute paths"
     develop=$(gh api "repos/$REPO/git/ref/heads/develop" --jq .object.sha)
+    tag=$(jq -c .tag "$work/run.json")
+    if [[ "$(jq -r .channel "$work/run.json")" == stable ]]; then
+        [[ "$(checked_tag "$1" "$(jq -er .source.commit "$input/signing-input.json")" \
+            "$(jq -er .source.tree "$input/signing-input.json")")" == "$(jq -r .oid <<< "$tag")" ]] \
+            || die "tag v$1 moved after preparation; prepare again"
+    fi
     jq -n --slurpfile manifest "$input/signing-input.json" --arg repo "$REPO" --arg develop "$develop" \
+        --argjson tag "$tag" \
         --arg approval "$RELEASE_APPROVAL" --arg approval_sha256 "$approval_sha256" \
         --arg manifest_sha256 "$(sha "$input/signing-input.json")" --arg key "$key" \
         --arg signer "$signer" --arg signer_sha256 "$(sha "$signer")" \
@@ -253,12 +298,13 @@ policy() {
         --arg openssl "$openssl" --arg openssl_sha256 "$(sha "$openssl")" '
         $manifest[0] as $m | [$m.files[].size] as $sizes |
         {repository: $repo, commit: $m.source.commit, tree: $m.source.tree,
-         version: $m.version, channel: $m.channel, develop_oid: $develop,
+         version: $m.version, channel: $m.channel,
          publisher_did: $m.installer.stamps.MAINTAINER_DID, manifest_sha256: $manifest_sha256,
          approval: {path: $approval, sha256: $approval_sha256},
          tool: {path: $signer, sha256: $signer_sha256}, python: {path: $python, sha256: $python_sha256},
          openssl: {path: $openssl, sha256: $openssl_sha256}, key_path: $key,
-         max_file_bytes: ($sizes | max), max_snapshot_bytes: ($sizes | add)}' > "$work/policy.json"
+         max_file_bytes: ($sizes | max), max_snapshot_bytes: ($sizes | add)}
+        + if $tag == null then {develop_oid: $develop} else {tag: $tag.name, tag_oid: $tag.oid} end' > "$work/policy.json"
     echo "Policy: $work/policy.json (sha256 $(sha "$work/policy.json")). Sign, typing the DID when asked:"
     echo "env -i GH_TOKEN=\"\$(gh auth token)\" '$python' -I -S '$signer' --policy '$work/policy.json' --input-root '$input' --output-root '$work/signed'"
 }
@@ -267,10 +313,11 @@ seed() {
     [[ $# == 2 ]] || die "usage: seed VERSION SIGNED_DIR"
     need_env RELEASE_SEED RELEASE_SEED_UNIT RELEASE_SEED_STAGE RELEASE_SEED_RUNTIME
     need_seed_data
-    local version="$1" signed work run name did prev platform id digest stage file artifact_commit artifact_attempt candidate recorded local_files=() state check
+    local version="$1" signed work run name did prev platform id digest stage file artifact_commit artifact_attempt candidate recorded local_files=() state check channel
     signed=$(realpath "$2") work=$(work_dir "$version")
     run=$(jq -er .run "$work/run.json")
     name=$(jq -er .input "$work/run.json")
+    channel=$(jq -r '.channel // "canary"' "$work/run.json")
     did=$(jq -er .signer_did "$signed/release-head.json")
     prev=$(jq -r '.payload.prev_head_cid // ""' "$signed/release-head.json")
     # Both reach the printed seed commands, which run before the Runtime verifies the signature.
@@ -331,7 +378,7 @@ done
 (cd signed && sha256sum -c --quiet ../signed.SHA256SUMS)
 [ "\$(ls signed | wc -l)" = "\$(wc -l < signed.SHA256SUMS)" ]
 export ELASTOS_DATA_DIR=$(q "$RELEASE_SEED_DATA") XDG_DATA_HOME=$(q "${RELEASE_SEED_DATA%/elastos}")
-publish() { $(q "$RELEASE_SEED_RUNTIME") publish-release --version $(q "$version") --channel canary --signed-publication signed \\
+publish() { $(q "$RELEASE_SEED_RUNTIME") publish-release --version $(q "$version") --channel $(q "$channel") --signed-publication signed \\
             --publisher-did $(q "$did") --ipfs-provider-bin $(q "$RELEASE_SEED_DATA/bin/ipfs-provider") "\$@"; }
 sudo -v; [ -x $(q "$RELEASE_SEED_RUNTIME") ]; [ -x $(q "$RELEASE_SEED_DATA/bin/ipfs-provider") ]; [ -w $(q "$RELEASE_SEED_DATA") ]
 unit=$(q "$RELEASE_SEED_UNIT"); sudo systemctl stop "\$unit"
@@ -398,5 +445,5 @@ command="${1:-}"
 case "$command" in
     prepare|policy|seed) shift; "$command" "$@" ;;
     seed-upgrade) shift; seed_upgrade "$@" ;;
-    *) sed -n '2,25p' "${BASH_SOURCE[0]}"; exit 2 ;;
+    *) sed -n '2,29p' "${BASH_SOURCE[0]}"; exit 2 ;;
 esac
