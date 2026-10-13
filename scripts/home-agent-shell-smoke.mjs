@@ -361,8 +361,13 @@ for (const invalid of [
   assert.equal(readiness.receive(legacy), "show", "a legacy reload's ready shows the room again");
   readiness.reset();
   assert.equal(readiness.receive(legacy), "show", "after Home changes src, a legacy ready still shows");
-  readiness.receive(hello(id(7)));
-  assert.equal(readiness.receive(legacy), "", "a legacy-shaped ready never shows a current document");
+  // Undo, then an in-frame reload into the old Assistant: its ready takes over from current A.
+  assert.equal(readiness.receive(hello(id(7))), "hide");
+  assert.equal(readiness.receive(legacy), "show", "a legacy ready after a current hello shows the room");
+  assert.equal(readiness.receive(ready(id(7))), "", "the replaced current document's ready no longer counts");
+  assert.equal(readiness.receive(hello(id(8))), "hide", "a following current document takes over again");
+  assert.equal(readiness.receive(ready(id(8))), "show");
+  assert.equal(readiness.receive(ready(id(8))), "", "shown once");
 }
 
 const offersPayload = {

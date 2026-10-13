@@ -113,7 +113,14 @@ export function createAssistantFrameReadiness() {
         }
         return "";
       }
-      if (hasExactKeys(message, ["type"]) && message.type === "home-agent:ready" && current === null) {
+      if (hasExactKeys(message, ["type"]) && message.type === "home-agent:ready") {
+        /* A legacy document is now active (e.g. Undo, then an in-frame reload
+           into the old Assistant). One source delivers in order, so an old
+           document's ready always arrives before the next document's hello and
+           cannot land late after a current hello; after Home changes src, a
+           stale legacy ready can at most show the room until the new hello. */
+        current = null;
+        shown = true;
         return "show";
       }
       return "";
