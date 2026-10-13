@@ -48,7 +48,7 @@ test("reply subchecks expose only fixed names while error details stay private",
 
 test("lifecycle subchecks locate the blocked UI phase without disclosing launch authority", () => {
   const secret = "home_token=fixture-secret /private/operator/home";
-  for (const subcheck of ["owner_configure", "contender_launch", "contender_configure", "owner_start", "busy", "stop", "stop_recovery", "idle", "idle_recovery", "crash", "crash_recovery"]) {
+  for (const subcheck of ["owner_configure", "contender_launch", "open_assistant", "contender_configure", "owner_start", "busy", "stop", "stop_recovery", "idle", "idle_recovery", "crash", "crash_recovery"]) {
     assert.deepEqual(publicJourneyFailure({ name: "TimeoutError", message: secret }, "finite_resource_lifecycle", subcheck),
       { failure_stage: "finite_resource_lifecycle", failure: "timeout", failure_check: subcheck });
   }
@@ -61,7 +61,7 @@ test("lifecycle subchecks locate the blocked UI phase without disclosing launch 
 test("model repair failures retain only the fixed journey phase", () => {
   const secret = "home_token=fixture-secret /private/operator/home";
   const stages = {
-    model_stop_get_different: ["stop_real_stream", "get_other_model", "other_model_reply"],
+    model_stop_get_different: ["stop_real_stream", "get_other_model", "open_assistant", "other_model_reply"],
     model_interrupted_get_retry: ["fresh_get_precondition", "partial_get", "restarted_home", "retry_retained_get"],
   };
   for (const [stage, checks] of Object.entries(stages)) {

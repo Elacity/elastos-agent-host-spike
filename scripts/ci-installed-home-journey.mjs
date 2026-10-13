@@ -152,6 +152,7 @@ async function resourceLifecycle(assistant, offer, context) {
   const secondPage = await context.newPage();
   try {
     // Each Home launches its own Assistant and completes the Shell's room handoff.
+    subcheck = "open_assistant";
     const second = await openInstalledAssistant(secondPage, `${base}/home/`);
     subcheck = "contender_configure";
     await second.locator("#agent-harness-new-chat").waitFor({ state: "visible" });
@@ -256,6 +257,7 @@ async function repairJourney(assistant, offer) {
   const second = await readyModel(marketplace, other.cid);
   assert.notEqual(second.model_runtime.offer_id, offer);
   await page.screenshot({ path: join(evidence, "repair-qwen-ready.png"), fullPage: true });
+  subcheck = "open_assistant";
   const nextAssistant = await openInstalledAssistant(page, `${base}/home/`);
   await nextAssistant.locator("#agent-harness-new-chat").click();
   await selectModel(nextAssistant, second.model_runtime.offer_id, other.cid);

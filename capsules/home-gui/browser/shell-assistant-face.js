@@ -590,6 +590,7 @@ export function bindAssistantFace(dependencies) {
   bindAgentSpace({
     available: () => Boolean(toggleEl()) && !toggleEl().hidden,
     busy: () => Boolean(taskbarEl()?.dataset.assistantMorph),
+    engaged: () => !closing && (assistantFaceActive() || Boolean(taskbarEl()?.dataset.assistantMorph)),
     open: () => showAssistantFace(),
     close: () => hideAssistantFace(),
   });

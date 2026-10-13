@@ -34,6 +34,7 @@ import {
   attachWindowResize,
 } from "./shell-window-geometry.js?v=home-20260813a";
 import {
+  agentSpaceEngaged,
   applyFullscreenStageFromPlacement,
   bindStageWindowHooks,
   desktopStageId,
@@ -2424,6 +2425,11 @@ function restoreSessionSpaces(storedSession, restoredEntries) {
     Array.isArray(storedSession?.space_order) ? storedSession.space_order : []
   ).map((key) => resolveStableSpaceKey(key, restoredEntries));
   restoreSpaceOrder(remappedOrder);
+  /* Restoration awaits each window's launch, so the person may have opened
+     the Assistant meanwhile; switching Space now would close that room. */
+  if (agentSpaceEngaged()) {
+    return;
+  }
   const savedStageKey =
     typeof storedSession?.active_stage === "string" && storedSession.active_stage.trim()
       ? storedSession.active_stage.trim()

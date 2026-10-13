@@ -32,7 +32,7 @@ export async function openInstalledAssistant(page, homeUrl, timeout = 60000) {
     document.querySelector("#home-unlock")?.hidden !== false,
   null, { timeout });
   const shell = page.frameLocator("#active-shell-frame");
-  // Shell readiness includes saved-window restoration, which can close an opening Assistant.
+  // Shell readiness includes saved-window restoration; a restore still running keeps an opened Assistant.
   await shell.locator('body[data-home-status="ready"][data-home-authority="signed"]').waitFor({ state: "visible", timeout });
   await shell.locator("#desktop").waitFor({ state: "visible", timeout });
   if (await shell.locator("#setup-sheet").isVisible()) {
