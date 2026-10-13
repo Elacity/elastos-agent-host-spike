@@ -18,8 +18,11 @@ if [ "${1:-}" = inputs ]; then
     npm install --prefix "$browser" --no-save --package-lock=false playwright@1.60.0
   installed "$core" playwright-core 1.59.1 ||
     npm install --prefix "$core" --no-save --package-lock=false playwright-core@1.59.1
+  # Tests use both SDK pins; keep both browser builds in the shared cache.
+  export PLAYWRIGHT_SKIP_BROWSER_GC=1
   # --with-deps installs Linux system libraries and needs root; CI only.
   "${browser}/node_modules/.bin/playwright" install chromium --only-shell ${CI:+--with-deps}
+  node "${core}/node_modules/playwright-core/cli.js" install chromium-headless-shell
   exit 0
 fi
 
