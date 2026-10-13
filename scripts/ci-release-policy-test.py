@@ -2367,6 +2367,99 @@ class InstalledJourneyTests(unittest.TestCase):
 
 
 class ModelRepairJourneyTests(unittest.TestCase):
+    def test_linux_workflow_prepares_runs_and_requires_model_repair_journey(self):
+        workflow = steps("source-home-linux")
+        prepare, = [step for step in workflow if step.startswith("name: prepare signed SmolLM2 fixture\n")]
+        home, = [step for step in workflow if step.startswith("name: installed Marketplace Get and Assistant reply\n")]
+        repair, = [step for step in workflow if "run: scripts/ci-installed-journeys.sh model-repair\n" in step]
+        summary, = [step for step in workflow if step.startswith("name: summarize installed model journey\n")]
+        browser, = [step for step in workflow if step.startswith("name: prepare installed Home browser\n")]
+        self.assertIn("npm ci --ignore-scripts --prefix elastos/tools/browser-playwright-engine", browser)
+        self.assertIn("playwright install chromium --with-deps --only-shell", browser)
+        before_browser = workflow[workflow.index(browser) - 1]
+        after_browser = workflow[workflow.index(browser) + 1]
+        self.assertEqual(field(before_browser, "node-version"), "'24'")
+        self.assertEqual(field(after_browser, "node-version"), "'26'")
+        self.assertEqual(field(prepare, "CI_MODEL_REPAIR_JOURNEY"), "${{ matrix.os == 'ubuntu-24.04' }}")
+        self.assertEqual(field(repair, "if"), "matrix.os == 'ubuntu-24.04'")
+        self.assertEqual(field(repair, "CI_MODEL_REPAIR_JOURNEY"), "'true'")
+        self.assertEqual(field(repair, "CI_SOURCE_HOME"), field(prepare, "CI_SOURCE_HOME"))
+        self.assertEqual(field(summary, "CI_SOURCE_HOME"), field(repair, "CI_SOURCE_HOME"))
+        self.assertEqual(field(summary, "CI_MODEL_REPAIR_JOURNEY"), field(prepare, "CI_MODEL_REPAIR_JOURNEY"))
+        self.assertEqual(field(summary, "if"), "always()")
+        for step in (prepare, repair, summary):
+            self.assertNotIn("continue-on-error:", step)
+        self.assertLess(workflow.index(browser), workflow.index(prepare))
+        self.assertLess(workflow.index(prepare), workflow.index(home))
+        self.assertLess(workflow.index(home), workflow.index(repair))
+        self.assertLess(workflow.index(repair), workflow.index(summary))
+        shell = (WORKFLOW.parents[2] / "scripts/ci-installed-journeys.sh").read_text()
+        self.assertIn('CI_MODEL_REPAIR_JOURNEY:-false', shell)
+        self.assertIn('ci-model-package.mjs repair-inputs "${CI_HOME}/model-inputs/qwen-inputs"', shell)
+        self.assertIn('"$EVIDENCE/model-repair" --model-repair', shell)
+
+    def test_model_repair_summary_requires_current_receipt_and_every_journey_result(self):
+        names = ("model_stop_get_different", "model_interrupted_get_retry", "model_remaining_fetch")
+        core = ("home_screenshots", "model_package_admission", "carrier_get", "installed_runtime_reply",
+                "model_timing_observer", "process_cleanup", "disk_reserve")
+        failures = (None, "missing", "failed_result", "candidate", "source_tree", "installed_runtime_sha256",
+                    "installed_model_provider_sha256", "source_components_sha256", "installed_engine", *names, *core)
+        for failure in failures:
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                platform = "macos" if sys.platform == "darwin" else "linux"
+                home, data, _, _ = InstalledJourneyTests().fixture(root, platform)
+                evidence = root / "source-home-journeys"
+                evidence.mkdir()
+                journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
+                identities = {"candidate": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+                              "source_tree": subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip(),
+                              "installed_runtime_sha256": journey["digest"](data / "bin/elastos"),
+                              "installed_model_provider_sha256": journey["digest"](data / "bin/model-provider"),
+                              "source_components_sha256": journey["digest"](data / "components.json")}
+                row = {**identities, "installed_engine": journey["engine_receipt"](data),
+                       "elapsed_seconds": 5, "fixture_preparation_seconds": 2,
+                       "results": {name: "passed" for name in core}}
+                if platform == "macos":
+                    timing = InstalledModelTimingTests()
+                    timing.setUp()
+                    row["model_timing"] = {"durations": timing.timing["run_metrics"](*timing.timing_fixture())}
+                for index in range(1, 4 if platform == "macos" else 2):
+                    run = evidence / ("run-" + str(index))
+                    run.mkdir()
+                    (run / "installed-journeys.json").write_text(json.dumps(row))
+                absent = evidence / "engine-absent-home"
+                absent.mkdir()
+                (absent / "installed-journeys.json").write_text(json.dumps({
+                    **identities, "engine_absent": True, "dispatch_unavailable_reason": "source_engine_required",
+                    "process_cleanup": {"before": {"llama_server": 0}},
+                    "results": {name: "passed" for name in ("engine_absent_home", "engine_absent_refusal",
+                                                            "home_screenshots", "process_cleanup", "disk_reserve")}}))
+                repair = {**row, "results": {name: "passed" for name in (*core, *names)}}
+                if failure in identities:
+                    repair[failure] = "stale"
+                elif failure == "failed_result":
+                    repair["results"][names[0]] = "failed"
+                elif failure == "installed_engine":
+                    repair["installed_engine"] = {}
+                elif failure in (*names, *core):
+                    repair["results"].pop(failure)
+                if failure != "missing":
+                    (evidence / "model-repair").mkdir()
+                    (evidence / "model-repair/installed-journeys.json").write_text(json.dumps(repair))
+                environment = {**os.environ, "CI_SOURCE_HOME": str(home), "RUNNER_TEMP": str(root),
+                               "GITHUB_STEP_SUMMARY": str(root / "summary.md"), "CI_MODEL_REPAIR_JOURNEY": "true",
+                               "CI_CARRIER_GET": "false", "CI_FINITE_MEMORY": "false", "PYTHONDONTWRITEBYTECODE": "1"}
+                result = subprocess.run(["/bin/bash", str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.sh"), "summary"],
+                                        env=environment, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode == 0, failure is None, result.stderr)
+                receipt = json.loads((evidence / "core-summary.json").read_text())
+                for name in names:
+                    failed_name = names[0] if failure == "failed_result" else failure
+                    expected = "failed or not run" if failure and (failed_name not in names or failed_name == name) else "passed"
+                    self.assertEqual(receipt["results"][name], expected)
+                self.assertIn("interrupted Get survives Home restart", (root / "summary.md").read_text())
+
     def test_engine_pidfd_binding_rejects_process_reuse_and_closes_descriptor(self):
         journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
         owner = journey["RepairRuntime"].__new__(journey["RepairRuntime"])

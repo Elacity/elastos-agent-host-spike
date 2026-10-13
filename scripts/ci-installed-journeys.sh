@@ -82,6 +82,7 @@ except (OSError, ValueError, AssertionError, KeyError, RuntimeError):
     engine = None
 carrier = os.environ.get("CI_CARRIER_GET") == "true"
 finite = os.environ.get("CI_FINITE_MEMORY") == "true"
+repair = os.environ.get("CI_MODEL_REPAIR_JOURNEY") == "true"
 results = {name: "failed or not run" for name in (
     "home_screenshots", "model_package_admission", *(["carrier_get"] if carrier else []),
     "installed_runtime_reply", "model_timing_observer", "process_cleanup", "disk_reserve")}
@@ -126,6 +127,18 @@ results["engine_absent_home"] = ("passed" if current(absence) and absence.get("e
                                         ("engine_absent_home", "engine_absent_refusal", "home_screenshots", "process_cleanup", "disk_reserve"))
                                 else "failed or not run")
 elapsed += absence.get("elapsed_seconds", 0) + absence.get("fixture_preparation_seconds", 0)
+repair_path = root / "model-repair/installed-journeys.json"
+repair_record = json.loads(repair_path.read_text()) if repair and repair_path.exists() else {}
+if repair:
+    repair_current = (current(repair_record) and engine is not None
+                      and repair_record.get("installed_engine") == engine
+                      and all(repair_record.get("results", {}).get(name) == "passed" for name in
+                              ("home_screenshots", "model_package_admission", "carrier_get", "installed_runtime_reply",
+                               "model_timing_observer", "process_cleanup", "disk_reserve")))
+    for name in ("model_stop_get_different", "model_interrupted_get_retry", "model_remaining_fetch"):
+        results[name] = ("passed" if repair_current and repair_record.get("results", {}).get(name) == "passed"
+                         else "failed or not run")
+    elapsed += repair_record.get("elapsed_seconds", 0) + repair_record.get("fixture_preparation_seconds", 0)
 (root / "core-summary.json").write_text(json.dumps({
     "candidate": commit, "source_tree": tree, "installed_runtime_sha256": sha,
     "results": results, "elapsed_seconds": elapsed, "model_timing_spread": spread,
@@ -133,6 +146,7 @@ elapsed += absence.get("elapsed_seconds", 0) + absence.get("fixture_preparation_
                       + ("; reply package only on a separate holder Home, fetched over Carrier" if carrier else ""),
     "engine_absent_home": absence,
     **({"finite_memory_refusal": memory} if finite else {}),
+    **({"model_repair": repair_record} if repair else {}),
 }, indent=2) + "\n")
 with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
     summary.write(f"### Installed journeys\n\nCandidate: `{commit}`\n\nSource tree: `{tree}`\n\nInstalled Runtime SHA-256: `{sha}`\n\n")
@@ -144,6 +158,8 @@ with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
         summary.write("\nThe reply package lives only in a separate holder Home's Kubo. The consumer Home knows that holder as one Carrier peer and holds no package, so Get reads every piece over Carrier.\n")
     if finite:
         summary.write("\nThe 1 GiB Home admits the signed model, then refuses Assistant Send before engine spawn. The 4 GiB Home proves Busy, Stop, idle closure and engine crash recovery. Runtime and its native children share each finite unit; the browser, holder and observer run outside it. Both units require zero OOM events and confirmed whole-process cleanup.\n")
+    if repair:
+        summary.write("\nA separate production Home proves Stop closes the engine, Get selects a different model and Assistant replies, then interrupted Get survives Home restart. Retry preserves the verified prefix and reads the remaining model bytes over Carrier.\n")
     summary.write("\nThe reply fixture uses the verified source engine prerequisite. Signed-release engine acquisition has separate acceptance evidence. A separate fresh signed-fixture Home proves Get, controlled Use refusal, Retry and Home usability with the optional engine absent.\n")
     summary.write(f"\nTiming receipts: {spread['status']} ({spread['recorded_runs']}/{expected_runs} runs).\n")
     if spread["status"] == "complete":
