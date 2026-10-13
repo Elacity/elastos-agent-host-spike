@@ -1018,15 +1018,18 @@ fn run_internal_guard() -> Result<(), ()> {
     let child_event_tx = event_tx.clone();
     if std::thread::Builder::new()
         .spawn(move || {
-            let event = match engine.wait() {
-                Ok(_) => GuardEvent::ChildExited,
-                Err(_) => GuardEvent::MonitorFailed,
+            let event = loop {
+                match child_exited_without_reaping(engine_pid) {
+                    Ok(true) => break GuardEvent::ChildExited,
+                    Ok(false) => std::thread::sleep(Duration::from_millis(10)),
+                    Err(_) => break GuardEvent::MonitorFailed,
+                }
             };
             let _ = child_event_tx.send(event);
         })
         .is_err()
     {
-        kill_guard_process_group(guard_group);
+        reap_engine_and_kill_guard_group(&mut engine, guard_group);
     }
     if std::thread::Builder::new()
         .spawn(move || {
@@ -1042,7 +1045,7 @@ fn run_internal_guard() -> Result<(), ()> {
         })
         .is_err()
     {
-        kill_guard_process_group(guard_group);
+        reap_engine_and_kill_guard_group(&mut engine, guard_group);
     }
 
     if matches!(event_rx.recv(), Ok(GuardEvent::ParentEof)) {
@@ -1052,7 +1055,19 @@ fn run_internal_guard() -> Result<(), ()> {
             Ok(GuardEvent::ParentEof) => {}
         }
     }
-    kill_guard_process_group(guard_group);
+    reap_engine_and_kill_guard_group(&mut engine, guard_group);
+}
+
+#[cfg(unix)]
+fn reap_engine_and_kill_guard_group(
+    engine: &mut std::process::Child,
+    process_group: libc::pid_t,
+) -> ! {
+    // The monitor leaves the child unreaped, so its PID remains owned through
+    // kill and wait. Reap it before the guard kills itself with the group.
+    let _ = engine.kill();
+    let _ = engine.wait();
+    kill_guard_process_group(process_group);
 }
 
 #[cfg(unix)]
