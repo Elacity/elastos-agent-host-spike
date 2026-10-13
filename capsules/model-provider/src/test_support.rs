@@ -206,7 +206,7 @@ def terminate(_signum, _frame):
 def ignore_termination(_signum, _frame):
     record('term_ignored')
 
-if mode in ('ignore_term', 'timeout_ignore_term'):
+if mode in ('ignore_term', 'timeout_ignore_term', 'stream_then_stall_ignore_term'):
     signal.signal(signal.SIGTERM, ignore_termination)
 else:
     signal.signal(signal.SIGTERM, terminate)
@@ -216,7 +216,7 @@ if mode == 'loader_failure':
     record('loader_failure')
     print('libgomp.so.1: missing loader dependency', file=sys.stderr)
     raise SystemExit(127)
-if mode == 'healthy_with_subtree':
+if mode in ('healthy_with_subtree', 'stream_then_stall_with_subtree'):
     subtree = subprocess.Popen([
         sys.executable,
         '-c',
@@ -305,6 +305,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'text/event-stream')
         self.end_headers()
         if prompt == 'stall':
+            if mode in ('stream_then_stall_with_subtree', 'stream_then_stall_ignore_term'):
+                payload = json.dumps({'choices': [{'delta': {'content': 'first reply'}}]})
+                self.wfile.write(('data: ' + payload + '\n\n').encode('utf-8'))
+                self.wfile.flush()
+                record('stream_delta')
             while True:
                 try:
                     self.wfile.write(b': keepalive\n\n')

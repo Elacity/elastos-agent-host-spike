@@ -30,6 +30,7 @@ pub(crate) struct ConfigRefresh {
     pub(crate) config: BridgeProviderConfig,
     offers: BTreeMap<String, ConfiguredOffer>,
     pub(crate) retire_offer: Option<String>,
+    pub(crate) activation_close_offers: Vec<String>,
     reclaim_history: bool,
 }
 
@@ -339,6 +340,7 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
             ));
         }
         let retire_offer = retired.pop();
+        let mut activation_close_offers = Vec::new();
         if let Some(id) = &retire_offer {
             if offer_has_unresolved_activity(self, id, &extra, retained_workers)? {
                 return Err(ProviderFault::selection_unavailable(
@@ -346,14 +348,29 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
                 ));
             }
         } else if addition {
+            require_retained_run_bindings(&self.journal, &offers)?;
             let mut unresolved = false;
             self.journal.visit_runs(|_, run, _| {
-                unresolved |= !run.status.is_terminal()
-                    || (run.status == RunStatus::SettlementUnknown
-                        && self.offers.contains_key(&run.offer.id));
+                unresolved |= !run.status.is_terminal();
+                if run.status == RunStatus::SettlementUnknown {
+                    if let Some(offer) = self.offers.get(&run.offer.id) {
+                        if retained_local_llama_run(run)
+                            && matches!(offer.adapter, AdapterConfig::LocalLlamaCppText { .. })
+                        {
+                            // Outcome uncertainty belongs to this retained run.
+                            // The serialized owner must close its exact engine
+                            // before activating an independent model.
+                            activation_close_offers.push(offer.id.clone());
+                        } else {
+                            unresolved = true;
+                        }
+                    }
+                }
                 Ok(())
             })?;
-            if (execution_owned && !hosted_additions_only)
+            activation_close_offers.sort();
+            activation_close_offers.dedup();
+            if (execution_owned && !hosted_additions_only && activation_close_offers.is_empty())
                 || !retained_workers.is_empty()
                 || unresolved
             {
@@ -371,6 +388,7 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
             config,
             offers,
             retire_offer,
+            activation_close_offers,
             reclaim_history: extra.owner_reclaim,
         })
     }
@@ -2622,7 +2640,12 @@ mod tests {
                 unresolved.backend_state = Some(running_backend_state());
             }
             state.journal.store_run(&unresolved).unwrap();
-            assert!(state.plan_refresh(proposed.clone(), true, &[]).is_err());
+            if status == RunStatus::Running {
+                assert!(state.plan_refresh(proposed.clone(), true, &[]).is_err());
+            } else {
+                let refresh = state.plan_refresh(proposed.clone(), true, &[]).unwrap();
+                assert_eq!(refresh.activation_close_offers, vec![local.id.clone()]);
+            }
         }
         state.journal.store_run(&run).unwrap();
         let mut new_local = local.clone();
@@ -2852,6 +2875,9 @@ mod tests {
         let mut restored = state.config.clone();
         restored.extra["offers"] = json!([local.clone(), state.offers["operator"].clone()]);
         restored.extra["runtime_admitted_offers"] = json!([{"offer_id": local.id}]);
+        let mut changed_binding = restored.clone();
+        changed_binding.extra["offers"][0]["adapter"]["settings"]["threads"] = json!(2);
+        assert!(state.plan_refresh(changed_binding, false, &[]).is_err());
         let restored_refresh = state.plan_refresh(restored, false, &[]).unwrap();
         assert!(restored_refresh.retire_offer.is_none());
         assert_eq!(*state.adapters.dispatch_calls.lock().unwrap(), 0);
@@ -6138,6 +6164,68 @@ mod tests {
         desired.extra["offers"] = json!([model, offer("another-model")]);
         state.plan_refresh(desired, false, &[]).unwrap();
         assert!(!run_path(&root, &run.run_id).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_unknown_activation_requires_exact_owner_close_and_keeps_history() {
+        let state = retirement_state();
+        let model = state.offers["admitted"].clone();
+        let input = json!({"schema":"elastos.model.input.text/v1","prompt":"old"});
+        let binding = create_binding("unknown-before-other-activation", &model.id, &input);
+        let mut run = prepared_run_for_offer(binding, &model, now_ms());
+        transition_terminal(
+            &model,
+            &mut run,
+            RunStatus::SettlementUnknown,
+            None,
+            Some(RunError {
+                class: ErrorClass::SettlementUnknown,
+                code: "settlement_unknown".into(),
+                message: "Unknown".into(),
+            }),
+        )
+        .unwrap();
+        state.journal.store_run(&run).unwrap();
+        let path = run_path(&state.config.base_path, &run.run_id);
+        let saved = std::fs::read(&path).unwrap();
+        let mut different = model.clone();
+        different.id = "different-model".into();
+        let mut desired = state.config.clone();
+        desired.extra["offers"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(different.clone()));
+        desired.extra["runtime_admitted_offers"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"offer_id":different.id}));
+        for execution_owned in [false, true] {
+            let refresh = state
+                .plan_refresh(desired.clone(), execution_owned, &[])
+                .unwrap();
+            assert_eq!(refresh.activation_close_offers, vec![model.id.clone()]);
+            assert!(state
+                .plan_refresh(desired.clone(), execution_owned, &[run.run_id.clone()])
+                .is_err());
+            assert!(state
+                .plan_refresh(desired.clone(), execution_owned, &["unbound-worker".into()])
+                .is_err());
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
+        assert_eq!(
+            state.journal.load_run(&run.run_id).unwrap().status,
+            RunStatus::SettlementUnknown
+        );
+        let mut active = prepared_run_for_offer(
+            create_binding("live-before-other-activation", &model.id, &input),
+            &model,
+            now_ms(),
+        );
+        active.status = RunStatus::Running;
+        active.backend_state = Some(serialize_local_text_backend_state(false).unwrap());
+        state.journal.store_run(&active).unwrap();
+        assert!(state.plan_refresh(desired, false, &[]).is_err());
     }
 
     #[cfg(unix)]

@@ -211,8 +211,26 @@ impl ProviderCoordinator {
                                 )
                             })?;
                     }
+                    for id in &refresh.activation_close_offers {
+                        provider
+                            .adapters()
+                            .close_local_model_offer(id)
+                            .await
+                            .map_err(|_| {
+                                ProviderFault::selection_unavailable(
+                                    "model activation closure unconfirmed",
+                                )
+                            })?;
+                    }
                     let execution_owned = provider.adapters().retains_execution().await;
                     let workers = provider.adapters().retained_worker_ids();
+                    if !refresh.activation_close_offers.is_empty()
+                        && (execution_owned || !workers.is_empty())
+                    {
+                        return Err(ProviderFault::selection_unavailable(
+                            "model activation pending",
+                        ));
+                    }
                     provider.confirm_history_recovery(&refresh, execution_owned, &workers)?;
                     provider
                         .adapters()
@@ -3703,6 +3721,77 @@ mod tests {
                 before_events,
                 "a retained uncertain Stop never launches or sends inference again"
             );
+            let (mut different, other_events, _) =
+                local_llama_offer(&format!("{root}/different-model"), "healthy");
+            different.id = "different-model".into();
+            let refused = coordinator
+                .route_request(init_request(&root, vec![offer.clone(), different.clone()]))
+                .await
+                .unwrap_err();
+            assert_eq!(refused.code(), "selection_unavailable");
+            assert_eq!(std::fs::read(&run_path).unwrap(), saved);
+            // The worker owns a real completed close even though this fixture
+            // retained an Unknown outcome. Its exit must arrive before another
+            // model activates; that old outcome and replay barrier stay exact.
+            while !coordinator
+                .provider
+                .as_ref()
+                .unwrap()
+                .adapters()
+                .retained_worker_ids()
+                .is_empty()
+            {
+                let update =
+                    tokio::time::timeout(FIXTURE_EVENT_TIMEOUT, coordinator.updates.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                coordinator.handle_update(update).await;
+            }
+            coordinator
+                .route_request(init_request(&root, vec![offer.clone(), different.clone()]))
+                .await
+                .unwrap();
+            let other_input = text_input("after unknown stop");
+            let other_binding =
+                create_binding("request:other-after-unknown-stop", &different, &other_input);
+            let created = coordinator.route_request(ProviderEnvelope {
+                operation: ProviderOperation::RunsCreate,
+                value: json!({"op":"runs_create","offer_id":different.id,"operation":different.operation,
+                    "input":other_input,"runtime_binding":other_binding}),
+            }).await.unwrap();
+            while !coordinator
+                .provider
+                .as_ref()
+                .unwrap()
+                .adapters()
+                .retained_worker_ids()
+                .is_empty()
+            {
+                let update =
+                    tokio::time::timeout(FIXTURE_EVENT_TIMEOUT, coordinator.updates.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                coordinator.handle_update(update).await;
+            }
+            let completed = coordinator
+                .route_request(get_run_envelope(
+                    created["data"]["run_id"].as_str().unwrap(),
+                    &access_binding(&other_binding),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(completed["data"]["status"], "completed");
+            assert_eq!(
+                completed["data"]["terminal"]["output"]["text"],
+                "reply:after unknown stop"
+            );
+            assert_eq!(std::fs::read(&run_path).unwrap(), saved);
+            assert_eq!(fake_llama_events(&events), before_events);
+            assert!(fake_llama_events(&other_events)
+                .iter()
+                .any(|line| line == "request:after unknown stop"));
         }
         coordinator.shutdown().await;
     }
