@@ -1352,6 +1352,7 @@ impl ProviderRegistry {
                 .await
                 .map_err(|_| unavailable())?
                 .map_err(|error| {
+                    tracing::info!("local model activation request failed");
                     tracing::debug!(?error, "private model activation failed");
                     unavailable()
                 })?;
@@ -1359,6 +1360,12 @@ impl ProviderRegistry {
         if response["status"] != "ok" {
             let code = response["code"].as_str().unwrap_or("");
             let message = response["message"].as_str().unwrap_or("");
+            let reason = match message {
+                "model activation pending" => "model activation pending",
+                "model activation closure unconfirmed" => "model activation closure unconfirmed",
+                _ => "model activation refused",
+            };
+            tracing::info!(reason, "local model activation refused");
             let detail = [code, message]
                 .into_iter()
                 .filter(|part| !part.is_empty())

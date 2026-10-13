@@ -1579,21 +1579,19 @@ impl PreparationOwner {
             )
             .await
             {
-                let _ = update_operation(&data, &operation, |record| {
+                let phase = match error.downcast_ref::<PreparationBudgetRefusal>() {
+                    Some(PreparationBudgetRefusal::Cache) => PreparationFailurePhase::CacheBudget,
+                    Some(PreparationBudgetRefusal::Memory) => PreparationFailurePhase::MemoryBudget,
+                    None => PreparationFailurePhase::Activation,
+                };
+                let recorded = update_operation(&data, &operation, |record| {
                     if record.state == PreparationState::Admitted && record.activation_pending {
-                        record.failure_phase =
-                            Some(match error.downcast_ref::<PreparationBudgetRefusal>() {
-                                Some(PreparationBudgetRefusal::Cache) => {
-                                    PreparationFailurePhase::CacheBudget
-                                }
-                                Some(PreparationBudgetRefusal::Memory) => {
-                                    PreparationFailurePhase::MemoryBudget
-                                }
-                                None => PreparationFailurePhase::Activation,
-                            });
+                        record.failure_phase = Some(phase);
                     }
-                });
-                tracing::debug!(?error, "private model activation pending");
+                })
+                .is_ok();
+                tracing::info!(operation_id = %operation, reason = phase.public_class(), recorded,
+                    "private model activation pending");
             }
             drop(worker_lock);
         }));
@@ -2613,6 +2611,12 @@ async fn prepare(
     // package. Progress and capacity then start from the bytes on disk.
     let resumed = resume_kept_stage(data_dir, id, &entry, &closure, stop, revalidate).await?;
     let record = require_active(data_dir, id, stop, revalidate)?;
+    let resuming = resumed.is_some();
+    let resumed_bytes = record.completed_bytes;
+    if resuming {
+        tracing::info!(operation_id = %id, completed_bytes = resumed_bytes,
+            "private model preparation resumed");
+    }
     let backend_volume = require_capacity(data_dir, registry, &record).await?;
     require_active(data_dir, id, stop, revalidate)?;
     // One route per package: after a local miss, later parts skip the local backend.
@@ -2663,6 +2667,15 @@ async fn prepare(
     // authority remain per read; the outstanding charge is not an OS reservation.
     let mut window_bytes = load_operation(data_dir, id)?.index_bytes;
     let resume_offset = partial.as_ref().map_or(0, |(_, _, offset)| *offset);
+    let weights_start = if closure
+        .files
+        .get(complete)
+        .is_some_and(|file| file.path == entry.manifest.entrypoint)
+    {
+        resume_offset
+    } else {
+        0
+    };
     // Parts of every file in package order; the in-flight window runs across
     // file boundaries so small files do not each pay a lone round trip.
     let mut parts = closure
@@ -2715,6 +2728,9 @@ async fn prepare(
                 }
                 window_bytes += length;
                 let (checks, reads, cid, delivered) = (&checks, &reads, &entry.cid, requested);
+                let first_remaining_weights = resuming
+                    && part_file.path == entry.manifest.entrypoint
+                    && part_offset == weights_start;
                 in_flight.push_back(InFlightPart {
                     length,
                     read: Box::pin(async move {
@@ -2729,6 +2745,11 @@ async fn prepare(
                             backend_check,
                         )
                         .await?;
+                        if first_remaining_weights {
+                            tracing::info!(operation_id = %id, completed_bytes = resumed_bytes,
+                                weights_offset = part_offset,
+                                "private model preparation remaining weights read");
+                        }
                         // A repeat keeps this part's slot, so the window stays bounded.
                         let mut backoff = MODEL_PART_RETRY_BACKOFF.iter();
                         loop {
@@ -12576,6 +12597,20 @@ server.serve_forever()
             .set_len(resumed_at + 1000)
             .unwrap();
         drop(owner);
+        let mut config = crate::api::model_provider_bridge_config(fixture.root.path()).unwrap();
+        drop(
+            append_admitted_model_startup_offers(
+                fixture.root.path(),
+                &fixture.registry,
+                &mut config,
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(
+            std::fs::metadata(&weights).unwrap().len(),
+            resumed_at + 1000
+        );
         // After the restart, status reconciles: the stage stays for the next Use.
         let owner = test_owner();
         fixture.invoke_fixture(
@@ -12599,6 +12634,74 @@ server.serve_forever()
             fixture.part_reads() - parts,
             fixture.parts_after(resumed_at),
             "reads resume at the last whole part on disk"
+        );
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn model_preparation_resumes_after_home_owner_stops_and_startup_keeps_stage() {
+        let fixture = SlowHolderPreparation::start(
+            127,
+            crate::carrier::tests::HolderBehavior {
+                delay: std::time::Duration::from_millis(30),
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .await;
+        let owner = test_owner();
+        let reply = fixture.invoke_fixture(
+            &owner,
+            "use",
+            "before-home-stop",
+            serde_json::json!({"cid": fixture.cid}),
+        );
+        let id = reply["operation_id"].as_str().unwrap().to_owned();
+        let weights = fixture.stage().join("weights.gguf");
+        for _ in 0..1000 {
+            if std::fs::metadata(&weights).is_ok_and(|meta| meta.len() >= 8 * 65536) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        // Normal Home shutdown lets its worker observe stopping and drain.
+        let task = owner.worker.lock().unwrap().take().unwrap();
+        drop(owner);
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("Home preparation worker drains after its owner stops")
+            .unwrap();
+        let stopped = load_operation(fixture.root.path(), &id).unwrap();
+        assert_eq!(stopped.state, PreparationState::Failed, "{stopped:?}");
+        assert_eq!(
+            stopped.projection()["failure_class"],
+            "download_interrupted"
+        );
+        assert_eq!(fixture.kept_stage(), Some(id));
+        let kept = std::fs::read(&weights).unwrap();
+        assert!(kept.len() >= 8 * 65536 && kept.len() < fixture.files["weights.gguf"].len());
+        let mut config = crate::api::model_provider_bridge_config(fixture.root.path()).unwrap();
+        drop(
+            append_admitted_model_startup_offers(
+                fixture.root.path(),
+                &fixture.registry,
+                &mut config,
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(std::fs::read(&weights).unwrap(), kept);
+        let (parts, index) = (fixture.part_reads(), fixture.index_reads());
+        let (record, _) = fixture.prepare("after-home-restart").await;
+        fixture.assert_admitted(&record);
+        assert_eq!(
+            fixture.part_reads() - parts,
+            fixture.parts_after(kept.len() as u64)
+        );
+        assert_eq!(
+            fixture.index_reads(),
+            index,
+            "startup preserves the signed index"
         );
         fixture.shutdown().await;
     }
