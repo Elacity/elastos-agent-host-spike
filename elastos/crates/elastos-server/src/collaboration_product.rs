@@ -220,8 +220,7 @@ impl CollaborationChatProductPort {
                 local_session_token,
             },
         )?;
-        self.core
-            .retain_history_message(&prepared.envelope_bytes, now_secs())?;
+        self.retain_projected_history(&prepared.envelope_bytes, prepared.issued_at)?;
         self.core
             .acknowledge_outgoing_product_projection(&prepared.envelope_sha256)?;
         Ok(object)
@@ -243,11 +242,21 @@ impl CollaborationChatProductPort {
             handoff.issued_at,
             CollaborationTextOrigin::Incoming,
         )?;
-        self.core
-            .retain_history_message(&handoff.envelope_bytes, now_secs())?;
+        self.retain_projected_history(&handoff.envelope_bytes, handoff.issued_at)?;
         self.core
             .acknowledge_product_handoff(&handoff.envelope_sha256)?;
         Ok(object)
+    }
+
+    fn retain_projected_history(&self, envelope: &[u8], issued_at: u64) -> anyhow::Result<()> {
+        let now = now_secs();
+        // Room retains the verified local obligation after catch-up retention ends.
+        if issued_at.saturating_add(crate::collaboration_core::CONVERSATION_HISTORY_RETENTION_SECS)
+            > now
+        {
+            self.core.retain_history_message(envelope, now)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn history_scope(&self) -> (&str, &str) {
@@ -1468,6 +1477,134 @@ mod tests {
             assert_eq!(reopened.objects[1].seq, received.seq);
             assert_eq!(reopened.objects[1].delivery_state, None);
             assert!(read_objects()[1]["delivery_state"].is_null());
+        }
+    }
+
+    #[test]
+    fn community_delivery_delayed_restart_preserves_unprojected_terminal_message() {
+        use crate::room_service::CommunityDeliveryState::Expired;
+        let skew = elastos_common::collaboration_protocol::MAX_COLLABORATION_CLOCK_SKEW_SECS;
+        for age in [
+            CHAT_MESSAGE_TTL_SECS + skew + 1,
+            crate::collaboration_core::CONVERSATION_HISTORY_RETENTION_SECS + skew + 1,
+        ] {
+            let fixture = fixture();
+            let now = now_secs();
+            let prepared = fixture
+                .port
+                .prepare_message(
+                    binding(&fixture, "delayed-own", "delayed original"),
+                    "delayed original",
+                    &fixture.person_profile,
+                    now - age,
+                )
+                .unwrap();
+            let (remote, remote_profile) = remote_authority(&fixture);
+            let incoming = remote
+                .prepare_profile_outgoing(
+                    &remote_profile,
+                    CHAT_SERVICE,
+                    CHAT_PAYLOAD_TYPE,
+                    serde_json::json!({"body":"delayed incoming"}),
+                    now - age,
+                    CHAT_MESSAGE_TTL_SECS,
+                )
+                .unwrap();
+            fixture
+                .core
+                .accept_incoming_from_signed_source_for_test(
+                    incoming.envelope_bytes(),
+                    now - age + 1,
+                )
+                .unwrap();
+            // Runtime stopped before local projection and restarts after wire expiry.
+            let reopen = || {
+                CollaborationChatProductPort::new(Arc::new(
+                    CollaborationCore::new(
+                        &fixture.data_root,
+                        fixture.device_key.clone(),
+                        fixture.profile.clone(),
+                        fixture.grant.clone(),
+                        CHAT_ROOM_CAPSULE,
+                    )
+                    .unwrap(),
+                ))
+                .unwrap()
+            };
+            let recovered = reopen();
+            let later = now + 1;
+            // A new send attempts pruning before the recovery worker projects.
+            recovered
+                .prepare_message(
+                    binding(&fixture, "delayed-next", "next intent"),
+                    "next intent",
+                    &fixture.person_profile,
+                    later,
+                )
+                .unwrap();
+            let pending = recovered.pending_outgoing_messages(later).unwrap();
+            let original = pending
+                .iter()
+                .find(|message| message.envelope_sha256 == prepared.envelope_sha256)
+                .unwrap();
+            assert_eq!(original.envelope_bytes, prepared.envelope_bytes);
+            assert!(recovered
+                .core
+                .pending_outgoing(later)
+                .unwrap()
+                .iter()
+                .all(|message| message.envelope_sha256() != prepared.envelope_sha256));
+            let own = recovered
+                .project_prepared_message(&fixture.data_root, original, None)
+                .unwrap();
+            let handoffs = recovered.pending_messages().unwrap();
+            assert_eq!(handoffs.len(), 1);
+            let received = recovered
+                .project_handoff(&fixture.data_root, &handoffs[0])
+                .unwrap();
+            assert!(recovered.pending_messages().unwrap().is_empty());
+            recovered
+                .prepare_message(
+                    binding(&fixture, "delayed-after-projection", "after projection"),
+                    "after projection",
+                    &fixture.person_profile,
+                    later + 1,
+                )
+                .unwrap();
+            assert!(recovered
+                .core
+                .outgoing_chat_delivery(&fixture.person_profile.document().profile_did)
+                .unwrap()
+                .iter()
+                .all(|message| message.envelope_sha256 != prepared.envelope_sha256));
+            // Chat stayed closed during recovery and pruning; a second restart reads it.
+            let restarted = reopen();
+            let session = crate::room_service::start_local_runtime_session(
+                &fixture.data_root,
+                &fixture.person_profile.document().profile_did,
+                "Local",
+                "Delayed recovery test",
+            )
+            .unwrap();
+            let poll = restarted
+                .conversation_poll_with_read_intent(
+                    &fixture.data_root,
+                    &session.token,
+                    0,
+                    &fixture.person_profile,
+                    false,
+                    later + 1,
+                )
+                .unwrap();
+            assert_eq!(poll.objects.len(), 2);
+            assert_eq!(poll.objects[0].seq, own.seq);
+            assert_eq!(poll.objects[0].body.as_deref(), Some("delayed original"));
+            assert_eq!(poll.objects[1].seq, received.seq);
+            assert_eq!(poll.objects[1].body.as_deref(), Some("delayed incoming"));
+            assert_eq!(poll.objects[1].delivery_state, None);
+            assert_eq!(poll.own_delivery.len(), 1);
+            assert_eq!(poll.own_delivery[0].seq, own.seq);
+            assert_eq!(poll.own_delivery[0].state, Expired);
         }
     }
 

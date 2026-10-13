@@ -1375,9 +1375,8 @@ impl CollaborationCore {
             })
             .filter_map(|entry| match self.verify_outgoing_record(entry) {
                 Ok(verified)
-                    if verified.envelope().payload.expires_at > now
-                        && verified.envelope().payload.created_at
-                            <= now.saturating_add(MAX_COLLABORATION_CLOCK_SKEW_SECS) =>
+                    if verified.envelope().payload.created_at
+                        <= now.saturating_add(MAX_COLLABORATION_CLOCK_SKEW_SECS) =>
                 {
                     Some(Ok(PendingOutgoingProductProjection {
                         outgoing: self.outgoing_handle(entry, verified),
@@ -2737,7 +2736,11 @@ fn prune_terminal_state(state: &mut CoreState, now: u64) -> anyhow::Result<bool>
     let mut retained_outgoing = Vec::with_capacity(state.outgoing.len());
     for entry in state.outgoing.drain(..) {
         let expires_at = stored_message_expiry(&entry.envelope)?;
-        if expires_at.saturating_add(MAX_COLLABORATION_CLOCK_SKEW_SECS) >= now {
+        // Transport expiry cannot discard a saved intent before its consumer
+        // records the local projection or acknowledges an expired Presence.
+        if entry.local_product_projection == OutgoingProductProjectionState::Pending
+            || expires_at.saturating_add(MAX_COLLABORATION_CLOCK_SKEW_SECS) >= now
+        {
             retained_outgoing.push(entry);
         }
     }
@@ -6316,8 +6319,9 @@ mod tests {
         let mut core = fixture.core();
         // This test fills the outbox in one second; pacing has its own test.
         core.sends_per_window = usize::MAX;
+        let mut originals = Vec::new();
         for index in 0..MAX_UNRESOLVED_OUTGOING {
-            prepare(
+            let original = prepare(
                 &core,
                 &format!("offline-{index}"),
                 serde_json::json!({"body":format!("message {index}")}),
@@ -6325,6 +6329,7 @@ mod tests {
                 1,
             )
             .unwrap();
+            originals.push(original);
         }
         assert_eq!(
             core.pending_outgoing_product_projections(NOW)
@@ -6354,8 +6359,36 @@ mod tests {
         .unwrap_err()
         .to_string()
         .contains("capacity"));
+        let restarted = fixture.core();
+        let recovery = restarted
+            .pending_outgoing_product_projections(prune_now + 1)
+            .unwrap();
+        assert_eq!(recovery.len(), originals.len());
+        for (pending, original) in recovery.iter().zip(&originals) {
+            assert_eq!(
+                pending.outgoing().envelope_bytes(),
+                original.envelope_bytes()
+            );
+        }
+        assert!(restarted
+            .pending_outgoing(prune_now + 1)
+            .unwrap()
+            .is_empty());
+        assert!(prepare(
+            &restarted,
+            "offline-still-needs-projection",
+            serde_json::json!({"body":"cannot discard pending intents"}),
+            prune_now + 1,
+            TTL,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("capacity"));
+        for original in &originals {
+            complete_projection(&restarted, original);
+        }
         let admitted = prepare(
-            &core,
+            &restarted,
             "offline-after-retention",
             serde_json::json!({"body":"admitted"}),
             prune_now + 1,
@@ -6363,7 +6396,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            core.pending_outgoing_product_projections(prune_now + 1)
+            restarted
+                .pending_outgoing_product_projections(prune_now + 1)
                 .unwrap()
                 .len(),
             1
@@ -6377,6 +6411,76 @@ mod tests {
                 .envelope_bytes(),
             admitted.envelope_bytes()
         );
+    }
+
+    #[test]
+    fn expired_pending_presence_is_acknowledged_before_terminal_pruning() {
+        let fixture = Fixture::new();
+        let core = Arc::new(fixture.core());
+        let profile = core.authority.sender_profile_for_test().unwrap();
+        let port =
+            crate::collaboration_presence::CollaborationPresenceProductPort::new(core).unwrap();
+        let original = port
+            .prepare_presence(
+                crate::collaboration_presence::presence_request_binding(
+                    "expired-presence-recovery",
+                    "runtime-principal",
+                    &profile,
+                )
+                .unwrap(),
+                &profile,
+                NOW,
+            )
+            .unwrap();
+        let after_expiry = original.expires_at() + MAX_COLLABORATION_CLOCK_SKEW_SECS + 1;
+        let restarted = Arc::new(fixture.core());
+        restarted
+            .with_mutation(Some(after_expiry), |_| {
+                Ok(Mutation {
+                    value: (),
+                    changed: false,
+                })
+            })
+            .unwrap();
+        assert!(restarted.pending_outgoing(after_expiry).unwrap().is_empty());
+        let restarted_port =
+            crate::collaboration_presence::CollaborationPresenceProductPort::new(restarted.clone())
+                .unwrap();
+        let pending = restarted_port
+            .pending_outgoing_presences(after_expiry)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].envelope_sha256(), original.envelope_sha256());
+        assert_eq!(
+            restarted_port
+                .project_prepared_presence(&pending[0], after_expiry)
+                .unwrap(),
+            crate::collaboration_presence::CollaborationPresenceProjectionOutcome::Expired,
+        );
+        assert!(restarted_port
+            .snapshot(after_expiry)
+            .unwrap()
+            .records()
+            .is_empty());
+        assert!(restarted
+            .pending_outgoing_product_projections(after_expiry)
+            .unwrap()
+            .is_empty());
+        restarted
+            .with_mutation(Some(after_expiry), |_| {
+                Ok(Mutation {
+                    value: (),
+                    changed: false,
+                })
+            })
+            .unwrap();
+        assert!(fixture
+            .core()
+            .load_state()
+            .unwrap()
+            .unwrap()
+            .outgoing
+            .is_empty());
     }
 
     #[test]
