@@ -208,7 +208,13 @@ impl Publication {
                 .and_then(|name| name.strip_suffix(".json"))
             {
                 let manifest = serde_json::from_value(component.clone())?;
-                crate::setup::admit_release_components(&manifest, platform)?;
+                // The publishing Runtime is the newest; it knows every kind it ships.
+                let unknown = crate::setup::admit_release_components(&manifest, platform)?;
+                ensure!(
+                    unknown.is_empty(),
+                    "component(s) {} have a development or unsupported release strategy",
+                    unknown.join(", ")
+                );
             }
             component_refs(&component, &artifact_directory, &names, &mut artifacts)?;
             if let Some(catalog) = component.get("model_catalog") {

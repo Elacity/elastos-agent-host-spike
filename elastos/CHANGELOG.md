@@ -6,8 +6,31 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Changed
+
+- From this release on, it does not matter which releases a Home skipped. When
+  a newer release brings a kind of component this version does not know, Update
+  still installs it, and the new version installs that component itself when
+  Home starts. If an update cannot be applied from this version at all, System
+  and `elastos update` say that the install command is needed once and show it,
+  instead of saying the publisher's release is not valid.
+
 ### Developer detail
 
+- `admit_release_components` returns the components of a kind this Runtime
+  does not know; the update neither fetches nor installs them, prints them and
+  records them in `deferred-support.json`, and every Home start (and every
+  repair) runs the new release's own repair, which installs them and removes
+  the file. Release publication still refuses such kinds. A signed components
+  manifest this Runtime cannot read is `InstallerRequired`: System's status and
+  `elastos update` print `curl -fsSL <publisher gateway>/install.sh | bash`.
+- `scripts/update-hop-oldest-release.json` pins 0.8.0-alpha.15, the oldest
+  release that still updates in System (alpha.13 and alpha.14 Homes run
+  install.sh once). `update-hop-compare.py check-oldest-start`, run by its test
+  in the source gate, refuses a `components.json` that release's updater cannot
+  read or install; while both pins name one release the update journey covers
+  that start in full. `scripts/release-publish.sh prepare` refuses a source
+  without the pin.
 - `scripts/release-publish.sh seed` and `seed-upgrade` require `RELEASE_SEED_DATA`
   to end in `/elastos` and export `XDG_DATA_HOME` as its parent, because the
   Runtime reads `$XDG_DATA_HOME/elastos`; the seed script checks the saved
