@@ -49,6 +49,7 @@ import {
   restoreExtraDesktops,
   restoreSpaceOrder,
   setActiveStage,
+  syncStagePresentation,
   toggleFullscreenStage,
   windowVisibleOnActiveSpace,
 } from "./shell-stages.js?v=home-20260813a";
@@ -2426,8 +2427,10 @@ function restoreSessionSpaces(storedSession, restoredEntries) {
   ).map((key) => resolveStableSpaceKey(key, restoredEntries));
   restoreSpaceOrder(remappedOrder);
   /* Restoration awaits each window's launch, so the person may have opened
-     the Assistant meanwhile; switching Space now would close that room. */
+     the Assistant meanwhile; switching Space now would close that room. Keep
+     the current Space but place the restored windows on it. */
   if (agentSpaceEngaged()) {
+    syncStagePresentation();
     return;
   }
   const savedStageKey =
