@@ -52,6 +52,7 @@ const MAX_PENDING_INCOMING: usize = 32;
 pub(crate) const MAX_PENDING_INCOMING_PER_SENDER: usize = 8;
 const MAX_ACCEPTANCE_RECEIPTS_PER_OUTGOING: usize = 32;
 const MAX_INCOMING_RECORDS_AND_TOMBSTONES: usize = 4_096;
+type IncomingIdentityIndex = HashMap<(String, String), String>;
 const MAX_VERIFICATION_CACHE_ENTRIES: usize = MAX_OUTGOING_RECORDS
     * MAX_ACCEPTANCE_RECEIPTS_PER_OUTGOING
     + MAX_INCOMING_RECORDS_AND_TOMBSTONES
@@ -80,7 +81,11 @@ pub(crate) struct CollaborationCore {
     #[cfg(test)]
     verification_misses: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
+    directory_syncs: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
     write_fault: std::sync::atomic::AtomicU8,
+    #[cfg(test)]
+    history_write_fault: std::sync::atomic::AtomicU8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,6 +274,8 @@ struct ConversationHistoryState {
     envelopes: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     retired_envelope_hashes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pending_projection_hashes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -400,6 +407,7 @@ pub(crate) enum WriteFault {
     BeforeWrite = 1,
     AfterFileSync = 2,
     AfterRename = 3,
+    BeforeAncestorSync = 4,
 }
 
 impl CollaborationCore {
@@ -443,7 +451,11 @@ impl CollaborationCore {
             #[cfg(test)]
             verification_misses: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
+            directory_syncs: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
             write_fault: std::sync::atomic::AtomicU8::new(0),
+            #[cfg(test)]
+            history_write_fault: std::sync::atomic::AtomicU8::new(0),
         })
     }
 
@@ -520,7 +532,36 @@ impl CollaborationCore {
         state: &CoreState,
         message: &VerifiedCollaborationMessage,
     ) -> anyhow::Result<bool> {
-        incoming_identity_conflicts(state, message, |bytes| self.verify_receipt_envelope(bytes))
+        if incoming_identity_conflicts(state, message, |bytes| self.verify_receipt_envelope(bytes))?
+        {
+            return Ok(true);
+        }
+        // History and live admission share the Core writer lock. Use the raw
+        // reader here because this check also runs inside with_mutation.
+        let (history, _) = self.load_history_raw()?;
+        self.history_identity_conflicts(history.as_ref(), message)
+    }
+
+    fn history_identity_conflicts(
+        &self,
+        history: Option<&ConversationHistoryState>,
+        candidate: &VerifiedCollaborationMessage,
+    ) -> anyhow::Result<bool> {
+        let Some(history) = history else {
+            return Ok(false);
+        };
+        let payload = &candidate.envelope().payload;
+        for original in &history.envelopes {
+            let authorized = self.authorize_stored_product_message(original.as_bytes())?;
+            let stored = &authorized.message().envelope().payload;
+            if stored.sender_profile_did == payload.sender_profile_did
+                && (stored.message_id == payload.message_id || stored.nonce == payload.nonce)
+                && authorized.message().envelope_sha256() != candidate.envelope_sha256()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn reject_incoming_conflicts(
@@ -624,9 +665,9 @@ impl CollaborationCore {
             .envelopes
             .iter()
             .filter(|envelope| {
-                !state
-                    .retired_envelope_hashes
-                    .contains(&collaboration_message_envelope_sha256(envelope.as_bytes()))
+                let hash = collaboration_message_envelope_sha256(envelope.as_bytes());
+                !state.retired_envelope_hashes.contains(&hash)
+                    && !state.pending_projection_hashes.contains(&hash)
             })
             .filter_map(|envelope| {
                 let authorized = self.authorize_stored_product_message(envelope.as_bytes());
@@ -654,37 +695,159 @@ impl CollaborationCore {
 
     /// Return only newly retained originals in the same age/count/byte window.
     /// An older peer cache cannot repeatedly reinsert rows the product evicted.
+    #[cfg(test)]
     pub(crate) fn history_projection_candidates(
         &self,
         envelopes: &[Vec<u8>],
         now: u64,
     ) -> anyhow::Result<Vec<Vec<u8>>> {
-        if envelopes.len() > MAX_CONVERSATION_HISTORY_MESSAGES {
-            anyhow::bail!("collaboration history batch exceeds its message bound");
-        }
-        for envelope in envelopes {
-            crate::collaboration_product::validate_chat_projection(
-                &self.authorize_stored_product_message(envelope)?,
+        self.with_mutation(None, |live| {
+            let (history, repaired) = self.load_history_raw()?;
+            let history = history.unwrap_or_else(|| self.empty_history());
+            if repaired {
+                self.write_history(&history)?;
+            }
+            let (_, value) = self.history_projection_state(live, history, envelopes, now)?;
+            Ok(Mutation {
+                value,
+                changed: false,
+            })
+        })
+    }
+
+    /// Product publishes only these candidates while the same Core writer lock
+    /// protects their history identities. The callback may use Room, not Core.
+    pub(crate) fn with_history_projection<T>(
+        &self,
+        envelopes: &[Vec<u8>],
+        now: u64,
+        project: impl FnOnce(&[Vec<u8>]) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        self.with_mutation(None, |live| {
+            let (history, repaired) = self.load_history_raw()?;
+            let history = history.unwrap_or_else(|| self.empty_history());
+            if repaired {
+                self.write_history(&history)?;
+            }
+            let before = canonical_history_bytes(&history)?;
+            let (mut history, candidates) =
+                self.history_projection_state(live, history, envelopes, now)?;
+            // Reserve signed identity before any Room row can become visible.
+            // Rewriting an existing pending reservation also proves publication
+            // after an earlier indeterminate rename/directory-sync failure.
+            if !candidates.is_empty() || canonical_history_bytes(&history)? != before {
+                self.write_history(&history)?;
+            }
+            let value = project(&candidates)?;
+            if !candidates.is_empty() {
+                let completed = candidates
+                    .iter()
+                    .map(|original| collaboration_message_envelope_sha256(original))
+                    .collect::<HashSet<_>>();
+                history
+                    .pending_projection_hashes
+                    .retain(|hash| !completed.contains(hash));
+                self.write_history(&history)?;
+            }
+            Ok(Mutation {
+                value,
+                changed: false,
+            })
+        })
+    }
+
+    /// Retry verified reserved originals locally, within the unchanged history
+    /// age/count/byte window, even when the sending peer is unavailable.
+    pub(crate) fn pending_history_projection(&self, now: u64) -> anyhow::Result<Vec<Vec<u8>>> {
+        self.with_mutation(None, |_| {
+            let (history, repaired) = self.load_history_raw()?;
+            let mut history = history.unwrap_or_else(|| self.empty_history());
+            let before = canonical_history_bytes(&history)?;
+            prune_history(&mut history, now)?;
+            if repaired || canonical_history_bytes(&history)? != before {
+                self.write_history(&history)?;
+            }
+            let value = history
+                .envelopes
+                .iter()
+                .filter(|original| {
+                    history
+                        .pending_projection_hashes
+                        .contains(&collaboration_message_envelope_sha256(original.as_bytes()))
+                })
+                .map(|original| original.as_bytes().to_vec())
+                .collect();
+            Ok(Mutation {
+                value,
+                changed: false,
+            })
+        })
+    }
+
+    fn history_projection_state(
+        &self,
+        live: &CoreState,
+        mut history: ConversationHistoryState,
+        envelopes: &[Vec<u8>],
+        now: u64,
+    ) -> anyhow::Result<(ConversationHistoryState, Vec<Vec<u8>>)> {
+        anyhow::ensure!(
+            envelopes.len() <= MAX_CONVERSATION_HISTORY_MESSAGES,
+            "collaboration history batch exceeds its message bound"
+        );
+        let (live_ids, live_nonces) = self.live_history_identities(live)?;
+        let mut ids = HashMap::new();
+        let mut nonces = HashMap::new();
+        let mut known = HashSet::new();
+        for envelope in &history.envelopes {
+            let original = self.authorize_stored_product_message(envelope.as_bytes())?;
+            let message = original.message();
+            known.insert(message.envelope_sha256().to_string());
+            insert_incoming_identity(
+                &mut ids,
+                &mut nonces,
+                &message.envelope().payload,
+                message.envelope_sha256(),
             )?;
         }
-        self.validate_history_live_identities(envelopes)?;
-        let mut state = self.load_history()?.unwrap_or_else(|| self.empty_history());
-        let known = state
+        let prior = known.clone();
+        let mut eligible = HashSet::new();
+        for envelope in envelopes {
+            let authorized = self.authorize_stored_product_message(envelope)?;
+            crate::collaboration_product::validate_chat_projection(&authorized)?;
+            let message = authorized.message();
+            if identity_index_conflicts(&live_ids, &live_nonces, message)
+                || identity_index_conflicts(&ids, &nonces, message)
+            {
+                continue;
+            }
+            eligible.insert(message.envelope_sha256().to_string());
+            if known.insert(message.envelope_sha256().to_string()) {
+                insert_incoming_identity(
+                    &mut ids,
+                    &mut nonces,
+                    &message.envelope().payload,
+                    message.envelope_sha256(),
+                )?;
+                history.envelopes.push(String::from_utf8(envelope.clone())?);
+                history
+                    .pending_projection_hashes
+                    .push(message.envelope_sha256().to_string());
+            }
+        }
+        prune_history(&mut history, now)?;
+        self.validate_history(&history)?;
+        let candidates = history
             .envelopes
             .iter()
-            .map(|entry| collaboration_message_envelope_sha256(entry.as_bytes()))
-            .collect::<HashSet<_>>();
-        append_history_envelopes(&mut state, envelopes)?;
-        self.validate_history_identities(&state)?;
-        prune_history(&mut state, now)?;
-        Ok(state
-            .envelopes
-            .into_iter()
             .filter(|envelope| {
-                !known.contains(&collaboration_message_envelope_sha256(envelope.as_bytes()))
+                let hash = collaboration_message_envelope_sha256(envelope.as_bytes());
+                eligible.contains(&hash)
+                    && (!prior.contains(&hash) || history.pending_projection_hashes.contains(&hash))
             })
-            .map(String::into_bytes)
-            .collect())
+            .map(|envelope| envelope.as_bytes().to_vec())
+            .collect();
+        Ok((history, candidates))
     }
 
     /// Called by a product only after its durable projection succeeds. Old
@@ -1343,7 +1506,7 @@ impl CollaborationCore {
         let state = self.load_state()?.unwrap_or_else(|| self.empty_state());
         let mut delivery = Vec::new();
         for entry in state.outgoing {
-            if entry.local_product_projection != OutgoingProductProjectionState::Complete {
+            if entry.local_product_projection == OutgoingProductProjectionState::Retired {
                 continue;
             }
             let message: SignedCollaborationMessage = serde_json::from_str(&entry.envelope)?;
@@ -1560,6 +1723,9 @@ impl CollaborationCore {
 
     pub(crate) fn pending_product_handoffs(&self) -> anyhow::Result<Vec<PendingProductHandoff>> {
         self.with_mutation(None, |state| {
+            // A separately changed history sidecar can invalidate a legacy
+            // handoff even when the exact Core-state cache still hits.
+            let changed = self.retire_history_conflicting_handoffs(state)?;
             let value = state
                 .incoming
                 .iter()
@@ -1568,11 +1734,35 @@ impl CollaborationCore {
                     Ok(PendingProductHandoff { authorized })
                 })
                 .collect::<anyhow::Result<_>>()?;
-            Ok(Mutation {
-                value,
-                changed: false,
-            })
+            Ok(Mutation { value, changed })
         })
+    }
+
+    fn retire_history_conflicting_handoffs(&self, state: &mut CoreState) -> anyhow::Result<bool> {
+        if state.incoming.is_empty() {
+            return Ok(false);
+        }
+        let (history, _) = self.load_history_raw()?;
+        let mut conflicting = Vec::new();
+        for (index, entry) in state.incoming.iter().enumerate() {
+            let authorized = self.verify_incoming_record(entry)?;
+            if self.history_identity_conflicts(history.as_ref(), authorized.message())? {
+                let receipt = self.verify_receipt_envelope(entry.acceptance_receipt.as_bytes())?;
+                conflicting.push((
+                    index,
+                    tombstone_retention_deadline(receipt.envelope().payload.accepted_at),
+                ));
+            }
+        }
+        let changed = !conflicting.is_empty();
+        for (index, retain_until) in conflicting.into_iter().rev() {
+            let entry = state.incoming.remove(index);
+            state.incoming_tombstones.push(IncomingTombstone {
+                acceptance_receipt: entry.acceptance_receipt,
+                retain_until,
+            });
+        }
+        Ok(changed)
     }
 
     fn repair_malformed_product_handoffs(&self, state: &mut CoreState) -> anyhow::Result<bool> {
@@ -2019,6 +2209,12 @@ impl CollaborationCore {
         if repaired {
             return Ok((Some(state), true));
         }
+        // A cold read can find exact bytes from an indeterminate rename.
+        // Persist their directory entries once before the cache admits retries.
+        self.sync_owned_state_directories(
+            #[cfg(test)]
+            None,
+        )?;
         *self
             .verified_state
             .lock()
@@ -2033,6 +2229,7 @@ impl CollaborationCore {
             binding: self.state_binding(),
             envelopes: Vec::new(),
             retired_envelope_hashes: Vec::new(),
+            pending_projection_hashes: Vec::new(),
         }
     }
 
@@ -2114,16 +2311,25 @@ impl CollaborationCore {
     /// The bounded original cache can evict a message while its verified live
     /// acceptance remains. Historical admission preserves that sender identity;
     /// only the exact accepted hash can replay it.
-    fn validate_history_live_identities(&self, envelopes: &[Vec<u8>]) -> anyhow::Result<()> {
-        let live = self.load_state()?.unwrap_or_else(|| self.empty_state());
-        self.validate_history_live_identities_in_state(&live, envelopes)
-    }
-
     fn validate_history_live_identities_in_state(
         &self,
         live: &CoreState,
         envelopes: &[Vec<u8>],
     ) -> anyhow::Result<()> {
+        let (ids, nonces) = self.live_history_identities(live)?;
+        for envelope in envelopes {
+            let authorized = self.authorize_stored_product_message(envelope)?;
+            if identity_index_conflicts(&ids, &nonces, authorized.message()) {
+                anyhow::bail!("collaboration history sender reused a live message ID or nonce");
+            }
+        }
+        Ok(())
+    }
+
+    fn live_history_identities(
+        &self,
+        live: &CoreState,
+    ) -> anyhow::Result<(IncomingIdentityIndex, IncomingIdentityIndex)> {
         let mut ids = HashMap::new();
         let mut nonces = HashMap::new();
         for entry in &live.incoming {
@@ -2140,26 +2346,7 @@ impl CollaborationCore {
             let receipt = self.verify_receipt_envelope(entry.acceptance_receipt.as_bytes())?;
             insert_receipt_identity(&mut ids, &mut nonces, &receipt.envelope().payload)?;
         }
-        for envelope in envelopes {
-            let authorized = self.authorize_stored_product_message(envelope)?;
-            let message = authorized.message();
-            let payload = &message.envelope().payload;
-            for accepted_hash in [
-                ids.get(&(
-                    payload.sender_profile_did.clone(),
-                    payload.message_id.clone(),
-                )),
-                nonces.get(&(payload.sender_profile_did.clone(), payload.nonce.clone())),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                if accepted_hash != message.envelope_sha256() {
-                    anyhow::bail!("collaboration history sender reused a live message ID or nonce");
-                }
-            }
-        }
-        Ok(())
+        Ok((ids, nonces))
     }
 
     fn validate_history_identities(&self, state: &ConversationHistoryState) -> anyhow::Result<()> {
@@ -2191,12 +2378,21 @@ impl CollaborationCore {
             .iter()
             .map(String::as_str)
             .collect::<HashSet<_>>();
+        let pending = state
+            .pending_projection_hashes
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
         if retired.len() != state.retired_envelope_hashes.len()
             || retired.len() > state.envelopes.len()
+            || pending.len() != state.pending_projection_hashes.len()
+            || pending.len() > state.envelopes.len()
+            || pending.iter().any(|hash| retired.contains(hash))
         {
             anyhow::bail!("collaboration retained history has invalid retirement markers");
         }
         let mut matched = 0;
+        let mut pending_matched = 0;
         for envelope in &state.envelopes {
             let hash = collaboration_message_envelope_sha256(envelope.as_bytes());
             if retired.contains(hash.as_str()) {
@@ -2206,16 +2402,34 @@ impl CollaborationCore {
                     anyhow::bail!("retired history original has a valid Shared product");
                 }
             }
+            if pending.contains(hash.as_str()) {
+                pending_matched += 1;
+                crate::collaboration_product::validate_chat_projection(
+                    &self.authorize_stored_product_message(envelope.as_bytes())?,
+                )?;
+            }
         }
         if matched != retired.len() {
             anyhow::bail!("retired history hash has no matching original");
         }
+        anyhow::ensure!(
+            pending_matched == pending.len(),
+            "pending history hash has no matching original"
+        );
         self.validate_history_identities(state)
     }
 
     fn write_history(&self, state: &ConversationHistoryState) -> anyhow::Result<()> {
         self.validate_history(state)?;
         let bytes = canonical_history_bytes(state)?;
+        #[cfg(test)]
+        let fault = self
+            .history_write_fault
+            .swap(0, std::sync::atomic::Ordering::SeqCst);
+        #[cfg(test)]
+        if fault == WriteFault::BeforeWrite as u8 {
+            anyhow::bail!("injected history failure before write");
+        }
         let temp = self
             .state_dir
             .join(format!(".{HISTORY_STATE_FILE}.{}.tmp", random_hex_128()?));
@@ -2231,13 +2445,25 @@ impl CollaborationCore {
             let mut file = options.open(&temp)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
+            #[cfg(test)]
+            if fault == WriteFault::AfterFileSync as u8 {
+                anyhow::bail!("injected history failure after file sync");
+            }
             validate_owner_only_regular_file(&temp, &file.metadata()?)?;
             if let Ok(metadata) = fs::symlink_metadata(self.history_path()) {
                 validate_owner_only_regular_file(&self.history_path(), &metadata)?;
             }
             fs::rename(&temp, self.history_path())?;
             renamed = true;
-            File::open(&self.state_dir)?.sync_all()?;
+            #[cfg(test)]
+            if fault == WriteFault::AfterRename as u8 {
+                anyhow::bail!("history durability is indeterminate after rename");
+            }
+            self.sync_owned_state_directories(
+                #[cfg(test)]
+                (fault == WriteFault::BeforeAncestorSync as u8)
+                    .then_some(WriteFault::BeforeAncestorSync),
+            )?;
             Ok(())
         })();
         if result.is_err() && !renamed {
@@ -2374,6 +2600,35 @@ impl CollaborationCore {
         Ok(())
     }
 
+    fn sync_owned_state_directories(
+        &self,
+        #[cfg(test)] fault: Option<WriteFault>,
+    ) -> anyhow::Result<()> {
+        let mut directory = self.state_dir.as_path();
+        loop {
+            anyhow::ensure!(
+                directory.starts_with(&self.data_root),
+                "collaboration directory sync escaped its data root"
+            );
+            File::open(directory)?.sync_all()?;
+            #[cfg(test)]
+            self.directory_syncs
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            #[cfg(test)]
+            if directory == self.state_dir && fault == Some(WriteFault::BeforeAncestorSync) {
+                anyhow::bail!(
+                    "collaboration directory durability is indeterminate before ancestor sync"
+                );
+            }
+            if directory == self.data_root {
+                return Ok(());
+            }
+            directory = directory
+                .parent()
+                .context("collaboration directory sync has no data root ancestor")?;
+        }
+    }
+
     fn state_path(&self) -> PathBuf {
         self.state_dir.join(CORE_STATE_FILE)
     }
@@ -2423,7 +2678,10 @@ impl CollaborationCore {
             if write_fault == Some(WriteFault::AfterRename) {
                 anyhow::bail!("collaboration state durability is indeterminate after rename");
             }
-            File::open(&self.state_dir)?.sync_all()?;
+            self.sync_owned_state_directories(
+                #[cfg(test)]
+                write_fault,
+            )?;
             Ok(())
         })();
         if result.is_err() && !renamed {
@@ -2439,6 +2697,12 @@ impl CollaborationCore {
     }
 
     #[cfg(test)]
+    pub(crate) fn inject_history_write_fault(&self, fault: WriteFault) {
+        self.history_write_fault
+            .store(fault as u8, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
     fn take_write_fault(&self) -> Option<WriteFault> {
         match self
             .write_fault
@@ -2447,6 +2711,7 @@ impl CollaborationCore {
             1 => Some(WriteFault::BeforeWrite),
             2 => Some(WriteFault::AfterFileSync),
             3 => Some(WriteFault::AfterRename),
+            4 => Some(WriteFault::BeforeAncestorSync),
             _ => None,
         }
     }
@@ -2564,6 +2829,24 @@ fn transport_incoming_acceptance(
         acceptance_receipt_bytes: accepted.acceptance_receipt_bytes,
         product_handoff_pending: accepted.product_handoff_pending,
     }
+}
+
+fn identity_index_conflicts(
+    ids: &IncomingIdentityIndex,
+    nonces: &IncomingIdentityIndex,
+    message: &VerifiedCollaborationMessage,
+) -> bool {
+    let payload = &message.envelope().payload;
+    [
+        ids.get(&(
+            payload.sender_profile_did.clone(),
+            payload.message_id.clone(),
+        )),
+        nonces.get(&(payload.sender_profile_did.clone(), payload.nonce.clone())),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|hash| hash != message.envelope_sha256())
 }
 
 fn incoming_identity_conflicts(
@@ -2805,6 +3088,9 @@ fn prune_history(state: &mut ConversationHistoryState, now: u64) -> anyhow::Resu
     state
         .retired_envelope_hashes
         .retain(|hash| retained_hashes.contains(hash));
+    state
+        .pending_projection_hashes
+        .retain(|hash| retained_hashes.contains(hash));
     while state.envelopes.len() > MAX_CONVERSATION_HISTORY_MESSAGES
         || canonical_history_bytes(state)?.len() > MAX_CONVERSATION_HISTORY_BYTES
     {
@@ -2816,6 +3102,9 @@ fn prune_history(state: &mut ConversationHistoryState, now: u64) -> anyhow::Resu
         state
             .retired_envelope_hashes
             .retain(|retired| retired != &hash);
+        state
+            .pending_projection_hashes
+            .retain(|pending| pending != &hash);
     }
     Ok(())
 }
@@ -3702,15 +3991,24 @@ mod tests {
         let first_misses = core
             .verification_misses
             .load(std::sync::atomic::Ordering::Relaxed);
+        let first_directory_syncs = core
+            .directory_syncs
+            .load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(first_misses, 1);
         for _ in 0..3 {
             core.load_state().unwrap();
             core.pending_outgoing(NOW).unwrap();
+            core.pending_product_handoffs().unwrap();
         }
         assert_eq!(
             core.verification_misses
                 .load(std::sync::atomic::Ordering::Relaxed),
             first_misses
+        );
+        assert_eq!(
+            core.directory_syncs
+                .load(std::sync::atomic::Ordering::Relaxed),
+            first_directory_syncs
         );
         let second = prepare(
             &core,
@@ -3731,6 +4029,9 @@ mod tests {
         let receipt_misses = core
             .verification_misses
             .load(std::sync::atomic::Ordering::Relaxed);
+        let receipt_directory_syncs = core
+            .directory_syncs
+            .load(std::sync::atomic::Ordering::Relaxed);
         assert!(receipt_misses > first_misses + 1);
         core.record_remote_acceptance(&receipt, NOW + 12).unwrap();
         core.load_state().unwrap();
@@ -3738,6 +4039,11 @@ mod tests {
             core.verification_misses
                 .load(std::sync::atomic::Ordering::Relaxed),
             receipt_misses
+        );
+        assert_eq!(
+            core.directory_syncs
+                .load(std::sync::atomic::Ordering::Relaxed),
+            receipt_directory_syncs
         );
         let writer = fixture.core();
         let third = prepare(
@@ -4613,6 +4919,414 @@ mod tests {
     }
 
     #[test]
+    fn generated_shared_products_cannot_fill_handoffs_and_consumers_work_after_restart() {
+        fn next(seed: &mut u64) -> u64 {
+            *seed ^= *seed << 13;
+            *seed ^= *seed >> 7;
+            *seed ^= *seed << 17;
+            *seed
+        }
+
+        const ROUNDS: usize = 512;
+        const CONSUMERS: [&str; 2] = [
+            COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+            crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+        ];
+        const OTHER_DELEGATIONS: [&str; 6] = [
+            "elastos.chat.direct-message/v1",
+            "elastos.chat.unregistered/v1",
+            "elastos.collaboration.acceptance-receipt/v1",
+            "elastos.room.accept.v1",
+            "elastos.room.invite.v1",
+            "elastos.room.join-invite.v1",
+        ];
+        let fixture = Fixture::new();
+        let mut core = Arc::new(fixture.core());
+        let local_profile = shared_test_profile(&core.authority, &fixture.device_key);
+        // Adding a delegated type requires an explicit consumer/generator decision.
+        let delegated: Vec<_> = local_profile
+            .document()
+            .collaboration_signers
+            .iter()
+            .filter(|signer| signer.service == SERVICE)
+            .flat_map(|signer| &signer.delegations)
+            .flat_map(|delegation| delegation.object_types.iter().map(String::as_str))
+            .collect();
+        let mut expected = Vec::from(CONSUMERS);
+        expected.extend(OTHER_DELEGATIONS);
+        expected.sort_unstable();
+        assert_eq!(delegated, expected);
+        let mut seed = 0x8c7d_41ae_b395_206fu64;
+        let authors: Vec<_> = (0..4)
+            .map(|_| {
+                let mut bytes = [0u8; 32];
+                for chunk in bytes.chunks_exact_mut(8) {
+                    chunk.copy_from_slice(&next(&mut seed).to_le_bytes());
+                }
+                let key = SigningKey::from_bytes(&bytes);
+                let authority = fixture.authority(key.clone());
+                let profile = shared_test_profile(&authority, &key);
+                (key, authority, profile)
+            })
+            .collect();
+        let mut coverage = [[0usize; 8]; CONSUMERS.len()];
+        let mut other_coverage = [0usize; OTHER_DELEGATIONS.len()];
+        let mut routes = [0usize; 3];
+        let mut attempts = 0;
+        let mut valid_processed = 0;
+        let mut identity_conflicts = 0;
+        let mut objects = Vec::new();
+        for round in 0..ROUNDS {
+            for consumer in 0..=CONSUMERS.len() {
+                let before_state = core
+                    .state_path()
+                    .exists()
+                    .then(|| fs::read(core.state_path()).unwrap());
+                let before_history = core
+                    .history_path()
+                    .exists()
+                    .then(|| fs::read(core.history_path()).unwrap());
+                let (key, remote, profile) = &authors[(next(&mut seed) % 4) as usize];
+                let variant = (next(&mut seed) % 8) as usize;
+                let length = (next(&mut seed) % 128) as usize;
+                let field = format!("extra_{:x}", next(&mut seed));
+                let text = format!("message {:x}", next(&mut seed));
+                let wrong_type = match next(&mut seed) % 5 {
+                    0 => serde_json::Value::Null,
+                    1 => serde_json::json!(false),
+                    2 => serde_json::json!(next(&mut seed)),
+                    3 => serde_json::json!([text]),
+                    _ => serde_json::json!({"nested":text}),
+                };
+                let (kind, product, bad_name) = if consumer < CONSUMERS.len() {
+                    coverage[consumer][variant] += 1;
+                    let product = if consumer == 0 {
+                        match variant {
+                            0 => serde_json::json!({"body":text, (field):wrong_type}),
+                            1 => serde_json::json!({"body":wrong_type}),
+                            2 => serde_json::json!({}),
+                            3 => {
+                                serde_json::json!({"body":(if length.is_multiple_of(2) { "🙂" } else { "x" }).repeat(
+                                crate::room_service::MAX_OBJECT_BODY_LEN + 1 + length)})
+                            }
+                            4 => serde_json::json!({"body":" \n\t".repeat(1 + length)}),
+                            5 => serde_json::json!([{"body":text}]),
+                            6 => serde_json::json!({"body":text}),
+                            _ => serde_json::json!({"body":format!(" {text} ")}),
+                        }
+                    } else {
+                        match variant {
+                            0 => serde_json::json!({(field):wrong_type}),
+                            1 => wrong_type,
+                            2 => serde_json::json!({"body":text}),
+                            3 => serde_json::json!({"body":"x".repeat(
+                                crate::room_service::MAX_OBJECT_BODY_LEN + 1 + length)}),
+                            4 => serde_json::json!(" \n\t".repeat(1 + length)),
+                            5 => serde_json::json!([{}]),
+                            6 => serde_json::json!({}),
+                            _ => serde_json::json!({"display_name":"n".repeat(65 + length)}),
+                        }
+                    };
+                    (CONSUMERS[consumer], product, variant == 6)
+                } else {
+                    let other = (next(&mut seed) % OTHER_DELEGATIONS.len() as u64) as usize;
+                    other_coverage[other] += 1;
+                    (
+                        OTHER_DELEGATIONS[other],
+                        serde_json::json!({"body":text}),
+                        false,
+                    )
+                };
+                let prepared = remote
+                    .prepare_profile_outgoing(profile, SERVICE, kind, product.clone(), NOW, TTL)
+                    .unwrap();
+                let mut signed: SignedCollaborationMessage =
+                    serde_json::from_slice(prepared.envelope_bytes()).unwrap();
+                // Keep signed identity and generated cases reproducible, including
+                // the malformed Profile carried inside an otherwise valid envelope.
+                signed.payload.message_id = format!("{:032x}", round * 3 + consumer + 1);
+                signed.payload.nonce = format!("{:032x}", next(&mut seed));
+                if bad_name {
+                    let mut document = profile.document().clone();
+                    document.display_name = "n".repeat(65 + length);
+                    signed.payload.payload["signed_profile"] =
+                        serde_json::to_value(resign_test_profile(key, &document)).unwrap();
+                }
+                let original = resign_message(key, signed.payload);
+                verify_stored_collaboration_message(&original, &fixture.profile, SERVICE).unwrap();
+                let frame = remote.prepare_transport_frame(&original).unwrap();
+                // Rotate real signed ingress paths rather than repeating every
+                // cryptographic path for every generated envelope.
+                let route = (next(&mut seed) % routes.len() as u64) as usize;
+                routes[route] += 1;
+                match route {
+                    0 => assert_eq!(
+                        transport_rejection(&core, &frame, NOW),
+                        CollaborationTransportRejection::InvalidMessage
+                    ),
+                    1 => assert!(core
+                        .accept_home_chat(&frame, &remote.local_device_did(), NOW)
+                        .is_err()),
+                    _ => assert!(core
+                        .accept_incoming(&original, &remote.local_device_did(), NOW)
+                        .is_err()),
+                }
+                if !bad_name {
+                    let operation = profile_operation(
+                        &format!("generated:{round}:{consumer}"),
+                        &local_profile,
+                        kind,
+                        &product,
+                    );
+                    assert!(core
+                        .prepare_profile_outgoing(
+                            operation,
+                            &local_profile,
+                            kind,
+                            product,
+                            NOW,
+                            TTL
+                        )
+                        .is_err());
+                }
+                attempts += 1;
+                assert!(core.pending_product_handoffs().unwrap().is_empty());
+                assert_eq!(core.summary().unwrap().pending_product_handoffs, 0);
+                assert_eq!(
+                    core.state_path()
+                        .exists()
+                        .then(|| fs::read(core.state_path()).unwrap()),
+                    before_state
+                );
+                assert_eq!(
+                    core.history_path()
+                        .exists()
+                        .then(|| fs::read(core.history_path()).unwrap()),
+                    before_history
+                );
+                if attempts % MAX_PENDING_INCOMING == 0 {
+                    core = Arc::new(fixture.core());
+                    assert!(core.pending_product_handoffs().unwrap().is_empty());
+                }
+            }
+            if round.is_multiple_of(8) {
+                let mut bytes = [0u8; 32];
+                for chunk in bytes.chunks_exact_mut(8) {
+                    chunk.copy_from_slice(&next(&mut seed).to_le_bytes());
+                }
+                let key = SigningKey::from_bytes(&bytes);
+                let remote = fixture.authority(key.clone());
+                let mut document = shared_test_profile(&remote, &key).document().clone();
+                document.display_name = match (round / 8) % 4 {
+                    0 => "n".repeat(49),
+                    1 => "n".repeat(64),
+                    2 => "é".repeat(32),
+                    _ => "🙂".repeat(16),
+                };
+                let profile =
+                    crate::collaboration_profile_authority::verify_signed_profile_document(
+                        &resign_test_profile(&key, &document),
+                    )
+                    .unwrap();
+                let now = now_secs();
+                let body = match (round / 8) % 4 {
+                    0 => "🙂".repeat(crate::room_service::MAX_OBJECT_BODY_LEN),
+                    1 => "x".repeat(crate::room_service::MAX_OBJECT_BODY_LEN),
+                    2 => "é".repeat(1 + (next(&mut seed) % 80) as usize),
+                    _ => format!("combining e\u{301} {:x}", next(&mut seed)),
+                };
+                let chat = remote
+                    .prepare_profile_outgoing(
+                        &profile,
+                        SERVICE,
+                        COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+                        serde_json::json!({"body":body}),
+                        now,
+                        TTL,
+                    )
+                    .unwrap();
+                let frame = remote
+                    .prepare_transport_frame(chat.envelope_bytes())
+                    .unwrap();
+                core.accept_home_chat(&frame, &remote.local_device_did(), now)
+                    .unwrap();
+                let port =
+                    crate::collaboration_product::CollaborationChatProductPort::new(core.clone())
+                        .unwrap();
+                let handoffs = port.pending_messages().unwrap();
+                assert_eq!(handoffs.len(), 1);
+                let object = port
+                    .project_handoff(&fixture.data_root, &handoffs[0])
+                    .unwrap();
+                assert_eq!(object.body.as_deref(), Some(body.as_str()));
+                assert_eq!(object.sender, document.display_name);
+                assert_eq!(object.sender_profile_verified, Some(true));
+                objects.push(object);
+                valid_processed += 1;
+
+                let mut conflict: SignedCollaborationMessage =
+                    serde_json::from_slice(chat.envelope_bytes()).unwrap();
+                conflict.payload.payload["product"] =
+                    serde_json::json!({"body":"different signed original"});
+                if round.is_multiple_of(16) {
+                    conflict.payload.nonce = format!("{:032x}", next(&mut seed));
+                } else {
+                    conflict.payload.message_id = format!("{:032x}", next(&mut seed));
+                }
+                let conflict = resign_message(&key, conflict.payload);
+                core.authorize_history_message(&conflict, now).unwrap();
+                let conflict_frame = remote.prepare_transport_frame(&conflict).unwrap();
+                assert_eq!(
+                    transport_rejection(&core, &conflict_frame, now),
+                    CollaborationTransportRejection::MessageIdentityConflict
+                );
+                identity_conflicts += 1;
+
+                let metadata = remote
+                    .prepare_profile_outgoing(
+                        &profile,
+                        SERVICE,
+                        crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+                        serde_json::json!({}),
+                        now,
+                        45,
+                    )
+                    .unwrap();
+                let frame = remote
+                    .prepare_transport_frame(metadata.envelope_bytes())
+                    .unwrap();
+                transport_incoming(&core, &frame, now);
+                let presence =
+                    crate::collaboration_presence::CollaborationPresenceProductPort::new(
+                        core.clone(),
+                    )
+                    .unwrap();
+                let handoffs = presence.pending_presences().unwrap();
+                assert_eq!(handoffs.len(), 1);
+                assert_eq!(
+                    presence.project_handoff(&handoffs[0], now).unwrap(),
+                    crate::collaboration_presence::CollaborationPresenceProjectionOutcome::Applied
+                );
+                assert!(presence
+                    .snapshot(now)
+                    .unwrap()
+                    .records()
+                    .iter()
+                    .any(
+                        |record| record.sender_profile_did() == profile.document().profile_did
+                            && record.display_name() == document.display_name
+                    ));
+                valid_processed += 1;
+                assert!(fixture
+                    .core()
+                    .pending_product_handoffs()
+                    .unwrap()
+                    .is_empty());
+            }
+        }
+        assert_eq!(attempts, ROUNDS * (CONSUMERS.len() + 1));
+        assert!(attempts > MAX_PENDING_INCOMING * 32);
+        assert!(coverage.iter().flatten().all(|count| *count > 0));
+        assert!(other_coverage.iter().all(|count| *count > 0));
+        assert!(routes.iter().all(|count| *count > 0));
+        assert_eq!(valid_processed, (ROUNDS / 8) * CONSUMERS.len());
+        assert_eq!(identity_conflicts, ROUNDS / 8);
+
+        // Valid signed names above the old Room limit still reach both consumers,
+        // including the Profile maximum. Use Chat's actual history wall clock.
+        let chat_now = now_secs();
+        let restarted = fixture.core();
+        for name_length in [49, 56, 64] {
+            let key = SigningKey::from_bytes(&[name_length as u8; 32]);
+            let remote = fixture.authority(key.clone());
+            let mut document = shared_test_profile(&remote, &key).document().clone();
+            document.display_name = "n".repeat(name_length);
+            let profile = crate::collaboration_profile_authority::verify_signed_profile_document(
+                &resign_test_profile(&key, &document),
+            )
+            .unwrap();
+            for kind in CONSUMERS {
+                let product = if kind == COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE {
+                    serde_json::json!({"body":format!("healthy {name_length}")})
+                } else {
+                    serde_json::json!({})
+                };
+                let now = if kind == COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE {
+                    chat_now
+                } else {
+                    NOW
+                };
+                let original = remote
+                    .prepare_profile_outgoing(&profile, SERVICE, kind, product, now, 45)
+                    .unwrap();
+                restarted
+                    .accept_incoming(original.envelope_bytes(), &remote.local_device_did(), now)
+                    .unwrap();
+            }
+        }
+        let projection_core = Arc::new(fixture.core());
+        let chat_port = crate::collaboration_product::CollaborationChatProductPort::new(
+            projection_core.clone(),
+        )
+        .unwrap();
+        let presence_port = crate::collaboration_presence::CollaborationPresenceProductPort::new(
+            projection_core.clone(),
+        )
+        .unwrap();
+        assert_eq!(projection_core.pending_product_handoffs().unwrap().len(), 6);
+        let handoffs = chat_port.pending_messages().unwrap();
+        assert_eq!(handoffs.len(), 3);
+        for handoff in &handoffs {
+            let object = chat_port
+                .project_handoff(&fixture.data_root, handoff)
+                .unwrap();
+            assert_eq!(object.sender_profile_verified, Some(true));
+            objects.push(object);
+        }
+        for handoff in presence_port.pending_presences().unwrap() {
+            assert_eq!(
+                presence_port.project_handoff(&handoff, NOW).unwrap(),
+                crate::collaboration_presence::CollaborationPresenceProjectionOutcome::Applied
+            );
+        }
+        let snapshot = presence_port.snapshot(NOW).unwrap();
+        assert_eq!(snapshot.records().len(), 3);
+        let session = crate::room_service::start_local_runtime_session(
+            &fixture.data_root,
+            &projection_core.local_device_did(),
+            "Reader",
+            "generated consumer test",
+        )
+        .unwrap();
+        let final_core = Arc::new(fixture.core());
+        let final_chat =
+            crate::collaboration_product::CollaborationChatProductPort::new(final_core.clone())
+                .unwrap();
+        let final_presence = crate::collaboration_presence::CollaborationPresenceProductPort::new(
+            final_core.clone(),
+        )
+        .unwrap();
+        let poll = final_chat
+            .conversation_poll(&fixture.data_root, &session.token, 0)
+            .unwrap();
+        assert_eq!(poll.objects.len(), objects.len());
+        for object in objects {
+            let retained = poll
+                .objects
+                .iter()
+                .find(|row| row.seq == object.seq)
+                .unwrap();
+            assert_eq!(retained.body, object.body);
+            assert_eq!(retained.sender, object.sender);
+            assert_eq!(retained.sender_profile_verified, Some(true));
+        }
+        assert_eq!(final_presence.snapshot(NOW).unwrap(), snapshot);
+        assert!(final_core.pending_product_handoffs().unwrap().is_empty());
+        assert!(final_chat.pending_messages().unwrap().is_empty());
+        assert!(final_presence.pending_presences().unwrap().is_empty());
+    }
+
+    #[test]
     fn legacy_unconsumable_outgoing_is_retired_without_losing_request_replay_protection() {
         let fixture = Fixture::new();
         let core = fixture.core();
@@ -4881,7 +5595,8 @@ mod tests {
         let corrected = resign_message(&key, corrected.payload);
         assert!(reopened
             .history_projection_candidates(std::slice::from_ref(&corrected), NOW)
-            .is_err());
+            .unwrap()
+            .is_empty());
         assert!(reopened.retain_history_message(&corrected, NOW).is_err());
         assert_eq!(fs::read(core.history_path()).unwrap(), saved);
         for mutation in 0..3 {
@@ -5661,6 +6376,172 @@ mod tests {
     }
 
     #[test]
+    fn history_reservation_write_failures_precede_projection_and_retry_publication() {
+        for fault in [
+            WriteFault::BeforeWrite,
+            WriteFault::AfterRename,
+            WriteFault::BeforeAncestorSync,
+        ] {
+            let fixture = Fixture::new();
+            let core = fixture.core();
+            let now = now_secs();
+            let (_, original) = remote_message(&fixture, generate_keypair().0, now);
+            let originals = std::slice::from_ref(&original);
+            core.inject_history_write_fault(fault);
+            let mut called = false;
+            assert!(core
+                .with_history_projection(originals, now, |_| {
+                    called = true;
+                    Ok(())
+                })
+                .is_err());
+            assert!(!called);
+            assert!(core.conversation_history(now).unwrap().is_empty());
+
+            let restarted = Arc::new(fixture.core());
+            let pending = restarted.pending_history_projection(now).unwrap();
+            if fault != WriteFault::BeforeWrite {
+                assert_eq!(pending, originals);
+                // An indeterminate reservation is fsynced again before Room.
+                restarted.inject_history_write_fault(WriteFault::BeforeWrite);
+                assert!(restarted
+                    .with_history_projection(&pending, now, |_| {
+                        called = true;
+                        Ok(())
+                    })
+                    .is_err());
+                assert!(!called);
+            } else {
+                assert!(pending.is_empty());
+                assert!(!restarted.history_path().exists());
+            }
+            let product =
+                crate::collaboration_product::CollaborationChatProductPort::new(restarted.clone())
+                    .unwrap();
+            product
+                .project_history(&fixture.data_root, originals, now)
+                .unwrap();
+            assert!(restarted
+                .pending_history_projection(now)
+                .unwrap()
+                .is_empty());
+            assert_eq!(restarted.conversation_history(now).unwrap(), originals);
+        }
+    }
+
+    #[test]
+    fn history_publication_failure_preserves_binding_and_recovers_room_offline() {
+        let fixture = Fixture::new();
+        let core = Arc::new(fixture.core());
+        let now = now_secs();
+        let (remote_key, original) = remote_message(&fixture, generate_keypair().0, now);
+        let authorized = core.authorize_history_message(&original, now).unwrap();
+        let profile = authorized.sender_profile().document();
+        let card = crate::room_service::RoomProfileCardView {
+            schema: "elastos.profile-card/v1".to_string(),
+            profile_id: profile.profile_did.clone(),
+            display_name: profile.display_name.clone(),
+            handle: profile.handle.clone(),
+            updated_at: profile.updated_at,
+        };
+        let mut room_row = None;
+        assert!(core
+            .with_history_projection(std::slice::from_ref(&original), now, |candidates| {
+                assert_eq!(candidates, std::slice::from_ref(&original));
+                room_row = Some(crate::room_service::project_collaboration_text(
+                    &fixture.data_root,
+                    core.conversation_scope(),
+                    authorized.message().envelope_sha256(),
+                    &card,
+                    "remote",
+                    now,
+                    crate::room_service::CollaborationTextOrigin::Incoming,
+                )?);
+                core.inject_history_write_fault(WriteFault::BeforeWrite);
+                Ok(())
+            })
+            .is_err());
+        let room_row = room_row.unwrap();
+        assert!(core.conversation_history(now).unwrap().is_empty());
+        assert_eq!(
+            core.pending_history_projection(now).unwrap(),
+            std::slice::from_ref(&original)
+        );
+        let mut alias: SignedCollaborationMessage = serde_json::from_slice(&original).unwrap();
+        alias.payload.payload["product"]["body"] = serde_json::json!("signed alias");
+        let conflict = resign_message(&remote_key, alias.payload);
+        core.authorize_history_message(&conflict, now).unwrap();
+        assert!(core
+            .accept_incoming_from_signed_source_for_test(&conflict, now)
+            .is_err());
+
+        let restarted = Arc::new(fixture.core());
+        let product =
+            crate::collaboration_product::CollaborationChatProductPort::new(restarted.clone())
+                .unwrap();
+        product
+            .retry_pending_history_projection(&fixture.data_root, now)
+            .unwrap();
+        assert!(restarted
+            .pending_history_projection(now)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            restarted.conversation_history(now).unwrap(),
+            std::slice::from_ref(&original)
+        );
+        let session = crate::room_service::start_local_runtime_session(
+            &fixture.data_root,
+            &core.local_device_did(),
+            "Reader",
+            "history publication retry test",
+        )
+        .unwrap();
+        let completed = product
+            .conversation_poll(&fixture.data_root, &session.token, 0)
+            .unwrap();
+        assert_eq!(completed.objects.len(), 1);
+        assert_eq!(completed.objects[0].seq, room_row.seq);
+        assert_eq!(completed.objects[0].body.as_deref(), Some("remote"));
+        let history: serde_json::Value =
+            serde_json::from_slice(&fs::read(restarted.history_path()).unwrap()).unwrap();
+        assert!(history.get("pending_projection_hashes").is_none());
+    }
+
+    #[test]
+    fn cold_acceptance_sync_failure_returns_no_receipt_and_retries_saved_original() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let (_, original) = remote_message(&fixture, generate_keypair().0, NOW);
+        core.inject_write_fault(WriteFault::BeforeAncestorSync);
+        assert!(core
+            .accept_incoming_from_signed_source_for_test(&original, NOW)
+            .is_err());
+        assert!(core.verified_state.lock().unwrap().is_none());
+        let saved = fs::read(core.state_path()).unwrap();
+        let state: CoreState = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(state.incoming.len(), 1);
+        assert_eq!(state.incoming[0].envelope.as_bytes(), original);
+        let restarted = fixture.core();
+        let retried = restarted
+            .accept_incoming_from_signed_source_for_test(&original, NOW + 1)
+            .unwrap();
+        assert_eq!(
+            retried.acceptance_receipt_bytes(),
+            state.incoming[0].acceptance_receipt.as_bytes()
+        );
+        assert!(retried.product_handoff_pending());
+        assert!(
+            restarted
+                .directory_syncs
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
+        );
+        assert_eq!(fs::read(restarted.state_path()).unwrap(), saved);
+        assert_eq!(restarted.pending_product_handoffs().unwrap().len(), 1);
+    }
+
+    #[test]
     fn history_retention_enforces_age_count_and_serialized_byte_bounds() {
         let fixture = Fixture::new();
         let core = fixture.core();
@@ -5804,7 +6685,8 @@ mod tests {
             // A still-pending live envelope also owns its identity.
             assert!(core
                 .history_projection_candidates(std::slice::from_ref(&bytes), now)
-                .is_err());
+                .unwrap()
+                .is_empty());
             conflicts.push(bytes);
         }
         assert_eq!(
@@ -5873,32 +6755,251 @@ mod tests {
         )
         .unwrap()
         .join("room/objects.json");
-        let before_room = fs::read(&room_path).unwrap();
         let before_live = fs::read(core.state_path()).unwrap();
-        let before_history = fs::read(core.history_path()).unwrap();
+        // The session's "joined" system row also takes a Room seq outside this
+        // collaboration namespace, so pin the catch-up row's own seq instead.
+        let mut catch_up_seq = None;
         for conflict in conflicts {
             assert!(core
                 .accept_incoming_from_signed_source_for_test(&conflict, now)
                 .is_err());
-            assert!(product
+            product
                 .project_history(
                     &fixture.data_root,
                     &[new_original.envelope_bytes().to_vec(), conflict.clone()],
                     now,
                 )
-                .is_err());
+                .unwrap();
             assert!(core.retain_history_message(&conflict, now).is_err());
-            assert_eq!(fs::read(&room_path).unwrap(), before_room);
             assert_eq!(fs::read(core.state_path()).unwrap(), before_live);
-            assert_eq!(fs::read(core.history_path()).unwrap(), before_history);
             let after_poll = product
                 .conversation_poll(&fixture.data_root, &session.token, 0)
                 .unwrap();
+            assert_eq!(after_poll.objects.len(), 2);
+            assert_eq!(after_poll.objects[0].seq, before_poll.objects[0].seq);
+            assert_eq!(after_poll.objects[0].body, before_poll.objects[0].body);
             assert_eq!(
-                serde_json::to_value(&after_poll.objects).unwrap(),
-                serde_json::to_value(&before_poll.objects).unwrap()
+                after_poll.objects[1].body.as_deref(),
+                Some("otherwise valid catch-up")
             );
-            assert_eq!(after_poll.latest_seq, before_poll.latest_seq);
+            assert!(after_poll.objects[1].seq > before_poll.latest_seq);
+            assert_eq!(after_poll.latest_seq, after_poll.objects[1].seq);
+            // The second conflict's batch must not re-project the catch-up row.
+            assert_eq!(
+                *catch_up_seq.get_or_insert(after_poll.objects[1].seq),
+                after_poll.objects[1].seq
+            );
+            let saved = fs::read(&room_path).unwrap();
+            product
+                .project_history(
+                    &fixture.data_root,
+                    &[conflict, new_original.envelope_bytes().to_vec()],
+                    now,
+                )
+                .unwrap();
+            assert_eq!(fs::read(&room_path).unwrap(), saved);
+        }
+    }
+
+    #[test]
+    fn history_first_identity_conflicts_refuse_custody_and_retire_legacy_handoffs_on_hot_cache() {
+        let fixture = Fixture::new();
+        let core = Arc::new(fixture.core());
+        let now = now_secs();
+        let key = SigningKey::from_bytes(&[93u8; 32]);
+        let author = fixture.authority(key.clone());
+        let original = author
+            .prepare_outgoing(
+                SERVICE,
+                COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+                serde_json::json!({"body":"history first"}),
+                now,
+                TTL,
+            )
+            .unwrap();
+        core.retain_history_message(original.envelope_bytes(), now)
+            .unwrap();
+        let history = core.load_history().unwrap().unwrap();
+        let before = fs::read(core.history_path()).unwrap();
+        let mut conflicts = Vec::new();
+        for reuse_id in [false, true] {
+            let mut signed: SignedCollaborationMessage =
+                serde_json::from_slice(original.envelope_bytes()).unwrap();
+            signed.payload.payload["product"] = serde_json::json!({"body":"signed conflict"});
+            if reuse_id {
+                signed.payload.nonce = "01".repeat(16);
+            } else {
+                signed.payload.message_id = "02".repeat(16);
+            }
+            let bytes = resign_message(&key, signed.payload);
+            let frame = author.prepare_transport_frame(&bytes).unwrap();
+            core.authorize_history_message(&bytes, now).unwrap();
+            for receiver in [core.clone(), Arc::new(fixture.core())] {
+                assert_eq!(
+                    transport_rejection(&receiver, &frame, now),
+                    CollaborationTransportRejection::MessageIdentityConflict
+                );
+                assert!(receiver
+                    .accept_incoming(&bytes, &author.local_device_did(), now)
+                    .is_err());
+                assert!(receiver
+                    .accept_home_chat(&frame, &author.local_device_did(), now)
+                    .is_err());
+                assert!(receiver.pending_product_handoffs().unwrap().is_empty());
+            }
+            conflicts.push(bytes);
+        }
+        assert_eq!(fs::read(core.history_path()).unwrap(), before);
+        assert!(!core.state_path().exists());
+
+        // Model an older accepted slot, then a separate history publication.
+        // The exact state cache still hits, so dispatch must recheck the sidecar.
+        core.write_history(&core.empty_history()).unwrap();
+        let incoming = core
+            .authority
+            .authorize_incoming(&conflicts[0], &author.local_device_did(), now)
+            .unwrap();
+        let receipt = core
+            .authority
+            .prepare_acceptance_receipt(&incoming, now)
+            .unwrap();
+        let mut legacy = core.empty_state();
+        legacy.incoming.push(IncomingRecord {
+            envelope: String::from_utf8(conflicts[0].clone()).unwrap(),
+            acceptance_receipt: String::from_utf8(receipt.clone()).unwrap(),
+            product_handoff: ProductHandoffState::Pending,
+        });
+        core.write_state(&legacy).unwrap();
+        core.load_state().unwrap();
+        assert!(core.verified_state.lock().unwrap().is_some());
+        core.write_history(&history).unwrap();
+        assert!(core.pending_product_handoffs().unwrap().is_empty());
+        let repaired = fixture.core().load_state().unwrap().unwrap();
+        assert!(repaired.incoming.is_empty());
+        assert_eq!(repaired.incoming_tombstones.len(), 1);
+        assert_eq!(
+            repaired.incoming_tombstones[0]
+                .acceptance_receipt
+                .as_bytes(),
+            receipt
+        );
+        let replay = fixture
+            .core()
+            .accept_incoming(&conflicts[0], &author.local_device_did(), now)
+            .unwrap();
+        assert!(!replay.product_handoff_pending());
+        assert_eq!(replay.acceptance_receipt_bytes(), receipt);
+
+        let healthy = author
+            .prepare_outgoing(
+                SERVICE,
+                COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+                serde_json::json!({"body":"healthy after conflict"}),
+                now,
+                TTL,
+            )
+            .unwrap();
+        core.accept_incoming(healthy.envelope_bytes(), &author.local_device_did(), now)
+            .unwrap();
+        let port = crate::collaboration_product::CollaborationChatProductPort::new(Arc::new(
+            fixture.core(),
+        ))
+        .unwrap();
+        let pending = port.pending_messages().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            port.project_handoff(&fixture.data_root, &pending[0])
+                .unwrap()
+                .body
+                .as_deref(),
+            Some("healthy after conflict")
+        );
+        assert!(fixture
+            .core()
+            .pending_product_handoffs()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn history_batch_conflicts_keep_unrelated_originals_in_both_orders() {
+        for reversed in [false, true] {
+            let fixture = Fixture::new();
+            let core = Arc::new(fixture.core());
+            let now = now_secs();
+            let key = SigningKey::from_bytes(&[94u8; 32]);
+            let author = fixture.authority(key.clone());
+            let first = author
+                .prepare_outgoing(
+                    SERVICE,
+                    COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+                    serde_json::json!({"body":"first candidate"}),
+                    now,
+                    TTL,
+                )
+                .unwrap();
+            let mut changed: SignedCollaborationMessage =
+                serde_json::from_slice(first.envelope_bytes()).unwrap();
+            changed.payload.payload["product"] = serde_json::json!({"body":"second candidate"});
+            let second = resign_message(&key, changed.payload);
+            let unrelated = author
+                .prepare_outgoing(
+                    SERVICE,
+                    COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+                    serde_json::json!({"body":"unrelated candidate"}),
+                    now,
+                    TTL,
+                )
+                .unwrap();
+            let mut batch = vec![
+                first.envelope_bytes().to_vec(),
+                second,
+                unrelated.envelope_bytes().to_vec(),
+            ];
+            if reversed {
+                batch.swap(0, 1);
+            }
+            let selected = core.history_projection_candidates(&batch, now).unwrap();
+            assert_eq!(selected.len(), 2);
+            assert!(selected.contains(&batch[0]));
+            assert!(selected.contains(&batch[2]));
+            assert!(!selected.contains(&batch[1]));
+            let product =
+                crate::collaboration_product::CollaborationChatProductPort::new(core.clone())
+                    .unwrap();
+            product
+                .project_history(&fixture.data_root, &batch, now)
+                .unwrap();
+            let saved = core.conversation_history(now).unwrap();
+            assert_eq!(saved, selected);
+            let session = crate::room_service::start_local_runtime_session(
+                &fixture.data_root,
+                &core.local_device_did(),
+                "Reader",
+                "batch conflict test",
+            )
+            .unwrap();
+            let before = product
+                .conversation_poll(&fixture.data_root, &session.token, 0)
+                .unwrap();
+            assert_eq!(before.objects.len(), 2);
+            assert!(before
+                .objects
+                .iter()
+                .any(|row| row.body.as_deref() == Some("unrelated candidate")));
+            batch.reverse();
+            product
+                .project_history(&fixture.data_root, &batch, now)
+                .unwrap();
+            let after = product
+                .conversation_poll(&fixture.data_root, &session.token, 0)
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(after.objects).unwrap(),
+                serde_json::to_value(before.objects).unwrap()
+            );
+            assert_eq!(after.latest_seq, before.latest_seq);
+            assert_eq!(core.conversation_history(now).unwrap(), saved);
         }
     }
 

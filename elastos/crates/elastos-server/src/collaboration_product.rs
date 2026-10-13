@@ -19,7 +19,7 @@ pub(crate) const CHAT_ROOM_CAPSULE: &str = "chat-room";
 pub(crate) const CHAT_INTERFACE: &str = "elastos.chat.room";
 const CHAT_RESOURCE: &str = "elastos://chat/message";
 const CHAT_PAYLOAD_TYPE: &str = "elastos.chat.message/v1";
-const CHAT_MESSAGE_TTL_SECS: u64 = 300;
+pub(crate) const CHAT_MESSAGE_TTL_SECS: u64 = 300;
 
 /// Cloneable opaque port for the one configured Chat collaboration product.
 #[derive(Clone)]
@@ -288,28 +288,43 @@ impl CollaborationChatProductPort {
             .iter()
             .map(|bytes| self.history_handoff(bytes, now))
             .collect::<anyhow::Result<Vec<_>>>()?;
-        let candidates = self.core.history_projection_candidates(messages, now)?;
-        let hashes = candidates
-            .iter()
-            .map(|bytes| {
-                elastos_common::collaboration_protocol::collaboration_message_envelope_sha256(bytes)
+        self.core
+            .with_history_projection(messages, now, |candidates| {
+                let hashes = candidates
+                .iter()
+                .map(|bytes| {
+                    elastos_common::collaboration_protocol::collaboration_message_envelope_sha256(
+                        bytes,
+                    )
+                })
+                .collect::<std::collections::HashSet<_>>();
+                for handoff in handoffs
+                    .into_iter()
+                    .filter(|handoff| hashes.contains(&handoff.envelope_sha256))
+                {
+                    crate::room_service::project_collaboration_text(
+                        data_dir,
+                        (&handoff.network_id, &handoff.conversation_id),
+                        &handoff.envelope_sha256,
+                        &room_profile_card(&handoff.sender_profile),
+                        &handoff.body,
+                        handoff.issued_at,
+                        CollaborationTextOrigin::Incoming,
+                    )?;
+                }
+                Ok(())
             })
-            .collect::<std::collections::HashSet<_>>();
-        for handoff in handoffs
-            .into_iter()
-            .filter(|handoff| hashes.contains(&handoff.envelope_sha256))
-        {
-            crate::room_service::project_collaboration_text(
-                data_dir,
-                (&handoff.network_id, &handoff.conversation_id),
-                &handoff.envelope_sha256,
-                &room_profile_card(&handoff.sender_profile),
-                &handoff.body,
-                handoff.issued_at,
-                CollaborationTextOrigin::Incoming,
-            )?;
-        }
-        self.core.retain_history_messages(&candidates, now)
+    }
+
+    /// Complete locally reserved catch-up rows after a storage failure or restart.
+    /// The signed originals stay on this Home, so recovery needs no peer.
+    pub(crate) fn retry_pending_history_projection(
+        &self,
+        data_dir: &Path,
+        now: u64,
+    ) -> anyhow::Result<()> {
+        let pending = self.core.pending_history_projection(now)?;
+        self.project_history(data_dir, &pending, now)
     }
 
     fn history_handoff(&self, bytes: &[u8], now: u64) -> anyhow::Result<CollaborationChatHandoff> {
@@ -1275,11 +1290,16 @@ mod tests {
                     later,
                 )
                 .unwrap();
-            assert!(fixture
+            let pending_delivery = fixture
                 .core
                 .outgoing_chat_delivery(&fixture.person_profile.document().profile_did)
-                .unwrap()
-                .is_empty());
+                .unwrap();
+            assert_eq!(pending_delivery.len(), 1);
+            assert_ne!(
+                pending_delivery[0].envelope_sha256,
+                prepared.envelope_sha256
+            );
+            assert!(!pending_delivery[0].accepted);
             let restarted = CollaborationChatProductPort::new(Arc::new(
                 CollaborationCore::new(
                     &fixture.data_root,
@@ -1430,10 +1450,15 @@ mod tests {
                     later,
                 )
                 .unwrap();
-            assert!(recovered_core
+            let pending_delivery = recovered_core
                 .outgoing_chat_delivery(&fixture.person_profile.document().profile_did)
-                .unwrap()
-                .is_empty());
+                .unwrap();
+            assert_eq!(pending_delivery.len(), 1);
+            assert_ne!(
+                pending_delivery[0].envelope_sha256,
+                prepared.envelope_sha256
+            );
+            assert!(!pending_delivery[0].accepted);
             let restarted = CollaborationChatProductPort::new(Arc::new(
                 CollaborationCore::new(
                     &fixture.data_root,
@@ -1697,11 +1722,16 @@ mod tests {
                     later,
                 )
                 .unwrap();
-            assert!(fixture
+            let pending_delivery = fixture
                 .core
                 .outgoing_chat_delivery(&fixture.person_profile.document().profile_did)
-                .unwrap()
-                .is_empty());
+                .unwrap();
+            assert_eq!(pending_delivery.len(), 1);
+            assert_ne!(
+                pending_delivery[0].envelope_sha256,
+                prepared.envelope_sha256
+            );
+            assert!(!pending_delivery[0].accepted);
             let saved = fixture
                 .port
                 .conversation_poll(&fixture.data_root, &session.token, 0)
@@ -1803,11 +1833,16 @@ mod tests {
                 later,
             )
             .unwrap();
-        assert!(fixture
+        let pending_delivery = fixture
             .core
             .outgoing_chat_delivery(&fixture.person_profile.document().profile_did)
-            .unwrap()
-            .is_empty());
+            .unwrap();
+        assert_eq!(pending_delivery.len(), 1);
+        assert_ne!(
+            pending_delivery[0].envelope_sha256,
+            prepared.envelope_sha256
+        );
+        assert!(!pending_delivery[0].accepted);
         let restarted = CollaborationChatProductPort::new(Arc::new(
             CollaborationCore::new(
                 &fixture.data_root,
@@ -2164,6 +2199,396 @@ mod tests {
             .port
             .community_unread(&fixture.data_root, &fixture.person_profile, now + 1)
             .unwrap());
+    }
+
+    #[test]
+    fn community_delivery_pending_projection_keeps_sending_across_poll_and_restart() {
+        use crate::room_service::CommunityDeliveryState::Sending;
+        let fixture = fixture();
+        let now = now_secs();
+        let session = crate::room_service::start_local_runtime_session(
+            &fixture.data_root,
+            &fixture.person_profile.document().profile_did,
+            "Local",
+            "Projection gap test",
+        )
+        .unwrap();
+        // This poll's Core read precedes the local prepare and Room publication.
+        let before_prepare = fixture
+            .core
+            .outgoing_chat_delivery(&fixture.person_profile.document().profile_did)
+            .unwrap();
+        assert!(before_prepare.is_empty());
+        let prepared = fixture
+            .port
+            .prepare_message(
+                binding(&fixture, "projection-gap", "pending original"),
+                "pending original",
+                &fixture.person_profile,
+                now,
+            )
+            .unwrap();
+        let namespace =
+            std::fs::read_dir(fixture.data_root.join("collaboration/default-conversation"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+        let history_path = namespace.join("history-v1.json");
+        std::fs::create_dir(&history_path).unwrap();
+        // Stop after Room publication, before history retention and Core ACK.
+        assert!(fixture
+            .port
+            .project_prepared_message(&fixture.data_root, &prepared, Some(&session.token))
+            .is_err());
+        let evidence = fixture
+            .core
+            .outgoing_chat_delivery(&fixture.person_profile.document().profile_did)
+            .unwrap();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].envelope_sha256, prepared.envelope_sha256);
+        assert!(!evidence[0].accepted);
+        let through_skew = prepared.expires_at
+            + elastos_common::collaboration_protocol::MAX_COLLABORATION_CLOCK_SKEW_SECS;
+        for at in [now, through_skew] {
+            let stale = crate::room_service::collaboration_room_poll_with_delivery(
+                &fixture.data_root,
+                &session.token,
+                fixture.core.conversation_scope(),
+                0,
+                &fixture.person_profile.document().profile_did,
+                &before_prepare,
+                at,
+            )
+            .unwrap();
+            assert_eq!(stale.objects.len(), 1);
+            assert_eq!(stale.objects[0].body.as_deref(), Some("pending original"));
+            assert_eq!(stale.own_delivery[0].state, Sending);
+        }
+        // A crash/reopen in the same gap retains the actual Pending original.
+        let restarted_core = Arc::new(
+            CollaborationCore::new(
+                &fixture.data_root,
+                fixture.device_key.clone(),
+                fixture.profile.clone(),
+                fixture.grant.clone(),
+                CHAT_ROOM_CAPSULE,
+            )
+            .unwrap(),
+        );
+        let restarted = CollaborationChatProductPort::new(restarted_core.clone()).unwrap();
+        let reopened = restarted
+            .conversation_poll_with_read_intent(
+                &fixture.data_root,
+                &session.token,
+                0,
+                &fixture.person_profile,
+                false,
+                now,
+            )
+            .unwrap();
+        assert_eq!(reopened.own_delivery[0].state, Sending);
+        let recovered = restarted.pending_outgoing_messages(now).unwrap().remove(0);
+        assert_eq!(recovered.envelope_bytes, prepared.envelope_bytes);
+        std::fs::remove_dir(&history_path).unwrap();
+        let completed = restarted
+            .project_prepared_message(&fixture.data_root, &recovered, None)
+            .unwrap();
+        assert_eq!(completed.seq, reopened.objects[0].seq);
+        // Sessionless recovery shows no viewer's delivery; the owner still sees Sending.
+        assert_eq!(completed.delivery_state, None);
+        let after_recovery = restarted
+            .conversation_poll_with_read_intent(
+                &fixture.data_root,
+                &session.token,
+                0,
+                &fixture.person_profile,
+                false,
+                now,
+            )
+            .unwrap();
+        assert_eq!(after_recovery.objects.len(), 1);
+        assert_eq!(after_recovery.objects[0].delivery_state, Some(Sending));
+        assert_eq!(after_recovery.own_delivery[0].state, Sending);
+        assert!(restarted.pending_outgoing_messages(now).unwrap().is_empty());
+        assert_eq!(
+            restarted.retained_history(now).unwrap(),
+            vec![prepared.envelope_bytes]
+        );
+    }
+
+    #[test]
+    fn room_durability_failure_keeps_projection_and_history_retryable_after_restart() {
+        use crate::room_service::CollaborationProjectionWriteFault::{
+            AfterRename, BeforeAncestorSync, BeforeFileSync,
+        };
+        for origin in ["outgoing", "incoming", "history"] {
+            for fault in [BeforeFileSync, AfterRename, BeforeAncestorSync] {
+                let fixture = fixture();
+                let now = now_secs();
+                let prepared = (origin == "outgoing").then(|| {
+                    fixture
+                        .port
+                        .prepare_message(
+                            binding(&fixture, "durability-own", "durable original"),
+                            "durable original",
+                            &fixture.person_profile,
+                            now,
+                        )
+                        .unwrap()
+                });
+                let original = if let Some(prepared) = &prepared {
+                    prepared.envelope_bytes.clone()
+                } else {
+                    let (remote, profile) = remote_authority(&fixture);
+                    remote
+                        .prepare_profile_outgoing(
+                            &profile,
+                            CHAT_SERVICE,
+                            CHAT_PAYLOAD_TYPE,
+                            serde_json::json!({"body":"durable original"}),
+                            now,
+                            CHAT_MESSAGE_TTL_SECS,
+                        )
+                        .unwrap()
+                        .envelope_bytes()
+                        .to_vec()
+                };
+                if origin == "incoming" {
+                    fixture
+                        .core
+                        .accept_incoming_from_signed_source_for_test(&original, now)
+                        .unwrap();
+                }
+                let handoff = (origin == "incoming")
+                    .then(|| fixture.port.pending_messages().unwrap().remove(0));
+                let project =
+                    |port: &CollaborationChatProductPort,
+                     prepared: &Option<PreparedCollaborationChatMessage>,
+                     handoff: &Option<CollaborationChatHandoff>| {
+                        match origin {
+                            "outgoing" => port
+                                .project_prepared_message(
+                                    &fixture.data_root,
+                                    prepared.as_ref().unwrap(),
+                                    None,
+                                )
+                                .map(|_| ()),
+                            "incoming" => port
+                                .project_handoff(&fixture.data_root, handoff.as_ref().unwrap())
+                                .map(|_| ()),
+                            _ => port.project_history(
+                                &fixture.data_root,
+                                std::slice::from_ref(&original),
+                                now,
+                            ),
+                        }
+                    };
+                crate::room_service::inject_collaboration_projection_write_fault(
+                    &fixture.data_root,
+                    fault,
+                )
+                .unwrap();
+                assert!(project(&fixture.port, &prepared, &handoff).is_err());
+                assert!(fixture.port.retained_history(now).unwrap().is_empty());
+                assert_eq!(
+                    fixture.port.pending_outgoing_messages(now).unwrap().len(),
+                    usize::from(origin == "outgoing")
+                );
+                assert_eq!(
+                    fixture.port.pending_messages().unwrap().len(),
+                    usize::from(origin == "incoming")
+                );
+
+                let restarted = CollaborationChatProductPort::new(Arc::new(
+                    CollaborationCore::new(
+                        &fixture.data_root,
+                        fixture.device_key.clone(),
+                        fixture.profile.clone(),
+                        fixture.grant.clone(),
+                        CHAT_ROOM_CAPSULE,
+                    )
+                    .unwrap(),
+                ))
+                .unwrap();
+                let recovered = (origin == "outgoing")
+                    .then(|| restarted.pending_outgoing_messages(now).unwrap().remove(0));
+                let received =
+                    (origin == "incoming").then(|| restarted.pending_messages().unwrap().remove(0));
+                // Even a row already visible after rename must be synced on retry.
+                crate::room_service::inject_collaboration_projection_write_fault(
+                    &fixture.data_root,
+                    AfterRename,
+                )
+                .unwrap();
+                assert!(project(&restarted, &recovered, &received).is_err());
+                assert!(restarted.retained_history(now).unwrap().is_empty());
+                project(&restarted, &recovered, &received).unwrap();
+                let session = crate::room_service::start_local_runtime_session(
+                    &fixture.data_root,
+                    &fixture.person_profile.document().profile_did,
+                    "Local",
+                    "Room durability test",
+                )
+                .unwrap();
+                let poll = restarted
+                    .conversation_poll(&fixture.data_root, &session.token, 0)
+                    .unwrap();
+                assert_eq!(poll.objects.len(), 1);
+                assert_eq!(poll.objects[0].body.as_deref(), Some("durable original"));
+                assert_eq!(
+                    restarted.retained_history(now).unwrap(),
+                    vec![original.clone()]
+                );
+                assert!(restarted.pending_outgoing_messages(now).unwrap().is_empty());
+                assert!(restarted.pending_messages().unwrap().is_empty());
+                project(&restarted, &recovered, &received).unwrap();
+                let replay = restarted
+                    .conversation_poll(&fixture.data_root, &session.token, 0)
+                    .unwrap();
+                assert_eq!(replay.objects.len(), 1);
+                assert_eq!(replay.objects[0].seq, poll.objects[0].seq);
+            }
+        }
+    }
+
+    #[test]
+    fn partial_history_projection_reserves_identities_and_recovers_locally_after_restart() {
+        use elastos_common::collaboration_protocol::{
+            canonical_collaboration_message_bytes, canonical_signed_collaboration_message_bytes,
+            SignedCollaborationMessage, COLLABORATION_MESSAGE_SIGNATURE_DOMAIN_V1,
+        };
+        let fixture = fixture();
+        let now = now_secs();
+        let session = crate::room_service::start_local_runtime_session(
+            &fixture.data_root,
+            &fixture.person_profile.document().profile_did,
+            "Local",
+            "Partial catch-up test",
+        )
+        .unwrap();
+        let key = generate_keypair().0;
+        let remote = DefaultConversationDeviceAuthority::new(
+            key.clone(),
+            fixture.profile.clone(),
+            fixture.grant.clone(),
+        )
+        .unwrap();
+        let profile = crate::collaboration_profile_authority::signed_profile_document_for_test(
+            &generate_keypair().0,
+            "Remote",
+            None,
+            1,
+            None,
+            now,
+            vec![remote.local_device_did()],
+        )
+        .unwrap();
+        let originals = ["first reserved row", "second reserved row"].map(|body| {
+            remote
+                .prepare_profile_outgoing(
+                    &profile,
+                    CHAT_SERVICE,
+                    CHAT_PAYLOAD_TYPE,
+                    serde_json::json!({"body":body}),
+                    now,
+                    CHAT_MESSAGE_TTL_SECS,
+                )
+                .unwrap()
+                .envelope_bytes()
+                .to_vec()
+        });
+        crate::room_service::inject_collaboration_projection_write_fault_after(
+            &fixture.data_root,
+            crate::room_service::CollaborationProjectionWriteFault::BeforeFileSync,
+            1,
+        )
+        .unwrap();
+        assert!(fixture
+            .port
+            .project_history(&fixture.data_root, &originals, now)
+            .is_err());
+        let partial = fixture
+            .port
+            .conversation_poll(&fixture.data_root, &session.token, 0)
+            .unwrap();
+        assert_eq!(partial.objects.len(), 1);
+        assert_eq!(
+            partial.objects[0].body.as_deref(),
+            Some("first reserved row")
+        );
+        assert!(fixture.core.conversation_history(now).unwrap().is_empty());
+        let pending = fixture.core.pending_history_projection(now).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(originals.iter().all(|original| pending.contains(original)));
+        // The Core guard has been released. Both identities are still reserved,
+        // including the row whose Room write failed, against a valid signed alias.
+        for original in &originals {
+            let mut alias: SignedCollaborationMessage = serde_json::from_slice(original).unwrap();
+            alias.payload.payload["product"]["body"] = serde_json::json!("different signed body");
+            let (signature, signer) = crate::crypto::domain_separated_sign(
+                &key,
+                COLLABORATION_MESSAGE_SIGNATURE_DOMAIN_V1,
+                &canonical_collaboration_message_bytes(&alias.payload).unwrap(),
+            );
+            alias.signature = signature;
+            alias.signer_did = signer;
+            let bytes = canonical_signed_collaboration_message_bytes(&alias).unwrap();
+            fixture.core.authorize_history_message(&bytes, now).unwrap();
+            assert!(fixture
+                .core
+                .accept_incoming_from_signed_source_for_test(&bytes, now)
+                .is_err());
+        }
+        let restarted = CollaborationChatProductPort::new(Arc::new(
+            CollaborationCore::new(
+                &fixture.data_root,
+                fixture.device_key.clone(),
+                fixture.profile.clone(),
+                fixture.grant.clone(),
+                CHAT_ROOM_CAPSULE,
+            )
+            .unwrap(),
+        ))
+        .unwrap();
+        // No peer or transport is involved: the durable reservation supplies bytes.
+        restarted
+            .retry_pending_history_projection(&fixture.data_root, now)
+            .unwrap();
+        assert!(restarted
+            .core
+            .pending_history_projection(now)
+            .unwrap()
+            .is_empty());
+        let completed = restarted
+            .conversation_poll(&fixture.data_root, &session.token, 0)
+            .unwrap();
+        assert_eq!(completed.objects.len(), 2);
+        assert_eq!(completed.objects[0].seq, partial.objects[0].seq);
+        assert_eq!(
+            completed.objects[0].body.as_deref(),
+            Some("first reserved row")
+        );
+        assert_eq!(
+            completed.objects[1].body.as_deref(),
+            Some("second reserved row")
+        );
+        let retained = restarted.core.conversation_history(now).unwrap();
+        assert_eq!(retained.len(), 2);
+        assert!(originals.iter().all(|original| retained.contains(original)));
+        restarted
+            .retry_pending_history_projection(&fixture.data_root, now)
+            .unwrap();
+        let replay = restarted
+            .conversation_poll(&fixture.data_root, &session.token, 0)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(replay.objects).unwrap(),
+            serde_json::to_value(completed.objects).unwrap()
+        );
+        assert_eq!(replay.latest_seq, completed.latest_seq);
+        assert_eq!(restarted.core.conversation_history(now).unwrap(), retained);
     }
 
     #[test]

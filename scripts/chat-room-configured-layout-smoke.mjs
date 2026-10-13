@@ -144,8 +144,14 @@ function startServer(scenario) {
   const initialDirectRecovery = scenario.startsWith("direct-initial-401");
   const sharedRecovery = scenario === "shared-poll-401";
   const sharedRenderOrdering = scenario === "shared-poll-render-before-metadata";
-  const communityDeliveryScenario = scenario === "community-delivery-status";
-  const sharedCursorScenario = scenario === "shared-send-intervening-peer";
+  const communityResponseOrdering = scenario === "community-delivery-response-order";
+  const communitySendOrdering = scenario === "community-send-stale-snapshot";
+  const communityPeriodicOrdering = scenario === "community-delivery-older-periodic";
+  const communityEventOrdering = scenario === "community-delivery-older-event";
+  const communityNonterminalOrdering = communityPeriodicOrdering || communityEventOrdering;
+  const communityDeliveryScenario = scenario === "community-delivery-status"
+    || communityResponseOrdering || communityNonterminalOrdering;
+  const sharedCursorScenario = scenario === "shared-send-intervening-peer" || communitySendOrdering;
   const contactAcceptance = scenario.startsWith("contact-acceptance");
   const historyScenario = scenario === "history-status-order-calendar";
   const unreadScenario = scenario === "direct-unread" || scenario === "visible-read";
@@ -169,6 +175,11 @@ function startServer(scenario) {
       ? createHold("contact-request")
       : null,
     "shared-poll-conversations": sharedRenderOrdering ? createHold("shared-poll-conversations") : null,
+    "community-before-send": communitySendOrdering ? createHold("community-before-send") : null,
+    "community-sending": communityResponseOrdering ? createHold("community-sending") : null,
+    "community-expired": communityResponseOrdering ? createHold("community-expired") : null,
+    "community-background": communityEventOrdering ? createHold("community-background") : null,
+    "community-nonterminal": communityNonterminalOrdering ? createHold("community-nonterminal") : null,
   };
   const trace = {
     cycles: [],
@@ -184,8 +195,11 @@ function startServer(scenario) {
     rejectSharedPoll: false,
     sharedMarkerReady: false,
     sharedMarkerPolled: false,
-    communityDeliveryState: "sending",
+    communityDeliveryState: communityEventOrdering ? "unknown" : "sending",
     communityDeliveryPolls: [],
+    communityHoldExpired: false,
+    communityHoldNonterminal: communityPeriodicOrdering,
+    communityPollUnavailable: false,
     sharedCursorReady: false,
     sharedCursorPolls: [],
     peerAccepted: false,
@@ -216,7 +230,8 @@ function startServer(scenario) {
       poll.objects = trace.current.polls === 0 ? [
         { ...historyMessage(1, communityDeliveryMarker, "2026-03-09T12:00:00Z"),
           sender: "Configured User", from_current_session: true, delivery_state: "sending" },
-        historyMessage(2, "Another person's Community message", "2026-03-09T12:00:01Z"),
+        historyMessage(2, "Another person's Community message",
+          communityResponseOrdering ? "2026-03-09T12:00:00Z" : "2026-03-09T12:00:01Z"),
       ] : [];
     }
     if (sharedCursorScenario) {
@@ -396,6 +411,11 @@ function startServer(scenario) {
           trace.pollErrors += 1;
           return json(response, { error: "invalid or expired session" }, 401);
         }
+        if ((communitySendOrdering || communityResponseOrdering || communityNonterminalOrdering)
+          && trace.communityPollUnavailable) {
+          trace.pollErrors += 1;
+          return json(response, { error: "Community poll is temporarily unavailable." }, 500);
+        }
         if (sharedRenderOrdering && trace.sharedMarkerReady) trace.sharedMarkerPolled = true;
         const poll = pollView();
         if (sharedCursorScenario && trace.sharedCursorReady) {
@@ -412,6 +432,26 @@ function startServer(scenario) {
           since: input.since, latest_seq: poll.latest_seq, object_count: poll.objects.length,
           state: poll.own_delivery[0].state,
         });
+        const communityHold = communitySendOrdering && !holds["community-before-send"].reached
+          ? holds["community-before-send"]
+          : communityResponseOrdering && !holds["community-sending"].reached
+            ? holds["community-sending"]
+            : communityResponseOrdering && trace.communityHoldExpired && !holds["community-expired"].reached
+              ? holds["community-expired"]
+              : communityEventOrdering && !holds["community-background"].reached
+                ? holds["community-background"]
+                : communityNonterminalOrdering && trace.communityHoldNonterminal && !holds["community-nonterminal"].reached
+                  ? holds["community-nonterminal"]
+                  : null;
+        if (communityHold) {
+          // Capture the Runtime body before waiting. Later state changes cannot
+          // replace the older response which the generated UI will receive.
+          communityHold.snapshot = structuredClone(poll);
+          communityHold.reached = true;
+          await communityHold.promise;
+          trace.heldReleases.push(communityHold.label);
+          return json(response, communityHold.snapshot);
+        }
         return json(response, poll);
       }
       if (url.pathname === "/api/apps/chat-room/contacts/request" && contactAcceptance) {
@@ -681,6 +721,15 @@ async function directSwitchState(frame) {
   }));
 }
 
+async function notifyChatRuntime(page) {
+  // Home delivers the event from its HTTP origin to the opaque Chat frame.
+  // The generated UI requests its own overlapping poll through its listener.
+  await page.evaluate(() => document.querySelector('iframe[title="Chat"]').contentWindow.postMessage({
+    type: "elastos:runtime-events",
+    events: [{ scope: "chat-room", kind: "chat-room.changed" }],
+  }, "*"));
+}
+
 async function runScenario(scenario) {
   const { server, trace, holds } = await startServer(scenario);
   const profile = await mkdtemp(join(tmpdir(), "elastos-chat-layout-"));
@@ -700,6 +749,158 @@ async function runScenario(scenario) {
     }
     await page.goto(url, { waitUntil: "domcontentloaded" });
     let frame = await chatFrame(page);
+
+    if (scenario === "community-send-stale-snapshot") {
+      await waitForConfiguredChatWithoutLegacyFlash(frame, "Community send response ordering");
+      const hold = holds["community-before-send"];
+      await waitFor(() => hold.reached);
+      assert(hold.snapshot.latest_seq === 10
+        && !hold.snapshot.objects.some(object => object.from_current_session)
+        && !(hold.snapshot.own_delivery || []).length,
+        "held pre-send snapshot already contains own delivery evidence", hold.snapshot);
+      await frame.locator("#message-input").fill(cursorOwnMarker);
+      await frame.locator("#message-input").press("Enter");
+      const own = frame.locator('#message-list [data-seq="12"]');
+      await frame.waitForFunction(() =>
+        document.querySelector('#message-list [data-seq="12"] .message-meta span:last-child')?.textContent === "Sending");
+      assert(!hold.released && await own.locator(".message-body").innerText() === cursorOwnMarker,
+        "own send did not render before the captured pre-send snapshot was released");
+      const draft = "Keep this next draft through the stale snapshot";
+      await frame.locator("#message-input").fill(draft);
+      trace.communityPollUnavailable = true;
+      hold.release();
+      await waitFor(() => trace.heldReleases.includes(hold.label) && trace.pollErrors > 0);
+      await frame.locator("#error-text").waitFor({ state: "visible" });
+      assert(await own.count() === 1
+        && await own.locator(".message-meta span:last-child").innerText() === "Sending"
+        && await own.locator(".message-body").innerText() === cursorOwnMarker,
+        "captured pre-send snapshot or subsequent network error erased own Sending evidence");
+      assert(trace.current.sends === 1 && await frame.locator("#message-input").inputValue() === draft,
+        "stale poll replay changed the next draft or sent again");
+      return;
+    }
+
+    if (scenario === "community-delivery-response-order") {
+      await waitForConfiguredChatWithoutLegacyFlash(frame, "Community delivery response ordering");
+      const own = frame.locator('#message-list [data-seq="1"]');
+      const sending = holds["community-sending"];
+      const expired = holds["community-expired"];
+      await waitFor(() => sending.reached);
+      // Accepted uses the ordinary time label. The peer row has the same
+      // timestamp, so compare rendered UI without duplicating its formatter.
+      const acceptedLabel = await frame.locator('#message-list [data-seq="2"] .message-meta span:last-child').innerText();
+      assert(acceptedLabel && !/Sending|Expired|Delivery unknown/.test(acceptedLabel),
+        "peer row does not provide an ordinary accepted time label", acceptedLabel);
+      assert(sending.snapshot.own_delivery[0].state === "sending" && !sending.released,
+        "Sending response was not captured before the newer delivery evidence");
+      trace.communityDeliveryState = "expired";
+      await notifyChatRuntime(page);
+      await frame.waitForFunction(() =>
+        document.querySelector('#message-list [data-seq="1"] .message-meta span:last-child')?.textContent === "Expired");
+      trace.communityHoldExpired = true;
+      await notifyChatRuntime(page);
+      await waitFor(() => expired.reached);
+      assert(expired.snapshot.own_delivery[0].state === "expired" && !expired.released && !sending.released,
+        "Expired response was not captured while the earlier Sending response remained held");
+      const draft = "Keep this draft when acceptance arrives";
+      await frame.locator("#message-input").fill(draft);
+      trace.communityDeliveryState = "accepted";
+      await notifyChatRuntime(page);
+      await frame.waitForFunction(expected =>
+        document.querySelector('#message-list [data-seq="1"] .message-meta span:last-child')?.textContent === expected, acceptedLabel);
+      assert(trace.communityDeliveryPolls.some(poll => poll.state === "accepted"
+        && poll.since === 2 && poll.latest_seq === 2 && poll.object_count === 0),
+        "Expired did not advance through a newer status-only Accepted poll", trace.communityDeliveryPolls);
+      assert(!expired.released && !sending.released,
+        "Accepted was observed only after the older delivery responses were released");
+      await frame.evaluate(() => {
+        const label = () => document.querySelector('#message-list [data-seq="1"] .message-meta span:last-child')?.textContent;
+        window.fixtureOwnDeliveryTransitions = [label()];
+        const observer = new MutationObserver(() => {
+          const current = label();
+          if (current !== window.fixtureOwnDeliveryTransitions.at(-1)) {
+            window.fixtureOwnDeliveryTransitions.push(current);
+          }
+        });
+        observer.observe(document.querySelector("#message-list"), { childList: true, characterData: true, subtree: true });
+      });
+      trace.communityPollUnavailable = true;
+      expired.release();
+      sending.release();
+      // The first held request belongs to the serial background loop. Its
+      // next failed poll proves that loop consumed the older Sending body.
+      await waitFor(() => trace.heldReleases.includes(expired.label)
+        && trace.heldReleases.includes(sending.label) && trace.pollErrors > 0);
+      await frame.locator("#error-text").waitFor({ state: "visible" });
+      const transitions = await frame.evaluate(() => window.fixtureOwnDeliveryTransitions);
+      assert(transitions.length > 0 && transitions.every(label => label === acceptedLabel)
+        && await own.locator(".message-meta span:last-child").innerText() === acceptedLabel,
+        "older Sending/Expired responses or a subsequent network error regressed Accepted", transitions);
+      assert(await own.count() === 1 && await own.locator(".message-body").innerText() === communityDeliveryMarker
+        && await frame.locator("#message-list [data-seq]").count() === 2,
+        "delivery response ordering replaced or duplicated Community history");
+      assert(trace.current.sends === 0 && await frame.locator("#message-input").inputValue() === draft,
+        "delivery response ordering changed the draft or created a send");
+      return;
+    }
+
+    if (scenario === "community-delivery-older-periodic" || scenario === "community-delivery-older-event") {
+      await waitForConfiguredChatWithoutLegacyFlash(frame, "Community nonterminal response ordering");
+      const own = frame.locator('#message-list [data-seq="1"]');
+      const eventOrdering = scenario === "community-delivery-older-event";
+      const olderState = eventOrdering ? "unknown" : "sending";
+      const newerState = eventOrdering ? "sending" : "unknown";
+      const newerLabel = eventOrdering ? "Sending" : "Delivery status unavailable";
+      const background = holds["community-background"];
+      const older = holds["community-nonterminal"];
+      if (eventOrdering) {
+        // Hold the serial background loop first, so the next held request
+        // must come from the generated Runtime-event listener.
+        await waitFor(() => background.reached);
+        trace.communityHoldNonterminal = true;
+        await notifyChatRuntime(page);
+      }
+      await waitFor(() => older.reached);
+      assert(older.snapshot.own_delivery[0].state === olderState && !older.released,
+        "older nonterminal response was not captured before the newer poll", older.snapshot);
+      const draft = "Keep this draft through nonterminal delivery ordering";
+      await frame.locator("#message-input").fill(draft);
+      trace.communityDeliveryState = newerState;
+      await notifyChatRuntime(page);
+      await frame.waitForFunction(expected =>
+        document.querySelector('#message-list [data-seq="1"] .message-meta span:last-child')?.textContent === expected, newerLabel);
+      assert(!older.released && (!background || !background.released)
+        && trace.communityDeliveryPolls.some(poll => poll.state === newerState
+          && poll.since === 2 && poll.latest_seq === 2 && poll.object_count === 0),
+        "newer nonterminal evidence was not applied before releasing the older request", trace.communityDeliveryPolls);
+      await frame.evaluate(() => {
+        const label = () => document.querySelector('#message-list [data-seq="1"] .message-meta span:last-child')?.textContent;
+        window.fixtureOwnDeliveryTransitions = [label()];
+        const observer = new MutationObserver(() => {
+          const current = label();
+          if (current !== window.fixtureOwnDeliveryTransitions.at(-1)) {
+            window.fixtureOwnDeliveryTransitions.push(current);
+          }
+        });
+        observer.observe(document.querySelector("#message-list"), { childList: true, characterData: true, subtree: true });
+      });
+      trace.communityPollUnavailable = true;
+      older.release();
+      if (background) background.release();
+      await waitFor(() => trace.heldReleases.includes(older.label)
+        && (!background || trace.heldReleases.includes(background.label)) && trace.pollErrors > 0);
+      await frame.locator("#error-text").waitFor({ state: "visible" });
+      const transitions = await frame.evaluate(() => window.fixtureOwnDeliveryTransitions);
+      assert(transitions.length > 0 && transitions.every(label => label === newerLabel)
+        && await own.locator(".message-meta span:last-child").innerText() === newerLabel,
+        "older nonterminal response replaced evidence from the newer request", transitions);
+      assert(await own.count() === 1 && await own.locator(".message-body").innerText() === communityDeliveryMarker
+        && await frame.locator("#message-list [data-seq]").count() === 2,
+        "nonterminal response ordering replaced or duplicated Community history");
+      assert(trace.current.sends === 0 && await frame.locator("#message-input").inputValue() === draft,
+        "nonterminal response ordering changed the draft or created a send");
+      return;
+    }
 
     if (scenario === "shared-send-intervening-peer") {
       await waitForConfiguredChatWithoutLegacyFlash(frame, "generated Chat cursor regression");
@@ -1515,6 +1716,10 @@ async function main() {
     "direct-list-unavailable",
     "shared-poll-render-before-metadata",
     "community-delivery-status",
+    "community-send-stale-snapshot",
+    "community-delivery-response-order",
+    "community-delivery-older-periodic",
+    "community-delivery-older-event",
     "shared-send-intervening-peer",
     "direct-switch",
     "direct-switch-hold-initial-conversations",

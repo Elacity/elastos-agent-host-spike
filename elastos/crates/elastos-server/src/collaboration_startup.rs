@@ -696,7 +696,6 @@ fn project_collaboration_outgoing(
                     .is_err()
                 {
                     tracing::warn!("collaboration Chat outgoing projection cycle failed");
-                    break;
                 }
             }
         }
@@ -710,7 +709,6 @@ fn project_collaboration_outgoing(
                         diagnostic = %bounded_presence_projection_diagnostic(&err),
                         "collaboration presence outgoing projection cycle failed"
                     );
-                    break;
                 }
             }
         }
@@ -730,12 +728,17 @@ fn project_collaboration_handoffs(
     if !product_port.community_membership().joined() {
         return;
     }
+    if product_port
+        .retry_pending_history_projection(data_root, now)
+        .is_err()
+    {
+        tracing::warn!("collaboration local history projection retry failed");
+    }
     match product_port.pending_messages() {
         Ok(handoffs) => {
             for handoff in &handoffs {
                 if product_port.project_handoff(data_root, handoff).is_err() {
                     tracing::warn!("collaboration Chat projection cycle failed");
-                    break;
                 }
             }
         }
@@ -746,7 +749,6 @@ fn project_collaboration_handoffs(
             for handoff in &handoffs {
                 if presence_port.project_handoff(handoff, now).is_err() {
                     tracing::warn!("collaboration presence projection cycle failed");
-                    break;
                 }
             }
         }
@@ -2097,6 +2099,114 @@ mod tests {
                 .objects
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn worker_handoff_failure_does_not_block_later_chat_or_presence_and_retries_next_cycle() {
+        let (temp, _) = configured_root(true);
+        let configuration =
+            load_and_accept_collaboration_startup_configuration(temp.path()).unwrap();
+        let CollaborationNetworkConfiguration::Configured {
+            profile,
+            grant: Some(grant),
+        } = configuration.configuration
+        else {
+            panic!("expected configured default conversation")
+        };
+        let device_key = generate_keypair().0;
+        let local_profile = profile_for_endpoint(&device_key, "Local");
+        let core = Arc::new(
+            CollaborationCore::new(
+                temp.path(),
+                device_key,
+                (*profile).clone(),
+                grant.clone(),
+                CHAT_ROOM_CAPSULE,
+            )
+            .unwrap(),
+        );
+        let product = CollaborationChatProductPort::new(core.clone()).unwrap();
+        let presence = CollaborationPresenceProductPort::new(core.clone()).unwrap();
+        crate::room_service::seed_room_owner(
+            temp.path(),
+            &local_profile,
+            crate::room_service::RoomOwnerSeedInput {
+                title: "Chat".to_string(),
+            },
+        )
+        .unwrap();
+        let remote_key = generate_keypair().0;
+        let remote_profile = profile_for_endpoint(&remote_key, "Remote");
+        let remote =
+            DefaultConversationDeviceAuthority::new(remote_key, (*profile).clone(), grant).unwrap();
+        let now = now_secs();
+        for body in ["retry first", "later Chat"] {
+            let original = remote
+                .prepare_profile_outgoing(
+                    &remote_profile,
+                    SERVICE,
+                    "elastos.chat.message/v1",
+                    serde_json::json!({"body":body}),
+                    now,
+                    TTL,
+                )
+                .unwrap();
+            accept_shared(&core, &remote, original.envelope_bytes(), now).unwrap();
+        }
+        let metadata = remote
+            .prepare_profile_outgoing(
+                &remote_profile,
+                SERVICE,
+                crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+                serde_json::json!({}),
+                now,
+                45,
+            )
+            .unwrap();
+        core.accept_incoming_from_signed_source_for_test(metadata.envelope_bytes(), now)
+            .unwrap();
+        assert_eq!(core.summary().unwrap().pending_product_handoffs, 3);
+        crate::room_service::inject_collaboration_projection_write_fault(
+            temp.path(),
+            crate::room_service::CollaborationProjectionWriteFault::BeforeFileSync,
+        )
+        .unwrap();
+        project_collaboration_handoffs(&product, &presence, temp.path(), now);
+        let pending = product.pending_messages().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(presence.pending_presences().unwrap().is_empty());
+        assert_eq!(presence.snapshot(now).unwrap().records().len(), 1);
+        let session = crate::room_service::start_local_runtime_session(
+            temp.path(),
+            &local_profile.document().profile_did,
+            "Local",
+            "worker retry test",
+        )
+        .unwrap();
+        let first_poll = product
+            .conversation_poll(temp.path(), &session.token, 0)
+            .unwrap();
+        assert_eq!(first_poll.objects.len(), 1);
+        assert_eq!(first_poll.objects[0].body.as_deref(), Some("later Chat"));
+        assert_eq!(core.summary().unwrap().pending_product_handoffs, 1);
+        // One attempt per handoff in this bounded cycle; the genuine IO failure
+        // retains its original until the next cycle completes its durable work.
+        project_collaboration_handoffs(&product, &presence, temp.path(), now);
+        assert_eq!(core.summary().unwrap().pending_product_handoffs, 0);
+        let completed = product
+            .conversation_poll(temp.path(), &session.token, 0)
+            .unwrap();
+        assert_eq!(completed.objects.len(), 2);
+        assert_eq!(completed.objects[0].seq, first_poll.objects[0].seq);
+        assert_eq!(completed.objects[1].body.as_deref(), Some("retry first"));
+        project_collaboration_handoffs(&product, &presence, temp.path(), now);
+        assert_eq!(
+            product
+                .conversation_poll(temp.path(), &session.token, 0)
+                .unwrap()
+                .latest_seq,
+            completed.latest_seq
         );
     }
 

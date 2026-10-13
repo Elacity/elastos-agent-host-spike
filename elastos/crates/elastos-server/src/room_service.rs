@@ -2886,7 +2886,7 @@ pub(crate) fn project_collaboration_text(
         sender_profile,
         body,
     } = collaboration_text_projection(scope, envelope_sha256, sender_profile, body)?;
-    with_locked_state(data_dir, |_, state| {
+    let object = with_locked_state(data_dir, |_, state| {
         let current_session = match local_session_token {
             Some(token) => {
                 let session = validate_session(state, token)?;
@@ -2950,7 +2950,31 @@ pub(crate) fn project_collaboration_text(
             },
         );
         Ok(object_view_from_record(object, current_session.as_ref()))
-    })
+    })?;
+    // Persist newly created Room ancestors before history or Core ACK advances.
+    // Retry also checks this boundary when the exact row already exists.
+    let paths = storage_paths(data_dir)?;
+    #[cfg(test)]
+    check_collaboration_projection_write_fault(
+        &paths.objects_path,
+        CollaborationProjectionWriteFault::BeforeAncestorSync,
+    )?;
+    let mut directory = paths.root_dir;
+    loop {
+        anyhow::ensure!(
+            directory.starts_with(data_dir),
+            "Room directory escaped its data root"
+        );
+        fs::File::open(&directory)?.sync_all()?;
+        if directory == data_dir {
+            break;
+        }
+        directory = directory
+            .parent()
+            .context("Room directory has no owned parent")?
+            .to_path_buf();
+    }
+    Ok(object)
 }
 
 struct CollaborationTextProjection {
@@ -3155,7 +3179,19 @@ pub(crate) fn collaboration_room_poll_with_delivery(
                 }
                 Some(entry) if entry.expires_at <= now => Some(CommunityDeliveryState::Expired),
                 Some(_) => Some(CommunityDeliveryState::Sending),
-                None if object.delivery_state == Some(CommunityDeliveryState::Sending) => {
+                // An empty Core snapshot may precede this row's prepare or
+                // projection ACK. Only old, genuinely missing evidence can
+                // downgrade Sending after the signed Chat lifetime plus skew.
+                None
+                    if object.delivery_state == Some(CommunityDeliveryState::Sending)
+                        && object
+                            .created_at
+                            .saturating_add(crate::collaboration_product::CHAT_MESSAGE_TTL_SECS)
+                            .saturating_add(
+                                elastos_common::collaboration_protocol::MAX_COLLABORATION_CLOCK_SKEW_SECS,
+                            )
+                            < now =>
+                {
                     Some(CommunityDeliveryState::Unknown)
                 }
                 None => object.delivery_state,
@@ -4789,7 +4825,9 @@ fn save_state(paths: &RoomPaths, state: &RoomState) -> anyhow::Result<()> {
     write_json_atomic(&paths.key_epochs_path, &state.key_epochs)?;
     write_json_atomic(&paths.pair_requests_path, &state.pending_requests)?;
     write_json_atomic(&paths.sessions_path, &state.sessions)?;
-    write_json_atomic(&paths.objects_path, &state.objects)?;
+    // Product history and handoff ACKs may advance only after these rows
+    // and their directory entry are durable, including an idempotent retry.
+    write_json_atomic_with_sync(&paths.objects_path, &state.objects, true)?;
     write_json_atomic(&paths.uploads_path, &state.uploads)?;
     Ok(())
 }
@@ -4881,6 +4919,16 @@ fn split_store_exists(paths: &RoomPaths) -> bool {
 }
 
 fn normalize_state_defaults(state: &mut RoomState) {
+    // Objects are durable before their Core ACK. Recover the cursor if a
+    // power loss kept older Room metadata beside those committed rows.
+    let retained_next_seq = state
+        .objects
+        .iter()
+        .map(|object| object.seq)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    state.next_seq = state.next_seq.max(retained_next_seq);
     if state.control.created_at == 0 {
         state.control.created_at = now_ts();
     }
@@ -4940,6 +4988,62 @@ where
     serde_json::from_slice(&bytes).with_context(|| format!("invalid {}", path.display()))
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CollaborationProjectionWriteFault {
+    BeforeFileSync,
+    AfterRename,
+    BeforeAncestorSync,
+}
+
+#[cfg(test)]
+thread_local! {
+    static COLLABORATION_PROJECTION_WRITE_FAULT: std::cell::RefCell<
+        Option<(PathBuf, CollaborationProjectionWriteFault, usize)>
+    > = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn inject_collaboration_projection_write_fault(
+    data_dir: &Path,
+    fault: CollaborationProjectionWriteFault,
+) -> anyhow::Result<()> {
+    inject_collaboration_projection_write_fault_after(data_dir, fault, 0)
+}
+
+#[cfg(test)]
+pub(crate) fn inject_collaboration_projection_write_fault_after(
+    data_dir: &Path,
+    fault: CollaborationProjectionWriteFault,
+    successful_writes: usize,
+) -> anyhow::Result<()> {
+    let path = storage_paths(data_dir)?.objects_path;
+    COLLABORATION_PROJECTION_WRITE_FAULT
+        .with(|slot| *slot.borrow_mut() = Some((path, fault, successful_writes)));
+    Ok(())
+}
+
+#[cfg(test)]
+fn check_collaboration_projection_write_fault(
+    path: &Path,
+    fault: CollaborationProjectionWriteFault,
+) -> anyhow::Result<()> {
+    COLLABORATION_PROJECTION_WRITE_FAULT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if let Some((target, stage, remaining)) = slot.as_mut() {
+            if target == path && *stage == fault {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                } else {
+                    slot.take();
+                    anyhow::bail!("injected collaboration Room durability failure");
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
 fn write_json_atomic<T>(path: &Path, value: &T) -> anyhow::Result<()>
 where
     T: Serialize,
@@ -4963,10 +5067,20 @@ where
     ));
     fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
     if durable {
+        #[cfg(test)]
+        check_collaboration_projection_write_fault(
+            path,
+            CollaborationProjectionWriteFault::BeforeFileSync,
+        )?;
         fs::File::open(&tmp)?.sync_all()?;
     }
     fs::rename(&tmp, path)?;
     if durable {
+        #[cfg(test)]
+        check_collaboration_projection_write_fault(
+            path,
+            CollaborationProjectionWriteFault::AfterRename,
+        )?;
         fs::File::open(parent)?.sync_all()?;
     }
     Ok(())
@@ -8000,6 +8114,70 @@ mod tests {
         assert!(empty_state.invites.is_empty());
         assert!(empty_state.sessions.is_empty());
         assert_eq!(empty_state.objects.len(), 1);
+    }
+
+    #[test]
+    fn durable_collaboration_rows_repair_stale_sequence_metadata_after_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = start_configured_collaboration_principal_session(
+            tmp.path(),
+            "did:key:z6configured",
+            "principal-one",
+            "Alice",
+            "ElastOS shell",
+        )
+        .unwrap();
+        let profile = RoomProfileCardView {
+            schema: "elastos.profile-card/v1".to_string(),
+            profile_id: "did:key:z6configured".to_string(),
+            display_name: "Alice".to_string(),
+            handle: None,
+            updated_at: now_ts(),
+        };
+        let first = project_collaboration_text(
+            tmp.path(),
+            ("network-one", "conversation-one"),
+            &format!("sha256:{}", "c".repeat(64)),
+            &profile,
+            "durable first row",
+            now_ts(),
+            CollaborationTextOrigin::Incoming,
+        )
+        .unwrap();
+        let paths = storage_paths(tmp.path()).unwrap();
+        let mut stale: RoomMeta = read_json_or_default(&paths.room_meta_path).unwrap();
+        stale.next_seq = first.seq;
+        write_json_atomic(&paths.room_meta_path, &stale).unwrap();
+        // Reopening uses the durable objects to repair an older metadata cursor.
+        assert_eq!(load_state(&paths).unwrap().next_seq, first.seq + 1);
+        let second = project_collaboration_text(
+            tmp.path(),
+            ("network-one", "conversation-one"),
+            &format!("sha256:{}", "d".repeat(64)),
+            &profile,
+            "new row after restart",
+            now_ts(),
+            CollaborationTextOrigin::Incoming,
+        )
+        .unwrap();
+        assert_eq!(second.seq, first.seq + 1);
+        let poll = collaboration_room_poll(
+            tmp.path(),
+            &session.token,
+            "network-one",
+            "conversation-one",
+            0,
+        )
+        .unwrap();
+        assert_eq!(poll.objects.len(), 2);
+        assert_eq!(poll.objects[0].seq, first.seq);
+        assert_eq!(poll.objects[1].seq, second.seq);
+        assert_eq!(poll.objects[0].body.as_deref(), Some("durable first row"));
+        assert_eq!(
+            poll.objects[1].body.as_deref(),
+            Some("new row after restart")
+        );
+        assert_eq!(poll.latest_seq, second.seq);
     }
 
     #[test]

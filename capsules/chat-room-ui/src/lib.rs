@@ -107,6 +107,8 @@ struct AppState {
     request_id: Option<String>,
     pending_chat_send: Option<PendingChatSend>,
     selection_generation: u64,
+    poll_requests: u64,
+    last_applied_delivery_poll: u64,
     room_mode_known: bool,
     collaboration_configured: bool,
     community_state: CommunityState,
@@ -179,6 +181,11 @@ struct PendingChatSend {
 struct SelectionGuard {
     generation: u64,
     selected_conversation_id: Option<String>,
+}
+
+struct PollRequestGuard {
+    selection: SelectionGuard,
+    request_number: u64,
 }
 
 #[derive(Clone)]
@@ -1910,6 +1917,7 @@ impl App {
         let request_token = self.home_token();
         spawn_local(async move {
             let headers = app.room_request_headers();
+            let poll_guard = begin_poll_request(&mut app.state.borrow_mut());
             let result = api_post_session_json(
                 &app.room_api_url("/poll"),
                 &RoomPollInput {
@@ -1926,7 +1934,10 @@ impl App {
             }
             match result {
                 Ok(poll) => {
-                    let (attachments, _changed) = app.apply_active_poll(poll);
+                    let Some((attachments, _changed)) = app.apply_active_poll(&poll_guard, poll)
+                    else {
+                        return;
+                    };
                     for attachment in attachments {
                         if let Err(err) = app.cache_attachment_data_url(&attachment).await {
                             app.set_error(Some(err));
@@ -1944,8 +1955,12 @@ impl App {
         });
     }
 
-    fn apply_active_poll(&self, poll: RoomPollView) -> (Vec<AttachmentView>, bool) {
-        apply_active_poll_state(&mut self.state.borrow_mut(), poll)
+    fn apply_active_poll(
+        &self,
+        guard: &PollRequestGuard,
+        poll: RoomPollView,
+    ) -> Option<(Vec<AttachmentView>, bool)> {
+        apply_active_poll_if_current(&mut self.state.borrow_mut(), guard, poll)
     }
 
     fn clear_browser_session_request_storage(&self) {
@@ -2348,6 +2363,7 @@ impl App {
             return Ok(true);
         }
 
+        let poll_guard = begin_poll_request(&mut self.state.borrow_mut());
         let start: ShellSessionStartOutput = api_post_empty_json_with_headers(
             &self.room_api_url("/session/start"),
             &self.home_token_headers(),
@@ -2363,7 +2379,8 @@ impl App {
         }
         let (attachments_to_cache, changed) = {
             let mut state = self.state.borrow_mut();
-            let Some(result) = apply_active_poll_if_current(&mut state, guard, start.poll) else {
+            let Some(result) = apply_active_poll_if_current(&mut state, &poll_guard, start.poll)
+            else {
                 return Ok(false);
             };
             result
@@ -3421,6 +3438,7 @@ impl App {
         if session_active {
             let request_token = self.home_token();
             let headers = self.room_request_headers();
+            let poll_guard = begin_poll_request(&mut self.state.borrow_mut());
             let response = api_post_session_json(
                 &self.room_api_url("/poll"),
                 &RoomPollInput {
@@ -3452,15 +3470,9 @@ impl App {
             {
                 return Ok(false);
             }
-            let (attachments_to_cache, changed) = if let Some(selection_guard) = guard {
-                let mut state = self.state.borrow_mut();
-                let Some(result) = apply_active_poll_if_current(&mut state, selection_guard, poll)
-                else {
-                    return Ok(false);
-                };
-                result
-            } else {
-                self.apply_active_poll(poll)
+            let Some((attachments_to_cache, changed)) = self.apply_active_poll(&poll_guard, poll)
+            else {
+                return Ok(false);
             };
             for attachment in attachments_to_cache {
                 if guard.is_some_and(|selection_guard| {
@@ -4724,6 +4736,17 @@ fn current_selection_guard(state: &AppState) -> SelectionGuard {
     }
 }
 
+fn begin_poll_request(state: &mut AppState) -> PollRequestGuard {
+    state.poll_requests = state
+        .poll_requests
+        .checked_add(1)
+        .expect("Chat poll request counter exhausted");
+    PollRequestGuard {
+        selection: current_selection_guard(state),
+        request_number: state.poll_requests,
+    }
+}
+
 fn library_picker_accepts(
     request: &LibraryPickerRequest,
     request_id: &str,
@@ -5003,9 +5026,19 @@ fn apply_active_poll_state(
             .map(|delivery| (delivery.seq, delivery.state))
             .collect::<BTreeMap<_, _>>();
         for object in &mut state.objects {
-            let delivery = own_delivery.get(&object.seq).copied();
-            if object.delivery_state != delivery {
-                object.delivery_state = delivery;
+            // A poll started before a local send can omit its new row. Keep
+            // the existing evidence until Runtime supplies an update for it.
+            let Some(delivery) = own_delivery.get(&object.seq).copied() else {
+                continue;
+            };
+            let delivery = match (object.delivery_state, delivery) {
+                (Some(CommunityDeliveryState::Accepted), _) => CommunityDeliveryState::Accepted,
+                (_, CommunityDeliveryState::Accepted) => CommunityDeliveryState::Accepted,
+                (Some(CommunityDeliveryState::Expired), _) => CommunityDeliveryState::Expired,
+                (_, delivery) => delivery,
+            };
+            if object.delivery_state != Some(delivery) {
+                object.delivery_state = Some(delivery);
                 delivery_changed = true;
             }
         }
@@ -5047,10 +5080,20 @@ fn community_delivery_label(state: Option<CommunityDeliveryState>) -> Option<&'s
 
 fn apply_active_poll_if_current(
     state: &mut AppState,
-    guard: &SelectionGuard,
-    poll: RoomPollView,
+    guard: &PollRequestGuard,
+    mut poll: RoomPollView,
 ) -> Option<(Vec<AttachmentView>, bool)> {
-    selection_guard_matches(state, guard).then(|| apply_active_poll_state(state, poll))
+    if !selection_guard_matches(state, &guard.selection) {
+        return None;
+    }
+    if guard.request_number < state.last_applied_delivery_poll {
+        // Periodic and Runtime-event polls overlap. Keep their recovered rows,
+        // but only newer requests may replace the current delivery evidence.
+        poll.own_delivery.clear();
+    } else {
+        state.last_applied_delivery_poll = guard.request_number;
+    }
+    Some(apply_active_poll_state(state, poll))
 }
 
 fn filter_configured_shared_poll(poll: &mut RoomPollView) {
@@ -5211,6 +5254,8 @@ fn load_state(session_storage: Option<&Storage>, config: &AppConfig) -> AppState
         },
         pending_chat_send: None,
         selection_generation: 0,
+        poll_requests: 0,
+        last_applied_delivery_poll: 0,
         room_mode_known: false,
         collaboration_configured: false,
         community_state: CommunityState::NotJoined,
@@ -5321,8 +5366,8 @@ mod tests {
     };
     use super::{
         admitted_home_origin, apply_active_poll_if_current, apply_active_poll_state,
-        apply_direct_refresh_if_current, apply_session_loss, chat_control_policy,
-        clear_selected_direct_conversation, commit_direct_selection,
+        apply_direct_refresh_if_current, apply_session_loss, begin_poll_request,
+        chat_control_policy, clear_selected_direct_conversation, commit_direct_selection,
         commit_requested_direct_selection_if_current, commit_shared_selection,
         conversation_initial, current_selection_guard, decode_query_value,
         documents_attachment_message, extract_fragment_param, extract_query_param,
@@ -5536,17 +5581,25 @@ mod tests {
             poll(Sending, vec![object(1, true), object(2, false)]),
         );
         assert_eq!(state.objects[0].delivery_state, Some(Sending));
-        for (delivery, label) in [
-            (Accepted, None),
-            (Expired, Some("Expired")),
-            (Unknown, Some("Delivery status unavailable")),
-            (Sending, Some("Sending")),
+        for (delivery, expected, label, changed) in [
+            (Unknown, Unknown, Some("Delivery status unavailable"), true),
+            (Sending, Sending, Some("Sending"), true),
+            (Expired, Expired, Some("Expired"), true),
+            (Unknown, Expired, Some("Expired"), false),
+            (Sending, Expired, Some("Expired"), false),
+            (Accepted, Accepted, None, true),
+            (Expired, Accepted, None, false),
+            (Unknown, Accepted, None, false),
+            (Sending, Accepted, None, false),
         ] {
-            assert!(apply_active_poll_state(&mut state, poll(delivery, vec![])).1);
+            assert_eq!(
+                apply_active_poll_state(&mut state, poll(delivery, vec![])).1,
+                changed
+            );
             assert_eq!(state.latest_seq, 2);
             assert_eq!(state.objects.len(), 2);
             assert_eq!(state.objects[0].body.as_deref(), Some("original 1"));
-            assert_eq!(state.objects[0].delivery_state, Some(delivery));
+            assert_eq!(state.objects[0].delivery_state, Some(expected));
             assert_eq!(
                 super::community_delivery_label(state.objects[0].delivery_state),
                 label
@@ -5558,9 +5611,217 @@ mod tests {
         }
         let mut no_evidence = poll(Sending, vec![]);
         no_evidence.own_delivery.clear();
-        assert!(apply_active_poll_state(&mut state, no_evidence).1);
-        assert_eq!(state.objects[0].delivery_state, None);
+        assert!(!apply_active_poll_state(&mut state, no_evidence).1);
+        assert_eq!(state.objects[0].delivery_state, Some(Accepted));
         assert_eq!(super::community_delivery_label(None), None);
+    }
+
+    #[test]
+    fn late_poll_snapshot_keeps_a_new_local_send_delivery_state() {
+        use super::CommunityDeliveryState::Sending;
+        let poll = |latest_seq, objects| RoomPollView {
+            objects,
+            transport: RoomTransportView {
+                configured: true,
+                available: true,
+                community_joined: Some(true),
+                ..RoomTransportView::default()
+            },
+            ..shared_poll(latest_seq)
+        };
+        let peer = serde_json::from_value(serde_json::json!({
+            "seq": 10, "sender": "Peer", "sender_profile_verified": true,
+            "from_current_session": false, "kind": "text", "body": "Earlier peer row",
+            "created_at": 100
+        }))
+        .unwrap();
+        let mut state = two_direct_conversations();
+        state.drafts.insert(None, ("Keep this draft".into(), 1));
+        apply_active_poll_state(&mut state, poll(10, vec![peer]));
+        let guard = begin_poll_request(&mut state);
+        // Runtime captured this response before the local send was stored.
+        let old_snapshot = poll(10, vec![]);
+        let sent: ConversationObjectView = serde_json::from_value(serde_json::json!({
+            "seq": 11, "sender": "Local", "sender_profile_verified": true,
+            "from_current_session": true, "kind": "text", "body": "New local original",
+            "created_at": 101, "delivery_state": "sending"
+        }))
+        .unwrap();
+        let direct = state.direct.clone();
+        let drafts = state.drafts.clone();
+        super::record_own_shared_send(&mut state, sent.clone());
+        assert_eq!(state.objects[1].delivery_state, Some(Sending));
+        assert!(apply_active_poll_if_current(&mut state, &guard, old_snapshot).is_some());
+        assert_eq!(state.latest_seq, 10);
+        assert_eq!(state.objects.len(), 2);
+        assert_eq!(state.objects[1].seq, 11);
+        assert_eq!(state.objects[1].body.as_deref(), Some("New local original"));
+        assert_eq!(state.objects[1].delivery_state, Some(Sending));
+        assert_eq!(
+            super::community_delivery_label(state.objects[1].delivery_state),
+            Some("Sending")
+        );
+        assert_eq!(state.direct, direct);
+        assert_eq!(state.drafts, drafts);
+        // The later current poll admits the row once and advances its cursor.
+        let mut current = poll(11, vec![sent]);
+        current.own_delivery = vec![super::CommunityDeliveryView {
+            seq: 11,
+            state: Sending,
+        }];
+        let current_guard = begin_poll_request(&mut state);
+        apply_active_poll_if_current(&mut state, &current_guard, current).unwrap();
+        assert_eq!(state.latest_seq, 11);
+        assert_eq!(state.objects.len(), 2);
+        assert_eq!(state.objects[1].delivery_state, Some(Sending));
+    }
+
+    #[test]
+    fn reordered_poll_snapshots_keep_terminal_delivery_when_disconnected() {
+        use super::CommunityDeliveryState::{Accepted, Expired, Sending, Unknown};
+        let own: ConversationObjectView = serde_json::from_value(serde_json::json!({
+            "seq": 1, "sender": "Local", "sender_profile_verified": true,
+            "from_current_session": true, "kind": "text", "body": "Accepted original",
+            "created_at": 100, "delivery_state": "sending"
+        }))
+        .unwrap();
+        let poll = |delivery, objects| RoomPollView {
+            objects,
+            own_delivery: vec![super::CommunityDeliveryView {
+                seq: 1,
+                state: delivery,
+            }],
+            transport: RoomTransportView {
+                configured: true,
+                available: true,
+                community_joined: Some(true),
+                ..RoomTransportView::default()
+            },
+            ..shared_poll(1)
+        };
+        let mut state = two_direct_conversations();
+        state.drafts.insert(None, ("Keep this draft".into(), 1));
+        apply_active_poll_state(&mut state, poll(Sending, vec![own.clone()]));
+        // Both full periodic and status-only Runtime-event responses can be
+        // captured before acceptance, then complete after the Accepted response.
+        let older = [Sending, Expired, Unknown].map(|delivery| {
+            let mut old_row = own.clone();
+            old_row.delivery_state = Some(delivery);
+            let mut snapshot = poll(delivery, vec![old_row]);
+            snapshot.transport.available = false;
+            (begin_poll_request(&mut state), snapshot)
+        });
+        let direct = state.direct.clone();
+        let drafts = state.drafts.clone();
+        let old_acceptance_guard = begin_poll_request(&mut state);
+        let old_acceptance = poll(Accepted, vec![]);
+        let expiration_guard = begin_poll_request(&mut state);
+        apply_active_poll_if_current(&mut state, &expiration_guard, poll(Expired, vec![])).unwrap();
+        assert_eq!(state.objects[0].delivery_state, Some(Expired));
+        apply_active_poll_if_current(&mut state, &old_acceptance_guard, old_acceptance).unwrap();
+        assert_eq!(state.objects[0].delivery_state, Some(Expired));
+        let guard = begin_poll_request(&mut state);
+        apply_active_poll_if_current(&mut state, &guard, poll(Accepted, vec![])).unwrap();
+        assert_eq!(state.objects[0].delivery_state, Some(Accepted));
+        for (guard, snapshot) in older {
+            apply_active_poll_if_current(&mut state, &guard, snapshot).unwrap();
+            assert_eq!(state.community_state, CommunityState::JoinedUnreachable);
+            assert_eq!(state.latest_seq, 1);
+            assert_eq!(state.objects.len(), 1);
+            assert_eq!(state.objects[0].delivery_state, Some(Accepted));
+            assert_eq!(state.objects[0].body.as_deref(), Some("Accepted original"));
+            assert_eq!(state.direct, direct);
+            assert_eq!(state.drafts, drafts);
+        }
+        let mut omitted = poll(Sending, vec![own]);
+        omitted.own_delivery.clear();
+        omitted.transport.available = false;
+        let guard = begin_poll_request(&mut state);
+        apply_active_poll_if_current(&mut state, &guard, omitted).unwrap();
+        assert_eq!(state.objects[0].delivery_state, Some(Accepted));
+    }
+
+    fn assert_nonterminal_poll_order(
+        older: super::CommunityDeliveryState,
+        newer: super::CommunityDeliveryState,
+    ) {
+        use super::CommunityDeliveryState::Sending;
+        let mut own: ConversationObjectView = serde_json::from_value(serde_json::json!({
+            "seq": 1, "sender": "Local", "sender_profile_verified": true,
+            "from_current_session": true, "kind": "text", "body": "Own original",
+            "created_at": 100, "delivery_state": "sending"
+        }))
+        .unwrap();
+        own.delivery_state = Some(older);
+        let poll = |delivery, objects| RoomPollView {
+            objects,
+            own_delivery: vec![super::CommunityDeliveryView {
+                seq: 1,
+                state: delivery,
+            }],
+            transport: RoomTransportView {
+                configured: true,
+                available: true,
+                community_joined: Some(true),
+                ..RoomTransportView::default()
+            },
+            ..shared_poll(1)
+        };
+        let mut state = two_direct_conversations();
+        state.drafts.insert(None, ("Keep this draft".into(), 1));
+        apply_active_poll_state(&mut state, poll(older, vec![own.clone()]));
+        let older_guard = begin_poll_request(&mut state);
+        let older_snapshot = poll(older, vec![own]);
+        let newer_guard = begin_poll_request(&mut state);
+        let direct = state.direct.clone();
+        let drafts = state.drafts.clone();
+        apply_active_poll_if_current(&mut state, &newer_guard, poll(newer, vec![])).unwrap();
+        assert_eq!(state.objects[0].delivery_state, Some(newer));
+        let sent: ConversationObjectView = serde_json::from_value(serde_json::json!({
+            "seq": 2, "sender": "Local", "sender_profile_verified": true,
+            "from_current_session": true, "kind": "text", "body": "Send after request start",
+            "created_at": 101, "delivery_state": "sending"
+        }))
+        .unwrap();
+        super::record_own_shared_send(&mut state, sent);
+        assert!(
+            !apply_active_poll_if_current(&mut state, &older_guard, older_snapshot)
+                .unwrap()
+                .1
+        );
+        assert_eq!(state.last_applied_delivery_poll, newer_guard.request_number);
+        assert_eq!(state.latest_seq, 1);
+        assert_eq!(state.objects.len(), 2);
+        assert_eq!(state.objects[0].delivery_state, Some(newer));
+        assert_eq!(state.objects[0].body.as_deref(), Some("Own original"));
+        assert_eq!(state.objects[1].delivery_state, Some(Sending));
+        assert_eq!(
+            state.objects[1].body.as_deref(),
+            Some("Send after request start")
+        );
+        assert_eq!(state.direct, direct);
+        assert_eq!(state.drafts, drafts);
+        // Nonterminal evidence remains reversible when the request is newer.
+        let current_guard = begin_poll_request(&mut state);
+        assert!(
+            apply_active_poll_if_current(&mut state, &current_guard, poll(older, vec![]))
+                .unwrap()
+                .1
+        );
+        assert_eq!(state.objects[0].delivery_state, Some(older));
+        assert_eq!(state.objects[1].delivery_state, Some(Sending));
+    }
+
+    #[test]
+    fn older_periodic_poll_cannot_replace_newer_nonterminal_delivery() {
+        use super::CommunityDeliveryState::{Sending, Unknown};
+        assert_nonterminal_poll_order(Sending, Unknown);
+    }
+
+    #[test]
+    fn older_event_poll_cannot_replace_newer_nonterminal_delivery() {
+        use super::CommunityDeliveryState::{Sending, Unknown};
+        assert_nonterminal_poll_order(Unknown, Sending);
     }
 
     #[test]
@@ -6733,7 +6994,7 @@ mod tests {
             removed: false,
             unread: false,
         }];
-        let shared_guard = current_selection_guard(&state);
+        let shared_guard = begin_poll_request(&mut state);
         let direct_guard =
             commit_direct_selection(&mut state, "direct:sha256:fixture-conversation")
                 .expect("direct selection should be available");
@@ -6760,6 +7021,7 @@ mod tests {
         .unwrap();
         let stale = apply_active_poll_if_current(&mut state, &shared_guard, poll);
         assert!(stale.is_none());
+        assert_eq!(state.last_applied_delivery_poll, 0);
         assert!(selection_guard_matches(&state, &direct_guard));
         assert_eq!(
             state.direct.selected_conversation_id.as_deref(),
