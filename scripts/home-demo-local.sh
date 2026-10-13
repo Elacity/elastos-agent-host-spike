@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 umask 077
+# Disposable demo Homes never join the Community network a release pins (setup and update skip it).
+export ELASTOS_COLLABORATION_STARTUP_MODE=isolated
 
 # This fixture owns setup, launch, and cleanup after bootstrap.
 export ELASTOS_INSTALL_ONLY=1

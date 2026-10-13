@@ -322,17 +322,35 @@ pub enum ReleaseNetworkPlan<'a> {
 pub fn plan_release_network<'a>(
     data_dir: &Path,
     pin: Option<&'a CollaborationNetworkPin>,
-) -> ReleaseNetworkPlan<'a> {
+) -> anyhow::Result<ReleaseNetworkPlan<'a>> {
     let Some(pin) = pin else {
-        return ReleaseNetworkPlan::Skip(ReleaseNetworkOutcome::NotPinned);
+        return Ok(ReleaseNetworkPlan::Skip(ReleaseNetworkOutcome::NotPinned));
     };
-    if std::env::var_os(SOURCE_HOME_COLLABORATION_MODE_ENV).is_some() {
-        return ReleaseNetworkPlan::Skip(ReleaseNetworkOutcome::SourceHomeManaged);
+    if source_home_manages_collaboration(
+        std::env::var_os(SOURCE_HOME_COLLABORATION_MODE_ENV).as_deref(),
+    )? {
+        return Ok(ReleaseNetworkPlan::Skip(
+            ReleaseNetworkOutcome::SourceHomeManaged,
+        ));
     }
     if is_isolated(data_dir) {
-        return ReleaseNetworkPlan::Skip(ReleaseNetworkOutcome::Isolated);
+        return Ok(ReleaseNetworkPlan::Skip(ReleaseNetworkOutcome::Isolated));
     }
-    ReleaseNetworkPlan::Install(pin)
+    Ok(ReleaseNetworkPlan::Install(pin))
+}
+
+/// True when the source-home collaboration mode is set to one of its exact
+/// values (`configured` or `isolated`, as `setup-source-home.sh` accepts).
+/// Unset leaves the choice to the release; any other value is refused, so a
+/// typo never skips the signed network silently.
+fn source_home_manages_collaboration(value: Option<&std::ffi::OsStr>) -> anyhow::Result<bool> {
+    match value.map(|value| value.to_str()) {
+        None => Ok(false),
+        Some(Some("configured" | "isolated")) => Ok(true),
+        Some(_) => anyhow::bail!(
+            "{SOURCE_HOME_COLLABORATION_MODE_ENV} must be configured or isolated, or unset"
+        ),
+    }
 }
 
 /// Fetches and verifies the release configuration this Home needs.
@@ -349,7 +367,7 @@ where
     F: FnOnce(&CollaborationNetworkPin) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<Vec<u8>>>,
 {
-    let ReleaseNetworkPlan::Install(pin) = plan_release_network(data_dir, pin) else {
+    let ReleaseNetworkPlan::Install(pin) = plan_release_network(data_dir, pin)? else {
         return Ok(None);
     };
     let bytes = fetch(pin)
@@ -371,7 +389,7 @@ pub fn install_fetched_release_network(
     pin: Option<&CollaborationNetworkPin>,
     fetched: Option<&[u8]>,
 ) -> anyhow::Result<ReleaseNetworkOutcome> {
-    match plan_release_network(data_dir, pin) {
+    match plan_release_network(data_dir, pin)? {
         ReleaseNetworkPlan::Skip(outcome) => Ok(outcome),
         ReleaseNetworkPlan::Install(pin) => {
             let release = fetched.context(
@@ -389,7 +407,7 @@ pub fn install_release_network(
     pin: Option<&CollaborationNetworkPin>,
     release_copy: &Path,
 ) -> anyhow::Result<ReleaseNetworkOutcome> {
-    let fetched = match plan_release_network(data_dir, pin) {
+    let fetched = match plan_release_network(data_dir, pin)? {
         ReleaseNetworkPlan::Install(_) => Some(fs::read(release_copy).with_context(|| {
             format!(
                 "the release pins a collaboration network but {} is missing; use the complete signed release, or run `elastos setup --isolated` to keep this Home out of Community",
@@ -864,6 +882,30 @@ pub(crate) mod tests {
             fs::read(data.path().join(COLLABORATION_STARTUP_CONFIG_FILE)).unwrap(),
             chain[0]
         );
+    }
+
+    #[test]
+    fn only_exact_source_home_modes_skip_the_release_network() {
+        use std::ffi::OsStr;
+        assert!(!source_home_manages_collaboration(None).unwrap());
+        for value in ["configured", "isolated"] {
+            assert!(source_home_manages_collaboration(Some(OsStr::new(value))).unwrap());
+        }
+        for value in ["", "Isolated", "isolated ", "1", "true", "off"] {
+            let error = source_home_manages_collaboration(Some(OsStr::new(value))).unwrap_err();
+            assert!(
+                format!("{error}").contains("must be configured or isolated"),
+                "{value:?}: {error}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert!(
+                source_home_manages_collaboration(Some(OsStr::from_bytes(b"isol\xffated")))
+                    .is_err()
+            );
+        }
     }
 
     #[test]
