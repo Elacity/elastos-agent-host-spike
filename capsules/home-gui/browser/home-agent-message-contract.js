@@ -84,3 +84,25 @@ export function normalizeHomeAgentBrowserUrl(message) {
     return "";
   }
 }
+
+/* Home sends a fresh hello after each Assistant document loads; the room shows
+   only for the ready that echoes the current nonce, so a ready sent before the
+   load, by a document that has since been replaced, or twice, never counts. */
+export function createAssistantFrameHandshake() {
+  let sequence = 0;
+  let nonce = "";
+  return Object.freeze({
+    hello() {
+      sequence += 1;
+      nonce = `assistant-${sequence}`;
+      return { type: "home-agent:hello", nonce };
+    },
+    acceptReady(message) {
+      return nonce !== "" && hasExactKeys(message, ["type", "nonce"]) &&
+        message.type === "home-agent:ready" && message.nonce === nonce;
+    },
+    reset() {
+      nonce = "";
+    },
+  });
+}

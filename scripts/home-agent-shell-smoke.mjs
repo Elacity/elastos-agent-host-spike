@@ -98,8 +98,10 @@ assert.ok(harnessHost.includes("error?.status === 409"), "a revision conflict re
 assert.ok(harnessHost.includes("if (workspaceRevision === null) {"), "no write before the read");
 assert.ok(entry.includes("loadAgentWorkspace()"), "the entry reads the workspace on boot");
 assert.ok(
-  entry.indexOf("loadAgentWorkspace()") < entry.indexOf('postToHome({ type: "home-agent:ready" })'),
-  "ready is posted after the workspace is read",
+  entry.indexOf("loadAgentWorkspace()") < entry.indexOf("booted = true;") &&
+    (entry.match(/booted = true;/g) || []).length === 1 &&
+    entry.includes("if (booted) postReady();"),
+  "ready is posted after the workspace is read, and a hello before then waits for it",
 );
 assert.equal(
   (gateway.match(/\/api\/apps\/assistant\/workspace-v2/g) || []).length,
@@ -135,8 +137,9 @@ assert.ok(homeFace.includes('const TARGET_ID = "assistant"'));
 assert.ok(
   homeFace.includes("function onAssistantFrameDocumentLoad(") &&
     homeFace.includes('frame?.addEventListener("load", onAssistantFrameDocumentLoad)') &&
-    homeFace.includes("frameReady = false"),
-  "a replaced Assistant document must handshake ready again so Home can raise the room",
+    homeFace.includes("frame.contentWindow?.postMessage(frameHandshake.hello(), \"*\");") &&
+    homeFace.includes("if (frameHandshake.acceptReady(message)) markFrameReady();"),
+  "each loaded Assistant document must answer Home's hello before Home raises the room",
 );
 assert.ok(
   homeWindows.includes('const HOME_AGENT_TARGET_ID = "assistant"') &&
@@ -324,6 +327,38 @@ for (const invalid of [
   { type: "home-agent:open-browser", url: `https://example.com/${"x".repeat(2_048)}` },
 ]) {
   assert.equal(homeMessageContract.normalizeHomeAgentBrowserUrl(invalid), "");
+}
+
+/* Ready handshake: only the answer to the current document's hello counts. */
+{
+  const ready = (nonce) => ({ type: "home-agent:ready", nonce });
+  // Ready before load: the boot ready carries no hello yet; the load's hello is answered.
+  let handshake = homeMessageContract.createAssistantFrameHandshake();
+  assert.equal(handshake.acceptReady(ready("")), false, "a ready before any hello never counts");
+  let hello = handshake.hello();
+  assert.equal(hello.type, "home-agent:hello");
+  assert.equal(handshake.acceptReady(ready(hello.nonce)), true, "the answer to the hello counts");
+  // Load before ready: the hello waits for the boot, which echoes it.
+  handshake = homeMessageContract.createAssistantFrameHandshake();
+  hello = handshake.hello();
+  assert.equal(handshake.acceptReady({ type: "home-agent:ready" }), false, "a ready without a nonce never counts");
+  assert.equal(handshake.acceptReady(ready(hello.nonce)), true, "a boot that finishes after the load counts");
+  handshake.reset();
+  assert.equal(handshake.acceptReady(ready(hello.nonce)), false, "a second ready for the same document is ignored");
+  // A failed load that never answers, then a good reload.
+  handshake = homeMessageContract.createAssistantFrameHandshake();
+  const failed = handshake.hello();
+  const reloaded = handshake.hello();
+  assert.notEqual(failed.nonce, reloaded.nonce);
+  assert.equal(handshake.acceptReady(ready("")), false, "the reload's early boot ready does not count");
+  assert.equal(handshake.acceptReady(ready(reloaded.nonce)), true, "the reload recovers after a failed load");
+  // A delayed ready from the previous document.
+  handshake = homeMessageContract.createAssistantFrameHandshake();
+  const previous = handshake.hello();
+  const current = handshake.hello();
+  assert.equal(handshake.acceptReady(ready(previous.nonce)), false, "a delayed ready from the replaced document is ignored");
+  assert.equal(handshake.acceptReady({ ...ready(current.nonce), extra: true }), false, "the ready shape is exact");
+  assert.equal(handshake.acceptReady(ready(current.nonce)), true);
 }
 
 const offersPayload = {

@@ -18,8 +18,9 @@
 
    Contract with the frame (event.source pins the sender; the frame is
    opaque-sandboxed so target origin is "*"):
-     Home → capsule   home-agent:open | home-agent:shelf-handover {on} | home-agent:close
-     capsule → Home   home-agent:ready | home-agent:shelf-metrics {width,height,radius}
+     Home → capsule   home-agent:hello {nonce} after each frame load |
+                      home-agent:open | home-agent:shelf-handover {on} | home-agent:close
+     capsule → Home   home-agent:ready {nonce} | home-agent:shelf-metrics {width,height,radius}
                       home-agent:close | home-agent:open-viewer {request}
                       home-agent:open-browser {url} */
 
@@ -35,6 +36,7 @@ import {
   setActiveStage,
 } from "./shell-stages.js?v=home-20260813a";
 import {
+  createAssistantFrameHandshake,
   normalizeHomeAgentBrowserUrl,
   normalizeHomeAgentViewerPayload,
 } from "./home-agent-message-contract.js?v=home-20260813a";
@@ -64,9 +66,7 @@ let idleDockWidth = 0;
 let spaceEl = null;
 let frame = null;
 let frameReady = false;
-/* Each capsule document sends one ready and fires one load, in either order. */
-let frameReadyCount = 0;
-let frameLoadCount = 0;
+const frameHandshake = createAssistantFrameHandshake();
 let launching = false;
 let launchQuery = {};
 let authorizedLaunch = null;
@@ -226,20 +226,17 @@ function onAssistantFrameDocumentLoad() {
   if (!frame?.dataset.route) {
     return;
   }
-  /* Home keeps dataset.route across a capsule document reload. The new
-     document must handshake ready again, or the room stays empty. A ready
-     that arrived before this load belongs to this document: keep it. */
-  frameLoadCount += 1;
-  if (frameReadyCount >= frameLoadCount) {
-    return;
-  }
+  /* Home keeps dataset.route across a capsule document reload. Each loaded
+     document must answer this hello before the room shows; an earlier or
+     stale ready never counts. */
   frameReady = false;
   frame.classList.remove("is-ready");
+  frame.contentWindow?.postMessage(frameHandshake.hello(), "*");
 }
 
 function markFrameReady() {
   frameReady = true;
-  frameReadyCount += 1;
+  frameHandshake.reset();
   frame?.classList.add("is-ready");
   deps.pushUiPreferencesToFrameWindow(frame?.contentWindow);
   if (assistantSpaceActive()) {
@@ -299,8 +296,6 @@ async function mountAssistantFrame() {
     frame.setAttribute("allow", deps.iframeAllowForLaunch(launched));
     frame.title = deps.escapeHtml(launched.title || "Assistant");
     const route = new URL(String(launched.route || ""), window.location.origin);
-    frameReadyCount = 0;
-    frameLoadCount = 0;
     frame.src = route.href;
     frame.dataset.route = route.href;
   } catch (error) {
@@ -366,8 +361,7 @@ export function retireAssistantSpace() {
     clearFaceGeometry(taskbar);
   }
   frameReady = false;
-  frameReadyCount = 0;
-  frameLoadCount = 0;
+  frameHandshake.reset();
   if (frame) {
     frame.removeAttribute("src");
     delete frame.dataset.route;
@@ -386,7 +380,7 @@ function onFrameMessage(event) {
   }
   switch (message.type) {
     case "home-agent:ready":
-      markFrameReady();
+      if (frameHandshake.acceptReady(message)) markFrameReady();
       break;
     case "home-agent:shelf-metrics":
       applyFaceMetrics(message);
