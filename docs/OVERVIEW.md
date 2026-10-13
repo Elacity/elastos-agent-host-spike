@@ -13,8 +13,9 @@ authorship.
 
 For people, Carrier is how Homes reach each other. Homes connect directly, by
 identity, and a new Home needs one introduction to join the network. Joining
-gives no access to anything: apps on another Home get only what its owner
-grants.
+Community lets other members send you Community posts and contact requests; it
+gives them no access to your files, apps or data, and direct messages need your
+approval of the contact.
 
 Use these documents as the sources of truth:
 
