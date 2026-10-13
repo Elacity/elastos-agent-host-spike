@@ -501,11 +501,11 @@ shellCore.shellState.currentSummary = firstRunSummary;
 shellSurface.renderDesktop(firstRunSummary);
 assert(
   JSON.stringify(shellCore.shellState.shellLayoutState.taskbar) === JSON.stringify([
+    "chat-room",
     "browser",
+    "system",
     "wallet",
     "documents",
-    "chat-room",
-    "system",
   ]),
   "fresh layout did not seed only the available core dock targets in canonical order",
   shellCore.shellState.shellLayoutState.taskbar,
