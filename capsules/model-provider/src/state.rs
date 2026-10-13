@@ -2626,7 +2626,7 @@ mod tests {
                 transition_terminal(
                     &local,
                     &mut unresolved,
-                    status,
+                    status.clone(),
                     None,
                     Some(RunError {
                         class: ErrorClass::SettlementUnknown,
@@ -2636,7 +2636,7 @@ mod tests {
                 )
                 .unwrap();
             } else {
-                unresolved.status = status;
+                unresolved.status = status.clone();
                 unresolved.backend_state = Some(running_backend_state());
             }
             state.journal.store_run(&unresolved).unwrap();
