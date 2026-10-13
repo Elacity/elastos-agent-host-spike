@@ -116,7 +116,7 @@ function inspectGraph(manifestPath, graphName) {
     ["ed25519-dalek", ["2.2.0", "3.0.0-rc.0"]],
     ["crossbeam-epoch", ["0.9.20"]],
     ["quinn", ["0.11.9"]],
-    ["quinn-proto", ["0.11.15"]],
+    ["quinn-proto", ["0.11.19"]],
     ["quick-xml", ["0.41.0"]],
     ["bincode", ["1.3.3"]],
   ]);
