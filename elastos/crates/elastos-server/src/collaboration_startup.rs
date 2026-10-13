@@ -2949,6 +2949,14 @@ mod tests {
             poll.latest_seq,
         );
 
+        // Shared receipts use the authenticated Home exchange, not gossip.
+        core.record_home_chat_acceptance(
+            &remote_receipt,
+            outgoing.envelope_sha256(),
+            &remote_authority.local_device_did(),
+            now + 1,
+        )
+        .unwrap();
         carrier.push([
             send_remote(),
             peek(
