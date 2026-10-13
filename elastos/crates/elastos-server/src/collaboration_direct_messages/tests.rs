@@ -1449,12 +1449,25 @@ async fn durable_pending_restarts_with_the_exact_envelope_and_settles_once() {
     restarted_b
         .memory_lookup
         .add_endpoint_info(pair._node_a.endpoint.watch_addr().get());
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-    restarted
-        .retry_pending(&pair.profile_a.document().profile_did, now_ts())
-        .await
-        .unwrap();
+    // The restarted pair needs a moment to dial; a slow runner needs longer
+    // than a fixed pause. Each retry resends the same durable envelope, so a
+    // transport-only failure never creates a second message (asserted below).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match restarted
+            .retry_pending(&pair.profile_a.document().profile_did, now_ts())
+            .await
+        {
+            Ok(()) => break,
+            Err(error)
+                if error.to_string() == "collaboration delivery transport is unavailable"
+                    && std::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            Err(error) => panic!("retry_pending did not settle: {error:#}"),
+        }
+    }
     let after = restarted
         .context(&pair.profile_a.document().profile_did, now_ts())
         .unwrap()

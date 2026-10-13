@@ -16804,20 +16804,46 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_taken_ipv6_carrier_port_keeps_a_random_ipv6_listener() {
-        // Another service holds the Carrier port on IPv6.
-        let Ok(occupied) = std::net::UdpSocket::bind("[::1]:0") else {
-            return; // This host has no IPv6.
+        // Another service holds the Carrier port on IPv6. On a busy host the
+        // same IPv4 port can belong to someone else, so pick a pair whose
+        // IPv4 side is free; the test is about the IPv6 side only.
+        let mut attempt = 0;
+        let (occupied, port, endpoint) = loop {
+            attempt += 1;
+            assert!(
+                attempt <= 20,
+                "no free IPv4 port beside a taken IPv6 port in 20 attempts"
+            );
+            let occupied = match std::net::UdpSocket::bind("[::1]:0") {
+                Ok(occupied) => occupied,
+                Err(_) if attempt == 1 => return, // This host has no IPv6.
+                Err(error) => panic!("IPv6 loopback stopped binding: {error}"),
+            };
+            let port = occupied.local_addr().unwrap().port();
+            let ipv4_free = std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok();
+            if !ipv4_free {
+                continue;
+            }
+            match bind_carrier_endpoint(
+                SecretKey::from_bytes(&[72u8; 32]),
+                CarrierNodeNetwork::Isolated,
+                None,
+                format!("0.0.0.0:{port}").parse().unwrap(),
+                false,
+            )
+            .await
+            {
+                Ok(endpoint) => break (occupied, port, endpoint),
+                // Someone took the IPv4 port between the check and the bind.
+                Err(error)
+                    if error.to_string()
+                        == format!("Failed to bind requested Carrier address 0.0.0.0:{port}") =>
+                {
+                    continue
+                }
+                Err(error) => panic!("IPv4 binds the fixed port while IPv6 is taken: {error:#}"),
+            }
         };
-        let port = occupied.local_addr().unwrap().port();
-        let endpoint = bind_carrier_endpoint(
-            SecretKey::from_bytes(&[72u8; 32]),
-            CarrierNodeNetwork::Isolated,
-            None,
-            format!("0.0.0.0:{port}").parse().unwrap(),
-            false,
-        )
-        .await
-        .expect("IPv4 binds the fixed port while IPv6 is taken");
         let sockets = endpoint.bound_sockets();
         let addr = super::tests::wait_for_direct_endpoint_addr(&endpoint).await;
         let snapshot: Vec<std::net::SocketAddr> = addr
