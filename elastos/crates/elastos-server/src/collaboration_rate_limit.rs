@@ -10,7 +10,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use elastos_common::collaboration_protocol::MAX_COLLABORATION_ENVELOPE_BYTES;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 /// Payload types the Community limits count. Presence is periodic and bounded
 /// by its own cadence.
@@ -114,10 +114,11 @@ impl ProfileRateLimiter {
 
 /// One received transport frame refused by a per-sender limit, kept for retry.
 pub(crate) struct HeldFrame {
-    frame: Vec<u8>,
+    frame: Arc<[u8]>,
     envelope_sha256: String,
     sender_profile_did: String,
     expires_at: u64,
+    reservation: Option<HeldReservation>,
 }
 
 impl HeldFrame {
@@ -128,16 +129,68 @@ impl HeldFrame {
         expires_at: u64,
     ) -> Self {
         Self {
-            frame: frame.to_vec(),
+            frame: Arc::from(frame),
             envelope_sha256: envelope_sha256.to_string(),
             sender_profile_did: sender_profile_did.to_string(),
             expires_at,
+            reservation: None,
         }
     }
 
     pub(crate) fn frame(&self) -> &[u8] {
         &self.frame
     }
+
+    fn reserved_copy(&self) -> Self {
+        Self {
+            frame: self.frame.clone(),
+            envelope_sha256: self.envelope_sha256.clone(),
+            sender_profile_did: self.sender_profile_did.clone(),
+            expires_at: self.expires_at,
+            reservation: None,
+        }
+    }
+}
+
+struct HeldReservation {
+    state: Weak<Mutex<HeldState>>,
+    hash: String,
+}
+
+impl Drop for HeldReservation {
+    fn drop(&mut self) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(in_flight) = state.in_flight.remove(&self.hash) {
+            if in_flight.completed {
+                if let Some(index) = state
+                    .frames
+                    .iter()
+                    .position(|frame| frame.envelope_sha256 == self.hash)
+                {
+                    let frame = state.frames.remove(index).unwrap();
+                    if in_flight.reheld {
+                        state.frames.push_back(frame);
+                    }
+                }
+            }
+            // Cancellation leaves the original at its reserved queue position,
+            // independent of the order in which retry handles are dropped.
+        }
+    }
+}
+
+struct InFlightFrame {
+    completed: bool,
+    reheld: bool,
+}
+
+#[derive(Default)]
+struct HeldState {
+    frames: VecDeque<HeldFrame>,
+    in_flight: HashMap<String, InFlightFrame>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,14 +206,14 @@ pub(crate) enum HoldOutcome {
 
 /// Bounded, in-order store of refused frames that the receiving Home retries.
 pub(crate) struct HeldFrames {
-    frames: Mutex<VecDeque<HeldFrame>>,
+    state: Arc<Mutex<HeldState>>,
     max_frames: usize,
 }
 
 impl Default for HeldFrames {
     fn default() -> Self {
         Self {
-            frames: Mutex::new(VecDeque::new()),
+            state: Arc::new(Mutex::new(HeldState::default())),
             max_frames: MAX_HELD_FRAMES,
         }
     }
@@ -171,36 +224,53 @@ impl HeldFrames {
     /// sender holding the most gives up its newest frame first, so a flood
     /// across many Profiles cannot push out a sender holding little.
     pub(crate) fn hold(&self, held: HeldFrame, now: u64) -> HoldOutcome {
-        let mut frames = self.frames.lock().unwrap_or_else(PoisonError::into_inner);
-        frames.retain(|frame| frame.expires_at > now);
-        if frames
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let HeldState { frames, in_flight } = &mut *state;
+        frames.retain(|frame| {
+            frame.expires_at > now || in_flight.contains_key(&frame.envelope_sha256)
+        });
+        if held.expires_at <= now {
+            return HoldOutcome::Dropped;
+        }
+        if let Some(in_flight) = state.in_flight.get_mut(&held.envelope_sha256) {
+            // Retry admission reuses the original reservation and byte buffer.
+            in_flight.reheld = true;
+            return HoldOutcome::Held;
+        }
+        if state
+            .frames
             .iter()
             .any(|frame| frame.envelope_sha256 == held.envelope_sha256)
         {
             return HoldOutcome::Held;
         }
-        let count_from = |frames: &VecDeque<HeldFrame>, sender: &str| {
-            frames
-                .iter()
-                .filter(|frame| frame.sender_profile_did == sender)
-                .count()
-        };
-        let from_sender = count_from(&frames, &held.sender_profile_did);
-        if held.expires_at <= now || from_sender >= MAX_HELD_FRAMES_PER_SENDER {
+        let from_sender = state
+            .frames
+            .iter()
+            .filter(|frame| frame.sender_profile_did == held.sender_profile_did)
+            .count();
+        if from_sender >= MAX_HELD_FRAMES_PER_SENDER {
             return HoldOutcome::Dropped;
         }
         // Plan every eviction first and apply it only if the frame then fits,
         // so a refusal leaves the queue exactly as it was.
         let mut counts = std::collections::BTreeMap::<&str, usize>::new();
-        for frame in frames.iter() {
+        for frame in &state.frames {
             *counts.entry(frame.sender_profile_did.as_str()).or_default() += 1;
         }
-        let mut len = frames.len();
-        let mut bytes: usize = frames.iter().map(|frame| frame.frame.len()).sum();
+        let mut len = state.frames.len();
+        let mut bytes: usize = state.frames.iter().map(|frame| frame.frame.len()).sum();
         let mut evicted = Vec::new();
         while len >= self.max_frames || bytes.saturating_add(held.frame.len()) > MAX_HELD_BYTES {
             let Some((largest, count)) = counts
                 .iter()
+                .filter(|(sender, _)| {
+                    state.frames.iter().enumerate().any(|(index, frame)| {
+                        frame.sender_profile_did == **sender
+                            && !state.in_flight.contains_key(&frame.envelope_sha256)
+                            && !evicted.contains(&index)
+                    })
+                })
                 .max_by(|left, right| left.1.cmp(right.1).then(right.0.cmp(left.0)))
                 .map(|(sender, count)| (sender.to_string(), *count))
             else {
@@ -209,46 +279,81 @@ impl HeldFrames {
             if count <= from_sender + 1 {
                 return HoldOutcome::HomeFull;
             }
-            let Some(index) = (0..frames.len()).rev().find(|index| {
-                frames[*index].sender_profile_did == largest && !evicted.contains(index)
+            let Some(index) = (0..state.frames.len()).rev().find(|index| {
+                state.frames[*index].sender_profile_did == largest
+                    && !state
+                        .in_flight
+                        .contains_key(&state.frames[*index].envelope_sha256)
+                    && !evicted.contains(index)
             }) else {
                 return HoldOutcome::HomeFull;
             };
             evicted.push(index);
             *counts
-                .entry(frames[index].sender_profile_did.as_str())
+                .entry(state.frames[index].sender_profile_did.as_str())
                 .or_default() -= 1;
             len -= 1;
-            bytes -= frames[index].frame.len();
+            bytes -= state.frames[index].frame.len();
         }
         drop(counts);
         evicted.sort_unstable();
         for index in evicted.into_iter().rev() {
-            frames.remove(index);
+            state.frames.remove(index);
         }
-        frames.push_back(held);
+        state.frames.push_back(held);
         HoldOutcome::Held
     }
 
-    /// Takes every unexpired held frame, oldest first.
+    /// Takes every unexpired held frame, oldest first, retaining its capacity
+    /// reservation until completion or restoration.
     pub(crate) fn take(&self, now: u64) -> Vec<HeldFrame> {
-        let mut frames = self.frames.lock().unwrap_or_else(PoisonError::into_inner);
-        frames.retain(|frame| frame.expires_at > now);
-        frames.drain(..).collect()
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let HeldState { frames, in_flight } = &mut *state;
+        frames.retain(|frame| {
+            frame.expires_at > now || in_flight.contains_key(&frame.envelope_sha256)
+        });
+        let mut held = Vec::new();
+        for frame in frames {
+            let hash = frame.envelope_sha256.clone();
+            if in_flight.contains_key(&hash) {
+                continue;
+            }
+            in_flight.insert(
+                hash.clone(),
+                InFlightFrame {
+                    completed: false,
+                    reheld: false,
+                },
+            );
+            let mut retry = frame.reserved_copy();
+            retry.reservation = Some(HeldReservation {
+                state: Arc::downgrade(&self.state),
+                hash,
+            });
+            held.push(retry);
+        }
+        held
     }
 
-    /// Puts frames taken by `take` back in front, keeping their order, when a
-    /// retry stopped before reaching them.
-    pub(crate) fn restore(&self, held: Vec<HeldFrame>) {
-        let mut frames = self.frames.lock().unwrap_or_else(PoisonError::into_inner);
-        for frame in held.into_iter().rev() {
-            if !frames
-                .iter()
-                .any(|stored| stored.envelope_sha256 == frame.envelope_sha256)
-            {
-                frames.push_front(frame);
+    /// Releases settled work, or requeues the same original when admission
+    /// refused it again while its reserved retry was in flight.
+    pub(crate) fn complete(&self, held: HeldFrame) {
+        if let Some(reservation) = &held.reservation {
+            if Weak::ptr_eq(&reservation.state, &Arc::downgrade(&self.state)) {
+                let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                if let Some(in_flight) = state.in_flight.get_mut(&reservation.hash) {
+                    in_flight.completed = true;
+                }
             }
         }
+        drop(held);
+    }
+
+    /// Makes outstanding retries eligible at their original queue positions.
+    pub(crate) fn restore(&self, held: Vec<HeldFrame>) {
+        // Dropping releases only the in-flight marker. The original queue
+        // entries already reserve every count, sender slot and byte.
+        drop(held);
     }
 }
 
@@ -295,11 +400,11 @@ mod tests {
     }
 
     fn senders(frames: &HeldFrames) -> Vec<String> {
-        frames
+        let state = frames.state.lock().unwrap();
+        state
             .frames
-            .lock()
-            .unwrap()
             .iter()
+            .filter(|frame| !state.in_flight.contains_key(&frame.envelope_sha256))
             .map(|frame| frame.sender_profile_did.clone())
             .collect()
     }
@@ -349,7 +454,7 @@ mod tests {
         let mut id = 0;
         'fill: for flooder in 0.. {
             for _ in 0..MAX_HELD_FRAMES_PER_SENDER {
-                if frames.frames.lock().unwrap().len() == MAX_HELD_FRAMES {
+                if frames.state.lock().unwrap().frames.len() == MAX_HELD_FRAMES {
                     break 'fill;
                 }
                 frames.hold(held(id, &format!("did:flood-{flooder}"), 200), 100);
@@ -458,6 +563,178 @@ mod tests {
             HoldOutcome::HomeFull
         );
         assert_eq!(senders(&frames).len(), MAX_HELD_FRAMES);
+    }
+
+    fn held_bounds(frames: &HeldFrames) -> (usize, usize, usize) {
+        let state = frames.state.lock().unwrap();
+        let mut counts = HashMap::<&str, usize>::new();
+        let mut count = 0;
+        let mut bytes = 0;
+        for frame in &state.frames {
+            count += 1;
+            bytes += frame.frame.len();
+            *counts.entry(frame.sender_profile_did.as_str()).or_default() += 1;
+        }
+        (count, bytes, counts.into_values().max().unwrap_or(0))
+    }
+
+    #[test]
+    fn taken_frames_reserve_count_and_restore_under_concurrent_refill() {
+        let frames = HeldFrames::default();
+        for id in 0..MAX_HELD_FRAMES {
+            assert_eq!(
+                frames.hold(held(id, &format!("did:{id}"), 200), 100),
+                HoldOutcome::Held
+            );
+        }
+        let mut taken = frames.take(100);
+        assert!(senders(&frames).is_empty());
+        for id in MAX_HELD_FRAMES..2 * MAX_HELD_FRAMES {
+            assert_eq!(
+                frames.hold(held(id, &format!("did:{id}"), 200), 100),
+                HoldOutcome::HomeFull
+            );
+        }
+        assert_eq!(
+            held_bounds(&frames),
+            (MAX_HELD_FRAMES, 8 * MAX_HELD_FRAMES, 1)
+        );
+        // Settling one reserved retry permits exactly one new queued frame.
+        frames.complete(taken.pop().unwrap());
+        assert_eq!(
+            frames.hold(held(999, "did:new", 200), 100),
+            HoldOutcome::Held
+        );
+        frames.restore(taken);
+        assert_eq!(
+            held_bounds(&frames),
+            (MAX_HELD_FRAMES, 8 * MAX_HELD_FRAMES, 1)
+        );
+        let restored = frames.take(100);
+        let hashes = restored
+            .iter()
+            .map(|frame| frame.envelope_sha256.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            hashes[..MAX_HELD_FRAMES - 1],
+            (0..MAX_HELD_FRAMES - 1)
+                .map(|id| format!("hash-{id}"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(hashes.last(), Some(&"hash-999"));
+        for frame in restored {
+            frames.complete(frame);
+        }
+        assert_eq!(held_bounds(&frames), (0, 0, 0));
+    }
+
+    #[test]
+    fn taken_frames_reserve_sender_slots_and_rehold_the_same_original() {
+        let frames = HeldFrames::default();
+        for id in 0..MAX_HELD_FRAMES_PER_SENDER {
+            assert_eq!(frames.hold(held(id, "did:a", 200), 100), HoldOutcome::Held);
+        }
+        let mut taken = frames.take(100);
+        assert_eq!(
+            frames.hold(held(99, "did:a", 200), 100),
+            HoldOutcome::Dropped
+        );
+        assert_eq!(frames.hold(held(0, "did:a", 200), 100), HoldOutcome::Held);
+        let retry = taken.remove(0);
+        frames.complete(retry);
+        assert_eq!(senders(&frames), ["did:a"]);
+        frames.restore(taken);
+        assert_eq!(
+            held_bounds(&frames),
+            (
+                MAX_HELD_FRAMES_PER_SENDER,
+                8 * MAX_HELD_FRAMES_PER_SENDER,
+                MAX_HELD_FRAMES_PER_SENDER
+            )
+        );
+        let restored = frames.take(100);
+        assert_eq!(
+            restored
+                .iter()
+                .filter(|frame| frame.envelope_sha256 == "hash-0")
+                .count(),
+            1
+        );
+        for frame in restored {
+            frames.complete(frame);
+        }
+        assert_eq!(held_bounds(&frames), (0, 0, 0));
+    }
+
+    #[test]
+    fn taken_frames_reserve_bytes_and_cancellation_restores_only_reserved_work() {
+        let frames = HeldFrames::default();
+        let large = MAX_COLLABORATION_ENVELOPE_BYTES;
+        for id in 0..MAX_HELD_BYTES / large {
+            assert_eq!(
+                frames.hold(sized(id, &format!("did:{id}"), 200, large), 100),
+                HoldOutcome::Held
+            );
+        }
+        let taken = frames.take(100);
+        assert_eq!(
+            frames.hold(sized(999, "did:new", 200, large), 100),
+            HoldOutcome::HomeFull
+        );
+        assert_eq!(
+            held_bounds(&frames),
+            (MAX_HELD_BYTES / large, MAX_HELD_BYTES, 1)
+        );
+        drop(taken);
+        assert_eq!(
+            held_bounds(&frames),
+            (MAX_HELD_BYTES / large, MAX_HELD_BYTES, 1)
+        );
+        // Foreign/unreserved frames cannot bypass admission via restore.
+        frames.restore(vec![sized(1_000, "did:unreserved", 200, large)]);
+        assert_eq!(
+            held_bounds(&frames),
+            (MAX_HELD_BYTES / large, MAX_HELD_BYTES, 1)
+        );
+        let expired = frames.take(200);
+        assert!(expired.is_empty());
+        assert_eq!(held_bounds(&frames), (0, 0, 0));
+    }
+
+    #[test]
+    fn cancelled_retry_handles_preserve_fifo_with_concurrent_refill() {
+        for cancel_iterator in [false, true] {
+            let frames = HeldFrames::default();
+            for id in 0..3 {
+                assert_eq!(
+                    frames.hold(held(id, &format!("did:{id}"), 200), 100),
+                    HoldOutcome::Held
+                );
+            }
+            let mut taken = frames.take(100);
+            // Completion frees one reservation; the refill stays behind both
+            // outstanding originals even when the worker is cancelled.
+            frames.complete(taken.remove(0));
+            assert_eq!(frames.hold(held(3, "did:new", 200), 100), HoldOutcome::Held);
+            if cancel_iterator {
+                drop(taken.into_iter());
+            } else {
+                drop(taken);
+            }
+            assert_eq!(held_bounds(&frames), (3, 24, 1));
+            let restored = frames.take(100);
+            assert_eq!(
+                restored
+                    .iter()
+                    .map(|frame| frame.envelope_sha256.as_str())
+                    .collect::<Vec<_>>(),
+                ["hash-1", "hash-2", "hash-3"]
+            );
+            for frame in restored {
+                frames.complete(frame);
+            }
+            assert_eq!(held_bounds(&frames), (0, 0, 0));
+        }
     }
 
     #[test]

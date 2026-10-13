@@ -748,7 +748,7 @@ fn presence_from_authorized(
     if message.payload_type != PRESENCE_PAYLOAD_TYPE {
         anyhow::bail!("collaboration payload is not Chat presence");
     }
-    exact_presence_payload(authorized.product_payload())?;
+    validate_presence_payload(authorized.product_payload())?;
     let profile = authorized.sender_profile();
     Ok(VerifiedPresence {
         envelope_bytes: envelope_bytes.to_vec(),
@@ -759,6 +759,11 @@ fn presence_from_authorized(
         issued_at: message.created_at,
         expires_at: message.expires_at,
     })
+}
+
+/// Runtime admission and Presence projection use the same exact DTO.
+pub(crate) fn validate_presence_payload(value: &serde_json::Value) -> anyhow::Result<()> {
+    exact_presence_payload(value).map(|_| ())
 }
 
 fn exact_presence_payload(value: &serde_json::Value) -> anyhow::Result<PresencePayload> {
@@ -1100,15 +1105,22 @@ mod tests {
                 PRESENCE_TTL_SECS,
             )
             .unwrap();
-        for message in [&presence, &chat, &malformed_presence] {
+        for message in [&presence, &chat] {
             fixture
                 .core
                 .accept_incoming_from_signed_source_for_test(message.envelope_bytes(), NOW + 4)
                 .unwrap();
         }
+        assert!(fixture
+            .core
+            .accept_incoming_from_signed_source_for_test(
+                malformed_presence.envelope_bytes(),
+                NOW + 4,
+            )
+            .is_err());
         assert_eq!(fixture.chat.pending_messages().unwrap().len(), 1);
         assert_eq!(fixture.presence.pending_presences().unwrap().len(), 1);
-        assert_eq!(fixture.core.summary().unwrap().pending_product_handoffs, 3);
+        assert_eq!(fixture.core.summary().unwrap().pending_product_handoffs, 2);
 
         let other_temp = tempfile::tempdir().unwrap();
         let other = fixture_at(other_temp.path());
@@ -1121,7 +1133,7 @@ mod tests {
             .presence
             .project_handoff(&handoffs[0], NOW + 4)
             .unwrap();
-        assert_eq!(fixture.core.summary().unwrap().pending_product_handoffs, 2);
+        assert_eq!(fixture.core.summary().unwrap().pending_product_handoffs, 1);
         assert_eq!(fixture.chat.pending_messages().unwrap().len(), 1);
 
         let chat_handoffs = fixture.chat.pending_messages().unwrap();
@@ -1129,7 +1141,7 @@ mod tests {
             .chat
             .project_handoff(&fixture.data_root, &chat_handoffs[0])
             .unwrap();
-        assert_eq!(fixture.core.summary().unwrap().pending_product_handoffs, 1);
+        assert_eq!(fixture.core.summary().unwrap().pending_product_handoffs, 0);
         assert!(fixture.chat.pending_messages().unwrap().is_empty());
         assert!(fixture.presence.pending_presences().unwrap().is_empty());
         let snapshot = fixture.presence.snapshot(NOW + 4).unwrap();
@@ -1153,7 +1165,7 @@ mod tests {
         assert_eq!(restarted_presence.snapshot(NOW + 4).unwrap(), snapshot);
         assert_eq!(
             restarted_core.summary().unwrap().pending_product_handoffs,
-            1
+            0
         );
     }
 

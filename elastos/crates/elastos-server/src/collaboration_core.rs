@@ -267,6 +267,8 @@ struct ConversationHistoryState {
     schema: String,
     binding: CoreStateBinding,
     envelopes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    retired_envelope_hashes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,6 +299,9 @@ enum OutgoingProductProjectionState {
     #[default]
     Pending,
     Complete,
+    /// A verified legacy intent with no consumable Shared product. Keep its
+    /// request binding for the original replay window, without retrying it.
+    Retired,
 }
 
 impl OutgoingProductProjectionState {
@@ -599,6 +604,7 @@ impl CollaborationCore {
         now: u64,
     ) -> anyhow::Result<AuthorizedDefaultConversationMessage> {
         let authorized = self.authorize_stored_product_message(envelope_bytes)?;
+        crate::collaboration_product::validate_chat_projection(&authorized)?;
         let message = &authorized.message().envelope().payload;
         if message.created_at > now.saturating_add(MAX_COLLABORATION_CLOCK_SKEW_SECS)
             || message
@@ -617,6 +623,11 @@ impl CollaborationCore {
         state
             .envelopes
             .iter()
+            .filter(|envelope| {
+                !state
+                    .retired_envelope_hashes
+                    .contains(&collaboration_message_envelope_sha256(envelope.as_bytes()))
+            })
             .filter_map(|envelope| {
                 let authorized = self.authorize_stored_product_message(envelope.as_bytes());
                 match authorized {
@@ -652,7 +663,9 @@ impl CollaborationCore {
             anyhow::bail!("collaboration history batch exceeds its message bound");
         }
         for envelope in envelopes {
-            self.authorize_stored_product_message(envelope)?;
+            crate::collaboration_product::validate_chat_projection(
+                &self.authorize_stored_product_message(envelope)?,
+            )?;
         }
         self.validate_history_live_identities(envelopes)?;
         let mut state = self.load_history()?.unwrap_or_else(|| self.empty_history());
@@ -693,25 +706,30 @@ impl CollaborationCore {
             anyhow::bail!("collaboration history batch exceeds its message bound");
         }
         for envelope in envelopes {
-            self.authorize_stored_product_message(envelope)?;
+            crate::collaboration_product::validate_chat_projection(
+                &self.authorize_stored_product_message(envelope)?,
+            )?;
         }
-        let _process = self
-            .mutation_mutex
-            .lock()
-            .map_err(|_| anyhow::anyhow!("collaboration mutation mutex is poisoned"))?;
-        self.ensure_state_directory()?;
-        let _file = lock_owner_only_file(&self.lock_path())?;
-        self.validate_history_live_identities(envelopes)?;
-        let mut state = self.load_history()?.unwrap_or_else(|| self.empty_history());
-        let before = canonical_history_bytes(&state)?;
-        append_history_envelopes(&mut state, envelopes)?;
-        self.validate_history_identities(&state)?;
-        prune_history(&mut state, now)?;
-        self.validate_history(&state)?;
-        if canonical_history_bytes(&state)? != before {
-            self.write_history(&state)?;
-        }
-        Ok(())
+        self.with_mutation(None, |live| {
+            self.validate_history_live_identities_in_state(live, envelopes)?;
+            let (history, repaired) = self.load_history_raw()?;
+            let mut state = history.unwrap_or_else(|| self.empty_history());
+            if repaired {
+                self.write_history(&state)?;
+            }
+            let before = canonical_history_bytes(&state)?;
+            append_history_envelopes(&mut state, envelopes)?;
+            self.validate_history_identities(&state)?;
+            prune_history(&mut state, now)?;
+            self.validate_history(&state)?;
+            if canonical_history_bytes(&state)? != before {
+                self.write_history(&state)?;
+            }
+            Ok(Mutation {
+                value: (),
+                changed: false,
+            })
+        })
     }
 
     pub(crate) fn local_device_did(&self) -> String {
@@ -853,7 +871,8 @@ impl CollaborationCore {
                 .outgoing
                 .iter()
                 .filter(|entry| {
-                    entry.remote_acceptance_receipts.is_empty()
+                    entry.local_product_projection != OutgoingProductProjectionState::Retired
+                        && entry.remote_acceptance_receipts.is_empty()
                         && stored_message_expiry(&entry.envelope)
                             .is_ok_and(|expires_at| expires_at > now)
                 })
@@ -862,7 +881,8 @@ impl CollaborationCore {
                 .outgoing
                 .iter()
                 .filter(|entry| {
-                    entry.remote_acceptance_receipts.is_empty()
+                    entry.local_product_projection != OutgoingProductProjectionState::Retired
+                        && entry.remote_acceptance_receipts.is_empty()
                         && stored_message_expiry(&entry.envelope)
                             .is_ok_and(|expires_at| expires_at <= now)
                 })
@@ -870,7 +890,10 @@ impl CollaborationCore {
             remotely_accepted_outgoing: state
                 .outgoing
                 .iter()
-                .filter(|entry| !entry.remote_acceptance_receipts.is_empty())
+                .filter(|entry| {
+                    entry.local_product_projection != OutgoingProductProjectionState::Retired
+                        && !entry.remote_acceptance_receipts.is_empty()
+                })
                 .count(),
             pending_product_handoffs: state.incoming.len(),
             replay_tombstones: state.incoming_tombstones.len(),
@@ -940,7 +963,7 @@ impl CollaborationCore {
                 ))
             }
         };
-        if validate_incoming_chat_payload(&authorized).is_err() {
+        if validate_shared_product_projection(&authorized).is_err() {
             return Ok(CollaborationTransportIngestion::Rejected(
                 CollaborationTransportRejection::InvalidMessage,
             ));
@@ -960,22 +983,6 @@ impl CollaborationCore {
             .load_state()
             .map_err(|_| CollaborationTransportRetryableError)?
             .unwrap_or_else(|| self.empty_state());
-        if self
-            .repair_malformed_chat_handoffs(&mut state)
-            .map_err(|_| CollaborationTransportRetryableError)?
-        {
-            self.with_mutation(None, |_| {
-                Ok(Mutation {
-                    value: (),
-                    changed: false,
-                })
-            })
-            .map_err(|_| CollaborationTransportRetryableError)?;
-            state = self
-                .load_state()
-                .map_err(|_| CollaborationTransportRetryableError)?
-                .unwrap_or_else(|| self.empty_state());
-        }
         if let Some(existing) = self
             .exact_incoming_replay(&state, frame, &envelope_hash, now)
             .map_err(|_| CollaborationTransportRetryableError)?
@@ -1171,6 +1178,11 @@ impl CollaborationCore {
                     );
                 }
                 let verified = self.verify_outgoing_record(existing)?;
+                if existing.local_product_projection == OutgoingProductProjectionState::Retired {
+                    anyhow::bail!(
+                        "collaboration operation was retired because its Shared product is invalid"
+                    );
+                }
                 validate_operation_for_intent(
                     &operation,
                     &self.operation_capsule,
@@ -1191,7 +1203,10 @@ impl CollaborationCore {
             let unresolved = state
                 .outgoing
                 .iter()
-                .filter(|entry| entry.remote_acceptance_receipts.is_empty())
+                .filter(|entry| {
+                    entry.local_product_projection != OutgoingProductProjectionState::Retired
+                        && entry.remote_acceptance_receipts.is_empty()
+                })
                 .count();
             if unresolved >= MAX_UNRESOLVED_OUTGOING || state.outgoing.len() >= MAX_OUTGOING_RECORDS
             {
@@ -1205,6 +1220,9 @@ impl CollaborationCore {
                 payload.clone(),
                 now,
                 ttl_secs,
+            )?;
+            validate_shared_product_projection(
+                &self.authorize_stored_product_message(prepared.envelope_bytes())?,
             )?;
             let envelope = String::from_utf8(prepared.envelope_bytes().to_vec())
                 .context("canonical collaboration envelope is not UTF-8")?;
@@ -1240,6 +1258,9 @@ impl CollaborationCore {
         let recent = state
             .outgoing
             .iter()
+            .filter(|entry| {
+                entry.local_product_projection != OutgoingProductProjectionState::Retired
+            })
             .filter_map(|entry| {
                 serde_json::from_str::<SignedCollaborationMessage>(&entry.envelope).ok()
             })
@@ -1354,9 +1375,8 @@ impl CollaborationCore {
             })
             .filter_map(|entry| match self.verify_outgoing_record(entry) {
                 Ok(verified)
-                    if verified.envelope().payload.expires_at > now
-                        && verified.envelope().payload.created_at
-                            <= now.saturating_add(MAX_COLLABORATION_CLOCK_SKEW_SECS) =>
+                    if verified.envelope().payload.created_at
+                        <= now.saturating_add(MAX_COLLABORATION_CLOCK_SKEW_SECS) =>
                 {
                     Some(Ok(PendingOutgoingProductProjection {
                         outgoing: self.outgoing_handle(entry, verified),
@@ -1383,6 +1403,9 @@ impl CollaborationCore {
                 })
                 .context("pending outgoing collaboration product projection was not found")?;
             self.verify_outgoing_record(entry)?;
+            if entry.local_product_projection == OutgoingProductProjectionState::Retired {
+                anyhow::bail!("retired collaboration intent cannot complete a product projection");
+            }
             if entry.local_product_projection == OutgoingProductProjectionState::Complete {
                 return Ok(Mutation {
                     value: (),
@@ -1468,7 +1491,7 @@ impl CollaborationCore {
         now: u64,
     ) -> anyhow::Result<DurableIncomingAcceptance> {
         let authorized = self.authorize_stored_product_message(envelope_bytes)?;
-        validate_incoming_chat_payload(&authorized)?;
+        validate_shared_product_projection(&authorized)?;
         let envelope_hash = collaboration_message_envelope_sha256(envelope_bytes);
         if let Some(state) = self.load_state()? {
             if let Some(existing) =
@@ -1552,20 +1575,35 @@ impl CollaborationCore {
         })
     }
 
-    fn repair_malformed_chat_handoffs(&self, state: &mut CoreState) -> anyhow::Result<bool> {
+    fn repair_malformed_product_handoffs(&self, state: &mut CoreState) -> anyhow::Result<bool> {
+        let mut changed = false;
+        for entry in &mut state.outgoing {
+            let invalid = validate_shared_product_projection(
+                &self.authorize_stored_product_message(entry.envelope.as_bytes())?,
+            )
+            .is_err();
+            if entry.local_product_projection == OutgoingProductProjectionState::Retired && !invalid
+            {
+                anyhow::bail!("retired collaboration intent has a valid Shared product");
+            }
+            if entry.local_product_projection != OutgoingProductProjectionState::Retired && invalid
+            {
+                entry.local_product_projection = OutgoingProductProjectionState::Retired;
+                changed = true;
+            }
+        }
         let mut malformed = Vec::new();
         for (index, entry) in state.incoming.iter().enumerate() {
             let authorized = self.verify_incoming_record(entry)?;
-            if validate_incoming_chat_payload(&authorized).is_err() {
-                let receipt =
-                    verify_stored_acceptance_receipt_envelope(entry.acceptance_receipt.as_bytes())?;
+            if validate_shared_product_projection(&authorized).is_err() {
+                let receipt = self.verify_receipt_envelope(entry.acceptance_receipt.as_bytes())?;
                 malformed.push((
                     index,
                     tombstone_retention_deadline(receipt.envelope().payload.accepted_at),
                 ));
             }
         }
-        let changed = !malformed.is_empty();
+        changed |= !malformed.is_empty();
         for (index, retain_until) in malformed.into_iter().rev() {
             let entry = state.incoming.remove(index);
             state.incoming_tombstones.push(IncomingTombstone {
@@ -1711,6 +1749,11 @@ impl CollaborationCore {
         self.held.restore(held);
     }
 
+    /// Release or requeue the reservation for one settled retry attempt.
+    pub(crate) fn complete_held_frame(&self, frame: HeldFrame) {
+        self.held.complete(frame);
+    }
+
     fn sender_backlog_full(
         &self,
         state: &CoreState,
@@ -1811,25 +1854,41 @@ impl CollaborationCore {
             .map_err(|_| anyhow::anyhow!("collaboration mutation mutex is poisoned"))?;
         self.ensure_state_directory()?;
         let _file_guard = lock_owner_only_file(&self.lock_path())?;
-        let mut state = self.load_state()?.unwrap_or_else(|| self.empty_state());
-        let repaired = self.repair_malformed_chat_handoffs(&mut state)?;
+        // This reader does not reacquire the process/file locks. On a cold or
+        // externally changed snapshot it verifies and repairs only once.
+        let (state, repaired) = self.load_state_raw()?;
+        let mut state = state.unwrap_or_else(|| self.empty_state());
+        if repaired {
+            // Retirement is a completed repair, even if the requested operation
+            // below refuses. Keep the original replay bindings durable first.
+            self.persist_verified_state(&state)?;
+        }
         let pruned = prune_now
             .map(|now| self.prune_terminal_state(&mut state, now))
             .transpose()?
             .unwrap_or(false);
         let mutation = f(&mut state)?;
-        if mutation.changed || pruned || repaired {
-            self.validate_state(&state)?;
-            // An indeterminate rename must be read and validated again.
-            *self.verified_state.lock().map_err(|_| {
-                anyhow::anyhow!("collaboration state verification cache poisoned")
-            })? = None;
-            self.write_state(&state)?;
-            *self.verified_state.lock().map_err(|_| {
-                anyhow::anyhow!("collaboration state verification cache poisoned")
-            })? = Some((canonical_state_bytes(&state)?, state));
+        if mutation.changed || pruned {
+            self.persist_verified_state(&state)?;
         }
         Ok(mutation.value)
+    }
+
+    fn persist_verified_state(&self, state: &CoreState) -> anyhow::Result<()> {
+        self.validate_state(state)?;
+        // An indeterminate rename must be read and validated again.
+        *self
+            .verified_state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("collaboration state verification cache poisoned"))? =
+            None;
+        self.write_state(state)?;
+        *self
+            .verified_state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("collaboration state verification cache poisoned"))? =
+            Some((canonical_state_bytes(state)?, state.clone()));
+        Ok(())
     }
 
     fn prune_terminal_state(&self, state: &mut CoreState, now: u64) -> anyhow::Result<bool> {
@@ -1869,13 +1928,28 @@ impl CollaborationCore {
     }
 
     fn load_state(&self) -> anyhow::Result<Option<CoreState>> {
+        let (state, repaired) = self.load_state_raw()?;
+        if repaired {
+            // Re-read under both writer locks; only the fsynced repair becomes
+            // an exact verified-state cache entry.
+            return self.with_mutation(None, |state| {
+                Ok(Mutation {
+                    value: Some(state.clone()),
+                    changed: false,
+                })
+            });
+        }
+        Ok(state)
+    }
+
+    fn load_state_raw(&self) -> anyhow::Result<(Option<CoreState>, bool)> {
         if !self.validate_existing_state_ancestors()? {
-            return Ok(None);
+            return Ok((None, false));
         }
         let path = self.state_path();
         let named_before = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok((None, false)),
             Err(err) => return Err(err.into()),
         };
         validate_owner_only_regular_file(&path, &named_before)?;
@@ -1930,23 +2004,27 @@ impl CollaborationCore {
                 .map_err(|_| anyhow::anyhow!("collaboration state verification cache poisoned"))?;
             if let Some((exact, state)) = cached.as_ref() {
                 if exact == &bytes {
-                    return Ok(Some(state.clone()));
+                    return Ok((Some(state.clone()), false));
                 }
             }
             *cached = None;
         }
-        let state: CoreState =
+        let mut state: CoreState =
             serde_json::from_slice(&bytes).context("invalid collaboration durable state")?;
         if canonical_state_bytes(&state)? != bytes {
             anyhow::bail!("collaboration durable state is not canonical JSON");
         }
         self.validate_state(&state)?;
+        let repaired = self.repair_malformed_product_handoffs(&mut state)?;
+        if repaired {
+            return Ok((Some(state), true));
+        }
         *self
             .verified_state
             .lock()
             .map_err(|_| anyhow::anyhow!("collaboration state verification cache poisoned"))? =
             Some((bytes, state.clone()));
-        Ok(Some(state))
+        Ok((Some(state), false))
     }
 
     fn empty_history(&self) -> ConversationHistoryState {
@@ -1954,6 +2032,7 @@ impl CollaborationCore {
             schema: HISTORY_STATE_SCHEMA.to_string(),
             binding: self.state_binding(),
             envelopes: Vec::new(),
+            retired_envelope_hashes: Vec::new(),
         }
     }
 
@@ -1962,13 +2041,30 @@ impl CollaborationCore {
     }
 
     fn load_history(&self) -> anyhow::Result<Option<ConversationHistoryState>> {
+        let (state, repaired) = self.load_history_raw()?;
+        if repaired {
+            return self.with_mutation(None, |_| {
+                let (state, repaired) = self.load_history_raw()?;
+                if repaired {
+                    self.write_history(state.as_ref().context("history repair lost its source")?)?;
+                }
+                Ok(Mutation {
+                    value: state,
+                    changed: false,
+                })
+            });
+        }
+        Ok(state)
+    }
+
+    fn load_history_raw(&self) -> anyhow::Result<(Option<ConversationHistoryState>, bool)> {
         if !self.validate_existing_state_ancestors()? {
-            return Ok(None);
+            return Ok((None, false));
         }
         let path = self.history_path();
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((None, false)),
             Err(error) => return Err(error.into()),
         };
         validate_owner_only_regular_file(&path, &metadata)?;
@@ -1991,12 +2087,28 @@ impl CollaborationCore {
         if bytes.len() > MAX_CONVERSATION_HISTORY_BYTES {
             anyhow::bail!("collaboration retained history exceeds its byte limit");
         }
-        let state: ConversationHistoryState = serde_json::from_slice(&bytes)?;
+        let mut state: ConversationHistoryState = serde_json::from_slice(&bytes)?;
         if canonical_history_bytes(&state)? != bytes {
             anyhow::bail!("collaboration retained history is not canonical JSON");
         }
         self.validate_history(&state)?;
-        Ok(Some(state))
+        let mut repaired = false;
+        for envelope in &state.envelopes {
+            let hash = collaboration_message_envelope_sha256(envelope.as_bytes());
+            if !state.retired_envelope_hashes.contains(&hash)
+                && crate::collaboration_product::validate_chat_projection(
+                    &self.authorize_stored_product_message(envelope.as_bytes())?,
+                )
+                .is_err()
+            {
+                state.retired_envelope_hashes.push(hash);
+                repaired = true;
+            }
+        }
+        if repaired {
+            prune_history(&mut state, now_secs())?;
+        }
+        Ok((Some(state), repaired))
     }
 
     /// The bounded original cache can evict a message while its verified live
@@ -2004,6 +2116,14 @@ impl CollaborationCore {
     /// only the exact accepted hash can replay it.
     fn validate_history_live_identities(&self, envelopes: &[Vec<u8>]) -> anyhow::Result<()> {
         let live = self.load_state()?.unwrap_or_else(|| self.empty_state());
+        self.validate_history_live_identities_in_state(&live, envelopes)
+    }
+
+    fn validate_history_live_identities_in_state(
+        &self,
+        live: &CoreState,
+        envelopes: &[Vec<u8>],
+    ) -> anyhow::Result<()> {
         let mut ids = HashMap::new();
         let mut nonces = HashMap::new();
         for entry in &live.incoming {
@@ -2065,6 +2185,30 @@ impl CollaborationCore {
             || canonical_history_bytes(state)?.len() > MAX_CONVERSATION_HISTORY_BYTES
         {
             anyhow::bail!("collaboration retained history has an invalid binding or bounds");
+        }
+        let retired = state
+            .retired_envelope_hashes
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        if retired.len() != state.retired_envelope_hashes.len()
+            || retired.len() > state.envelopes.len()
+        {
+            anyhow::bail!("collaboration retained history has invalid retirement markers");
+        }
+        let mut matched = 0;
+        for envelope in &state.envelopes {
+            let hash = collaboration_message_envelope_sha256(envelope.as_bytes());
+            if retired.contains(hash.as_str()) {
+                matched += 1;
+                let authorized = self.authorize_stored_product_message(envelope.as_bytes())?;
+                if crate::collaboration_product::validate_chat_projection(&authorized).is_ok() {
+                    anyhow::bail!("retired history original has a valid Shared product");
+                }
+            }
+        }
+        if matched != retired.len() {
+            anyhow::bail!("retired history hash has no matching original");
         }
         self.validate_history_identities(state)
     }
@@ -2135,7 +2279,10 @@ impl CollaborationCore {
             || state
                 .outgoing
                 .iter()
-                .filter(|entry| entry.remote_acceptance_receipts.is_empty())
+                .filter(|entry| {
+                    entry.local_product_projection != OutgoingProductProjectionState::Retired
+                        && entry.remote_acceptance_receipts.is_empty()
+                })
                 .count()
                 > MAX_UNRESOLVED_OUTGOING
         {
@@ -2389,11 +2536,23 @@ fn collaboration_transport_frame_kind(
     }
 }
 
-fn validate_incoming_chat_payload(
+fn validate_shared_product_projection(
     authorized: &AuthorizedDefaultConversationMessage,
 ) -> anyhow::Result<()> {
-    if authorized.message().envelope().payload.payload_type == COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE {
-        crate::collaboration_product::validate_chat_projection(authorized)?;
+    match authorized
+        .message()
+        .envelope()
+        .payload
+        .payload_type
+        .as_str()
+    {
+        COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE => {
+            crate::collaboration_product::validate_chat_projection(authorized)?;
+        }
+        crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE => {
+            crate::collaboration_presence::validate_presence_payload(authorized.product_payload())?;
+        }
+        _ => anyhow::bail!("Shared collaboration payload type has no registered product consumer"),
     }
     Ok(())
 }
@@ -2577,7 +2736,11 @@ fn prune_terminal_state(state: &mut CoreState, now: u64) -> anyhow::Result<bool>
     let mut retained_outgoing = Vec::with_capacity(state.outgoing.len());
     for entry in state.outgoing.drain(..) {
         let expires_at = stored_message_expiry(&entry.envelope)?;
-        if expires_at.saturating_add(MAX_COLLABORATION_CLOCK_SKEW_SECS) >= now {
+        // Transport expiry cannot discard a saved intent before its consumer
+        // records the local projection or acknowledges an expired Presence.
+        if entry.local_product_projection == OutgoingProductProjectionState::Pending
+            || expires_at.saturating_add(MAX_COLLABORATION_CLOCK_SKEW_SECS) >= now
+        {
             retained_outgoing.push(entry);
         }
     }
@@ -2634,13 +2797,25 @@ fn prune_history(state: &mut ConversationHistoryState, now: u64) -> anyhow::Resu
         .into_iter()
         .map(|(_, _, envelope)| envelope)
         .collect();
+    let retained_hashes = state
+        .envelopes
+        .iter()
+        .map(|envelope| collaboration_message_envelope_sha256(envelope.as_bytes()))
+        .collect::<HashSet<_>>();
+    state
+        .retired_envelope_hashes
+        .retain(|hash| retained_hashes.contains(hash));
     while state.envelopes.len() > MAX_CONVERSATION_HISTORY_MESSAGES
         || canonical_history_bytes(state)?.len() > MAX_CONVERSATION_HISTORY_BYTES
     {
         if state.envelopes.is_empty() {
             anyhow::bail!("collaboration history binding exceeds its byte limit");
         }
-        state.envelopes.remove(0);
+        let removed = state.envelopes.remove(0);
+        let hash = collaboration_message_envelope_sha256(removed.as_bytes());
+        state
+            .retired_envelope_hashes
+            .retain(|retired| retired != &hash);
     }
     Ok(())
 }
@@ -2756,6 +2931,7 @@ pub(crate) fn lock_owner_only_file(path: &Path) -> anyhow::Result<FileLock> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     use elastos_common::collaboration_protocol::{
         canonical_collaboration_acceptance_receipt_bytes, canonical_collaboration_message_bytes,
@@ -2992,7 +3168,7 @@ mod tests {
         prepare(
             &core,
             "accepted-before-leave",
-            serde_json::json!({"content":"before"}),
+            serde_json::json!({"body":"before"}),
             NOW,
             TTL,
         )
@@ -3025,7 +3201,7 @@ mod tests {
         assert!(prepare(
             &core,
             "refused-while-left",
-            serde_json::json!({"content":"left"}),
+            serde_json::json!({"body":"left"}),
             NOW + 1,
             TTL,
         )
@@ -3037,7 +3213,7 @@ mod tests {
         prepare(
             &core,
             "accepted-after-rejoin",
-            serde_json::json!({"content":"rejoined"}),
+            serde_json::json!({"body":"rejoined"}),
             NOW + 2,
             TTL,
         )
@@ -3206,6 +3382,68 @@ mod tests {
         .unwrap()
     }
 
+    fn shared_test_profile(
+        authority: &DefaultConversationDeviceAuthority,
+        device_key: &SigningKey,
+    ) -> crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument {
+        let original = authority.sender_profile_for_test().unwrap();
+        let mut document = original.document().clone();
+        for signer in &mut document.collaboration_signers {
+            if signer.service == SERVICE {
+                for delegation in &mut signer.delegations {
+                    delegation
+                        .object_types
+                        .push("elastos.chat.unregistered/v1".to_string());
+                    delegation.object_types.sort();
+                }
+            }
+        }
+        let signed = resign_test_profile(device_key, &document);
+        crate::collaboration_profile_authority::verify_signed_profile_document(&signed).unwrap()
+    }
+
+    fn resign_test_profile(
+        device_key: &SigningKey,
+        document: &crate::collaboration_profile_authority::CollaborationProfileDocument,
+    ) -> crate::collaboration_profile_authority::SignedCollaborationProfileDocument {
+        let mut seed = device_key.to_bytes();
+        seed[0] ^= 0xa5;
+        seed[31] ^= 0x5a;
+        let profile_key = SigningKey::from_bytes(&seed);
+        let (signature, signer_did) = crate::crypto::domain_separated_sign(
+            &profile_key,
+            crate::collaboration_profile_authority::COLLABORATION_PROFILE_DOCUMENT_SIGNATURE_DOMAIN_V1,
+            &serde_json::to_vec(document).unwrap(),
+        );
+        serde_json::from_value(serde_json::json!({
+            "payload": document, "signature": signature, "signer_did": signer_did,
+        }))
+        .unwrap()
+    }
+
+    fn profile_operation(
+        request_id: &str,
+        profile: &crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument,
+        payload_type: &str,
+        product: &serde_json::Value,
+    ) -> EspRequestBinding {
+        let payload =
+            crate::collaboration_default_conversation::profile_authenticated_conversation_payload(
+                profile,
+                product.clone(),
+            )
+            .unwrap();
+        esp_request_binding(
+            request_id,
+            "runtime-principal",
+            OPERATION_CAPSULE,
+            Some("elastos.chat.room"),
+            DEFAULT_CONVERSATION_SEND_METHOD,
+            ["elastos://chat/message".to_string()],
+            &intent(payload_type, &payload, TTL),
+        )
+    }
+
     fn remote_receipt(
         fixture: &Fixture,
         outgoing: &DurableOutgoingMessage,
@@ -3276,13 +3514,13 @@ mod tests {
     ) -> CoreState {
         assert!(tombstones <= MAX_INCOMING_RECORDS_AND_TOMBSTONES);
         assert!(outgoing <= MAX_OUTGOING_RECORDS);
-        assert!(payload_bytes <= 16 * 1024);
+        assert!(payload_bytes <= crate::room_service::MAX_OBJECT_BODY_LEN);
         assert!(outgoing * (payload_bytes + 8192) + tombstones * 2048 <= MAX_CORE_STATE_BYTES);
         let (remote_key, _) = generate_keypair();
         let remote = fixture.authority(remote_key);
         let local_profile = core.authority.sender_profile_for_test().unwrap();
         let remote_profile = remote.sender_profile_for_test().unwrap();
-        let payload = serde_json::json!({"content":"x".repeat(payload_bytes)});
+        let payload = serde_json::json!({"body":"x".repeat(payload_bytes.max(1))});
         let mut state = core.empty_state();
         for index in 0..outgoing {
             let prepared = core
@@ -3812,7 +4050,11 @@ mod tests {
             MAX_INCOMING_RECORDS_AND_TOMBSTONES,
         );
         let outgoing = parameter("COLLAB_VALIDATION_BENCH_OUTGOING", 8, MAX_OUTGOING_RECORDS);
-        let payload_bytes = parameter("COLLAB_VALIDATION_BENCH_PAYLOAD_BYTES", 256, 16 * 1024);
+        let payload_bytes = parameter(
+            "COLLAB_VALIDATION_BENCH_PAYLOAD_BYTES",
+            256,
+            crate::room_service::MAX_OBJECT_BODY_LEN,
+        );
         let iterations = parameter("COLLAB_VALIDATION_BENCH_ITERATIONS", 3, 100);
         assert!(iterations > 0 && tombstones + outgoing > 0);
         let fixture = Fixture::new();
@@ -3997,6 +4239,679 @@ mod tests {
     }
 
     #[test]
+    fn malformed_presence_cannot_fill_handoffs_and_legacy_restart_keeps_replay_protection() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let mut legacy = core.empty_state();
+        let mut malformed_frames = Vec::new();
+        let mut first_author = None;
+        for _ in 0..4 {
+            let key = generate_keypair().0;
+            let remote = fixture.authority(key.clone());
+            for _ in 0..MAX_PENDING_INCOMING_PER_SENDER {
+                let original = remote
+                    .prepare_outgoing(
+                        SERVICE,
+                        crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+                        serde_json::json!({"extra":true}),
+                        NOW,
+                        45,
+                    )
+                    .unwrap();
+                let frame = remote
+                    .prepare_transport_frame(original.envelope_bytes())
+                    .unwrap();
+                assert_eq!(
+                    transport_rejection(&core, &frame, NOW),
+                    CollaborationTransportRejection::InvalidMessage
+                );
+                assert!(core
+                    .accept_incoming(original.envelope_bytes(), &remote.local_device_did(), NOW)
+                    .is_err());
+                assert!(!core.state_path().exists());
+                // Seed only the old, fully signed and receipt-bound on-disk shape.
+                let incoming = core
+                    .authority
+                    .authorize_incoming(original.envelope_bytes(), &remote.local_device_did(), NOW)
+                    .unwrap();
+                let receipt = core
+                    .authority
+                    .prepare_acceptance_receipt(&incoming, NOW)
+                    .unwrap();
+                legacy.incoming.push(IncomingRecord {
+                    envelope: String::from_utf8(original.envelope_bytes().to_vec()).unwrap(),
+                    acceptance_receipt: String::from_utf8(receipt).unwrap(),
+                    product_handoff: ProductHandoffState::Pending,
+                });
+                if first_author.is_none() {
+                    first_author = Some(key.clone());
+                }
+                malformed_frames.push(frame);
+            }
+        }
+        assert_eq!(legacy.incoming.len(), MAX_PENDING_INCOMING);
+        core.validate_state(&legacy).unwrap();
+        core.ensure_state_directory().unwrap();
+        core.write_state(&legacy).unwrap();
+        let mut invalid_receipt = legacy.clone();
+        invalid_receipt.incoming[0].acceptance_receipt =
+            legacy.incoming[1].acceptance_receipt.clone();
+        let invalid_bytes = canonical_state_bytes(&invalid_receipt).unwrap();
+        write_owner_only(&core.state_path(), &invalid_bytes);
+        assert!(fixture.core().pending_product_handoffs().is_err());
+        assert_eq!(fs::read(core.state_path()).unwrap(), invalid_bytes);
+        write_owner_only(&core.state_path(), &canonical_state_bytes(&legacy).unwrap());
+
+        let after_expiry = NOW + 45 + MAX_COLLABORATION_CLOCK_SKEW_SECS + 1;
+        let restarted = fixture.core();
+        assert!(restarted.pending_product_handoffs().unwrap().is_empty());
+        let repaired = restarted.load_state().unwrap().unwrap();
+        assert_eq!(repaired.incoming_tombstones.len(), MAX_PENDING_INCOMING);
+        for entry in &legacy.incoming {
+            assert!(repaired
+                .incoming_tombstones
+                .iter()
+                .any(|retired| retired.acceptance_receipt == entry.acceptance_receipt));
+        }
+        for frame in &malformed_frames {
+            assert_eq!(
+                transport_rejection(&restarted, frame, after_expiry),
+                CollaborationTransportRejection::InvalidMessage
+            );
+        }
+        // Correcting the DTO cannot reuse the retired author's MessageID or nonce.
+        let original: SignedCollaborationMessage =
+            serde_json::from_str(&legacy.incoming[0].envelope).unwrap();
+        let mut corrected = original.payload;
+        corrected.payload["product"] = serde_json::json!({});
+        corrected.created_at = after_expiry;
+        corrected.expires_at = after_expiry + 45;
+        let corrected = resign_message(&first_author.unwrap(), corrected);
+        assert!(restarted
+            .accept_incoming(
+                &corrected,
+                &message_source_endpoint_did(&corrected),
+                after_expiry
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("reused"));
+        let presence = fixture.authority(generate_keypair().0);
+        let valid_presence = presence
+            .prepare_outgoing(
+                SERVICE,
+                crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+                serde_json::json!({}),
+                after_expiry,
+                45,
+            )
+            .unwrap();
+        let valid_frame = presence
+            .prepare_transport_frame(valid_presence.envelope_bytes())
+            .unwrap();
+        transport_incoming(&restarted, &valid_frame, after_expiry);
+        let (_, valid_chat) =
+            remote_transport_message(&fixture, generate_keypair().0, after_expiry);
+        transport_incoming(&restarted, &valid_chat, after_expiry);
+        let pending = fixture.core().pending_product_handoffs().unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(
+            fixture
+                .core()
+                .load_state()
+                .unwrap()
+                .unwrap()
+                .incoming_tombstones
+                .len(),
+            MAX_PENDING_INCOMING
+        );
+    }
+
+    #[test]
+    fn shared_consumer_matrix_refuses_unconsumable_payloads_before_storage_and_repairs_on_load() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let cases = [
+            (
+                COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+                serde_json::json!({"extra":true}),
+            ),
+            (
+                COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+                serde_json::json!({"body":7}),
+            ),
+            (
+                COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+                serde_json::json!({"body":"ok","extra":true}),
+            ),
+            (
+                COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+                serde_json::json!({"body":"x".repeat(crate::room_service::MAX_OBJECT_BODY_LEN + 1)}),
+            ),
+            (
+                crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+                serde_json::json!({"extra":true}),
+            ),
+            (
+                crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+                serde_json::json!([]),
+            ),
+            ("elastos.chat.direct-message/v1", serde_json::json!({})),
+            ("elastos.chat.unregistered/v1", serde_json::json!({})),
+        ];
+        let local_profile = shared_test_profile(&core.authority, &fixture.device_key);
+        let mut legacy = core.empty_state();
+        let mut first = None;
+        for author_index in 0..4 {
+            let key = generate_keypair().0;
+            let remote = fixture.authority(key.clone());
+            let profile = shared_test_profile(&remote, &key);
+            for (case_index, (kind, product)) in cases.iter().enumerate() {
+                let original = remote
+                    .prepare_profile_outgoing(&profile, SERVICE, kind, product.clone(), NOW, TTL)
+                    .unwrap();
+                let frame = remote
+                    .prepare_transport_frame(original.envelope_bytes())
+                    .unwrap();
+                assert_eq!(
+                    transport_rejection(&core, &frame, NOW),
+                    CollaborationTransportRejection::InvalidMessage
+                );
+                assert!(core
+                    .accept_home_chat(&frame, &remote.local_device_did(), NOW)
+                    .is_err());
+                assert!(core
+                    .accept_incoming(original.envelope_bytes(), &remote.local_device_did(), NOW)
+                    .is_err());
+                assert!(core
+                    .authorize_history_message(original.envelope_bytes(), NOW)
+                    .is_err());
+                assert!(core
+                    .retain_history_message(original.envelope_bytes(), NOW)
+                    .is_err());
+                assert!(core
+                    .history_projection_candidates(&[original.envelope_bytes().to_vec()], NOW)
+                    .is_err());
+                let operation = profile_operation(
+                    &format!("invalid:{author_index}:{case_index}"),
+                    &local_profile,
+                    kind,
+                    product,
+                );
+                assert!(core
+                    .prepare_profile_outgoing(
+                        operation,
+                        &local_profile,
+                        kind,
+                        product.clone(),
+                        NOW,
+                        TTL
+                    )
+                    .is_err());
+                assert!(!core.state_path().exists());
+                assert!(!core.history_path().exists());
+                let authorized = core
+                    .authority
+                    .authorize_incoming(original.envelope_bytes(), &remote.local_device_did(), NOW)
+                    .unwrap();
+                let receipt = core
+                    .authority
+                    .prepare_acceptance_receipt(&authorized, NOW)
+                    .unwrap();
+                legacy.incoming.push(IncomingRecord {
+                    envelope: String::from_utf8(original.envelope_bytes().to_vec()).unwrap(),
+                    acceptance_receipt: String::from_utf8(receipt).unwrap(),
+                    product_handoff: ProductHandoffState::Pending,
+                });
+                if first.is_none() {
+                    first = Some((key.clone(), original.envelope_bytes().to_vec()));
+                }
+            }
+            // An author-signed but overlength Profile is not an admissible author
+            // for either registered consumer. Signature validity cannot repair it.
+            for kind in [
+                COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+                crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+            ] {
+                let product = if kind == COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE {
+                    serde_json::json!({"body":"valid"})
+                } else {
+                    serde_json::json!({})
+                };
+                let original = remote
+                    .prepare_profile_outgoing(&profile, SERVICE, kind, product, NOW, TTL)
+                    .unwrap();
+                let mut document = profile.document().clone();
+                document.display_name = "x".repeat(65);
+                let mut signed: SignedCollaborationMessage =
+                    serde_json::from_slice(original.envelope_bytes()).unwrap();
+                signed.payload.payload["signed_profile"] =
+                    serde_json::to_value(resign_test_profile(&key, &document)).unwrap();
+                let invalid = resign_message(&key, signed.payload);
+                let frame = remote.prepare_transport_frame(&invalid).unwrap();
+                assert_eq!(
+                    transport_rejection(&core, &frame, NOW),
+                    CollaborationTransportRejection::InvalidMessage
+                );
+                assert!(core
+                    .accept_incoming(&invalid, &remote.local_device_did(), NOW)
+                    .is_err());
+                assert!(!core.state_path().exists());
+            }
+        }
+        assert_eq!(legacy.incoming.len(), MAX_PENDING_INCOMING);
+        core.validate_state(&legacy).unwrap();
+        core.ensure_state_directory().unwrap();
+        core.write_state(&legacy).unwrap();
+        let before = fs::read(core.state_path()).unwrap();
+        let failed_repair = fixture.core();
+        failed_repair.inject_write_fault(WriteFault::BeforeWrite);
+        assert!(failed_repair.summary().is_err());
+        assert_eq!(fs::read(core.state_path()).unwrap(), before);
+        let restarted = fixture.core();
+        // A plain read, before any handoff or mutation, durably repairs legacy slots.
+        assert_eq!(restarted.summary().unwrap().pending_product_handoffs, 0);
+        let repaired = restarted.load_state().unwrap().unwrap();
+        assert_eq!(repaired.incoming_tombstones.len(), MAX_PENDING_INCOMING);
+        assert!(repaired.incoming.is_empty());
+        for entry in &legacy.incoming {
+            assert!(repaired
+                .incoming_tombstones
+                .iter()
+                .any(|tombstone| tombstone.acceptance_receipt == entry.acceptance_receipt));
+        }
+        let (key, bytes) = first.unwrap();
+        let mut signed: SignedCollaborationMessage = serde_json::from_slice(&bytes).unwrap();
+        signed.payload.payload["product"] = serde_json::json!({"body":"corrected"});
+        let corrected = resign_message(&key, signed.payload);
+        assert!(restarted
+            .accept_incoming(&corrected, &message_source_endpoint_did(&corrected), NOW)
+            .unwrap_err()
+            .to_string()
+            .contains("reused"));
+        // Chat's actual projection retains history at the wall clock; Presence
+        // uses its explicit fixture clock below to prove its live snapshot.
+        let chat_now = now_secs();
+        let (_, chat) = remote_transport_message(&fixture, generate_keypair().0, chat_now);
+        transport_incoming(&restarted, &chat, chat_now);
+        let presence = fixture.authority(generate_keypair().0);
+        let metadata = presence
+            .prepare_outgoing(
+                SERVICE,
+                crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+                serde_json::json!({}),
+                NOW,
+                45,
+            )
+            .unwrap();
+        restarted
+            .accept_incoming(metadata.envelope_bytes(), &presence.local_device_did(), NOW)
+            .unwrap();
+        let projection_core = Arc::new(fixture.core());
+        let chat_port = crate::collaboration_product::CollaborationChatProductPort::new(
+            projection_core.clone(),
+        )
+        .unwrap();
+        let presence_port = crate::collaboration_presence::CollaborationPresenceProductPort::new(
+            projection_core.clone(),
+        )
+        .unwrap();
+        assert_eq!(projection_core.pending_product_handoffs().unwrap().len(), 2);
+        let chat_handoffs = chat_port.pending_messages().unwrap();
+        assert_eq!(chat_handoffs.len(), 1);
+        let object = chat_port
+            .project_handoff(&fixture.data_root, &chat_handoffs[0])
+            .unwrap();
+        assert_eq!(object.body.as_deref(), Some("remote"));
+        assert_eq!(object.sender_profile_verified, Some(true));
+        let presence_handoffs = presence_port.pending_presences().unwrap();
+        assert_eq!(presence_handoffs.len(), 1);
+        assert_eq!(
+            presence_port
+                .project_handoff(&presence_handoffs[0], NOW)
+                .unwrap(),
+            crate::collaboration_presence::CollaborationPresenceProjectionOutcome::Applied
+        );
+        let snapshot = presence_port.snapshot(NOW).unwrap();
+        assert_eq!(snapshot.records().len(), 1);
+        assert_eq!(snapshot.records()[0].last_seen_at(), NOW);
+        assert_eq!(snapshot.records()[0].expires_at(), NOW + 45);
+        assert_eq!(
+            projection_core.summary().unwrap().pending_product_handoffs,
+            0
+        );
+        let session = crate::room_service::start_local_runtime_session(
+            &fixture.data_root,
+            &projection_core.local_device_did(),
+            "Reader",
+            "consumer repair test",
+        )
+        .unwrap();
+        let restarted_core = Arc::new(fixture.core());
+        let restarted_chat =
+            crate::collaboration_product::CollaborationChatProductPort::new(restarted_core.clone())
+                .unwrap();
+        let restarted_presence =
+            crate::collaboration_presence::CollaborationPresenceProductPort::new(
+                restarted_core.clone(),
+            )
+            .unwrap();
+        let poll = restarted_chat
+            .conversation_poll(&fixture.data_root, &session.token, 0)
+            .unwrap();
+        assert_eq!(poll.objects.len(), 1);
+        assert_eq!(poll.objects[0].seq, object.seq);
+        assert_eq!(poll.objects[0].body.as_deref(), Some("remote"));
+        assert_eq!(poll.objects[0].sender_profile_verified, Some(true));
+        assert_eq!(restarted_presence.snapshot(NOW).unwrap(), snapshot);
+        assert!(restarted_chat.pending_messages().unwrap().is_empty());
+        assert!(restarted_presence.pending_presences().unwrap().is_empty());
+        assert_eq!(
+            restarted_core.summary().unwrap().pending_product_handoffs,
+            0
+        );
+    }
+
+    #[test]
+    fn legacy_unconsumable_outgoing_is_retired_without_losing_request_replay_protection() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let profile = shared_test_profile(&core.authority, &fixture.device_key);
+        let cases = [
+            (
+                COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+                serde_json::json!({"body":false}),
+            ),
+            (
+                crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+                serde_json::json!({"extra":true}),
+            ),
+            ("elastos.chat.unregistered/v1", serde_json::json!({})),
+        ];
+        let mut legacy = core.empty_state();
+        for index in 0..MAX_UNRESOLVED_OUTGOING {
+            let (kind, product) = &cases[index % cases.len()];
+            let original = core
+                .authority
+                .prepare_profile_outgoing(&profile, SERVICE, kind, product.clone(), NOW, TTL)
+                .unwrap();
+            legacy.outgoing.push(OutgoingRecord {
+                operation: profile_operation(&format!("legacy:{index}"), &profile, kind, product),
+                envelope: String::from_utf8(original.envelope_bytes().to_vec()).unwrap(),
+                local_product_projection: if index % 2 == 0 {
+                    OutgoingProductProjectionState::Pending
+                } else {
+                    OutgoingProductProjectionState::Complete
+                },
+                remote_acceptance_receipts: Vec::new(),
+            });
+        }
+        core.validate_state(&legacy).unwrap();
+        core.ensure_state_directory().unwrap();
+        core.write_state(&legacy).unwrap();
+        let restarted = fixture.core();
+        let first = &legacy.outgoing[0];
+        let (kind, product) = &cases[0];
+        // A rejected operation must still commit the legacy repair it loaded.
+        assert!(restarted
+            .prepare_profile_outgoing(
+                first.operation.clone(),
+                &profile,
+                kind,
+                product.clone(),
+                NOW,
+                TTL
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("retired"));
+        let repaired = fixture.core().load_state().unwrap().unwrap();
+        assert_eq!(repaired.outgoing.len(), MAX_UNRESOLVED_OUTGOING);
+        assert!(
+            repaired
+                .outgoing
+                .iter()
+                .all(|entry| entry.local_product_projection
+                    == OutgoingProductProjectionState::Retired)
+        );
+        for (old, retired) in legacy.outgoing.iter().zip(&repaired.outgoing) {
+            assert_eq!(old.envelope, retired.envelope);
+            assert_eq!(old.operation, retired.operation);
+            assert!(restarted
+                .acknowledge_outgoing_product_projection(&collaboration_message_envelope_sha256(
+                    old.envelope.as_bytes()
+                ))
+                .is_err());
+        }
+        assert!(restarted.pending_outgoing(NOW).unwrap().is_empty());
+        assert!(restarted
+            .pending_outgoing_product_projections(NOW)
+            .unwrap()
+            .is_empty());
+        assert!(restarted
+            .outgoing_chat_delivery(&profile.document().profile_did)
+            .unwrap()
+            .is_empty());
+        let first = &legacy.outgoing[0];
+        let (kind, product) = &cases[0];
+        assert!(restarted
+            .prepare_profile_outgoing(
+                first.operation.clone(),
+                &profile,
+                kind,
+                product.clone(),
+                NOW,
+                TTL
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("retired"));
+        let different = serde_json::json!({"body":"valid"});
+        let reused = profile_operation(
+            &first.operation.request_id,
+            &profile,
+            COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+            &different,
+        );
+        assert!(restarted
+            .prepare_profile_outgoing(
+                reused,
+                &profile,
+                COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+                different,
+                NOW,
+                TTL
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("another binding"));
+        let summary = restarted.summary().unwrap();
+        assert_eq!(
+            summary.live_unresolved_outgoing
+                + summary.expired_unaccepted_outgoing
+                + summary.remotely_accepted_outgoing,
+            0
+        );
+        let valid = prepare(
+            &restarted,
+            "fresh-after-retirement",
+            serde_json::json!({"body":"valid"}),
+            NOW,
+            TTL,
+        )
+        .unwrap();
+        complete_projection(&restarted, &valid);
+        assert_eq!(restarted.pending_outgoing(NOW).unwrap().len(), 1);
+        let at_boundary = NOW + TTL + MAX_COLLABORATION_CLOCK_SKEW_SECS;
+        restarted
+            .with_mutation(Some(at_boundary), |_| {
+                Ok(Mutation {
+                    value: (),
+                    changed: false,
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            restarted.load_state().unwrap().unwrap().outgoing.len(),
+            MAX_UNRESOLVED_OUTGOING + 1
+        );
+        restarted
+            .with_mutation(Some(at_boundary + 1), |_| {
+                Ok(Mutation {
+                    value: (),
+                    changed: false,
+                })
+            })
+            .unwrap();
+        assert!(fixture
+            .core()
+            .load_state()
+            .unwrap()
+            .unwrap()
+            .outgoing
+            .is_empty());
+
+        let product = serde_json::json!({"body":"a valid intent cannot be marked retired"});
+        let original = core
+            .authority
+            .prepare_profile_outgoing(
+                &profile,
+                SERVICE,
+                COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+                product.clone(),
+                NOW,
+                TTL,
+            )
+            .unwrap();
+        let mut forged_retirement = core.empty_state();
+        forged_retirement.outgoing.push(OutgoingRecord {
+            operation: profile_operation(
+                "false-retirement",
+                &profile,
+                COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+                &product,
+            ),
+            envelope: String::from_utf8(original.envelope_bytes().to_vec()).unwrap(),
+            local_product_projection: OutgoingProductProjectionState::Retired,
+            remote_acceptance_receipts: Vec::new(),
+        });
+        core.write_state(&forged_retirement).unwrap();
+        let bytes = fs::read(core.state_path()).unwrap();
+        assert!(fixture.core().load_state().is_err());
+        assert_eq!(fs::read(core.state_path()).unwrap(), bytes);
+    }
+
+    #[test]
+    fn retained_history_retires_invalid_consumers_but_keeps_signed_replay_bindings() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let key = generate_keypair().0;
+        let remote = fixture.authority(key.clone());
+        let profile = shared_test_profile(&remote, &key);
+        let mut history = core.empty_history();
+        for (kind, product) in [
+            (
+                crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+                serde_json::json!({}),
+            ),
+            (
+                COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+                serde_json::json!({"body":false}),
+            ),
+            (
+                crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+                serde_json::json!({"extra":true}),
+            ),
+            (
+                "elastos.chat.unregistered/v1",
+                serde_json::json!({"body":"Chat-shaped but unregistered"}),
+            ),
+            (
+                COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE,
+                serde_json::json!({"body":"retained valid row"}),
+            ),
+        ] {
+            let original = remote
+                .prepare_profile_outgoing(&profile, SERVICE, kind, product, NOW, TTL)
+                .unwrap();
+            history
+                .envelopes
+                .push(String::from_utf8(original.envelope_bytes().to_vec()).unwrap());
+        }
+        core.ensure_state_directory().unwrap();
+        let original = canonical_history_bytes(&history).unwrap();
+        assert!(!String::from_utf8(original.clone())
+            .unwrap()
+            .contains("retired_envelope_hashes"));
+        write_owner_only(&core.history_path(), &original);
+        let mut corrupt = history.clone();
+        let mut signed: SignedCollaborationMessage =
+            serde_json::from_str(&corrupt.envelopes[0]).unwrap();
+        signed.signature = "00".repeat(64);
+        corrupt.envelopes[0] =
+            String::from_utf8(canonical_signed_collaboration_message_bytes(&signed).unwrap())
+                .unwrap();
+        let corrupt_bytes = canonical_history_bytes(&corrupt).unwrap();
+        write_owner_only(&core.history_path(), &corrupt_bytes);
+        assert!(core.conversation_history(NOW).is_err());
+        assert_eq!(fs::read(core.history_path()).unwrap(), corrupt_bytes);
+        write_owner_only(&core.history_path(), &original);
+        let reopened = fixture.core();
+        assert_eq!(
+            reopened.conversation_history(NOW).unwrap(),
+            vec![history.envelopes[4].as_bytes().to_vec()]
+        );
+        let retired = reopened.load_history().unwrap().unwrap();
+        let mut canonical_originals = history.envelopes.clone();
+        // All five timestamps are NOW; the existing retention order breaks
+        // ties with the original hash, without changing or dropping bytes.
+        canonical_originals
+            .sort_by_key(|envelope| collaboration_message_envelope_sha256(envelope.as_bytes()));
+        assert_eq!(retired.envelopes, canonical_originals);
+        assert_eq!(retired.retired_envelope_hashes.len(), 4);
+        let saved = fs::read(core.history_path()).unwrap();
+        assert_eq!(
+            fixture.core().conversation_history(NOW).unwrap(),
+            vec![history.envelopes[4].as_bytes().to_vec()]
+        );
+        let mut corrected: SignedCollaborationMessage =
+            serde_json::from_str(&history.envelopes[0]).unwrap();
+        corrected.payload.payload_type = COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE.to_string();
+        corrected.payload.payload["product"] = serde_json::json!({"body":"corrected"});
+        let corrected = resign_message(&key, corrected.payload);
+        assert!(reopened
+            .history_projection_candidates(std::slice::from_ref(&corrected), NOW)
+            .is_err());
+        assert!(reopened.retain_history_message(&corrected, NOW).is_err());
+        assert_eq!(fs::read(core.history_path()).unwrap(), saved);
+        for mutation in 0..3 {
+            let mut invalid = retired.clone();
+            match mutation {
+                0 => invalid
+                    .retired_envelope_hashes
+                    .push(collaboration_message_envelope_sha256(
+                        history.envelopes[4].as_bytes(),
+                    )),
+                1 => invalid
+                    .retired_envelope_hashes
+                    .push(invalid.retired_envelope_hashes[0].clone()),
+                _ => invalid.retired_envelope_hashes[0] = format!("sha256:{}", "00".repeat(32)),
+            }
+            let bytes = canonical_history_bytes(&invalid).unwrap();
+            write_owner_only(&core.history_path(), &bytes);
+            assert!(reopened.load_history().is_err());
+            assert!(fixture.core().load_history().is_err());
+            assert_eq!(fs::read(core.history_path()).unwrap(), bytes);
+        }
+        write_owner_only(&core.history_path(), &saved);
+        let mut expired = fixture.core().load_history().unwrap().unwrap();
+        prune_history(&mut expired, NOW + CONVERSATION_HISTORY_RETENTION_SECS).unwrap();
+        assert!(expired.envelopes.is_empty());
+        assert!(expired.retired_envelope_hashes.is_empty());
+        core.validate_history(&expired).unwrap();
+    }
+
+    #[test]
     fn concurrent_shared_admission_keeps_five_cap_and_counts_only_new_commits() {
         use std::sync::{Arc, Barrier};
         let fixture = Fixture::new();
@@ -4096,7 +5011,7 @@ mod tests {
             prepare(
                 &core,
                 &format!("burst-{index}"),
-                serde_json::json!({"index":index}),
+                serde_json::json!({"body":format!("message {index}")}),
                 NOW,
                 TTL,
             )
@@ -4106,7 +5021,7 @@ mod tests {
         let error = prepare(
             &core,
             "burst-over",
-            serde_json::json!({"over":true}),
+            serde_json::json!({"body":"over"}),
             NOW + 1,
             TTL,
         )
@@ -4123,7 +5038,7 @@ mod tests {
         prepare(
             &core,
             "burst-0",
-            serde_json::json!({"index":0}),
+            serde_json::json!({"body":"message 0"}),
             NOW + 1,
             TTL,
         )
@@ -4132,7 +5047,7 @@ mod tests {
         prepare(
             &core,
             "burst-over",
-            serde_json::json!({"over":true}),
+            serde_json::json!({"body":"over"}),
             NOW + COMMUNITY_RATE_WINDOW_SECS,
             TTL,
         )
@@ -4146,19 +5061,23 @@ mod tests {
         // A send that fails before the write saves nothing and counts nothing.
         for _ in 0..=COMMUNITY_SENDS_PER_WINDOW {
             core.inject_write_fault(WriteFault::BeforeWrite);
-            assert!(
-                prepare(&core, "unsaved", serde_json::json!({"n":0}), NOW, TTL)
-                    .unwrap_err()
-                    .downcast_ref::<CommunitySendRateLimited>()
-                    .is_none()
-            );
+            assert!(prepare(
+                &core,
+                "unsaved",
+                serde_json::json!({"body":"unsaved"}),
+                NOW,
+                TTL
+            )
+            .unwrap_err()
+            .downcast_ref::<CommunitySendRateLimited>()
+            .is_none());
         }
         // A send that fails after the rename is saved, and counts.
         core.inject_write_fault(WriteFault::AfterRename);
         assert!(prepare(
             &core,
             "saved-late",
-            serde_json::json!({"late":true}),
+            serde_json::json!({"body":"late"}),
             NOW,
             TTL
         )
@@ -4167,19 +5086,20 @@ mod tests {
             prepare(
                 &core,
                 &format!("saved-{index}"),
-                serde_json::json!({"index":index}),
+                serde_json::json!({"body":format!("message {index}")}),
                 NOW,
                 TTL,
             )
             .unwrap();
         }
-        let error = prepare(&core, "over", serde_json::json!({"over":true}), NOW, TTL).unwrap_err();
+        let error =
+            prepare(&core, "over", serde_json::json!({"body":"over"}), NOW, TTL).unwrap_err();
         assert!(error.downcast_ref::<CommunitySendRateLimited>().is_some());
         // Its retry returns the stored message without counting again.
         prepare(
             &core,
             "saved-late",
-            serde_json::json!({"late":true}),
+            serde_json::json!({"body":"late"}),
             NOW,
             TTL,
         )
@@ -4427,7 +5347,7 @@ mod tests {
         let outgoing = prepare(
             &core,
             "transport-receipt",
-            serde_json::json!({"content":"outgoing"}),
+            serde_json::json!({"body":"outgoing"}),
             NOW,
             TTL,
         )
@@ -4498,7 +5418,7 @@ mod tests {
         let schema_outgoing = prepare(
             &unmatched_fixture.core(),
             "schema-dispatch",
-            serde_json::json!({"schema":"dispatch"}),
+            serde_json::json!({"body":"schema dispatch"}),
             NOW,
             TTL,
         )
@@ -4543,7 +5463,7 @@ mod tests {
         let capacity_outgoing = prepare(
             &capacity_core,
             "receipt-capacity",
-            serde_json::json!({"capacity":true}),
+            serde_json::json!({"body":"capacity"}),
             NOW,
             TTL,
         )
@@ -4585,7 +5505,7 @@ mod tests {
         let fault_outgoing = prepare(
             &fault_core,
             "receipt-write-fault",
-            serde_json::json!({"fault":true}),
+            serde_json::json!({"body":"fault"}),
             NOW,
             TTL,
         )
@@ -4626,7 +5546,7 @@ mod tests {
         let outgoing = prepare(
             &core,
             "legacy-pending-projection",
-            serde_json::json!({"content":"pending"}),
+            serde_json::json!({"body":"pending"}),
             NOW,
             TTL,
         )
@@ -4731,7 +5651,7 @@ mod tests {
             .authorize_history_message(&original, NOW - MAX_COLLABORATION_CLOCK_SKEW_SECS - 1)
             .is_err());
         let mut altered: serde_json::Value = serde_json::from_slice(&original).unwrap();
-        altered["payload"]["payload"]["product"]["content"] = serde_json::json!("altered");
+        altered["payload"]["payload"]["product"]["body"] = serde_json::json!("altered");
         assert!(core
             .authorize_history_message(&serde_json::to_vec(&altered).unwrap(), NOW)
             .is_err());
@@ -4814,12 +5734,12 @@ mod tests {
             vec![newest.envelope_bytes().to_vec()]
         );
         assert_eq!(fs::read(core.history_path()).unwrap(), before);
-        for offset in 205..230 {
+        for offset in 205..405 {
             let outgoing = authority
                 .prepare_outgoing(
                     SERVICE,
                     "elastos.chat.message/v1",
-                    serde_json::json!({"body":"x".repeat(48 * 1024)}),
+                    serde_json::json!({"body":"🙂".repeat(crate::room_service::MAX_OBJECT_BODY_LEN)}),
                     NOW + offset,
                     TTL,
                 )
@@ -4827,12 +5747,12 @@ mod tests {
             state
                 .envelopes
                 .push(String::from_utf8(outgoing.envelope_bytes().to_vec()).unwrap());
-            prune_history(&mut state, NOW + 230).unwrap();
+            prune_history(&mut state, NOW + 405).unwrap();
         }
         assert!(state.envelopes.len() < MAX_CONVERSATION_HISTORY_MESSAGES);
         assert!(canonical_history_bytes(&state).unwrap().len() <= MAX_CONVERSATION_HISTORY_BYTES);
         core.validate_history(&state).unwrap();
-        prune_history(&mut state, NOW + 230 + CONVERSATION_HISTORY_RETENTION_SECS).unwrap();
+        prune_history(&mut state, NOW + 405 + CONVERSATION_HISTORY_RETENTION_SECS).unwrap();
         assert!(state.envelopes.is_empty());
     }
 
@@ -4999,7 +5919,7 @@ mod tests {
         );
         assert!(!managed_root.exists());
 
-        let payload = serde_json::json!({"content":"same text"});
+        let payload = serde_json::json!({"body":"same text"});
         let first = prepare(&core, "send-1", payload.clone(), NOW, TTL).unwrap();
         let retry = prepare(&core, "send-1", payload.clone(), NOW + 20, TTL).unwrap();
         assert_eq!(first.envelope_bytes(), retry.envelope_bytes());
@@ -5013,7 +5933,7 @@ mod tests {
             prepare(&restarted, "send-2", payload.clone(), NOW + 40, TTL).unwrap();
         assert_ne!(first.envelope_bytes(), duplicate_content.envelope_bytes());
 
-        let changed = serde_json::json!({"content":"changed"});
+        let changed = serde_json::json!({"body":"changed"});
         assert!(prepare(&restarted, "send-1", changed, NOW + 40, TTL)
             .unwrap_err()
             .to_string()
@@ -5228,13 +6148,13 @@ mod tests {
         let chat = prepare(
             &core,
             "shared-custody",
-            serde_json::json!({"content":"retained original"}),
+            serde_json::json!({"body":"retained original"}),
             NOW,
             TTL,
         )
         .unwrap();
         let presence_type = "elastos.chat.presence/v1";
-        let presence_payload = serde_json::json!({"online":true});
+        let presence_payload = serde_json::json!({});
         let presence = core
             .prepare_outgoing(
                 operation(
@@ -5297,7 +6217,7 @@ mod tests {
         let outgoing = prepare(
             &core,
             "remote-acceptance",
-            serde_json::json!({"content":"hello"}),
+            serde_json::json!({"body":"hello"}),
             NOW,
             TTL,
         )
@@ -5358,7 +6278,7 @@ mod tests {
         prepare(
             &restarted,
             "accepted-prune-anchor",
-            serde_json::json!({"after":"accepted expiry"}),
+            serde_json::json!({"body":"after accepted expiry"}),
             prune_now,
             TTL,
         )
@@ -5378,7 +6298,7 @@ mod tests {
         prepare(
             &clock_core,
             "clock-rollback",
-            serde_json::json!({"clock":"rollback"}),
+            serde_json::json!({"body":"clock rollback"}),
             NOW,
             TTL,
         )
@@ -5399,15 +6319,17 @@ mod tests {
         let mut core = fixture.core();
         // This test fills the outbox in one second; pacing has its own test.
         core.sends_per_window = usize::MAX;
+        let mut originals = Vec::new();
         for index in 0..MAX_UNRESOLVED_OUTGOING {
-            prepare(
+            let original = prepare(
                 &core,
                 &format!("offline-{index}"),
-                serde_json::json!({"index":index}),
+                serde_json::json!({"body":format!("message {index}")}),
                 NOW,
                 1,
             )
             .unwrap();
+            originals.push(original);
         }
         assert_eq!(
             core.pending_outgoing_product_projections(NOW)
@@ -5418,7 +6340,7 @@ mod tests {
         assert!(prepare(
             &core,
             "offline-blocked",
-            serde_json::json!({"blocked":true}),
+            serde_json::json!({"body":"blocked"}),
             NOW,
             1,
         )
@@ -5430,23 +6352,52 @@ mod tests {
         assert!(prepare(
             &core,
             "offline-too-early",
-            serde_json::json!({"too_early":true}),
+            serde_json::json!({"body":"too_early"}),
             prune_now,
             1,
         )
         .unwrap_err()
         .to_string()
         .contains("capacity"));
+        let restarted = fixture.core();
+        let recovery = restarted
+            .pending_outgoing_product_projections(prune_now + 1)
+            .unwrap();
+        assert_eq!(recovery.len(), originals.len());
+        for (pending, original) in recovery.iter().zip(&originals) {
+            assert_eq!(
+                pending.outgoing().envelope_bytes(),
+                original.envelope_bytes()
+            );
+        }
+        assert!(restarted
+            .pending_outgoing(prune_now + 1)
+            .unwrap()
+            .is_empty());
+        assert!(prepare(
+            &restarted,
+            "offline-still-needs-projection",
+            serde_json::json!({"body":"cannot discard pending intents"}),
+            prune_now + 1,
+            TTL,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("capacity"));
+        for original in &originals {
+            complete_projection(&restarted, original);
+        }
         let admitted = prepare(
-            &core,
+            &restarted,
             "offline-after-retention",
-            serde_json::json!({"admitted":true}),
+            serde_json::json!({"body":"admitted"}),
             prune_now + 1,
             TTL,
         )
         .unwrap();
         assert_eq!(
-            core.pending_outgoing_product_projections(prune_now + 1)
+            restarted
+                .pending_outgoing_product_projections(prune_now + 1)
                 .unwrap()
                 .len(),
             1
@@ -5460,6 +6411,76 @@ mod tests {
                 .envelope_bytes(),
             admitted.envelope_bytes()
         );
+    }
+
+    #[test]
+    fn expired_pending_presence_is_acknowledged_before_terminal_pruning() {
+        let fixture = Fixture::new();
+        let core = Arc::new(fixture.core());
+        let profile = core.authority.sender_profile_for_test().unwrap();
+        let port =
+            crate::collaboration_presence::CollaborationPresenceProductPort::new(core).unwrap();
+        let original = port
+            .prepare_presence(
+                crate::collaboration_presence::presence_request_binding(
+                    "expired-presence-recovery",
+                    "runtime-principal",
+                    &profile,
+                )
+                .unwrap(),
+                &profile,
+                NOW,
+            )
+            .unwrap();
+        let after_expiry = original.expires_at() + MAX_COLLABORATION_CLOCK_SKEW_SECS + 1;
+        let restarted = Arc::new(fixture.core());
+        restarted
+            .with_mutation(Some(after_expiry), |_| {
+                Ok(Mutation {
+                    value: (),
+                    changed: false,
+                })
+            })
+            .unwrap();
+        assert!(restarted.pending_outgoing(after_expiry).unwrap().is_empty());
+        let restarted_port =
+            crate::collaboration_presence::CollaborationPresenceProductPort::new(restarted.clone())
+                .unwrap();
+        let pending = restarted_port
+            .pending_outgoing_presences(after_expiry)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].envelope_sha256(), original.envelope_sha256());
+        assert_eq!(
+            restarted_port
+                .project_prepared_presence(&pending[0], after_expiry)
+                .unwrap(),
+            crate::collaboration_presence::CollaborationPresenceProjectionOutcome::Expired,
+        );
+        assert!(restarted_port
+            .snapshot(after_expiry)
+            .unwrap()
+            .records()
+            .is_empty());
+        assert!(restarted
+            .pending_outgoing_product_projections(after_expiry)
+            .unwrap()
+            .is_empty());
+        restarted
+            .with_mutation(Some(after_expiry), |_| {
+                Ok(Mutation {
+                    value: (),
+                    changed: false,
+                })
+            })
+            .unwrap();
+        assert!(fixture
+            .core()
+            .load_state()
+            .unwrap()
+            .unwrap()
+            .outgoing
+            .is_empty());
     }
 
     #[test]
@@ -5541,7 +6562,7 @@ mod tests {
         prepare(
             &core,
             "candidate-validation",
-            serde_json::json!({"candidate":true}),
+            serde_json::json!({"body":"candidate"}),
             NOW,
             TTL,
         )
@@ -5575,7 +6596,7 @@ mod tests {
         prepare(
             &core,
             "stored-signature-source",
-            serde_json::json!({"stored":true}),
+            serde_json::json!({"body":"stored"}),
             NOW,
             TTL,
         )
@@ -5722,7 +6743,7 @@ mod tests {
         ] {
             let fixture = Fixture::new();
             let core = fixture.core();
-            let payload = serde_json::json!({"fault":fault as u8});
+            let payload = serde_json::json!({"body":format!("fault {}", fault as u8)});
             core.inject_write_fault(fault);
             assert!(prepare(&core, "faulted-send", payload.clone(), NOW, TTL).is_err());
             if fault == WriteFault::AfterRename {
@@ -5742,7 +6763,7 @@ mod tests {
         prepare(
             &core,
             "secure-state",
-            serde_json::json!({"secure":true}),
+            serde_json::json!({"body":"secure"}),
             NOW,
             TTL,
         )
@@ -5792,7 +6813,7 @@ mod tests {
         assert!(prepare(
             &lock_core,
             "symlink-lock",
-            serde_json::json!({"lock":true}),
+            serde_json::json!({"body":"lock"}),
             NOW,
             TTL,
         )
@@ -5814,7 +6835,7 @@ mod tests {
         assert!(prepare(
             &mode_core,
             "insecure-lock",
-            serde_json::json!({"lock":"insecure"}),
+            serde_json::json!({"body":"insecure lock"}),
             NOW,
             TTL,
         )
@@ -5834,7 +6855,7 @@ mod tests {
             let result = prepare(
                 &second,
                 "serialized-send",
-                serde_json::json!({"serialized":true}),
+                serde_json::json!({"body":"serialized"}),
                 NOW,
                 TTL,
             );
@@ -5881,7 +6902,7 @@ mod tests {
         prepare(
             &external_core,
             "external-state",
-            serde_json::json!({"external":true}),
+            serde_json::json!({"body":"external"}),
             NOW,
             TTL,
         )
