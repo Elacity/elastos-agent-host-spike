@@ -439,10 +439,9 @@ jobs:
             [[ ! -e "$CARGO_TARGET_DIR" && ! -L "$CARGO_TARGET_DIR" && ! -e "$CARGO_BUILD_BUILD_DIR" && ! -L "$CARGO_BUILD_BUILD_DIR" ]]
             reuse=()
             [[ "$name" == N ]] || reuse=(--reuse-support "$inputs/N")
-            image=()
-            [[ "$name" != N || "$RELEASE_PLATFORM" != aarch64-linux ]] || image=(--browser-vm-image-cid "$BROWSER_IMAGE_CID" --browser-vm-image-sha256 "$BROWSER_IMAGE_SHA256" --browser-vm-image-size "$BROWSER_IMAGE_SIZE")
+            # Browser is Mac-only until #90: Linux builds take no image input.
             HOME="$RELEASE_ROOT/home" scripts/prepare-release-platform.sh \
-              --version "$version" --output "$inputs/$name" ${reuse[@]+"${reuse[@]}"} ${image[@]+"${image[@]}"}
+              --version "$version" --output "$inputs/$name" ${reuse[@]+"${reuse[@]}"}
             python3 -I -S scripts/release-platform-input.py verify "$inputs/$name" > /dev/null
             rm -rf "$CARGO_TARGET_DIR" "$CARGO_BUILD_BUILD_DIR"
           done

@@ -274,6 +274,15 @@ export function validateComponents(components, manifests) {
   const localAi = home.filter((name) => name === "llama-server" || (name.startsWith("model-") && name !== "model-provider"));
   assert(localAi.length === 0, `Home: local AI installs on demand, found ${localAi.join(", ")}`);
   for (const [name, component] of Object.entries(components.external)) {
+    // A capsule record is keyed by (name, release_path) and names one platform,
+    // so one file cannot serve two platform rows.
+    const rowsByPath = new Map();
+    for (const [platform, metadata] of Object.entries(object(component.platforms) ? component.platforms : {})) {
+      const path = metadata?.release_path;
+      if (path === undefined) continue;
+      assert(!rowsByPath.has(path), `${name}: platforms ${rowsByPath.get(path)} and ${platform} share release_path ${path}; one record cannot serve both`);
+      rowsByPath.set(path, platform);
+    }
     // microVM pieces publish no platform until signed, artifact-backed bytes exist.
     const unreleased = ["crosvm", "vmlinux"].includes(name);
     assert(object(component.platforms) && (unreleased || Object.keys(component.platforms).length > 0), `${name}: release platforms`);

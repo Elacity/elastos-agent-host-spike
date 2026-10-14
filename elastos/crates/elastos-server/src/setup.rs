@@ -8233,16 +8233,17 @@ pub(crate) mod tests {
                 .iter()
                 .any(|name| name == browser_vm_image::NAME));
         }
-        for platform in ["darwin-arm64", "linux-arm64"] {
-            let info = &manifest.external[browser_vm_image::NAME].platforms[platform];
-            assert_eq!(info.strategy.as_deref(), Some(browser_vm_image::NAME));
-            assert_eq!(
-                info.install_path.as_deref(),
-                Some(browser_vm_image::INSTALL_PATH)
-            );
-            assert!(info.release_path.as_ref().unwrap().ends_with(".tar.gz"));
-            assert!(admit_release_components(&manifest, platform).is_err());
-        }
+        let platforms = &manifest.external[browser_vm_image::NAME].platforms;
+        // Linux ARM64 offers no Browser image until #90; a record names one platform.
+        assert!(!platforms.contains_key("linux-arm64") && !platforms.contains_key("linux-amd64"));
+        let info = &platforms["darwin-arm64"];
+        assert_eq!(info.strategy.as_deref(), Some(browser_vm_image::NAME));
+        assert_eq!(
+            info.install_path.as_deref(),
+            Some(browser_vm_image::INSTALL_PATH)
+        );
+        assert!(info.release_path.as_ref().unwrap().ends_with(".tar.gz"));
+        assert!(admit_release_components(&manifest, "darwin-arm64").is_err());
     }
 
     #[test]

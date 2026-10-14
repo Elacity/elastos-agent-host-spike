@@ -878,17 +878,13 @@ class ReleasePolicyTests(unittest.TestCase):
                     else:
                         built = [json.loads(line) for line in calls.read_text().splitlines()]
                         self.assertEqual(len(built), 2)
-                        for flag, value in [("--browser-vm-image-cid", env["BROWSER_IMAGE_CID"]),
-                                            ("--browser-vm-image-sha256", env["BROWSER_IMAGE_SHA256"]),
-                                            ("--browser-vm-image-size", env["BROWSER_IMAGE_SIZE"])]:
-                            self.assertEqual(built[0]["args"][built[0]["args"].index(flag) + 1], value)
-                            self.assertNotIn(flag, built[1]["args"])
+                        # Browser image input is Mac-only until #90.
+                        image = (['--browser-vm-image-cid', env['BROWSER_IMAGE_CID'],
+                                  '--browser-vm-image-sha256', env['BROWSER_IMAGE_SHA256'],
+                                  '--browser-vm-image-size', env['BROWSER_IMAGE_SIZE']] if job == "mac" else [])
                         self.assertEqual({item['target'] for item in built}, {str(target)})
                         self.assertEqual({item['build'] for item in built}, {str(build_dir)})
-                        self.assertEqual(built[0]['args'], ['--version', '1.2.3', '--output', str(release / 'inputs/N'),
-                                                          '--browser-vm-image-cid', env['BROWSER_IMAGE_CID'],
-                                                          '--browser-vm-image-sha256', env['BROWSER_IMAGE_SHA256'],
-                                                          '--browser-vm-image-size', env['BROWSER_IMAGE_SIZE']])
+                        self.assertEqual(built[0]['args'], ['--version', '1.2.3', '--output', str(release / 'inputs/N'), *image])
                         self.assertEqual(built[1]['args'], ['--version', '1.2.4', '--output', str(release / 'inputs/N1'),
                                                           '--reuse-support', str(release / 'inputs/N')])
                         self.assertFalse(target.exists() or target.is_symlink())
