@@ -19,8 +19,9 @@ const until = async (predicate, label) => {
   }
 };
 
-/** Run N answers "Reply N"; `firstReply` holds run 1's events until it resolves. */
-async function openAssistant(t, { firstReply = null } = {}) {
+/** Run N answers "Reply N"; `firstReply` holds run 1's events until it resolves.
+    `eventsPage(after_sequence)`, when given, serves every run's events pages instead. */
+async function openAssistant(t, { firstReply = null, eventsPage = null } = {}) {
   let stored = { schema, revision: 0, document: { v: 1, liveOfferId: offerId, sessions: [] } };
   const creates = [], errors = [];
   const server = createServer(async (req, res) => {
@@ -62,6 +63,10 @@ async function openAssistant(t, { firstReply = null } = {}) {
             offer_id: offerId, operation: "text.generate", status: "running", sequence_cursor: 0 } }); return;
         }
         if (url.pathname === "/api/provider/model/runs_events") {
+          if (eventsPage) {
+            json({ status: "ok", data: { schema: "elastos.model.run-events/v1", run_id: body.run_id,
+              ...await eventsPage(body.after_sequence) } }); return;
+          }
           const run = body.run_id.at(-1);
           if (run === "1") await firstReply;
           json({ status: "ok", data: { schema: "elastos.model.run-events/v1", run_id: body.run_id, next_cursor: 2, has_more: false,
@@ -222,5 +227,72 @@ test("Edit on a queued follow-up sent in this view resubmits that message", asyn
   assert.deepEqual(await app.replyTexts(), ["Reply 1", "Reply 3"]);
   assert.ok(!/Second question|Reply 2/.test(app.creates[2].input.prompt), app.creates[2].input.prompt);
   await app.savedTranscript([["user", "First question"], ["agent", "Reply 1"], ["user", "Edited follow-up"], ["agent", "Reply 3"]]);
+  assert.deepEqual(app.errors, []);
+});
+
+/** A long streamed reply (paragraphs, code block); page `hold` waits on `gate`. */
+function longReply({ hold = -1, gate = null } = {}) {
+  const parts = [];
+  for (let i = 1; i <= 8; i += 1) parts.push(`Paragraph ${i}. ${"The reply keeps going with more words. ".repeat(8)}\n\n`);
+  parts.push("\n```js\n");
+  for (let i = 1; i <= 12; i += 1) parts.push(`const line${i} = ${i};\n`);
+  parts.push("```\n\nLast paragraph of the reply.\n");
+  return async after => {
+    const index = Number(after);
+    if (index === hold) await gate;
+    const last = index + 1 === parts.length;
+    return { next_cursor: index + (last ? 2 : 1), has_more: !last, events: [
+      { sequence: index + 1, kind: "text_delta", data: { text: parts[index] } },
+      ...(last ? [{ sequence: index + 2, kind: "completed", terminal: true, data: {} }] : [])] };
+  };
+}
+
+const scrollState = frame => frame.locator("#agent-harness-stream").evaluate(scroller => {
+  const actions = [...document.querySelectorAll(".agent-msg-agent .agent-msg-actions")].at(-1);
+  const jump = document.querySelector("[data-agent-jump-latest]");
+  return {
+    scrollTop: scroller.scrollTop,
+    fromBottom: scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight,
+    actionsBottom: actions?.getBoundingClientRect().bottom ?? null,
+    composerTop: document.querySelector(".taskbar").getBoundingClientRect().top,
+    jumpVisible: !!jump && !jump.hidden && jump.getBoundingClientRect().height > 0,
+  };
+});
+const presented = frame => frame.locator('.agent-msg-agent[data-stream-phase="presentation_done"]').waitFor({ state: "attached", timeout: 10000 });
+
+test("A long streamed reply ends with its actions above the composer and the transcript at the bottom", async t => {
+  const app = await openAssistant(t, { eventsPage: longReply() });
+  await app.composer.fill("Write a long answer");
+  await app.composer.press("Enter");
+  await presented(app.frame);
+  await app.page.waitForTimeout(300);
+  const end = await scrollState(app.frame);
+  assert.ok(end.actionsBottom !== null, "the reply has its actions row");
+  assert.ok(end.actionsBottom <= end.composerTop,
+    `the actions row (bottom ${end.actionsBottom}) is above the composer (top ${end.composerTop})`);
+  assert.ok(end.fromBottom < 4, `the transcript is at the bottom (${end.fromBottom}px left)`);
+  assert.deepEqual(app.errors, []);
+});
+
+test("Scrolling up while a reply streams keeps the reader's place and offers Jump to latest", async t => {
+  let release;
+  const gate = new Promise(done => { release = done; });
+  const app = await openAssistant(t, { eventsPage: longReply({ hold: 6, gate }) });
+  await app.composer.fill("Write a long answer");
+  await app.composer.press("Enter");
+  await app.frame.locator(".agent-msg-agent .agent-msg-body", { hasText: "Paragraph 6" }).waitFor();
+  const box = await app.frame.locator("#agent-harness-stream").boundingBox();
+  await app.page.mouse.move(box.x + box.width / 2, box.y + box.height / 3);
+  await app.page.mouse.wheel(0, -400);
+  await app.page.waitForTimeout(300);
+  const held = await scrollState(app.frame);
+  release();
+  await presented(app.frame);
+  await app.page.waitForTimeout(300);
+  const end = await scrollState(app.frame);
+  assert.ok(Math.abs(end.scrollTop - held.scrollTop) < 2,
+    `the reader's place is kept (${held.scrollTop} then ${end.scrollTop})`);
+  assert.ok(end.fromBottom > 100, "the transcript did not jump to the end");
+  assert.ok(end.jumpVisible, "Jump to latest is offered");
   assert.deepEqual(app.errors, []);
 });

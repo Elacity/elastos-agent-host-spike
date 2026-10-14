@@ -1925,6 +1925,8 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
   let lastFlushAt = 0;
   let sawFirstToken = false;
   let stickToBottom = true;
+  /* scrollTop the stream left a following reader at; null if not following. */
+  let endScrollTop = null;
   let answerNotifiedAt = 0;
   let hiddenBuffered = false;
   let progressEl = null;
@@ -2714,13 +2716,10 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
         abandonRich ||
         perf.slowFrames > 12 ||
         perf.longTasks.some((row) => row.duration >= 50);
-      /* The rich render below makes the reply taller; keep a pinned reader
-         at the end. Decided before rendering, so a reader who scrolled up
-         (listeners may already be gone) stays where they are. */
-      const pinned =
-        stickToBottom &&
-        !!scroller &&
-        scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= FOLLOW_RESUME_PX;
+      /* The last flush and the rich render below make the reply taller; keep
+         a reader who was following at the end. One who scrolled up since the
+         stream ended (its listeners are gone) stays where they are. */
+      const pinned = endScrollTop !== null && !!scroller && scroller.scrollTop >= endScrollTop - 1;
       answerBodyRef.dataset.mdSource = answerTextRef;
       const skipRich = unhealthy || stoppedEarly || state.quality === "plain";
       if (!skipRich) {
@@ -2948,8 +2947,9 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     }
     /* The cancelled frame carried the final flush (and the Stopped note sits
        below it): land on the true end before the listeners go. */
-    if (stickToBottom) {
+    if (stickToBottom && scroller) {
       host.scrollStreamToEnd();
+      endScrollTop = scroller.scrollTop;
     }
     window.removeEventListener("resize", onResizeFollow);
     document.removeEventListener("keydown", onKeyNav);
