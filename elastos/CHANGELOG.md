@@ -62,7 +62,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   and targets, and that the job's path filter covers every file the build
   calls, loads or packages.
 
-## [0.8.0] - 2026-10-13
+## [0.8.0] - 2026-10-14
 
 ### Security
 
@@ -92,6 +92,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - Known issue: on the Jetson, getting a model is slow (Qwen takes about 43 minutes) and replies run on the CPU (about 25 seconds each).
 - Known issue: on a Mac with a slow connection, getting a model can stop with "Model content could not be read".
 - Known issue: Browser runs only on Apple Silicon Macs.
+- Community works without turning on Discovery. Discovery now only controls whether you are listed in People and can receive contact requests.
 
 ### Fixed
 
@@ -100,6 +101,52 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   one (no container bridge, LAN or loopback addresses), and a Runtime on a
   fixed Carrier port also listens on that port over IPv6, so its ticket stays
   the same across restarts (#336).
+- Browser shows "Starting Browser…" while it starts, and no longer shows white bars around the page.
+- Chat: the message box returns to one line after you send, People → Message reuses the open Chat window, and Open Inbox in People works.
+
+## [0.8.0-alpha.17] - 2026-10-14
+
+Release candidate for 0.8.0 on the test channel, with the same notes.
+
+### Security
+
+- Isolation status: the first stage of the isolation plan (#173) is done, except that the seed does not yet run under its own account (#174, in 0.8.1). Web pages and shared files open in a separate sandbox; the web Terminal is off by default; Home checks allowed hosts and rejects requests whose Origin header names another website; sandboxed apps need valid tokens to reach private data; releases are signed with a new key kept off the public server.
+- Isolation status, not done yet: Home can still get every app's permissions, providers run as normal programs with your account's rights (only the model provider is partly limited), and approvals are not yet shown on a screen that only the Runtime controls. These stages (S1 and S2 of #173) are planned for 0.8.1.
+
+### Added
+
+- An owner (admin) can add another passkey, such as a second device or a security key, in System → Accounts → Add passkey. You confirm with your current passkey first, and the new passkey opens the same account as an admin (#338).
+
+### Changed
+
+- When an update cannot be applied from this version (the release uses a
+  newer format or a kind of component this version does not know), System and
+  `elastos update` say that the install command is needed once and show it,
+  instead of saying the publisher's release is not valid. Your current version
+  stays unchanged.
+- Homes on the test channel also accept the final release, so they update to
+  0.8.0 in System. Running the install command again moves them to the stable
+  channel (#335).
+- Make admin and Make guest in System → Accounts change every passkey of that account together (#338).
+- Spam limits for Chat: 5 Community messages per Profile every 10 seconds (Chat
+  shows "Slow down"), 5 per sender on receiving Homes without holding up other
+  senders, and Discovery relay caps of 4 listings per Home, 8 contact requests
+  per sender and 16 per Home. The relay admits only the signing Home's own
+  submissions.
+- Known issue: on the Jetson, getting a model is slow (Qwen takes about 43 minutes) and replies run on the CPU (about 25 seconds each).
+- Known issue: on a Mac with a slow connection, getting a model can stop with "Model content could not be read".
+- Known issue: Browser runs only on Apple Silicon Macs.
+- Community works without turning on Discovery. Discovery now only controls whether you are listed in People and can receive contact requests.
+
+### Fixed
+
+- When sign-in fails, the lock screen now says why in one line and what to do next, instead of showing nothing (#338).
+- The publisher's Carrier ticket lists only its public addresses when it has
+  one (no container bridge, LAN or loopback addresses), and a Runtime on a
+  fixed Carrier port also listens on that port over IPv6, so its ticket stays
+  the same across restarts (#336).
+- Browser shows "Starting Browser…" while it starts, and no longer shows white bars around the page.
+- Chat: the message box returns to one line after you send, People → Message reuses the open Chat window, and Open Inbox in People works.
 
 ## [0.8.0-alpha.16] - 2026-10-13
 
