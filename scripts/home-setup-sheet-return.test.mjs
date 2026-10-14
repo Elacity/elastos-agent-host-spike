@@ -126,4 +126,10 @@ test("Close or Later keeps the sheet closed, also from the card", async () => {
   assert(!read("capsules/home-gui/browser/shell-windows.js").includes("windowClosed"), "no app-close tracking");
   assert(read("capsules/home-gui/browser/shell-keyboard.js").includes('!event.target?.closest?.("#setup-sheet")'),
     "Escape from the card reaches the sheet's Close on every Space");
+  // Pinned at source: no DOM library or browser is available to the behaviour suite.
+  assert(/event\.target === card\s*&& sheet\.classList\.contains\("is-yielded"\)\) \{[^}]*event\.stopPropagation\(\);\s*returnSetupSheet\(\);/
+    .test(setup), "Enter on the card opens the sheet only, not the selected desktop item");
+  const gui = read("capsules/home-gui/browser/home-gui.js");
+  const outside = gui.slice(gui.indexOf("assistantFaceActive() &&"), gui.indexOf("hideAssistantFace();", gui.indexOf("assistantFaceActive() &&")));
+  assert(outside.includes('!event.target.closest("#setup-sheet")'), "using the card does not close the Assistant");
 });

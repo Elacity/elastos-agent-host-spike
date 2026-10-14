@@ -1380,6 +1380,8 @@ export function bindHomeGuiInteractions(options = {}) {
       assistantFaceActive() &&
       !event.target.closest("#assistant-face") &&
       !event.target.closest("#assistant-toggle") &&
+      // The Home welcome card works over the room; using it does not close the Assistant.
+      !event.target.closest("#setup-sheet") &&
       !(assistantSpaceActive() && event.target.closest("#assistant-space"))
     ) {
       hideAssistantFace();

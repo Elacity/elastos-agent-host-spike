@@ -63,7 +63,9 @@ export function bindSetupSheet() {
       hideSetupSheet();
     } else if ((event.key === "Enter" || event.key === " ") && event.target === card
       && sheet.classList.contains("is-yielded")) {
+      // Enter here opens the sheet only, not the selected desktop item.
       event.preventDefault();
+      event.stopPropagation();
       returnSetupSheet();
     }
   });
