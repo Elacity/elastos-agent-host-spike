@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { engineChoiceHidden } from "../../capsules/browser/browser/browser-service-selection.js";
 
 // Product navigation and operator reads can reach the same fixture through
 // different origins. Neither input grants Home or Runtime authority.
@@ -146,7 +147,12 @@ export function browserJourneyEngineChoice(summary, engineId) {
   assert(choices.length === 1, "Requested Browser Engine is ambiguous in the Runtime inventory");
   assert(choices[0].direct_network === false && choices[0].wallet_injection === false,
     "Requested Browser Engine violates the Runtime network or Wallet boundary");
-  if (!engineId.startsWith("remote-engine-")) return { engineId, adapterId: engineId };
+  if (!engineId.startsWith("remote-engine-")) {
+    // Settings hides the selector when this engine is the only one Automatic uses;
+    // the journey then relies on Automatic, as a person would.
+    const visible = adapters.filter(adapter => adapter.direct_network === false && adapter.wallet_injection === false);
+    return { engineId: engineChoiceHidden(visible, "") ? "" : engineId, adapterId: engineId };
+  }
   const offers = (summary.engine_adapter.remote_services?.offers || []).filter(offer =>
     offer.state === "approved" && offer.launch_available === true &&
     offer.selectable_adapters?.some(adapter => adapter.id === engineId));

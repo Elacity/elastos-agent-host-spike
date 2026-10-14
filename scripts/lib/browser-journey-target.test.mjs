@@ -71,7 +71,7 @@ test("profile binding uses accepted Runtime principal, lifecycle profile and act
   const binding = browserJourneyProfileBinding(config, summary, pageId, "http://localhost:8090/apps/browser/", token);
   assert.equal(binding.principal_sha256, hash(principal)); assert.equal(binding.runtime_signer_sha256, hash("did:key:runtime123"));
   assert.equal(binding.profile_key_hash, summary.sessions.lifecycle.sessions[0].profile_key_hash);
-  assert.equal(binding.engine_id, "", "Local VM keeps its actual empty Runtime selection");
+  assert.equal(binding.engine_id, "", "Automatic keeps its actual empty Runtime selection");
   assert.ok(!JSON.stringify(binding).includes(principal)); assert.ok(!JSON.stringify(binding).includes(token));
   for (const change of [s => { s.principal_id = "other-principal"; }, s => { s.sessions.lifecycle.sessions[0].profile_key_hash = short("other"); },
     s => { s.sessions.lifecycle.sessions[0].phase = "RETIRING"; }, s => { s.sessions.lifecycle.sessions.push(s.sessions.lifecycle.sessions[0]); },
@@ -204,6 +204,11 @@ test("approved Engine selection binds the active Runtime page and concrete adapt
     assert.throws(() => browserJourneyEngineRoute({ sessions: { recoverable_page: bad } }, choice, "page-one"), /different Engine or page/);
   }
   assert.throws(() => browserJourneyEngineRoute(summary, choice, "page-one"), /different Engine or page/);
-  assert.deepEqual(browserJourneyEngineChoice({ engine_adapter: { adapters: [{ ...adapter, id: adapterId }] } }, adapterId),
+  const local = { ...adapter, id: adapterId, backing_substrate: "local_microvm" };
+  assert.deepEqual(browserJourneyEngineChoice({ engine_adapter: { adapters: [local] } }, adapterId),
+    { engineId: "", adapterId }, "a lone local engine is reached through Automatic, as Settings hides the selector");
+  assert.deepEqual(browserJourneyEngineChoice({ engine_adapter: { adapters: [local, { ...local, id: "other" }] } }, adapterId),
     { engineId: adapterId, adapterId });
+  assert.deepEqual(browserJourneyEngineChoice({ engine_adapter: { adapters: [{ ...local, backing_substrate: "remote_operator_vm" }] } }, adapterId),
+    { engineId: adapterId, adapterId }, "Automatic skips remote VMs, so they stay explicit");
 });
