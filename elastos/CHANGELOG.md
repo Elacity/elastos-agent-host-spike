@@ -6,11 +6,6 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
-### Fixed
-
-- In the Assistant, Edit on a message you just sent opens the editor. Before,
-  it did nothing until the chat was reopened.
-
 ### Developer detail
 
 - `scripts/release-publish.sh` publishes a final version `X.Y.Z` on `stable`
@@ -73,6 +68,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 - Isolation status: the first stage of the isolation plan (#173) is done, except that the seed does not yet run under its own account (#174, in 0.8.1). Web pages and shared files open in a separate sandbox; the web Terminal is off by default; Home checks allowed hosts and rejects requests whose Origin header names another website; sandboxed apps need valid tokens to reach private data; releases are signed with a new key kept off the public server.
 - Isolation status, not done yet: Home can still get every app's permissions, providers run as normal programs with your account's rights (only the model provider is partly limited), and approvals are not yet shown on a screen that only the Runtime controls. These stages (S1 and S2 of #173) are planned for 0.8.1.
+- Security update for the TLS library (rustls 0.23.46), which fixes four reported weaknesses (RUSTSEC-2026-0346 to 0349, #380).
 
 ### Added
 
@@ -94,10 +90,14 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   senders, and Discovery relay caps of 4 listings per Home, 8 contact requests
   per sender and 16 per Home. The relay admits only the signing Home's own
   submissions.
-- Known issue: on the Jetson, getting a model is slow (Qwen takes about 43 minutes) and replies run on the CPU (about 25 seconds each).
-- Known issue: on a Mac with a slow connection, getting a model can stop with "Model content could not be read".
+- Known issue: on the Jetson, getting a model is slow (Qwen takes about 43 minutes). The first Qwen reply takes about 22 seconds and the second about 3.6 seconds.
 - Known issue: Browser runs only on Apple Silicon Macs.
-- Community works without turning on Discovery. Discovery now only controls whether you are listed in People and can receive contact requests.
+- Community posts reach members again without turning on Discovery, also across networks: they travel through the seed's Community node. Posts are signed, but that node can read them in transit until the relay arrives in 0.8.1. Direct messages across networks need that relay.
+- Upgrading from 0.7.1 or earlier: run the install command once. System update cannot move these Homes to 0.8.0, because releases are now signed with a new key (#186). Your Home keeps its data.
+- A Browser session now lasts until you close it, until Home stops answering for 5 minutes, until Runtime stops, or 12 hours (it used to close after 10 minutes).
+- Browser Settings no longer shows Agent access, which no agent can use yet (#290), and hides the engine choice when there is only one engine. The default engine is called Automatic.
+- If a model download is interrupted, Home now resumes it by itself a few times before asking you to Retry.
+- A model's memory check now says: "This device has enough memory for this model. Replies also need some of it free when the model runs."
 
 ### Fixed
 
@@ -108,6 +108,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   the same across restarts (#336).
 - Browser shows "Starting Browser…" while it starts, and no longer shows white bars around the page.
 - Chat: the message box returns to one line after you send, People → Message reuses the open Chat window, and Open Inbox in People works.
+- In the Assistant, Edit on a message you just sent opens the editor, and Delete removes that message. Before, Edit did nothing until the chat was reopened.
 
 ## [0.8.0-alpha.17] - 2026-10-14
 
@@ -117,6 +118,7 @@ Release candidate for 0.8.0 on the test channel, with the same notes.
 
 - Isolation status: the first stage of the isolation plan (#173) is done, except that the seed does not yet run under its own account (#174, in 0.8.1). Web pages and shared files open in a separate sandbox; the web Terminal is off by default; Home checks allowed hosts and rejects requests whose Origin header names another website; sandboxed apps need valid tokens to reach private data; releases are signed with a new key kept off the public server.
 - Isolation status, not done yet: Home can still get every app's permissions, providers run as normal programs with your account's rights (only the model provider is partly limited), and approvals are not yet shown on a screen that only the Runtime controls. These stages (S1 and S2 of #173) are planned for 0.8.1.
+- Security update for the TLS library (rustls 0.23.46), which fixes four reported weaknesses (RUSTSEC-2026-0346 to 0349, #380).
 
 ### Added
 
@@ -138,10 +140,14 @@ Release candidate for 0.8.0 on the test channel, with the same notes.
   senders, and Discovery relay caps of 4 listings per Home, 8 contact requests
   per sender and 16 per Home. The relay admits only the signing Home's own
   submissions.
-- Known issue: on the Jetson, getting a model is slow (Qwen takes about 43 minutes) and replies run on the CPU (about 25 seconds each).
-- Known issue: on a Mac with a slow connection, getting a model can stop with "Model content could not be read".
+- Known issue: on the Jetson, getting a model is slow (Qwen takes about 43 minutes). The first Qwen reply takes about 22 seconds and the second about 3.6 seconds.
 - Known issue: Browser runs only on Apple Silicon Macs.
-- Community works without turning on Discovery. Discovery now only controls whether you are listed in People and can receive contact requests.
+- Community posts reach members again without turning on Discovery, also across networks: they travel through the seed's Community node. Posts are signed, but that node can read them in transit until the relay arrives in 0.8.1. Direct messages across networks need that relay.
+- Upgrading from 0.7.1 or earlier: run the install command once. System update cannot move these Homes to 0.8.0, because releases are now signed with a new key (#186). Your Home keeps its data.
+- A Browser session now lasts until you close it, until Home stops answering for 5 minutes, until Runtime stops, or 12 hours (it used to close after 10 minutes).
+- Browser Settings no longer shows Agent access, which no agent can use yet (#290), and hides the engine choice when there is only one engine. The default engine is called Automatic.
+- If a model download is interrupted, Home now resumes it by itself a few times before asking you to Retry.
+- A model's memory check now says: "This device has enough memory for this model. Replies also need some of it free when the model runs."
 
 ### Fixed
 
@@ -152,6 +158,7 @@ Release candidate for 0.8.0 on the test channel, with the same notes.
   the same across restarts (#336).
 - Browser shows "Starting Browser…" while it starts, and no longer shows white bars around the page.
 - Chat: the message box returns to one line after you send, People → Message reuses the open Chat window, and Open Inbox in People works.
+- In the Assistant, Edit on a message you just sent opens the editor, and Delete removes that message. Before, Edit did nothing until the chat was reopened.
 
 ## [0.8.0-alpha.16] - 2026-10-13
 
