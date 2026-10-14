@@ -1925,13 +1925,29 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
   let lastFlushAt = 0;
   let sawFirstToken = false;
   let stickToBottom = true;
+  /* scrollTop the stream left a following reader at; null if not following. */
+  let endScrollTop = null;
+  /* Land on the end now and once more after layout settles, unless the reader
+     moved up in between or another turn took the transcript. */
+  const pinToEnd = () => {
+    scroller.scrollTop = scroller.scrollHeight;
+    const top = scroller.scrollTop;
+    window.requestAnimationFrame(() => {
+      if (generation === ctx.streamGeneration && scroller.scrollTop >= top - 1) {
+        scroller.scrollTop = scroller.scrollHeight;
+        if (endScrollTop === top) {
+          endScrollTop = scroller.scrollTop;
+        }
+      }
+    });
+    return top;
+  };
   let answerNotifiedAt = 0;
   let hiddenBuffered = false;
   let progressEl = null;
   let revealTimer = 0;
   let followRaf = 0;
   let followScrollQuiet = false;
-  let streamAnchor = null;
   let longTaskObserver = null;
   let frameWatch = 0;
   let streamingFlush = false;
@@ -2053,12 +2069,14 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     }
     followRaf = window.requestAnimationFrame(() => {
       followRaf = 0;
-      if (!stickToBottom || selectionInStream() || !streamAnchor?.isConnected) {
+      if (!stickToBottom || selectionInStream() || !scroller) {
         return;
       }
       followScrollQuiet = true;
       const t0 = performance.now();
-      streamAnchor.scrollIntoView({ block: "end", inline: "nearest", behavior: "auto" });
+      /* True bottom: the stream's bottom padding keeps the end above the
+         floating composer; scrollIntoView on an anchor left it underneath. */
+      scroller.scrollTop = scroller.scrollHeight;
       const took = performance.now() - t0;
       perf.followMs += took;
       const last = perf.traces[perf.traces.length - 1];
@@ -2177,10 +2195,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     tailEl.className = "agent-stream-tail";
     tailNode = document.createTextNode("");
     tailEl.append(tailNode);
-    streamAnchor = document.createElement("div");
-    streamAnchor.className = "agent-stream-anchor";
-    streamAnchor.setAttribute("aria-hidden", "true");
-    answerBody.append(frozenEl, tailEl, streamAnchor);
+    answerBody.append(frozenEl, tailEl);
   };
 
   const freezeSlice = (text, { markdown = false } = {}) => {
@@ -2716,6 +2731,10 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
         abandonRich ||
         perf.slowFrames > 12 ||
         perf.longTasks.some((row) => row.duration >= 50);
+      /* The last flush and the rich render below make the reply taller; keep
+         a reader who was following at the end. One who scrolled up since the
+         stream ended (its listeners are gone) stays where they are. */
+      const pinned = endScrollTop !== null && !!scroller && scroller.scrollTop >= endScrollTop - 1;
       answerBodyRef.dataset.mdSource = answerTextRef;
       const skipRich = unhealthy || stoppedEarly || state.quality === "plain";
       if (!skipRich) {
@@ -2737,6 +2756,9 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
         } catch {
           /* keep streamed prefix — canonical survives presentation failure */
         }
+      }
+      if (pinned) {
+        pinToEnd();
       }
       timings.t6 = Date.now();
       setPhase("presentation_done");
@@ -2937,6 +2959,11 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     if (followRaf) {
       window.cancelAnimationFrame(followRaf);
       followRaf = 0;
+    }
+    /* The cancelled frame carried the final flush (and the Stopped note sits
+       below it): land on the true end before the listeners go. */
+    if (stickToBottom && scroller && generation === ctx.streamGeneration) {
+      endScrollTop = pinToEnd();
     }
     window.removeEventListener("resize", onResizeFollow);
     document.removeEventListener("keydown", onKeyNav);
