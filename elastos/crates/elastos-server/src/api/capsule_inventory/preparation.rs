@@ -2472,12 +2472,25 @@ async fn unless_cancelled<T>(
             biased;
             result = &mut read => return result,
             _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
-                if load_operation(data_dir, id)?.cancel_requested {
-                    return Err(PreparationStopped.into());
+                // A busy inventory lock (a progress save in flight) only
+                // moves this check to the next poll; it is not a read failure.
+                match load_operation(data_dir, id) {
+                    Ok(record) if record.cancel_requested => {
+                        return Err(PreparationStopped.into());
+                    }
+                    Err(error) if !inventory_busy(&error) => return Err(error),
+                    _ => {}
                 }
             }
         }
     }
+}
+
+/// The inventory lock stayed taken past its bounded wait (storage `Inventory::open`).
+fn inventory_busy(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
 }
 
 /// Each 64 KiB part pays one network round trip, so one preparation keeps this
@@ -12698,6 +12711,26 @@ server.serve_forever()
         assert!(!prepared.join("stage").exists());
         assert!(!prepared.join(format!("admitted-{id}")).exists());
         fixture.shutdown().await;
+    }
+
+    /// Alpha.17 on a Mac: a progress save holding the inventory lock past the
+    /// cancel check's 1 s wait stopped the Get as unreadable content. A busy
+    /// lock only moves the check to the next poll; Cancel still ends the read.
+    #[tokio::test]
+    async fn model_preparation_cancel_check_waits_out_a_busy_inventory_lock() {
+        let (root, record, _, _) = staged_fixture(now().unwrap(), false).await;
+        let id = record.operation_id.as_str();
+        let held = Inventory::open(root.path(), false).unwrap();
+        let read = unless_cancelled(root.path(), id, async {
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            anyhow::Ok(7)
+        });
+        assert_eq!(read.await.unwrap(), 7, "the read outlives a busy lock");
+        drop(held);
+        update_operation(root.path(), id, |record| record.cancel_requested = true).unwrap();
+        let pending = std::future::pending::<anyhow::Result<()>>();
+        let cancelled = unless_cancelled(root.path(), id, pending).await;
+        assert!(cancelled.unwrap_err().is::<PreparationStopped>());
     }
 
     /// A part read the holder refuses or answers badly is read once and stops
