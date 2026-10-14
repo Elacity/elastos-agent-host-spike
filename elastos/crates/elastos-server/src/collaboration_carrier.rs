@@ -270,7 +270,7 @@ impl JoinedCollaborationNetwork {
         Ok(())
     }
 
-    pub(crate) async fn send_metadata(
+    pub(crate) async fn send_gossip(
         &self,
         core: &crate::collaboration_core::CollaborationCore,
         frame: &[u8],
@@ -281,7 +281,7 @@ impl JoinedCollaborationNetwork {
             None => core.allows_gossip_frame(frame)?,
         };
         if !allowed {
-            anyhow::bail!("Shared Chat originals and receipts use direct Home delivery");
+            anyhow::bail!("this collaboration frame does not travel over gossip");
         }
         self.send_frame(frame).await
     }

@@ -1218,6 +1218,14 @@ mod tests {
         })
     }
 
+    fn gossip_envelope_hash(request: &serde_json::Value) -> String {
+        let frame = crate::collaboration_protocol::verify_collaboration_transport_frame(
+            request["message"].as_str().unwrap().as_bytes(),
+        )
+        .unwrap();
+        collaboration_message_envelope_sha256(frame.envelope_bytes())
+    }
+
     fn accept_shared(
         core: &CollaborationCore,
         authority: &DefaultConversationDeviceAuthority,
@@ -1550,10 +1558,14 @@ mod tests {
         for operation in ["gossip_send", "gossip_peek", "gossip_ack"] {
             assert!(operations.iter().any(|op| op == operation));
         }
+        // Presence and the Shared post travel over gossip; nothing else does.
         assert!(requests
             .iter()
             .filter(|request| request["op"] == "gossip_send")
-            .all(|request| request["message"].as_str() == Some(presence_frame.as_str())));
+            .all(
+                |request| request["message"].as_str() == Some(presence_frame.as_str())
+                    || gossip_envelope_hash(request) == first.envelope_sha256()
+            ));
         let core = service_port.test_core();
         let peers = service_presence_port.history_participants(now).unwrap();
         assert_eq!(peers.len(), 1);
@@ -1955,19 +1967,21 @@ mod tests {
         );
         assert!(!request_ops(&carrier).iter().any(|op| op == "gossip_send"));
 
-        carrier.push([peek(0, 0, Vec::new()), ack(0, 0, false)]);
+        carrier.push([send_remote(), peek(0, 0, Vec::new()), ack(0, 0, false)]);
         run_collaboration_worker_cycle(&driver, &product_port, temp.path(), NOW + 1).await;
         assert!(core
             .pending_outgoing_product_projections(NOW + 1)
             .unwrap()
             .is_empty());
         assert_eq!(core.pending_outgoing(NOW + 1).unwrap().len(), 1);
+        // The projected post is broadcast once; a restarted worker broadcasts
+        // it once more until a Home receipt arrives.
         assert_eq!(
             request_ops(&carrier)
                 .iter()
                 .filter(|op| op.as_str() == "gossip_send")
                 .count(),
-            0
+            1
         );
         assert_eq!(
             product_port
@@ -1995,7 +2009,7 @@ mod tests {
             .unwrap();
         let restart_driver =
             CollaborationTransportDriver::new(restarted_core.clone(), restart_joined);
-        restart_carrier.push([peek(0, 0, Vec::new()), ack(0, 0, false)]);
+        restart_carrier.push([send_remote(), peek(0, 0, Vec::new()), ack(0, 0, false)]);
         run_collaboration_worker_cycle(&restart_driver, &restarted_port, temp.path(), NOW + 2)
             .await;
         assert_eq!(
@@ -2011,7 +2025,7 @@ mod tests {
                 .iter()
                 .filter(|op| op.as_str() == "gossip_send")
                 .count(),
-            0
+            1
         );
     }
 
@@ -2506,6 +2520,7 @@ mod tests {
         let carrier = FakeCarrier::new([
             FakeReply::JoinEcho,
             send_remote(),
+            send_remote(),
             peek(0, 0, Vec::new()),
             ack(0, 0, false),
         ]);
@@ -2532,7 +2547,7 @@ mod tests {
                 .iter()
                 .filter(|request| request["op"] == "gossip_send")
                 .count(),
-            1
+            2
         );
         assert!(chat
             .retained_history(now)
@@ -2995,7 +3010,13 @@ mod tests {
             .await
             .unwrap();
         let driver = CollaborationTransportDriver::new(core.clone(), joined);
-        carrier.push_for("gossip_send", [FakeReply::Error("send failed")]);
+        carrier.push_for(
+            "gossip_send",
+            [
+                FakeReply::Error("send failed"),
+                FakeReply::Error("send failed"),
+            ],
+        );
         carrier.push_for("gossip_peek", [FakeReply::Error("peek failed")]);
         run_collaboration_worker_cycle(&driver, &product_port, temp.path(), now + 1).await;
         assert_eq!(core.pending_outgoing(now + 1).unwrap().len(), 2);
@@ -3009,7 +3030,12 @@ mod tests {
             .is_empty());
         assert_eq!(
             request_ops(&carrier),
-            ["gossip_join_exact", "gossip_send", "gossip_peek"]
+            [
+                "gossip_join_exact",
+                "gossip_send",
+                "gossip_send",
+                "gossip_peek"
+            ]
         );
 
         core.inject_write_fault(WriteFault::BeforeWrite);
@@ -3059,14 +3085,7 @@ mod tests {
             poll.latest_seq,
         );
 
-        // Shared receipts use the authenticated Home exchange, not gossip.
-        core.record_home_chat_acceptance(
-            &remote_receipt,
-            outgoing.envelope_sha256(),
-            &remote_authority.local_device_did(),
-            now + 1,
-        )
-        .unwrap();
+        // A Shared receipt over gossip settles the post like the Home exchange.
         carrier.push([
             send_remote(),
             peek(
@@ -3081,7 +3100,8 @@ mod tests {
         ]);
         run_collaboration_worker_cycle(&driver, &product_port, temp.path(), now + 1).await;
         let pending = core.pending_outgoing(now + 1).unwrap();
-        // Shared still owes other Homes, while this peer's receipt is durable.
+        // Shared still owes other Homes' direct delivery; this peer's gossip
+        // receipt is durable and ends its gossip.
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].envelope_bytes(), outgoing.envelope_bytes());
         assert!(pending[0].accepted_by(&remote_authority.local_device_did()));
@@ -3099,13 +3119,25 @@ mod tests {
             &request_ops(&carrier)[before_settled..],
             &["gossip_peek", "gossip_ack"]
         );
-        assert!(carrier
+        let shared_frame = core
+            .prepare_transport_frame(outgoing.envelope_bytes())
+            .unwrap();
+        let gossip = carrier
             .requests()
-            .iter()
+            .into_iter()
             .filter(|request| request["op"] == "gossip_send")
-            .all(
-                |request| request["message"].as_str() == std::str::from_utf8(&presence_frame).ok()
-            ));
+            .map(|request| request["message"].as_str().unwrap().as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            gossip
+                .iter()
+                .filter(|frame| **frame == shared_frame)
+                .count(),
+            1
+        );
+        assert!(gossip
+            .iter()
+            .all(|frame| *frame == shared_frame || *frame == presence_frame));
         assert_eq!(
             collaboration_message_envelope_sha256(outgoing.envelope_bytes()),
             outgoing.envelope_sha256()

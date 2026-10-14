@@ -139,7 +139,6 @@ impl DurableOutgoingMessage {
         self.created_at
     }
 
-    #[cfg(test)]
     pub(crate) fn remote_acceptance_recorded(&self) -> bool {
         !self.accepted_endpoints.is_empty()
     }
@@ -228,6 +227,9 @@ pub(crate) enum CollaborationTransportRejection {
     /// The sender already has the most messages waiting for Chat. Held and
     /// retried like `SenderRateLimited`, so one sender never holds the batch.
     SenderBacklogFull,
+    /// A Community bootstrap endpoint sent, admitted or receipted a Shared
+    /// post. Bootstrap endpoints forward gossip and carry discovery only.
+    BootstrapEndpoint,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -911,8 +913,8 @@ impl CollaborationCore {
             .any(|peer| peer.node_id == key.to_string())
     }
 
-    /// Gossip carries Presence metadata. Shared originals and their receipts
-    /// belong to an authenticated Home-to-Home provider exchange.
+    /// Gossip carries Presence metadata and Shared posts with their receipts.
+    /// Shared posts also use the authenticated Home-to-Home provider exchange.
     pub(crate) fn allows_gossip_frame(&self, frame: &[u8]) -> anyhow::Result<bool> {
         let Ok(frame) = verify_collaboration_transport_frame(frame) else {
             return Ok(false);
@@ -923,8 +925,9 @@ impl CollaborationCore {
                 else {
                     return Ok(false);
                 };
-                Ok(message.message().envelope().payload.payload_type
-                    == crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE)
+                Ok(gossip_payload_type(
+                    &message.message().envelope().payload.payload_type,
+                ))
             }
             Ok(CollaborationTransportFrameKind::AcceptanceReceipt) => {
                 let Ok(receipt) = self.verify_receipt_envelope(frame.envelope_bytes()) else {
@@ -937,12 +940,13 @@ impl CollaborationCore {
                 }) else {
                     return Ok(false);
                 };
-                Ok(self
-                    .verify_outgoing_record(outgoing)?
-                    .envelope()
-                    .payload
-                    .payload_type
-                    == crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE)
+                Ok(gossip_payload_type(
+                    &self
+                        .verify_outgoing_record(outgoing)?
+                        .envelope()
+                        .payload
+                        .payload_type,
+                ))
             }
             _ => Ok(false),
         }
@@ -955,9 +959,7 @@ impl CollaborationCore {
     ) -> anyhow::Result<bool> {
         let original = verify_collaboration_transport_frame(original_frame)?;
         let message = self.authorize_stored_product_message(original.envelope_bytes())?;
-        if message.message().envelope().payload.payload_type
-            != crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE
-        {
+        if !gossip_payload_type(&message.message().envelope().payload.payload_type) {
             return Ok(false);
         }
         let receipt = verify_collaboration_transport_frame(receipt_frame)?;
@@ -1136,6 +1138,14 @@ impl CollaborationCore {
                 CollaborationTransportRejection::MessageSelfEcho,
             ));
         }
+        if verified.envelope().payload.payload_type == COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE
+            && (self.is_bootstrap_endpoint(source_endpoint_did)
+                || self.is_bootstrap_endpoint(&self.authority.local_device_did()))
+        {
+            return Ok(CollaborationTransportIngestion::Rejected(
+                CollaborationTransportRejection::BootstrapEndpoint,
+            ));
+        }
 
         let _receive_guard = self
             .receive_admission_mutex
@@ -1265,6 +1275,13 @@ impl CollaborationCore {
         let verified_message = self
             .verify_outgoing_record(entry)
             .map_err(|_| CollaborationTransportRetryableError)?;
+        if verified_message.envelope().payload.payload_type == COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE
+            && self.is_bootstrap_endpoint(receipt.accepting_endpoint_did())
+        {
+            return Ok(CollaborationTransportIngestion::Rejected(
+                CollaborationTransportRejection::BootstrapEndpoint,
+            ));
+        }
         for existing_bytes in &entry.remote_acceptance_receipts {
             let existing = self
                 .verify_receipt_envelope(existing_bytes.as_bytes())
@@ -1609,6 +1626,9 @@ impl CollaborationCore {
                 == COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE
             {
                 self.community_membership.require_joined()?;
+                if self.is_bootstrap_endpoint(&recipient_did) {
+                    anyhow::bail!("a Community bootstrap endpoint cannot accept a Shared post");
+                }
             }
             verify_collaboration_acceptance_receipt(receipt_bytes, &verified_message, now)?;
 
@@ -2772,6 +2792,11 @@ fn valid_request_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
+}
+
+fn gossip_payload_type(payload_type: &str) -> bool {
+    payload_type == crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE
+        || payload_type == COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE
 }
 
 fn collaboration_transport_frame_kind(
