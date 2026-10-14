@@ -230,9 +230,10 @@ pub(crate) enum CollaborationTransportRejection {
     /// A Community bootstrap endpoint sent, admitted or receipted a Shared
     /// post. Bootstrap endpoints forward gossip and carry discovery only.
     BootstrapEndpoint,
-    /// The original already holds its maximum receipts. Capacity never frees
-    /// while it lives, so one more receipt adds nothing and is consumed.
-    AcceptanceCapacityReached,
+    /// The original is already accepted and this further receipt could not be
+    /// stored (receipt or byte capacity, storage). It adds nothing, so it is
+    /// consumed; capacity would not free while the original lives.
+    AcceptanceNotStored,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1312,17 +1313,16 @@ impl CollaborationCore {
                 CollaborationTransportRejection::AcceptanceBeforeProductProjection,
             ));
         }
-        if entry.remote_acceptance_receipts.len() >= MAX_ACCEPTANCE_RECEIPTS_PER_OUTGOING {
-            return Ok(CollaborationTransportIngestion::Rejected(
-                CollaborationTransportRejection::AcceptanceCapacityReached,
-            ));
+        let redundant = !entry.remote_acceptance_receipts.is_empty();
+        match self.record_remote_acceptance(frame, now) {
+            Ok(()) => Ok(CollaborationTransportIngestion::RemoteAcceptance(
+                CollaborationTransportRemoteAcceptance::Applied,
+            )),
+            Err(_) if redundant => Ok(CollaborationTransportIngestion::Rejected(
+                CollaborationTransportRejection::AcceptanceNotStored,
+            )),
+            Err(_) => Err(CollaborationTransportRetryableError),
         }
-
-        self.record_remote_acceptance(frame, now)
-            .map_err(|_| CollaborationTransportRetryableError)?;
-        Ok(CollaborationTransportIngestion::RemoteAcceptance(
-            CollaborationTransportRemoteAcceptance::Applied,
-        ))
     }
 
     pub(crate) fn prepare_profile_outgoing(
@@ -6239,7 +6239,7 @@ mod tests {
         let before_overflow = fs::read(capacity_core.state_path()).unwrap();
         assert_eq!(
             transport_rejection(&capacity_core, &overflow, NOW + 1),
-            CollaborationTransportRejection::AcceptanceCapacityReached
+            CollaborationTransportRejection::AcceptanceNotStored
         );
         assert_eq!(
             fs::read(capacity_core.state_path()).unwrap(),
