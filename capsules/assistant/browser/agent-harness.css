@@ -2132,14 +2132,6 @@ html[data-agent-reasoning="off"] .agent-thinking {
   overflow-anchor: none;
 }
 
-.agent-stream-anchor {
-  height: 1px;
-  width: 100%;
-  pointer-events: none;
-  overflow-anchor: none;
-  scroll-margin-block-end: 32px;
-}
-
 .agent-stream-frozen {
   display: block;
   contain: content;

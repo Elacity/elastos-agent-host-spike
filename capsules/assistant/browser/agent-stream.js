@@ -1931,7 +1931,6 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
   let revealTimer = 0;
   let followRaf = 0;
   let followScrollQuiet = false;
-  let streamAnchor = null;
   let longTaskObserver = null;
   let frameWatch = 0;
   let streamingFlush = false;
@@ -2053,12 +2052,14 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     }
     followRaf = window.requestAnimationFrame(() => {
       followRaf = 0;
-      if (!stickToBottom || selectionInStream() || !streamAnchor?.isConnected) {
+      if (!stickToBottom || selectionInStream() || !scroller) {
         return;
       }
       followScrollQuiet = true;
       const t0 = performance.now();
-      streamAnchor.scrollIntoView({ block: "end", inline: "nearest", behavior: "auto" });
+      /* True bottom: the stream's bottom padding keeps the end above the
+         floating composer; scrollIntoView on an anchor left it underneath. */
+      scroller.scrollTop = scroller.scrollHeight;
       const took = performance.now() - t0;
       perf.followMs += took;
       const last = perf.traces[perf.traces.length - 1];
@@ -2177,10 +2178,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     tailEl.className = "agent-stream-tail";
     tailNode = document.createTextNode("");
     tailEl.append(tailNode);
-    streamAnchor = document.createElement("div");
-    streamAnchor.className = "agent-stream-anchor";
-    streamAnchor.setAttribute("aria-hidden", "true");
-    answerBody.append(frozenEl, tailEl, streamAnchor);
+    answerBody.append(frozenEl, tailEl);
   };
 
   const freezeSlice = (text, { markdown = false } = {}) => {
@@ -2716,6 +2714,13 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
         abandonRich ||
         perf.slowFrames > 12 ||
         perf.longTasks.some((row) => row.duration >= 50);
+      /* The rich render below makes the reply taller; keep a pinned reader
+         at the end. Decided before rendering, so a reader who scrolled up
+         (listeners may already be gone) stays where they are. */
+      const pinned =
+        stickToBottom &&
+        !!scroller &&
+        scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= FOLLOW_RESUME_PX;
       answerBodyRef.dataset.mdSource = answerTextRef;
       const skipRich = unhealthy || stoppedEarly || state.quality === "plain";
       if (!skipRich) {
@@ -2737,6 +2742,9 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
         } catch {
           /* keep streamed prefix — canonical survives presentation failure */
         }
+      }
+      if (pinned) {
+        host.scrollStreamToEnd();
       }
       timings.t6 = Date.now();
       setPhase("presentation_done");
@@ -2937,6 +2945,11 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     if (followRaf) {
       window.cancelAnimationFrame(followRaf);
       followRaf = 0;
+    }
+    /* The cancelled frame carried the final flush (and the Stopped note sits
+       below it): land on the true end before the listeners go. */
+    if (stickToBottom) {
+      host.scrollStreamToEnd();
     }
     window.removeEventListener("resize", onResizeFollow);
     document.removeEventListener("keydown", onKeyNav);
