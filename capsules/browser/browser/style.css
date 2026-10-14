@@ -273,6 +273,7 @@ select {
   padding: 10px;
 }
 
+.browser-settings-panel [hidden],
 .browser-settings-confirm[hidden] {
   display: none;
 }
