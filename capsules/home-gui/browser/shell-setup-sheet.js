@@ -24,7 +24,6 @@ let bound = false;
 let dismissedThisSession = false;
 let recoveryActBusy = false;
 let drag = null;
-let waitingForSystemClose = false;
 
 export function bindSetupSheet() {
   if (bound) {
@@ -62,6 +61,12 @@ export function bindSetupSheet() {
       event.preventDefault();
       event.stopPropagation();
       hideSetupSheet();
+    } else if ((event.key === "Enter" || event.key === " ") && event.target === card
+      && sheet.classList.contains("is-yielded")) {
+      // Enter here opens the sheet only, not the selected desktop item.
+      event.preventDefault();
+      event.stopPropagation();
+      returnSetupSheet();
     }
   });
 }
@@ -104,14 +109,6 @@ export function setupSheetOpen() {
   return Boolean(sheet) && !sheet.hidden;
 }
 
-// System closed after the settings branch: the yielded sheet comes back as the guide.
-export function setupSheetWindowClosed(targetId) {
-  if (targetId !== "system" || !waitingForSystemClose) return;
-  waitingForSystemClose = false;
-  // After teardown finishes moving focus to the next window.
-  if (setupSheetOpen()) queueMicrotask(returnSetupSheet);
-}
-
 // The sheet is modal again: keyboard focus moves into it from System.
 function returnSetupSheet() {
   restoreSetupSheetOverlay();
@@ -137,10 +134,10 @@ export function syncSetupSheet(previous, summary) {
   if (!homeSetupNeedsAct(summary)) {
     forgetChromeNotification(SETUP_REMINDER_ID);
     if (setupFinished(summary) && setupSheetOpen()) {
-      // Step 1 done: keep the sheet as the guide to the next steps.
-      waitingForSystemClose = false;
+      // Step 1 done: keep the sheet as the guide to the next steps. It comes back once when
+      // setup finishes; afterwards an app opened from it keeps the front until the card is clicked.
       renderSetupSheet(summary);
-      if (sheet.classList.contains("is-yielded")) returnSetupSheet();
+      if (!setupFinished(previous) && sheet.classList.contains("is-yielded")) returnSetupSheet();
       return;
     }
     hideSetupSheet({ restoreFocus: false, rememberDismiss: false });
@@ -171,7 +168,6 @@ function rememberSetupReminder() {
 }
 
 export function hideSetupSheet({ restoreFocus = true, rememberDismiss = true } = {}) {
-  waitingForSystemClose = false;
   if (!sheet || sheet.hidden) {
     return;
   }
@@ -244,7 +240,8 @@ function renderSetupSheet(summary) {
 
 function openGoal(targetId) {
   if (!targetById(shellState.currentSummary, targetId)) return;
-  hideSetupSheet({ restoreFocus: false });
+  // The sheet collapses to its card; clicking the card brings it back. Only Close or Later dismiss it.
+  yieldSetupSheet();
   openTarget(targetId);
 }
 
@@ -258,7 +255,6 @@ async function openRecoveryAct() {
   yieldSetupSheet();
   if (profileStatus !== "ready" || unavailable) {
     const query = { settings: "security" };
-    waitingForSystemClose = true;
     openTarget("system", { query });
     return;
   }
@@ -283,6 +279,8 @@ function yieldSetupSheet() {
   }
   sheet.classList.add("is-yielded");
   sheet.setAttribute("aria-modal", "false");
+  // The card is the way back: click it, or focus it and press Enter.
+  card?.setAttribute("tabindex", "0");
 }
 
 function restoreSetupSheetOverlay() {
@@ -292,6 +290,7 @@ function restoreSetupSheetOverlay() {
   sheet.classList.remove("is-yielded");
   sheet.setAttribute("aria-modal", "true");
   if (card) {
+    card.removeAttribute("tabindex");
     card.classList.remove("is-dragging");
     card.style.left = "";
     card.style.top = "";
@@ -312,6 +311,9 @@ function onSetupCardPointerDown(event) {
   }
   const rect = card.getBoundingClientRect();
   drag = {
+    startX: event.clientX,
+    startY: event.clientY,
+    moved: false,
     offsetX: event.clientX - rect.left,
     offsetY: event.clientY - rect.top,
     width: rect.width,
@@ -325,6 +327,10 @@ function onSetupCardPointerMove(event) {
   if (!drag || !card) {
     return;
   }
+  if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 4) {
+    return;
+  }
+  drag.moved = true;
   const maxX = Math.max(8, window.innerWidth - drag.width - 8);
   const maxY = Math.max(8, window.innerHeight - drag.height - 8);
   const x = Math.min(Math.max(8, event.clientX - drag.offsetX), maxX);
@@ -335,10 +341,13 @@ function onSetupCardPointerMove(event) {
   card.style.right = "auto";
 }
 
-function onSetupCardPointerUp() {
+function onSetupCardPointerUp(event) {
   if (!drag || !card) {
     return;
   }
+  const clicked = !drag.moved && event?.type === "pointerup";
   drag = null;
   card.classList.remove("is-dragging");
+  // A click without a drag brings the full sheet back.
+  if (clicked) returnSetupSheet();
 }

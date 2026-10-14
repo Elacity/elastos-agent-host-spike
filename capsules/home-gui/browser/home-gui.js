@@ -99,7 +99,6 @@ import {
 import {
   bindSetupSheet,
   holdHomeSetupAct,
-  setupSheetWindowClosed,
   syncSetupSheet,
 } from "./shell-setup-sheet.js?v=home-20260813a";
 import {
@@ -224,7 +223,6 @@ configureWindowHooks({
   syncMenubar,
   updateTaskbarState,
   holdHomeSetupAct,
-  windowClosed: setupSheetWindowClosed,
   // Host-mediated launches: GUI never fetch-launches; shell-windows and the
   // wallet rail call this hook after bindHomeGuiInteractions binds it.
   launchTarget: (...args) => homeGuiHostActions.launchTarget?.(...args),
@@ -1382,6 +1380,8 @@ export function bindHomeGuiInteractions(options = {}) {
       assistantFaceActive() &&
       !event.target.closest("#assistant-face") &&
       !event.target.closest("#assistant-toggle") &&
+      // The Home welcome card works over the room; using it does not close the Assistant.
+      !event.target.closest("#setup-sheet") &&
       !(assistantSpaceActive() && event.target.closest("#assistant-space"))
     ) {
       hideAssistantFace();
