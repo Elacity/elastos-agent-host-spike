@@ -366,7 +366,7 @@ impl CollaborationChatProductPort {
             status.detail = if available {
                 "Recent Community history is available from an online participant."
             } else {
-                "Earlier Community posts cannot be loaded right now. New posts still arrive."
+                "Earlier Community posts cannot be loaded right now."
             }
             .to_string();
         }
