@@ -76,7 +76,11 @@ async function openAssistant(t, { firstReply = null } = {}) {
       const path = resolve(base, match[2] || "index.html");
       assert.ok(path.startsWith(`${base}/`));
       const bytes = await readFile(path);
-      res.writeHead(200, { ...headers, "content-type": types[extname(path)] || "application/octet-stream" });
+      // The Runtime's app-document sandbox (browser_capsules.rs
+      // shell_content_security_policy): no allow-modals, so confirm() is ignored.
+      const csp = match[1] === "assistant" && path === resolve(base, "index.html")
+        ? { "content-security-policy": "sandbox allow-scripts allow-forms allow-popups allow-downloads" } : {};
+      res.writeHead(200, { ...headers, ...csp, "content-type": types[extname(path)] || "application/octet-stream" });
       res.end(bytes);
     } catch (error) { errors.push(String(error)); res.writeHead(500); res.end(); }
   });
@@ -89,11 +93,14 @@ async function openAssistant(t, { firstReply = null } = {}) {
   });
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   page.on("pageerror", error => errors.push(String(error)));
-  page.on("dialog", dialog => dialog.accept());
+  page.on("dialog", dialog => { errors.push(`browser dialog: ${dialog.message()}`); void dialog.dismiss(); });
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   const frame = page.frameLocator("iframe");
   const composer = frame.locator("#agent-composer-input");
   await composer.waitFor({ state: "visible" });
+  const capsuleFrame = page.frames().find(item => item.url().includes("/apps/assistant/"));
+  assert.equal(await capsuleFrame.evaluate(() => window.confirm("probe")), false,
+    "as on a real Home, the Assistant document cannot open browser dialogs");
   const userRows = frame.locator(".agent-msg-user");
   const replies = frame.locator(".agent-msg-agent .agent-msg-body");
   // DOM text: rows use content-visibility:auto, so rendered text can be empty.
@@ -152,11 +159,25 @@ test("Edit on a message sent in this view replaces that turn onward, then resubm
   assert.ok(!/Second question|Third question|Reply 2|Reply 3/.test(prompt), "the resubmitted run drops the replaced turns");
   await app.savedTranscript([["user", "First question"], ["agent", "Reply 1"], ["user", "Edited question"], ["agent", "Reply 4"]]);
 
-  // Delete shifts the later messages; Edit then acts on the message shown.
+  // Delete asks in the row (Escape and Cancel keep the message), then shifts
+  // the later messages; Edit then acts on the message shown.
   const firstReply = app.frame.locator(".agent-msg-agent").filter({ hasText: "Reply 1" });
+  const question = firstReply.getByRole("group", { name: "Delete this message?" });
   await firstReply.hover();
   await firstReply.getByRole("button", { name: "Delete" }).click();
+  await question.waitFor({ state: "visible", timeout: 5000 });
+  await app.page.keyboard.press("Escape");
+  await question.waitFor({ state: "detached", timeout: 5000 });
+  await firstReply.hover();
+  await firstReply.getByRole("button", { name: "Delete" }).click();
+  await question.getByRole("button", { name: "Cancel" }).click();
+  assert.equal(await question.count(), 0);
+  assert.deepEqual(await app.replyTexts(), ["Reply 1", "Reply 4"], "Escape and Cancel keep the reply");
+  await firstReply.hover();
+  await firstReply.getByRole("button", { name: "Delete" }).click();
+  await question.getByRole("button", { name: "Delete" }).click();
   await app.savedTranscript([["user", "First question"], ["user", "Edited question"], ["agent", "Reply 4"]]);
+  assert.deepEqual(await app.replyTexts(), ["Reply 4"]);
   const edited = await app.startEdit(1);
   assert.equal(await edited.locator("textarea").inputValue(), "Edited question");
   await app.resubmit(edited, "Final question", "Reply 5");
@@ -166,6 +187,15 @@ test("Edit on a message sent in this view replaces that turn onward, then resubm
   assert.ok(["First question", "Final question"].every(text => prompt.includes(text)), prompt);
   assert.ok(!/Edited question|Reply 1|Reply 4/.test(prompt), prompt);
   await app.savedTranscript([["user", "First question"], ["user", "Final question"], ["agent", "Reply 5"]]);
+
+  // Rename, Edit tags and Import JSON used prompt()/alert(), which this sandbox
+  // ignores; they stay out of the chat menu until they work in the page.
+  await app.frame.getByRole("button", { name: /^Chat actions for / }).first().click();
+  const menuItems = app.frame.getByRole("menuitem");
+  await menuItems.first().waitFor();
+  const items = await menuItems.allTextContents();
+  assert.ok(items.includes("Delete"), items.join(", "));
+  for (const hidden of ["Rename", "Edit tags…", "Import JSON…"]) assert.ok(!items.includes(hidden), `${hidden} is not offered`);
   assert.deepEqual(app.errors, []);
 });
 

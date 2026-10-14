@@ -1352,6 +1352,49 @@ export function openCodeArtifact(code, lang = "") {
   });
 }
 
+/* Delete asks in the row: the Runtime serves app documents without
+   allow-modals, so window.confirm() is ignored and returns false. */
+export function beginDeleteMessage(msgIndex) {
+  const row = host.streamEl()?.querySelector(`.agent-msg[data-msg-index="${Number(msgIndex)}"]`);
+  const actions = row?.querySelector(".agent-msg-actions");
+  if (!row || !actions || ctx.turnBusy || row.querySelector("[data-delete-confirm-bar]")) {
+    return false;
+  }
+  actions.hidden = true;
+  const bar = document.createElement("div");
+  bar.className = "agent-msg-edit-bar agent-msg-delete-confirm";
+  bar.dataset.deleteConfirmBar = "1";
+  bar.setAttribute("role", "group");
+  bar.setAttribute("aria-label", "Delete this message?");
+  const question = document.createElement("span");
+  question.textContent = "Delete this message?";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "agent-msg-edit-cancel";
+  cancel.dataset.deleteCancel = "1";
+  cancel.textContent = "Cancel";
+  const confirm = document.createElement("button");
+  confirm.type = "button";
+  confirm.className = "agent-msg-edit-send";
+  confirm.dataset.deleteConfirm = "1";
+  confirm.textContent = "Delete";
+  bar.append(question, cancel, confirm);
+  row.append(bar);
+  cancel.focus({ preventScroll: true });
+  return true;
+}
+
+/** Close any open Delete question; true when one was open. */
+export function cancelDeleteMessage() {
+  const bars = host.streamEl()?.querySelectorAll("[data-delete-confirm-bar]") || [];
+  for (const bar of bars) {
+    const actions = bar.closest(".agent-msg")?.querySelector(".agent-msg-actions");
+    if (actions) actions.hidden = false;
+    bar.remove();
+  }
+  return bars.length > 0;
+}
+
 export function deleteMessageAt(msgIndex) {
   const session = ctx.sessions.find((s) => s.id === ctx.activeSessionId);
   if (!session || ctx.turnBusy) {
@@ -1359,9 +1402,6 @@ export function deleteMessageAt(msgIndex) {
   }
   const index = Number(msgIndex);
   if (!Number.isInteger(index) || index < 0 || index >= session.messages.length) {
-    return false;
-  }
-  if (!window.confirm("Delete this message from the chat?")) {
     return false;
   }
   session.messages.splice(index, 1);

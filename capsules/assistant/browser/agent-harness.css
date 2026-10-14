@@ -2213,6 +2213,16 @@ html[data-agent-reasoning="off"] .agent-thinking {
   opacity: 1;
 }
 
+.agent-msg-actions[hidden] {
+  display: none;
+}
+
+.agent-msg-delete-confirm {
+  justify-content: flex-start;
+  font-size: 13px;
+  color: var(--text);
+}
+
 .agent-msg-action,
 .agent-msg-retry,
 /* Group the per-block action buttons (Open · Copy) on the right of the head. */
