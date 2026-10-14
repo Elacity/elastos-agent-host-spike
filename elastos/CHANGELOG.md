@@ -68,7 +68,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 - Isolation status: the first stage of the isolation plan (#173) is done, except that the seed does not yet run under its own account (#174, in 0.8.1). Web pages and shared files open in a separate sandbox; the web Terminal is off by default; Home checks allowed hosts and rejects requests whose Origin header names another website; sandboxed apps need valid tokens to reach private data; releases are signed with a new key kept off the public server.
 - Isolation status, not done yet: Home can still get every app's permissions, providers run as normal programs with your account's rights (only the model provider is partly limited), and approvals are not yet shown on a screen that only the Runtime controls. These stages (S1 and S2 of #173) are planned for 0.8.1.
-- Security update for the TLS library (rustls 0.23.46), which fixes four reported weaknesses (RUSTSEC-2026-0346 to 0349, #380).
+- Security updates for the TLS library (rustls 0.23.46, four reported weaknesses, RUSTSEC-2026-0346 to 0349, #380) and the WebAssembly runtime (wasmtime 36.0.18, RUSTSEC-2026-0363).
 
 ### Added
 
@@ -109,7 +109,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - Browser shows "Starting Browser…" while it starts, and no longer shows white bars around the page.
 - Chat: the message box returns to one line after you send, People → Message reuses the open Chat window, and Open Inbox in People works.
 - In the Assistant, Edit on a message you just sent opens the editor, and Delete asks in the message itself, then removes it. Before, Edit did nothing until the chat was reopened, and Delete did nothing.
-- First-run setup: after you save the Recovery Kit or close System, the welcome sheet comes back with the next steps.
+- First-run setup: the welcome sheet no longer disappears. Opening a step shrinks it to a small card that you click to continue, and it comes back after you save the Recovery Kit.
 
 ## [0.8.0-alpha.17] - 2026-10-14
 
@@ -119,7 +119,7 @@ Release candidate for 0.8.0 on the test channel, with the same notes.
 
 - Isolation status: the first stage of the isolation plan (#173) is done, except that the seed does not yet run under its own account (#174, in 0.8.1). Web pages and shared files open in a separate sandbox; the web Terminal is off by default; Home checks allowed hosts and rejects requests whose Origin header names another website; sandboxed apps need valid tokens to reach private data; releases are signed with a new key kept off the public server.
 - Isolation status, not done yet: Home can still get every app's permissions, providers run as normal programs with your account's rights (only the model provider is partly limited), and approvals are not yet shown on a screen that only the Runtime controls. These stages (S1 and S2 of #173) are planned for 0.8.1.
-- Security update for the TLS library (rustls 0.23.46), which fixes four reported weaknesses (RUSTSEC-2026-0346 to 0349, #380).
+- Security updates for the TLS library (rustls 0.23.46, four reported weaknesses, RUSTSEC-2026-0346 to 0349, #380) and the WebAssembly runtime (wasmtime 36.0.18, RUSTSEC-2026-0363).
 
 ### Added
 
@@ -160,7 +160,7 @@ Release candidate for 0.8.0 on the test channel, with the same notes.
 - Browser shows "Starting Browser…" while it starts, and no longer shows white bars around the page.
 - Chat: the message box returns to one line after you send, People → Message reuses the open Chat window, and Open Inbox in People works.
 - In the Assistant, Edit on a message you just sent opens the editor, and Delete asks in the message itself, then removes it. Before, Edit did nothing until the chat was reopened, and Delete did nothing.
-- First-run setup: after you save the Recovery Kit or close System, the welcome sheet comes back with the next steps.
+- First-run setup: the welcome sheet no longer disappears. Opening a step shrinks it to a small card that you click to continue, and it comes back after you save the Recovery Kit.
 
 ## [0.8.0-alpha.16] - 2026-10-13
 
