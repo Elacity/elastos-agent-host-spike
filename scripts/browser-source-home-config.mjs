@@ -496,12 +496,14 @@ function browserVzTransportConfig(
       1,
       0xffffffff,
     ),
+    // Same as the Home launch token (12 h): a Browser session ends when the user
+    // closes it or Home stops its heartbeat, not when this credential expires.
     ttl_secs: boundedIntegerEnv(
       env,
       "ELASTOS_BROWSER_VZ_TRANSPORT_TTL_SECS",
-      600,
+      43200,
       120,
-      3600,
+      43200,
     ),
   };
 }

@@ -828,8 +828,13 @@ fn validate_browser_vz_transport_config(config: &BrowserVzTransportConfig) -> Re
     {
         return Err("Browser VZ vsock ports must be non-zero and distinct".to_string());
     }
-    if !(120..=3_600).contains(&config.ttl_secs) {
-        return Err("Browser VZ transport ttl_secs must be 120..3600".to_string());
+    // A Browser session lives until the user closes it, five minutes without a
+    // Home heartbeat, or the Home launch token lifetime; the transport must not
+    // end it earlier.
+    if !(120..=HOME_LAUNCH_TOKEN_TTL_SECS).contains(&config.ttl_secs) {
+        return Err(format!(
+            "Browser VZ transport ttl_secs must be 120..{HOME_LAUNCH_TOKEN_TTL_SECS}"
+        ));
     }
     Ok(())
 }
@@ -1456,6 +1461,44 @@ mod tests {
         let public = browser_vz_public_transport_proof(&launch.authority, &receipt).unwrap();
         assert!(public.get("credential").is_none());
         assert!(public.get("auth_secret").is_none());
+    }
+
+    #[test]
+    fn transport_outlives_ten_minutes_up_to_home_token_lifetime() {
+        let root = tempfile::tempdir().unwrap();
+        write_config(root.path());
+        let path = root.path().join("config/browser-vz-vsock-transport.json");
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let write = |config: &serde_json::Value| {
+            std::fs::write(&path, serde_json::to_vec(config).unwrap()).unwrap()
+        };
+        config["ttl_secs"] = serde_json::json!(HOME_LAUNCH_TOKEN_TTL_SECS + 1);
+        write(&config);
+        assert!(!browser_vz_transport_ready(root.path()));
+        config["ttl_secs"] = serde_json::json!(HOME_LAUNCH_TOKEN_TTL_SECS);
+        write(&config);
+        assert!(browser_vz_transport_ready(root.path()));
+        let issued_at_ms = current_unix_secs().unwrap() * 1_000;
+        let launch = prepare_browser_vz_transport_launch(
+            root.path(),
+            BrowserVzTransportLaunchBinding {
+                generation:
+                    "sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+                page_id: "page:vz-long-session",
+                vm_id: "browser-vm-long-session",
+                principal_id: "person:local:proof",
+                egress_stream_id: "stream:long-session",
+                egress_target: "tls://example.com:443",
+                egress_runtime_socket_path: "/tmp/elastos-egress-long-session.sock",
+            },
+        )
+        .unwrap()
+        .unwrap();
+        let expires_at_ms = launch.authority["expires_at_unix_ms"].as_u64().unwrap();
+        assert!(expires_at_ms >= issued_at_ms + HOME_LAUNCH_TOKEN_TTL_SECS * 1_000);
+        assert!(expires_at_ms > issued_at_ms + 10 * 60 * 1_000);
+        validate_browser_vz_transport_authority(&launch.authority).unwrap();
     }
 
     #[test]
