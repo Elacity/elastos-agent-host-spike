@@ -244,7 +244,7 @@ function startServer(scenario) {
       const details = {
         searching: "Checking recent Community history from online participants.",
         available: "Recent Community history is available from an online participant.",
-        unavailable: "Recent Community history is unavailable. Another participant must be online to catch up.",
+        unavailable: "Earlier Community posts cannot be loaded right now. New posts still arrive.",
       };
       poll.transport.history = { status: trace.historyStatus, detail: details[trace.historyStatus] };
       poll.objects = trace.historyPhase < 2 ? [
@@ -1072,8 +1072,8 @@ async function runScenario(scenario) {
       await waitFor(() => trace.pollCursors.includes(4));
       trace.historyStatus = "unavailable";
       await historyStatus("unavailable");
-      assert((await frame.locator("#conversation-detail").innerText()).includes("Another participant must be online"),
-        "unavailable history does not explain how to catch up");
+      assert((await frame.locator("#conversation-detail").innerText()).includes("New posts still arrive"),
+        "unavailable history does not say that new posts still arrive");
       await page.setViewportSize({ width: 375, height: 900 });
       await frame.waitForFunction(() => {
         const detail = document.querySelector("#conversation-detail");
