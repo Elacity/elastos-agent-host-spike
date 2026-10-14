@@ -1328,6 +1328,24 @@ function postMarketplaceNavigate(entry, query) {
   }, "*");
 }
 
+function isChatConversationQuery(query) {
+  return !!query && typeof query === "object" && !Array.isArray(query)
+    && Object.keys(query).join(",") === "conversation_id"
+    && typeof query.conversation_id === "string" && query.conversation_id.length > 0;
+}
+
+function postChatNavigate(entry, query) {
+  const frame = entry.node.querySelector(".window-frame");
+  const homeToken = browserLaunchAuthority(frame?.dataset.route)?.homeToken;
+  if (!homeToken || !frame?.contentWindow) return false;
+  frame.contentWindow.postMessage({
+    type: "elastos.chat.navigate/v1",
+    homeToken,
+    query: { conversation_id: query.conversation_id },
+  }, "*");
+  return true;
+}
+
 function postServicesNavigate(entry, query) {
   const frame = entry.node.querySelector(".window-frame");
   const homeToken = browserLaunchAuthority(frame?.dataset.route)?.homeToken;
@@ -1734,6 +1752,15 @@ async function launchBrowserTargetWindow(targetId, options = {}) {
   const defaultHybrid = !single && targetById(shellState.currentSummary, targetId)?.window_policy === "hybrid"
     && options.newWindow !== true && !options.authorizedLaunch && !options.restoredPlacement
     && Object.keys(options.query || {}).length === 0;
+  // A conversation request (People's Message) goes to the open Chat window.
+  if (targetId === "chat-room" && options.newWindow !== true && !options.authorizedLaunch
+    && !options.restoredPlacement && isChatConversationQuery(options.query)) {
+    const open = topDefaultHybridWindow(targetId);
+    if (open && postChatNavigate(open, options.query)) {
+      focusWindow(open.id);
+      return open;
+    }
+  }
   if (!single && !defaultHybrid) return createBrowserTargetWindow(targetId, options);
   let entry = single ? topBrowserWindowEntryForTarget(targetId) : topDefaultHybridWindow(targetId);
   const key = `${single ? "single" : "default"}:${targetId}`;
