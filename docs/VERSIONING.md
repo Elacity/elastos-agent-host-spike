@@ -154,7 +154,7 @@ That matches the coordinated runtime release train better than per-crate changel
 
 ## Publishing a release
 
-A canary release moves through three places: GitHub builds it without keys, the
+A release moves through three places: GitHub builds it without keys, the
 operator Mac prepares and signs it, and the seed imports and serves it. Choose
 the version by the contract change (see Meaning) and update the changelog first;
 `scripts/publish-release.sh` checks the version format with
@@ -174,6 +174,13 @@ writes `model-catalog.json` and prints its CID.
 (4) Put `model-catalog.json` at the repository root and add `model_catalog` to `components.json`: `head_cid` (the signer's CID),
 `publisher_dids` (the signing DID) and `local_use` (`max_cache_bytes` 8 GiB, `max_model_memory_bytes` 4 GiB).
 Keep that head stable across releases: a new head means every admitted model needs Use again.
+
+The Community network travels the same way. The custodian signs its initial profile with
+`release-signer.py --operation community-profile` ([COLLABORATION_NETWORK_PROFILE.md](COLLABORATION_NETWORK_PROFILE.md#initial-production-profile)),
+which writes `collaboration-network-release-v1.json` and `collaboration-network-release-pin-v1.json`. Put the first at the
+repository root and merge the second's `collaboration_network` object into `components.json` through a reviewed pull request,
+then build the package. At prepare, set `RELEASE_COMMUNITY_DIR` to that signed output directory (canonical, owner-only, those
+two files only). Without it the release names no network, and prepare refuses a source that pins one.
 
 Before preparing a release, the operator creates an approval file in a protected
 directory outside the candidate inputs and `RELEASE_WORK`. Set `RELEASE_APPROVAL`
@@ -244,7 +251,15 @@ a SHA-256 pin. It supports the attestation verification flags used by the signer
    and bundles. Candidate scripts and executables stay in the build jobs.
    The job summary records each native artifact's ID and digest.
 2. **Prepare.** On the operator Mac, from a clone of this repository, run
-   `scripts/release-publish.sh prepare RUN_ID VERSION`. It checks that the run
+   `scripts/release-publish.sh prepare RUN_ID VERSION`. Before it downloads
+   anything, it refuses unless `scripts/update-hop-previous-release.json` at
+   source H names the release head the origin serves now (its `head_cid`), so
+   H's CI update journey started from the release users run; step 5 moves that
+   pin. It also refuses a source without `scripts/update-hop-oldest-release.json`
+   (see [Skipped releases](#skipped-releases)). N+1 of a pair keeps N's source
+   and so its pin; it passes once the public
+   head is the head this Mac signed for N from the same run and that head
+   follows the pin. It checks that the run
    succeeded from approved W/ref/event and that source H is on `develop`, downloads
    and verifies all three platform artifacts with their native name suffixes
    and certificate-authenticated proof attempts. A retained native artifact from an earlier attempt can use its original
@@ -263,7 +278,12 @@ a SHA-256 pin. It supports the attestation verification flags used by the signer
    a worktree, takes Kubo from the Mac build, checks the public bootstrap against
    the independent delivery approval, copies the seed's
    current `publish-state.json` and runs `scripts/publish-release.sh
-   --prepare-only` in an isolated data directory.
+   --prepare-only` in an isolated data directory. It then binds the Community
+   network: with `RELEASE_COMMUNITY_DIR`, the custodian's pin must equal the
+   source pin and name the exact startup-file bytes, network ID and signer set
+   the release carries, and the package's own `aarch64-darwin` Runtime must
+   accept the file with `elastos collaboration-config verify`; the signer
+   refuses a pin whose file, network ID or signer set differ.
 3. **Sign.** `scripts/release-publish.sh policy VERSION SIGNER KEY OPENSSL`
    writes the exact signer policy (with the current `develop` head and the
    independent approval file's path and SHA-256) and prints the `release-signer.py`
@@ -285,11 +305,40 @@ a SHA-256 pin. It supports the attestation verification flags used by the signer
    hash, stop the service, run the preflight, import, and start the service.
    The import sends no gossip. Older seed Runtimes still print `No running
    runtime found` after the commit; that is expected, and the sequence accepts
-   only that error.
+   only that error. The seed's Runtime admits only release files it knows: the
+   first release that carries `collaboration-network-release-v1.json` needs a
+   seed Runtime with Community network admission, so run `seed-upgrade` from a
+   package that has it before this import; an older seed Runtime's preflight
+   refuses the file before it imports anything. Releases from 0.8.0 list per-capsule records
+   (`capsule_records`, each `elastos.capsule.record/v1` signed under its own
+   domain `elastos.capsule.record.v1`). `release-signer.py` derives one record
+   per released archive from the verified components and signs it; a record
+   names the capsule's bytes and declared version, never the release version,
+   so it stays byte-identical while the capsule is unchanged. Seed Runtimes
+   before 0.8.0 accept these releases and do not check the records; a 0.8.0
+   seed checks each record against its components row. Homes check records when
+   a release lists them; the release after 0.8.0 makes them required.
 5. **Pin for CI.** Run `python3 scripts/update-hop-compare.py pin-previous-release`
    and merge the updated `scripts/update-hop-previous-release.json` into `develop`.
    It checks the signed head and release the seed now serves. Every pull
-   request's CI update journey then starts from this release.
+   request's CI update journey then starts from this release, and the next
+   `prepare` refuses a source without it.
+
+**A final release** (`X.Y.Z`) uses the same steps and is published on
+`stable`; prereleases are published on `canary`. The seed serves one head, and
+a Home subscribed to `canary` also accepts a newer `stable` head from its
+trusted signer, so one signed stable head reaches canary Homes in System, and
+stable Homes and fresh installs through `install.sh`. A stable Home never
+accepts a canary head, and running `install.sh` again moves a canary Home to
+`stable`. Before step 1, merge the version change (`elastos/Cargo.toml` and the
+changelog) into `develop`, merge the release pull request from `develop` into
+`main`, and tag its `develop` commit `vX.Y.Z`. Build that commit in step 1.
+Prepare refuses unless the tag names the source commit, `main` contains it and
+has the same tree, `elastos/Cargo.toml` has that version and all three
+platforms are selected. The policy pins the tag for the signer, which checks
+again, before and after the DID is typed, that the tag names the source and
+that `main` contains it with the same tree; the stable release needs a signer
+copy installed from this source.
 
 The seed only answers requests. It serves three Carrier ops: `release_head`
 (the signed head), `content_fetch` (any object by CID, from its Kubo pins) and
@@ -325,9 +374,38 @@ tools is an explicit new approval, rather than preparation-time discovery.
 
 Seed details come from `RELEASE_SEED`, `RELEASE_SEED_DATA`,
 `RELEASE_SEED_UNIT`, `RELEASE_SEED_STAGE`, `RELEASE_SEED_RUNTIME` and
-`RELEASE_SEED_USER`, not from this repository. Publish N first; after N is
+`RELEASE_SEED_USER`, not from this repository. `RELEASE_SEED_DATA` is the
+service's `$XDG_DATA_HOME/elastos` (absolute, ending in `/elastos`); the seed
+scripts export its parent as `XDG_DATA_HOME`. Publish N first; after N is
 accepted on a real install, prepare N+1 from the same run before its artifacts
-expire (14 days).
+expire (14 days), with N's work directory (and the `signed` directory the policy
+command writes there) still in `RELEASE_WORK`. The printed seed commands carry
+every value as one shell word; `seed` refuses a signed head whose `signer_did`
+is not a `did:key` or whose `prev_head_cid` is not a canonical CID, and a first
+publication (no `prev_head_cid`) may start without saved publish state.
+
+## Skipped releases
+
+A Home may skip any number of releases, as long as no release ships what the
+oldest supported updater refuses. An updater refuses a whole signed release
+whose components use a schema or a component kind (`strategy`) it does not
+know. `scripts/update-hop-oldest-release.json` names the oldest release that
+still updates in System, with the component kinds its signed releases ship.
+The source gate (`update-hop-compare.py check-oldest-start`, through its test)
+refuses a checkout whose `components.json` that release's updater cannot read
+or install, and `scripts/release-publish.sh prepare` refuses a source without
+the pin. When it and the previous pin name one release, CI's update journey
+runs that start in full. To ship such a change anyway, decide that Homes on the
+pinned release run install.sh once, say so in the release notes, and move the
+pin with `python3 scripts/update-hop-compare.py pin-oldest-release` (it takes
+the previous pin and reads that release's signed components from the origin).
+
+A Home that still meets such a release does not change. From the release after
+0.8.0-alpha.15, System and `elastos update` then say the install command is
+needed once and print it, `curl -fsSL '<publisher gateway>/install.sh' | bash`,
+with the URL built from the gateway the Home was installed from and quoted as
+one shell word. Older updaters (alpha.15 and earlier) say the publisher's signed
+release is not valid for this Home.
 
 ## Withdraw a bad release
 

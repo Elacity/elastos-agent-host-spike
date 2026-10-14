@@ -34,6 +34,7 @@ import {
   attachWindowResize,
 } from "./shell-window-geometry.js?v=home-20260813a";
 import {
+  agentSpaceEngaged,
   applyFullscreenStageFromPlacement,
   bindStageWindowHooks,
   desktopStageId,
@@ -48,6 +49,7 @@ import {
   restoreExtraDesktops,
   restoreSpaceOrder,
   setActiveStage,
+  syncStagePresentation,
   toggleFullscreenStage,
   windowVisibleOnActiveSpace,
 } from "./shell-stages.js?v=home-20260813a";
@@ -125,8 +127,13 @@ export function acceptHomeNavigation(entry, data) {
   record.sequence = data.sequence;
   // Null means this document is still loading, not a request to clear selection.
   if (data.query !== null) {
-    entry.launchQuery = { ...data.query };
-    persistBrowserSession();
+    const currentQuery = normalizedLaunchQuery(entry.launchQuery);
+    const keys = Object.keys(data.query);
+    if (keys.length !== Object.keys(currentQuery).length ||
+        keys.some((key) => currentQuery[key] !== data.query[key])) {
+      entry.launchQuery = { ...data.query };
+      persistBrowserSession();
+    }
   }
   return true;
 }
@@ -2419,6 +2426,13 @@ function restoreSessionSpaces(storedSession, restoredEntries) {
     Array.isArray(storedSession?.space_order) ? storedSession.space_order : []
   ).map((key) => resolveStableSpaceKey(key, restoredEntries));
   restoreSpaceOrder(remappedOrder);
+  /* Restoration awaits each window's launch, so the person may have opened
+     the Assistant meanwhile; switching Space now would close that room. Keep
+     the current Space but place the restored windows on it. */
+  if (agentSpaceEngaged()) {
+    syncStagePresentation();
+    return;
+  }
   const savedStageKey =
     typeof storedSession?.active_stage === "string" && storedSession.active_stage.trim()
       ? storedSession.active_stage.trim()

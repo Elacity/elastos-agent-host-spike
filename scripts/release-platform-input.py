@@ -26,6 +26,9 @@ import tempfile
 SCRIPT_ROOT = Path(__file__).resolve().parent
 SOURCE_ROOT = SCRIPT_ROOT.parent
 SCHEMA = "elastos.release-platform-input/v1"
+RELEASE_NETWORK_FILE = "collaboration-network-release-v1.json"
+# Publication imports a pinned raw block up to this size.
+MAX_RELEASE_NETWORK_BYTES = 2 * 1024 * 1024
 PLATFORMS = {
     "x86_64-linux": ("linux-amd64", "x86_64-unknown-linux-musl", 62),
     "aarch64-linux": ("linux-arm64", "aarch64-unknown-linux-musl", 183),
@@ -194,6 +197,25 @@ def admit_model_catalog_artifact(manifest, artifact_root, referenced):
     referenced.add("model-catalog.json")
 
 
+def admit_collaboration_network_artifact(manifest, template, artifact_root, referenced):
+    """Admit the release copy of the source-pinned Community network."""
+    pin = manifest.get("collaboration_network")
+    if pin != template.get("collaboration_network"):
+        raise ValueError("prepared collaboration_network pin differs from source template")
+    if pin is None:
+        return
+    if not isinstance(pin, dict) or not isinstance(pin.get("head_cid"), str) or not pin["head_cid"]:
+        raise ValueError("collaboration_network.head_cid is required")
+    with regular_file(artifact_root, RELEASE_NETWORK_FILE).open("rb") as network:
+        data = network.read(MAX_RELEASE_NETWORK_BYTES + 1)
+    if len(data) > MAX_RELEASE_NETWORK_BYTES:
+        raise ValueError("Community network artifact exceeds its publication bound")
+    actual = catalog_head_cid(data)
+    if actual != pin["head_cid"]:
+        raise ValueError(f"{RELEASE_NETWORK_FILE} head {actual} does not match pin {pin['head_cid']}")
+    referenced.add(RELEASE_NETWORK_FILE)
+
+
 def file_record(path):
     return {"sha256": digest(path), "size": path.stat().st_size,
             "executable": bool(path.stat().st_mode & 0o111)}
@@ -337,9 +359,9 @@ def check_archive(path, extract_path=None, provider=False, home_cli_platform=Non
     if home_cli_platform is not None and (extract_path != "home-cli" or renderer not in regular):
         raise ValueError(f"{path.name}: Home CLI native renderer is missing")
     if engine_platform is not None and f"{extract_path}/llama-server" not in regular:
-        raise ValueError(f"{path.name}: ARM64 llama-server executable is missing")
+        raise ValueError(f"{path.name}: Linux llama-server executable is missing")
     if engine_platform is not None and engine_libraries == 0:
-        raise ValueError(f"{path.name}: ARM64 llama-server libraries are missing")
+        raise ValueError(f"{path.name}: Linux llama-server libraries are missing")
     if media_platform is not None:
         if extract_path != "media-tools":
             raise ValueError("media-tools extraction root differs from its contract")
@@ -506,10 +528,10 @@ def check_upstream_archive(path, recipe, receipt, platform):
             raise ValueError("upstream model payload has no GGUF header")
     else:
         check_native_header(header, mode, platform, entrypoint)
-        if recipe["component"] == "llama-server" and platform == "aarch64-linux":
+        if recipe["component"] == "llama-server" and platform in ("aarch64-linux", "x86_64-linux"):
             libraries = [name for name in headers if ".so" in PurePosixPath(name).name]
             if not libraries:
-                raise ValueError("upstream ARM64 llama-server libraries are missing")
+                raise ValueError("upstream Linux llama-server libraries are missing")
             for name in libraries:
                 check_native_header(*headers[name], platform, name)
 
@@ -656,7 +678,7 @@ def check_contents(root, platform, omissions):
                 check_archive(path, info["extract_path"], provider=is_provider_metadata,
                               home_cli_platform=platform if name == "home-cli" and not is_provider_metadata else None,
                               media_platform=platform if name == "media-tools" else None,
-                              engine_platform=platform if name == "llama-server" and platform == "aarch64-linux" else None)
+                              engine_platform=platform if name == "llama-server" and platform in ("aarch64-linux", "x86_64-linux") else None)
             elif name in browser_scripts and not is_metadata:
                 original = regular_file(SOURCE_ROOT, browser_scripts[name])
                 if path.read_bytes() != original.read_bytes() or not path.stat().st_mode & 0o111:
@@ -669,6 +691,7 @@ def check_contents(root, platform, omissions):
     actual = {str(path.relative_to(root / "artifacts"))
               for path in (root / "artifacts").rglob("*") if not path.is_dir() or path.is_symlink()}
     admit_model_catalog_artifact(manifest, root / "artifacts", referenced)
+    admit_collaboration_network_artifact(manifest, template, root / "artifacts", referenced)
     if actual != referenced:
         raise ValueError(f"artifact inventory mismatch: {sorted(actual ^ referenced)}")
     return manifest, template

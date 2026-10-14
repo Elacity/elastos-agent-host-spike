@@ -41,6 +41,19 @@ The installer needs `curl` and a working `python3`; on a Mac without the
 Command Line Tools it stops first and asks you to run `xcode-select --install`.
 Setup and updates need outgoing UDP to port 4433 for Carrier.
 
+Carrier uses mDNS by default to find other Homes on the same local network.
+It announces the Carrier node ID and local addresses. People Discovery controls
+signed Profile advertisements separately. Runtime checks Profile and message
+authority before it accepts Chat messages. Chat uses an encrypted Carrier
+connection.
+
+To turn mDNS off, set `ELASTOS_CARRIER_MDNS=0` in Runtime's environment before
+starting it. Restart Runtime after changing this setting. Keep mDNS on for
+automatic direct reconnection after a restart or local address change. Carrier
+owns peer address resolution. See
+[Community availability](COLLABORATION_NETWORK_PROFILE.md#availability) for
+the bootstrap and connection contract.
+
 The installer detects the platform (Linux `x86_64`/`aarch64` or
 macOS Apple silicon), verifies the signed release, installs Runtime, and
 fetches the Home profile from the trusted publisher. It
@@ -200,10 +213,15 @@ connection fails, the check fails.
 **What System shows.** System shows the new version and its release notes.
 
 **Approve and restart.** You approve the update with your passkey for that
-exact release. The Runtime downloads the binary and components by CID over
-Carrier (a component listed without a CID comes by its release name), stages
-everything beside the running Home and restarts Home. A download fails only
-after 30 seconds without data.
+exact release. The Runtime always downloads the new Runtime binary and
+`components.json` by CID over Carrier. A capsule is downloaded only when its
+signed record changed: the release lists one record per capsule archive
+(name, capsule version, SHA-256, size, CID, signer), each signed on its own by
+the publisher. Before any download the Runtime checks each record's signature
+against the publisher DIDs in `sources.json` and that it matches the
+capsule's entry in `components.json`; downloaded bytes must match the same
+SHA-256 and size. The Runtime stages everything beside the running Home and
+restarts Home. A download fails only after 30 seconds without data.
 
 **If it fails.** If the new release does not start, the previous release is
 restored.
@@ -255,7 +273,12 @@ Replace `<previous head CID>` with the saved CID. A plain update to an older
 release is refused. Undo needs the network: it fetches the changed parts of the
 previous release again by CID from the trusted source, so the source must be
 reachable. Undo keeps your identity, accounts, and user data, including data
-written after the update.
+written after the update. A Home that joined the release Community
+network stays joined, with its accepted revision, contacts, and messages. An
+older release with no network pin, or with an older pin for the same network,
+keeps the joined configuration in place. Leaving Community is a separate
+action. To keep a Home out of Community, choose that before its first start
+with `elastos setup --isolated`.
 
 For a legacy Home, the first update to a new publisher key uses the installer's
 re-trust step. After that step, Undo accepts only heads signed by the current

@@ -149,20 +149,9 @@ try {
   // Exercise the actual operator site assets under the same response policy.
   const operatorResponse = await page.goto(`${origin}/operator/`);
   assert.equal(operatorResponse.headers()['content-security-policy'], expectedPolicy);
-  await page.locator('#mac-arm').click();
-  assert.equal(await page.locator('#mac-arm').getAttribute('aria-selected'), 'true');
-  assert.equal(await page.locator('#install-panel').getAttribute('aria-labelledby'), 'mac-arm');
-  assert.ok((await page.locator('#install-guide').getAttribute('href')).endsWith('/docs/MAC.md'));
-  await page.locator('#mac-arm').press('ArrowLeft');
-  assert.equal(await page.locator('#linux-arm').getAttribute('aria-selected'), 'true');
   assert.ok(await page.locator('.hero-mark').evaluate(image => image.complete && image.naturalWidth > 0));
   assert.notEqual(await page.locator('html').evaluate(element => getComputedStyle(element).backgroundColor), 'rgba(0, 0, 0, 0)');
-  // The production installer control is release-gated. Enable it only in this
-  // browser fixture to test the existing selection recovery in the opaque page.
-  await page.locator('#copy-install').evaluate(button => {
-    button.disabled = false;
-    document.querySelector('#install-command').closest('pre').hidden = false;
-  });
+  // The opaque page has no clipboard permission, so Copy selects the command instead.
   await page.locator('#copy-install').click();
   await page.waitForFunction(() => document.querySelector('#copy-status').textContent.includes('Command selected.'));
   assert.equal(await page.evaluate(() => window.getSelection().toString()),

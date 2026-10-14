@@ -16,7 +16,8 @@ use bindings::{
     resolve_capsule_method_binding, static_capsule_method_binding, RuntimeCapsuleAffordanceBinding,
 };
 pub(super) use read_model::{
-    capsule_catalog_summary, capsule_interface_registry_summary, CapsuleCatalogResponse,
+    capsule_catalog_summary, capsule_interface_registry_summary,
+    capsule_interface_registry_summary_from_catalog, CapsuleCatalogResponse,
     CapsuleInterfaceRegistryResponse,
 };
 
@@ -49,6 +50,19 @@ pub(super) async fn capsule_catalog(
             Json(serde_json::json!({ "error": err.to_string() })),
         )
             .into_response(),
+    }
+}
+
+fn project_model_memory_fit(
+    catalog: &mut CapsuleCatalogResponse,
+    memory: Option<elastos_common::host_memory::HostMemory>,
+) {
+    for row in &mut catalog.capsules {
+        if row.source == "signed-model-catalog" {
+            row.model_memory_fit = row.model_content.as_ref().map(|metadata| {
+                elastos_common::host_memory::model_memory_fit(metadata.minimum_memory_mb, memory)
+            });
+        }
     }
 }
 
@@ -86,6 +100,10 @@ async fn caller_capsule_catalog_summary(
             }
         }
         let mut catalog = capsule_catalog_summary(&state.data_dir);
+        project_model_memory_fit(
+            &mut catalog,
+            elastos_common::host_memory::observe_host_memory(std::env::consts::OS).ok(),
+        );
         for row in &mut catalog.capsules {
             if row.model_content.is_some() {
                 row.model_runtime = Some(
@@ -149,7 +167,18 @@ pub(super) async fn capsule_interface_registry_summary_with_bindings(
     data_dir: &std::path::Path,
     registry: Option<&elastos_runtime::provider::ProviderRegistry>,
 ) -> read_model::CapsuleInterfaceRegistryResponse {
-    let mut summary = capsule_interface_registry_summary(data_dir);
+    capsule_interface_registry_summary_with_bindings_from_catalog(
+        &capsule_catalog_summary(data_dir),
+        registry,
+    )
+    .await
+}
+
+pub(super) async fn capsule_interface_registry_summary_with_bindings_from_catalog(
+    catalog: &CapsuleCatalogResponse,
+    registry: Option<&elastos_runtime::provider::ProviderRegistry>,
+) -> read_model::CapsuleInterfaceRegistryResponse {
+    let mut summary = capsule_interface_registry_summary_from_catalog(catalog);
     for entry in &mut summary.interfaces {
         let mut bindings = Vec::with_capacity(entry.interface.methods.len());
         for method in &entry.interface.methods {
@@ -648,8 +677,36 @@ async fn dispatch_capsule_affordance(
     }
 }
 
-/// A disk-space refusal keeps its reason and size; other failures stay generic.
+/// Known Runtime refusal facts have bounded prose; provider details stay private.
+#[cfg(unix)]
 fn preparation_invoke_error(error: anyhow::Error) -> (StatusCode, &'static str, String) {
+    if let Some(expired) = error
+        .downcast_ref::<crate::api::capsule_inventory::preparation::PreparationRequestExpired>(
+    ) {
+        return (
+            StatusCode::CONFLICT,
+            expired.public_class(),
+            expired.public_message().into(),
+        );
+    }
+    if let Some(memory) =
+        error.downcast_ref::<crate::api::capsule_inventory::preparation::PreparationMemoryRefusal>()
+    {
+        return (
+            StatusCode::CONFLICT,
+            memory.public_class(),
+            memory.public_message().into(),
+        );
+    }
+    if let Some(budget) =
+        error.downcast_ref::<crate::api::capsule_inventory::preparation::PreparationBudgetRefusal>()
+    {
+        return (
+            StatusCode::CONFLICT,
+            budget.public_class(),
+            budget.public_message().into(),
+        );
+    }
     if let Some(space) = error.downcast_ref::<elastos_common::NotEnoughFreeSpace>() {
         let reason = space.to_string();
         let reason = reason
@@ -849,6 +906,83 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[cfg(unix)]
+    #[test]
+    fn model_catalog_device_fit_is_a_signed_row_fact_with_safe_refusals() {
+        use crate::api::capsule_inventory::tests::{
+            model_catalog_fixture, write_model_catalog_fixture,
+        };
+        use elastos_common::host_memory::{HostMemory, ModelMemoryFit};
+        let root = tempfile::tempdir().unwrap();
+        write_model_catalog_fixture(root.path(), &model_catalog_fixture());
+        for (memory, expected) in [
+            (
+                Some(HostMemory {
+                    total: 16 << 30,
+                    available: 0,
+                    pressure_normal: false,
+                }),
+                ModelMemoryFit::Fits,
+            ),
+            (
+                Some(HostMemory {
+                    total: 4 << 30,
+                    available: 4 << 30,
+                    pressure_normal: false,
+                }),
+                ModelMemoryFit::Insufficient,
+            ),
+            (None, ModelMemoryFit::Unavailable),
+        ] {
+            let mut catalog = capsule_catalog_summary(root.path());
+            project_model_memory_fit(&mut catalog, memory);
+            assert_eq!(catalog.capsules.len(), 1);
+            assert_eq!(catalog.capsules[0].model_memory_fit, Some(expected));
+            assert_eq!(catalog.capsules[0].state, "unprepared");
+            let mut public = serde_json::to_value(&catalog).unwrap();
+            assert_eq!(public["counts"]["total"], catalog.capsules.len());
+            // Capsule count is public; raw device memory remains private.
+            public["counts"].as_object_mut().unwrap().remove("total");
+            let projected = serde_json::to_string(&public).unwrap();
+            assert!(!projected.contains(&root.path().display().to_string()));
+            assert!(!projected.contains("\"available\":") && !projected.contains("\"total\":"));
+        }
+        for refusal in [
+            crate::api::capsule_inventory::preparation::PreparationMemoryRefusal::Insufficient,
+            crate::api::capsule_inventory::preparation::PreparationMemoryRefusal::Unavailable,
+        ] {
+            let (status, code, message) = preparation_invoke_error(
+                anyhow::Error::new(refusal).context("private /secret/provider credential"),
+            );
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(code, refusal.public_class());
+            assert_eq!(message, refusal.public_message());
+            assert!(!message.contains("/secret") && !message.contains("credential"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_get_expired_request_shows_only_the_fixed_runtime_reason() {
+        let (status, code, message) = preparation_invoke_error(
+            anyhow::Error::new(
+                crate::api::capsule_inventory::preparation::PreparationRequestExpired,
+            )
+            .context("private provider /secret credential"),
+        );
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(code, elastos_model_contract::MODEL_REQUEST_EXPIRED_CODE);
+        assert_eq!(
+            message,
+            elastos_model_contract::MODEL_REQUEST_EXPIRED_MESSAGE
+        );
+        let (_, code, _) = preparation_invoke_error(anyhow::anyhow!(
+            elastos_model_contract::MODEL_REQUEST_EXPIRED_MESSAGE
+        ));
+        assert_eq!(code, "preparation_unavailable");
+    }
+
+    #[cfg(unix)]
     #[test]
     fn model_get_disk_refusal_keeps_the_reason_and_size() {
         let refused = anyhow::Error::new(elastos_common::NotEnoughFreeSpace { needed: 3 << 30 })
@@ -862,6 +996,27 @@ mod tests {
         );
         let (_, code, _) = preparation_invoke_error(anyhow::anyhow!("other failure"));
         assert_eq!(code, "preparation_unavailable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_get_budget_refusals_show_only_fixed_runtime_facts() {
+        use crate::api::capsule_inventory::preparation::PreparationBudgetRefusal;
+        for budget in [
+            PreparationBudgetRefusal::Cache,
+            PreparationBudgetRefusal::Memory,
+        ] {
+            let error = anyhow::Error::new(budget).context("private provider /secret credential");
+            let (status, code, message) = preparation_invoke_error(error);
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(code, budget.public_class());
+            assert_eq!(message, budget.public_message());
+            assert!(!message.contains("/secret") && !message.contains("credential"));
+        }
+        let (_, code, message) =
+            preparation_invoke_error(anyhow::anyhow!("private provider /secret credential"));
+        assert_eq!(code, "preparation_unavailable");
+        assert_eq!(message, "Model preparation is unavailable.");
     }
 
     #[tokio::test]

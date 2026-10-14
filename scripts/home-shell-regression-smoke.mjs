@@ -501,11 +501,11 @@ shellCore.shellState.currentSummary = firstRunSummary;
 shellSurface.renderDesktop(firstRunSummary);
 assert(
   JSON.stringify(shellCore.shellState.shellLayoutState.taskbar) === JSON.stringify([
+    "chat-room",
     "browser",
+    "system",
     "wallet",
     "documents",
-    "chat-room",
-    "system",
   ]),
   "fresh layout did not seed only the available core dock targets in canonical order",
   shellCore.shellState.shellLayoutState.taskbar,
@@ -2410,6 +2410,50 @@ assert(restoredBrowserLaunches.at(-1).query.url === "https://example.invalid/vis
   "session restore launched a hidden leftover Browser");
 shellCore.shellState.windows.clear();
 shellCore.shellState.activeWindowId = null;
+{
+  // A restore that finishes after the person opened the Assistant keeps the room.
+  const shellStages = await import(`../capsules/home-gui/browser/shell-stages.js?v=${moduleVersion}`);
+  let engaged = true;
+  let roomCloses = 0;
+  shellStages.bindAgentSpace({
+    available: () => true, busy: () => false, engaged: () => engaged,
+    open() {}, close() { roomCloses += 1; },
+  });
+  const restoreWithVisibleWindow = async () => {
+    shellCore.shellState.homeBrowserState.session = {
+      root_shell: "home-gui", browser_context_id: shellCore.shellState.browserContextId, active_stage: "desktop",
+      windows: [{ target: "browser", active: true, query: { url: "https://example.invalid/restored" } }],
+    };
+    await shellWindows.restoreShellSession();
+    shellCore.shellState.windows.clear();
+    shellCore.shellState.activeWindowId = null;
+  };
+  await restoreWithVisibleWindow();
+  assert(roomCloses === 0, "session restore closed an Assistant room opened while it ran");
+  // Opening -> restore -> close before the ring entered Agent: restored windows sit on their own Desktops.
+  shellCore.shellState.homeBrowserState.session = {
+    root_shell: "home-gui", browser_context_id: shellCore.shellState.browserContextId, active_stage: "desktop",
+    desktops: ["desk-restore-2"],
+    windows: [
+      { target: "browser", active: true, query: { url: "https://example.invalid/here" } },
+      { target: "browser", desktopSpaceId: "desk-restore-2", query: { url: "https://example.invalid/elsewhere" } },
+    ],
+  };
+  await shellWindows.restoreShellSession();
+  engaged = false;
+  const restoredBySpace = Object.fromEntries([...shellCore.shellState.windows.values()]
+    .map((entry) => [entry.desktopSpaceId === "desk-restore-2" ? "other" : "current", entry.node.dataset.spaceVisible]));
+  assert(shellStages.getActiveStageId() === shellStages.desktopStageId() && roomCloses === 0,
+    "restore during an opening room changed the Space or closed the room", shellStages.getActiveStageId());
+  assert(restoredBySpace.current === "true" && restoredBySpace.other === "false",
+    "restored windows were not placed on their Desktops while the room was opening", restoredBySpace);
+  shellCore.shellState.windows.clear();
+  shellCore.shellState.activeWindowId = null;
+  shellStages.restoreExtraDesktops([]);
+  await restoreWithVisibleWindow();
+  assert(roomCloses === 1, "session restore must still apply the saved Space when no room is open");
+  shellStages.bindAgentSpace(undefined);
+}
 const shellMenubar = await import(`../capsules/home-gui/browser/shell-menubar.js?v=${moduleVersion}`);
 const menuLaunches = [];
 shellMenubar.bindMenubar({
@@ -2836,6 +2880,32 @@ for (const [target, entry] of consumerEntries) {
   assert(!shellWindows.acceptHomeNavigation(entry, { ...report, query: {} }), "Changed actor accepted an existing binding");
   entry.targetId = oldTarget;
   assert(JSON.stringify(entry.launchQuery) === before, "Wrong actor/effect altered selector");
+
+  const sessionSaves = () => savedStatePatches.filter((patch) => Object.hasOwn(patch, "session")).length;
+  const settledQuery = { ...entry.launchQuery };
+  const savesBeforeRefresh = sessionSaves();
+  for (let refresh = 0; refresh < 8; refresh += 1) {
+    const hint = { ...report, sequence: record.sequence + 1, query: settledQuery };
+    assert(shellWindows.acceptHomeNavigation(entry, hint), `${target} rejected a fresh unchanged selection`);
+    assert(record.sequence === hint.sequence, `${target} did not advance its navigation guard`);
+    assert(!shellWindows.acceptHomeNavigation(entry, hint), `${target} accepted a replay after an unchanged selection`);
+  }
+  assert(sessionSaves() === savesBeforeRefresh, `${target} saved Home state for an unchanged selection`);
+  assert(shellWindows.acceptHomeNavigation(entry, { ...report, sequence: record.sequence + 1, query: null }),
+    `${target} rejected a loading document hint`);
+  assert(JSON.stringify(entry.launchQuery) === before && sessionSaves() === savesBeforeRefresh,
+    `${target} changed settled selection while loading`);
+  assert(shellWindows.acceptHomeNavigation(entry, { ...report, sequence: record.sequence + 1, query: {} }),
+    `${target} rejected an explicit selection clear`);
+  assert(sessionSaves() === savesBeforeRefresh + 1 && Object.keys(entry.launchQuery).length === 0,
+    `${target} did not persist its selection clear exactly once`);
+  assert(shellWindows.acceptHomeNavigation(entry, { ...report, sequence: record.sequence + 1, query: {} }),
+    `${target} rejected a fresh empty selection`);
+  assert(sessionSaves() === savesBeforeRefresh + 1, `${target} saved the same empty selection twice`);
+  assert(shellWindows.acceptHomeNavigation(entry, { ...report, sequence: record.sequence + 1, query: settledQuery }),
+    `${target} rejected its next settled selection`);
+  assert(sessionSaves() === savesBeforeRefresh + 2 && JSON.stringify(entry.launchQuery) === before,
+    `${target} did not persist its changed selection exactly once`);
 }
 await openHybrid("library", { query: { mode: "attach", returnTarget: "chat-room" } });
 const pickerEntry = [...shellCore.shellState.windows.values()].at(-1);

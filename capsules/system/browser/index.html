@@ -88,6 +88,7 @@
                     <div class="pc2-card-sublabel">Local browser credentials for this Home account.</div>
                   </div>
                   <span class="pc2-card-value system-value-muted" data-field="passkey-status" hidden></span>
+                  <button id="passkey-add" class="system-button system-button-secondary" type="button" hidden>Add passkey</button>
                 </div>
                 <div id="account-list" class="account-list" aria-live="polite"></div>
                 <dl class="system-fields compact-proof">
@@ -271,6 +272,16 @@
                 </dl>
               </div>
             </div>
+          </section>
+
+          <section class="pc2-section" id="community-membership" aria-labelledby="community-title" hidden>
+            <h2 id="community-title" class="pc2-section-title">Community</h2>
+            <div class="pc2-group"><div class="pc2-group-row">
+              <div class="pc2-card-label">This Home</div>
+              <p class="pc2-card-sublabel" data-field="community-detail"></p>
+              <button id="community-toggle" class="pc2-btn pc2-btn-secondary" type="button" disabled>Leave Community</button>
+              <div class="system-status" data-field="community-status" role="status" hidden></div>
+            </div></div>
           </section>
 
           <section class="pc2-section" aria-labelledby="technical-title">

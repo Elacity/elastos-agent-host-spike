@@ -253,7 +253,7 @@ fn complete_pair_admission_refuses_every_changed_binding_before_migration() {
             "release signer" => {
                 fixture.release = signed(release["payload"].take(), "elastos.release.v1", 72)
             }
-            "channel" => fixture.source.channel = "canary".into(),
+            "channel" => fixture.source.channel = "jetson-test".into(),
             "version" => fixture.source.installed_version = "0.7.1".into(),
             "head cid" => fixture.source.head_cid = raw_cid(b"other head"),
             "release cid" => {
@@ -302,6 +302,15 @@ fn complete_pair_admission_refuses_every_changed_binding_before_migration() {
         );
         assert_eq!(fixture.snapshot(), before, "setup: {case}");
     }
+}
+
+#[test]
+fn canary_source_admits_its_signers_installed_stable_pair() {
+    // A canary Home that updated in System to a stable release keeps its subscription.
+    let mut fixture = Fixture::new();
+    fixture.source.channel = "canary".into();
+    fixture.publish();
+    assert_eq!(fixture.load().unwrap().release, fixture.release);
 }
 
 #[test]

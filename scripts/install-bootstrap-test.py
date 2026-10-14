@@ -143,7 +143,7 @@ def pinned_components(catalog=CATALOG):
     return json.dumps(manifest, sort_keys=True).encode() + b"\n"
 
 
-def installable_fixture(runtime=RUNTIME_STUB, components=COMPONENTS, version="0.7.1"):
+def installable_fixture(runtime=RUNTIME_STUB, components=COMPONENTS, version="0.7.1", release_extra=None):
     """Deterministic signed head/release advertising the fixture Runtime stub and manifest."""
     release_payload = {
         "schema": "elastos.release/v1", "version": version, "channel": "stable",
@@ -151,7 +151,8 @@ def installable_fixture(runtime=RUNTIME_STUB, components=COMPONENTS, version="0.
         "platforms": {"x86_64-linux": {
             "binary": {"cid": "binary-a", "sha256": hashlib.sha256(runtime).hexdigest(), "size": len(runtime)},
             "components": {"cid": "components-a", "sha256": hashlib.sha256(components).hexdigest(),
-                           "size": len(components)}}}}
+                           "size": len(components)}}},
+        **(release_extra or {})}
     signed_release = sign_envelope(release_payload, "elastos.release.v1")
     release = encode_envelope(signed_release)
     head_payload = {
@@ -761,7 +762,7 @@ validate_release_identity "$1" "$2"
         backend.sign.return_value = bytes(64)
         backend.verify.return_value = True
         prepared = SimpleNamespace(publisher_did=FIXTURE_DID, files=(), release=signer.json_bytes(payload),
-                                   updated_at=1, prev_head_cid=None)
+                                   updated_at=1, prev_head_cid=None, capsule_records=())
         publication = dict(signer.sign_publication(prepared, backend))
         release = publication["release.json"]
         head = json.loads(publication["release-head.json"])["payload"]
@@ -898,6 +899,22 @@ class InstallationTests(unittest.TestCase):
                         self.assertIn(f"\nTMPDIR={sandbox.root / 'tmp'}\n", marker.read_text())
                         self.assertEqual(sandbox.runtime_calls()[-1], "setup")
                     self.assertEqual(list((sandbox.root / "tmp").iterdir()), [])
+
+    def test_release_listing_capsule_records_installs_unchanged(self):
+        # Installers from 0.8.0-alpha.13 on read named release fields only, so a
+        # release that lists per-capsule records still installs through them.
+        record = sign_envelope({"schema": "elastos.capsule.record/v1", "name": "shell", "platform": "*",
+                                "capsule_version": None, "sha256": "a" * 64, "size": 1,
+                                "cid": "bafkreifixture", "release_path": "shell-linux-amd64"},
+                               "elastos.capsule.record.v1")
+        did, head, release = installable_fixture(release_extra={"capsule_records": [record]})
+        with InstallerSandbox(head, release, did) as sandbox:
+            self.existing_installation(sandbox)
+            sandbox.respond("binary", RUNTIME_STUB)
+            result, requests = sandbox.run("--install-only")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(requests, self.REQUESTS)
+            self.assertEqual((sandbox.root / "candidate" / "release.json").read_bytes(), release)
 
     def test_piped_run_prints_plain_numbered_steps_and_ready_summary(self):
         # curl | bash with captured stdout is the CI and log case: no colour,
@@ -1440,18 +1457,21 @@ prepare_browser_linux_host
                                'exit "${BROWSER_SETUP_RESULT:-0}"\n')
             runtime.chmod(0o755)
             script = HELPERS + """
-INSTALL_DIR="$1" INSTALL_ONLY=false DATA_DIR="$1/data"
+INSTALL_DIR="$1" INSTALL_ONLY=false DATA_DIR="$1/data" ISOLATED="$3"
 export CALLS="$1/calls" HOST_READY="$1/host-ready" BROWSER_SETUP_RESULT="$2"
 prepare_browser_linux_host() { touch "$HOST_READY"; BROWSER_LINUX_HOST_READY=true; printf 'HOST_READY\\n' >> "$CALLS"; }
 show_ready() { printf 'HOME_READY\\n' >> "$CALLS"; }
 finish_install
 """
-            for browser_result in [0, 7]:
-                calls, ready = root / 'calls', root / 'host-ready'
-                calls.unlink(missing_ok=True); ready.unlink(missing_ok=True)
-                result = shell(script, root, browser_result)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(calls.read_text().splitlines(), ['SETUP:setup', 'HOST_READY', 'SETUP:setup', 'HOME_READY'])
+            for isolated in ['false', 'true']:
+                for browser_result in [0, 7]:
+                    calls, ready = root / 'calls', root / 'host-ready'
+                    calls.unlink(missing_ok=True); ready.unlink(missing_ok=True)
+                    result = shell(script, root, browser_result, isolated)
+                    setup = 'SETUP:setup --isolated' if isolated == 'true' else 'SETUP:setup'
+                    with self.subTest(isolated=isolated, browser_result=browser_result):
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(calls.read_text().splitlines(), [setup, 'HOST_READY', setup, 'HOME_READY'])
 
     def test_rerun_with_retained_linux_helper_never_asks_for_sudo_after_setup_retires_it(self):
         # An earlier release left the helper and its check now fails. Setup runs

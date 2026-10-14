@@ -182,13 +182,9 @@ pub(super) fn check_matches_source(
     source: &crate::sources::TrustedSource,
     check: &crate::operator_control::OperatorUpdateCheck,
 ) -> bool {
-    let channel = if source.channel.trim().is_empty() {
-        "stable"
-    } else {
-        source.channel.trim()
-    };
+    // The offer carries its signed channel; the source's policy admits it.
     check.source_name == source.name
-        && check.channel == channel
+        && crate::update::verify_source_channel(source, &check.channel).is_ok()
         && check.current_version == source.installed_version
         && source.publisher_dids.contains(&check.publisher_did)
 }

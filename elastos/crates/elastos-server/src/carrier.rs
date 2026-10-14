@@ -1330,9 +1330,9 @@ enum CarrierNodeNetwork {
     /// Operator configuration cannot select this value.
     Public,
     /// Direct connections only. The Minimal preset has no public Iroh relay
-    /// and no public address discovery. Peers use explicit tickets and
-    /// MemoryLookup. An approved ElastOS relay stays CR3. This constructor
-    /// rejects `ELASTOS_RELAY_URL`.
+    /// and no public address discovery. Peers resolve LAN addresses through
+    /// mDNS and explicit tickets through MemoryLookup. An approved ElastOS relay
+    /// stays CR3. This constructor rejects `ELASTOS_RELAY_URL`.
     Isolated,
 }
 
@@ -1409,6 +1409,98 @@ fn published_direct_endpoint_addr(addr: iroh::EndpointAddr) -> iroh::EndpointAdd
     let mut next = addr;
     next.addrs.retain(|transport| transport.is_ip());
     next
+}
+
+/// The address a ticket shared beyond this host carries (#336). When the
+/// endpoint has a public address, loopback, link-local, container bridge, LAN
+/// and CGNAT addresses are dropped: they reach nobody else, and LAN peers find
+/// each other through mDNS. A host with no public address (a LAN or a test)
+/// keeps its addresses. The shell-scope `get_ticket` keeps every address.
+fn exported_endpoint_addr(addr: iroh::EndpointAddr) -> iroh::EndpointAddr {
+    let public = |transport: &iroh::TransportAddr| match transport {
+        iroh::TransportAddr::Ip(addr) => is_public_ip(addr.ip()),
+        _ => false,
+    };
+    let mut next = addr;
+    if next.addrs.iter().any(public) {
+        next.addrs
+            .retain(|transport| !transport.is_ip() || public(transport));
+    }
+    next
+}
+
+/// Global unicast, excluding the IANA special-use ranges.
+fn is_public_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => is_public_ipv4(v4),
+        std::net::IpAddr::V6(v6) => {
+            let s = v6.segments();
+            // IPv4-mapped (::ffff:0:0/96) and NAT64 (64:ff9b::/96) carry an
+            // IPv4 address. IPv4-compatible (::/96) is deprecated: never public.
+            let embedded = std::net::Ipv4Addr::from((u32::from(s[6]) << 16) | u32::from(s[7]));
+            if s[..5] == [0; 5] && s[5] == 0xffff {
+                return is_public_ipv4(embedded);
+            }
+            if s[..6] == [0; 6] {
+                return false;
+            }
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                return is_public_ipv4(embedded);
+            }
+            // 6to4 (2002::/16) carries an IPv4 address in bits 16..48.
+            if s[0] == 0x2002 {
+                return is_public_ipv4(std::net::Ipv4Addr::from(
+                    (u32::from(s[1]) << 16) | u32::from(s[2]),
+                ));
+            }
+            let bits = u128::from(v6);
+            let within =
+                |net: &(u128, u32)| bits & !u128::MAX.checked_shr(net.1).unwrap_or(0) == net.0;
+            // Globally reachable blocks inside the IETF 2001::/23 assignment.
+            if GLOBAL_IPV6_IN_IETF.iter().any(within) {
+                return true;
+            }
+            (bits >> 125) == 1 && !SPECIAL_USE_IPV6.iter().any(within)
+        }
+    }
+}
+
+/// IANA IPv6 Special-Purpose Address Registry entries inside 2000::/3 that
+/// are not globally reachable, as (prefix, length). Everything outside
+/// 2000::/3 (::, ::1, 100::/64, fc00::/7, fe80::/10, multicast) is excluded
+/// by the 2000::/3 check; mapped, compatible, NAT64 and 6to4 are judged by
+/// their IPv4 address above.
+const SPECIAL_USE_IPV6: [(u128, u32); 3] = [
+    (0x2001_0000 << 96, 23), // IETF assignments: Teredo, benchmarking, ORCHID
+    (0x2001_0db8 << 96, 32), // documentation
+    (0x3fff_0000 << 96, 20), // documentation
+];
+
+/// Globally reachable sub-blocks of 2001::/23 (PCP, TURN and DNS-SD anycast,
+/// AMT, AS112-v6).
+const GLOBAL_IPV6_IN_IETF: [(u128, u32); 5] = [
+    ((0x2001_0001 << 96) | 1, 128),
+    ((0x2001_0001 << 96) | 2, 128),
+    ((0x2001_0001 << 96) | 3, 128),
+    (0x2001_0003 << 96, 32),
+    (0x2001_0004_0112 << 80, 48),
+];
+
+fn is_public_ipv4(v4: std::net::Ipv4Addr) -> bool {
+    let [a, b, c, _] = v4.octets();
+    !(a == 0
+        || a == 10
+        || (a == 100 && (b & 0xc0) == 64)
+        || a == 127
+        || (a == 169 && b == 254)
+        || (a == 172 && (b & 0xf0) == 16)
+        || (a == 192 && b == 0 && (c == 0 || c == 2))
+        || (a == 192 && b == 88 && c == 99)
+        || (a == 192 && b == 168)
+        || (a == 198 && (b & 0xfe) == 18)
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
+        || a >= 224)
 }
 
 fn direct_only_relay_only_error(endpoints: &[iroh::EndpointAddr]) -> Option<serde_json::Value> {
@@ -1508,21 +1600,48 @@ async fn bind_carrier_endpoint(
     allow_ephemeral_fallback: bool,
 ) -> anyhow::Result<Endpoint> {
     let builder = || short_lived_endpoint_builder(secret_key.clone(), network, approved_relay);
-    let requested = builder()?;
-    // Iroh retains the other address family's default wildcard listener.
-    // A configured loopback endpoint uses only its requested IP transport.
-    // Its local-only address has no external router port to map.
-    let requested = if requested_bind_addr.ip().is_loopback() {
-        requested
-            .clear_ip_transports()
-            .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
-    } else {
-        requested
+    let requested = || -> anyhow::Result<iroh::endpoint::Builder> {
+        let requested = builder()?;
+        // Iroh retains the other address family's default wildcard listener.
+        // A configured loopback endpoint uses only its requested IP transport.
+        // Its local-only address has no external router port to map.
+        let requested = if requested_bind_addr.ip().is_loopback() {
+            requested
+                .clear_ip_transports()
+                .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
+        } else {
+            requested
+        };
+        requested.bind_addr(requested_bind_addr).map_err(|error| {
+            anyhow::anyhow!("Invalid Carrier address {requested_bind_addr}: {error}")
+        })
     };
-    let bound = requested.bind_addr(requested_bind_addr).map_err(|error| {
-        anyhow::anyhow!("Invalid Carrier address {requested_bind_addr}: {error}")
-    })?;
-    match bound.bind().await {
+    // An IPv4 wildcard on a fixed port also listens on the same IPv6 port, so
+    // a published ticket keeps one address per family across restarts (#336).
+    // If that IPv6 port is taken or the host has no IPv6, the Runtime keeps
+    // iroh's default ephemeral IPv6 listener instead.
+    let fixed_v6 = match requested_bind_addr {
+        std::net::SocketAddr::V4(v4) if v4.ip().is_unspecified() && v4.port() != 0 => Some(
+            std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, v4.port())),
+        ),
+        _ => None,
+    };
+    let first = match fixed_v6 {
+        Some(v6) => {
+            let bound = requested()?
+                .bind_addr(v6)
+                .map_err(|error| anyhow::anyhow!("Invalid Carrier IPv6 address {v6}: {error}"))?;
+            match bound.bind().await {
+                Ok(endpoint) => return Ok(endpoint),
+                Err(error) => {
+                    warn!("carrier: cannot listen on {v6} ({error}); IPv6 uses a random port");
+                    requested()?.bind().await
+                }
+            }
+        }
+        None => requested()?.bind().await,
+    };
+    match first {
         Ok(endpoint) => Ok(endpoint),
         Err(error) if !allow_ephemeral_fallback => Err(error).with_context(|| {
             format!("Failed to bind requested Carrier address {requested_bind_addr}")
@@ -1707,20 +1826,17 @@ async fn start_carrier_node_with_network(
     )
     .await?;
 
-    // Add mDNS for LAN discovery alongside the N0 preset lookup services.
-    match network {
-        CarrierNodeNetwork::Public if carrier_mdns_enabled() => {
-            if let Ok(mdns) = MdnsAddressLookup::builder().build(endpoint.id()) {
-                endpoint
-                    .address_lookup()
-                    .context("Carrier endpoint closed before mDNS setup")?
-                    .add(mdns);
-            }
+    // LAN discovery exchanges IP addresses for direct connections.
+    // The endpoint's IP-only policy also filters the published addresses.
+    if carrier_mdns_enabled() {
+        if let Ok(mdns) = MdnsAddressLookup::builder().build(endpoint.id()) {
+            endpoint
+                .address_lookup()
+                .context("Carrier endpoint closed before mDNS setup")?
+                .add(mdns);
         }
-        CarrierNodeNetwork::Public => {
-            info!("carrier: mDNS discovery disabled by ELASTOS_CARRIER_MDNS");
-        }
-        CarrierNodeNetwork::Isolated => {}
+    } else {
+        info!("carrier: mDNS discovery disabled by ELASTOS_CARRIER_MDNS");
     }
 
     // Add MemoryLookup for explicit peer addresses (--connect tickets)
@@ -2662,7 +2778,10 @@ async fn carrier_provider_invoke_registry(
         }),
     );
 
-    let result = if target == "custody" {
+    let result = if target == "custody"
+        || target == crate::collaboration_history::HISTORY_PROVIDER
+        || target == crate::collaboration_transport::SHARED_PROVIDER
+    {
         registry
             .send_runtime_provider_target_raw(target, &request)
             .await
@@ -2696,6 +2815,8 @@ fn carrier_provider_target_allowed(target: &str) -> bool {
             | "collaboration"
             | "collaboration-direct"
             | "collaboration-profile"
+            | "collaboration.history"
+            | "collaboration.shared"
     )
 }
 
@@ -7548,6 +7669,13 @@ impl Provider for CarrierGossipProvider {
                 } else {
                     watcher.get()
                 };
+                // The publisher bootstrap asks for the ticket it shares beyond
+                // this host; local callers keep every address (#336).
+                let addr = if request["exported"].as_bool() == Some(true) {
+                    exported_endpoint_addr(addr)
+                } else {
+                    addr
+                };
                 let ticket_json = serde_json::json!({
                     "topic": null,
                     "endpoints": [addr],
@@ -8312,6 +8440,8 @@ fn carrier_endpoint_matches_peer(endpoint: &iroh::EndpointAddr, peer_did: &str) 
     did_to_public_key(peer_did).is_some_and(|public_key| endpoint.id == public_key)
 }
 
+// Its raw fetch methods are still crate-visible; component bytes go through
+// AdmittedRow functions. Restricting these methods is #369.
 pub struct CarrierClient {
     conn: iroh::endpoint::Connection,
     _endpoint: Endpoint,
@@ -8724,13 +8854,27 @@ impl CarrierClient {
             "{operation} exceeds its {max_bytes}-byte bound ({len} bytes declared)"
         );
         let mut content = vec![0u8; len as usize];
+        // Only a scoped caller (setup's progress line) is told how far the
+        // body has come, at most once per `REPLY_PROGRESS_CHUNK` bytes. The
+        // read itself is unchanged, so the idle rule above still decides.
+        let progress = REPLY_PROGRESS.try_with(std::sync::Arc::clone).ok();
+        if let Some(progress) = &progress {
+            progress(0, len);
+        }
         let mut filled = 0;
+        let mut reported = 0;
         while filled < content.len() {
             let read = tokio::time::timeout(idle, recv.read(&mut content[filled..]))
                 .await
                 .map_err(stalled)??;
             filled += read
                 .ok_or_else(|| anyhow::anyhow!("{operation} ended early ({filled}/{len} bytes)"))?;
+            if let Some(progress) = &progress {
+                if filled == content.len() || filled - reported >= REPLY_PROGRESS_CHUNK {
+                    reported = filled;
+                    progress(filled as u64, len);
+                }
+            }
         }
         Ok(content)
     }
@@ -8759,15 +8903,23 @@ impl CarrierClient {
         send.finish().context(CarrierTransportFailure)?;
 
         let mut reader = BufReader::new(recv);
-        // A bounded read holds at most 64 KiB of base64 plus its envelope;
-        // a holder that sends more is refused before it is buffered.
-        let (line, _budget) = if bounded {
-            let line = read_peer_line(
-                &mut reader,
-                CARRIER_BOUNDED_INVOKE_MAX_RESPONSE_BYTES,
-                CARRIER_PROVIDER_REPLY_WAIT,
-            )
-            .await;
+        let reply_bound = if invocation.target == crate::collaboration_history::HISTORY_PROVIDER
+            && invocation.op == "read"
+            && invocation.transfer == ProviderTransfer::Json
+        {
+            Some(crate::collaboration_history::MAX_HISTORY_CARRIER_REPLY_BYTES as u64)
+        } else if invocation.target == crate::collaboration_transport::SHARED_PROVIDER
+            && invocation.op == "deliver"
+            && invocation.transfer == ProviderTransfer::Json
+        {
+            Some(crate::collaboration_transport::MAX_SHARED_CARRIER_REPLY_BYTES as u64)
+        } else if bounded {
+            Some(CARRIER_BOUNDED_INVOKE_MAX_RESPONSE_BYTES)
+        } else {
+            None
+        };
+        let (line, _budget) = if let Some(limit) = reply_bound {
+            let line = read_peer_line(&mut reader, limit, CARRIER_PROVIDER_REPLY_WAIT).await;
             (line, None)
         } else if whole_content {
             (
@@ -8788,6 +8940,12 @@ impl CarrierClient {
             }
         };
         let line = line.map_err(carrier_answer_read_error)?;
+        if let Some(limit) = reply_bound {
+            anyhow::ensure!(
+                line.ends_with('\n'),
+                "bounded Carrier provider response exceeds {limit} bytes"
+            );
+        }
         let response: serde_json::Value = serde_json::from_str(line.trim())?;
         carrier_provider_invoke_result(response)
     }
@@ -8890,6 +9048,23 @@ impl CarrierClient {
             .transpose()?
             .ok_or_else(|| anyhow::anyhow!("Carrier gossip pull response missing messages"))
     }
+}
+
+/// Receives `(bytes_read, bytes_declared)` for each byte reply read inside
+/// [`with_reply_progress`]. Replies read outside a scope report nothing.
+pub(crate) type ReplyProgress = std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>;
+
+tokio::task_local! {
+    static REPLY_PROGRESS: ReplyProgress;
+}
+
+const REPLY_PROGRESS_CHUNK: usize = 64 * 1024;
+
+pub(crate) async fn with_reply_progress<F: std::future::Future>(
+    progress: ReplyProgress,
+    future: F,
+) -> F::Output {
+    REPLY_PROGRESS.scope(progress, future).await
 }
 
 /// A download fails only when no bytes arrive for this long, never on total
@@ -10869,9 +11044,50 @@ pub(crate) mod tests {
         assert!(!response.to_string().contains("\"connect_ticket\":"));
     }
 
+    #[tokio::test]
+    async fn test_carrier_shared_dispatch_uses_private_runtime_target_and_authenticated_source() {
+        let registry = ProviderRegistry::new();
+        let target = crate::collaboration_transport::SHARED_PROVIDER;
+        registry
+            .register_runtime_provider_target(target, Arc::new(MockCarrierContentProvider))
+            .await
+            .unwrap();
+        let request = serde_json::json!({
+            "source": target, "target": target, "operation": "deliver", "transfer": "json",
+            "request": {"op":"deliver", "_runtime_invocation": {
+                "schema":"elastos.provider.invocation/v1", "source":target, "target":target,
+                "op":"deliver", "capability":format!("provider:{target}->{target}:deliver"),
+                "transport":"carrier-provider-plane", "carrier":null, "transfer":"json",
+                "range":null, "progress":null
+            }}
+        });
+        assert!(registry
+            .send_raw(target, &request["request"])
+            .await
+            .is_err());
+        let source = authenticated_test_source_endpoint();
+        let response = carrier_provider_invoke_registry(&registry, &request, &source)
+            .await
+            .unwrap();
+        assert_eq!(response["ok"], true);
+        assert_eq!(
+            response["result"]["data"]["runtime_invocation"]["carrier"]["source_endpoint_did"],
+            public_key_to_did(&source).unwrap()
+        );
+        let mut forged = request;
+        forged["request"]["_runtime_invocation"]["carrier"] =
+            serde_json::json!({"source_endpoint_did":"forged"});
+        let refused = carrier_provider_invoke_registry(&registry, &forged, &source)
+            .await
+            .unwrap();
+        assert_eq!(refused["ok"], false);
+        assert_eq!(refused["code"], "invalid_provider_invocation");
+    }
+
     #[test]
     fn test_carrier_provider_target_admission_keeps_protected_runtime_targets_narrow() {
         assert!(carrier_provider_target_allowed("custody"));
+        assert!(carrier_provider_target_allowed("collaboration.shared"));
         assert!(!carrier_provider_target_allowed("protect"));
         assert!(!carrier_provider_target_allowed("media"));
         assert!(!carrier_provider_target_allowed(
@@ -10896,6 +11112,82 @@ pub(crate) mod tests {
         assert_eq!(endpoint.bound_sockets(), vec![bind_addr]);
         releasing.await.unwrap();
         endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn reply_progress_reports_chunks_inside_its_scope_only() {
+        let server = Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .clear_ip_transports()
+            .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
+            .alpns(vec![CARRIER_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let address = wait_for_direct_endpoint_addr(&server).await;
+        let payload: Vec<u8> = (0..200_000u32).map(|index| index as u8).collect();
+        let served = payload.clone();
+        let server_endpoint = server.clone();
+        let serving = tokio::spawn(async move {
+            // Two complete replies, then one that declares more than the bound.
+            for declared in [served.len() as u64, served.len() as u64, 1u64 << 20] {
+                let conn = server_endpoint.accept().await.unwrap().await.unwrap();
+                let (mut send, recv) = conn.accept_bi().await.unwrap();
+                let mut request = String::new();
+                BufReader::new(recv).read_line(&mut request).await.unwrap();
+                send.write_all(&declared.to_be_bytes()).await.unwrap();
+                if declared == served.len() as u64 {
+                    send.write_all(&served).await.unwrap();
+                }
+                send.finish().unwrap();
+                conn.closed().await;
+            }
+        });
+        let reports = Arc::new(StdMutex::new(Vec::new()));
+        let recorded = Arc::clone(&reports);
+        let sink: ReplyProgress =
+            Arc::new(move |read, declared| recorded.lock().unwrap().push((read, declared)));
+        let fetch = |max_bytes| {
+            let address = address.clone();
+            async move {
+                let client = CarrierClient::connect_endpoint_addr(address, 5)
+                    .await
+                    .unwrap();
+                let result = client.fetch_file_bounded("artifact", max_bytes).await;
+                client.close().await;
+                result
+            }
+        };
+
+        let bytes = with_reply_progress(Arc::clone(&sink), fetch(1 << 21))
+            .await
+            .unwrap();
+        assert_eq!(bytes, payload);
+        let len = payload.len() as u64;
+        let seen = reports.lock().unwrap().clone();
+        assert_eq!(seen.first(), Some(&(0, len)));
+        assert_eq!(seen.last(), Some(&(len, len)));
+        assert!(seen.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        // Reports are spaced at least one chunk apart, so they stay few.
+        assert!(seen.len() >= 2, "{seen:?}");
+        assert!(seen.len() <= 1 + payload.len().div_ceil(REPLY_PROGRESS_CHUNK));
+        assert!(seen[1..seen.len() - 1]
+            .windows(2)
+            .all(|pair| pair[1].0 - pair[0].0 >= REPLY_PROGRESS_CHUNK as u64));
+
+        reports.lock().unwrap().clear();
+        assert_eq!(fetch(1 << 21).await.unwrap(), payload);
+        assert!(reports.lock().unwrap().is_empty());
+
+        let error = with_reply_progress(sink, fetch(1 << 19)).await.unwrap_err();
+        assert!(error.to_string().contains("byte bound"), "{error}");
+        assert!(reports.lock().unwrap().is_empty());
+        tokio::time::timeout(Duration::from_secs(5), serving)
+            .await
+            .unwrap()
+            .unwrap();
+        server.close().await;
     }
 
     #[tokio::test]
@@ -10935,12 +11227,20 @@ pub(crate) mod tests {
         sources.default_source = source.name.clone();
         sources.sources.push(source);
         crate::sources::save_trusted_sources(dir.path(), &sources).unwrap();
+        // The fixture row names the bytes the source serves.
+        let row = crate::capsule_record::AdmittedRow::for_test(
+            "artifact",
+            &serde_json::from_value(serde_json::json!({
+                "release_path": "artifact", "size": 7,
+                "checksum": format!("sha256:{:x}", Sha256::digest(b"fixture")),
+            }))
+            .unwrap(),
+        );
         let refused = tokio::time::timeout(
             Duration::from_secs(5),
             crate::setup::fetch_first_party_component_via_carrier(
                 dir.path(),
-                None,
-                "artifact",
+                &row,
                 crate::setup::FirstPartyCarrierContext::Setup,
             ),
         )
@@ -10972,8 +11272,7 @@ pub(crate) mod tests {
         for _ in 0..2 {
             let bytes = crate::setup::fetch_first_party_component_via_carrier(
                 dir.path(),
-                None,
-                "artifact",
+                &row,
                 crate::setup::FirstPartyCarrierContext::Setup,
             )
             .await
@@ -11072,8 +11371,7 @@ pub(crate) mod tests {
                 Duration::from_secs(10),
                 crate::setup::install_first_party_component_via_carrier(
                     dir.path(),
-                    "fixture-tool",
-                    &info,
+                    &crate::capsule_record::AdmittedRow::for_test("fixture-tool", &info),
                     &dest,
                     crate::setup::FirstPartyCarrierContext::Setup,
                 ),
@@ -11297,6 +11595,7 @@ pub(crate) mod tests {
                 Some(&old_components),
                 &new_components,
                 "*",
+                &crate::capsule_record::UpdateRecords::default(),
             ),
         )
         .await
@@ -11314,6 +11613,7 @@ pub(crate) mod tests {
                 Some(&old_components),
                 &new_components,
                 "*",
+                &crate::capsule_record::UpdateRecords::default(),
                 crate::setup::FirstPartyCarrierContext::Runtime,
             ),
         )
@@ -12803,6 +13103,127 @@ pub(crate) mod tests {
             _local_dir: local_dir,
             _remote_dir: remote_dir,
         }
+    }
+
+    struct HistoryWireProbe {
+        bytes: Arc<std::sync::atomic::AtomicUsize>,
+        requests: Arc<StdMutex<Vec<serde_json::Value>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for HistoryWireProbe {
+        async fn handle(
+            &self,
+            _request: ResourceRequest,
+        ) -> Result<ResourceResponse, ProviderError> {
+            Err(ProviderError::Provider("history is Runtime-owned".into()))
+        }
+        fn schemes(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+        fn name(&self) -> &'static str {
+            "history-wire-probe"
+        }
+        async fn send_raw(
+            &self,
+            request: &serde_json::Value,
+        ) -> Result<serde_json::Value, ProviderError> {
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(
+                serde_json::json!({"body":"x".repeat(self.bytes.load(std::sync::atomic::Ordering::SeqCst))}),
+            )
+        }
+    }
+
+    async fn assert_private_carrier_reply_bound(target: &str, operation: &str, limit: usize) {
+        let fixture = peer_did_route_fixture(181, 182).await;
+        let payload_size = 32 * 1024;
+        assert!(payload_size < limit);
+        let size = Arc::new(std::sync::atomic::AtomicUsize::new(payload_size));
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        fixture
+            ._remote_registry
+            .register_runtime_provider_target(
+                target,
+                Arc::new(HistoryWireProbe {
+                    bytes: size.clone(),
+                    requests: requests.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(fixture
+            ._remote_registry
+            .send_raw(target, &serde_json::json!({"op":operation}))
+            .await
+            .is_err());
+        let invocation = ProviderInvocation {
+            source: target.into(),
+            target: target.into(),
+            op: operation.into(),
+            request: serde_json::json!({"op":operation}),
+            transfer: ProviderTransfer::Json,
+            range: None,
+            progress: None,
+            transport: ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
+                peer_did: fixture.remote_did.clone(),
+                timeout_ms: Some(5_000),
+            }),
+        };
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            fixture.local_registry.invoke_provider(invocation.clone()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response["body"], "x".repeat(payload_size));
+        let mut request = requests.lock().unwrap()[0].clone();
+        assert_eq!(
+            request["_runtime_invocation"]["carrier"]["source_endpoint_did"],
+            public_key_to_did(&fixture.local_node.endpoint.id()).unwrap()
+        );
+        // The receiving Runtime owns this metadata; wire callers supply null.
+        request["_runtime_invocation"]["carrier"] = serde_json::Value::Null;
+        size.store(limit + 1, std::sync::atomic::Ordering::SeqCst);
+        let client = CarrierClient::connect_known_endpoint(
+            &fixture.local_node.endpoint,
+            fixture.remote_addr.clone(),
+            5,
+        )
+        .await
+        .unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.invoke_provider(&invocation, request),
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(&format!("exceeds {limit} bytes")), "{error}");
+        shutdown_test_carrier_node(fixture.remote_node).await;
+        shutdown_test_carrier_node(fixture.local_node).await;
+    }
+
+    #[tokio::test]
+    async fn private_history_carrier_read_authenticates_source_and_bounds_the_wire_reply() {
+        assert_private_carrier_reply_bound(
+            crate::collaboration_history::HISTORY_PROVIDER,
+            "read",
+            crate::collaboration_history::MAX_HISTORY_CARRIER_REPLY_BYTES,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn private_shared_carrier_delivery_authenticates_source_and_bounds_the_wire_reply() {
+        assert_private_carrier_reply_bound(
+            crate::collaboration_transport::SHARED_PROVIDER,
+            "deliver",
+            crate::collaboration_transport::MAX_SHARED_CARRIER_REPLY_BYTES,
+        )
+        .await;
     }
 
     fn peer_did_invocation(peer_did: &str) -> ProviderInvocation {
@@ -16297,6 +16718,185 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn exported_ticket_lists_only_public_addresses() {
+        let peer = SecretKey::from_bytes(&[70u8; 32]).public();
+        let ips = |addrs: &[&str]| {
+            let addr = iroh::EndpointAddr::from(peer).with_addrs(
+                addrs
+                    .iter()
+                    .map(|addr| iroh::TransportAddr::Ip(addr.parse().unwrap())),
+            );
+            exported_endpoint_addr(addr)
+                .addrs
+                .into_iter()
+                .map(|transport| match transport {
+                    iroh::TransportAddr::Ip(addr) => addr.to_string(),
+                    other => panic!("unexpected transport: {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        // The seed: public IPv4 beside Docker bridges, benchmarking and loopback.
+        let seed = ips(&[
+            "127.0.0.1:4433",
+            "172.17.0.1:4433",
+            "172.19.0.1:4433",
+            "198.18.0.1:4433",
+            "77.42.19.31:4433",
+        ]);
+        assert_eq!(seed, ["77.42.19.31:4433"]);
+        let mixed = ips(&[
+            "[::1]:4433",
+            "[fe80::1]:4433",
+            "[fd00::1]:4433",
+            "[2001:db8::1]:4433",
+            "[2001:2::1]:4433",
+            "[2001:10::1]:4433",
+            "[2001:20::1]:4433",
+            "[2001::1]:4433",
+            "[3fff::1]:4433",
+            "[100::1]:4433",
+            "[5f00::1]:4433",
+            "[2002:c0a8:101::1]:4433",
+            "[64:ff9b:1::1]:4433",
+            "[ff02::1]:4433",
+            "[::ffff:10.0.0.1]:4433",
+            "[64:ff9b::c000:201]:4433",
+            "169.254.1.1:4433",
+            "100.64.0.1:4433",
+            "192.0.2.1:4433",
+            "203.0.113.9:4433",
+            "224.0.0.1:4433",
+            "[::ffff:77.42.19.31]:4433",
+            "[::77.42.19.31]:4433",
+            "[2a01:4f9:c013:e725::1]:4433",
+        ]);
+        assert_eq!(
+            mixed,
+            ["[::ffff:77.42.19.31]:4433", "[2a01:4f9:c013:e725::1]:4433"]
+        );
+        // A host with only private and special-use addresses keeps them (a LAN).
+        assert_eq!(
+            ips(&["192.168.1.20:4433", "198.18.0.1:4433", "127.0.0.1:4433"]).len(),
+            3
+        );
+        // Each IPv6 special-use range counts as private, so a LAN keeps its route.
+        assert_eq!(
+            ips(&["192.168.1.20:4433", "[2001:2::1]:4433", "[3fff::1]:4433"]).len(),
+            3
+        );
+        // IPv4-compatible is never public, so a LAN beside it keeps its route.
+        assert_eq!(ips(&["192.168.1.20:4433", "[::77.42.19.31]:4433"]).len(), 2);
+        // Globally reachable: 6to4 of a public IPv4, AMT, and 2001:4860 (outside 2001::/23).
+        assert_eq!(
+            ips(&[
+                "[2002:4d2a:131f::1]:4433",
+                "[2001:3::1]:4433",
+                "[2001:4860::8888]:4433",
+                "10.0.0.2:4433",
+            ]),
+            [
+                "[2001:3::1]:4433",
+                "[2001:4860::8888]:4433",
+                "[2002:4d2a:131f::1]:4433"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_taken_ipv6_carrier_port_keeps_a_random_ipv6_listener() {
+        // Another service holds the Carrier port on IPv6. On a busy host the
+        // same IPv4 port can belong to someone else, so pick a pair whose
+        // IPv4 side is free; the test is about the IPv6 side only.
+        let mut attempt = 0;
+        let (occupied, port, endpoint) = loop {
+            attempt += 1;
+            assert!(
+                attempt <= 20,
+                "no free IPv4 port beside a taken IPv6 port in 20 attempts"
+            );
+            let occupied = match std::net::UdpSocket::bind("[::1]:0") {
+                Ok(occupied) => occupied,
+                Err(_) if attempt == 1 => return, // This host has no IPv6.
+                Err(error) => panic!("IPv6 loopback stopped binding: {error}"),
+            };
+            let port = occupied.local_addr().unwrap().port();
+            let ipv4_free = std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok();
+            if !ipv4_free {
+                continue;
+            }
+            match bind_carrier_endpoint(
+                SecretKey::from_bytes(&[72u8; 32]),
+                CarrierNodeNetwork::Isolated,
+                None,
+                format!("0.0.0.0:{port}").parse().unwrap(),
+                false,
+            )
+            .await
+            {
+                Ok(endpoint) => break (occupied, port, endpoint),
+                // Someone took the IPv4 port between the check and the bind.
+                Err(error)
+                    if error.to_string()
+                        == format!("Failed to bind requested Carrier address 0.0.0.0:{port}") =>
+                {
+                    continue
+                }
+                Err(error) => panic!("IPv4 binds the fixed port while IPv6 is taken: {error:#}"),
+            }
+        };
+        let sockets = endpoint.bound_sockets();
+        let addr = super::tests::wait_for_direct_endpoint_addr(&endpoint).await;
+        let snapshot: Vec<std::net::SocketAddr> = addr
+            .addrs
+            .iter()
+            .filter_map(|transport| match transport {
+                iroh::TransportAddr::Ip(addr) => Some(*addr),
+                _ => None,
+            })
+            .collect();
+        let ticket = {
+            let json =
+                serde_json::json!({ "topic": null, "endpoints": [exported_endpoint_addr(addr)] });
+            data_encoding::BASE32_NOPAD.encode(&serde_json::to_vec(&json).unwrap())
+        };
+        endpoint.close().await;
+        drop(occupied);
+        assert!(
+            sockets.iter().any(|s| s.is_ipv4() && s.port() == port),
+            "IPv4 keeps the fixed port: {sockets:?}"
+        );
+        assert!(
+            sockets.iter().any(|s| s.is_ipv6() && s.port() != port),
+            "IPv6 falls back to a random port: {sockets:?}"
+        );
+        let decoded = decode_ticket_endpoints(&ticket);
+        let ips: Vec<std::net::SocketAddr> = decoded[0]
+            .addrs
+            .iter()
+            .filter_map(|transport| match transport {
+                iroh::TransportAddr::Ip(addr) => Some(*addr),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            ips.iter().all(|ip| ip.is_ipv4() == (ip.port() == port)),
+            "the ticket lists IPv4 on the fixed port and IPv6 on its own: {ips:?}"
+        );
+        // The ticket lists exactly the snapshot's public addresses, or all of
+        // them on a host with none, so any IPv6 the host advertises stays.
+        let expected: Vec<_> = if snapshot.iter().any(|ip| is_public_ip(ip.ip())) {
+            snapshot
+                .iter()
+                .copied()
+                .filter(|ip| is_public_ip(ip.ip()))
+                .collect()
+        } else {
+            snapshot.clone()
+        };
+        assert_eq!(ips, expected, "snapshot {snapshot:?}");
+    }
+
+    #[test]
     fn test_ticket_encode_decode_roundtrip() {
         // Simulate the ticket format used by get_ticket / connect
         let ticket_json = serde_json::json!({
@@ -18833,9 +19433,13 @@ pub(crate) mod tests {
     async fn test_default_carrier_node_is_isolated() {
         let dir = tempfile::tempdir().unwrap();
         let (sk, did) = elastos_identity::derive_did(&[45u8; 32]);
-        let node = start_carrier_node(&sk, &did, dir.path().to_path_buf())
-            .await
-            .unwrap();
+        let node = tokio::time::timeout(
+            Duration::from_secs(10),
+            start_carrier_node(&sk, &did, dir.path().to_path_buf()),
+        )
+        .await
+        .expect("direct Carrier startup deadline")
+        .unwrap();
         {
             let state = node.gossip_state.lock().await;
             assert!(
@@ -18843,6 +19447,14 @@ pub(crate) mod tests {
                 "unset ELASTOS_CARRIER_NETWORK starts Isolated"
             );
         }
-        shutdown_test_carrier_node(node).await;
+        assert_eq!(
+            node.endpoint.address_lookup().unwrap().len(),
+            if carrier_mdns_enabled() { 3 } else { 2 },
+            "direct startup registers LAN mDNS alongside memory and gossip lookups unless opted out"
+        );
+        assert!(node.endpoint.addr().relay_urls().next().is_none());
+        tokio::time::timeout(Duration::from_secs(5), shutdown_test_carrier_node(node))
+            .await
+            .expect("direct Carrier shutdown deadline");
     }
 }

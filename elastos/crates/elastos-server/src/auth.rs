@@ -917,6 +917,31 @@ struct GuestRegistrationTerminal {
     expires_at: u64,
 }
 
+#[derive(Debug)]
+pub(crate) struct GuestRegistrationCapacityExceeded {
+    pub retry_after_secs: Option<u64>,
+}
+
+impl std::fmt::Display for GuestRegistrationCapacityExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Guest sign-up is full. Use an existing account or try again later.")
+    }
+}
+
+impl std::error::Error for GuestRegistrationCapacityExceeded {}
+
+fn guest_registration_capacity_error(state: &AuthState, now: u64) -> anyhow::Error {
+    GuestRegistrationCapacityExceeded {
+        retry_after_secs: state
+            .guest_registrations
+            .iter()
+            .filter_map(|record| record.terminal.as_ref())
+            .map(|terminal| terminal.expires_at.saturating_sub(now).max(1))
+            .min(),
+    }
+    .into()
+}
+
 pub(crate) struct GuestRegistrationClient<'a> {
     pub origin: &'a str,
     pub rp_id: &'a str,
@@ -974,14 +999,15 @@ pub(crate) fn begin_guest_registration(
     }
     mutate_auth_state(data_dir, |state| {
         require_guest_registration_policy(state)?;
+        let now = now_ts();
         state.guest_registrations.retain(|record| {
             record
                 .terminal
                 .as_ref()
-                .is_none_or(|terminal| terminal.expires_at > now_ts())
+                .is_none_or(|terminal| terminal.expires_at > now)
         });
         if state.guest_registrations.len() >= MAX_GUEST_REGISTRATIONS {
-            return enrollment_denied();
+            return Err(guest_registration_capacity_error(state, now));
         }
         identity.begin_bound_principal_registration(
             ceremony_id,
@@ -1031,7 +1057,7 @@ pub(crate) fn complete_guest_registration(
                     .is_none_or(|terminal| terminal.expires_at > now)
             });
             if state.guest_registrations.len() >= MAX_GUEST_REGISTRATIONS {
-                return enrollment_denied();
+                return Err(guest_registration_capacity_error(state, now));
             }
             let candidate = identity.verify_bound_registration(
                 ceremony_id,
@@ -1621,6 +1647,160 @@ pub(crate) fn complete_owner_recovery(
     })
 }
 
+/// A signed-in person adding another passkey to their own account. Every
+/// field comes from the verified launch, never from the request body.
+pub(crate) struct PasskeyAddClient<'a> {
+    pub origin: &'a str,
+    pub rp_id: &'a str,
+    pub principal_id: &'a str,
+    pub proof_binding_id: &'a str,
+    pub session_id: &'a str,
+}
+
+fn passkey_add_binding(client: &PasskeyAddClient<'_>) -> anyhow::Result<[u8; 32]> {
+    Ok(Sha256::digest(serde_json::to_vec(&(
+        "passkey-add",
+        client.origin,
+        client.rp_id,
+        client.principal_id,
+        client.proof_binding_id,
+        client.session_id,
+    ))?)
+    .into())
+}
+
+/// Starts a registration only this session can complete.
+pub(crate) fn begin_passkey_add(
+    identity: &mut elastos_identity::IdentityManager,
+    client: &PasskeyAddClient<'_>,
+    ceremony_id: &str,
+) -> anyhow::Result<elastos_identity::CreationOptions> {
+    let binding = passkey_add_binding(client)?;
+    identity.begin_bound_principal_registration(ceremony_id, client.rp_id, client.origin, binding)
+}
+
+/// Adds the new passkey to the signing owner's own account: same principal,
+/// same root, admin role. Only an admin passkey that is still active when
+/// the auth write runs can add one, so the new passkey is never a guest and
+/// never admin for anyone else. Nothing else on this Home changes.
+pub(crate) fn complete_passkey_add(
+    data_dir: &Path,
+    identity: &mut elastos_identity::IdentityManager,
+    client: &PasskeyAddClient<'_>,
+    ceremony_id: &str,
+    response: &elastos_identity::RegistrationResponse,
+) -> anyhow::Result<PrincipalRecord> {
+    if ceremony_id.len() > 128
+        || response._id.len() > 8192
+        || response._raw_id.len() > 8192
+        || response._type != "public-key"
+        || response.response.client_data_json.len() > 4096
+        || response.response.attestation_object.len() > 32768
+    {
+        return enrollment_denied();
+    }
+    let binding = passkey_add_binding(client)?;
+    let record = mutate_auth_state(data_dir, |state| {
+        let now = now_ts();
+        normalize_principal_records(state);
+        let signer = state
+            .principals
+            .iter()
+            .find(|principal| {
+                principal.proof_binding_id == client.proof_binding_id
+                    && principal.principal_id == client.principal_id
+            })
+            .cloned()
+            .ok_or(OwnerEnrollmentDenied)?;
+        ensure_proof_binding_not_revoked(&signer)?;
+        if signer.role != RuntimePrincipalRole::Admin {
+            anyhow::bail!("admin passkey required to add a passkey");
+        }
+        if signer
+            .proof_binding
+            .passkey
+            .as_ref()
+            .is_none_or(|passkey| passkey.rp_id != client.rp_id)
+        {
+            return enrollment_denied();
+        }
+        identity.reload_credentials()?;
+        let candidate = identity.verify_bound_registration(
+            ceremony_id,
+            response,
+            client.rp_id,
+            client.origin,
+            binding,
+        )?;
+        if !candidate.user_verified
+            || state.principals.iter().any(|principal| {
+                principal
+                    .proof_binding
+                    .passkey
+                    .as_ref()
+                    .is_some_and(|key| key.credential_id == candidate.credential.credential_id)
+            })
+        {
+            return enrollment_denied();
+        }
+        let previous_history = identity.guest_credential_history()?;
+        let proof_binding =
+            ProofBinding::passkey_webauthn(elastos_runtime::auth::PasskeyWebAuthnBinding {
+                credential_id: candidate.credential.credential_id.clone(),
+                public_key: candidate.credential.public_key.clone(),
+                sign_count: candidate.credential.sign_count,
+                user_verified: true,
+                origin: candidate.origin.clone(),
+                rp_id: candidate.credential.rp_id.clone(),
+                created_at: now,
+                last_used_at: now,
+                revoked_at: None,
+            });
+        let event = sign_audit_event(
+            data_dir,
+            RuntimeAuditEventV1 {
+                schema: RuntimeAuditEventV1::SCHEMA.into(),
+                event_id: format!("audit:{}", random_secret_hex()),
+                event_type: "auth.passkey.added".into(),
+                principal_id: Some(signer.principal_id.clone()),
+                proof_binding_id: Some(proof_binding.id()),
+                session_id: Some(client.session_id.into()),
+                challenge_id: None,
+                capsule_id: None,
+                result: "ok".into(),
+                reason: "passkey added to the signed-in account after fresh passkey approval"
+                    .into(),
+                occurred_at: now,
+                signer_did: None,
+                signature: None,
+            },
+        )?;
+        let record = PrincipalRecord {
+            principal_id: signer.principal_id.clone(),
+            localhost_root: signer.localhost_root.clone(),
+            proof_binding_id: proof_binding.id(),
+            proof_binding,
+            display_name: signer.display_name.clone(),
+            initial_profile_display_name: None,
+            role: RuntimePrincipalRole::Admin,
+            created_at: now,
+            updated_at: now,
+        };
+        state.principals.push(record.clone());
+        push_audit_event(data_dir, state, event)?;
+        // Last effect before the single auth write, as in owner recovery. If
+        // the write fails, the credential has no account: it cannot sign in
+        // and is not listed, and the challenge stays open so a retry with the
+        // same response reconciles this credential instead of refusing it.
+        identity.persist_guest_candidate(&candidate, &previous_history)?;
+        #[cfg(test)]
+        owner_enrollment_test_fault(data_dir, OwnerEnrollmentTestFault::AfterCredential)?;
+        Ok(record)
+    })?;
+    identity.cancel_challenge(ceremony_id);
+    Ok(record)
+}
+
 pub(crate) fn random_secret_hex() -> String {
     let mut bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
@@ -2178,6 +2358,150 @@ mod guest_registration_tests {
             client(claim).origin,
             id.as_bytes(),
         )
+    }
+
+    #[test]
+    fn full_guest_store_refuses_new_records_but_keeps_completion_replay() {
+        let (root, mut identity) = fixture();
+        let claim = random_secret_hex();
+        let intent = PasskeyEnrollmentIntent::Recover {};
+        // Begin one valid ceremony before the retained-record pool fills.
+        let pending = begin(root.path(), &mut identity, &claim, "pending");
+        let mut first = None;
+        for index in 0..MAX_GUEST_REGISTRATIONS {
+            let id = format!("guest-{index}");
+            let response = begin(root.path(), &mut identity, &claim, &id);
+            let grant = complete_guest_registration(
+                root.path(),
+                &mut identity,
+                &client(&claim),
+                &id,
+                &response,
+                &intent,
+            )
+            .unwrap();
+            if first.is_none() {
+                first = Some((id, response, grant));
+            }
+        }
+        let before = std::fs::read(auth_state_path(root.path()).unwrap()).unwrap();
+        let credentials = identity.credentials().len();
+        for result in [
+            begin_guest_registration(root.path(), &mut identity, &client(&claim), "new", &intent)
+                .map(|_| ()),
+            complete_guest_registration(
+                root.path(),
+                &mut identity,
+                &client(&claim),
+                "pending",
+                &pending,
+                &intent,
+            )
+            .map(|_| ()),
+        ] {
+            let error = result.unwrap_err();
+            let capacity = error
+                .downcast_ref::<GuestRegistrationCapacityExceeded>()
+                .unwrap();
+            assert!(capacity
+                .retry_after_secs
+                .is_some_and(|seconds| { seconds > 0 && seconds <= AUTH_SESSION_TTL_SECS }));
+        }
+        assert_eq!(
+            std::fs::read(auth_state_path(root.path()).unwrap()).unwrap(),
+            before
+        );
+        assert_eq!(identity.credentials().len(), credentials);
+        let (id, response, grant) = first.unwrap();
+        let replay = complete_guest_registration(
+            root.path(),
+            &mut identity,
+            &client(&claim),
+            &id,
+            &response,
+            &intent,
+        )
+        .unwrap();
+        assert_eq!(replay.session_id, grant.session_id);
+
+        // Capacity cannot override an owner's registration policy.
+        set_guest_registration_enabled(root.path(), false, now_ts()).unwrap();
+        assert!(begin_guest_registration(
+            root.path(),
+            &mut identity,
+            &client(&claim),
+            "new",
+            &intent,
+        )
+        .unwrap_err()
+        .is::<OwnerEnrollmentDenied>());
+        set_guest_registration_enabled(root.path(), true, now_ts()).unwrap();
+        mutate_auth_state(root.path(), |state| {
+            state.guest_registrations[0]
+                .terminal
+                .as_mut()
+                .unwrap()
+                .expires_at = now_ts() - 1;
+            Ok(())
+        })
+        .unwrap();
+        // The denied valid completion can fill the expired slot without a new begin.
+        complete_guest_registration(
+            root.path(),
+            &mut identity,
+            &client(&claim),
+            "pending",
+            &pending,
+            &intent,
+        )
+        .unwrap();
+        assert_eq!(
+            load_auth_state(root.path())
+                .unwrap()
+                .guest_registrations
+                .len(),
+            MAX_GUEST_REGISTRATIONS
+        );
+    }
+
+    #[test]
+    fn guest_capacity_retry_uses_only_known_terminal_expiry() {
+        let (root, mut identity) = fixture();
+        let claim = random_secret_hex();
+        let response = begin(root.path(), &mut identity, &claim, "guest");
+        complete_guest_registration(
+            root.path(),
+            &mut identity,
+            &client(&claim),
+            "guest",
+            &response,
+            &PasskeyEnrollmentIntent::Recover {},
+        )
+        .unwrap();
+        let mut state = load_auth_state(root.path()).unwrap();
+        let expiry = state.guest_registrations[0]
+            .terminal
+            .as_ref()
+            .unwrap()
+            .expires_at;
+        let error = guest_registration_capacity_error(&state, expiry - 90);
+        assert_eq!(
+            error
+                .downcast_ref::<GuestRegistrationCapacityExceeded>()
+                .unwrap()
+                .retry_after_secs,
+            Some(90)
+        );
+        // Interrupted records have no guaranteed expiry; advertise no deadline.
+        state.guest_registrations[0].terminal = None;
+        let error = guest_registration_capacity_error(&state, expiry - 90);
+        assert_eq!(
+            error
+                .downcast_ref::<GuestRegistrationCapacityExceeded>()
+                .unwrap()
+                .retry_after_secs,
+            None
+        );
     }
 
     #[test]
@@ -4885,6 +5209,35 @@ pub fn read_principal_root_object(
     read_principal_root_object_locked(data_dir, principal_id, localhost_root, object_uri, path)
 }
 
+/// Reads only under current principal-root protection. Missing protection
+/// returns None before object bytes are read; each call loads fresh authority.
+pub(crate) fn read_protected_principal_root_object(
+    data_dir: &Path,
+    principal_id: &str,
+    localhost_root: &str,
+    object_uri: &str,
+    path: &Path,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    validate_principal_root_object_binding(principal_id, localhost_root, object_uri)?;
+    let _guard = principal_root_object_mutation_lock()
+        .lock()
+        .map_err(|_| anyhow!("principal-root object mutation lock poisoned"))?;
+    let Some(protection) = load_principal_root_protection(data_dir, principal_id, localhost_root)?
+    else {
+        return Ok(None);
+    };
+    let bytes = read_principal_root_object_bytes(path)?;
+    decrypt_principal_root_object_bytes(
+        data_dir,
+        principal_id,
+        localhost_root,
+        object_uri,
+        &protection,
+        &bytes,
+    )
+    .map(Some)
+}
+
 // Caller holds principal_root_object_mutation_lock, including conditional writes.
 fn read_principal_root_object_locked(
     data_dir: &Path,
@@ -4898,9 +5251,27 @@ fn read_principal_root_object_locked(
     else {
         return Ok(bytes);
     };
-    let data_key = principal_root_data_key_from_protection(data_dir, &protection)?;
+    decrypt_principal_root_object_bytes(
+        data_dir,
+        principal_id,
+        localhost_root,
+        object_uri,
+        &protection,
+        &bytes,
+    )
+}
+
+fn decrypt_principal_root_object_bytes(
+    data_dir: &Path,
+    principal_id: &str,
+    localhost_root: &str,
+    object_uri: &str,
+    protection: &PrincipalRootProtectionV1,
+    bytes: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    let data_key = principal_root_data_key_from_protection(data_dir, protection)?;
     let envelope: PrincipalRootObjectEnvelopeV1 =
-        serde_json::from_slice(&bytes).with_context(|| {
+        serde_json::from_slice(bytes).with_context(|| {
             format!("{PROTECTED_PRINCIPAL_ROOT_OBJECT_NOT_ENCRYPTED}: {object_uri}")
         })?;
     validate_principal_root_object_envelope(
@@ -5474,30 +5845,134 @@ pub fn ensure_proof_binding_not_revoked(record: &PrincipalRecord) -> anyhow::Res
     Ok(())
 }
 
+fn revoke_binding_in_state(
+    state: &mut AuthState,
+    proof_binding_id: &str,
+    revoked_at: u64,
+) -> anyhow::Result<PrincipalRecord> {
+    let principal = state
+        .principals
+        .iter_mut()
+        .find(|principal| principal.proof_binding_id == proof_binding_id)
+        .ok_or_else(|| anyhow!("passkey proof binding not found"))?;
+    let Some(passkey) = principal.proof_binding.passkey.as_mut() else {
+        anyhow::bail!("proof binding is not a passkey");
+    };
+    passkey.revoked_at = Some(revoked_at);
+    principal.updated_at = revoked_at;
+    let record = principal.clone();
+    for stored in &mut state.sessions {
+        if stored.grant.proof_binding_id == proof_binding_id {
+            stored.revoked_at = Some(revoked_at);
+        }
+    }
+    Ok(record)
+}
+
+/// Unchecked revocation for test fixtures; requests use
+/// `revoke_passkey_for_actor`.
+#[cfg(test)]
 pub fn revoke_passkey_binding(
     data_dir: &Path,
     proof_binding_id: &str,
     revoked_at: u64,
 ) -> anyhow::Result<PrincipalRecord> {
     mutate_auth_state(data_dir, |state| {
-        let principal = state
+        revoke_binding_in_state(state, proof_binding_id, revoked_at)
+    })
+}
+
+fn active_passkey(principal: &PrincipalRecord) -> bool {
+    principal
+        .proof_binding
+        .passkey
+        .as_ref()
+        .is_some_and(|passkey| passkey.revoked_at.is_none())
+}
+
+/// Removes one passkey in one auth write. The actor's passkey, the permission
+/// and the last-admin rule are checked under the same lock as the
+/// revocation, so two concurrent removals cannot both pass and leave guests
+/// without an admin. A passkey already revoked returns its record unchanged,
+/// so a retry can finish removing its credential.
+pub fn revoke_passkey_for_actor(
+    data_dir: &Path,
+    actor_principal_id: &str,
+    actor_proof_binding_id: &str,
+    proof_binding_id: &str,
+    revoked_at: u64,
+) -> anyhow::Result<PrincipalRecord> {
+    mutate_auth_state(data_dir, |state| {
+        let actor = state
             .principals
-            .iter_mut()
+            .iter()
+            .find(|principal| {
+                principal.proof_binding_id == actor_proof_binding_id
+                    && principal.principal_id == actor_principal_id
+            })
+            .ok_or_else(|| anyhow!("auth session principal mismatch"))?;
+        ensure_proof_binding_not_revoked(actor)?;
+        if actor_proof_binding_id != proof_binding_id && actor.role != RuntimePrincipalRole::Admin {
+            anyhow::bail!("admin passkey required to remove another passkey");
+        }
+        let target = state
+            .principals
+            .iter()
             .find(|principal| principal.proof_binding_id == proof_binding_id)
             .ok_or_else(|| anyhow!("passkey proof binding not found"))?;
-        let Some(passkey) = principal.proof_binding.passkey.as_mut() else {
+        if target.proof_binding.passkey.is_none() {
             anyhow::bail!("proof binding is not a passkey");
-        };
-        passkey.revoked_at = Some(revoked_at);
-        principal.updated_at = revoked_at;
-        let record = principal.clone();
-        for stored in &mut state.sessions {
-            if stored.grant.proof_binding_id == proof_binding_id {
-                stored.revoked_at = Some(revoked_at);
-            }
         }
-        Ok(record)
+        if !active_passkey(target) {
+            return Ok(target.clone());
+        }
+        let others = || {
+            state
+                .principals
+                .iter()
+                .filter(|principal| principal.proof_binding_id != proof_binding_id)
+                .filter(|principal| active_passkey(principal))
+        };
+        if target.role == RuntimePrincipalRole::Admin
+            && !others().any(|principal| principal.role == RuntimePrincipalRole::Admin)
+            && others().next().is_some()
+        {
+            anyhow::bail!("last admin passkey cannot be removed while guest passkeys remain");
+        }
+        revoke_binding_in_state(state, proof_binding_id, revoked_at)
     })
+}
+
+/// A role belongs to the account, not to one of its passkeys: every passkey
+/// of the same principal gets the new role together.
+fn set_account_role(
+    state: &mut AuthState,
+    index: usize,
+    role: RuntimePrincipalRole,
+    updated_at: u64,
+) -> PrincipalRecord {
+    let principal_id = state.principals[index].principal_id.clone();
+    for principal in &mut state.principals {
+        if principal.principal_id == principal_id {
+            principal.role = role;
+            principal.updated_at = updated_at;
+        }
+    }
+    state.principals[index].clone()
+}
+
+fn active_passkey_role_target(state: &AuthState, proof_binding_id: &str) -> anyhow::Result<usize> {
+    let index = state
+        .principals
+        .iter()
+        .position(|principal| principal.proof_binding_id == proof_binding_id)
+        .ok_or_else(|| anyhow!("passkey proof binding not found"))?;
+    let target = &state.principals[index];
+    ensure_proof_binding_not_revoked(target)?;
+    if target.proof_binding.passkey.is_none() {
+        anyhow::bail!("proof binding is not a passkey");
+    }
+    Ok(index)
 }
 
 pub fn promote_passkey_to_admin(
@@ -5506,21 +5981,16 @@ pub fn promote_passkey_to_admin(
     updated_at: u64,
 ) -> anyhow::Result<PrincipalRecord> {
     mutate_auth_state(data_dir, |state| {
-        let principal = state
-            .principals
-            .iter_mut()
-            .find(|principal| principal.proof_binding_id == proof_binding_id)
-            .ok_or_else(|| anyhow!("passkey proof binding not found"))?;
-        ensure_proof_binding_not_revoked(principal)?;
-        if principal.proof_binding.passkey.is_none() {
-            anyhow::bail!("proof binding is not a passkey");
-        }
-        if principal.role == RuntimePrincipalRole::Admin {
+        let index = active_passkey_role_target(state, proof_binding_id)?;
+        if state.principals[index].role == RuntimePrincipalRole::Admin {
             anyhow::bail!("passkey is already admin");
         }
-        principal.role = RuntimePrincipalRole::Admin;
-        principal.updated_at = updated_at;
-        Ok(principal.clone())
+        Ok(set_account_role(
+            state,
+            index,
+            RuntimePrincipalRole::Admin,
+            updated_at,
+        ))
     })
 }
 
@@ -5530,38 +6000,29 @@ pub fn demote_passkey_to_guest(
     updated_at: u64,
 ) -> anyhow::Result<PrincipalRecord> {
     mutate_auth_state(data_dir, |state| {
-        let index = state
-            .principals
-            .iter()
-            .position(|principal| principal.proof_binding_id == proof_binding_id)
-            .ok_or_else(|| anyhow!("passkey proof binding not found"))?;
+        let index = active_passkey_role_target(state, proof_binding_id)?;
         let target = &state.principals[index];
-        ensure_proof_binding_not_revoked(target)?;
-        if target.proof_binding.passkey.is_none() {
-            anyhow::bail!("proof binding is not a passkey");
-        }
         if target.role != RuntimePrincipalRole::Admin {
             anyhow::bail!("passkey is already guest");
         }
-        let active_admin_count = state
-            .principals
-            .iter()
-            .filter(|principal| {
-                principal.role == RuntimePrincipalRole::Admin
-                    && principal
-                        .proof_binding
-                        .passkey
-                        .as_ref()
-                        .is_some_and(|passkey| passkey.revoked_at.is_none())
-            })
-            .count();
-        if active_admin_count <= 1 {
+        // Another account must keep an active admin passkey.
+        if !state.principals.iter().any(|principal| {
+            principal.principal_id != target.principal_id
+                && principal.role == RuntimePrincipalRole::Admin
+                && principal
+                    .proof_binding
+                    .passkey
+                    .as_ref()
+                    .is_some_and(|passkey| passkey.revoked_at.is_none())
+        }) {
             anyhow::bail!("last admin passkey cannot be demoted");
         }
-        let principal = &mut state.principals[index];
-        principal.role = RuntimePrincipalRole::Guest;
-        principal.updated_at = updated_at;
-        Ok(principal.clone())
+        Ok(set_account_role(
+            state,
+            index,
+            RuntimePrincipalRole::Guest,
+            updated_at,
+        ))
     })
 }
 
@@ -10801,6 +11262,123 @@ mod tests {
             .unwrap(),
             b"# Secret\n"
         );
+    }
+
+    #[test]
+    fn required_protected_read_refuses_plaintext_and_observes_each_current_protection() {
+        let root = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let data = root.path();
+        let principal = "person:local:required-protected-read";
+        let localhost_root = principal_localhost_root(principal);
+        let uri = format!("{localhost_root}/Documents/example.txt");
+        let path = rooted_localhost_fs_path(data, &uri).unwrap();
+        write_principal_root_object(data, principal, &localhost_root, &uri, &path, b"plain")
+            .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for directory in path.parent().unwrap().ancestors() {
+                if !directory.starts_with(data) {
+                    break;
+                }
+                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+        }
+        let plain = std::fs::read(&path).unwrap();
+        assert!(read_protected_principal_root_object(
+            data,
+            principal,
+            &localhost_root,
+            &uri,
+            &path
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), plain);
+        assert_eq!(
+            read_principal_root_object(data, principal, &localhost_root, &uri, &path).unwrap(),
+            b"plain",
+            "the ordinary unprotected read keeps its existing behavior"
+        );
+
+        let protection = store_test_principal_root_protection(data, principal);
+        assert!(
+            read_protected_principal_root_object(data, principal, &localhost_root, &uri, &path)
+                .is_err(),
+            "current protection requires an encrypted object"
+        );
+        write_protected_principal_root_object(
+            data,
+            principal,
+            &localhost_root,
+            &uri,
+            &path,
+            b"protected",
+        )
+        .unwrap();
+        let encrypted = std::fs::read(&path).unwrap();
+        let auth_before = refresh_persisted_bytes(data);
+        for _ in 0..3 {
+            assert_eq!(
+                read_protected_principal_root_object(data, principal, &localhost_root, &uri, &path)
+                    .unwrap()
+                    .unwrap(),
+                b"protected"
+            );
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), encrypted);
+        assert_eq!(refresh_persisted_bytes(data), auth_before);
+
+        // A new protected key for the same owner is current immediately. The
+        // reader cannot use the earlier key to accept old encrypted bytes.
+        let replacement = store_test_principal_root_protection(data, principal);
+        assert_ne!(replacement.data_key_id, protection.data_key_id);
+        assert!(read_protected_principal_root_object(
+            data,
+            principal,
+            &localhost_root,
+            &uri,
+            &path
+        )
+        .is_err());
+        mutate_auth_state(data, |state| {
+            state.principal_root_protections.clear();
+            Ok(())
+        })
+        .unwrap();
+        assert!(read_protected_principal_root_object(
+            data,
+            principal,
+            &localhost_root,
+            &uri,
+            &path
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), encrypted);
+        assert!(read_protected_principal_root_object(
+            data,
+            "person:local:foreign",
+            &localhost_root,
+            &uri,
+            &path,
+        )
+        .unwrap()
+        .is_none());
+        assert!(read_protected_principal_root_object(
+            data,
+            principal,
+            &localhost_root,
+            "localhost://Users/foreign/example.txt",
+            &path,
+        )
+        .is_err());
     }
 
     #[test]

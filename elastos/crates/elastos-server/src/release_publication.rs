@@ -182,6 +182,10 @@ impl Publication {
                 )?;
             }
         }
+        // Each capsule record is signed on its own by the pinned publisher and
+        // matches its components row; platforms stay limited to binary and components.
+        let capsule_records =
+            crate::capsule_record::CapsuleRecords::from_release(r, &[pinned_did.to_owned()])?;
         let mut visited = BTreeSet::new();
         loop {
             let next = artifacts
@@ -208,7 +212,16 @@ impl Publication {
                 .and_then(|name| name.strip_suffix(".json"))
             {
                 let manifest = serde_json::from_value(component.clone())?;
-                crate::setup::admit_release_components(&manifest, platform)?;
+                // The publishing Runtime knows every kind it ships.
+                let unknown = crate::setup::admit_release_components(&manifest, platform)?;
+                ensure!(
+                    unknown.is_empty(),
+                    "component(s) {} have a development or unsupported release strategy",
+                    unknown.join(", ")
+                );
+                if let Some(records) = &capsule_records {
+                    records.admit_manifest(&manifest)?;
+                }
             }
             component_refs(&component, &artifact_directory, &names, &mut artifacts)?;
             if let Some(catalog) = component.get("model_catalog") {
@@ -229,6 +242,9 @@ impl Publication {
                     &descriptor,
                     Some("model-catalog.json"),
                 )?;
+            }
+            if let Some(network) = component.get("collaboration_network") {
+                admit_collaboration_network(&artifact_directory, &names, &mut artifacts, network)?;
             }
         }
         ensure!(
@@ -669,6 +685,48 @@ fn admit_descriptor(
     Ok(())
 }
 
+/// A manifest pin names one release file by its raw CID; the file is served
+/// beside the components manifest under its fixed name.
+fn admit_pinned_file(
+    dir: &File,
+    names: &BTreeSet<String>,
+    artifacts: &mut BTreeMap<String, Artifact>,
+    pin: &Value,
+    name: &str,
+) -> Result<Vec<u8>> {
+    let cid = text(pin, "head_cid")?;
+    ensure!(
+        checked_cid(cid)?.codec() == 0x55,
+        "{name} pin must be a raw CID"
+    );
+    let file = regular(dir, name, MAX_COMPONENTS)?;
+    let bytes = bounded_bytes(&file, MAX_COMPONENTS)?;
+    crate::update::verify_release_metadata_cid(cid, &bytes)?;
+    let descriptor = serde_json::json!({"cid":cid,"sha256":digest(&bytes),"size":bytes.len()});
+    admit_descriptor(dir, names, artifacts, &descriptor, Some(name))?;
+    Ok(bytes)
+}
+
+/// The release network is checked as every Home checks it before joining.
+fn admit_collaboration_network(
+    dir: &File,
+    names: &BTreeSet<String>,
+    artifacts: &mut BTreeMap<String, Artifact>,
+    pin: &Value,
+) -> Result<()> {
+    use crate::collaboration_release_network as release_network;
+    let bytes = admit_pinned_file(
+        dir,
+        names,
+        artifacts,
+        pin,
+        release_network::RELEASE_COLLABORATION_NETWORK_FILE,
+    )?;
+    let pin: release_network::CollaborationNetworkPin =
+        serde_json::from_value(pin.clone()).context("collaboration network pin refused")?;
+    release_network::verify_release_network_bytes(&pin, &bytes)
+}
+
 fn component_refs(
     value: &Value,
     dir: &File,
@@ -1094,6 +1152,22 @@ mod tests {
         fn open(&self) -> Result<Publication> {
             Publication::open_flat(&self.input, &self.did)
         }
+
+        fn write_components(&mut self, components: &Value) {
+            let bytes = serde_json::to_vec(components).unwrap();
+            std::fs::write(self.input.join("components-aarch64-darwin.json"), &bytes).unwrap();
+            self.release["platforms"]["aarch64-darwin"]["components"] = descriptor(&bytes);
+            self.write_signed();
+        }
+
+        fn pin_network(&mut self, pin: Value) {
+            let mut components: Value = serde_json::from_slice(
+                &std::fs::read(self.input.join("components-aarch64-darwin.json")).unwrap(),
+            )
+            .unwrap();
+            components["collaboration_network"] = pin;
+            self.write_components(&components);
+        }
     }
 
     #[test]
@@ -1471,6 +1545,115 @@ mod tests {
             fixture.write_signed();
             assert!(fixture.open().is_err(), "{field}");
         }
+    }
+
+    fn network_pin(bytes: &[u8]) -> Value {
+        let config: Value = serde_json::from_slice(bytes).unwrap();
+        json!({
+            "head_cid": raw_cid(bytes),
+            "expected_network_id": config["expected_network_id"],
+            "trusted_profile_signer_dids": config["trusted_profile_signer_dids"],
+        })
+    }
+
+    #[test]
+    fn pinned_collaboration_network_is_admitted_only_with_its_exact_file() {
+        use crate::collaboration_release_network::RELEASE_COLLABORATION_NETWORK_FILE as NETWORK;
+        let (_signer, chain) =
+            crate::collaboration_release_network::tests::signed_profile_chain_config(1);
+        let (_other, other) =
+            crate::collaboration_release_network::tests::signed_profile_chain_config(1);
+        let mut fixture = PublicPublicationFixture::new();
+        fixture.pin_network(network_pin(&chain[0]));
+        std::fs::write(fixture.input.join(NETWORK), &chain[0]).unwrap();
+        let publication = fixture.open().unwrap();
+        let admitted = publication
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.name == NETWORK)
+            .unwrap();
+        assert_eq!(admitted.cid, raw_cid(&chain[0]));
+        assert_eq!(
+            publication.read_verified_artifact(NETWORK).unwrap(),
+            chain[0]
+        );
+
+        let mut another_network = network_pin(&chain[0]);
+        another_network["expected_network_id"] = json!("another-network");
+        for (case, pin, file) in [
+            ("missing file", network_pin(&chain[0]), None),
+            ("other bytes", network_pin(&chain[0]), Some(&other[0])),
+            ("other network ID", another_network, Some(&chain[0])),
+        ] {
+            let mut fixture = PublicPublicationFixture::new();
+            fixture.pin_network(pin);
+            if let Some(file) = file {
+                std::fs::write(fixture.input.join(NETWORK), file).unwrap();
+            }
+            assert!(fixture.open().is_err(), "{case}");
+        }
+
+        let fixture = PublicPublicationFixture::new();
+        std::fs::write(fixture.input.join(NETWORK), &chain[0]).unwrap();
+        let error = fixture.open().err().unwrap().to_string();
+        assert!(error.contains("unadvertised"), "{error}");
+    }
+
+    #[test]
+    fn signed_capsule_records_are_admitted_only_when_each_matches_its_row() {
+        let support = b"public qualified support archive";
+        let record = |key: &SigningKey, did: &str, change: Value| {
+            let mut payload = json!({"schema":"elastos.capsule.record/v1","name":"home",
+                "platform":"*","capsule_version":null,"sha256":digest(support),
+                "size":support.len(),"cid":raw_cid(support),"release_path":"home.tar.gz",
+                "signer_did":did});
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(change.as_object().unwrap().clone());
+            crate::capsule_record::signed_record(key, payload)
+        };
+        let mut fixture = PublicPublicationFixture::new();
+        fixture.release["capsule_records"] = json!([record(&fixture.key, &fixture.did, json!({}))]);
+        fixture.write_signed();
+        assert_eq!(fixture.open().unwrap().artifacts().len(), 4);
+
+        let (other, _) = generate_keypair();
+        let other_did = crate::crypto::encode_signing_key_did(&other);
+        let extra = json!({"name":"services","release_path":"services.tar.gz"});
+        for (case, records) in [
+            (
+                "size",
+                json!([record(&fixture.key, &fixture.did, json!({"size": 1}))]),
+            ),
+            (
+                "version",
+                json!([record(
+                    &fixture.key,
+                    &fixture.did,
+                    json!({"capsule_version": "2"})
+                )]),
+            ),
+            ("signer", json!([record(&other, &other_did, json!({}))])),
+            ("missing", json!([])),
+            (
+                "unused",
+                json!([
+                    record(&fixture.key, &fixture.did, json!({})),
+                    record(&fixture.key, &fixture.did, extra.clone())
+                ]),
+            ),
+        ] {
+            fixture.release["capsule_records"] = records;
+            fixture.write_signed();
+            assert!(fixture.open().is_err(), "{case}");
+        }
+        // Records belong at the release top level; platform descriptors stay strict.
+        fixture.release["capsule_records"] = json!([record(&fixture.key, &fixture.did, json!({}))]);
+        fixture.release["platforms"]["aarch64-darwin"]["capsule_records"] = json!([]);
+        fixture.write_signed();
+        let error = fixture.open().err().expect("platform records admitted");
+        assert!(format!("{error:#}").contains("platform descriptor fields refused"));
     }
 
     #[test]

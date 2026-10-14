@@ -191,6 +191,7 @@ struct Receipt {
 pub struct UpdateRequest {
     pub id: String,
     pub source_name: String,
+    /// The signed head's channel the owner approved; the source policy admits it.
     pub channel: String,
     pub publisher_did: String,
     pub current_version: String,
@@ -1200,10 +1201,7 @@ impl Controller {
             .clone();
         let source = installed_source(&self.receipt.data_dir)?;
         anyhow::ensure!(
-            request.source_name == source.name
-                && request.channel == normalized_channel(&source)
-                && source.publisher_dids.first() == Some(&request.publisher_did)
-                && request.current_version == source.installed_version,
+            owner_choice_matches_source(&request, &source),
             "Update choice changed. Check the update again."
         );
         let client = Arc::new(
@@ -1440,7 +1438,16 @@ impl crate::update::RestartOwner for Controller {
     }
 }
 
-fn verify_update_choice(
+/// The owner's choice still names this Home's source, signer and version, and
+/// the source's channel policy admits the offered channel.
+pub(crate) fn owner_choice_matches_source(request: &UpdateRequest, source: &TrustedSource) -> bool {
+    request.source_name == source.name
+        && crate::update::verify_source_channel(source, &request.channel).is_ok()
+        && source.publisher_dids.first() == Some(&request.publisher_did)
+        && request.current_version == source.installed_version
+}
+
+pub(crate) fn verify_update_choice(
     bytes: &[u8],
     choice: &UpdateRequest,
     source: &TrustedSource,
@@ -1454,10 +1461,11 @@ fn verify_update_choice(
     anyhow::ensure!(
         signer == choice.publisher_did
             && head["payload"]["latest_release_cid"].as_str() == Some(choice.release_cid.as_str())
-            && head["payload"]["version"].as_str() == Some(choice.new_version.as_str()),
+            && head["payload"]["version"].as_str() == Some(choice.new_version.as_str())
+            && head["payload"]["channel"].as_str() == Some(choice.channel.as_str()),
         "Signed release differs from the owner update choice."
     );
-    crate::update::verify_source_channel(source, head["payload"]["channel"].as_str().unwrap_or(""))
+    crate::update::verify_source_channel(source, &choice.channel)
 }
 
 fn path_present(path: &Path) -> Result<bool> {
@@ -1473,14 +1481,6 @@ fn installed_source(data_dir: &Path) -> Result<TrustedSource> {
         .default_source()
         .cloned()
         .context("Installed trusted source is unavailable.")
-}
-
-fn normalized_channel(source: &TrustedSource) -> &str {
-    if source.channel.trim().is_empty() {
-        "stable"
-    } else {
-        source.channel.trim()
-    }
 }
 
 #[cfg(test)]
@@ -1583,22 +1583,25 @@ fn controller_file_digest(path: &Path) -> Result<Option<String>> {
 
 pub(crate) const REFUSED_MESSAGE: &str = "This update was refused because the publisher's signed release is not valid for this Home. Your current version is unchanged.";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ApplyFailure {
     SourceUnavailable,
     NotEnoughSpace,
     DownloadMismatch,
     Refused,
+    /// The updater's own plain words, with the install command to run once.
+    InstallerRequired(String),
     Unknown,
 }
 
 impl ApplyFailure {
-    fn message(self) -> &'static str {
+    fn message(&self) -> &str {
         match self {
             Self::SourceUnavailable => "Home could not reach the update source. Your current version is unchanged. Connect to the internet and select Update again.",
             Self::NotEnoughSpace => "There is not enough free disk space for this update. Your current version is unchanged. Free some space and select Update again.",
             Self::DownloadMismatch => "The downloaded update did not match what the publisher signed. Your current version is unchanged. Select Update again.",
             Self::Refused => REFUSED_MESSAGE,
+            Self::InstallerRequired(message) => message,
             Self::Unknown => "The update could not be completed. Your current version is unchanged. Select Update again.",
         }
     }
@@ -1615,6 +1618,11 @@ fn classify_apply_failure(error: &anyhow::Error) -> ApplyFailure {
         .any(|cause| cause.is::<crate::update::DownloadMismatch>())
     {
         ApplyFailure::DownloadMismatch
+    } else if let Some(installer) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<crate::update::InstallerRequired>())
+    {
+        ApplyFailure::InstallerRequired(installer.to_string())
     } else if error
         .chain()
         .any(|cause| cause.is::<crate::update::ReleaseRefused>())

@@ -8,6 +8,48 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Developer detail
 
+- `scripts/release-publish.sh` publishes a final version `X.Y.Z` on `stable`
+  from its tag `vX.Y.Z` on `main` (#335). See docs/VERSIONING.md.
+- A signed components manifest whose schema this Runtime does not know, or
+  whose known components pass every check but which also names a component
+  kind (`strategy`) this Runtime does not know, is `InstallerRequired`; a
+  malformed manifest of the known schema and every other admission refusal stay
+  `ReleaseRefused`. System's status and
+  `elastos update` print `curl -fsSL '<publisher gateway>/install.sh' | bash`,
+  the URL built with URL operations (no query, fragment or credentials) and
+  single-quoted as one shell word.
+- `scripts/update-hop-oldest-release.json` pins 0.8.0-alpha.15, the oldest
+  release that still updates in System (alpha.13 and alpha.14 Homes run
+  install.sh once). `update-hop-compare.py check-oldest-start`, run by its test
+  in the source gate, refuses a `components.json` that release's updater cannot
+  read or install; while both pins name one release the update journey covers
+  that start in full. `scripts/release-publish.sh prepare` refuses a source
+  without the pin.
+- A release names the Community network only when the approved source pins it
+  and `scripts/release-publish.sh prepare` gets `RELEASE_COMMUNITY_DIR`, the
+  custodian's `community-profile` output for exactly that pin; the package's
+  own Runtime verifies the file before signing, and prepare refuses a source
+  pin without that output. The release signer refuses a Community pin whose
+  network ID or signer set differ from its file.
+- `scripts/release-publish.sh seed` and `seed-upgrade` require `RELEASE_SEED_DATA`
+  to end in `/elastos` and export `XDG_DATA_HOME` as its parent, because the
+  Runtime reads `$XDG_DATA_HOME/elastos`; the seed script checks the saved
+  publish state against the signed head's `prev_head_cid` before downloading
+  (a first publication may have none). `seed` refuses a signed head whose
+  `signer_did` or `prev_head_cid` is not plain data, and its printed commands
+  carry every value as one shell word.
+- CI's update journey starts from 0.8.0-alpha.15, the release users run now.
+  On Apple Silicon and Linux ARM64, alpha.14's `elastos update` refused
+  alpha.15 for its new `browser-vm-image` strategy; CI started from
+  0.8.0-alpha.8 and never ran that hop.
+  `scripts/release-publish.sh prepare` refuses, before any download, a source
+  whose `scripts/update-hop-previous-release.json` does not name the public
+  release head; N+1 of a pair passes once the public head is the N this Mac
+  signed from the same run.
+- Only the Runtime binary (`elastos`) compiles in the release version. Home
+  CLI, the shell and the Browser VZ supervisor no longer do, so their bytes
+  stay the same across releases when their code does not change (#194). The
+  terminal Home shows the Runtime version it reads from the Runtime.
 - CI's `release-upstream-assets` job runs the release's upstream asset build
   (`scripts/release-upstream-assets.py`, including the Browser helper source
   builds) for Linux ARM64 and Apple Silicon on every pull request that changes
@@ -19,6 +61,86 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   `ci-release-policy-test.py` checks they use the same runner, Rust toolchain
   and targets, and that the job's path filter covers every file the build
   calls, loads or packages.
+
+## [0.8.0] - 2026-10-13
+
+### Security
+
+- Isolation status: the first stage of the isolation plan (#173) is done, except that the seed does not yet run under its own account (#174, in 0.8.1). Web pages and shared files open in a separate sandbox; the web Terminal is off by default; Home checks allowed hosts and rejects requests whose Origin header names another website; sandboxed apps need valid tokens to reach private data; releases are signed with a new key kept off the public server.
+- Isolation status, not done yet: Home can still get every app's permissions, providers run as normal programs with your account's rights (only the model provider is partly limited), and approvals are not yet shown on a screen that only the Runtime controls. These stages (S1 and S2 of #173) are planned for 0.8.1.
+
+### Added
+
+- An owner (admin) can add another passkey, such as a second device or a security key, in System → Accounts → Add passkey. You confirm with your current passkey first, and the new passkey opens the same account as an admin (#338).
+
+### Changed
+
+- When an update cannot be applied from this version (the release uses a
+  newer format or a kind of component this version does not know), System and
+  `elastos update` say that the install command is needed once and show it,
+  instead of saying the publisher's release is not valid. Your current version
+  stays unchanged.
+- Homes on the test channel also accept the final release, so they update to
+  0.8.0 in System. Running the install command again moves them to the stable
+  channel (#335).
+- Make admin and Make guest in System → Accounts change every passkey of that account together (#338).
+- Spam limits for Chat: 5 Community messages per Profile every 10 seconds (Chat
+  shows "Slow down"), 5 per sender on receiving Homes without holding up other
+  senders, and Discovery relay caps of 4 listings per Home, 8 contact requests
+  per sender and 16 per Home. The relay admits only the signing Home's own
+  submissions.
+- Known issue: on the Jetson, getting a model is slow (Qwen takes about 43 minutes) and replies run on the CPU (about 25 seconds each).
+- Known issue: on a Mac with a slow connection, getting a model can stop with "Model content could not be read".
+- Known issue: Browser runs only on Apple Silicon Macs.
+
+### Fixed
+
+- When sign-in fails, the lock screen now says why in one line and what to do next, instead of showing nothing (#338).
+- The publisher's Carrier ticket lists only its public addresses when it has
+  one (no container bridge, LAN or loopback addresses), and a Runtime on a
+  fixed Carrier port also listens on that port over IPv6, so its ticket stays
+  the same across restarts (#336).
+
+## [0.8.0-alpha.16] - 2026-10-13
+
+Release candidate for 0.8.0 on the test channel, with the same notes.
+
+### Security
+
+- Isolation status: the first stage of the isolation plan (#173) is done, except that the seed does not yet run under its own account (#174, in 0.8.1). Web pages and shared files open in a separate sandbox; the web Terminal is off by default; Home checks allowed hosts and rejects requests whose Origin header names another website; sandboxed apps need valid tokens to reach private data; releases are signed with a new key kept off the public server.
+- Isolation status, not done yet: Home can still get every app's permissions, providers run as normal programs with your account's rights (only the model provider is partly limited), and approvals are not yet shown on a screen that only the Runtime controls. These stages (S1 and S2 of #173) are planned for 0.8.1.
+
+### Added
+
+- An owner (admin) can add another passkey, such as a second device or a security key, in System → Accounts → Add passkey. You confirm with your current passkey first, and the new passkey opens the same account as an admin (#338).
+
+### Changed
+
+- When an update cannot be applied from this version (the release uses a
+  newer format or a kind of component this version does not know), System and
+  `elastos update` say that the install command is needed once and show it,
+  instead of saying the publisher's release is not valid. Your current version
+  stays unchanged.
+- Homes on the test channel also accept the final release, so they update to
+  0.8.0 in System. Running the install command again moves them to the stable
+  channel (#335).
+- Make admin and Make guest in System → Accounts change every passkey of that account together (#338).
+- Spam limits for Chat: 5 Community messages per Profile every 10 seconds (Chat
+  shows "Slow down"), 5 per sender on receiving Homes without holding up other
+  senders, and Discovery relay caps of 4 listings per Home, 8 contact requests
+  per sender and 16 per Home. The relay admits only the signing Home's own
+  submissions.
+- Known issue: on the Jetson, getting a model is slow (Qwen takes about 43 minutes) and replies run on the CPU (about 25 seconds each).
+- Known issue: on a Mac with a slow connection, getting a model can stop with "Model content could not be read".
+- Known issue: Browser runs only on Apple Silicon Macs.
+
+### Fixed
+
+- When sign-in fails, the lock screen now says why in one line and what to do next, instead of showing nothing (#338).
+- The publisher's Carrier ticket lists only its public addresses when it has
+  one (no container bridge, LAN or loopback addresses), and a Runtime on a
+  fixed Carrier port also listens on that port over IPv6, so its ticket stays
+  the same across restarts (#336).
 
 ## [0.8.0-alpha.15]
 

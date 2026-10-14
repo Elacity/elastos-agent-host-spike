@@ -18,6 +18,10 @@ const overlayStatusNode = document.querySelector('[data-field="overlay-status"]'
 const settingsSearchInput = document.querySelector("#settings-search");
 const guestRegistrationInput = document.querySelector("#guest-registration");
 const guestRegistrationStatusNode = document.querySelector('[data-field="guest-registration-status"]');
+const communitySection = document.querySelector("#community-membership");
+const communityButton = document.querySelector("#community-toggle");
+let communityMembership = null;
+let communityBusy = false;
 const themeSegment = document.querySelector("#theme-segment");
 const accentPickerNode = document.querySelector("#accent-picker");
 const accentCustomPopover = document.querySelector("#accent-custom-popover");
@@ -27,6 +31,7 @@ const dockAutoHideInput = document.querySelector("#dock-autohide");
 const uiSoundsInput = document.querySelector("#ui-sounds");
 const passkeyStatusNode = document.querySelector('[data-field="passkey-status"]');
 const accountListNode = document.querySelector("#account-list");
+const passkeyAddButton = document.querySelector("#passkey-add");
 const recoveryDownloadButton = document.querySelector("#recovery-download");
 const recoveryProfileSetup = document.querySelector("#recovery-profile-setup");
 const recoveryProfileName = document.querySelector("#recovery-profile-name");
@@ -190,6 +195,7 @@ async function boot() {
   configureAppearanceEditor();
   configureAppearancePreferences();
   configureGuestAccess();
+  configureCommunityMembership();
   configureAiProvider();
   configurePasskeyAccess();
   configureRecoveryAccess();
@@ -369,7 +375,10 @@ async function refreshSystemSummary() {
   if (systemSummaryInFlight) return systemSummaryInFlight;
   systemSummaryInFlight = (async () => {
     const systemSummary = await fetchRuntimeUpdateJson({ headers: shellHeaders() });
-    if (runtimeUpdateActive) renderSystemSummary(systemSummary);
+    if (runtimeUpdateActive) {
+      renderSystemSummary(systemSummary);
+      await refreshCommunityMembership();
+    }
   })();
   try { await systemSummaryInFlight; }
   finally { systemSummaryInFlight = null; }
@@ -675,6 +684,60 @@ function configureGuestAccess() {
   guestRegistrationInput.disabled = !hasShellAccess();
   if (hasShellAccess()) {
     guestRegistrationInput.addEventListener("change", onGuestRegistrationChange);
+  }
+}
+
+function configureCommunityMembership() {
+  if (communityButton) communityButton.addEventListener("click", updateCommunityMembership);
+}
+
+function renderCommunityMembership(membership) {
+  if (!membership || membership.schema !== "elastos.community-membership/v1"
+      || typeof membership.configured !== "boolean" || typeof membership.joined !== "boolean") {
+    throw new Error("Community setting is unavailable.");
+  }
+  communityMembership = membership;
+  if (communitySection) communitySection.hidden = !membership.configured;
+  setTextFields("community-detail", readText(membership.detail));
+  if (communityButton) {
+    communityButton.textContent = membership.joined ? "Leave Community" : "Rejoin Community";
+    communityButton.disabled = communityBusy || !membership.configured
+      || currentAccess.role !== "admin" || !hasShellAccess();
+  }
+}
+
+async function refreshCommunityMembership() {
+  if (communityBusy) return;
+  try {
+    renderCommunityMembership(await fetchRuntimeUpdateJson({ headers: shellHeaders() }, "/api/apps/system/community"));
+    setHiddenFields("community-status", true);
+  } catch (error) {
+    if (communityButton) communityButton.disabled = true;
+    setTextFields("community-status", publicSystemError(error, "Community setting is unavailable."));
+    setHiddenFields("community-status", false);
+  }
+}
+
+async function updateCommunityMembership() {
+  if (communityBusy || !communityMembership?.configured || currentAccess.role !== "admin" || !hasShellAccess()) return;
+  communityBusy = true;
+  renderCommunityMembership(communityMembership);
+  setHiddenFields("community-status", true);
+  try {
+    const membership = await fetchRuntimeUpdateJson({
+      method: "POST",
+      headers: shellHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ joined: !communityMembership.joined }),
+    }, "/api/apps/system/community");
+    renderCommunityMembership(membership);
+    setTextFields("community-status", membership.joined ? "Community rejoined. Discovery uses its saved preference." : "Community and Discovery stopped on this Home.");
+    setHiddenFields("community-status", false);
+  } catch (error) {
+    setTextFields("community-status", publicSystemError(error, "Community setting could not be changed."));
+    setHiddenFields("community-status", false);
+  } finally {
+    communityBusy = false;
+    renderCommunityMembership(communityMembership);
   }
 }
 
@@ -1178,6 +1241,7 @@ function configurePasskeyAccess() {
   if (accountListNode) {
     accountListNode.addEventListener("click", onAccountListClick);
   }
+  passkeyAddButton?.addEventListener("click", onPasskeyAdd);
 }
 
 function configureRecoveryAccess() {
@@ -2621,7 +2685,12 @@ function renderAccounts(accounts) {
     accountListNode.append(empty);
     return;
   }
-  const adminCount = activeAccounts.filter((account) => readText(account.role) === "admin").length;
+  // Roles belong to accounts; one account may have several passkeys.
+  const adminPasskeyCount = activeAccounts.filter((account) => readText(account.role) === "admin").length;
+  const adminAccountCount = new Set(activeAccounts
+    .filter((account) => readText(account.role) === "admin")
+    .map((account) => readText(account.principal_id))).size;
+  const currentPrincipalId = readText(activeAccounts.find((account) => account.current)?.principal_id);
   const table = document.createElement("table");
   table.className = "account-table";
   table.innerHTML = `
@@ -2639,7 +2708,9 @@ function renderAccounts(accounts) {
   for (const account of activeAccounts) {
     body.append(accountRow(account, {
       activeCount: activeAccounts.length,
-      adminCount,
+      adminPasskeyCount,
+      adminAccountCount,
+      currentPrincipalId,
     }));
   }
   table.append(body);
@@ -2681,7 +2752,9 @@ function accountRow(passkey, listState = {}) {
 
   const passkeyRole = readText(passkey.role);
   const canManagePasskeyRoles = currentAccess.role === "admin";
-  const adminCount = Number(listState.adminCount);
+  const adminAccountCount = Number(listState.adminAccountCount);
+  const ownAccount = Boolean(listState.currentPrincipalId)
+    && readText(passkey.principal_id) === listState.currentPrincipalId;
   if (canManagePasskeyRoles && passkeyRole === "guest") {
     const promote = document.createElement("button");
     promote.className = "system-button system-button-secondary passkey-promote";
@@ -2691,14 +2764,14 @@ function accountRow(passkey, listState = {}) {
     promote.disabled = !promote.dataset.passkeyPromote || !hasShellAccess();
     actions.append(promote);
   }
-  if (canManagePasskeyRoles && passkeyRole === "admin" && !passkey.current) {
+  if (canManagePasskeyRoles && passkeyRole === "admin" && !passkey.current && !ownAccount) {
     const demote = document.createElement("button");
     demote.className = "system-button system-button-secondary passkey-demote";
     demote.type = "button";
     demote.textContent = "Make guest";
     demote.dataset.passkeyDemote = passkey.proof_binding_id || "";
-    demote.disabled = !demote.dataset.passkeyDemote || !hasShellAccess() || adminCount <= 1;
-    if (adminCount <= 1) {
+    demote.disabled = !demote.dataset.passkeyDemote || !hasShellAccess() || adminAccountCount <= 1;
+    if (adminAccountCount <= 1) {
       demote.title = "At least one admin must remain.";
     }
     actions.append(demote);
@@ -2711,7 +2784,7 @@ function accountRow(passkey, listState = {}) {
   remove.dataset.passkeyRevoke = passkey.proof_binding_id || "";
   remove.dataset.current = passkey.current ? "true" : "false";
   const protectsLastAdmin = readText(passkey.role) === "admin"
-    && Number(listState.adminCount) <= 1
+    && Number(listState.adminPasskeyCount) <= 1
     && Number(listState.activeCount) > 1;
   remove.disabled = !remove.dataset.passkeyRevoke || !hasShellAccess() || protectsLastAdmin;
   if (protectsLastAdmin) {
@@ -2794,6 +2867,67 @@ async function onAccountListClick(event) {
     showPasskeyStatus(String(error.message || error), "error");
     button.disabled = false;
   }
+}
+
+async function onPasskeyAdd() {
+  if (!passkeyAddButton || !hasShellAccess()) {
+    return;
+  }
+  passkeyAddButton.disabled = true;
+  showPasskeyStatus("Confirm with your current passkey, then create the new one.", "muted");
+  try {
+    await requestHomePasskeyAdd(apiHomeToken, homeParentOrigin);
+    await refreshAccountList();
+    showPasskeyStatus("Passkey added. You can sign in with it now.", "success");
+    notifyHomeSummaryChanged();
+  } catch (error) {
+    showPasskeyStatus(error, "error");
+  } finally {
+    passkeyAddButton.disabled = false;
+  }
+}
+
+// Passkeys can only be created by Home itself, never inside this frame.
+function requestHomePasskeyAdd(homeToken, parentOrigin) {
+  if (!homeToken || window.top === window || !parentOrigin) {
+    return Promise.reject(new Error("Open System from Home to add a passkey."));
+  }
+  const requestId = window.crypto?.randomUUID?.()
+    || `passkey-add-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return new Promise((resolve, reject) => {
+    // Two passkey prompts, each up to two minutes.
+    const timeout = window.setTimeout(() => {
+      window.removeEventListener("message", onResult);
+      reject(new Error("Adding the passkey timed out. Select Add passkey to try again."));
+    }, 300_000);
+    const onResult = (event) => {
+      if (event.source !== window.top || event.origin !== parentOrigin) {
+        return;
+      }
+      const result = event.data && typeof event.data === "object" ? event.data : null;
+      if (result?.type !== "elastos.home.passkey-add.result/v1" || result.requestId !== requestId) {
+        return;
+      }
+      window.clearTimeout(timeout);
+      window.removeEventListener("message", onResult);
+      const role = readText(result.role);
+      if (!hasExactKeys(result, role ? ["type", "requestId", "role"] : ["type", "requestId", "error"])) {
+        reject(new Error("Home did not add the passkey. Select Add passkey to try again."));
+        return;
+      }
+      if (role) {
+        resolve(role);
+        return;
+      }
+      reject(new Error(readText(result.error) || "Home did not add the passkey. Select Add passkey to try again."));
+    };
+    window.addEventListener("message", onResult);
+    window.top.postMessage({
+      type: "elastos.home.passkey-add.request/v1",
+      requestId,
+      homeToken,
+    }, parentOrigin);
+  });
 }
 
 async function refreshRecoveryStatus() {
@@ -3626,6 +3760,10 @@ function setAccessPolicy(access) {
     guest_registration_enabled: access && access.guest_registration_enabled === true,
   };
   setGuestRegistrationControlState();
+  // Only an owner (admin) adds passkeys; the server refuses anyone else.
+  if (passkeyAddButton) {
+    passkeyAddButton.hidden = !hasShellAccess() || currentAccess.role !== "admin";
+  }
 }
 
 function setGuestRegistrationControlState() {
@@ -3864,12 +4002,12 @@ async function pollRuntimeUpdate() {
   scheduleRuntimeUpdateRefresh();
 }
 
-async function fetchRuntimeUpdateJson(init) {
+async function fetchRuntimeUpdateJson(init, url = "/api/apps/system/summary") {
   const abort = new AbortController();
   runtimeUpdateRequests.add(abort);
   // Carrier admission includes connection, signed metadata checks and transport drain.
-  const timeout = window.setTimeout(() => abort.abort(), init.method === "POST" ? 60_000 : 10_000);
-  try { return await fetchJson("/api/apps/system/summary", { ...init, signal: abort.signal }); }
+  const timeout = window.setTimeout(() => abort.abort(), url === "/api/apps/system/summary" && init.method === "POST" ? 60_000 : 10_000);
+  try { return await fetchJson(url, { ...init, signal: abort.signal }); }
   finally {
     window.clearTimeout(timeout);
     runtimeUpdateRequests.delete(abort);

@@ -471,11 +471,12 @@ impl<R: Read> Read for CancellableReader<'_, R> {
 
 pub(super) async fn install_via_carrier(
     data: &Path,
-    info: &PlatformInfo,
+    row: &crate::capsule_record::AdmittedRow,
     dest: &Path,
     platform: &str,
     context: super::FirstPartyCarrierContext,
 ) -> anyhow::Result<()> {
+    let info = row.info();
     validate_request(data, info, dest, platform)?;
     let bind_addr = super::first_party_carrier_bind_addr(data, context)?;
     let source = crate::sources::load_trusted_sources(data)?
@@ -962,8 +963,7 @@ mod tests {
             std::time::Duration::from_secs(5),
             super::super::install_first_party_component_via_carrier(
                 target.path(),
-                NAME,
-                &info,
+                &crate::capsule_record::AdmittedRow::for_test(NAME, &info),
                 &dest,
                 super::super::FirstPartyCarrierContext::Setup,
             ),
@@ -1017,8 +1017,7 @@ mod tests {
         });
         super::super::install_first_party_component_via_carrier(
             target.path(),
-            NAME,
-            &info,
+            &crate::capsule_record::AdmittedRow::for_test(NAME, &info),
             &dest,
             super::super::FirstPartyCarrierContext::Runtime,
         )
@@ -1031,8 +1030,7 @@ mod tests {
         corrupt.checksum = Some(format!("sha256:{}", "0".repeat(64)));
         let error = super::super::install_first_party_component_via_carrier(
             target.path(),
-            NAME,
-            &corrupt,
+            &crate::capsule_record::AdmittedRow::for_test(NAME, &corrupt),
             &dest,
             super::super::FirstPartyCarrierContext::Runtime,
         )
@@ -1404,8 +1402,7 @@ mod tests {
         let (_, new_info) = archive(&fixture(b"new-image"));
         assert!(super::super::install_first_party_component_via_carrier(
             temp.path(),
-            NAME,
-            &new_info,
+            &crate::capsule_record::AdmittedRow::for_test(NAME, &new_info),
             &temp.path().join(INSTALL_PATH),
             super::super::FirstPartyCarrierContext::Setup,
         )

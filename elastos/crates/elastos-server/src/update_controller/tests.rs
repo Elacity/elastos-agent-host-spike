@@ -56,6 +56,11 @@ impl PrivateFixture {
     }
 
     fn publish_installed_release_with_components(&self, components: &[u8]) -> TrustedSource {
+        self.publish_installed_release_listing(components, json!({}))
+    }
+
+    /// `extra` adds top-level release payload fields, such as `capsule_records`.
+    fn publish_installed_release_listing(&self, components: &[u8], extra: Value) -> TrustedSource {
         self.file(&self.data.join("components.json"), components, 0o600);
         let binary = fs::read(&self.binary).unwrap();
         let descriptor = |bytes: &[u8]| {
@@ -63,15 +68,17 @@ impl PrivateFixture {
                 "cid": raw_cid(bytes), "sha256": digest(bytes), "size": bytes.len()
             })
         };
-        let release = signed(
-            json!({
-                "schema":"elastos.release/v1", "version":"0.7.0", "channel":"stable",
-                "platforms": {(crate::update::detect_release_platform()): {
-                    "binary": descriptor(&binary), "components": descriptor(components)
-                }}
-            }),
-            "elastos.release.v1",
-        );
+        let mut payload = json!({
+            "schema":"elastos.release/v1", "version":"0.7.0", "channel":"stable",
+            "platforms": {(crate::update::detect_release_platform()): {
+                "binary": descriptor(&binary), "components": descriptor(components)
+            }}
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let release = signed(payload, "elastos.release.v1");
         let head = signed(
             json!({
                 "schema":"elastos.release.head/v1", "version":"0.7.0", "channel":"stable",
@@ -696,6 +703,14 @@ fn installed_controller_admission_binds_signature_channel_version_platform_and_b
         admit_installed_release(&envelope, &source, &fixture.binary).unwrap(),
         expected
     );
+    let canary = TrustedSource {
+        channel: "canary".into(),
+        ..source.clone()
+    };
+    assert_eq!(
+        admit_installed_release(&envelope, &canary, &fixture.binary).unwrap(),
+        expected
+    );
     for refusal in [
         "binary",
         "version",
@@ -717,7 +732,7 @@ fn installed_controller_admission_binds_signature_channel_version_platform_and_b
                 envelope.clone()
             }
             "channel" => {
-                source.channel = "canary".into();
+                source.channel = "jetson-test".into();
                 envelope.clone()
             }
             "publisher" => {
@@ -815,6 +830,61 @@ fn signed_update_choice_requires_the_exact_head_release_publisher_version_and_ch
 }
 
 #[test]
+fn canary_update_choice_accepts_only_the_trusted_signers_stable_head() {
+    let (mut source, choice, head) = choice_fixture();
+    source.channel = "canary".into();
+    // The owner approves the offered stable channel; the canary source admits it.
+    assert_eq!(choice.channel, "stable");
+    assert!(owner_choice_matches_source(&choice, &source));
+    verify_update_choice(&head, &choice, &source).unwrap();
+    let mut subscription = choice.clone();
+    subscription.channel = "canary".into();
+    assert!(owner_choice_matches_source(&subscription, &source));
+    assert!(verify_update_choice(&head, &subscription, &source).is_err());
+    let mut stable = source.clone();
+    stable.channel = "stable".into();
+    assert!(!owner_choice_matches_source(&subscription, &stable));
+    for (field, value) in [
+        ("source_name", "another source"),
+        ("channel", "jetson-test"),
+        ("publisher_did", "did:key:another"),
+        ("current_version", "0.6.9"),
+    ] {
+        let mut changed = serde_json::to_value(&choice).unwrap();
+        changed[field] = json!(value);
+        let changed: UpdateRequest = serde_json::from_value(changed).unwrap();
+        assert!(!owner_choice_matches_source(&changed, &source), "{field}");
+    }
+    let value: Value = serde_json::from_slice(&head).unwrap();
+    let mut unsigned = value.clone();
+    unsigned.as_object_mut().unwrap().remove("signature");
+    let other_key = ed25519_dalek::SigningKey::from_bytes(&[44; 32]);
+    let (signature, other_did) = crate::crypto::domain_separated_sign(
+        &other_key,
+        "elastos.release.head.v1",
+        &serde_json::to_vec(&value["payload"]).unwrap(),
+    );
+    let wrong_signer =
+        json!({"payload": value["payload"], "signature": signature, "signer_did": other_did});
+    let forged = json!({"payload": value["payload"], "signature": signature, "signer_did": value["signer_did"]});
+    for (case, envelope, expected) in [
+        ("unsigned", unsigned, "Missing signature in envelope"),
+        ("wrong signer", wrong_signer, "Signer DID mismatch"),
+        (
+            "forged",
+            forged,
+            "Signed envelope signature verification failed",
+        ),
+    ] {
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let mut choice = choice.clone();
+        choice.head_cid = raw_cid(&bytes);
+        let error = verify_update_choice(&bytes, &choice, &source).unwrap_err();
+        assert!(error.to_string().contains(expected), "{case}: {error:#}");
+    }
+}
+
+#[test]
 fn receipt_round_trip_keeps_non_utf8_launch_args_environment_and_working_directory() {
     let fixture = PrivateFixture::new();
     let cwd = fixture
@@ -899,6 +969,34 @@ fn receipt_round_trip_keeps_non_utf8_launch_args_environment_and_working_directo
     bad.args[0] = "invalid base64!".into();
     assert!(bad.command(&fixture.binary, &generation, true).is_err());
     assert_ne!(bad.sha256().unwrap(), receipt.launch_sha256);
+}
+
+#[test]
+fn launch_capture_and_restart_preserve_carrier_mdns_choice() {
+    for choice in [None, Some("0"), Some("1")] {
+        let environment = choice.into_iter().map(|value| {
+            (
+                OsString::from("ELASTOS_CARRIER_MDNS"),
+                OsString::from(value),
+            )
+        });
+        let launch = LaunchPlan::capture_environment(environment, PathBuf::from("/Home fixture"));
+        for restarting in [false, true] {
+            let command = launch
+                .command(
+                    Path::new("/Home fixture/bin/elastos"),
+                    &"c".repeat(32),
+                    restarting,
+                )
+                .unwrap();
+            let retained = command
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| *key == OsStr::new("ELASTOS_CARRIER_MDNS"))
+                .and_then(|(_, value)| value);
+            assert_eq!(retained, choice.map(OsStr::new));
+        }
+    }
 }
 
 #[test]
@@ -3708,6 +3806,70 @@ impl crate::update::RestartOwner for StagingRestartOwner {
 }
 
 #[tokio::test]
+async fn home_launch_and_browser_paths_refuse_a_release_whose_record_differs_before_writing() {
+    let app = b"fixture app archive";
+    let row = json!({"install_path":"capsules/fixture-app", "extract_path":"fixture-app",
+        "release_path":"fixture-app.tar.gz", "cid":raw_cid(app),
+        "checksum":format!("sha256:{}", digest(app)), "size":app.len()});
+    let components = serde_json::to_vec(&json!({
+        "schema":"elastos.components/v1", "capsules":{}, "profiles":{},
+        "external":{"fixture-app":{"install_path":"capsules/fixture-app","platforms":{"*":row}}}
+    }))
+    .unwrap();
+    let did = crate::crypto::encode_signing_key_did(&test_key());
+    let record = |size: usize| {
+        crate::capsule_record::signed_record(
+            &test_key(),
+            json!({"schema":"elastos.capsule.record/v1", "name":"fixture-app", "platform":"*",
+                "capsule_version":null, "sha256":digest(app), "size":size, "cid":raw_cid(app),
+                "release_path":"fixture-app.tar.gz", "signer_did":did}),
+        )
+    };
+    let fixture = PrivateFixture::new();
+    fixture.publish_installed_release_listing(
+        &components,
+        json!({"capsule_records":[record(app.len() + 1)]}),
+    );
+    // The refusal names the record, so it comes before any Carrier fetch.
+    let error =
+        crate::setup::ensure_capsule_component_for_home_launch(&fixture.data, "fixture-app")
+            .await
+            .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("differs from the release components"),
+        "{error:#}"
+    );
+    // The shared check the Browser helper and image downloads run first.
+    let error = crate::setup::admit_installed_components(
+        &fixture.data,
+        crate::setup::FirstPartyCarrierContext::Runtime,
+    )
+    .err()
+    .expect("a differing record is refused");
+    assert!(error
+        .to_string()
+        .contains("differs from the release components"));
+    assert!(!fixture.data.join("capsules/fixture-app").exists());
+
+    let fixture = PrivateFixture::new();
+    fixture.publish_installed_release_listing(
+        &components,
+        json!({"capsule_records":[record(app.len())]}),
+    );
+    let admitted = crate::setup::admit_installed_components(
+        &fixture.data,
+        crate::setup::FirstPartyCarrierContext::Runtime,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(admitted.bytes, components);
+    // A Runtime admission holds the installation writer until it is dropped.
+    assert!(crate::install_transaction::acquire_installed_writer(&fixture.data).is_err());
+    drop(admitted);
+    assert!(crate::install_transaction::acquire_installed_writer(&fixture.data).is_ok());
+}
+
+#[tokio::test]
 async fn staged_support_skips_linux_only_home_component_on_darwin() {
     let fixture = PrivateFixture::new();
     fixture.publish_installed_release();
@@ -3730,7 +3892,10 @@ async fn staged_support_skips_linux_only_home_component_on_darwin() {
         "profiles":{"home":{"components":["browser-stream-bridge"]}},
         "external":{"browser-stream-bridge":{
             "install_path":"bin/browser-stream-bridge",
-            "platforms":{"linux-arm64":{"cid":raw_cid(b"linux support")}}
+            "platforms":{"linux-arm64":{
+                "release_path":"browser-stream-bridge-linux-arm64", "cid":raw_cid(b"linux support"),
+                "checksum":format!("sha256:{}", digest(b"linux support")), "size":b"linux support".len()
+            }}
         }}
     }))
     .unwrap();
@@ -3740,6 +3905,7 @@ async fn staged_support_skips_linux_only_home_component_on_darwin() {
         &fs::read(fixture.data.join("components.json")).unwrap(),
         &components,
         "darwin-arm64",
+        &crate::capsule_record::UpdateRecords::default(),
         &fetch,
         &mut owner,
     )
@@ -3778,7 +3944,7 @@ async fn staged_support_replaces_a_component_left_by_an_interrupted_undo() {
     let components = serde_json::to_vec(&json!({
         "schema":"elastos.components/v1", "capsules":{}, "profiles":{},
         "external":{"fixture-provider":{"install_path":"bin/fixture-provider", "platforms":{
-            (crate::setup::detect_platform()): {"cid":cid, "checksum":format!("sha256:{}", digest(signed)), "size":signed.len()}
+            (crate::setup::detect_platform()): {"release_path":"fixture-provider", "cid":cid, "checksum":format!("sha256:{}", digest(signed)), "size":signed.len()}
         }}}
     }))
     .unwrap();
@@ -3791,6 +3957,7 @@ async fn staged_support_replaces_a_component_left_by_an_interrupted_undo() {
         &components,
         &components,
         &crate::setup::detect_platform(),
+        &crate::capsule_record::UpdateRecords::default(),
         &fetch,
         &mut owner,
     )
@@ -3975,6 +4142,7 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
         "catalogue",
         "catalogue restored",
         "catalogue fetch",
+        "canary updated",
     ] {
         let fixture = PrivateFixture::new();
         fs::create_dir(fixture.data.join("bin")).unwrap();
@@ -4132,6 +4300,17 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
         let (_, mut request, _) = choice_fixture();
         request.head_cid = raw_cid(&head);
         request.release_cid = raw_cid(&release);
+        if outcome == "canary updated" {
+            // A canary Home: the owner approved the offered stable head, and the
+            // controller admits that choice as `apply` does before staging it.
+            let mut sources = crate::sources::load_trusted_sources(&fixture.data).unwrap();
+            sources.sources[0].channel = "canary".into();
+            crate::sources::save_trusted_sources(&fixture.data, &sources).unwrap();
+            let source = installed_source(&fixture.data).unwrap();
+            assert_eq!(request.channel, "stable");
+            assert!(owner_choice_matches_source(&request, &source));
+            verify_update_choice(&head, &request, &source).unwrap();
+        }
         let mut command = tokio::process::Command::new("/bin/sh");
         command.args(["-c", "exec sleep 60"]);
         let child = child::OwnedChild::spawn(&mut command).unwrap();
@@ -4259,7 +4438,14 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
         .await;
         owner.controller.publish_apply_result(&result).unwrap();
         let status = status(&fixture.data).unwrap().unwrap();
-        let updated = ["updated", "support path", "moved", "bundle", "catalogue"];
+        let updated = [
+            "updated",
+            "support path",
+            "moved",
+            "bundle",
+            "catalogue",
+            "canary updated",
+        ];
         if updated.contains(&outcome) {
             result.unwrap();
             assert_eq!(
@@ -4273,6 +4459,20 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
                 fs::read(fixture.data.join(&candidate_support)).unwrap(),
                 b"new support"
             );
+            if outcome == "canary updated" {
+                // The Home runs the stable release and keeps its canary subscription.
+                let source = installed_source(&fixture.data).unwrap();
+                assert_eq!(
+                    (source.channel.as_str(), source.installed_version.as_str()),
+                    ("canary", "0.7.1")
+                );
+                crate::installed_release::read_without_migration(
+                    &fixture.data,
+                    &fixture.binary,
+                    &source,
+                )
+                .unwrap();
+            }
         } else if outcome.ends_with("restored") {
             assert!(result.is_err());
             assert_eq!((owner.stops, owner.starts), (2, 2));
@@ -4397,6 +4597,222 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
     }
 }
 
+#[tokio::test]
+async fn system_update_fetches_the_pinned_network_before_stop_and_joins_after_activation() {
+    let config_file = crate::collaboration_startup::COLLABORATION_STARTUP_CONFIG_FILE;
+    for outcome in [
+        "joined",
+        "tampered",
+        "isolated",
+        "join fails",
+        "candidate fails",
+    ] {
+        let fixture = PrivateFixture::new();
+        fs::create_dir(fixture.data.join("bin")).unwrap();
+        fixture.file(
+            &fixture.data.join("bin/fixture-provider"),
+            b"old support",
+            0o755,
+        );
+        let manifest = |bytes: &[u8]| {
+            json!({
+                "schema":"elastos.components/v1", "profiles":{}, "capsules":{},
+                "external":{"fixture-provider":{"install_path":"bin/fixture-provider", "platforms":{
+                    (crate::setup::detect_platform()): {"release_path":"fixture-provider", "cid":raw_cid(bytes), "checksum":format!("sha256:{}", digest(bytes)), "size":bytes.len()}
+                }}}
+            })
+        };
+        let (_signer, chain) =
+            crate::collaboration_release_network::tests::signed_profile_chain_config(1);
+        let network = chain[0].clone();
+        let parsed: Value = serde_json::from_slice(&network).unwrap();
+        let network_cid = crate::setup::catalog_head_cid(&network).unwrap();
+        let mut value = manifest(b"new support");
+        value["collaboration_network"] = json!({
+            "head_cid": network_cid,
+            "expected_network_id": parsed["expected_network_id"],
+            "trusted_profile_signer_dids": parsed["trusted_profile_signer_dids"],
+        });
+        let old_components = serde_json::to_vec(&manifest(b"old support")).unwrap();
+        let components = serde_json::to_vec(&value).unwrap();
+        fixture.publish_installed_release_with_components(&old_components);
+        publish_retained_receipt(&fixture);
+        if outcome == "isolated" {
+            crate::collaboration_release_network::choose_isolated(&fixture.data).unwrap();
+        }
+        if outcome == "join fails" {
+            // Nothing can be joined where a directory holds the config path.
+            fs::create_dir(fixture.data.join(config_file)).unwrap();
+        }
+        let binary = b"#!/bin/sh\nprintf 'elastos 0.7.1\\n'\n".as_slice();
+        let descriptor =
+            |bytes: &[u8]| json!({"cid":raw_cid(bytes),"sha256":digest(bytes),"size":bytes.len()});
+        let release = signed(
+            json!({
+                "schema":"elastos.release/v1","version":"0.7.1","channel":"stable",
+                "platforms":{(crate::update::detect_release_platform()):{"binary":descriptor(binary),"components":descriptor(&components)}}
+            }),
+            "elastos.release.v1",
+        );
+        let head = signed(
+            json!({
+                "schema":"elastos.release.head/v1","version":"0.7.1","channel":"stable",
+                "latest_release_cid":raw_cid(&release),"release_sha256":digest(&release)
+            }),
+            "elastos.release.head.v1",
+        );
+        let (_, mut request, _) = choice_fixture();
+        request.head_cid = raw_cid(&head);
+        request.release_cid = raw_cid(&release);
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 60"]);
+        let child = child::OwnedChild::spawn(&mut command).unwrap();
+        let pid = child.pid();
+        let birth = process_start(pid).unwrap();
+        let mut owner = StagingRestartOwner {
+            controller: Controller {
+                receipt: read_private_json(&fixture.directory.join(RECEIPT)).unwrap(),
+                directory: fixture.directory.clone(),
+                child: Some(child),
+                request: Some(request.clone()),
+                previous_binary_sha256: digest(b"signed fixture Runtime"),
+                previous_version: "0.7.0".into(),
+                generation: "a".repeat(32),
+                host_ready: true,
+                carrier: None,
+                carrier_close: None,
+                test_readiness: None,
+            },
+            host: Some(
+                crate::host_lock::acquire_host_process_lock(&fixture.data, "home", "fixture")
+                    .unwrap(),
+            ),
+            stops: 0,
+            starts: 0,
+            fail_candidate: outcome == "candidate fails",
+            candidate_support: PathBuf::from("bin/fixture-provider"),
+        };
+        owner
+            .controller
+            .publish("staging", "Checking the signed update.")
+            .unwrap();
+        let served_network = if outcome == "tampered" {
+            crate::collaboration_release_network::tests::signed_profile_chain_config(1).1[0].clone()
+        } else {
+            network.clone()
+        };
+        let items = std::collections::BTreeMap::from([
+            (request.head_cid.clone(), head),
+            (request.release_cid.clone(), release),
+            (raw_cid(binary), binary.to_vec()),
+            (raw_cid(&components), components),
+            (raw_cid(b"new support"), b"new support".to_vec()),
+            (network_cid.clone(), served_network),
+        ]);
+        let network_fetches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = network_fetches.clone();
+        let data = fixture.data.clone();
+        let fetch: crate::update::FetchFn = Box::new(move |cid| {
+            let bytes = items.get(&cid).cloned();
+            let network_fetch = cid == network_cid;
+            let observed = observed.clone();
+            let birth = birth.clone();
+            let data = data.clone();
+            Box::pin(async move {
+                if network_fetch {
+                    observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    // The network comes with the other downloads, while the
+                    // current Home still runs on the current release.
+                    assert!(!child::generation_gone(pid, &birth).unwrap());
+                    assert_eq!(
+                        fs::read(data.join("bin/fixture-provider")).unwrap(),
+                        b"old support"
+                    );
+                }
+                bytes.ok_or_else(|| anyhow::anyhow!("content {cid} is not published"))
+            })
+        });
+        let result = crate::update::run_restarting_update(
+            &fixture.data,
+            &fetch,
+            request.head_cid,
+            &mut owner,
+        )
+        .await;
+        owner.controller.publish_apply_result(&result).unwrap();
+        let status = status(&fixture.data).unwrap().unwrap();
+        let joined_network = || fs::read(fixture.data.join(config_file)).ok();
+        match outcome {
+            "joined" => {
+                result.unwrap();
+                assert_eq!((owner.stops, owner.starts), (1, 1));
+                assert_eq!(status.phase, "updated");
+                assert_eq!(joined_network(), Some(network.clone()));
+                assert_eq!(
+                    fs::metadata(fixture.data.join(config_file))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+            "isolated" => {
+                result.unwrap();
+                assert_eq!(network_fetches.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert_eq!(joined_network(), None);
+            }
+            "tampered" => {
+                let error = format!("{:#}", result.unwrap_err());
+                assert!(error.contains("does not match the pinned"), "{error}");
+                assert_eq!((owner.stops, owner.starts), (0, 0));
+                assert_eq!(status.phase, "failed");
+                assert!(status.message.contains("unchanged"));
+                assert_eq!(joined_network(), None);
+                assert_eq!(
+                    fs::read(&fixture.binary).unwrap(),
+                    b"signed fixture Runtime"
+                );
+            }
+            "join fails" => {
+                assert!(result.is_err());
+                assert_eq!((owner.stops, owner.starts), (2, 1));
+                assert_eq!(status.phase, "restored");
+                assert!(fixture.data.join(config_file).is_dir());
+            }
+            "candidate fails" => {
+                assert!(result.is_err());
+                assert_eq!((owner.stops, owner.starts), (2, 2));
+                assert_eq!(status.phase, "restored");
+                // The previous release comes back; the joined network stays.
+                assert_eq!(joined_network(), Some(network.clone()));
+            }
+            _ => unreachable!(),
+        }
+        if outcome != "tampered" && outcome != "isolated" {
+            assert_eq!(network_fetches.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+        if ["join fails", "candidate fails"].contains(&outcome) {
+            assert!(owner.controller.child.is_some(), "previous Home is running");
+            assert_eq!(
+                fs::read(&fixture.binary).unwrap(),
+                b"signed fixture Runtime"
+            );
+            assert_eq!(
+                fs::read(fixture.data.join("components.json")).unwrap(),
+                old_components
+            );
+        }
+        assert!(
+            !InstallTransaction::has_pending_recovery(&fixture.binary),
+            "{outcome}"
+        );
+        assert!(!fixture.data.join(".elastos.update-support").exists());
+        owner.host.take();
+        owner.controller.stop_child().await.unwrap();
+    }
+}
+
 #[test]
 fn apply_failures_are_classified_only_from_typed_evidence() {
     for (error, expected) in [
@@ -4425,6 +4841,19 @@ fn apply_failures_are_classified_only_from_typed_evidence() {
             .unwrap_err()
             .context("staging"),
             ApplyFailure::Refused,
+        ),
+        (
+            // A newer signed format or kind: plain words and the command, never "not valid".
+            crate::update::installer_required::<()>(
+                &serde_json::from_value(json!({"name":"fixture", "publisher_dids":["did:key:fixture"],
+                    "gateways":["https://publisher.example"]}))
+                .unwrap(),
+                "0.9.0",
+                crate::update::refused(Err(anyhow::anyhow!("release components use schema v2"))),
+            )
+            .unwrap_err()
+            .context("staging"),
+            ApplyFailure::InstallerRequired("ElastOS 0.9.0 needs the install command once; this Home cannot apply it itself. Your current version is unchanged. Run this once: curl -fsSL 'https://publisher.example/install.sh' | bash".into()),
         ),
         (
             anyhow::anyhow!("Binary SHA-256 mismatch!"),

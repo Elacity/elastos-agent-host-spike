@@ -181,6 +181,7 @@ use gateway_origin::*;
 use gateway_passkey_step_up::*;
 pub(super) use gateway_passkey_step_up::{
     consume_or_recover_passkey_step_up_effect, consume_passkey_step_up_token,
+    require_hosted_step_up_launch,
 };
 #[cfg(test)]
 pub(crate) use gateway_passkey_step_up::{
@@ -639,6 +640,14 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
                 .layer(DefaultBodyLimit::max(96 * 1024)),
         )
         .route(
+            "/api/auth/passkey/add/begin",
+            post(super::auth_gateway::passkey_add_begin).layer(DefaultBodyLimit::max(96 * 1024)),
+        )
+        .route(
+            "/api/auth/passkey/add/complete",
+            post(super::auth_gateway::passkey_add_complete).layer(DefaultBodyLimit::max(96 * 1024)),
+        )
+        .route(
             "/api/auth/owner-recovery/begin",
             post(super::auth_gateway::owner_recovery_begin),
         )
@@ -717,6 +726,10 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
             get(gateway_carrier_bootstrap),
         )
         .route("/api/carrier/bootstrap", get(gateway_carrier_bootstrap))
+        .route(
+            "/api/apps/chat-room/contacts/request",
+            post(chat_room_contact_request),
+        )
         .route("/artifacts/*path", get(serve_artifact_file))
         .route(
             "/api/apps/assistant/workspace",
@@ -767,6 +780,10 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
         .route(
             "/api/apps/system/access/guest-registration",
             post(system_guest_registration_update),
+        )
+        .route(
+            "/api/apps/system/community",
+            get(system_community_membership_get).post(system_community_membership_update),
         )
         .route(
             "/api/apps/system/ai-provider",
@@ -1469,6 +1486,7 @@ fn inbox_error_response(err: anyhow::Error) -> Response {
         .map(str::to_string)
         .unwrap_or_else(|| err.to_string());
     let status = if text.contains("home launch token")
+        || text.contains("admin passkey required")
         || text.contains("fresh passkey")
         || text.contains("passkey step-up")
         || text.contains("auth session is not active")
@@ -1476,7 +1494,9 @@ fn inbox_error_response(err: anyhow::Error) -> Response {
         || text.contains("belongs to a different principal")
     {
         StatusCode::FORBIDDEN
-    } else if profile_required.is_some() {
+    } else if profile_required.is_some()
+        || text == crate::collaboration_release_network::COMMUNITY_LEFT_DETAIL
+    {
         StatusCode::CONFLICT
     } else if text.contains("service access request delivery failed") {
         StatusCode::SERVICE_UNAVAILABLE
@@ -1547,7 +1567,9 @@ fn home_error_response(err: anyhow::Error) -> Response {
     if text.contains("share terms") || text.contains("hosted connection is required") {
         return (StatusCode::BAD_REQUEST, text).into_response();
     }
-    if profile_required.is_some() {
+    if profile_required.is_some()
+        || text == crate::collaboration_release_network::COMMUNITY_LEFT_DETAIL
+    {
         return (StatusCode::CONFLICT, text).into_response();
     }
     if appearance_request.is_some() {
