@@ -99,7 +99,6 @@ import {
 import {
   bindSetupSheet,
   holdHomeSetupAct,
-  setupSheetWindowClosed,
   syncSetupSheet,
 } from "./shell-setup-sheet.js?v=home-20260813a";
 import {
@@ -224,7 +223,6 @@ configureWindowHooks({
   syncMenubar,
   updateTaskbarState,
   holdHomeSetupAct,
-  windowClosed: setupSheetWindowClosed,
   // Host-mediated launches: GUI never fetch-launches; shell-windows and the
   // wallet rail call this hook after bindHomeGuiInteractions binds it.
   launchTarget: (...args) => homeGuiHostActions.launchTarget?.(...args),
