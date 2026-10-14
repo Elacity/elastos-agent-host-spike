@@ -57,5 +57,7 @@ test("one engine that Automatic uses is not offered as a choice", () => {
   assert.equal(engineChoiceHidden([local], "browser-vm-product"), false, "an explicit choice stays visible");
   assert.equal(engineChoiceHidden([{ id: "mac-remote", backing_substrate: "remote_operator_vm" }], ""), false,
     "Automatic skips remote VMs, so the remote engine stays choosable");
+  assert.equal(engineChoiceHidden([{ id: "remote-engine-aa", backing_substrate: "local_microvm" }], ""), false,
+    "a granted remote service is never picked by Automatic, so it stays choosable");
   assert.equal(engineChoiceHidden([local, { id: "jetson", backing_substrate: "local_microvm" }], ""), false);
 });
