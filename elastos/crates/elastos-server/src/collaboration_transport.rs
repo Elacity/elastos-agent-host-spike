@@ -23,6 +23,7 @@ pub(crate) struct CollaborationTransportDriver {
     core: Arc<CollaborationCore>,
     network: JoinedCollaborationNetwork,
     home_delivery: Option<SharedHomeDelivery>,
+    gossip: Mutex<SharedRetrySchedule>,
 }
 
 const SHARED_FAST_RETRY_WINDOW_SECS: u64 = 3;
@@ -35,6 +36,8 @@ const MAX_SHARED_DELIVERY_BYTES: usize = MAX_COLLABORATION_TRANSPORT_FRAME_BYTES
 // The Shared JSON payload bound plus Carrier's result envelope and newline.
 pub(crate) const MAX_SHARED_CARRIER_REPLY_BYTES: usize = MAX_SHARED_DELIVERY_BYTES + 64;
 const HOME_DELIVERY_TIMEOUT: Duration = Duration::from_secs(2);
+/// Schedule key for the gossip plane: one broadcast reaches every Home.
+const GOSSIP_PLANE: &str = "gossip";
 
 #[derive(Clone)]
 struct SharedHomeDelivery {
@@ -298,6 +301,7 @@ impl CollaborationTransportDriver {
             core,
             network,
             home_delivery: None,
+            gossip: Mutex::new(SharedRetrySchedule::default()),
         }
     }
 
@@ -331,9 +335,8 @@ impl CollaborationTransportDriver {
         &self,
         now: u64,
     ) -> anyhow::Result<CollaborationOutgoingRetrySummary> {
-        let metadata = async {
-            match tokio::time::timeout(SHARED_CUSTODY_FAST_RETRY, self.retry_metadata_once(now))
-                .await
+        let gossip = async {
+            match tokio::time::timeout(SHARED_CUSTODY_FAST_RETRY, self.retry_gossip_once(now)).await
             {
                 Ok(result) => result,
                 Err(_) => Ok(CollaborationOutgoingRetrySummary {
@@ -350,10 +353,10 @@ impl CollaborationTransportDriver {
                 _ => Ok(CollaborationOutgoingRetrySummary::default()),
             }
         };
-        // Metadata cannot hold a Home attempt behind a gossip response. Both
+        // A gossip response cannot hold a Home attempt back. Both
         // branches remain owned by this existing worker future and cancel with it.
-        let (metadata, homes) = tokio::join!(metadata, homes);
-        let mut summary = metadata?;
+        let (gossip, homes) = tokio::join!(gossip, homes);
+        let mut summary = gossip?;
         let homes = homes?;
         summary.attempted += homes.attempted;
         summary.remote_broadcasts += homes.remote_broadcasts;
@@ -361,26 +364,83 @@ impl CollaborationTransportDriver {
         Ok(summary)
     }
 
-    async fn retry_metadata_once(
+    /// Broadcasts Presence every cycle and each Shared post once, then again
+    /// on the slow cadence until its first Home receipt. Gossip reaches Homes
+    /// that no presence or Discovery lists and no direct dial reaches.
+    async fn retry_gossip_once(
         &self,
         now: u64,
     ) -> anyhow::Result<CollaborationOutgoingRetrySummary> {
         if !self.core.community_membership().joined() {
             return Ok(CollaborationOutgoingRetrySummary::default());
         }
-        let selected = self
+        let pending = self.core.pending_outgoing(now)?;
+        let bootstrap = self
             .core
-            .pending_outgoing(now)?
-            .into_iter()
-            .filter(|message| !message.shared_chat());
+            .is_bootstrap_endpoint(&self.core.local_device_did());
+        let attempted_at = Instant::now();
+        let selected = {
+            let mut schedule = self
+                .gossip
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Shared gossip schedule lock poisoned"))?;
+            let live = pending
+                .iter()
+                .filter(|message| message.shared_chat() && !message.remote_acceptance_recorded())
+                .map(|message| message.envelope_sha256().to_string())
+                .collect::<HashSet<_>>();
+            schedule
+                .attempts
+                .retain(|(hash, _), _| live.contains(hash.as_str()));
+            let mut shared = 0;
+            pending
+                .into_iter()
+                .filter(|message| {
+                    if !message.shared_chat() {
+                        return true;
+                    }
+                    if bootstrap
+                        || shared == MAX_CUSTODY_RETRIES_PER_CYCLE
+                        || !live.contains(message.envelope_sha256())
+                    {
+                        return false;
+                    }
+                    let due = schedule
+                        .attempts
+                        .get(&(
+                            message.envelope_sha256().to_string(),
+                            GOSSIP_PLANE.to_string(),
+                        ))
+                        .is_none_or(|last| {
+                            attempted_at.duration_since(*last) >= SHARED_CUSTODY_RETRY
+                        });
+                    shared += usize::from(due);
+                    due
+                })
+                .collect::<Vec<_>>()
+        };
         let mut summary = CollaborationOutgoingRetrySummary::default();
         for outgoing in selected {
             self.core.community_membership().require_joined()?;
+            if outgoing.shared_chat() {
+                // Recorded per send, so a cycle cut short leaves the rest due.
+                self.gossip
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("Shared gossip schedule lock poisoned"))?
+                    .attempts
+                    .insert(
+                        (
+                            outgoing.envelope_sha256().to_string(),
+                            GOSSIP_PLANE.to_string(),
+                        ),
+                        attempted_at,
+                    );
+            }
             summary.attempted += 1;
             let frame = self
                 .core
                 .prepare_transport_frame(outgoing.envelope_bytes())?;
-            match self.network.send_metadata(&self.core, &frame, None).await {
+            match self.network.send_gossip(&self.core, &frame, None).await {
                 Ok(CollaborationCarrierSendOutcome::RemoteBroadcast { .. }) => {
                     summary.remote_broadcasts += 1;
                 }
@@ -408,8 +468,6 @@ impl CollaborationTransportDriver {
         // senders may never resend them, so this Home owns the retry.
         let mut held = self.core.take_held_frames(now).into_iter();
         while let Some(frame) = held.next() {
-            // Held Shared work was admitted only by the authenticated direct
-            // operation. Its sender retries that operation for the receipt.
             if !self
                 .ingest_frame(frame.frame(), now, &mut summary, true)
                 .await
@@ -448,22 +506,10 @@ impl CollaborationTransportDriver {
         frame: &[u8],
         now: u64,
         summary: &mut CollaborationIncomingOnceSummary,
-        held_direct: bool,
+        held: bool,
     ) -> bool {
         match self.core.allows_gossip_frame(frame) {
             Ok(true) => {}
-            Ok(false) if held_direct => {
-                match self.core.ingest_transport_frame(frame, now) {
-                    Ok(CollaborationTransportIngestion::Incoming(_)) => {
-                        summary.incoming_acceptances += 1
-                    }
-                    Ok(CollaborationTransportIngestion::Rejected(_)) => {
-                        summary.deterministic_rejections += 1
-                    }
-                    _ => return false,
-                }
-                return true;
-            }
             Ok(false) => {
                 summary.deterministic_rejections += 1;
                 return true;
@@ -490,14 +536,16 @@ impl CollaborationTransportDriver {
                 };
                 match self
                     .network
-                    .send_metadata(&self.core, &receipt_frame, Some(frame))
+                    .send_gossip(&self.core, &receipt_frame, Some(frame))
                     .await
                 {
                     Ok(CollaborationCarrierSendOutcome::RemoteBroadcast { .. }) => {
                         summary.acceptance_receipt_broadcasts += 1;
                         true
                     }
-                    Ok(CollaborationCarrierSendOutcome::LocalOnlyBuffered) | Err(_) => false,
+                    // A held frame's senders fetch its durable receipt again
+                    // by retrying: direct by the Home call, gossip by re-broadcast.
+                    Ok(CollaborationCarrierSendOutcome::LocalOnlyBuffered) | Err(_) => held,
                 }
             }
         }
@@ -702,7 +750,7 @@ mod tests {
         async fn driver(
             &self,
             core: Arc<CollaborationCore>,
-            carrier: Arc<FakeCarrier>,
+            carrier: Arc<dyn Provider>,
         ) -> CollaborationTransportDriver {
             let joined = join_collaboration_network(carrier, &self.profile)
                 .await
@@ -986,15 +1034,28 @@ mod tests {
         lose_reply: bool,
         stall: bool,
     ) -> (CollaborationTransportDriver, Arc<Plane>) {
-        let registry = Arc::new(ProviderRegistry::new());
         let presence = CollaborationPresenceProductPort::new(core.clone()).unwrap();
         observe(fixture, &core, &presence, peer);
+        let peers = BTreeMap::from([(
+            peer_core.local_device_did(),
+            delivery(peer_core, Arc::new(ProviderRegistry::new())),
+        )]);
+        plane_driver(fixture, core, carrier, peers, lose_reply, stall).await
+    }
+
+    async fn plane_driver(
+        fixture: &Fixture,
+        core: Arc<CollaborationCore>,
+        carrier: Arc<dyn Provider>,
+        peers: BTreeMap<String, SharedHomeDelivery>,
+        lose_reply: bool,
+        stall: bool,
+    ) -> (CollaborationTransportDriver, Arc<Plane>) {
+        let registry = Arc::new(ProviderRegistry::new());
+        let presence = CollaborationPresenceProductPort::new(core.clone()).unwrap();
         let plane = Arc::new(Plane {
             source: core.local_device_did(),
-            peers: BTreeMap::from([(
-                peer_core.local_device_did(),
-                delivery(peer_core, Arc::new(ProviderRegistry::new())),
-            )]),
+            peers,
             calls: Mutex::new(Vec::new()),
             lose_reply: AtomicBool::new(lose_reply),
             stall,
@@ -1008,6 +1069,126 @@ mod tests {
             .await
             .unwrap();
         (driver, plane)
+    }
+
+    /// One gossip topic whose bootstrap forwards every frame to every other
+    /// joined Home. Homes share no direct path.
+    struct BootstrapRelay {
+        profile: VerifiedCollaborationNetworkProfile,
+        homes: Mutex<Vec<(Vec<String>, u64)>>,
+    }
+    struct RelayCarrier {
+        relay: Arc<BootstrapRelay>,
+        home: usize,
+    }
+    impl BootstrapRelay {
+        fn new(profile: &VerifiedCollaborationNetworkProfile) -> Arc<Self> {
+            Arc::new(Self {
+                profile: profile.clone(),
+                homes: Mutex::default(),
+            })
+        }
+        fn join(self: &Arc<Self>) -> Arc<RelayCarrier> {
+            let mut homes = self.homes.lock().unwrap();
+            homes.push((Vec::new(), 0));
+            Arc::new(RelayCarrier {
+                relay: self.clone(),
+                home: homes.len() - 1,
+            })
+        }
+        fn inbox(&self, home: &RelayCarrier) -> Vec<String> {
+            self.homes.lock().unwrap()[home.home].0.clone()
+        }
+    }
+    /// Carrier's reply to `remember_peer` for the profile's one bootstrap.
+    fn remembered(profile: &VerifiedCollaborationNetworkProfile) -> serde_json::Value {
+        let node = &profile.profile().bootstrap_peers[0].node_id;
+        serde_json::json!({"status":"ok","data":{"added":[node]}})
+    }
+    #[async_trait::async_trait]
+    impl Provider for RelayCarrier {
+        async fn handle(&self, _: ResourceRequest) -> Result<ResourceResponse, ProviderError> {
+            unreachable!()
+        }
+        fn schemes(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+        fn name(&self) -> &'static str {
+            "test-relay-carrier"
+        }
+        async fn send_raw(
+            &self,
+            request: &serde_json::Value,
+        ) -> Result<serde_json::Value, ProviderError> {
+            let mut homes = self.relay.homes.lock().unwrap();
+            match request["op"].as_str().unwrap() {
+                "remember_peer" => Ok(remembered(&self.relay.profile)),
+                "gossip_join_exact" => {
+                    Ok(serde_json::json!({"status":"ok","data":{"topic":request["topic"]}}))
+                }
+                "gossip_send" => {
+                    let message = request["message"].as_str().unwrap();
+                    for (index, (inbox, _)) in homes.iter_mut().enumerate() {
+                        if index != self.home {
+                            inbox.push(message.to_string());
+                        }
+                    }
+                    Ok(serde_json::json!({"status":"ok","data":{"remote_peer_count":1}}))
+                }
+                "gossip_peek" => {
+                    let (inbox, cursor) = &homes[self.home];
+                    let frames = inbox[*cursor as usize..]
+                        .iter()
+                        .take(32)
+                        .map(|message| serde_json::json!({"content":message}))
+                        .collect::<Vec<_>>();
+                    Ok(peek(*cursor, *cursor + frames.len() as u64, frames))
+                }
+                "gossip_ack" => {
+                    let cursor = request["cursor"].as_u64().unwrap();
+                    let next = request["next_cursor"].as_u64().unwrap();
+                    homes[self.home].1 = next;
+                    Ok(ack(cursor, next))
+                }
+                _ => Err(ProviderError::Unavailable(
+                    "relay has no such op".to_string(),
+                )),
+            }
+        }
+    }
+
+    /// A fixture whose profile names `seed` as its Community bootstrap.
+    fn bootstrap_fixture(seed: &SigningKey) -> Fixture {
+        let mut fixture = Fixture::new();
+        let key = crate::carrier::did_to_public_key(&crate::crypto::encode_signing_key_did(seed))
+            .unwrap();
+        let ticket = serde_json::to_vec(
+            &serde_json::json!({"topic":null,"endpoints":[iroh::EndpointAddr::from(key)]}),
+        )
+        .unwrap();
+        let bootstrap = crate::collaboration_network::CollaborationBootstrapPeer {
+            node_id: key.to_string(),
+            connect_ticket: data_encoding::BASE32_NOPAD
+                .encode(&ticket)
+                .to_ascii_lowercase(),
+        };
+        let grant_bytes =
+            canonical_default_conversation_grant_bytes(fixture.grant.grant()).unwrap();
+        let (signer, _) = generate_keypair();
+        fixture.profile = verified_profile(&signer, raw_sha256_cid(&grant_bytes), vec![bootstrap]);
+        fixture.grant = verify_default_conversation_grant(&fixture.profile, &grant_bytes).unwrap();
+        fixture
+    }
+
+    fn receipt_message_hash(frame: &str) -> String {
+        let receipt =
+            crate::collaboration_protocol::verify_collaboration_transport_frame(frame.as_bytes())
+                .unwrap();
+        let receipt: serde_json::Value = serde_json::from_slice(receipt.envelope_bytes()).unwrap();
+        receipt["payload"]["message_envelope_sha256"]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 
     #[tokio::test(start_paused = true)]
@@ -1027,9 +1208,10 @@ mod tests {
             .unwrap();
         let (driver, plane) =
             home_driver(&a, ac.clone(), carrier.clone(), &b, bc.clone(), true, false).await;
+        // The gossip broadcast fails offline next to the lost direct reply.
         assert_eq!(
             driver.retry_outgoing_once(NOW).await.unwrap().send_failures,
-            1
+            2
         );
         assert_eq!(bc.summary().unwrap().pending_product_handoffs, 1);
         assert!(!ac.pending_outgoing(NOW).unwrap()[0].accepted_by(&bc.local_device_did()));
@@ -1059,10 +1241,17 @@ mod tests {
             crate::collaboration_protocol::verify_collaboration_transport_frame(&calls[0].1)
                 .unwrap();
         assert_eq!(frame.envelope_bytes(), outgoing.envelope_bytes());
-        assert!(carrier
+        let gossip = carrier
             .requests()
-            .iter()
-            .all(|request| request["op"] != "gossip_send"));
+            .into_iter()
+            .filter(|request| request["op"] == "gossip_send")
+            .map(|request| request["message"].as_str().unwrap().as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            gossip,
+            [calls[0].1.clone()],
+            "one broadcast of the same original"
+        );
         assert!(ac.pending_outgoing(NOW + TTL).unwrap().is_empty());
     }
 
@@ -1168,10 +1357,11 @@ mod tests {
                 .unwrap();
             hashes.insert(out.envelope_sha256().to_string());
         }
+        // Gossip keeps the same per-cycle bound and cadence beside direct.
         for expected in [4, 4, 1] {
             let result = driver.retry_outgoing_once(NOW + 3).await.unwrap();
-            assert_eq!(result.attempted, expected);
-            assert_eq!(result.send_failures, expected);
+            assert_eq!(result.attempted, 2 * expected);
+            assert_eq!(result.send_failures, 2 * expected);
         }
         let attempted: HashSet<_> = plane
             .calls
@@ -1199,7 +1389,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(5)).await;
         assert_eq!(
             driver.retry_outgoing_once(NOW + 8).await.unwrap().attempted,
-            4
+            8
         );
         assert_eq!(
             driver
@@ -1213,20 +1403,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_gossip_and_forged_provider_source_are_refused_before_durable_admission() {
+    async fn shared_gossip_is_admitted_once_and_forged_provider_source_is_refused() {
         let a = Fixture::new();
         let ac = a.core();
         let (sender, _) = generate_keypair();
-        let (_, message) = remote_message(&a, sender.clone(), "legacy Chat");
+        let (_, message) = remote_message(&a, sender.clone(), "Shared post");
         let frame = sign_collaboration_transport_frame(&sender, &message).unwrap();
-        let carrier = FakeCarrier::new();
-        let driver = a.driver(ac.clone(), carrier.clone()).await;
-        carrier.push([serde_json::json!({"status":"ok","data":{"messages":[{"content":std::str::from_utf8(&frame).unwrap()}],"scanned":1,"limit":32,"cursor":0,"next_cursor":1}}), serde_json::json!({"status":"ok","data":{"cursor":0,"next_cursor":1,"advanced":true}})]);
-        let result = driver.process_incoming_once(NOW).await.unwrap();
-        assert!(
-            matches!(result, CollaborationIncomingOnceOutcome::Acknowledged(summary) if summary.deterministic_rejections == 1 && summary.incoming_acceptances == 0)
-        );
-        assert_eq!(ac.summary().unwrap().pending_product_handoffs, 0);
         let service = delivery(ac.clone(), Arc::new(ProviderRegistry::new()));
         let (foreign, _) = generate_keypair();
         assert!(service
@@ -1238,51 +1420,54 @@ mod tests {
         let mut raw = invocation(&frame, &crate::crypto::encode_signing_key_did(&sender));
         raw.as_object_mut().unwrap().remove("_runtime_invocation");
         assert!(service.receive(&raw, NOW).is_err());
-        let count = carrier.requests().len();
-        assert!(driver
-            .network
-            .send_metadata(&ac, &frame, None)
-            .await
-            .is_err());
-        assert_eq!(carrier.requests().len(), count);
+        assert_eq!(ac.summary().unwrap().pending_product_handoffs, 0);
+
+        let carrier = FakeCarrier::new();
+        let driver = a.driver(ac.clone(), carrier.clone()).await;
+        carrier.push([
+            peek(0, 1, vec![gossip(&frame)]),
+            serde_json::json!({"status":"ok","data":{"remote_peer_count":1}}),
+            ack(0, 1),
+        ]);
+        assert_eq!(
+            driver.process_incoming_once(NOW).await.unwrap(),
+            CollaborationIncomingOnceOutcome::Acknowledged(CollaborationIncomingOnceSummary {
+                incoming_acceptances: 1,
+                acceptance_receipt_broadcasts: 1,
+                ..CollaborationIncomingOnceSummary::default()
+            })
+        );
+        let receipt = carrier
+            .requests()
+            .into_iter()
+            .find(|request| request["op"] == "gossip_send")
+            .unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(ac
+            .allows_gossip_receipt(receipt.as_bytes(), &frame)
+            .unwrap());
+        // The direct copy replays the gossip admission: one row, one receipt.
         let response = service
             .receive(
                 &invocation(&frame, &crate::crypto::encode_signing_key_did(&sender)),
                 NOW,
             )
             .unwrap();
-        let receipt = ac
-            .prepare_transport_frame(response["receipt"].as_str().unwrap().as_bytes())
-            .unwrap();
-        assert!(driver
-            .network
-            .send_metadata(&ac, &receipt, Some(&frame))
-            .await
-            .is_err());
-        assert_eq!(carrier.requests().len(), count);
+        assert_eq!(
+            crate::collaboration_protocol::verify_collaboration_transport_frame(receipt.as_bytes())
+                .unwrap()
+                .envelope_bytes(),
+            response["receipt"].as_str().unwrap().as_bytes()
+        );
+        assert_eq!(ac.summary().unwrap().pending_product_handoffs, 1);
     }
 
     #[tokio::test]
     async fn seed_sender_receiver_presence_and_receipt_are_excluded_from_chat_plane() {
         let (seed, _) = generate_keypair();
-        let mut fixture = Fixture::new();
-        let key = crate::carrier::did_to_public_key(&crate::crypto::encode_signing_key_did(&seed))
-            .unwrap();
-        let ticket = serde_json::to_vec(
-            &serde_json::json!({"topic":null,"endpoints":[iroh::EndpointAddr::from(key)]}),
-        )
-        .unwrap();
-        let bootstrap = crate::collaboration_network::CollaborationBootstrapPeer {
-            node_id: key.to_string(),
-            connect_ticket: data_encoding::BASE32_NOPAD
-                .encode(&ticket)
-                .to_ascii_lowercase(),
-        };
-        let grant_bytes =
-            canonical_default_conversation_grant_bytes(fixture.grant.grant()).unwrap();
-        let (signer, _) = generate_keypair();
-        fixture.profile = verified_profile(&signer, raw_sha256_cid(&grant_bytes), vec![bootstrap]);
-        fixture.grant = verify_default_conversation_grant(&fixture.profile, &grant_bytes).unwrap();
+        let fixture = bootstrap_fixture(&seed);
         let core = fixture.core();
         let mut seed_fixture = peer_fixture(&fixture);
         seed_fixture.device_key = seed.clone();
@@ -1306,6 +1491,21 @@ mod tests {
         assert!(core
             .accept_home_chat(&seed_frame, &seed_core.local_device_did(), NOW)
             .is_err());
+        // A seed-local Core refuses Shared posts over gossip too, and no Home
+        // admits a Shared post that a seed signed.
+        let refused = CollaborationTransportIngestion::Rejected(
+            crate::collaboration_core::CollaborationTransportRejection::BootstrapEndpoint,
+        );
+        assert_eq!(
+            seed_core
+                .ingest_transport_frame(&normal_frame, NOW)
+                .unwrap(),
+            refused
+        );
+        assert_eq!(
+            core.ingest_transport_frame(&seed_frame, NOW).unwrap(),
+            refused
+        );
         let seed_receipt = remote_receipt(&fixture, &outgoing, seed);
         assert!(core
             .record_home_chat_acceptance(
@@ -1351,6 +1551,291 @@ mod tests {
         assert_eq!(seed_core.summary().unwrap().pending_product_handoffs, 0);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn homes_without_discovery_or_direct_path_exchange_a_post_over_bootstrap_gossip() {
+        for stale_listing in [false, true] {
+            let (seed, _) = generate_keypair();
+            let a = bootstrap_fixture(&seed);
+            let b = peer_fixture(&a);
+            let mut s = peer_fixture(&a);
+            s.device_key = seed;
+            let (ac, bc, sc) = (a.core(), b.core(), s.core());
+            if stale_listing {
+                // A listing makes A dial B directly; the dial fails.
+                let presence = CollaborationPresenceProductPort::new(ac.clone()).unwrap();
+                observe(&a, &ac, &presence, &b);
+            }
+            let relay = BootstrapRelay::new(&a.profile);
+            let a_carrier = relay.join();
+            let b_carrier = relay.join();
+            let (ad, plane) = plane_driver(
+                &a,
+                ac.clone(),
+                a_carrier.clone(),
+                BTreeMap::new(),
+                false,
+                false,
+            )
+            .await;
+            let bd = b.driver(bc.clone(), b_carrier.clone()).await;
+            let seed_carrier = relay.join();
+            let sd = s.driver(sc.clone(), seed_carrier.clone()).await;
+            let outgoing = prepare_outgoing(&ac, "gossip-post", serde_json::json!({"body":"hi"}));
+            ac.acknowledge_outgoing_product_projection(outgoing.envelope_sha256())
+                .unwrap();
+
+            ad.retry_outgoing_once(NOW).await.unwrap();
+            ad.retry_outgoing_once(NOW).await.unwrap();
+            assert_eq!(relay.inbox(&b_carrier).len(), 1, "one broadcast at send");
+            assert_eq!(
+                plane.calls.lock().unwrap().len(),
+                usize::from(stale_listing)
+            );
+            tokio::time::advance(SHARED_CUSTODY_RETRY).await;
+            ad.retry_outgoing_once(NOW + 5).await.unwrap();
+            assert_eq!(relay.inbox(&b_carrier).len(), 2, "slow re-broadcast");
+
+            assert_eq!(
+                bd.process_incoming_once(NOW + 5).await.unwrap(),
+                CollaborationIncomingOnceOutcome::Acknowledged(CollaborationIncomingOnceSummary {
+                    incoming_acceptances: 2,
+                    acceptance_receipt_broadcasts: 2,
+                    ..CollaborationIncomingOnceSummary::default()
+                })
+            );
+            assert_eq!(bc.pending_product_handoffs().unwrap().len(), 1);
+            assert!(!ac.pending_outgoing(NOW + 5).unwrap()[0].remote_acceptance_recorded());
+            assert_eq!(
+                ad.process_incoming_once(NOW + 6).await.unwrap(),
+                CollaborationIncomingOnceOutcome::Acknowledged(CollaborationIncomingOnceSummary {
+                    remote_acceptances: 2,
+                    ..CollaborationIncomingOnceSummary::default()
+                })
+            );
+            let accepted = &ac.pending_outgoing(NOW + 6).unwrap()[0];
+            assert!(accepted.accepted_by(&bc.local_device_did()));
+            assert_eq!(ac.summary().unwrap().remotely_accepted_outgoing, 1);
+            tokio::time::advance(SHARED_CUSTODY_RETRY).await;
+            ad.retry_outgoing_once(NOW + 11).await.unwrap();
+            assert_eq!(
+                relay.inbox(&b_carrier).len(),
+                2,
+                "the Home receipt ends gossip"
+            );
+
+            // The seed forwarded both posts and receipts and admitted none.
+            assert_eq!(relay.inbox(&seed_carrier).len(), 4);
+            assert!(matches!(
+                sd.process_incoming_once(NOW + 11).await.unwrap(),
+                CollaborationIncomingOnceOutcome::Acknowledged(summary)
+                    if summary.deterministic_rejections == 4 && summary.incoming_acceptances == 0
+            ));
+            let seed_state = sc.summary().unwrap();
+            assert_eq!(
+                seed_state.pending_product_handoffs + seed_state.replay_tombstones,
+                0
+            );
+            assert!(sc.pending_product_handoffs().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_signed_receipt_never_accepts_a_shared_post() {
+        let (seed, _) = generate_keypair();
+        let a = bootstrap_fixture(&seed);
+        let ac = a.core();
+        let outgoing = prepare_outgoing(&ac, "seed-receipt", serde_json::json!({"body":"hi"}));
+        ac.acknowledge_outgoing_product_projection(outgoing.envelope_sha256())
+            .unwrap();
+        let receipt = remote_receipt(&a, &outgoing, seed.clone());
+        let frame = sign_collaboration_transport_frame(&seed, &receipt).unwrap();
+        let carrier = FakeCarrier::new();
+        carrier.push([remembered(&a.profile)]);
+        let driver = a.driver(ac.clone(), carrier.clone()).await;
+        carrier.push([peek(0, 1, vec![gossip(&frame)]), ack(0, 1)]);
+        assert_eq!(
+            driver.process_incoming_once(NOW + 1).await.unwrap(),
+            CollaborationIncomingOnceOutcome::Acknowledged(CollaborationIncomingOnceSummary {
+                deterministic_rejections: 1,
+                ..CollaborationIncomingOnceSummary::default()
+            })
+        );
+        assert_eq!(
+            ac.ingest_transport_frame(&frame, NOW + 1).unwrap(),
+            CollaborationTransportIngestion::Rejected(
+                crate::collaboration_core::CollaborationTransportRejection::BootstrapEndpoint,
+            )
+        );
+        assert!(ac.record_remote_acceptance(&receipt, NOW + 1).is_err());
+        assert!(!ac.pending_outgoing(NOW + 1).unwrap()[0].remote_acceptance_recorded());
+        assert_eq!(ac.summary().unwrap().remotely_accepted_outgoing, 0);
+    }
+
+    #[tokio::test]
+    async fn redundant_receipts_that_cannot_be_stored_never_hold_the_gossip_batch() {
+        // Full receipt capacity, or any storage failure such as byte capacity.
+        for at_capacity in [true, false] {
+            let a = Fixture::new();
+            let ac = a.core();
+            let outgoing = prepare_outgoing(&ac, "many-homes", serde_json::json!({"body":"hi"}));
+            ac.acknowledge_outgoing_product_projection(outgoing.envelope_sha256())
+                .unwrap();
+            let receipt_frame = |key: SigningKey| {
+                let receipt = remote_receipt(&a, &outgoing, key.clone());
+                sign_collaboration_transport_frame(&key, &receipt).unwrap()
+            };
+            let stored = if at_capacity {
+                crate::collaboration_core::MAX_ACCEPTANCE_RECEIPTS_PER_OUTGOING
+            } else {
+                1
+            };
+            for _ in 0..stored {
+                ac.ingest_transport_frame(&receipt_frame(generate_keypair().0), NOW + 1)
+                    .unwrap();
+            }
+            if !at_capacity {
+                ac.inject_write_fault(WriteFault::BeforeWrite);
+            }
+            let (other, _) = generate_keypair();
+            let frames = vec![
+                gossip(&receipt_frame(generate_keypair().0)),
+                gossip(&presence_frame(&a, &other, NOW)),
+            ];
+            let carrier = FakeCarrier::new();
+            let driver = a.driver(ac.clone(), carrier.clone()).await;
+            carrier.push([
+                peek(0, 2, frames),
+                serde_json::json!({"status":"ok","data":{"remote_peer_count":1}}),
+                ack(0, 2),
+            ]);
+            assert_eq!(
+                driver.process_incoming_once(NOW + 1).await.unwrap(),
+                CollaborationIncomingOnceOutcome::Acknowledged(CollaborationIncomingOnceSummary {
+                    deterministic_rejections: 1,
+                    incoming_acceptances: 1,
+                    acceptance_receipt_broadcasts: 1,
+                    ..CollaborationIncomingOnceSummary::default()
+                })
+            );
+            assert!(ac.pending_outgoing(NOW + 1).unwrap()[0].remote_acceptance_recorded());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn direct_and_gossip_copies_give_one_row_and_one_receipt() {
+        let a = Fixture::new();
+        let b = peer_fixture(&a);
+        let (ac, bc) = (a.core(), b.core());
+        let relay = BootstrapRelay::new(&a.profile);
+        let a_carrier = relay.join();
+        let b_carrier = relay.join();
+        let presence = CollaborationPresenceProductPort::new(ac.clone()).unwrap();
+        observe(&a, &ac, &presence, &b);
+        let peers = BTreeMap::from([(
+            bc.local_device_did(),
+            delivery(bc.clone(), Arc::new(ProviderRegistry::new())),
+        )]);
+        let (ad, plane) =
+            plane_driver(&a, ac.clone(), a_carrier.clone(), peers, false, false).await;
+        let bd = b.driver(bc.clone(), b_carrier).await;
+        let outgoing = prepare_outgoing(&ac, "both-paths", serde_json::json!({"body":"hi"}));
+        ac.acknowledge_outgoing_product_projection(outgoing.envelope_sha256())
+            .unwrap();
+        assert_eq!(
+            ad.retry_outgoing_once(NOW).await.unwrap().remote_broadcasts,
+            2,
+            "one gossip broadcast and one direct delivery"
+        );
+        assert_eq!(plane.calls.lock().unwrap().len(), 1);
+        assert!(ac.pending_outgoing(NOW).unwrap()[0].accepted_by(&bc.local_device_did()));
+        assert_eq!(
+            bd.process_incoming_once(NOW + 1).await.unwrap(),
+            CollaborationIncomingOnceOutcome::Acknowledged(CollaborationIncomingOnceSummary {
+                incoming_acceptances: 1,
+                acceptance_receipt_broadcasts: 1,
+                ..CollaborationIncomingOnceSummary::default()
+            })
+        );
+        assert_eq!(bc.pending_product_handoffs().unwrap().len(), 1);
+        let receipt = relay.inbox(&a_carrier).pop().unwrap();
+        assert_eq!(
+            ac.ingest_transport_frame(receipt.as_bytes(), NOW + 1)
+                .unwrap(),
+            CollaborationTransportIngestion::RemoteAcceptance(
+                crate::collaboration_core::CollaborationTransportRemoteAcceptance::Replayed
+            )
+        );
+        assert_eq!(
+            ad.process_incoming_once(NOW + 1).await.unwrap(),
+            CollaborationIncomingOnceOutcome::Acknowledged(CollaborationIncomingOnceSummary {
+                remote_acceptances: 1,
+                ..CollaborationIncomingOnceSummary::default()
+            })
+        );
+        assert_eq!(ac.summary().unwrap().remotely_accepted_outgoing, 1);
+    }
+
+    #[tokio::test]
+    async fn rate_limited_gossip_posts_are_held_and_released_in_order() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let (sender, _) = generate_keypair();
+        let limit = crate::collaboration_rate_limit::COMMUNITY_RECEIVES_PER_SENDER_PER_WINDOW;
+        let mut hashes = Vec::new();
+        let mut frames = Vec::new();
+        for i in 0..limit + 2 {
+            let (_, message) = remote_message(&fixture, sender.clone(), &format!("post-{i}"));
+            hashes.push(collaboration_message_envelope_sha256(&message));
+            frames.push(gossip(
+                &sign_collaboration_transport_frame(&sender, &message).unwrap(),
+            ));
+        }
+        let sent = serde_json::json!({"status":"ok","data":{"remote_peer_count":1}});
+        let carrier = FakeCarrier::new();
+        let driver = fixture.driver(core.clone(), carrier.clone()).await;
+        let count = frames.len() as u64;
+        carrier.push([peek(0, count, frames)]);
+        carrier.push(std::iter::repeat_n(sent.clone(), limit));
+        carrier.push([ack(0, count)]);
+        assert_eq!(
+            driver.process_incoming_once(NOW).await.unwrap(),
+            CollaborationIncomingOnceOutcome::Acknowledged(CollaborationIncomingOnceSummary {
+                deterministic_rejections: 2,
+                incoming_acceptances: limit,
+                acceptance_receipt_broadcasts: limit,
+                ..CollaborationIncomingOnceSummary::default()
+            })
+        );
+        for handoff in core.pending_product_handoffs().unwrap() {
+            core.acknowledge_product_handoff(
+                handoff.authorized_message().message().envelope_sha256(),
+            )
+            .unwrap();
+        }
+        carrier.push([
+            sent.clone(),
+            sent,
+            peek(count, count, Vec::new()),
+            ack(count, count),
+        ]);
+        let window = crate::collaboration_rate_limit::COMMUNITY_RATE_WINDOW_SECS;
+        assert_eq!(
+            driver.process_incoming_once(NOW + window).await.unwrap(),
+            CollaborationIncomingOnceOutcome::Acknowledged(CollaborationIncomingOnceSummary {
+                incoming_acceptances: 2,
+                acceptance_receipt_broadcasts: 2,
+                ..CollaborationIncomingOnceSummary::default()
+            })
+        );
+        let receipts = carrier
+            .requests()
+            .iter()
+            .filter(|request| request["op"] == "gossip_send")
+            .map(|request| receipt_message_hash(request["message"].as_str().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(receipts, hashes, "every post is receipted, in send order");
+    }
+
     #[tokio::test]
     async fn held_direct_message_retries_without_sender_and_storage_failure_retains_metadata_batch()
     {
@@ -1379,7 +1864,9 @@ mod tests {
         assert!(core.pending_product_handoffs().unwrap().is_empty());
         let carrier = FakeCarrier::new();
         let driver = fixture.driver(core.clone(), carrier.clone()).await;
-        carrier.push([serde_json::json!({"status":"ok","data":{"messages":[],"scanned":0,"limit":32,"cursor":0,"next_cursor":0}}), serde_json::json!({"status":"ok","data":{"cursor":0,"next_cursor":0,"advanced":false}})]);
+        // No gossip peer takes the receipt; the direct sender fetches it again.
+        carrier.push_failure("no gossip peer");
+        carrier.push([peek(0, 0, Vec::new()), ack(0, 0)]);
         let result = driver
             .process_incoming_once(
                 NOW + crate::collaboration_rate_limit::COMMUNITY_RATE_WINDOW_SECS,
@@ -1395,10 +1882,15 @@ mod tests {
             handoffs[0].authorized_message().message().envelope_sha256(),
             held_hash.unwrap()
         );
-        assert!(carrier
-            .requests()
-            .iter()
-            .all(|request| request["op"] != "gossip_send"));
+        assert_eq!(
+            request_ops(&carrier),
+            [
+                "gossip_join_exact",
+                "gossip_send",
+                "gossip_peek",
+                "gossip_ack"
+            ]
+        );
         let metadata = presence_frame(&fixture, &sender, NOW + 61);
         carrier.push([serde_json::json!({"status":"ok","data":{"messages":[{"content":std::str::from_utf8(&metadata).unwrap()}],"scanned":1,"limit":32,"cursor":0,"next_cursor":1}})]);
         core.inject_write_fault(WriteFault::BeforeWrite);
@@ -1453,8 +1945,8 @@ mod tests {
             br#"{"payload":{"schema":"elastos.collaboration.unknown/v1"}}"#,
         )
         .unwrap();
-        let (_, legacy) = remote_message(&fixture, key.clone(), "legacy Chat");
-        let legacy = sign_collaboration_transport_frame(&key, &legacy).unwrap();
+        let (_, shared) = remote_message(&fixture, key.clone(), "Shared post");
+        let shared = sign_collaboration_transport_frame(&key, &shared).unwrap();
         let (valid_key, _) = generate_keypair();
         let metadata = presence_frame(&fixture, &valid_key, NOW);
         let frames = vec![
@@ -1467,15 +1959,17 @@ mod tests {
                     .unwrap(),
             ),
             gossip(&conflict),
-            gossip(&legacy),
+            gossip(&shared),
             gossip(&metadata),
         ];
         let carrier = FakeCarrier::new();
         let driver = fixture.driver(core.clone(), carrier.clone()).await;
+        let sent = serde_json::json!({"status":"ok","data":{"remote_peer_count":1}});
         carrier.push([
             peek(0, 7, frames.clone()),
             peek(0, 7, frames),
-            serde_json::json!({"status":"ok","data":{"remote_peer_count":1}}),
+            sent.clone(),
+            sent,
             ack(0, 7),
         ]);
         core.inject_write_fault(WriteFault::BeforeWrite);
@@ -1491,13 +1985,13 @@ mod tests {
             driver.process_incoming_once(NOW).await.unwrap(),
             CollaborationIncomingOnceOutcome::Acknowledged(CollaborationIncomingOnceSummary {
                 carrier_rejected_frames: 2,
-                deterministic_rejections: 4,
-                incoming_acceptances: 1,
-                acceptance_receipt_broadcasts: 1,
+                deterministic_rejections: 3,
+                incoming_acceptances: 2,
+                acceptance_receipt_broadcasts: 2,
                 ..CollaborationIncomingOnceSummary::default()
             })
         );
-        assert_eq!(core.pending_product_handoffs().unwrap().len(), 1);
+        assert_eq!(core.pending_product_handoffs().unwrap().len(), 2);
         let requests = carrier.requests();
         assert_eq!(
             requests
@@ -1513,6 +2007,7 @@ mod tests {
                 "gossip_peek",
                 "gossip_peek",
                 "gossip_send",
+                "gossip_send",
                 "gossip_ack"
             ]
         );
@@ -1521,15 +2016,15 @@ mod tests {
                 .iter()
                 .filter(|request| request["op"] == "gossip_send")
                 .count(),
-            1
+            2
         );
-        let receipt = requests
+        let receipts = requests
             .iter()
-            .find(|request| request["op"] == "gossip_send")
-            .unwrap();
-        assert!(core
-            .allows_gossip_receipt(receipt["message"].as_str().unwrap().as_bytes(), &metadata)
-            .unwrap());
+            .filter(|request| request["op"] == "gossip_send")
+            .map(|request| request["message"].as_str().unwrap().as_bytes())
+            .collect::<Vec<_>>();
+        assert!(core.allows_gossip_receipt(receipts[0], &shared).unwrap());
+        assert!(core.allows_gossip_receipt(receipts[1], &metadata).unwrap());
     }
 
     #[tokio::test]
