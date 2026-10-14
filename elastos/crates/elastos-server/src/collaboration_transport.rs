@@ -1671,6 +1671,44 @@ mod tests {
         assert_eq!(ac.summary().unwrap().remotely_accepted_outgoing, 0);
     }
 
+    #[tokio::test]
+    async fn receipts_past_capacity_never_hold_the_gossip_batch() {
+        let a = Fixture::new();
+        let ac = a.core();
+        let outgoing = prepare_outgoing(&ac, "many-homes", serde_json::json!({"body":"hi"}));
+        ac.acknowledge_outgoing_product_projection(outgoing.envelope_sha256())
+            .unwrap();
+        let receipt_frame = |key: SigningKey| {
+            let receipt = remote_receipt(&a, &outgoing, key.clone());
+            sign_collaboration_transport_frame(&key, &receipt).unwrap()
+        };
+        for _ in 0..crate::collaboration_core::MAX_ACCEPTANCE_RECEIPTS_PER_OUTGOING {
+            ac.ingest_transport_frame(&receipt_frame(generate_keypair().0), NOW + 1)
+                .unwrap();
+        }
+        let (other, _) = generate_keypair();
+        let frames = vec![
+            gossip(&receipt_frame(generate_keypair().0)),
+            gossip(&presence_frame(&a, &other, NOW)),
+        ];
+        let carrier = FakeCarrier::new();
+        let driver = a.driver(ac.clone(), carrier.clone()).await;
+        carrier.push([
+            peek(0, 2, frames),
+            serde_json::json!({"status":"ok","data":{"remote_peer_count":1}}),
+            ack(0, 2),
+        ]);
+        assert_eq!(
+            driver.process_incoming_once(NOW + 1).await.unwrap(),
+            CollaborationIncomingOnceOutcome::Acknowledged(CollaborationIncomingOnceSummary {
+                deterministic_rejections: 1,
+                incoming_acceptances: 1,
+                acceptance_receipt_broadcasts: 1,
+                ..CollaborationIncomingOnceSummary::default()
+            })
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn direct_and_gossip_copies_give_one_row_and_one_receipt() {
         let a = Fixture::new();

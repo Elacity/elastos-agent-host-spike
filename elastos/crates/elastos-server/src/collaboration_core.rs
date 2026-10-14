@@ -50,7 +50,7 @@ const MAX_UNRESOLVED_OUTGOING: usize = 64;
 const MAX_OUTGOING_RECORDS: usize = 4_096;
 const MAX_PENDING_INCOMING: usize = 32;
 pub(crate) const MAX_PENDING_INCOMING_PER_SENDER: usize = 8;
-const MAX_ACCEPTANCE_RECEIPTS_PER_OUTGOING: usize = 32;
+pub(crate) const MAX_ACCEPTANCE_RECEIPTS_PER_OUTGOING: usize = 32;
 const MAX_INCOMING_RECORDS_AND_TOMBSTONES: usize = 4_096;
 type IncomingIdentityIndex = HashMap<(String, String), String>;
 const MAX_VERIFICATION_CACHE_ENTRIES: usize = MAX_OUTGOING_RECORDS
@@ -230,6 +230,9 @@ pub(crate) enum CollaborationTransportRejection {
     /// A Community bootstrap endpoint sent, admitted or receipted a Shared
     /// post. Bootstrap endpoints forward gossip and carry discovery only.
     BootstrapEndpoint,
+    /// The original already holds its maximum receipts. Capacity never frees
+    /// while it lives, so one more receipt adds nothing and is consumed.
+    AcceptanceCapacityReached,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1310,7 +1313,9 @@ impl CollaborationCore {
             ));
         }
         if entry.remote_acceptance_receipts.len() >= MAX_ACCEPTANCE_RECEIPTS_PER_OUTGOING {
-            return Err(CollaborationTransportRetryableError);
+            return Ok(CollaborationTransportIngestion::Rejected(
+                CollaborationTransportRejection::AcceptanceCapacityReached,
+            ));
         }
 
         self.record_remote_acceptance(frame, now)
@@ -6232,9 +6237,10 @@ mod tests {
             NOW + 1,
         );
         let before_overflow = fs::read(capacity_core.state_path()).unwrap();
-        assert!(capacity_core
-            .ingest_transport_frame(&overflow, NOW + 1)
-            .is_err());
+        assert_eq!(
+            transport_rejection(&capacity_core, &overflow, NOW + 1),
+            CollaborationTransportRejection::AcceptanceCapacityReached
+        );
         assert_eq!(
             fs::read(capacity_core.state_path()).unwrap(),
             before_overflow
