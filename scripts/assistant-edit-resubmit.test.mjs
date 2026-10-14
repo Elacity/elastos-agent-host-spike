@@ -19,7 +19,8 @@ const until = async (predicate, label) => {
   }
 };
 
-test("Edit on a message sent in this view replaces that turn onward, then resubmits; Cancel restores", async () => {
+/** Run N answers "Reply N"; `firstReply` holds run 1's events until it resolves. */
+async function openAssistant(t, { firstReply = null } = {}) {
   let stored = { schema, revision: 0, document: { v: 1, liveOfferId: offerId, sessions: [] } };
   const creates = [], errors = [];
   const server = createServer(async (req, res) => {
@@ -61,8 +62,10 @@ test("Edit on a message sent in this view replaces that turn onward, then resubm
             offer_id: offerId, operation: "text.generate", status: "running", sequence_cursor: 0 } }); return;
         }
         if (url.pathname === "/api/provider/model/runs_events") {
+          const run = body.run_id.at(-1);
+          if (run === "1") await firstReply;
           json({ status: "ok", data: { schema: "elastos.model.run-events/v1", run_id: body.run_id, next_cursor: 2, has_more: false,
-            events: [{ sequence: 1, kind: "text_delta", data: { text: `Reply ${body.run_id.at(-1)}` } },
+            events: [{ sequence: 1, kind: "text_delta", data: { text: `Reply ${run}` } },
               { sequence: 2, kind: "completed", terminal: true, data: {} }] } }); return;
         }
         throw new Error(`Unexpected API operation: ${req.method} ${url.pathname}`);
@@ -79,60 +82,115 @@ test("Edit on a message sent in this view replaces that turn onward, then resubm
   });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const browser = await chromium.launch({ headless: true });
-  try {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
-    page.on("pageerror", error => errors.push(String(error)));
-    await page.goto(`http://127.0.0.1:${server.address().port}/`);
-    const frame = page.frameLocator("iframe");
-    const composer = frame.locator("#agent-composer-input");
-    const userRows = frame.locator(".agent-msg-user");
-    const userTexts = userRows.locator(".agent-msg-body");
-    const replies = frame.locator(".agent-msg-agent .agent-msg-body");
-    const forms = frame.locator("[data-edit-form]");
-    // DOM text: rows use content-visibility:auto, so rendered text can be empty.
-    const texts = async locator => (await locator.allTextContents()).map(text => text.trim());
-    const startEdit = async index => {
+  t.after(async () => {
+    await browser.close();
+    server.closeAllConnections();
+    await new Promise(done => server.close(done));
+  });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  page.on("pageerror", error => errors.push(String(error)));
+  page.on("dialog", dialog => dialog.accept());
+  await page.goto(`http://127.0.0.1:${server.address().port}/`);
+  const frame = page.frameLocator("iframe");
+  const composer = frame.locator("#agent-composer-input");
+  await composer.waitFor({ state: "visible" });
+  const userRows = frame.locator(".agent-msg-user");
+  const replies = frame.locator(".agent-msg-agent .agent-msg-body");
+  // DOM text: rows use content-visibility:auto, so rendered text can be empty.
+  const texts = async locator => (await locator.allTextContents()).map(text => text.trim());
+  const saved = () => JSON.stringify(stored.document.sessions?.[0]?.messages?.map(message => [message.role, message.text]));
+  return {
+    page, frame, composer, userRows, replies, creates, errors,
+    userTexts: () => texts(userRows.locator(".agent-msg-body")),
+    replyTexts: () => texts(replies),
+    send: async (question, reply) => {
+      await composer.fill(question);
+      await composer.press("Enter");
+      if (reply) await replies.filter({ hasText: reply }).waitFor();
+    },
+    startEdit: async index => {
       const row = userRows.nth(index);
       await row.hover();
       await row.getByRole("button", { name: "Edit and resubmit" }).click();
       await row.locator("[data-edit-form]").waitFor({ state: "visible", timeout: 5000 });
       return row.locator("[data-edit-form]");
-    };
+    },
+    resubmit: async (form, text, reply) => {
+      await form.locator("textarea").fill(text);
+      await form.getByRole("button", { name: "Save & submit" }).click();
+      await replies.filter({ hasText: reply }).waitFor();
+    },
+    savedTranscript: async expected => {
+      await until(() => saved() === JSON.stringify(expected), "the workspace keeps the transcript");
+    },
+  };
+}
 
-    await composer.waitFor({ state: "visible" });
-    for (const [index, question] of ["First question", "Second question"].entries()) {
-      await composer.fill(question);
-      await composer.press("Enter");
-      await replies.filter({ hasText: `Reply ${index + 1}` }).waitFor();
-    }
+test("Edit on a message sent in this view replaces that turn onward, then resubmits; Cancel and Delete keep indices right", async t => {
+  const app = await openAssistant(t);
+  await app.send("First question", "Reply 1");
+  await app.send("Second question", "Reply 2");
+  await app.send("Third question", "Reply 3");
 
-    // Both rows were appended as sent; nothing re-rendered the transcript yet.
-    assert.equal(await (await startEdit(0)).locator("textarea").inputValue(), "First question");
-    const second = await startEdit(1);
-    assert.equal(await second.locator("textarea").inputValue(), "Second question");
-    await second.getByRole("button", { name: "Cancel" }).click();
-    assert.equal(await forms.count(), 0, "Cancel closes the editors");
-    assert.deepEqual(await texts(userTexts), ["First question", "Second question"]);
-    assert.deepEqual(await texts(replies), ["Reply 1", "Reply 2"], "Cancel keeps the replies");
-    assert.equal(creates.length, 2, "Cancel does not resubmit");
+  // The rows were appended as sent; nothing re-rendered the transcript yet.
+  assert.equal(await (await app.startEdit(0)).locator("textarea").inputValue(), "First question");
+  const second = await app.startEdit(1);
+  assert.equal(await second.locator("textarea").inputValue(), "Second question");
+  await second.getByRole("button", { name: "Cancel" }).click();
+  assert.equal(await app.frame.locator("[data-edit-form]").count(), 0, "Cancel closes the editors");
+  assert.deepEqual(await app.userTexts(), ["First question", "Second question", "Third question"]);
+  assert.deepEqual(await app.replyTexts(), ["Reply 1", "Reply 2", "Reply 3"], "Cancel keeps the replies");
+  assert.equal(app.creates.length, 3, "Cancel does not resubmit");
 
-    const edit = await startEdit(1);
-    await edit.locator("textarea").fill("Edited question");
-    await edit.getByRole("button", { name: "Save & submit" }).click();
-    await replies.filter({ hasText: "Reply 3" }).waitFor();
-    assert.deepEqual(await texts(userTexts), ["First question", "Edited question"]);
-    assert.deepEqual(await texts(replies), ["Reply 1", "Reply 3"], "the edited turn's reply is replaced");
-    assert.equal(creates.length, 3, "Save & submit sends one new run");
-    const prompt = creates[2].input.prompt;
-    assert.ok(["First question", "Reply 1", "Edited question"].every(text => prompt.includes(text)), prompt);
-    assert.ok(!/Second question|Reply 2/.test(prompt), "the resubmitted run does not carry the replaced turn");
-    const expected = [["user", "First question"], ["agent", "Reply 1"], ["user", "Edited question"], ["agent", "Reply 3"]];
-    const saved = () => JSON.stringify(stored.document.sessions?.[0]?.messages?.map(message => [message.role, message.text]));
-    await until(() => saved() === JSON.stringify(expected), "the workspace keeps the edited transcript");
-    assert.deepEqual(errors, []);
-  } finally {
-    await browser.close();
-    server.closeAllConnections();
-    await new Promise(done => server.close(done));
-  }
+  // Editing an earlier turn drops it and every later turn and reply.
+  await app.resubmit(await app.startEdit(1), "Edited question", "Reply 4");
+  assert.deepEqual(await app.userTexts(), ["First question", "Edited question"]);
+  assert.deepEqual(await app.replyTexts(), ["Reply 1", "Reply 4"]);
+  assert.equal(app.creates.length, 4, "Save & submit sends one new run");
+  let prompt = app.creates[3].input.prompt;
+  assert.ok(["First question", "Reply 1", "Edited question"].every(text => prompt.includes(text)), prompt);
+  assert.ok(!/Second question|Third question|Reply 2|Reply 3/.test(prompt), "the resubmitted run drops the replaced turns");
+  await app.savedTranscript([["user", "First question"], ["agent", "Reply 1"], ["user", "Edited question"], ["agent", "Reply 4"]]);
+
+  // Delete shifts the later messages; Edit then acts on the message shown.
+  const firstReply = app.frame.locator(".agent-msg-agent").filter({ hasText: "Reply 1" });
+  await firstReply.hover();
+  await firstReply.getByRole("button", { name: "Delete" }).click();
+  await app.savedTranscript([["user", "First question"], ["user", "Edited question"], ["agent", "Reply 4"]]);
+  const edited = await app.startEdit(1);
+  assert.equal(await edited.locator("textarea").inputValue(), "Edited question");
+  await app.resubmit(edited, "Final question", "Reply 5");
+  assert.deepEqual(await app.userTexts(), ["First question", "Final question"]);
+  assert.deepEqual(await app.replyTexts(), ["Reply 5"]);
+  prompt = app.creates[4].input.prompt;
+  assert.ok(["First question", "Final question"].every(text => prompt.includes(text)), prompt);
+  assert.ok(!/Edited question|Reply 1|Reply 4/.test(prompt), prompt);
+  await app.savedTranscript([["user", "First question"], ["user", "Final question"], ["agent", "Reply 5"]]);
+  assert.deepEqual(app.errors, []);
+});
+
+test("Edit on a queued follow-up sent in this view resubmits that message", async t => {
+  let release;
+  const app = await openAssistant(t, { firstReply: new Promise(done => { release = done; }) });
+  t.after(() => release());
+  await app.send("First question");
+  await until(() => app.creates.length === 1, "first run created");
+  // While a reply streams the composer's Enter is Stop, so the composer cannot
+  // queue; queue through the capsule's own module instance instead.
+  const capsule = app.page.frames().find(frame => frame.url().includes("/apps/assistant/"));
+  await capsule.evaluate(async () => (await import("/apps/assistant/agent-stream.js"))
+    .enqueueFollowUp("Second question", { displayText: "Second question" }));
+  await app.frame.locator(".agent-queue-item-text").filter({ hasText: "Second question" }).waitFor();
+  release();
+  await app.replies.filter({ hasText: "Reply 2" }).waitFor();
+  assert.deepEqual(await app.userTexts(), ["First question", "Second question"]);
+
+  const queued = await app.startEdit(1);
+  assert.equal(await queued.locator("textarea").inputValue(), "Second question");
+  await app.resubmit(queued, "Edited follow-up", "Reply 3");
+  assert.deepEqual(await app.userTexts(), ["First question", "Edited follow-up"]);
+  assert.deepEqual(await app.replyTexts(), ["Reply 1", "Reply 3"]);
+  assert.ok(!/Second question|Reply 2/.test(app.creates[2].input.prompt), app.creates[2].input.prompt);
+  await app.savedTranscript([["user", "First question"], ["agent", "Reply 1"], ["user", "Edited follow-up"], ["agent", "Reply 3"]]);
+  assert.deepEqual(app.errors, []);
 });

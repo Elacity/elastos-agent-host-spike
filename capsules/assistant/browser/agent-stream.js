@@ -863,7 +863,7 @@ export function drainFollowUpQueue() {
     ...(Array.isArray(next.parts) && next.parts.length ? { parts: next.parts } : {}),
   });
   host.renderSessions();
-  appendMessage("user", displayText, { parts: next.parts, modelText: next.text });
+  appendMessage("user", displayText, { msgIndex: target.messages.length - 1, parts: next.parts, modelText: next.text });
   startTurnForPrompt(next.text);
 }
 
