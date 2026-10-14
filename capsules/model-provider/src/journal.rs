@@ -2235,9 +2235,12 @@ fn rename_directory_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
         use std::os::unix::ffi::OsStrExt;
         let from = std::ffi::CString::new(from.as_os_str().as_bytes())?;
         let to = std::ffi::CString::new(to.as_os_str().as_bytes())?;
+        // The release builds Linux binaries against musl, whose libc has no renameat2 wrapper;
+        // the raw syscall works with glibc and musl alike.
         #[cfg(target_os = "linux")]
         let result = unsafe {
-            libc::renameat2(
+            libc::syscall(
+                libc::SYS_renameat2,
                 libc::AT_FDCWD,
                 from.as_ptr(),
                 libc::AT_FDCWD,
