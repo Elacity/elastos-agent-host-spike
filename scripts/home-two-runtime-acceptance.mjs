@@ -509,6 +509,11 @@ async function completeRecoverySetup(side) {
         value: current,
       };
     });
+    // Welcome returns with step 1 done and the next steps; the person closes it.
+    await homeGuiFrame.locator("#setup-sheet:not(.is-yielded) #setup-sheet-step-recovery.is-complete")
+      .waitFor({ state: "visible", timeout: 30_000 });
+    await homeGuiFrame.locator("#setup-sheet-close").click();
+    await homeGuiFrame.locator("#setup-sheet").waitFor({ state: "hidden", timeout: 5_000 });
     assertOk(after.signedIn && after.archiveSchema === "elastos.principal.root-recovery.status/v1"
       && after.principalId === side.signupPrincipalId && after.localhostRoot.startsWith("localhost://Users/")
       && after.profileSchema === "elastos.profile.readiness/v1" && after.profileStatus === "ready"

@@ -970,6 +970,7 @@ function tearDownWindowEntry(entry) {
   if (entry.fullscreenStage) {
     forgetClosedFullscreenSpace(entry.id);
   }
+  windowHooks?.windowClosed?.(entry.targetId);
 }
 
 function hasExactKeys(value, expectedKeys) {

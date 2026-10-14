@@ -24,7 +24,7 @@ let bound = false;
 let dismissedThisSession = false;
 let recoveryActBusy = false;
 let drag = null;
-let finishedHideTimer = null;
+let waitingForSystemClose = false;
 
 export function bindSetupSheet() {
   if (bound) {
@@ -104,15 +104,18 @@ export function setupSheetOpen() {
   return Boolean(sheet) && !sheet.hidden;
 }
 
-function scheduleFinishedSetupSheetHide() {
-  if (finishedHideTimer !== null) {
-    return;
-  }
-  const holdMs = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 1400;
-  finishedHideTimer = window.setTimeout(() => {
-    finishedHideTimer = null;
-    hideSetupSheet({ restoreFocus: true, rememberDismiss: false });
-  }, holdMs);
+// System closed after the settings branch: the yielded sheet comes back as the guide.
+export function setupSheetWindowClosed(targetId) {
+  if (targetId !== "system" || !waitingForSystemClose) return;
+  waitingForSystemClose = false;
+  // After teardown finishes moving focus to the next window.
+  if (setupSheetOpen()) queueMicrotask(returnSetupSheet);
+}
+
+// The sheet is modal again: keyboard focus moves into it from System.
+function returnSetupSheet() {
+  restoreSetupSheetOverlay();
+  (recoveryButton && !recoveryButton.disabled ? recoveryButton : closeButton)?.focus();
 }
 
 export function holdHomeSetupAct(targetId) {
@@ -134,8 +137,10 @@ export function syncSetupSheet(previous, summary) {
   if (!homeSetupNeedsAct(summary)) {
     forgetChromeNotification(SETUP_REMINDER_ID);
     if (setupFinished(summary) && setupSheetOpen()) {
+      // Step 1 done: keep the sheet as the guide to the next steps.
+      waitingForSystemClose = false;
       renderSetupSheet(summary);
-      scheduleFinishedSetupSheetHide();
+      if (sheet.classList.contains("is-yielded")) returnSetupSheet();
       return;
     }
     hideSetupSheet({ restoreFocus: false, rememberDismiss: false });
@@ -166,10 +171,7 @@ function rememberSetupReminder() {
 }
 
 export function hideSetupSheet({ restoreFocus = true, rememberDismiss = true } = {}) {
-  if (finishedHideTimer !== null) {
-    window.clearTimeout(finishedHideTimer);
-    finishedHideTimer = null;
-  }
+  waitingForSystemClose = false;
   if (!sheet || sheet.hidden) {
     return;
   }
@@ -256,6 +258,7 @@ async function openRecoveryAct() {
   yieldSetupSheet();
   if (profileStatus !== "ready" || unavailable) {
     const query = { settings: "security" };
+    waitingForSystemClose = true;
     openTarget("system", { query });
     return;
   }
@@ -267,10 +270,9 @@ async function openRecoveryAct() {
   } finally {
     recoveryActBusy = false;
     renderSetupSheet(shellState.currentSummary);
-    if (!saved && sheet && !sheet.hidden) {
-      restoreSetupSheetOverlay();
-      if (recoveryBody) recoveryBody.textContent = "Recovery Kit was not saved. Try again, or choose Later.";
-      recoveryButton?.focus();
+    if (sheet && !sheet.hidden) {
+      if (!saved && recoveryBody) recoveryBody.textContent = "Recovery Kit was not saved. Try again, or choose Later.";
+      returnSetupSheet();
     }
   }
 }
