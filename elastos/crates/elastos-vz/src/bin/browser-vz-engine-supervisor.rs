@@ -5914,6 +5914,34 @@ mod tests {
         ));
     }
 
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn home_lifetime_transport_keeps_browser_vm_past_ten_minutes() {
+        // Simulated clock. The Runtime issues the transport for ttl_secs; the
+        // shipped value is the Home launch token lifetime (12 h), not 600 s.
+        let signals = install_shutdown_signal_reporter().unwrap();
+        let ten_minutes_and_a_second = Duration::from_secs(10 * 60 + 1);
+        for (ttl_secs, outlives_ten_minutes) in [(600_u64, false), (12 * 60 * 60, true)] {
+            let mut transport = transport_fixture('l');
+            transport.authority["expires_at_unix_ms"] =
+                json!(current_unix_millis().unwrap() + ttl_secs * 1_000);
+            let wait =
+                wait_for_shutdown_or_transport_expiry(&signals, Some(&transport), None, None);
+            tokio::pin!(wait);
+            let early = tokio::time::timeout(ten_minutes_and_a_second, &mut wait).await;
+            assert_eq!(early.is_err(), outlives_ten_minutes, "ttl_secs={ttl_secs}");
+            let outcome = match early {
+                Ok(outcome) => outcome,
+                Err(_) => tokio::time::timeout(Duration::from_secs(ttl_secs), &mut wait)
+                    .await
+                    .expect("transport still ends at its expiry"),
+            };
+            assert!(matches!(
+                outcome,
+                ShutdownWaitReason::TransportExpired { .. }
+            ));
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn owned_turn_port_absence_waits_for_released_relay_udp() {
         let listen = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();

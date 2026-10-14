@@ -319,6 +319,10 @@ stop or crash. VM launchers forward the verified reader identified by
 Helpers remove only the socket inode they bound. Runtime retains Engine and
 profile ownership until exact cleanup proves that native writers have stopped.
 
+A Browser session lives until you close it, 5 minutes without a Home heartbeat,
+Runtime exit, or 12 h (the Home launch token lifetime, which also bounds the VZ
+transport `ttl_secs`).
+
 ### Display Session ABI
 
 The real Browser surface negotiates an explicit display session:
