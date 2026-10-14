@@ -23,3 +23,10 @@ export function renderServiceSelection(select, {
   select.value = selectedId;
   return selected;
 }
+
+// One engine that Automatic already uses is not a choice, so Settings hides it.
+// Runtime's Automatic skips remote VMs, so a remote-only engine stays choosable.
+export function engineChoiceHidden(engines, selectedId) {
+  return !selectedId && engines.length <= 1 &&
+    engines[0]?.backing_substrate !== "remote_operator_vm";
+}
