@@ -40,6 +40,7 @@ const PAGE_STATUS_AFTER_INPUT_FOLLOWUP_DELAYS_MS = [650, 1800, 3500, 6500];
 const PAGE_HEARTBEAT_INTERVAL_MS = 60_000;
 const BROWSER_OPEN_POLL_INTERVAL_MS = 1_200;
 const BROWSER_OPEN_POLL_TIMEOUT_MS = 5 * 60_000;
+const BROWSER_OPEN_ELAPSED_VISIBLE_SECONDS = 5;
 const LIBRARY_FILE_PICKER_MAX_BYTES = 16 * 1024 * 1024;
 const PRODUCT_DISPLAY_MODE = "webrtc_remote_display";
 const GUARANTEE_MECHANISM_MICROVM = "mechanism_microvm";
@@ -2077,7 +2078,7 @@ function browserOpenJobError(status) {
   return next;
 }
 
-async function waitForRuntimeOpen(response, { engineLabel, exitLabel }) {
+async function waitForRuntimeOpen(response) {
   if (response?.schema === "elastos.browser.open-result/v1") {
     return response;
   }
@@ -2089,9 +2090,11 @@ async function waitForRuntimeOpen(response, { engineLabel, exitLabel }) {
   }
   const startedAt = Date.now();
   while (Date.now() - startedAt < BROWSER_OPEN_POLL_TIMEOUT_MS) {
-    const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+    const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
     showStatus(
-      `Browser is preparing ${engineLabel} with ${exitLabel} (${elapsedSeconds}s). Wait for preparation to finish, then close Browser if needed.`,
+      elapsedSeconds >= BROWSER_OPEN_ELAPSED_VISIBLE_SECONDS
+        ? `Starting Browser… ${elapsedSeconds}s`
+        : "Starting Browser…",
       { sticky: true },
     );
     await wait(BROWSER_OPEN_POLL_INTERVAL_MS);
@@ -2237,7 +2240,7 @@ async function requestRuntimeOpen(value, { history = "push" } = {}) {
     ) {
       openSettlement.statusUrl = accepted.status_url;
     }
-    const response = await waitForRuntimeOpen(accepted, { engineLabel, exitLabel });
+    const response = await waitForRuntimeOpen(accepted);
     const openedPage = runtimeOpenResultPage(response);
     if (!openedPage) {
       throw new Error("Browser did not open the page.");

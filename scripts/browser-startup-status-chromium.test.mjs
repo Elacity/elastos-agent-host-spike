@@ -10,7 +10,7 @@ const { chromium } = require("playwright");
 const root = new URL("../", import.meta.url);
 
 test("Browser paints a status before scripts, through preparation and actionable failures", async () => {
-  let releaseSummary, failure, opened;
+  let releaseSummary, failure, opened, polled;
   let summaryReady = new Promise(resolve => { releaseSummary = resolve; });
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, "http://localhost");
@@ -25,6 +25,7 @@ test("Browser paints a status before scripts, through preparation and actionable
       response.setHeader("content-type", "application/json");
       response.end(JSON.stringify({ schema: "elastos.browser.open-accepted/v1", status_url: "/api/apps/browser/open/test" }));
     } else if (url.pathname === "/api/apps/browser/open/test") {
+      polled++;
       response.setHeader("content-type", "application/json");
       response.end(JSON.stringify({ schema: "elastos.browser.open-status/v1",
         status: failure ? "failed" : "pending", error: failure }));
@@ -58,12 +59,13 @@ test("Browser paints a status before scripts, through preparation and actionable
       }
       await context.close();
     }
+    let elapsedChecked = false;
     for (const [stage, reason, code, expected] of [
       ["engine_compatibility", "", "engine_not_found", /Engine is unavailable.*Choose/],
       ["engine_readiness", "artifact_invalid", "", /files need repair.*Prepare/],
       ["engine_readiness", "host_unsupported", "", /virtualization is unavailable.*choose/i],
     ]) {
-      failure = null; opened = 0;
+      failure = null; opened = 0; polled = 0;
       summaryReady = new Promise(resolve => { releaseSummary = resolve; });
       const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
       await page.goto(`${origin}/apps/browser/#home_token=isolated-test-token`);
@@ -72,7 +74,17 @@ test("Browser paints a status before scripts, through preparation and actionable
       assert.match(await status.innerText(), /checking its Engine/);
       assert.equal(opened, 0);
       releaseSummary();
-      await page.waitForFunction(() => document.querySelector("#browser-status")?.textContent.includes("Browser is preparing"));
+      const pollDeadline = Date.now() + 10_000;
+      while (!polled && Date.now() < pollDeadline) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.ok(polled, "Browser polls its startup status within 10 s of opening");
+      const preparing = await status.innerText();
+      assert.ok(preparing.trim(), "preparation keeps a visible status");
+      assert.doesNotMatch(preparing, /close|\d+s\b/i, "preparation is one calm line, without a Close instruction or early timer");
+      if (!elapsedChecked) {
+        elapsedChecked = true;
+        await page.waitForFunction(() => /\b\d+s\b/.test(document.querySelector("#browser-status")?.textContent || ""), null, { timeout: 10_000 });
+        assert.doesNotMatch(await status.innerText(), /close/i);
+      }
       assert.equal(opened, 1);
       failure = { schema: "elastos.browser.open-error/v1", http_status: 503, stage, reason, code,
         outcome: { schema: "elastos.browser.open-outcome/v1", state: "terminal_pre_effect_failure",
