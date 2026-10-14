@@ -287,7 +287,11 @@ test("Scrolling up while a reply streams keeps the reader's place and offers Jum
   const box = await app.frame.locator("#agent-harness-stream").boundingBox();
   await app.page.mouse.move(box.x + box.width / 2, box.y + box.height / 3);
   await app.page.mouse.wheel(0, -400);
-  await settled(app.frame);
+  // mouse.wheel returns before the scroll finishes: wait until it stops moving.
+  for (let last = -1, now = (await scrollState(app.frame)).scrollTop; now !== last;) {
+    await settled(app.frame);
+    [last, now] = [now, (await scrollState(app.frame)).scrollTop];
+  }
   const held = await scrollState(app.frame);
   release();
   await presented(app.frame);

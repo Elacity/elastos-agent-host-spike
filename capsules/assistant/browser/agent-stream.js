@@ -1935,6 +1935,9 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     window.requestAnimationFrame(() => {
       if (generation === ctx.streamGeneration && scroller.scrollTop >= top - 1) {
         scroller.scrollTop = scroller.scrollHeight;
+        if (endScrollTop === top) {
+          endScrollTop = scroller.scrollTop;
+        }
       }
     });
     return top;
