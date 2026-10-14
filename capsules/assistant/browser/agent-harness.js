@@ -1253,7 +1253,7 @@ export function sendToAgentHarness(prompt, opts = {}) {
     renderSessions();
     setTitle(session.title);
     clearEmptyState();
-    appendMessage("user", displayText, { parts, modelText });
+    appendMessage("user", displayText, { msgIndex: session.messages.length - 1, parts, modelText });
     startTurnForPrompt(modelText);
     return true;
   }

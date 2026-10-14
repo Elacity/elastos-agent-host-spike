@@ -6,6 +6,11 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Fixed
+
+- In the Assistant, Edit on a message you just sent opens the editor. Before,
+  it did nothing until the chat was reopened.
+
 ### Developer detail
 
 - `scripts/release-publish.sh` publishes a final version `X.Y.Z` on `stable`

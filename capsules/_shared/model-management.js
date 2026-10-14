@@ -4,7 +4,7 @@
   const STATES = new Set(["capacity_pending", "reserved", "preparing", "verifying", "admission_pending", "admitted", "reclaimed", "failed", "uncertain", "cancelled", "expired"]);
   const active = p => p && ["capacity_pending", "reserved", "preparing", "verifying", "admission_pending", "uncertain"].includes(p.state);
   const MEMORY_FIT_TEXT = Object.freeze({
-    fits: "Meets this model’s minimum memory requirement",
+    fits: "This device has enough memory for this model. Replies also need some of it free when the model runs.",
     insufficient: "This device has less memory than this model requires. Choose a smaller model.",
     unavailable: "This Home could not check the device memory. Ask the Home owner to check the memory limits, then try again.",
   });
