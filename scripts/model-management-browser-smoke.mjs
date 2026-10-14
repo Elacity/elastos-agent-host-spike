@@ -198,7 +198,7 @@ try {
       assert.equal(await frame.getByText("Not on this device yet", { exact: true }).count(), 1);
       assert.equal(await frame.getByRole("button", { name: "Get", exact: true }).isEnabled(), true);
     }
-    await frame.getByText("Meets this model’s minimum memory requirement", { exact: true }).waitFor();
+    await frame.getByText("This device has enough memory for this model. Replies also need some of it free when the model runs.", { exact: true }).waitFor();
     for (const [fit, explanation] of [
       ["insufficient", "This device has less memory than this model requires. Choose a smaller model."],
       ["unavailable", "This Home could not check the device memory. Ask the Home owner to check the memory limits, then try again."],
@@ -216,7 +216,7 @@ try {
     assert.doesNotMatch(await frame.locator("body").innerText(), /\/secret|credential|private provider/);
     modelMemoryFit = "fits";
     await refreshModels();
-    await frame.getByText("Meets this model’s minimum memory requirement", { exact: true }).waitFor();
+    await frame.getByText("This device has enough memory for this model. Replies also need some of it free when the model runs.", { exact: true }).waitFor();
     assert.equal(await frame.getByRole("button", { name: acquire, exact: true }).isEnabled(), true);
     for (const [state, cause, explanation] of [
       ["failed", "storage_service_unavailable", "The storage service is unavailable. Retry when it is running."],
