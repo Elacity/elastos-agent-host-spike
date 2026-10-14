@@ -2155,17 +2155,36 @@ fn open_journal_directory(path: &Path) -> Result<fs::File, ProviderFault> {
     Ok(file)
 }
 
+/// How long a busy journal directory lock is retried before it counts as a
+/// pending transaction. A child spawned on another thread holds a copy of this
+/// close-on-exec descriptor until it execs, which keeps an flock alive after its
+/// owner closed it; under load that window lasts milliseconds, never seconds.
+#[cfg(unix)]
+const JOURNAL_LOCK_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+#[cfg(unix)]
+const JOURNAL_LOCK_RETRY_STEP: std::time::Duration = std::time::Duration::from_millis(5);
+
 fn lock_journal_directory(directory: &fs::File) -> Result<(), ProviderFault> {
     #[cfg(unix)]
     {
-        match directory.try_lock() {
-            Ok(()) => Ok(()),
-            Err(fs::TryLockError::WouldBlock) => Err(ProviderFault::selection_unavailable(
-                "journal transaction pending",
-            )),
-            Err(_) => Err(ProviderFault::corrupt_journal(
-                "journal transaction lock is unavailable",
-            )),
+        let deadline = std::time::Instant::now() + JOURNAL_LOCK_RETRY_WINDOW;
+        loop {
+            match directory.try_lock() {
+                Ok(()) => return Ok(()),
+                Err(fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(JOURNAL_LOCK_RETRY_STEP);
+                }
+                Err(fs::TryLockError::WouldBlock) => {
+                    return Err(ProviderFault::selection_unavailable(
+                        "journal transaction pending",
+                    ))
+                }
+                Err(_) => {
+                    return Err(ProviderFault::corrupt_journal(
+                        "journal transaction lock is unavailable",
+                    ))
+                }
+            }
         }
     }
     #[cfg(not(unix))]
@@ -4228,6 +4247,25 @@ mod tests {
             assert_eq!(file_bytes(&path), before);
             reopened.store_run(&fresh).unwrap();
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn briefly_held_directory_lock_is_waited_out_not_reported_pending() {
+        // A lock that outlives its owner only until a concurrently spawned child
+        // execs must not fail the transaction.
+        let root = temp_root("briefly-held-writer");
+        let journal = RunJournal::open(root.clone()).unwrap();
+        let holder = open_journal_directory(&root.join("runs")).unwrap();
+        holder.try_lock().unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(holder);
+        });
+        let fresh = prepared_run("after-brief-holder");
+        journal.store_run(&fresh).unwrap();
+        release.join().unwrap();
+        assert!(run_path(&root, &fresh.run_id).exists());
     }
 
     #[test]
