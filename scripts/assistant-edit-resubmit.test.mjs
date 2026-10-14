@@ -187,6 +187,15 @@ test("Edit on a message sent in this view replaces that turn onward, then resubm
   assert.ok(["First question", "Final question"].every(text => prompt.includes(text)), prompt);
   assert.ok(!/Edited question|Reply 1|Reply 4/.test(prompt), prompt);
   await app.savedTranscript([["user", "First question"], ["user", "Final question"], ["agent", "Reply 5"]]);
+
+  // Rename, Edit tags and Import JSON used prompt()/alert(), which this sandbox
+  // ignores; they stay out of the chat menu until they work in the page.
+  await app.frame.getByRole("button", { name: /^Chat actions for / }).first().click();
+  const menuItems = app.frame.getByRole("menuitem");
+  await menuItems.first().waitFor();
+  const items = await menuItems.allTextContents();
+  assert.ok(items.includes("Delete"), items.join(", "));
+  for (const hidden of ["Rename", "Edit tags…", "Import JSON…"]) assert.ok(!items.includes(hidden), `${hidden} is not offered`);
   assert.deepEqual(app.errors, []);
 });
 
