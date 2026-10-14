@@ -109,6 +109,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - Browser shows "Starting Browser…" while it starts, and no longer shows white bars around the page.
 - Chat: the message box returns to one line after you send, People → Message reuses the open Chat window, and Open Inbox in People works.
 - In the Assistant, Edit on a message you just sent opens the editor, and Delete removes that message. Before, Edit did nothing until the chat was reopened.
+- First-run setup: after you save the Recovery Kit or close System, the welcome sheet comes back with the next steps.
 
 ## [0.8.0-alpha.17] - 2026-10-14
 
@@ -159,6 +160,7 @@ Release candidate for 0.8.0 on the test channel, with the same notes.
 - Browser shows "Starting Browser…" while it starts, and no longer shows white bars around the page.
 - Chat: the message box returns to one line after you send, People → Message reuses the open Chat window, and Open Inbox in People works.
 - In the Assistant, Edit on a message you just sent opens the editor, and Delete removes that message. Before, Edit did nothing until the chat was reopened.
+- First-run setup: after you save the Recovery Kit or close System, the welcome sheet comes back with the next steps.
 
 ## [0.8.0-alpha.16] - 2026-10-13
 
