@@ -2929,7 +2929,24 @@ async fn prepare(
                 unless_cancelled(data_dir, id, next_part_in_order(&mut in_flight))
                     .await
                     .context(read_phase)?;
-            let bytes = checked?.context(read_phase)?;
+            let bytes = match checked? {
+                Ok(bytes) => bytes,
+                Err(error) if transient_part_read_error(&error) => {
+                    // A refusal a later part already met outranks a failure in
+                    // transit, so an automatic resume never reads that part again.
+                    for part in in_flight.iter_mut() {
+                        match part.done.take() {
+                            Some(Err(refused)) => return Err(refused),
+                            Some(Ok(Err(refused))) if !transient_part_read_error(&refused) => {
+                                return Err(refused.context(read_phase));
+                            }
+                            done => part.done = done,
+                        }
+                    }
+                    return Err(error.context(read_phase));
+                }
+                Err(error) => return Err(error.context(read_phase)),
+            };
             require_active(data_dir, id, stop, revalidate)?;
             if weights && offset == 0 {
                 ensure!(
@@ -12362,12 +12379,14 @@ server.serve_forever()
     /// A holder reached through availability in process, so a test can pause
     /// time: reads of the weights part at `fail_at` fail in transit (the code
     /// Carrier reports for a late or lost answer) `failures` times, then it
-    /// serves. Requests are recorded in the shape the Carrier holder sees.
+    /// serves; the first read of the weights part at `refuse_at` is refused.
+    /// Requests are recorded in the shape the Carrier holder sees.
     struct TransitHolder {
         files: std::collections::BTreeMap<String, Vec<u8>>,
         served: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
         fail_at: u64,
         failures: std::sync::atomic::AtomicUsize,
+        refuse_at: std::sync::Mutex<Option<u64>>,
     }
 
     #[async_trait::async_trait]
@@ -12397,6 +12416,15 @@ server.serve_forever()
             self.served.lock().unwrap().push(seen);
             let file = &self.files[request["path"].as_str().unwrap()];
             let range = &request["range"];
+            if request["path"] == "weights.gguf"
+                && range["start"].as_u64().is_some_and(|start| {
+                    let mut refuse_at = self.refuse_at.lock().unwrap();
+                    refuse_at.take_if(|at| *at == start).is_some()
+                })
+            {
+                return Ok(serde_json::json!({"status":"error",
+                    "code":"carrier_fetch_failed", "message":"fixture holder refused"}));
+            }
             if request["path"] == "weights.gguf"
                 && range["start"] == self.fail_at
                 && self
@@ -12536,6 +12564,12 @@ server.serve_forever()
         /// As `start` with a `TransitHolder` failing reads of weight part
         /// `part` in transit `failures` times.
         async fn in_process(part: u64, failures: usize) -> Self {
+            Self::in_process_refusing(part, failures, None).await
+        }
+
+        /// As `in_process`; the holder refuses the first read of weight part
+        /// `refused`.
+        async fn in_process_refusing(part: u64, failures: usize, refused: Option<u64>) -> Self {
             let (root, cid, files, registry) = Self::consumer(None).await;
             let served = Arc::new(std::sync::Mutex::new(Vec::new()));
             registry
@@ -12544,6 +12578,7 @@ server.serve_forever()
                     served: served.clone(),
                     fail_at: part * 65536,
                     failures: failures.into(),
+                    refuse_at: refused.map(|part| part * 65536).into(),
                 }))
                 .await;
             Self {
@@ -12830,6 +12865,28 @@ server.serve_forever()
                 record.admission_id
             ))
             .exists());
+        fixture.shutdown().await;
+    }
+
+    /// A refusal a later part in the window already met is never read again
+    /// by an automatic resume, even when an earlier part failed in transit.
+    #[tokio::test(start_paused = true)]
+    async fn model_preparation_does_not_resume_past_a_refusal_already_met() {
+        let attempt = 1 + MODEL_PART_RETRY_BACKOFF.len();
+        let fixture = SlowHolderPreparation::in_process_refusing(20, attempt, Some(21)).await;
+        let (record, _) = fixture.prepare("refused-behind-transit").await;
+        assert_eq!(record.state, PreparationState::Failed, "{record:?}");
+        assert_eq!(
+            record.failure_phase,
+            Some(PreparationFailurePhase::WeightsRead)
+        );
+        assert_eq!(fixture.reads_at(20 * 65536), attempt);
+        assert_eq!(
+            fixture.reads_at(21 * 65536),
+            1,
+            "the refused part is not read again"
+        );
+        assert_eq!(fixture.kept_stage(), Some(record.operation_id.clone()));
         fixture.shutdown().await;
     }
 
