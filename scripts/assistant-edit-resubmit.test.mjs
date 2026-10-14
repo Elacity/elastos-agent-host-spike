@@ -258,6 +258,9 @@ const scrollState = frame => frame.locator("#agent-harness-stream").evaluate(scr
     jumpVisible: !!jump && !jump.hidden && jump.getBoundingClientRect().height > 0,
   };
 });
+/** Two frames: the pin after layout (and any wrong late scroll) has run. */
+const settled = frame => frame.locator("#agent-harness-stream").evaluate(() =>
+  new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
 const presented = frame => frame.locator('.agent-msg-agent[data-stream-phase="presentation_done"]').waitFor({ state: "attached", timeout: 10000 });
 
 test("A long streamed reply ends with its actions above the composer and the transcript at the bottom", async t => {
@@ -265,7 +268,7 @@ test("A long streamed reply ends with its actions above the composer and the tra
   await app.composer.fill("Write a long answer");
   await app.composer.press("Enter");
   await presented(app.frame);
-  await app.page.waitForTimeout(300);
+  await settled(app.frame);
   const end = await scrollState(app.frame);
   assert.ok(end.actionsBottom !== null, "the reply has its actions row");
   assert.ok(end.actionsBottom <= end.composerTop,
@@ -284,11 +287,11 @@ test("Scrolling up while a reply streams keeps the reader's place and offers Jum
   const box = await app.frame.locator("#agent-harness-stream").boundingBox();
   await app.page.mouse.move(box.x + box.width / 2, box.y + box.height / 3);
   await app.page.mouse.wheel(0, -400);
-  await app.page.waitForTimeout(300);
+  await settled(app.frame);
   const held = await scrollState(app.frame);
   release();
   await presented(app.frame);
-  await app.page.waitForTimeout(300);
+  await settled(app.frame);
   const end = await scrollState(app.frame);
   assert.ok(Math.abs(end.scrollTop - held.scrollTop) < 2,
     `the reader's place is kept (${held.scrollTop} then ${end.scrollTop})`);

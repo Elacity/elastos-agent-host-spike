@@ -1927,6 +1927,18 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
   let stickToBottom = true;
   /* scrollTop the stream left a following reader at; null if not following. */
   let endScrollTop = null;
+  /* Land on the end now and once more after layout settles, unless the reader
+     moved up in between or another turn took the transcript. */
+  const pinToEnd = () => {
+    scroller.scrollTop = scroller.scrollHeight;
+    const top = scroller.scrollTop;
+    window.requestAnimationFrame(() => {
+      if (generation === ctx.streamGeneration && scroller.scrollTop >= top - 1) {
+        scroller.scrollTop = scroller.scrollHeight;
+      }
+    });
+    return top;
+  };
   let answerNotifiedAt = 0;
   let hiddenBuffered = false;
   let progressEl = null;
@@ -2743,7 +2755,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
         }
       }
       if (pinned) {
-        host.scrollStreamToEnd();
+        pinToEnd();
       }
       timings.t6 = Date.now();
       setPhase("presentation_done");
@@ -2947,9 +2959,8 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
     }
     /* The cancelled frame carried the final flush (and the Stopped note sits
        below it): land on the true end before the listeners go. */
-    if (stickToBottom && scroller) {
-      host.scrollStreamToEnd();
-      endScrollTop = scroller.scrollTop;
+    if (stickToBottom && scroller && generation === ctx.streamGeneration) {
+      endScrollTop = pinToEnd();
     }
     window.removeEventListener("resize", onResizeFollow);
     document.removeEventListener("keydown", onKeyNav);
