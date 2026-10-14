@@ -74,7 +74,9 @@ test("Browser paints a status before scripts, through preparation and actionable
       assert.match(await status.innerText(), /checking its Engine/);
       assert.equal(opened, 0);
       releaseSummary();
-      while (!polled) await new Promise(resolve => setTimeout(resolve, 25));
+      const pollDeadline = Date.now() + 10_000;
+      while (!polled && Date.now() < pollDeadline) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.ok(polled, "Browser polls its startup status within 10 s of opening");
       const preparing = await status.innerText();
       assert.ok(preparing.trim(), "preparation keeps a visible status");
       assert.doesNotMatch(preparing, /close|\d+s\b/i, "preparation is one calm line, without a Close instruction or early timer");
