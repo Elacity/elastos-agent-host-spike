@@ -1547,7 +1547,7 @@ impl PreparationOwner {
             let result = if activation_retry {
                 Ok(())
             } else if starting {
-                prepare(&data, &registry, &operation, &stopping, &revalidate).await
+                prepare_resuming(&data, &registry, &operation, &stopping, &revalidate).await
             } else {
                 reconcile(&data, &registry, &operation, &stopping, &revalidate).await
             };
@@ -2472,12 +2472,25 @@ async fn unless_cancelled<T>(
             biased;
             result = &mut read => return result,
             _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
-                if load_operation(data_dir, id)?.cancel_requested {
-                    return Err(PreparationStopped.into());
+                // A busy inventory lock (a progress save in flight) only
+                // moves this check to the next poll; it is not a read failure.
+                match load_operation(data_dir, id) {
+                    Ok(record) if record.cancel_requested => {
+                        return Err(PreparationStopped.into());
+                    }
+                    Err(error) if !inventory_busy(&error) => return Err(error),
+                    _ => {}
                 }
             }
         }
     }
+}
+
+/// The inventory lock stayed taken past its bounded wait (storage `Inventory::open`).
+fn inventory_busy(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
 }
 
 /// Each 64 KiB part pays one network round trip, so one preparation keeps this
@@ -2540,6 +2553,69 @@ fn transient_part_read_error(error: &anyhow::Error) -> bool {
         error.downcast_ref::<ProviderError>(),
         Some(ProviderError::Io(_))
     )
+}
+
+/// Waits before each automatic resume of a Get whose content reads kept
+/// failing in transit, about four minutes in all.
+const MODEL_GET_RESUME_WAITS: [std::time::Duration; 5] = [
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(15),
+    std::time::Duration::from_secs(30),
+    std::time::Duration::from_secs(60),
+    std::time::Duration::from_secs(120),
+];
+
+/// A stopped attempt passed the backend drain barrier that settled cleanup
+/// requires, so its record may continue from the bytes on disk.
+struct DrainedAttempt(());
+
+/// `prepare`, resumed as Retry resumes (kept bytes re-hashed, a fresh read
+/// route, every authority and capacity check again) after a content read
+/// failed in transit. Cancel and a stopping Home end a wait within one poll.
+/// A stop after the last resume is an interrupted download that keeps its
+/// stage; refusals, integrity, budget and every other failure end at once.
+async fn prepare_resuming(
+    data_dir: &Path,
+    registry: &elastos_runtime::provider::ProviderRegistry,
+    id: &str,
+    stop: &AtomicBool,
+    revalidate: &Revalidate,
+) -> anyhow::Result<()> {
+    let mut waits = MODEL_GET_RESUME_WAITS.iter();
+    let mut drained = None;
+    loop {
+        let error = match prepare(data_dir, registry, id, stop, revalidate, drained.take()).await {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        if !matches!(
+            failure_phase(&error),
+            PreparationFailurePhase::MetadataRead | PreparationFailurePhase::WeightsRead
+        ) || !transient_part_read_error(&error)
+        {
+            return Err(error);
+        }
+        let Some(wait) = waits.next() else {
+            return Err(error.context(PreparationFailurePhase::Interrupted));
+        };
+        tracing::warn!(operation_id = %id, wait_s = wait.as_secs(),
+            error = %format_args!("{error:#}"),
+            "private model preparation resumes after a read failed in transit");
+        if registry.prepare_local_ipfs_backend().await.is_err() {
+            return Err(error);
+        }
+        let until = tokio::time::Instant::now() + *wait;
+        unless_cancelled(data_dir, id, async {
+            while tokio::time::Instant::now() < until {
+                ensure!(!stop.load(Ordering::Acquire), PreparationStopped);
+                let poll = tokio::time::Instant::now() + std::time::Duration::from_millis(200);
+                tokio::time::sleep_until(poll.min(until)).await;
+            }
+            Ok(())
+        })
+        .await?;
+        drained = Some(DrainedAttempt(()));
+    }
 }
 
 /// Outer result: the part's authority/capacity checks. Inner: its read.
@@ -2639,6 +2715,7 @@ async fn prepare(
     id: &str,
     stop: &AtomicBool,
     revalidate: &Revalidate,
+    drained: Option<DrainedAttempt>,
 ) -> anyhow::Result<()> {
     let record = require_active(data_dir, id, stop, revalidate)?;
     let backend = registry.prepare_local_ipfs_backend().await;
@@ -2665,12 +2742,19 @@ async fn prepare(
         )
         .await;
     }
-    if record.index_bytes > 0 || record.completed_bytes > 0 {
+    if (record.index_bytes > 0 || record.completed_bytes > 0) && drained.is_none() {
         anyhow::bail!("interrupted partial preparation requires settled cleanup");
     }
-    // A stage kept by an earlier failure continues when it holds this signed
-    // package. Progress and capacity then start from the bytes on disk.
+    // A stage kept by an earlier failure (or by this Get's stopped attempt)
+    // continues when it holds this signed package. Progress and capacity then
+    // start from the bytes on disk; without one they start over from zero.
     let resumed = resume_kept_stage(data_dir, id, &entry, &closure, stop, revalidate).await?;
+    if resumed.is_none() && drained.is_some() {
+        update_operation(data_dir, id, |record| {
+            record.index_bytes = 0;
+            record.completed_bytes = 0;
+        })?;
+    }
     let record = require_active(data_dir, id, stop, revalidate)?;
     let resuming = resumed.is_some();
     let resumed_bytes = record.completed_bytes;
@@ -2845,7 +2929,24 @@ async fn prepare(
                 unless_cancelled(data_dir, id, next_part_in_order(&mut in_flight))
                     .await
                     .context(read_phase)?;
-            let bytes = checked?.context(read_phase)?;
+            let bytes = match checked? {
+                Ok(bytes) => bytes,
+                Err(error) if transient_part_read_error(&error) => {
+                    // A refusal a later part already met outranks a failure in
+                    // transit, so an automatic resume never reads that part again.
+                    for part in in_flight.iter_mut() {
+                        match part.done.take() {
+                            Some(Err(refused)) => return Err(refused),
+                            Some(Ok(Err(refused))) if !transient_part_read_error(&refused) => {
+                                return Err(refused.context(read_phase));
+                            }
+                            done => part.done = done,
+                        }
+                    }
+                    return Err(error.context(read_phase));
+                }
+                Err(error) => return Err(error.context(read_phase)),
+            };
             require_active(data_dir, id, stop, revalidate)?;
             if weights && offset == 0 {
                 ensure!(
@@ -12268,8 +12369,82 @@ server.serve_forever()
         cid: String,
         files: std::collections::BTreeMap<String, Vec<u8>>,
         served: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
-        consumer: crate::carrier::CarrierNode,
-        holder: crate::carrier::tests::HolderRuntime,
+        /// The consumer's and the holder's Carrier nodes; none in process.
+        carrier: Option<(
+            crate::carrier::CarrierNode,
+            crate::carrier::tests::HolderRuntime,
+        )>,
+    }
+
+    /// A holder reached through availability in process, so a test can pause
+    /// time: reads of the weights part at `fail_at` fail in transit (the code
+    /// Carrier reports for a late or lost answer) `failures` times, then it
+    /// serves; the first read of the weights part at `refuse_at` is refused.
+    /// Requests are recorded in the shape the Carrier holder sees.
+    struct TransitHolder {
+        files: std::collections::BTreeMap<String, Vec<u8>>,
+        served: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        fail_at: u64,
+        failures: std::sync::atomic::AtomicUsize,
+        refuse_at: std::sync::Mutex<Option<u64>>,
+    }
+
+    #[async_trait::async_trait]
+    impl elastos_runtime::provider::Provider for TransitHolder {
+        fn name(&self) -> &'static str {
+            "transit-holder-fixture"
+        }
+        fn schemes(&self) -> Vec<&'static str> {
+            vec!["availability"]
+        }
+        async fn handle(
+            &self,
+            _: elastos_runtime::provider::ResourceRequest,
+        ) -> Result<
+            elastos_runtime::provider::ResourceResponse,
+            elastos_runtime::provider::ProviderError,
+        > {
+            panic!("preparation reads availability through send_raw")
+        }
+        async fn send_raw(
+            &self,
+            request: &serde_json::Value,
+        ) -> Result<serde_json::Value, elastos_runtime::provider::ProviderError> {
+            use base64::Engine as _;
+            let mut seen = request.clone();
+            seen["_runtime_invocation"] = serde_json::json!({"range": request["range"]});
+            self.served.lock().unwrap().push(seen);
+            let file = &self.files[request["path"].as_str().unwrap()];
+            let range = &request["range"];
+            if request["path"] == "weights.gguf"
+                && range["start"].as_u64().is_some_and(|start| {
+                    let mut refuse_at = self.refuse_at.lock().unwrap();
+                    refuse_at.take_if(|at| *at == start).is_some()
+                })
+            {
+                return Ok(serde_json::json!({"status":"error",
+                    "code":"carrier_fetch_failed", "message":"fixture holder refused"}));
+            }
+            if request["path"] == "weights.gguf"
+                && range["start"] == self.fail_at
+                && self
+                    .failures
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                        left.checked_sub(1)
+                    })
+                    .is_ok()
+            {
+                return Ok(serde_json::json!({"status":"error",
+                    "code":crate::carrier::CARRIER_FETCH_IN_TRANSIT_CODE,
+                    "message":"fixture holder answer deadline passed"}));
+            }
+            let bytes = match (range["start"].as_u64(), range["end"].as_u64()) {
+                (Some(start), Some(end)) => &file[start as usize..=end as usize],
+                _ => &file[..],
+            };
+            Ok(serde_json::json!({"status":"ok",
+                "data":{"data":base64::engine::general_purpose::STANDARD.encode(bytes)}}))
+        }
     }
 
     impl SlowHolderPreparation {
@@ -12289,26 +12464,7 @@ server.serve_forever()
             serve: impl FnOnce(&mut std::collections::BTreeMap<String, Vec<u8>>),
         ) -> Self {
             use crate::carrier::tests as carrier_fixture;
-            let root = tempfile::tempdir().unwrap();
-            // 44 weight parts of 64 KiB (the last one short) and four one-part
-            // files: 48 parts, six full windows.
-            let mut weights = b"GGUF\x03\0\0\0".to_vec();
-            weights.extend(
-                (0..43 * 65536 + 100u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8),
-            );
-            let (payload, files) = package_fixture(weights);
-            write_preparation_catalog(root.path(), &payload);
-            let cid = payload["entries"][0]["cid"].as_str().unwrap().to_owned();
-            let mut backend = PreparationBackend::new(files.clone(), cid.clone());
-            backend.fail_capacity_at = fail_capacity_at;
-            let backend = Arc::new(backend);
-            backend.missing_cache.store(true, Ordering::Release);
-            let registry = Arc::new(elastos_runtime::provider::ProviderRegistry::new());
-            registry
-                .register_sub_provider("ipfs", backend)
-                .await
-                .unwrap();
-            register_content(&registry, root.path()).await;
+            let (root, cid, files, registry) = Self::consumer(fail_capacity_at).await;
             let (consumer_sk, consumer_did) = elastos_identity::derive_did(&[seed; 32]);
             let consumer = crate::carrier::start_isolated_carrier_node_with_registry(
                 &consumer_sk,
@@ -12368,8 +12524,70 @@ server.serve_forever()
                 cid,
                 files,
                 served,
-                consumer,
-                holder,
+                carrier: Some((consumer, holder)),
+            }
+        }
+
+        /// The package and a consumer whose own cache is empty; its backend
+        /// refuses its `nth` capacity check.
+        async fn consumer(
+            fail_capacity_at: Option<usize>,
+        ) -> (
+            tempfile::TempDir,
+            String,
+            std::collections::BTreeMap<String, Vec<u8>>,
+            Arc<elastos_runtime::provider::ProviderRegistry>,
+        ) {
+            let root = tempfile::tempdir().unwrap();
+            // 44 weight parts of 64 KiB (the last one short) and four one-part
+            // files: 48 parts, six full windows.
+            let mut weights = b"GGUF\x03\0\0\0".to_vec();
+            weights.extend(
+                (0..43 * 65536 + 100u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8),
+            );
+            let (payload, files) = package_fixture(weights);
+            write_preparation_catalog(root.path(), &payload);
+            let cid = payload["entries"][0]["cid"].as_str().unwrap().to_owned();
+            let mut backend = PreparationBackend::new(files.clone(), cid.clone());
+            backend.fail_capacity_at = fail_capacity_at;
+            let backend = Arc::new(backend);
+            backend.missing_cache.store(true, Ordering::Release);
+            let registry = Arc::new(elastos_runtime::provider::ProviderRegistry::new());
+            registry
+                .register_sub_provider("ipfs", backend)
+                .await
+                .unwrap();
+            register_content(&registry, root.path()).await;
+            (root, cid, files, registry)
+        }
+
+        /// As `start` with a `TransitHolder` failing reads of weight part
+        /// `part` in transit `failures` times.
+        async fn in_process(part: u64, failures: usize) -> Self {
+            Self::in_process_refusing(part, failures, None).await
+        }
+
+        /// As `in_process`; the holder refuses the first read of weight part
+        /// `refused`.
+        async fn in_process_refusing(part: u64, failures: usize, refused: Option<u64>) -> Self {
+            let (root, cid, files, registry) = Self::consumer(None).await;
+            let served = Arc::new(std::sync::Mutex::new(Vec::new()));
+            registry
+                .register(Arc::new(TransitHolder {
+                    files: files.clone(),
+                    served: served.clone(),
+                    fail_at: part * 65536,
+                    failures: failures.into(),
+                    refuse_at: refused.map(|part| part * 65536).into(),
+                }))
+                .await;
+            Self {
+                root,
+                registry,
+                cid,
+                files,
+                served,
+                carrier: None,
             }
         }
 
@@ -12399,7 +12617,8 @@ server.serve_forever()
             let reply =
                 self.invoke_fixture(&owner, "use", key, serde_json::json!({"cid": self.cid}));
             let task = owner.worker.lock().unwrap().take().unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(120), task)
+            // Six attempts and their automatic resume waits fit in ten minutes.
+            tokio::time::timeout(std::time::Duration::from_secs(600), task)
                 .await
                 .expect("preparation settles")
                 .unwrap();
@@ -12432,8 +12651,10 @@ server.serve_forever()
 
         async fn shutdown(self) {
             use crate::carrier::tests as carrier_fixture;
-            carrier_fixture::shutdown_test_carrier_node(self.holder.node).await;
-            carrier_fixture::shutdown_test_carrier_node(self.consumer).await;
+            if let Some((consumer, holder)) = self.carrier {
+                carrier_fixture::shutdown_test_carrier_node(holder.node).await;
+                carrier_fixture::shutdown_test_carrier_node(consumer).await;
+            }
         }
     }
 
@@ -12614,28 +12835,27 @@ server.serve_forever()
         fixture.shutdown().await;
     }
 
-    #[tokio::test]
-    async fn model_preparation_stops_after_four_failed_reads_of_one_part() {
+    /// A part whose reads keep failing in transit stops each attempt after
+    /// four reads; the Get resumes by itself five times, then reports an
+    /// interrupted download that keeps its stage for Retry instead of
+    /// "content could not be read".
+    #[tokio::test(start_paused = true)]
+    async fn model_preparation_reports_an_interrupted_download_after_six_failed_attempts() {
         let failing = 7 * 65536;
-        let fixture = SlowHolderPreparation::start(
-            105,
-            crate::carrier::tests::HolderBehavior {
-                stall_always: [failing].into(),
-                ..Default::default()
-            },
-            |_| {},
-        )
-        .await;
-        let (record, _) = fixture.prepare("stall-always").await;
+        let fixture = SlowHolderPreparation::in_process(7, usize::MAX).await;
+        let (record, _) = fixture.prepare("lost-in-transit").await;
         assert_eq!(record.state, PreparationState::Failed, "{record:?}");
-        assert_eq!(
-            record.failure_phase,
-            Some(PreparationFailurePhase::WeightsRead)
-        );
+        assert_eq!(record.projection()["failure_class"], "download_interrupted");
         assert_eq!(
             fixture.reads_at(failing),
-            1 + MODEL_PART_RETRY_BACKOFF.len()
+            (1 + MODEL_GET_RESUME_WAITS.len()) * (1 + MODEL_PART_RETRY_BACKOFF.len())
         );
+        assert_eq!(
+            fixture.index_reads(),
+            1,
+            "every resume reuses the kept index"
+        );
+        assert_eq!(fixture.kept_stage(), Some(record.operation_id.clone()));
         assert_eq!(record.reserved_bytes, 0);
         assert!(!fixture
             .root
@@ -12645,6 +12865,28 @@ server.serve_forever()
                 record.admission_id
             ))
             .exists());
+        fixture.shutdown().await;
+    }
+
+    /// A refusal a later part in the window already met is never read again
+    /// by an automatic resume, even when an earlier part failed in transit.
+    #[tokio::test(start_paused = true)]
+    async fn model_preparation_does_not_resume_past_a_refusal_already_met() {
+        let attempt = 1 + MODEL_PART_RETRY_BACKOFF.len();
+        let fixture = SlowHolderPreparation::in_process_refusing(20, attempt, Some(21)).await;
+        let (record, _) = fixture.prepare("refused-behind-transit").await;
+        assert_eq!(record.state, PreparationState::Failed, "{record:?}");
+        assert_eq!(
+            record.failure_phase,
+            Some(PreparationFailurePhase::WeightsRead)
+        );
+        assert_eq!(fixture.reads_at(20 * 65536), attempt);
+        assert_eq!(
+            fixture.reads_at(21 * 65536),
+            1,
+            "the refused part is not read again"
+        );
+        assert_eq!(fixture.kept_stage(), Some(record.operation_id.clone()));
         fixture.shutdown().await;
     }
 
@@ -12698,6 +12940,26 @@ server.serve_forever()
         assert!(!prepared.join("stage").exists());
         assert!(!prepared.join(format!("admitted-{id}")).exists());
         fixture.shutdown().await;
+    }
+
+    /// Alpha.17 on a Mac: a progress save holding the inventory lock past the
+    /// cancel check's 1 s wait stopped the Get as unreadable content. A busy
+    /// lock only moves the check to the next poll; Cancel still ends the read.
+    #[tokio::test]
+    async fn model_preparation_cancel_check_waits_out_a_busy_inventory_lock() {
+        let (root, record, _, _) = staged_fixture(now().unwrap(), false).await;
+        let id = record.operation_id.as_str();
+        let held = Inventory::open(root.path(), false).unwrap();
+        let read = unless_cancelled(root.path(), id, async {
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            anyhow::Ok(7)
+        });
+        assert_eq!(read.await.unwrap(), 7, "the read outlives a busy lock");
+        drop(held);
+        update_operation(root.path(), id, |record| record.cancel_requested = true).unwrap();
+        let pending = std::future::pending::<anyhow::Result<()>>();
+        let cancelled = unless_cancelled(root.path(), id, pending).await;
+        assert!(cancelled.unwrap_err().is::<PreparationStopped>());
     }
 
     /// A part read the holder refuses or answers badly is read once and stops
@@ -12798,22 +13060,6 @@ server.serve_forever()
     }
 
     impl SlowHolderPreparation {
-        /// A fixture whose holder stalls past the answer budget on every read
-        /// from `parts` weight parts on, until the switch is set to `u64::MAX`.
-        async fn stalling_from(seed: u8, parts: u64) -> (Self, Arc<std::sync::atomic::AtomicU64>) {
-            let stall_from = Arc::new(std::sync::atomic::AtomicU64::new(parts * 65536));
-            let fixture = Self::start(
-                seed,
-                crate::carrier::tests::HolderBehavior {
-                    stall_from: Some(stall_from.clone()),
-                    ..Default::default()
-                },
-                |_| {},
-            )
-            .await;
-            (fixture, stall_from)
-        }
-
         fn stage(&self) -> std::path::PathBuf {
             self.root.path().join("model-preparation/stage")
         }
@@ -12879,35 +13125,34 @@ server.serve_forever()
             assert_eq!(self.kept_stage(), None);
         }
 
-        /// The first Use stops at weight part 20 when its reads keep failing
-        /// in transit and keeps its stage; the holder then answers again.
-        async fn fail_halfway(
-            &self,
-            stall_from: &std::sync::atomic::AtomicU64,
-        ) -> PreparationRecord {
-            let (failed, _) = self.prepare("first-use").await;
+        /// A first Use that stopped at weight part 20 because its reads kept
+        /// failing in transit through every automatic resume, and kept its
+        /// stage; the holder answers every later read.
+        async fn failed_halfway() -> Self {
+            let attempts = 1 + MODEL_GET_RESUME_WAITS.len();
+            let fixture =
+                Self::in_process(20, attempts * (1 + MODEL_PART_RETRY_BACKOFF.len())).await;
+            let (failed, _) = fixture.prepare("first-use").await;
             assert_eq!(failed.state, PreparationState::Failed, "{failed:?}");
             assert_eq!(
                 failed.failure_phase,
-                Some(PreparationFailurePhase::WeightsRead)
+                Some(PreparationFailurePhase::Interrupted)
             );
             assert_eq!(failed.reserved_bytes, 0);
             assert_eq!(
-                std::fs::metadata(self.stage().join("weights.gguf"))
+                std::fs::metadata(fixture.stage().join("weights.gguf"))
                     .unwrap()
                     .len(),
                 20 * 65536
             );
-            assert_eq!(self.kept_stage(), Some(failed.operation_id.clone()));
-            stall_from.store(u64::MAX, Ordering::Release);
-            failed
+            assert_eq!(fixture.kept_stage(), Some(failed.operation_id.clone()));
+            fixture
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn model_preparation_resumes_after_a_read_failure_with_only_remaining_parts() {
-        let (fixture, stall_from) = SlowHolderPreparation::stalling_from(117, 20).await;
-        fixture.fail_halfway(&stall_from).await;
+        let fixture = SlowHolderPreparation::failed_halfway().await;
         let (parts, index) = (fixture.part_reads(), fixture.index_reads());
         let (record, _) = fixture.prepare("next-use").await;
         fixture.assert_admitted(&record);
@@ -12921,6 +13166,132 @@ server.serve_forever()
             assert_eq!(fixture.reads_at(part * 65536), 1, "part {part} read once");
         }
         fixture.shutdown().await;
+    }
+
+    /// Alpha.17 on a Mac: the Qwen Get stopped twice at 64-67 MB with
+    /// "Model content could not be read" and Retry then finished it. The Get
+    /// now resumes by itself from the saved bytes, with its progress never
+    /// below them and no failure shown, within the same operation.
+    #[tokio::test(start_paused = true)]
+    async fn model_preparation_get_resumes_by_itself_after_reads_keep_failing_in_transit() {
+        // Weight part 20 fails in transit nine times: two whole attempts and
+        // the first read of a third, which then completes the Get.
+        let fixture = SlowHolderPreparation::in_process(20, 9).await;
+        let owner = test_owner();
+        let reply = fixture.invoke_fixture(
+            &owner,
+            "use",
+            "auto-resume",
+            serde_json::json!({"cid": fixture.cid}),
+        );
+        let id = reply["operation_id"].as_str().unwrap().to_owned();
+        let task = owner.worker.lock().unwrap().take().unwrap();
+        let saved = std::cell::Cell::new(0);
+        let sample = || {
+            let record = load_operation(fixture.root.path(), &id).unwrap();
+            assert!(
+                record.completed_bytes >= saved.get(),
+                "progress went back: {record:?}"
+            );
+            saved.set(record.completed_bytes);
+            record
+        };
+        while !task.is_finished() {
+            let record = sample();
+            if record.state != PreparationState::Admitted {
+                assert_eq!(record.failure_phase, None, "{record:?}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        task.await.unwrap();
+        let record = sample();
+        assert_eq!(fixture.reads_at(20 * 65536), 10);
+        fixture.assert_admitted(&record);
+        // Activation needs an engine this fixture lacks; the Get itself
+        // recorded no failure.
+        assert!(
+            !record
+                .failure_phase
+                .is_some_and(PreparationFailurePhase::keeps_stage),
+            "{record:?}"
+        );
+        assert_eq!(
+            fixture.index_reads(),
+            1,
+            "every resume reuses the kept index"
+        );
+        for part in 0..20 {
+            assert_eq!(fixture.reads_at(part * 65536), 1, "part {part} read once");
+        }
+        fixture.shutdown().await;
+    }
+
+    /// Cancel and a stopping Home end an automatic resume wait at once:
+    /// Cancel discards the stage, a stopping Home keeps it for Retry.
+    #[tokio::test(start_paused = true)]
+    async fn model_preparation_cancel_or_home_stop_ends_a_resume_wait_at_once() {
+        for home_stops in [false, true] {
+            let fixture = SlowHolderPreparation::in_process(20, usize::MAX).await;
+            let owner = test_owner();
+            let reply = fixture.invoke_fixture(
+                &owner,
+                "use",
+                "resume-wait",
+                serde_json::json!({"cid": fixture.cid}),
+            );
+            let id = reply["operation_id"].as_str().unwrap().to_owned();
+            let finished = || {
+                owner
+                    .worker
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_none_or(|task| task.is_finished())
+            };
+            // The second attempt stops after its fourth read; the Get then
+            // waits 15 s. Stop 5 s into that wait.
+            let reads = 2 * (1 + MODEL_PART_RETRY_BACKOFF.len());
+            while fixture.reads_at(20 * 65536) < reads {
+                assert!(!finished());
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            assert!(!finished());
+            let task = if home_stops {
+                let task = owner.worker.lock().unwrap().take().unwrap();
+                drop(owner);
+                task
+            } else {
+                let cancelled = fixture.invoke_fixture(
+                    &owner,
+                    "cancel",
+                    "resume-wait-cancel",
+                    serde_json::json!({"operation_id": id}),
+                );
+                assert_eq!(cancelled["cancel_requested"], true);
+                owner.worker.lock().unwrap().take().unwrap()
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(1), task)
+                .await
+                .expect("the wait ends at once")
+                .unwrap();
+            let record = load_operation(fixture.root.path(), &id).unwrap();
+            assert_eq!(
+                fixture.reads_at(20 * 65536),
+                reads,
+                "no read after the stop"
+            );
+            assert_eq!(record.reserved_bytes, 0);
+            if home_stops {
+                assert_eq!(record.state, PreparationState::Failed, "{record:?}");
+                assert_eq!(record.projection()["failure_class"], "download_interrupted");
+                assert_eq!(fixture.kept_stage(), Some(id));
+            } else {
+                assert_eq!(record.state, PreparationState::Cancelled, "{record:?}");
+                assert!(!fixture.stage().exists());
+            }
+            fixture.shutdown().await;
+        }
     }
 
     #[tokio::test]
@@ -13077,10 +13448,9 @@ server.serve_forever()
         fixture.shutdown().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn model_preparation_rejects_a_corrupted_kept_part_and_starts_over() {
-        let (fixture, stall_from) = SlowHolderPreparation::stalling_from(121, 20).await;
-        fixture.fail_halfway(&stall_from).await;
+        let fixture = SlowHolderPreparation::failed_halfway().await;
         {
             let path = fixture.stage().join("weights.gguf");
             let mut bytes = std::fs::read(&path).unwrap();
@@ -13108,10 +13478,9 @@ server.serve_forever()
         fixture.shutdown().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn model_preparation_does_not_continue_a_stage_of_another_package() {
-        let (fixture, stall_from) = SlowHolderPreparation::stalling_from(123, 20).await;
-        fixture.fail_halfway(&stall_from).await;
+        let fixture = SlowHolderPreparation::failed_halfway().await;
         {
             let path = fixture.stage().join("_elastos_object.json");
             let mut other: serde_json::Value =
@@ -14632,6 +15001,7 @@ server.serve_forever()
                 &record.operation_id,
                 &AtomicBool::new(false),
                 &revalidate,
+                None,
             )
             .await
             .unwrap();
@@ -14682,6 +15052,7 @@ server.serve_forever()
                 &record.operation_id,
                 &AtomicBool::new(false),
                 &revalidate,
+                None,
             )
             .await
             .unwrap_err();
@@ -14794,7 +15165,8 @@ server.serve_forever()
                     &registry,
                     &record.operation_id,
                     &stopped,
-                    &revalidate
+                    &revalidate,
+                    None,
                 )
                 .await
                 .is_err(),
