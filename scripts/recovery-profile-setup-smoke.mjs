@@ -212,7 +212,7 @@ const later = vm.createContext({
   SETUP_REMINDER_ID: "setup",
   shellState: { currentSummary: laterSummary, shellLayoutState: {} },
   sheet: { hidden: false, inert: false, setAttribute() {} },
-  finishedHideTimer: null, dismissedThisSession: false, drag: null,
+  dismissedThisSession: false, drag: null,
   restoreSetupSheetOverlay() {},
   showSetupSheet: () => { reopenedSheets += 1; },
   rememberChromeNotification: (item) => reminders.push(item),

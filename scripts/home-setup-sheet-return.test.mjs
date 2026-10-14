@@ -25,10 +25,11 @@ function fixture() {
     RECOVERY_READINESS_SCHEMA: "elastos.recovery.readiness/v1",
     SETUP_REMINDER_ID: "setup",
     shellState: { currentSummary: summary, shellLayoutState: {} },
-    sheet, card: null, recoveryBody: { textContent: "" }, recoveryButton: { focus() {} },
+    sheet, card: null, recoveryBody: { textContent: "" }, recoveryButton: { disabled: false, focus() { f.focused = "recovery"; } },
+    closeButton: { focus() { f.focused = "close"; } },
     recoveryActBusy: false, waitingForSystemClose: false, dismissedThisSession: false, drag: null,
-    targetById: () => ({ id: "system" }), setTimeout,
-    renderSetupSheet() {}, forgetChromeNotification() {}, rememberChromeNotification() {}, showSetupSheet() {},
+    targetById: () => ({ id: "system" }), setTimeout, queueMicrotask,
+    renderSetupSheet() { f.context.recoveryButton.disabled = f.context.setupFinished(summary); }, forgetChromeNotification() {}, rememberChromeNotification() {}, showSetupSheet() {},
     openTarget: (id, options) => f.opened.push([id, options]),
     openSystemRecoverySave: async () => {
       assert(classes.has("is-yielded"), "System is in front while it saves");
@@ -38,7 +39,7 @@ function fixture() {
   });
   vm.runInContext(["typedReadinessStatus", "homeSetupStatus", "homeRecoveryStatus", "setupFinished",
     "homeSetupNeedsAct", "setupSheetOpen", "yieldSetupSheet", "restoreSetupSheetOverlay", "openRecoveryAct",
-    "syncSetupSheet", "setupSheetWindowClosed", "hideSetupSheet", "rememberSetupReminder"]
+    "syncSetupSheet", "setupSheetWindowClosed", "returnSetupSheet", "hideSetupSheet", "rememberSetupReminder"]
     .map((name) => functionSource(setup, name)).join("\n"), f.context);
   f.shown = () => !sheet.hidden && !classes.has("is-yielded");
   return f;
@@ -50,9 +51,11 @@ test("Save Recovery Kit brings the onboarding sheet back, done or for Retry", as
   await f.context.openRecoveryAct();
   assert(f.shown(), "failed save brings the sheet back for Retry");
   assert.match(f.context.recoveryBody.textContent, /not saved/);
+  assert.equal(f.focused, "recovery", "Retry has keyboard focus");
   f.saveResult = true;
   await f.context.openRecoveryAct();
   assert(f.shown(), "saved kit brings the sheet back");
+  assert.equal(f.focused, "close", "focus leaves System for the enabled sheet control");
   f.context.syncSetupSheet(null, f.summary);
   await new Promise((resolve) => setTimeout(resolve, 1500));
   assert(f.shown(), "step 1 done keeps the sheet open with the next steps");
@@ -64,10 +67,15 @@ test("Closing System after the settings step brings the onboarding sheet back", 
   await f.context.openRecoveryAct();
   assert.deepEqual(JSON.parse(JSON.stringify(f.opened)), [["system", { query: { settings: "security" } }]]);
   assert(f.classes.has("is-yielded"), "System settings is in front");
+  f.focused = "system";
   f.context.setupSheetWindowClosed("wallet");
+  await null;
   assert(f.classes.has("is-yielded"), "another window closing leaves System in front");
   f.context.setupSheetWindowClosed("system");
+  f.focused = "next window";
+  await null;
   assert(f.shown(), "closing System brings the sheet back");
+  assert.equal(f.focused, "recovery", "the returned sheet holds keyboard focus");
   assert(read("capsules/home-gui/browser/home-gui.js").includes("windowClosed: setupSheetWindowClosed,"));
   assert(read("capsules/home-gui/browser/shell-windows.js").includes("windowHooks?.windowClosed?.(entry.targetId);"));
 });

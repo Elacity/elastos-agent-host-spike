@@ -108,7 +108,14 @@ export function setupSheetOpen() {
 export function setupSheetWindowClosed(targetId) {
   if (targetId !== "system" || !waitingForSystemClose) return;
   waitingForSystemClose = false;
-  if (setupSheetOpen()) restoreSetupSheetOverlay();
+  // After teardown finishes moving focus to the next window.
+  if (setupSheetOpen()) queueMicrotask(returnSetupSheet);
+}
+
+// The sheet is modal again: keyboard focus moves into it from System.
+function returnSetupSheet() {
+  restoreSetupSheetOverlay();
+  (recoveryButton && !recoveryButton.disabled ? recoveryButton : closeButton)?.focus();
 }
 
 export function holdHomeSetupAct(targetId) {
@@ -133,7 +140,7 @@ export function syncSetupSheet(previous, summary) {
       // Step 1 done: keep the sheet as the guide to the next steps.
       waitingForSystemClose = false;
       renderSetupSheet(summary);
-      restoreSetupSheetOverlay();
+      returnSetupSheet();
       return;
     }
     hideSetupSheet({ restoreFocus: false, rememberDismiss: false });
@@ -264,9 +271,8 @@ async function openRecoveryAct() {
     recoveryActBusy = false;
     renderSetupSheet(shellState.currentSummary);
     if (sheet && !sheet.hidden) {
-      restoreSetupSheetOverlay();
       if (!saved && recoveryBody) recoveryBody.textContent = "Recovery Kit was not saved. Try again, or choose Later.";
-      recoveryButton?.focus();
+      returnSetupSheet();
     }
   }
 }
