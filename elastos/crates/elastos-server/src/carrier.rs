@@ -12119,9 +12119,6 @@ pub(crate) mod tests {
         pub(crate) stall_once: std::collections::BTreeSet<u64>,
         /// Range starts whose every read stalls past the answer budget.
         pub(crate) stall_always: std::collections::BTreeSet<u64>,
-        /// While it holds a value below `u64::MAX`, every read of a range
-        /// starting at or after that offset stalls past the answer budget.
-        pub(crate) stall_from: Option<Arc<std::sync::atomic::AtomicU64>>,
         /// Range starts whose first read the holder refuses.
         pub(crate) refuse_once: std::collections::BTreeSet<u64>,
         /// Range starts whose every read the holder refuses.
@@ -12139,7 +12136,6 @@ pub(crate) mod tests {
         pub(crate) serial: Option<tokio::sync::Mutex<()>>,
         pub(crate) stall_once: StdMutex<std::collections::BTreeSet<u64>>,
         pub(crate) stall_always: std::collections::BTreeSet<u64>,
-        pub(crate) stall_from: Option<Arc<std::sync::atomic::AtomicU64>>,
         pub(crate) refuse_once: StdMutex<std::collections::BTreeSet<u64>>,
         pub(crate) refuse_always: std::collections::BTreeSet<u64>,
         pub(crate) oversize: std::collections::BTreeSet<u64>,
@@ -12177,11 +12173,7 @@ pub(crate) mod tests {
             tokio::time::sleep(self.delay).await;
             let start = request["_runtime_invocation"]["range"]["start"].as_u64();
             let stalls = start.is_some_and(|start| {
-                self.stall_always.contains(&start)
-                    || self.stall_from.as_ref().is_some_and(|from| {
-                        start >= from.load(std::sync::atomic::Ordering::Acquire)
-                    })
-                    || self.stall_once.lock().unwrap().remove(&start)
+                self.stall_always.contains(&start) || self.stall_once.lock().unwrap().remove(&start)
             });
             if stalls {
                 tokio::time::sleep(Duration::from_secs(7)).await;
@@ -12383,7 +12375,6 @@ pub(crate) mod tests {
                     serial: behavior.serialized.then(|| tokio::sync::Mutex::new(())),
                     stall_once: StdMutex::new(behavior.stall_once),
                     stall_always: behavior.stall_always,
-                    stall_from: behavior.stall_from,
                     refuse_once: StdMutex::new(behavior.refuse_once),
                     refuse_always: behavior.refuse_always,
                     oversize: behavior.oversize,

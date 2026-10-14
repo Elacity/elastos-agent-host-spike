@@ -347,8 +347,10 @@ When admitted content cannot run, the same projection can report a fixed
 Runtime derives this current fact from its host profile, engine acquisition
 policy, catalogue head binding and caller budget. Preparation also reports fixed
 `download_interrupted` and `storage_service_unavailable` causes so the caller
-can resume a retained transfer or restart its storage service. The UI explains the next
-action while retaining the admitted content.
+can resume a retained transfer or restart its storage service. A Get whose
+content reads fail in transit first resumes by itself from the kept bytes, up
+to five times over about four minutes, and reports `download_interrupted` only
+after that. The UI explains the next action while retaining the admitted content.
 Other failures keep the general service-unavailable state. The projection
 stores no failure cause and exposes no provider error text or host path.
 
