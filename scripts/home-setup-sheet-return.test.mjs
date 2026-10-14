@@ -59,6 +59,12 @@ test("Save Recovery Kit brings the onboarding sheet back, done or for Retry", as
   f.context.syncSetupSheet(null, f.summary);
   await new Promise((resolve) => setTimeout(resolve, 1500));
   assert(f.shown(), "step 1 done keeps the sheet open with the next steps");
+  f.focused = "next step";
+  f.context.syncSetupSheet(f.summary, f.summary);
+  assert.equal(f.focused, "next step", "a routine refresh keeps focus on the chosen next step");
+  f.context.yieldSetupSheet();
+  f.context.syncSetupSheet(f.summary, f.summary);
+  assert(f.shown() && f.focused === "close", "finished setup returns a yielded sheet with focus");
 });
 
 test("Closing System after the settings step brings the onboarding sheet back", async () => {

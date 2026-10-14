@@ -140,7 +140,7 @@ export function syncSetupSheet(previous, summary) {
       // Step 1 done: keep the sheet as the guide to the next steps.
       waitingForSystemClose = false;
       renderSetupSheet(summary);
-      returnSetupSheet();
+      if (sheet.classList.contains("is-yielded")) returnSetupSheet();
       return;
     }
     hideSetupSheet({ restoreFocus: false, rememberDismiss: false });
