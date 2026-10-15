@@ -323,19 +323,28 @@ message and run the retained controller:
 
 If it reports that the previous Home start was already attempted, the previous
 release is already back in place. Stop every `elastos` process of this Home and
-move these files into a folder of your own (keep them; do not delete them):
+move these files out of the way. Several have the same name, so make a folder
+of your own with the subfolders `bin`, `data` and `installation`, and move each
+file into the subfolder named below (keep them; do not delete them):
 
-- next to the installed `elastos` binary: `.elastos.update-journal.json`,
-  `.elastos.update-stage` and `.elastos.update-rollback`
-- in the data directory: `.elastos.update-stage`, `.elastos.update-rollback`,
-  `.elastos.update-support` and `update-controller/active-request.json`
-- in the data directory's `installation` folder: `.elastos.update-stage` and
+- `bin`: from next to the installed `elastos` binary,
+  `.elastos.update-journal.json`, `.elastos.update-stage` and
   `.elastos.update-rollback`
+- `data`: from the data directory, `.elastos.update-stage`,
+  `.elastos.update-rollback`, `.elastos.update-support` and
+  `update-controller/active-request.json`
+- `installation`: from the data directory's `installation` folder,
+  `.elastos.update-stage` and `.elastos.update-rollback`
 
-Then run the install command
-(`curl -fsSL https://elastos.elacitylabs.com/install.sh | bash`). It installs
-the current release and runs `elastos setup`, and keeps your data directory and
-identity. Start Home with `elastos home --browser`.
+Then run the install command as the same user, with the same `HOME` (and on
+Linux the same `XDG_DATA_HOME`) as this Home, and add
+`-s -- --install-dir <folder>` when the `elastos` binary is not in
+`~/.local/bin`:
+`curl -fsSL https://elastos.elacitylabs.com/install.sh | bash`. The installer
+finds the data directory from `HOME` and `XDG_DATA_HOME` (it ignores
+`ELASTOS_RECOVERY_DATA`). It installs the current release and runs
+`elastos setup`, and keeps that data directory and its identity. Start Home
+with `elastos home --browser`.
 
 The receipt keeps Home paths, locale, desktop opener settings and Runtime launch
 bindings. It also retains the configured Wallet price API key, which Wallet reads
