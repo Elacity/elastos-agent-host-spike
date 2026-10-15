@@ -293,17 +293,42 @@ again before starting Home. Runtime owns the saved transaction and verifies its
 files before recovery. Keep the installation files and data in place.
 
 A Home with an installed update controller keeps its controller Runtime and
-private receipt in the data directory. If a Home restart was interrupted, run
-`elastos home --browser`. It hands recovery to that retained controller, which
-verifies its signed Runtime, retained launch settings and saved release before
-it starts Home. When the start of the restored previous release failed, the
-controller starts that release again, at most twice per run, and clears the
-recovery files once Home is ready. It never starts the failed new release again.
-Keep this terminal open. Every Home start, first or after an update, has a
-120-second limit. Each start appends its output under a header to the private
+private receipt in the data directory. The controller of the version that runs
+the update owns its restart and recovery, so the steps below depend on that
+version.
+
+From 0.8.0 (and its test release 0.8.0-alpha.18), if a Home restart was
+interrupted, run `elastos home --browser`. It
+hands recovery to that retained controller, which verifies its signed Runtime,
+retained launch settings and saved release before it starts Home. When the
+start of the restored previous release failed, the controller starts that
+release again, at most twice per run, and clears the recovery files once Home
+is ready. It never starts the failed new release again. Keep this terminal
+open. Every Home start, first or after an update, has a 120-second limit. Each
+start appends its output under a header to the private
 `update-controller/runtime.log` file, so a failed update start stays readable
-after the rollback; a startup failure names that file. The receipt keeps Home
-paths, locale, desktop opener settings and Runtime launch
+after the rollback; a startup failure names that file.
+
+On 0.8.0-alpha.16 and 0.8.0-alpha.17 (including an update from one of them to
+0.8.0), an update or rollback start has a 30-second limit, each start replaces
+`update-controller/runtime.log`, and `elastos home --browser` refuses a pending
+restart. Set `ELASTOS_RECOVERY_DATA` to the data directory shown in the local
+message and run the retained controller:
+
+```bash
+"${ELASTOS_RECOVERY_DATA}/update-controller/runtime" __update-controller \
+  --receipt "${ELASTOS_RECOVERY_DATA}/update-controller/receipt.json"
+```
+
+If it reports that the previous Home start was already attempted, the previous
+release is already back in place but its start failed. Stop every `elastos`
+process of this Home. Then, in the `.elastos.update-journal.json` file next to
+the installed `elastos` binary, set `restart.phase` from `previous_running` (or
+`previous_start_claimed`) to `restored`, `restart.generation` to `""`, and
+`restart.pid` and `restart.process_start` to `null`. Keep every other file in
+place and run the command above again, when the device is otherwise idle.
+
+The receipt keeps Home paths, locale, desktop opener settings and Runtime launch
 bindings. It also retains the configured Wallet price API key, which Wallet reads
 from the environment. Other provider and Browser settings stay in their installed
 private configuration files. Keep the receipt's owner-only permissions and
