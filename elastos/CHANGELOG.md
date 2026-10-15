@@ -94,7 +94,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - Known issue: on the Jetson, getting a model is slow (Qwen takes about 43 minutes). The first Qwen reply takes about 22 seconds and the second about 3.6 seconds.
 - Known issue: Browser runs only on Apple Silicon Macs.
 - Known issue: Updating to this version in System from an earlier test version on a slow device such as a Jetson can still fail, because the earlier version runs the update; use the install command there.
-- Community posts reach members again without turning on Discovery, also across networks: they travel through the seed's Community node. Posts are signed, but that node can read them in transit until the relay arrives in 0.8.1. Direct messages across networks need that relay.
+- Community posts reach members again without turning on Discovery, also across networks: they travel through the seed's Community node. Posts are signed, but that node can read them in transit until the relay arrives in 0.8.1. Direct messages across networks need that relay. Contact requests across networks, and showing as online in People, still need Discovery on.
 - Upgrading from 0.7.1 or earlier: run the install command once. System update cannot move these Homes to 0.8.0, because releases are now signed with a new key (#186). Your Home keeps its data.
 - A Browser session now lasts until you close it, until Home stops answering for 5 minutes, until Runtime stops, or 12 hours (it used to close after 10 minutes).
 - Browser Settings no longer shows Agent access, which no agent can use yet (#290), and hides the engine choice when there is only one engine. The default engine is called Automatic.
@@ -150,7 +150,7 @@ Release candidate for 0.8.0 on the test channel, with the same notes.
 - Known issue: on the Jetson, getting a model is slow (Qwen takes about 43 minutes). The first Qwen reply takes about 22 seconds and the second about 3.6 seconds.
 - Known issue: Browser runs only on Apple Silicon Macs.
 - Known issue: Updating to this version in System from an earlier test version on a slow device such as a Jetson can still fail, because the earlier version runs the update; use the install command there.
-- Community posts reach members again without turning on Discovery, also across networks: they travel through the seed's Community node. Posts are signed, but that node can read them in transit until the relay arrives in 0.8.1. Direct messages across networks need that relay.
+- Community posts reach members again without turning on Discovery, also across networks: they travel through the seed's Community node. Posts are signed, but that node can read them in transit until the relay arrives in 0.8.1. Direct messages across networks need that relay. Contact requests across networks, and showing as online in People, still need Discovery on.
 - Upgrading from 0.7.1 or earlier: run the install command once. System update cannot move these Homes to 0.8.0, because releases are now signed with a new key (#186). Your Home keeps its data.
 - A Browser session now lasts until you close it, until Home stops answering for 5 minutes, until Runtime stops, or 12 hours (it used to close after 10 minutes).
 - Browser Settings no longer shows Agent access, which no agent can use yet (#290), and hides the engine choice when there is only one engine. The default engine is called Automatic.
