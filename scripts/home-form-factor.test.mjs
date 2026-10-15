@@ -140,6 +140,51 @@ test("desktop pinch-zoom never becomes a keyboard inset", () => {
   relayKeyboardInset(0, doc, fakeView({ width: 1440, height: 900, coarse: false }));
 });
 
+// phones-r1 #3-#5: tablet and desktop keep the desktop shell byte-for-byte,
+// whatever the pointer. Every touch or narrow change keys on the phone class.
+test("a coarse tablet takes no keyboard inset; the phone does", () => {
+  const doc = fakeDocument();
+  const tablet = fakeView({ width: 820, height: 1180, coarse: true, hover: false });
+  assert.deepEqual(relayKeyboardInset(336, doc, tablet), { factor: "tablet", coarse: true, inset: 0 });
+  assert.equal(doc.vars.get("--keyboard-inset"), "0px");
+  relayKeyboardInset(0, doc, tablet);
+});
+
+test("touch and narrow shell changes key on the phone class, never pointer or width alone", () => {
+  const read = (path) => readFileSync(new URL(`../capsules/${path}`, import.meta.url), "utf8");
+  const expose = read("home-gui/browser/shell-expose.js");
+  assert.doesNotMatch(expose, /data(set)?\.pointer|coarse/i, "Mission Control reads isPhone(), not the pointer");
+  const caption = expose.slice(expose.indexOf("function mountExposeCaption"), expose.indexOf("function clearExposeCaption"));
+  assert.match(caption, /if \(!isPhone\(\)\) \{\s*caption\.textContent = text;\s*entry\.node\.appendChild\(caption\);\s*return;/,
+    "off the phone the caption is the desktop's plain text and no card Close");
+  assert.match(expose, /if \(isPhone\(\)\) \{\s*node\.style\.setProperty\("--expose-card-scale"/);
+
+  const spotlight = read("home-gui/browser/shell-spotlight.js");
+  assert.match(spotlight, /openOnClick = event\.pointerType === "touch" && isPhone\(\);/,
+    "only a phone defers Spotlight touch activation to click");
+
+  const css = read("home-gui/browser/style.css");
+  const phoneList = css.indexOf("@media (max-width: 640px), (pointer: coarse)");
+  const outside = css.slice(0, phoneList);
+  assert.doesNotMatch(outside, /data-pointer|\(pointer: coarse\)|\(hover: none\)/, "no pointer-keyed shell CSS outside the phone list");
+  for (const declaration of ["overscroll-behavior: none", "touch-action: manipulation", "-webkit-touch-callout: none", "translateX(-50%) scale(calc(1 / var(--expose-card-scale"]) {
+    for (let at = outside.indexOf(declaration); at !== -1; at = outside.indexOf(declaration, at + 1)) {
+      const rule = outside.slice(outside.lastIndexOf("}", at) + 1, at);
+      assert.match(rule, /body\[data-form-factor="phone"\]/, `${declaration} outside a phone-scoped rule`);
+    }
+  }
+  assert.match(css, /\.expose-caption \{[^}]*transform: translateX\(-50%\);/, "desktop caption keeps its plain transform");
+
+  const people = read("people/browser/style.css");
+  const peopleNarrow = people.slice(people.indexOf("@media (max-width: 760px)"));
+  assert.doesNotMatch(peopleNarrow.slice(0, peopleNarrow.indexOf(".people-sidebar")), /grid-template-rows/,
+    "a narrow desktop People window keeps the desktop sidebar row");
+  const inbox = read("inbox/browser/index.html");
+  assert.match(inbox, /\n\s*\.entry-split \{\s*grid-template-columns: 1fr;\s*grid-template-rows: minmax\(160px, 42%\) minmax\(0, 1fr\);/);
+  assert.match(inbox, /html\[data-el-form-factor="phone"\] \.entry-rows \{\s*max-height: 40dvh;/);
+  assert.doesNotMatch(inbox.replace(/html\[data-el-form-factor="phone"\] \.entry-rows \{[^}]*\}/, ""), /40dvh/);
+});
+
 test("bindFormFactor syncs now and on resize, and unbinds cleanly", () => {
   const doc = fakeDocument();
   const view = fakeView({ width: 390, height: 844, coarse: true, hover: false });

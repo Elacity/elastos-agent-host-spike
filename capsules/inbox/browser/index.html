@@ -555,17 +555,25 @@
         gap: 8px;
       }
 
-      /* The list is as tall as its requests (capped, then it scrolls) so the
-         selected request reads directly beneath it, not mid-screen. */
       .entry-split {
         grid-template-columns: 1fr;
-        grid-template-rows: auto minmax(0, 1fr);
+        grid-template-rows: minmax(160px, 42%) minmax(0, 1fr);
       }
 
       .entry-rows {
-        max-height: 40dvh;
         border-right: 0;
         border-bottom: 1px solid var(--line);
+      }
+
+      /* Phone stage: the list is as tall as its requests (capped, then it
+         scrolls) so the selected request reads directly beneath it, not
+         mid-screen. A narrow desktop window keeps the split above. */
+      html[data-el-form-factor="phone"] .entry-split {
+        grid-template-rows: auto minmax(0, 1fr);
+      }
+
+      html[data-el-form-factor="phone"] .entry-rows {
+        max-height: 40dvh;
       }
 
       .summary-stack {

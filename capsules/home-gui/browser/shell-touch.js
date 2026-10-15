@@ -32,9 +32,11 @@ function defaultContextMenuEvent({ clientX, clientY }) {
 // Binds on `root` in the capture phase, so element handlers that stop
 // propagation cannot hide a press from it. Returns `swallowNextClick` for
 // callers that dismiss a menu on pointerdown and must not let that tap land
-// on whatever sat under the menu.
+// on whatever sat under the menu. `active` is asked on every press; Home
+// passes isPhone, so tablet and desktop keep the browser's own touch handling.
 export function bindTouchLongPress(root, {
   skip = "",
+  active = () => true,
   setTimer = (callback, ms) => window.setTimeout(callback, ms),
   clearTimer = (timer) => window.clearTimeout(timer),
   now = () => (window.performance ? window.performance.now() : Date.now()),
@@ -68,7 +70,7 @@ export function bindTouchLongPress(root, {
 
   root.addEventListener("pointerdown", (event) => {
     cancel();
-    if (!isTouchLike(event) || typeof event.target?.dispatchEvent !== "function") {
+    if (!active() || !isTouchLike(event) || typeof event.target?.dispatchEvent !== "function") {
       return;
     }
     if (skip && event.target.closest?.(skip)) {

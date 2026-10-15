@@ -71,9 +71,10 @@ export function syncFormFactor(doc = document, view = window) {
   const coarse = isCoarsePointer(view);
   doc.body.dataset.formFactor = factor;
   doc.body.dataset.pointer = coarse ? "coarse" : "fine";
-  // Desktop pinch-zoom also shrinks the visual viewport; only coarse-pointer
-  // hosts have a soft keyboard, so the inset is theirs alone.
-  const inset = coarse ? relayedKeyboardInset : 0;
+  // Desktop pinch-zoom also shrinks the visual viewport, and tablet and
+  // desktop keep the desktop stage unchanged, so only the phone takes the
+  // inset.
+  const inset = factor === FORM_FACTORS.phone ? relayedKeyboardInset : 0;
   doc.documentElement.style.setProperty("--keyboard-inset", `${inset}px`);
   return { factor, coarse, inset };
 }

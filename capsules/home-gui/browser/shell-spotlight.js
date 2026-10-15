@@ -18,6 +18,7 @@ import {
 } from "./shell-motion.js?v=home-20260813a";
 import { registerStageLayer } from "./shell-popovers.js?v=home-20260813a";
 import { bindSheetHandle, SHEET_DRAG_UP } from "./shell-sheet-handle.js?v=home-20260813a";
+import { isPhone } from "./shell-form-factor.js?v=home-20260813a";
 
 /* Spotlight: shell-wide search (macOS anatomy — dimmed backdrop, centered
  * floating bar, grouped results that grow beneath it). Searches everything
@@ -221,17 +222,18 @@ function renderResults() {
     detail.className = "spotlight-detail";
     detail.textContent = item.detail;
     row.append(glyph, title, detail);
-    let pressedBy = "";
+    let openOnClick = false;
     row.addEventListener("pointerdown", (event) => {
       event.preventDefault();
-      pressedBy = event.pointerType;
-      // A finger landing on a row may be starting a scroll; touch opens on click.
-      if (pressedBy !== "touch") {
+      // On the phone a finger landing on a row may be starting a scroll, so
+      // touch opens on click; tablet and desktop open on press as before.
+      openOnClick = event.pointerType === "touch" && isPhone();
+      if (!openOnClick) {
         activateResult(index);
       }
     });
     row.addEventListener("click", () => {
-      if (pressedBy === "touch") {
+      if (openOnClick) {
         activateResult(index);
       }
     });

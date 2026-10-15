@@ -124,6 +124,7 @@ export const shellState = {
   launcherIgnoreOutsideUntil: 0,
   recentUiAction: { key: "", at: 0 },
   lastPointer: { x: 0, y: 0, at: 0 },
+  lastPointerMove: { x: 0, y: 0, at: 0 },
   editingDesktopTargetId: null,
   longPressState: null,
   restoringSession: false,

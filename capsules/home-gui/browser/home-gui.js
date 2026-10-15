@@ -152,7 +152,7 @@ import {
   retireConnectorSheet,
   showConnectorSheet,
 } from "./shell-connector-sheet.js?v=home-20260813a";
-import { bindFormFactor } from "./shell-form-factor.js?v=home-20260813a";
+import { bindFormFactor, isPhone } from "./shell-form-factor.js?v=home-20260813a";
 import { bindPhoneDock } from "./shell-phone-dock.js?v=home-20260813a";
 import { bindPhoneStage } from "./shell-phone-stage.js?v=home-20260813a";
 import { bindCapsuleLayout } from "./shell-capsule-layout.js?v=home-20260813a";
@@ -1119,12 +1119,30 @@ async function toggleHomeGuiFullscreen() {
   }
 }
 
-// Last press or move: where the pointer is, for the window close guard.
-function trackPointer(event) {
+function trackPointerDown(event) {
   shellState.lastPointer = {
     x: event.clientX,
     y: event.clientY,
     at: window.performance ? window.performance.now() : Date.now(),
+  };
+  // On the phone a tap on Close has no pointermove before it, so the press
+  // itself is the fresh gesture that clears the window close guard.
+  if (isPhone()) {
+    shellState.lastPointerMove = { ...shellState.lastPointer };
+  }
+}
+
+function trackPointerMove(event) {
+  const at = window.performance ? window.performance.now() : Date.now();
+  shellState.lastPointer = {
+    x: event.clientX,
+    y: event.clientY,
+    at,
+  };
+  shellState.lastPointerMove = {
+    x: event.clientX,
+    y: event.clientY,
+    at,
   };
 }
 
@@ -1196,9 +1214,10 @@ export function bindHomeGuiInteractions(options = {}) {
   bindPhoneStage();
   // Capsule frames learn the size class so they can take their phone layout.
   bindCapsuleLayout();
-  // A held finger opens the same menus a right-click does; desktop icons
-  // keep their own long-press, which also arms the touch drag.
-  const touchLongPress = bindTouchLongPress(document, { skip: ".desktop-shortcut" });
+  // A held finger on the phone opens the same menus a right-click does;
+  // desktop icons keep their own long-press, which also arms the touch drag.
+  // Tablet and desktop keep the browser's own touch behaviour.
+  const touchLongPress = bindTouchLongPress(document, { skip: ".desktop-shortcut", active: isPhone });
 
   // The brand button itself toggles the ElastOS menu (bound in
   // bindIdentityMenu); the go-home action lives inside it as Show desktop.
@@ -1312,7 +1331,7 @@ export function bindHomeGuiInteractions(options = {}) {
   });
 
   document.addEventListener("pointermove", (event) => {
-    trackPointer(event);
+    trackPointerMove(event);
     continueTargetDrag(event);
     updateDesktopMarquee(event);
   });
@@ -1328,7 +1347,7 @@ export function bindHomeGuiInteractions(options = {}) {
   });
 
   document.addEventListener("pointerdown", (event) => {
-    trackPointer(event);
+    trackPointerDown(event);
     const now = window.performance ? window.performance.now() : Date.now();
     if (
       shellState.contextMenuOpen &&

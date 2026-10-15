@@ -32,18 +32,35 @@
       return;
     }
     let open = false;
+    const ownTabindex = !drawer.hasAttribute("tabindex");
 
+    // Off the phone the sidebar is a normal column again and its markup is
+    // exactly what the capsule shipped: no drawer state, focus or ARIA.
     function render() {
-      const phone = onPhone();
-      const state = phone && open ? OPEN : CLOSED;
+      if (!onPhone()) {
+        drawer.removeAttribute("data-el-drawer-state");
+        room.removeAttribute("data-el-drawer-state");
+        drawer.inert = false;
+        if (ownTabindex) {
+          drawer.removeAttribute("tabindex");
+        }
+        for (const toggle of toggles) {
+          toggle.removeAttribute("aria-controls");
+          toggle.removeAttribute("aria-expanded");
+        }
+        return;
+      }
+      const state = open ? OPEN : CLOSED;
       drawer.setAttribute("data-el-drawer-state", state);
       room.setAttribute("data-el-drawer-state", state);
-      // An off-screen drawer must not take focus or speak; off the phone the
-      // sidebar is a normal column again.
-      drawer.inert = phone && !open;
+      // An off-screen drawer must not take focus or speak.
+      drawer.inert = !open;
+      if (ownTabindex) {
+        drawer.setAttribute("tabindex", "-1");
+      }
       for (const toggle of toggles) {
         toggle.setAttribute("aria-controls", id);
-        toggle.setAttribute("aria-expanded", String(phone && open));
+        toggle.setAttribute("aria-expanded", String(open));
       }
     }
 
@@ -57,9 +74,6 @@
       }
     }
 
-    if (!drawer.hasAttribute("tabindex")) {
-      drawer.setAttribute("tabindex", "-1");
-    }
     for (const toggle of toggles) {
       toggle.addEventListener("click", () => setOpen(!open));
     }

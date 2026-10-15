@@ -1372,14 +1372,14 @@ function layoutMissionFloor() {
     if (isDesktopSpace(selectedSpaceId)) {
       if (title) title.textContent = `No windows on ${spaceLabel(selectedSpaceId)}`;
       if (hint) {
-        hint.textContent = coarsePointerShell()
+        hint.textContent = isPhone()
           ? "Tap + for a new Desktop, or tap a Space above to open it."
           : "Drag a window onto the Spaces bar to make a fullscreen Space, or tap + for a new Desktop. Click a Space above to open it.";
       }
     } else {
       if (title) title.textContent = spaceLabel(selectedSpaceId);
       if (hint) {
-        hint.textContent = coarsePointerShell()
+        hint.textContent = isPhone()
           ? "Tap the Space above to open it."
           : "Click the Space above or press Enter to open it.";
       }
@@ -1593,35 +1593,36 @@ function cardSourceRect(node) {
   };
 }
 
-function coarsePointerShell() {
-  return document.body.dataset.pointer === "coarse";
-}
-
-// Caption = app icon + name so a card reads at a glance; on touch shells a
-// close button rides the card as well, since the scaled-down title bar's own
+// On the phone the caption is app icon + name so a card reads at a glance,
+// and a close button rides the card, since the scaled-down title bar's own
 // Close is no longer a target. Both counter the card's scale via
-// --expose-card-scale so they stay legible at any grid size.
+// --expose-card-scale so they stay legible at any grid size. Tablet and
+// desktop keep the plain text caption.
 function mountExposeCaption(entry, wasMinimized) {
   clearExposeCaption(entry.node);
   const caption = document.createElement("div");
   caption.className = "expose-caption";
   caption.setAttribute("aria-hidden", "true");
   const title = entry.title || entry.targetId || entry.id;
+  const text = wasMinimized ? `${title} · Min` : title;
+  if (!isPhone()) {
+    caption.textContent = text;
+    entry.node.appendChild(caption);
+    return;
+  }
   const icon = document.createElement("span");
   icon.className = "expose-caption-icon";
   mountGlyph(icon, entry.targetId || entry.id);
   const label = document.createElement("span");
   label.className = "expose-caption-label";
-  label.textContent = wasMinimized ? `${title} · Min` : title;
+  label.textContent = text;
   caption.append(icon, label);
   entry.node.appendChild(caption);
-  if (coarsePointerShell()) {
-    const close = document.createElement("button");
-    close.type = "button";
-    close.className = "expose-close";
-    close.setAttribute("aria-label", `Close ${title}`);
-    entry.node.appendChild(close);
-  }
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "expose-close";
+  close.setAttribute("aria-label", `Close ${title}`);
+  entry.node.appendChild(close);
 }
 
 function clearExposeCaption(node) {
@@ -1725,7 +1726,9 @@ function layoutExposeGrid(entries) {
       node.style.transition = "transform 220ms cubic-bezier(0.2, 0, 0, 1)";
     }
     node.style.transform = gridTransform;
-    node.style.setProperty("--expose-card-scale", String(scale));
+    if (isPhone()) {
+      node.style.setProperty("--expose-card-scale", String(scale));
+    }
     mountExposeCaption(entry, wasMinimized);
   });
   syncActiveCard();

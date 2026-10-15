@@ -18,7 +18,7 @@ the Home GUI frame.
 | Class | Width | Pointer | Layout |
 | --- | --- | --- | --- |
 | phone | ≤ 640 px | usually coarse | app-grid Home, one window at a time, sheets instead of popovers, 44 px chrome |
-| tablet | 641–1100 px | coarse or fine | desktop layout with 44 px chrome when the pointer is coarse |
+| tablet | 641–1100 px | coarse or fine | the existing desktop, unchanged |
 | desktop | > 1100 px | usually fine | the existing desktop |
 
 Pointer class comes from `(pointer: coarse)` and `(hover: none)`, never from
@@ -35,8 +35,10 @@ The single source of truth for the class in JavaScript is
 `shell-form-factor.js`; `shouldOpenMaximizedByDefault()` in `shell-core.js`
 delegates to it, and the class is mirrored onto
 `document.body.dataset.formFactor` and `dataset.pointer` so CSS and tests read
-the same fact. New phone rules key on `body[data-form-factor="phone"]`, not
-on `@media (max-width: 640px)`, so landscape follows.
+the same fact. Every touch or narrow change keys on the phone class
+(`isPhone()`, `body[data-form-factor="phone"]`, or the phone media list that
+mirrors `classifyFormFactor()`), never on the pointer, hover or width alone:
+tablet and desktop keep the desktop shell byte-for-byte, whatever the pointer.
 
 ## Viewport truth (M1)
 
@@ -48,15 +50,16 @@ on `@media (max-width: 640px)`, so landscape follows.
   host page measures the covered height (`home/browser/home-keyboard-inset.js`)
   and relays it to the shell as `home:keyboard-inset`. `shell-form-factor.js`
   takes it only from the trusted parent and writes `--keyboard-inset` on
-  `:root` on coarse-pointer hosts; `--stage-bottom` adds it and the Assistant
+  `:root` on the phone only; `--stage-bottom` adds it and the Assistant
   room ends above it, so an open window and the Assistant composer stay above
   the keyboard. Desktop pinch-zoom never produces an inset. The phone smoke
   plays the host in both engines.
-- `overscroll-behavior: none` on `html, body`; `touch-action: manipulation`
-  and no tap highlight on shell controls; `-webkit-touch-callout: none` on
-  shell chrome only, never on capsule frames.
-- Every `100vh` carries a `100dvh` twin on the next line.
-- The bar pads its ends with `env(safe-area-inset-left/right)`; the phone
+- On the phone: `overscroll-behavior: none` on the shell; `touch-action:
+  manipulation` and no tap highlight on shell controls;
+  `-webkit-touch-callout: none` on shell chrome only, never on capsule frames.
+- Every `100vh` carries a `100dvh` twin on the next line, except the desktop
+  Control Centre's, whose `100dvh` is phone-only.
+- On the phone the bar pads its ends with `env(safe-area-inset-left/right)`; the phone
   window inset does the same, so landscape notches never cover content.
 
 Deferred from M1 on purpose: converting the shell's 66 `px` font sizes to
@@ -228,24 +231,29 @@ would be; no `image-set()` variant.
   swallowed — it would land on the card and undo the open. Control Centre →
   Overview opens the same switcher by button; the Minimise chevron sends the
   window Home instead.
-- Cards carry the capsule icon and name (`.expose-caption`, counter-scaled by
-  `--expose-card-scale` so they read at natural size) and, on coarse
-  pointers, a 44 px Close (`.expose-close`) — the scaled title bar's own Close
-  is no longer a target. Touch cards let both hang outside the scaled window
+- On the phone, cards carry the capsule icon and name (`.expose-caption`,
+  counter-scaled by `--expose-card-scale` so they read at natural size) and a
+  44 px Close (`.expose-close`) — the scaled title bar's own Close is no
+  longer a target. Phone cards let both hang outside the scaled window
   (`overflow: visible; contain: none`). Portrait stages size the Space thumbs
   by height (`MISSION_PORTRAIT_THUMB_MIN_W`); the landscape width floor made a
   portrait thumb ~350 px tall and left the cards a quarter of the screen.
-- Copy on coarse pointers: "Tap + for a new Desktop…", no mouse language.
+- Copy on the phone: "Tap + for a new Desktop…", no mouse language.
 - Stage history (`shell-phone-stage-history.js`, pure, unit-tested): the
-  shell keeps at most one entry of its own, pushed when the first layer (a
-  window, a sheet, Mission Control) opens and consumed when the last closes,
-  so back on the bare desktop leaves Home as before. popstate closes the top
-  layer: the shell's Escape registry, then Mission Control, then any open
-  sheet through its own closer, then the window goes home (minimise). The
-  decision reads `history.state` — capsule frames add joint-session steps of
-  their own above ours and traversal is asynchronous, so counting pushes
-  drifts — and never issues more than one `back()` per close cycle: a second
-  one before the first lands could walk out of the host's history.
+  shell keeps at most one entry of its own, pushed when a layer (a window, a
+  sheet, Mission Control) opens and none of its entries is current. The shell
+  never calls `back()` while anything is open, so every popstate is one user
+  Back and nothing is in flight to tell apart. popstate closes the top layer
+  (the one that paints on top, through its own close), else the window goes
+  home (minimise). A layer leaves the "closing" set the moment it is seen
+  closed, so a sheet reopened right after Back is a new layer. Closing the
+  last layer by hand leaves our entry; the next Back pops it with nothing
+  open, and the shell finishes that Back as "leave Home" with one `back()`.
+  The decision reads `history.state`, never a counter.
+- App frames add no history entries on a phone: Library (the one capsule
+  with its own history) waits for the shell's layout message and keeps its
+  folder history in memory on a phone stage, so Back never steps inside an
+  app frame first. On desktop and tablet it keeps browser history as before.
 - **WebKit fallback (recorded per plan).** Safari and every iOS browser
   record nested frame loads as joint steps and, seen from the shell frame,
   one `history.back()` after a `pushState` took the shell frame itself to
@@ -259,6 +267,9 @@ would be; no `image-set()` variant.
   with caption icon and Close, `history.back()` → home with no entry left
   (Chromium) or nothing pushed (WebKit), the Home frame alive either way, and
   rotation to landscape and back with the window still filling the stage.
+  Its Back-race step checks that Library adds no entry and goes home on one
+  Back, that an app closed by hand and reopened goes home on one Back, and
+  that a sheet reopened right after Back closes on the next Back.
 
 ## Sheets (M4)
 
@@ -567,11 +578,11 @@ Escape, or picking an item closes it. It is bound by markup alone
 
 A first-party capsule fits the phone stage when:
 
-- every control is at least 44 px on a coarse pointer (`--el-touch-target`
+- every control is at least 44 px on the phone stage (`--el-touch-target`
   from `capsules/_shared/elastos-ui.css`, vendored with `just vendor-ui`;
   never edit the generated per-capsule copies);
-- text inputs are 16 px on a coarse pointer so iOS does not zoom the page;
-- a sidebar or navigation column becomes a sheet or drawer below 640 px and
+- text inputs are 16 px on the phone stage so iOS does not zoom the page;
+- a sidebar or navigation column becomes a sheet or drawer on the phone stage and
   content comes first;
 - rows are at least 48 px tall;
 - the capsule needs no keyboard code: the shell ends its frame above the soft

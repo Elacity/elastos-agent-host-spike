@@ -47,8 +47,9 @@
      and the dock clearance — system chrome is never covered. */
   --stage-top: calc(var(--toolbar-h) + env(safe-area-inset-top, 0px));
   --stage-bottom: calc(var(--taskbar-h) + var(--taskbar-offset) + 10px + env(safe-area-inset-bottom, 0px) + var(--keyboard-inset, 0px));
-  /* Soft-keyboard height on coarse-pointer hosts; shell-form-factor.js writes
-     it from visualViewport so the stage ends above the keyboard. 0 on desktop. */
+  /* Soft-keyboard height on the phone; shell-form-factor.js writes it from
+     the host's visualViewport so the stage ends above the keyboard. 0 on
+     tablet and desktop. */
   --keyboard-inset: 0px;
   /* Shelf scale: slightly larger than the original 60/50/40 for XDR density. */
   --taskbar-h: 72px;
@@ -77,8 +78,6 @@ body {
   margin: 0;
   min-height: 100%;
   overflow: hidden;
-  /* The shell is not a page: no rubber-band or pull-to-refresh on it. */
-  overscroll-behavior: none;
   background: var(--bg);
   color: var(--text);
   font-family: var(--el-font);
@@ -101,30 +100,37 @@ button {
   color: inherit;
 }
 
+/* Phone only (body[data-form-factor="phone"], shell-form-factor.js); the
+   :where() keeps each selector's desktop specificity. The shell is not a
+   page: no rubber-band or pull-to-refresh on it. */
+:where(body[data-form-factor="phone"]) {
+  overscroll-behavior: none;
+}
+
 /* Touch truth for shell controls: no 300 ms double-tap delay, no grey tap
    flash. Drag surfaces (.desktop-shortcut, .taskbar-item) keep their own
    `touch-action: none` further down and win. */
-button,
-a,
-[role="button"],
-.launcher-card {
+:where(body[data-form-factor="phone"]) button,
+:where(body[data-form-factor="phone"]) a,
+:where(body[data-form-factor="phone"]) [role="button"],
+:where(body[data-form-factor="phone"]) .launcher-card {
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
 }
 
 /* Shell chrome only — never capsule frames — so a long-press reaches our
    menus instead of the browser's link/image callout. */
-.toolbar,
-.taskbar,
-.window-head,
-.launcher {
+:where(body[data-form-factor="phone"]) .toolbar,
+:where(body[data-form-factor="phone"]) .taskbar,
+:where(body[data-form-factor="phone"]) .window-head,
+:where(body[data-form-factor="phone"]) .launcher {
   -webkit-touch-callout: none;
 }
 
 /* A held finger opens the app menu (shell-touch.js), so it must not start a
    text selection on the name first. */
-.taskbar-item,
-.launcher-card {
+:where(body[data-form-factor="phone"]) .taskbar-item,
+:where(body[data-form-factor="phone"]) .launcher-card {
   user-select: none;
   -webkit-user-select: none;
 }
@@ -236,8 +242,7 @@ img {
   justify-content: flex-start;
   gap: 0;
   height: calc(var(--toolbar-h) + env(safe-area-inset-top, 0px));
-  /* Landscape notches: keep the bar's ends clear of the rounded corners. */
-  padding: env(safe-area-inset-top, 0px) max(12px, env(safe-area-inset-right, 0px)) 0 max(12px, env(safe-area-inset-left, 0px));
+  padding: env(safe-area-inset-top, 0px) 12px 0;
   background-color: var(--chrome-fill);
   box-shadow:
     inset 0 -0.5px 0 var(--hairline),
@@ -245,6 +250,11 @@ img {
   backdrop-filter: blur(10px);
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* Phone held sideways: keep the bar's ends clear of the rounded corners. */
+:where(body[data-form-factor="phone"]) .toolbar {
+  padding: env(safe-area-inset-top, 0px) max(12px, env(safe-area-inset-right, 0px)) 0 max(12px, env(safe-area-inset-left, 0px));
 }
 
 .toolbar-active-title {
@@ -808,7 +818,6 @@ img {
   gap: 0;
   width: min(300px, calc(100vw - 16px));
   max-height: calc(100vh - var(--stage-top) - var(--stage-bottom) - 24px);
-  max-height: calc(100dvh - var(--stage-top) - var(--stage-bottom) - 24px);
   overflow-x: hidden;
   overflow-y: auto;
   padding: var(--bar-menu-pad);
@@ -825,6 +834,11 @@ img {
 
 .control-centre[hidden] {
   display: none;
+}
+
+/* The phone's browser bars come and go; size to the dynamic viewport. */
+:where(body[data-form-factor="phone"]) .control-centre {
+  max-height: calc(100dvh - var(--stage-top) - var(--stage-bottom) - 24px);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -3125,12 +3139,7 @@ body.expose-active .window.expose-card-active {
   position: absolute;
   left: 50%;
   bottom: -26px;
-  /* The card is scaled; the caption reads at its natural size regardless. */
-  transform: translateX(-50%) scale(calc(1 / var(--expose-card-scale, 1)));
-  transform-origin: 50% 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+  transform: translateX(-50%);
   max-width: min(220px, 90%);
   padding: 3px 10px;
   border-radius: 8px;
@@ -3146,6 +3155,16 @@ body.expose-active .window.expose-card-active {
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
 }
 
+/* Phone: the caption is icon + name (shell-expose.js), and the card is
+   scaled; the caption reads at its natural size regardless. */
+:where(body[data-form-factor="phone"]) .expose-caption {
+  transform: translateX(-50%) scale(calc(1 / var(--expose-card-scale, 1)));
+  transform-origin: 50% 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .expose-caption-icon {
   flex: 0 0 auto;
   width: 14px;
@@ -3159,8 +3178,8 @@ body.expose-active .window.expose-card-active {
   text-overflow: ellipsis;
 }
 
-/* Touch shells: a real Close on each card (the scaled title bar's own Close is
-   no longer a target). Counter-scaled like the caption; 44 px hit box. */
+/* Phone: a real Close on each card (the scaled title bar's own Close is no
+   longer a target). Counter-scaled like the caption; 44 px hit box. */
 .expose-close {
   display: none;
   position: absolute;
@@ -3185,14 +3204,14 @@ body.expose-active .window.expose-card-active {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%231d2438' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M6 6l12 12M18 6L6 18'/%3E%3C/svg%3E");
 }
 
-/* Touch cards let the caption and Close hang outside the scaled window;
+/* Phone cards let the caption and Close hang outside the scaled window;
    .window otherwise clips (overflow + contain: paint). */
-body[data-pointer="coarse"].expose-active .window.expose-card {
+body[data-form-factor="phone"].expose-active .window.expose-card {
   overflow: visible;
   contain: none;
 }
 
-body[data-pointer="coarse"].expose-active .window.expose-card .expose-close {
+body[data-form-factor="phone"].expose-active .window.expose-card .expose-close {
   display: block;
 }
 
@@ -4559,9 +4578,9 @@ body.dragging-target {
   .launcher,
   .launcher-header,
   .launcher-scroll,
-  .taskbar.is-launcher-face .launcher,
-  .taskbar.is-launcher-face .launcher-header,
-  .taskbar.is-launcher-face .launcher-scroll,
+  :where(body[data-form-factor="phone"]) .taskbar.is-launcher-face .launcher,
+  :where(body[data-form-factor="phone"]) .taskbar.is-launcher-face .launcher-header,
+  :where(body[data-form-factor="phone"]) .taskbar.is-launcher-face .launcher-scroll,
   .taskbar {
     transition: none;
   }

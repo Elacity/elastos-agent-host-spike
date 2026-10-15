@@ -1332,16 +1332,27 @@ assert(
   shellSpotlight.showSpotlight();
   spotlightInput.value = "system";
   spotlightInput.dispatch("input");
+  // Tablet and desktop: a touch opens on press, exactly as before the phone
+  // work (phones-r1 #4).
+  spotlightResults.children[1].dispatch("pointerdown", { pointerType: "touch" });
+  spotlightPanel.dispatch("animationend", { target: spotlightPanel });
+  assert(shellSpotlight.spotlightOpen() === false, "Home Spotlight off the phone must open a touched result on press");
+  // Phone: a finger landing may be a scroll, so touch opens on the tap.
+  window.innerWidth = 390;
+  shellSpotlight.showSpotlight();
+  spotlightInput.value = "system";
+  spotlightInput.dispatch("input");
   const touchedRow = spotlightResults.children[1];
   touchedRow.dispatch("pointerdown", { pointerType: "touch" });
   spotlightPanel.dispatch("animationend", { target: spotlightPanel });
   assert(
     shellSpotlight.spotlightOpen() === true,
-    "Home Spotlight must not open a result when a finger lands on it (the touch may be a scroll)",
+    "Home Spotlight on the phone must not open a result when a finger lands on it (the touch may be a scroll)",
   );
   touchedRow.dispatch("click");
   spotlightPanel.dispatch("animationend", { target: spotlightPanel });
-  assert(shellSpotlight.spotlightOpen() === false, "Home Spotlight must open a touched result on tap");
+  window.innerWidth = 1280;
+  assert(shellSpotlight.spotlightOpen() === false, "Home Spotlight on the phone must open a touched result on tap");
   shellSpotlight.showSpotlight();
   spotlightInput.value = "system";
   spotlightInput.dispatch("input");

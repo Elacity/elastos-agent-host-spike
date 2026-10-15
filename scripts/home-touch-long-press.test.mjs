@@ -10,7 +10,7 @@ import {
 
 // A fake clock and timer queue, a root that runs capture listeners, and
 // targets whose `contextmenu` listener opens (cancels) or ignores the event.
-function harness({ opensMenu = true, skipped = false } = {}) {
+function harness({ opensMenu = true, skipped = false, active = () => true } = {}) {
   let time = 0;
   let nextTimer = 1;
   const timers = new Map();
@@ -34,6 +34,7 @@ function harness({ opensMenu = true, skipped = false } = {}) {
   };
   const api = bindTouchLongPress(root, {
     skip: ".desktop-shortcut",
+    active,
     setTimer(callback, ms) {
       const id = nextTimer++;
       timers.set(id, { callback, at: time + ms });
@@ -73,6 +74,24 @@ function harness({ opensMenu = true, skipped = false } = {}) {
   };
   return { api, dispatch, advance, received, pendingTimers: () => timers.size };
 }
+
+// Home binds with `active: isPhone`: a held finger on a touch tablet or touch
+// desktop keeps the browser's own behaviour (phones-r1 #4).
+test("off the phone a held finger never dispatches a contextmenu or eats a click", () => {
+  const { dispatch, advance, received, pendingTimers } = harness({ active: () => false });
+  dispatch("pointerdown");
+  assert.equal(pendingTimers(), 0);
+  advance(LONG_PRESS_MS * 2);
+  dispatch("pointerup");
+  assert.equal(received.length, 0);
+  assert.equal(dispatch("click").defaultPrevented, false);
+});
+
+test("Home gates its long-press on isPhone", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("../capsules/home-gui/browser/home-gui.js", import.meta.url), "utf8");
+  assert.match(source, /bindTouchLongPress\(document, \{[^}]*active: isPhone[^}]*\}\)/);
+});
 
 test("holding a finger still dispatches one contextmenu at the finger", () => {
   const { dispatch, advance, received } = harness();
