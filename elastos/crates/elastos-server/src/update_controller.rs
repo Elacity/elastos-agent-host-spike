@@ -1091,12 +1091,21 @@ impl Controller {
             if child.observed_exit()?.is_some() {
                 bail!("Home exited before it became ready.");
             }
-            if process_start(pid).as_deref() != Some(start.as_str()) {
-                // A Home that exits between the two checks no longer has a start time.
-                if child.observed_exit()?.is_some() {
-                    bail!("Home exited before it became ready.");
+            match process_start(pid) {
+                Some(current) if current != start => bail!("Home process generation changed."),
+                Some(_) => {}
+                // macOS hides an exiting Home's start time before its exit is observable, so
+                // check again until the exit shows or the deadline passes.
+                None => {
+                    if tokio::time::Instant::now() >= deadline {
+                        bail!(
+                            "Home did not become ready within {} seconds.",
+                            budget.as_secs()
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
                 }
-                bail!("Home process generation changed.");
             }
             let home_port = BROWSER_HOME_PORT;
             // A fixture Home reports its ephemeral port once it has bound the listener.
