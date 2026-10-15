@@ -1682,8 +1682,8 @@ mod tests {
                 45,
             )
             .unwrap();
+        // The unanswered local presence waits 5 s before its resend.
         carrier.push([
-            send_remote(),
             peek(
                 0,
                 1,
@@ -3046,11 +3046,8 @@ mod tests {
         assert_eq!(core.summary().unwrap().pending_product_handoffs, 0);
         let receipt =
             accept_shared(&core, &remote_authority, incoming.envelope_bytes(), now + 1).unwrap();
-        carrier.push([
-            send_remote(),
-            peek(0, 0, Vec::new()),
-            FakeReply::Error("ack failed"),
-        ]);
+        // Unanswered gossip waits 5 s before a resend, so these cycles send none.
+        carrier.push([peek(0, 0, Vec::new()), FakeReply::Error("ack failed")]);
         run_collaboration_worker_cycle(&driver, &product_port, temp.path(), now + 1).await;
         assert_eq!(core.summary().unwrap().pending_product_handoffs, 0);
         assert_eq!(core.summary().unwrap().remotely_accepted_outgoing, 0);
@@ -3073,7 +3070,7 @@ mod tests {
             accept_shared(&core, &remote_authority, incoming.envelope_bytes(), now + 1).unwrap(),
             receipt,
         );
-        carrier.push([send_remote(), peek(0, 0, Vec::new()), ack(0, 0, false)]);
+        carrier.push([peek(0, 0, Vec::new()), ack(0, 0, false)]);
         run_collaboration_worker_cycle(&driver, &product_port, temp.path(), now + 1).await;
         assert_eq!(core.summary().unwrap().pending_product_handoffs, 0);
         assert_eq!(core.pending_outgoing(now + 1).unwrap().len(), 2);
@@ -3087,7 +3084,6 @@ mod tests {
 
         // A Shared receipt over gossip settles the post like the Home exchange.
         carrier.push([
-            send_remote(),
             peek(
                 0,
                 2,
@@ -3128,6 +3124,11 @@ mod tests {
             .filter(|request| request["op"] == "gossip_send")
             .map(|request| request["message"].as_str().unwrap().as_bytes().to_vec())
             .collect::<Vec<_>>();
+        assert_eq!(
+            gossip.len(),
+            2,
+            "each original went out once in five cycles"
+        );
         assert_eq!(
             gossip
                 .iter()

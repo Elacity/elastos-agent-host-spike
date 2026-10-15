@@ -227,8 +227,9 @@ pub(crate) enum CollaborationTransportRejection {
     /// The sender already has the most messages waiting for Chat. Held and
     /// retried like `SenderRateLimited`, so one sender never holds the batch.
     SenderBacklogFull,
-    /// A Community bootstrap endpoint sent, admitted or receipted a Shared
-    /// post. Bootstrap endpoints forward gossip and carry discovery only.
+    /// This Core is a Community bootstrap node, which admits no frame, or a
+    /// bootstrap endpoint sent or receipted a Shared post. Bootstrap
+    /// endpoints forward gossip and carry discovery only.
     BootstrapEndpoint,
     /// The original is already accepted and this further receipt could not be
     /// stored (receipt or byte capacity, storage). It adds nothing, so it is
@@ -919,7 +920,12 @@ impl CollaborationCore {
 
     /// Gossip carries Presence metadata and Shared posts with their receipts.
     /// Shared posts also use the authenticated Home-to-Home provider exchange.
+    /// A bootstrap node only forwards the topic: its Core takes no frame, so
+    /// gossip costs it no verification or storage.
     pub(crate) fn allows_gossip_frame(&self, frame: &[u8]) -> anyhow::Result<bool> {
+        if self.is_bootstrap_endpoint(&self.local_device_did()) {
+            return Ok(false);
+        }
         let Ok(frame) = verify_collaboration_transport_frame(frame) else {
             return Ok(false);
         };
@@ -1077,6 +1083,11 @@ impl CollaborationCore {
         if !self.community_membership.joined() {
             return Err(CollaborationTransportRetryableError);
         }
+        if self.is_bootstrap_endpoint(&self.authority.local_device_did()) {
+            return Ok(CollaborationTransportIngestion::Rejected(
+                CollaborationTransportRejection::BootstrapEndpoint,
+            ));
+        }
         let verified_transport = match verify_collaboration_transport_frame(frame) {
             Ok(verified) => verified,
             Err(_) => {
@@ -1143,8 +1154,7 @@ impl CollaborationCore {
             ));
         }
         if verified.envelope().payload.payload_type == COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE
-            && (self.is_bootstrap_endpoint(source_endpoint_did)
-                || self.is_bootstrap_endpoint(&self.authority.local_device_did()))
+            && self.is_bootstrap_endpoint(source_endpoint_did)
         {
             return Ok(CollaborationTransportIngestion::Rejected(
                 CollaborationTransportRejection::BootstrapEndpoint,
