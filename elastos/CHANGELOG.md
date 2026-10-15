@@ -98,7 +98,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   submissions.
 - Known issue: on the Jetson, getting a model is slow (Qwen takes about 43 minutes). The first Qwen reply takes about 22 seconds and the second about 3.6 seconds.
 - Known issue: Browser runs only on Apple Silicon Macs.
-- Known issue: Updating to this version in System from a test version older than 0.8.0-alpha.18 on a slow device such as a Jetson can still fail, because that older version runs the update; use the install command there.
+- Known issue: Updating to this version in System from a test version older than 0.8.0-alpha.18 on a slow device such as a Jetson can still fail, because that older version runs the update. If Home is then stuck, follow "Recover an interrupted update" in `docs/INSTALL.md`.
 - Community posts reach members again without turning on Discovery, also across networks: they travel through the seed's Community node. Posts are signed, but that node can read them in transit until the relay arrives in 0.8.1. Direct messages across networks need that relay. Contact requests across networks, and showing as online in People, still need Discovery on.
 - Upgrading from 0.7.1 or earlier: run the install command once. System update cannot move these Homes to 0.8.0, because releases are now signed with a new key (#186). Your Home keeps its data.
 - A Browser session now lasts until you close it, until Home stops answering for 5 minutes, until Runtime stops, or 12 hours (it used to close after 10 minutes).
@@ -122,7 +122,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - In the Assistant, Edit on a message you just sent opens the editor, and Delete asks in the message itself, then removes it. A reply that just finished, or that you stopped, offers Delete and Regenerate right away. Before, Edit did nothing until the chat was reopened, and Delete did nothing.
 - In the Assistant, the end of each reply and its buttons stay above the message box, so you no longer scroll down to read the last lines.
 - First-run setup: the welcome sheet no longer disappears. Opening a step shrinks it to a small card that you click to continue, and it comes back after you save the Recovery Kit.
-- From this version on, a System update gives Home up to 2 minutes to start, so it no longer fails, or leaves Home stopped, on a slower device such as a Jetson. If the previous version was put back but could not start, `elastos home --browser` starts it again. The update log keeps the output of every start.
+- From this version on, every Home start gives its newly started Runtime up to 2 minutes to become ready: a System update, `elastos home --browser`, and `elastos home` without `--browser` (which gave up after 30 seconds). So Home no longer fails to start, or is left stopped by an update, on a slower device such as a Jetson. If the previous version was put back but could not start, `elastos home --browser` starts it again. The update log keeps the output of every update start.
 - During an update, System says that Home is restarting and how long it usually takes, and reloads by itself when the update is done.
 - Community posts are no longer held up by an overloaded Community node: Homes resend unanswered posts and presence less often, and the node only forwards them.
 
