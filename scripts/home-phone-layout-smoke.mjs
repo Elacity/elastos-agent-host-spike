@@ -1849,16 +1849,34 @@ async function probePhoneBack(frame) {
     await sleep(ASSISTANT_OPEN_WAIT_MS);
   }
 
-  // About from bare Home is a layer of its own: Back closes it and Home stays.
-  await frame.evaluate(() => document.querySelector("#identity-menu-about")?.click());
-  await sleep(SHEET_SETTLE_MS);
-  const aboutBefore = await frame.evaluate(() => !document.querySelector("#about-overlay")?.hidden);
-  await systemBack();
-  await sleep(SHEET_SETTLE_MS);
-  const aboutAfter = await frame.evaluate(() => ({
-    home: location.href.includes("/apps/home-gui/"),
-    aboutOpen: !document.querySelector("#about-overlay")?.hidden,
-  }));
+  // Every Home surface that can be a Back layer, from the shell's own list:
+  // open it from bare Home, Back once, and it must be gone with Home still
+  // here. A surface added to HOME_GUI_HOST_SELECTORS without an opener below
+  // fails here, so Back cannot silently miss it.
+  const layerSelectors = await frame.evaluate(async () => {
+    const stage = await import(new URL("./shell-phone-stage.js?v=home-20260813a", location.href).href);
+    return [...stage.LAYER_SELECTORS];
+  });
+  const layers = [];
+  for (const selector of layerSelectors) {
+    const present = await frame.evaluate((selector) => Boolean(document.querySelector(selector)), selector);
+    if (!present) {
+      layers.push({ selector, present: false });
+      continue;
+    }
+    const opener = LAYER_OPENERS[selector];
+    if (!opener) {
+      layers.push({ selector, present: true, opener: false });
+      continue;
+    }
+    await opener(frame);
+    await sleep(SHEET_SETTLE_MS);
+    const before = await readLayer(frame, selector);
+    await systemBack();
+    await sleep(SHEET_SETTLE_MS);
+    const after = await readLayer(frame, selector);
+    layers.push({ selector, present: true, opener: true, before, after });
+  }
 
   await openTarget(frame, "library");
   await openTarget(frame, "documents");
@@ -1889,9 +1907,44 @@ async function probePhoneBack(frame) {
   }
   return {
     menuBefore, menuAfter, welcomeBefore, welcomeAfter, assistantBefore, assistantAfter,
-    aboutBefore, aboutAfter, spaceSetup, spaceAfter,
+    layers, spaceSetup, spaceAfter,
   };
 }
+
+function readLayer(frame, selector) {
+  return frame.evaluate((selector) => {
+    const node = document.querySelector(selector);
+    return {
+      home: location.href.includes("/apps/home-gui/"),
+      shown: Boolean(node && !node.hidden && node.getClientRects().length > 0),
+    };
+  }, selector);
+}
+
+async function callShellModule(frame, file, call) {
+  await frame.evaluate(async ({ file, call }) => {
+    const module = await import(new URL(`./${file}?v=home-20260813a`, location.href).href);
+    module[call]();
+  }, { file, call });
+}
+
+// How a person opens each Home surface; keyed by HOME_GUI_HOST_SELECTORS.
+const LAYER_OPENERS = Object.freeze({
+  ".launcher": (frame) => callShellModule(frame, "shell-surface.js", "showLauncher"),
+  "#desktop-context-menu": (frame) => longPressDockApp(frame),
+  "#notification-center": (frame) => callShellModule(frame, "shell-notifications.js", "toggleNotificationCenter"),
+  "#control-centre": (frame) => callShellModule(frame, "shell-control-centre.js", "showControlCentre"),
+  "#wallet-rail": (frame) => callShellModule(frame, "shell-wallet-rail.js", "showWalletRail"),
+  "#inbox-rail": (frame) => callShellModule(frame, "shell-inbox-rail.js", "showInboxRail"),
+  "#setup-sheet": (frame) => frame.evaluate(() => {
+    const sheet = document.querySelector("#setup-sheet");
+    sheet.classList.remove("is-yielded");
+    sheet.hidden = false;
+  }),
+  "#spotlight": (frame) => callShellModule(frame, "shell-spotlight.js", "showSpotlight"),
+  "#shortcuts-overlay": (frame) => callShellModule(frame, "shell-keyboard.js", "toggleShortcutsOverlay"),
+  "#about-overlay": (frame) => frame.evaluate(() => document.querySelector("#identity-menu-about")?.click()),
+});
 
 function phoneBackFailures(run) {
   if (!run.back) {
@@ -1899,7 +1952,7 @@ function phoneBackFailures(run) {
   }
   const {
     menuBefore, menuAfter, welcomeBefore, welcomeAfter, assistantBefore, assistantAfter,
-    aboutBefore, aboutAfter, spaceSetup, spaceAfter,
+    layers, spaceSetup, spaceAfter,
   } = run.back;
   const label = `${run.engine}/${run.profile}/back`;
   const failures = [];
@@ -1915,11 +1968,20 @@ function phoneBackFailures(run) {
   if (!welcomeAfter.home || welcomeAfter.welcomeOpen || !welcomeAfter.assistantOpen) {
     failures.push(`${label}: Back must close the welcome sheet first and keep the Assistant. Got ${JSON.stringify(welcomeAfter)}`);
   }
-  if (!aboutBefore) {
-    failures.push(`${label}: About must open from the identity menu before Back`);
-  }
-  if (!aboutAfter.home || aboutAfter.aboutOpen) {
-    failures.push(`${label}: Back must close About and leave Home. Got ${JSON.stringify(aboutAfter)}`);
+  for (const layer of layers) {
+    if (!layer.present) {
+      continue;
+    }
+    if (!layer.opener) {
+      failures.push(`${label}: ${layer.selector} is a Back layer with no opener in LAYER_OPENERS`);
+      continue;
+    }
+    if (!layer.before.shown) {
+      failures.push(`${label}: ${layer.selector} must be open before Back. Got ${JSON.stringify(layer.before)}`);
+    }
+    if (!layer.after.home || layer.after.shown) {
+      failures.push(`${label}: Back must close ${layer.selector} and leave Home. Got ${JSON.stringify(layer.after)}`);
+    }
   }
   if (!assistantBefore.assistantOpen) {
     failures.push(`${label}: Assistant must be open before Back. Got ${JSON.stringify(assistantBefore)}`);

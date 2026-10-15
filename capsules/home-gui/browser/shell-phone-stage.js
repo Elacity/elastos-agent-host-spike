@@ -2,20 +2,22 @@
 
    Back: the shell keeps at most one history entry of its own (model in
    shell-phone-stage-history.js). It is pushed when the first layer (a window
-   on the stage, a sheet, Mission Control, the Assistant room, or the
-   long-press menu) opens on a phone and consumed again
-   when the last layer closes, so the bare desktop never traps back — the
-   host page's own history is left alone. popstate closes the top layer:
-   Mission Control, then any open sheet (through the shell's Escape
-   contract), then the window that is actually on this Space goes home
-   (minimise; the capsule keeps running). A window parked on another Space
-   is not that window.
+   on the stage, Mission Control, the Assistant room, or any visible Home
+   surface other than the bar, Dock and desktop) opens on a phone and consumed
+   again when the last layer closes, so the bare desktop never traps back —
+   the host page's own history is left alone. popstate closes the top layer:
+   the top-most open surface gets the Escape a keyboard user would press there
+   (or the shell's ordered Escape stack, if the surface has no Escape of its
+   own), then Mission Control, then the window that is actually on this Space
+   goes home (minimise; the capsule keeps running). A window parked on another
+   Space is not that window. The surfaces come from HOME_GUI_HOST_SELECTORS,
+   so a new Home surface is a Back layer without a second list.
 
    Swipe: a downward drag on the title bar opens Mission Control as the app
    switcher. It starts on the title bar only — capsule frames own their own
    touches — and cancels on horizontal drift. Presentation only. */
 
-import { shellState } from "./shell-core.js?v=home-20260813a";
+import { HOME_GUI_HOST_SELECTORS, shellState } from "./shell-core.js?v=home-20260813a";
 import {
   STAGE_HISTORY_STATE,
   createStageHistory,
@@ -24,45 +26,28 @@ import {
 import { isPhone } from "./shell-form-factor.js?v=home-20260813a";
 import { minimizeWindow } from "./shell-windows.js?v=home-20260813a";
 import { closeExpose, isExposeOpen, openExpose } from "./shell-expose.js?v=home-20260813a";
-import { handleShellEscape } from "./shell-popovers.js?v=home-20260813a";
-import { hideDesktopContextMenu, hideLauncher } from "./shell-surface.js?v=home-20260813a";
-import { hideSpotlight } from "./shell-spotlight.js?v=home-20260813a";
-import { hideControlCentre } from "./shell-control-centre.js?v=home-20260813a";
-import { hideNotificationCenter } from "./shell-notifications.js?v=home-20260813a";
-import { hideInboxRail } from "./shell-inbox-rail.js?v=home-20260813a";
-import { hideWalletRail } from "./shell-wallet-rail.js?v=home-20260813a";
-import { dismissAssistantForBack, hideAssistantFace } from "./shell-assistant-face.js?v=home-20260813a";
-import { hideSetupSheet } from "./shell-setup-sheet.js?v=home-20260813a";
+import { dispatchStageBackEscape } from "./shell-popovers.js?v=home-20260813a";
+import { assistantFaceActive, dismissAssistantForBack } from "./shell-assistant-face.js?v=home-20260813a";
 
 // A title-bar drag this far down opens the switcher…
 export const TITLE_SWIPE_DOWN_PX = 48;
 // …unless it drifted this far sideways first (a scroll or a slip).
 export const TITLE_SWIPE_DRIFT_PX = 32;
 
-// Sheets that count as a layer over the stage, top-most first, each with the
-// closer its module already exposes. About's closer lives in the entry
-// module, so Back presses its own Close button. `overlay` sheets sit above the
-// shell's Escape registry (see closeTopStageLayer); the welcome sheet only
-// while it is in front, not when it has yielded to a card behind the
-// Assistant.
-const SHEETS = Object.freeze([
-  { selector: "#about-overlay", overlay: true, close: (doc) => doc.querySelector("#about-close")?.click() },
-  {
-    selector: "#setup-sheet",
-    overlay: (node) => !node.classList.contains("is-yielded"),
-    close: () => hideSetupSheet(),
-  },
-  { selector: "#desktop-context-menu", overlay: true, close: () => hideDesktopContextMenu() },
-  { selector: "#assistant-space", overlay: true, close: () => dismissAssistantForBack() },
-  { selector: "#control-centre", close: () => hideControlCentre() },
-  { selector: "#notification-center", close: () => hideNotificationCenter() },
-  { selector: "#spotlight", close: () => hideSpotlight() },
-  { selector: "#inbox-rail", close: () => hideInboxRail() },
-  { selector: "#wallet-rail", close: () => hideWalletRail() },
-  { selector: "#launcher", close: () => hideLauncher() },
-  { selector: "#assistant-face", close: () => hideAssistantFace() },
+// Always on screen, so never a layer. The notification toast is a passing
+// notice that dismisses itself, not something Back has to close.
+const STAGE_CHROME = Object.freeze([
+  ".desktop-backdrop",
+  ".toolbar",
+  ".desktop-workspace",
+  ".taskbar",
+  "#home-notification-toast",
 ]);
-export const SHEET_SELECTORS = Object.freeze(SHEETS.map((sheet) => sheet.selector));
+export const LAYER_SELECTORS = Object.freeze(
+  HOME_GUI_HOST_SELECTORS.filter((selector) => !STAGE_CHROME.includes(selector)),
+);
+// The Assistant room lives outside the host surfaces (it is its own frame).
+const ASSISTANT_ROOM = "#assistant-space";
 
 // On the stage: not minimised, and still in the Space the Dock is showing.
 export function windowOnStage(entry) {
@@ -80,46 +65,65 @@ export function visibleWindowCount(windows = shellState.windows) {
   return count;
 }
 
+function shown(node) {
+  return Boolean(node && !node.hidden && node.getClientRects().length > 0);
+}
+
+function assistantOpen(doc) {
+  return shown(doc.querySelector(ASSISTANT_ROOM)) || assistantFaceActive();
+}
+
+// Open layers as { node, close } with the top-most last: by z-index, then by
+// document order (a later sibling paints above an earlier one).
+export function openStageLayers(doc = document) {
+  const layers = LAYER_SELECTORS.map((selector) => doc.querySelector(selector))
+    .filter(shown)
+    .map((node) => ({ node, close: () => closeSurface(doc, node) }));
+  if (assistantOpen(doc)) {
+    const node = doc.querySelector(ASSISTANT_ROOM);
+    layers.push({ node, close: () => dismissAssistantForBack() });
+  }
+  const view = doc.defaultView;
+  const z = (node) => {
+    const value = node && view ? Number.parseInt(view.getComputedStyle(node).zIndex, 10) : 0;
+    return Number.isFinite(value) ? value : 0;
+  };
+  return layers.sort((a, b) => {
+    const byZ = z(a.node) - z(b.node);
+    if (byZ !== 0 || !a.node || !b.node) {
+      return byZ;
+    }
+    return a.node.compareDocumentPosition(b.node) & 4 ? -1 : 1;
+  });
+}
+
 export function openSheetCount(doc = document) {
-  return SHEET_SELECTORS.filter((selector) => {
-    const node = doc.querySelector(selector);
-    return node && !node.hidden;
-  }).length;
+  return openStageLayers(doc).length;
 }
 
 export function stageLayerCount(doc = document) {
   return visibleWindowCount() + openSheetCount(doc) + (isExposeOpen() ? 1 : 0);
 }
 
-// Closes the top layer and reports how many remain. About, the welcome sheet,
-// the long-press menu and the Assistant room sit above the Escape registry:
-// the Agent room is not a desktop Space, so the fullscreen-stage Escape
-// handler would otherwise take the back and leave the room up.
-function openNode(doc, selector) {
-  const node = doc.querySelector(selector);
-  return node && !node.hidden ? node : null;
+// The surface's own Escape first. A surface that only answers the shell's
+// ordered Escape stack (Quick Look, the window switcher) neither claims that
+// key nor closes, so it gets a plain Escape.
+function closeSurface(doc, node) {
+  const claimed = dispatchStageBackEscape(node);
+  if (!claimed && shown(node)) {
+    doc.body.dispatchEvent(new doc.defaultView.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  }
 }
 
+// Closes the top layer and reports how many remain.
 export function closeTopStageLayer(doc = document) {
-  const overlay = SHEETS.find((sheet) => {
-    const node = sheet.overlay ? openNode(doc, sheet.selector) : null;
-    return Boolean(node) && (sheet.overlay === true || sheet.overlay(node));
-  });
-  if (overlay) {
-    overlay.close(doc);
-    return stageLayerCount(doc);
-  }
-  // The shell's ordered Escape registry first (modal, menus, Mission Control…).
-  if (handleShellEscape()) {
+  const top = openStageLayers(doc).at(-1);
+  if (top) {
+    top.close();
     return stageLayerCount(doc);
   }
   if (isExposeOpen()) {
     closeExpose();
-    return stageLayerCount(doc);
-  }
-  const openSheet = SHEETS.find((sheet) => openNode(doc, sheet.selector));
-  if (openSheet) {
-    openSheet.close(doc);
     return stageLayerCount(doc);
   }
   const active = shellState.windows.get(shellState.activeWindowId);

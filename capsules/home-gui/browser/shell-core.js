@@ -394,6 +394,30 @@ export function canonicalTargetTitle(targetId, title) {
   return normalizedTitle || targetId;
 }
 
+/* Every top-level surface the Home GUI owns in the host document: the host
+   mounts and unmounts them together, and the phone stage counts the visible
+   ones (other than the always-present chrome) as Back layers. */
+export const HOME_GUI_HOST_SELECTORS = Object.freeze([
+  ".desktop-backdrop",
+  ".toolbar",
+  ".desktop-workspace",
+  ".taskbar",
+  ".launcher",
+  "#desktop-context-menu",
+  "#home-notification-toast",
+  "#notification-center",
+  "#control-centre",
+  "#wallet-rail",
+  "#inbox-rail",
+  "#setup-sheet",
+  "#connector-sheet",
+  "#spotlight",
+  "#window-switcher",
+  "#quick-look",
+  "#shortcuts-overlay",
+  "#about-overlay",
+]);
+
 /* Window chrome modes are presentation-only. Fail closed to standard.
    unified-sidebar: split-view apps — lights over the leading column. */
 export const WINDOW_CHROME_STANDARD = "standard";

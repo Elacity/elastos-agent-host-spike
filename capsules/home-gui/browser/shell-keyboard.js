@@ -32,6 +32,7 @@ import {
 import {
   closeOtherShellPopovers,
   handleShellEscape,
+  isStageBackEscape,
   registerEscapeHandler,
   registerShellPopover,
   setOverlayOpen,
@@ -297,8 +298,9 @@ export function bindShellKeyboard() {
       if (!homeGuiOwnsKeys()) {
         return;
       }
-      // Escape from the Home welcome sheet or its card is the sheet's own Close.
-      if (event.key === "Escape" && !event.target?.closest?.("#setup-sheet")) {
+      // Escape from the Home welcome sheet or its card is the sheet's own Close,
+      // and the phone's Back aims its Escape at one layer, which closes itself.
+      if (event.key === "Escape" && !event.target?.closest?.("#setup-sheet") && !isStageBackEscape(event)) {
         if (handleShellEscape()) {
           event.preventDefault();
           event.stopPropagation();

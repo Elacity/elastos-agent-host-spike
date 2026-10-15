@@ -55,6 +55,24 @@ export function handleShellEscape() {
   return true;
 }
 
+/* The phone's Back closes one layer by sending it the Escape a keyboard user
+   would press there. The ordered stack above is skipped for that event: it
+   ranks surfaces for a key with no target, and Back already chose its target.
+   Returns whether a handler claimed the key. */
+const stageBackEscapes = new WeakSet();
+
+export function dispatchStageBackEscape(target) {
+  const view = target.ownerDocument?.defaultView || globalThis;
+  const event = new view.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+  stageBackEscapes.add(event);
+  target.dispatchEvent(event);
+  return event.defaultPrevented;
+}
+
+export function isStageBackEscape(event) {
+  return stageBackEscapes.has(event);
+}
+
 export function closeOtherShellPopovers(exceptId) {
   for (const [id, close] of registry) {
     if (id === exceptId) {

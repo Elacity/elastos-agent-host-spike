@@ -9,6 +9,7 @@ import {
   launcherToggleButton,
   launcherViewToggle,
   identityMenuSystemButton,
+  HOME_GUI_HOST_SELECTORS,
   shellState,
   taskbarTargets,
   toolbarFullscreenButton,
@@ -176,26 +177,6 @@ bindWalletRail();
 bindInboxRail();
 bindConnectorSheet();
 
-const HOME_GUI_HOST_SELECTORS = Object.freeze([
-  ".desktop-backdrop",
-  ".toolbar",
-  ".desktop-workspace",
-  ".taskbar",
-  ".launcher",
-  "#desktop-context-menu",
-  "#home-notification-toast",
-  "#notification-center",
-  "#control-centre",
-  "#wallet-rail",
-  "#inbox-rail",
-  "#setup-sheet",
-  "#connector-sheet",
-  "#spotlight",
-  "#window-switcher",
-  "#quick-look",
-  "#shortcuts-overlay",
-  "#about-overlay",
-]);
 let homeGuiInteractionsBound = false;
 
 export const homeGuiWindowHooks = Object.freeze({
