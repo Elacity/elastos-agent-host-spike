@@ -110,7 +110,6 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Fixed
 
-- `elastos home` without `--browser`, and other commands that start a Runtime, now wait up to 120 seconds for it, the same as `elastos home --browser`. Before, they gave up after 30 seconds, so Home failed to start on a slow device such as a Jetson.
 - When sign-in fails, the lock screen now says why in one line and what to do next, instead of showing nothing (#338).
 - The publisher's Carrier ticket lists only its public addresses when it has
   one (no container bridge, LAN or loopback addresses), and a Runtime on a
@@ -124,7 +123,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - In the Assistant, Edit on a message you just sent opens the editor, and Delete asks in the message itself, then removes it. A reply that just finished, or that you stopped, offers Delete and Regenerate right away. Before, Edit did nothing until the chat was reopened, and Delete did nothing.
 - In the Assistant, the end of each reply and its buttons stay above the message box, so you no longer scroll down to read the last lines.
 - First-run setup: the welcome sheet no longer disappears. Opening a step shrinks it to a small card that you click to continue, and it comes back after you save the Recovery Kit.
-- From this version on, a System update gives Home up to 2 minutes to start, so it no longer fails, or leaves Home stopped, on a slower device such as a Jetson. If the previous version was put back but could not start, `elastos home --browser` starts it again. The update log keeps the output of every start.
+- From this version on, every Home start gives Home up to 2 minutes to start: a System update, `elastos home --browser`, and `elastos home` without `--browser` (which gave up after 30 seconds). So Home no longer fails to start, or is left stopped by an update, on a slower device such as a Jetson. If the previous version was put back but could not start, `elastos home --browser` starts it again. The update log keeps the output of every start.
 - During an update, System says that Home is restarting and how long it usually takes, and reloads by itself when the update is done.
 - Community posts are no longer held up by an overloaded Community node: Homes resend unanswered posts and presence less often, and the node only forwards them.
 

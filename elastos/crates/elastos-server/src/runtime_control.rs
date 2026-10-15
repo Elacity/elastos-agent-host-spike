@@ -112,12 +112,17 @@ fn create_managed_runtime_start_marker(path: &Path) -> std::io::Result<std::fs::
     Ok(file)
 }
 
+// The owner holds the start lock through setup and the whole readiness wait, so a
+// marker counts as abandoned only after that budget plus time for setup.
+const MANAGED_RUNTIME_START_LOCK_LIFETIME: Duration =
+    Duration::from_secs(RUNTIME_READY_TIMEOUT.as_secs() + 30);
+
 fn managed_runtime_start_marker_is_stale(path: &Path) -> bool {
     path.metadata()
         .and_then(|metadata| metadata.modified())
         .ok()
         .and_then(|modified| modified.elapsed().ok())
-        .is_some_and(|elapsed| elapsed > Duration::from_secs(60))
+        .is_some_and(|elapsed| elapsed > MANAGED_RUNTIME_START_LOCK_LIFETIME)
 }
 
 impl Drop for ManagedRuntimeStartGuard {
@@ -1554,6 +1559,37 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(exited, StartWait::Exited(1)));
+    }
+
+    // A start that is still waiting for a slow Runtime keeps its lock; only a
+    // marker older than the whole start is taken over.
+    #[test]
+    fn start_lock_outlives_a_slow_owner_and_expires_after_the_budget() {
+        let data = tempfile::tempdir().unwrap();
+        let path = managed_runtime_start_lock_path(data.path());
+        let age_marker = |age: Duration| {
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() - age)
+                .unwrap();
+        };
+        let ManagedRuntimeStart::Owner(_owner) =
+            acquire_managed_runtime_start_lock(data.path()).unwrap()
+        else {
+            panic!("first start must own the lock");
+        };
+        age_marker(RUNTIME_READY_TIMEOUT - Duration::from_secs(1));
+        assert!(matches!(
+            acquire_managed_runtime_start_lock(data.path()).unwrap(),
+            ManagedRuntimeStart::Waiter
+        ));
+        age_marker(MANAGED_RUNTIME_START_LOCK_LIFETIME + Duration::from_secs(1));
+        assert!(matches!(
+            acquire_managed_runtime_start_lock(data.path()).unwrap(),
+            ManagedRuntimeStart::Owner(_)
+        ));
     }
 
     #[test]
