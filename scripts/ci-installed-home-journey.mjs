@@ -5,7 +5,7 @@ import { appendFileSync, readFileSync, statfsSync, writeFileSync, renameSync } f
 import { join } from "node:path";
 import { applyRunEventsPage, terminalOutputText } from "../capsules/assistant/browser/model-contract.js";
 import { publicJourneyFailure } from "./ci-installed-home-failure.mjs";
-import { openInstalledApp, openInstalledAssistant, returnInstalledHome } from "./ci-installed-home-navigation.mjs";
+import { openInstalledApp, openInstalledAssistant, reopenInstalledAssistant, resizeInstalledHome, returnInstalledHome } from "./ci-installed-home-navigation.mjs";
 const require = createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url));
 const { chromium } = require("playwright");
 const [base, evidence, data, mode, resourceControl] = process.argv.slice(2);
@@ -280,9 +280,11 @@ async function repairJourney(assistant, offer) {
   modelRepair.different_model = { cid: other.cid, model_sha256: other.model_sha256, offer_id: second.model_runtime.offer_id,
     run_id: replied.run.run_id, status: "completed", runtime_restart_before_get: false };
   results.model_stop_get_different = "passed";
-  await page.setViewportSize({ width: 390, height: 844 });
+  await resizeInstalledHome(page, { width: 390, height: 844 });
+  await reopenInstalledAssistant(page);
   await page.screenshot({ path: join(evidence, "repair-qwen-reply-phone.png"), fullPage: true });
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await resizeInstalledHome(page, { width: 1440, height: 900 });
+  await reopenInstalledAssistant(page);
   await returnInstalledHome(page, nextAssistant, evidence);
   marketplace = await app("marketplace");
   stage = "model_interrupted_get_retry";
@@ -416,11 +418,11 @@ try {
     await setupReminder.waitFor({ state: "hidden", timeout: 5000 });
   }
   await page.screenshot({ path: join(evidence, "home-desktop.png"), fullPage: true });
-  await page.setViewportSize({ width: 390, height: 844 });
+  await resizeInstalledHome(page, { width: 390, height: 844 });
   await shell.locator("#desktop").waitFor({ state: "visible" });
   await page.screenshot({ path: join(evidence, "home-phone.png"), fullPage: true });
   results.home_screenshots = "passed";
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await resizeInstalledHome(page, { width: 1440, height: 900 });
   stage = "model_package_admission";
   const marketplace = await app("marketplace");
   const initialCatalog = await projection(marketplace, "/api/capsules/catalog");
@@ -586,7 +588,8 @@ try {
     results.installed_runtime_reply = "passed";
     await page.screenshot({ path: join(evidence, "assistant-reply-desktop.png"), fullPage: true });
     subcheck = "reply_bounds";
-    await page.setViewportSize({ width: 390, height: 844 });
+    await resizeInstalledHome(page, { width: 390, height: 844 });
+    await reopenInstalledAssistant(page);
     await assistant.waitForFunction(() =>
       !document.body.classList.contains("agent-harness-drawer-open") &&
       document.querySelector("#agent-harness-drawer-open")?.getAttribute("aria-expanded") === "false" &&
