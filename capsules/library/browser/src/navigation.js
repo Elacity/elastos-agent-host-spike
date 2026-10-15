@@ -20,8 +20,21 @@ export function createLibraryNavigation({
     upButton.disabled = !root || state.currentUri === root.uri;
   }
 
+  // On a phone stage the shell owns the system Back: an entry of this frame's
+  // own would take Back before the shell sees it (joint session history). The
+  // shell's layout message (elastos-theme.js) names the stage, so an embedded
+  // Library adds no entry until it knows it is not on a phone.
+  function onPhoneStage() {
+    return typeof document !== "undefined" && document.documentElement?.dataset.elFormFactor === "phone";
+  }
+
+  function stageKnown() {
+    return window.parent === window || Boolean(document.documentElement?.dataset.elFormFactor);
+  }
+
   function browserHistoryAvailable() {
-    return !!(window.history && typeof window.history.pushState === "function" && typeof window.history.replaceState === "function");
+    return !!(window.history && typeof window.history.pushState === "function" && typeof window.history.replaceState === "function")
+      && !onPhoneStage();
   }
 
   function createHistoryEntry(uri) {
@@ -52,6 +65,17 @@ export function createLibraryNavigation({
 
   function installBrowserHistory() {
     if (!browserHistoryAvailable() || !state.currentUri) return;
+    if (!stageKnown()) {
+      const observer = new MutationObserver(() => {
+        if (stageKnown()) {
+          observer.disconnect();
+          installBrowserHistory();
+        }
+      });
+      observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-el-form-factor"] });
+      return;
+    }
+    if (state.historyIndex >= 0) return;
     const entry = createHistoryEntry(state.currentUri);
     state.historyEntries = [entry];
     state.historyIndex = 0;
@@ -74,6 +98,8 @@ export function createLibraryNavigation({
   async function handleBrowserPopState(event) {
     const data = event.state || {};
     if (data.schema === LIBRARY_HISTORY_GUARD_SCHEMA) {
+      // Turned into a phone stage since: let Back through to the shell.
+      if (onPhoneStage()) return;
       const entry = state.historyEntries[state.historyIndex] || createHistoryEntry(state.currentUri);
       window.history.pushState(libraryHistoryState(entry), "", window.location.href);
       setStatus("Library kept focus.");

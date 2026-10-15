@@ -1,27 +1,21 @@
 /* One-entry history model for the phone stage; pure so node:test can drive
-   it. The shell pushes one entry when its first layer opens and consumes it
-   when the last layer closes, so back on the bare desktop leaves Home.
+   it. The shell pushes one entry when a layer opens and none of its entries is
+   current, so the system Back lands on this document as a popstate and closes
+   exactly one layer.
 
-   history.state is the source of truth, not a flag: capsule frames add joint
-   session entries of their own above ours and traversal is asynchronous, so
-   counting pushes and pops drifts (WebKit delivered pops to the wrong step).
-   Reading which entry we landed on cannot drift.
+   The shell never calls back() while anything is open, so no traversal of its
+   own is ever in flight and every popstate is the user's Back: one Back at a
+   time, nothing to tell apart. history.state is the source of truth, not a
+   counter: it cannot drift.
 
-   Leaving calls back() once per close cycle and never retries: a second
-   back() before the traversal lands could walk out of the host's own
-   history. The leave stays in flight until its popstate lands (or, if that
-   back() only popped a capsule step and no popstate reaches this document,
-   until LEAVE_SETTLE_MS pass); layers opened and closed meanwhile neither push
-   nor call back() again. The landing pop is our own leave, never a user's
-   back: it only re-arms if a layer opened meanwhile. A leftover entry of ours
-   is consumed by the next close or the user's next back — one extra back
-   press, never a navigation away. */
+   Closing the last layer by hand (Close, Escape) leaves our entry in place
+   rather than racing a back() against the user. The user's next Back pops it
+   with nothing open; that Back meant "leave Home", so the shell finishes it
+   with one back() of its own. Capsule frames add no entries of their own on a
+   phone stage (Library holds its history there), so a Back never steps inside
+   an app frame first. */
 
 export const STAGE_HISTORY_STATE = Object.freeze({ elastosStage: true });
-
-// A same-document traversal lands within a frame or two; this is the bound
-// after which a leave whose pop never reached us counts as landed.
-export const LEAVE_SETTLE_MS = 1000;
 
 export function isStageHistoryState(state) {
   return Boolean(state && typeof state === "object" && state.elastosStage === true);
@@ -30,93 +24,40 @@ export function isStageHistoryState(state) {
 /**
  * @param {object} io
  * @param {() => boolean} io.onOurEntry — is history.state ours right now
- * @param {() => number} io.layerCount — windows + open Back layers
+ * @param {() => number} io.layerCount — windows + open Back layers (0 off a phone)
  * @param {() => void} io.pushState — push STAGE_HISTORY_STATE
  * @param {() => void} io.back — history.back()
  * @param {() => number} io.onBack — close the top layer; returns layers left
- * @param {(fn: () => void) => void} [io.defer] — run fn after LEAVE_SETTLE_MS
  */
-export function createStageHistory({
-  onOurEntry,
-  layerCount,
-  pushState,
-  back,
-  onBack,
-  defer = (fn) => setTimeout(fn, LEAVE_SETTLE_MS),
-}) {
-  let leaving = false;
-  let leaveToken = 0;
+export function createStageHistory({ onOurEntry, layerCount, pushState, back, onBack }) {
+  // Whether our entry was current when we last looked: a pop that leaves it
+  // with nothing open is the user's Back off a leftover entry.
+  let wasOurs = onOurEntry();
 
-  // The leave landed: re-arm for a layer that opened while it was in flight.
-  const landed = () => {
-    leaving = false;
-    leaveToken += 1;
+  const arm = () => {
     if (layerCount() > 0 && !onOurEntry()) {
       pushState();
     }
-  };
-
-  const leave = () => {
-    if (leaving) {
-      return;
-    }
-    leaving = true;
-    const token = ++leaveToken;
-    back();
-    defer(() => {
-      if (leaving && token === leaveToken) {
-        landed();
-      }
-    });
+    wasOurs = onOurEntry();
   };
 
   return {
-    get leaving() {
-      return leaving;
-    },
     // Called whenever the layer count may have changed.
-    sync() {
-      if (leaving) {
-        // The traversal is in flight; its landing re-syncs.
-        return;
-      }
-      const layers = layerCount();
-      const ours = onOurEntry();
-      if (layers > 0) {
-        if (!ours) {
-          pushState();
-        }
-        return;
-      }
-      if (ours) {
-        leave();
-      }
-    },
+    sync: arm,
     // A history traversal landed on this document. Returns whether the shell
-    // handled it as a user's back.
+    // handled it as Back on an open layer.
     handlePopState() {
-      if (leaving) {
-        landed();
-        return false;
-      }
-      const layers = layerCount();
       const ours = onOurEntry();
-      if (layers === 0) {
-        // A leftover entry of ours surfaced with nothing open: the user is on
-        // the way out.
-        if (ours) {
-          leave();
+      if (layerCount() === 0) {
+        const leftover = wasOurs && !ours;
+        wasOurs = ours;
+        if (leftover) {
+          back();
         }
         return false;
       }
-      // Something is open and the user went back: from above our entry (a
-      // capsule step was popped) or off it (we sit beneath it now).
-      const remaining = onBack();
-      if (remaining > 0 && !ours) {
-        pushState();
-      } else if (remaining === 0 && ours) {
-        leave();
-      }
+      onBack();
+      arm();
       return true;
     },
   };

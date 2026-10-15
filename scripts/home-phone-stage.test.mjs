@@ -17,7 +17,7 @@ function harness() {
   const entries = [HOST];
   let index = 0;
   let pending = 0;
-  const timers = [];
+  let leftHome = false;
   const log = [];
   let layers = 0;
   const stage = {
@@ -55,14 +55,7 @@ function harness() {
       stage.onBackResult = null;
       return layers;
     },
-    defer: (fn) => timers.push(fn),
   });
-  // LEAVE_SETTLE_MS passes: run the settle timers.
-  const settle = () => {
-    for (const fn of timers.splice(0)) {
-      fn();
-    }
-  };
 
   // Deliver queued traversals; popstate reaches the shell only when its own
   // document's entry changed (from or to one of ours).
@@ -70,6 +63,7 @@ function harness() {
     while (pending > 0) {
       pending -= 1;
       if (index === 0) {
+        leftHome = true;
         continue;
       }
       const from = shellEntryAt(index);
@@ -82,11 +76,6 @@ function harness() {
   const userBack = () => {
     pending += 1;
     flush();
-  };
-  const capsuleNavigates = () => {
-    entries.splice(index + 1);
-    entries.push(CAPSULE);
-    index += 1;
   };
   const open = () => {
     layers += 1;
@@ -101,9 +90,7 @@ function harness() {
     log,
     stage,
     flush,
-    settle,
     userBack,
-    capsuleNavigates,
     open,
     closeByHand,
     get entries() {
@@ -111,6 +98,9 @@ function harness() {
     },
     get layers() {
       return layers;
+    },
+    get leftHome() {
+      return leftHome;
     },
   };
 }
@@ -139,12 +129,35 @@ test("bare desktop never pushes and ignores stray pops", () => {
   assert.deepEqual(h.entries, [HOST]);
 });
 
-test("closing the last layer by hand leaves our entry; the pop that follows is not treated as back", () => {
+test("closing the last layer by hand leaves our entry and calls no back()", () => {
   const h = harness();
   h.open();
   h.closeByHand();
   h.flush();
+  assert.deepEqual(h.log, ["push"]);
+  assert.deepEqual(h.entries, [HOST, STAGE_HISTORY_STATE]);
+});
+
+test("Back off a leftover entry with nothing open finishes leaving Home in one press", () => {
+  const h = harness();
+  h.open();
+  h.closeByHand();
+  h.userBack();
   assert.deepEqual(h.log, ["push", "back"]);
+  assert.equal(h.leftHome, true);
+  assert.equal(h.log.includes("onBack"), false);
+});
+
+test("reopening after a close by hand reuses the leftover entry", () => {
+  const h = harness();
+  h.open();
+  h.closeByHand();
+  h.open();
+  assert.deepEqual(h.log, ["push"]);
+  h.userBack();
+  assert.deepEqual(h.log, ["push", "onBack"]);
+  assert.equal(h.layers, 0);
+  assert.equal(h.leftHome, false, "Back closed the layer and nothing else");
   assert.deepEqual(h.entries, [HOST]);
 });
 
@@ -160,113 +173,39 @@ test("system back closes the top layer and re-arms while layers remain, then goe
   assert.deepEqual(h.log, ["push", "onBack", "push", "onBack"]);
   assert.equal(h.layers, 0);
   assert.deepEqual(h.entries, [HOST]);
+  // Bare Home now: the next Back is the user's own way out, untouched.
+  h.userBack();
+  assert.equal(h.leftHome, true);
+  assert.equal(h.log.filter((step) => step === "back").length, 0);
 });
 
-test("a capsule's own history step above ours: back pops it first, then the shell layer", () => {
+test("every pop is one user Back: close, reopen, Back at once closes the reopened layer", () => {
   const h = harness();
   h.open();
-  h.capsuleNavigates();
-  assert.deepEqual(h.entries, [HOST, STAGE_HISTORY_STATE, CAPSULE]);
-  // The first back is the capsule's own (its document steps back); the shell
-  // sees nothing and the window stays.
   h.userBack();
-  assert.deepEqual(h.log, ["push"]);
-  assert.equal(h.layers, 1);
-  assert.deepEqual(h.entries, [HOST, STAGE_HISTORY_STATE]);
-  // The next back pops our entry: the window goes home.
+  h.open();
   h.userBack();
-  assert.deepEqual(h.log, ["push", "onBack"]);
+  assert.deepEqual(h.log, ["push", "onBack", "push", "onBack"]);
   assert.equal(h.layers, 0);
+  assert.equal(h.leftHome, false);
   assert.deepEqual(h.entries, [HOST]);
 });
 
-test("leaving past a capsule step calls back() once; the leftover entry is consumed by the next close", () => {
-  const h = harness();
-  h.open();
-  h.capsuleNavigates();
-  h.closeByHand();
-  // That back() only popped the capsule step; our entry is still current and
-  // no second back() follows — it could walk out of the host's history.
-  h.flush();
-  h.history.sync();
-  h.history.sync();
-  assert.deepEqual(h.entries, [HOST, STAGE_HISTORY_STATE]);
-  assert.equal(h.log.filter((step) => step === "back").length, 1);
-  // No popstate reached the shell; once the leave settles, reopening reuses
-  // the leftover entry and closing again consumes it.
-  h.settle();
-  h.open();
-  assert.equal(h.log.filter((step) => step === "push").length, 1);
-  h.closeByHand();
-  h.flush();
-  assert.deepEqual(h.entries, [HOST]);
-  assert.equal(h.log.filter((step) => step === "back").length, 2);
-});
-
-test("only one back() per close cycle while the traversal is in flight", () => {
+test("off a phone (no layers counted) the shell neither pushes nor calls back()", () => {
   const calls = [];
-  let layers = 0;
+  let ours = true;
   const history = createStageHistory({
-    onOurEntry: () => true,
-    layerCount: () => layers,
+    onOurEntry: () => ours,
+    layerCount: () => 0,
     pushState: () => calls.push("push"),
     back: () => calls.push("back"),
     onBack: () => 0,
-    defer: () => {},
   });
   history.sync();
   history.sync();
-  history.sync();
+  assert.deepEqual(calls, []);
+  // The user's own Back off our leftover entry still leaves in one press.
+  ours = false;
+  assert.equal(history.handlePopState(), false);
   assert.deepEqual(calls, ["back"]);
-  assert.equal(history.leaving, true);
-  // A layer opening and closing again before the pop lands changes nothing.
-  layers = 1;
-  history.sync();
-  layers = 0;
-  history.sync();
-  assert.deepEqual(calls, ["back"]);
-  assert.equal(history.leaving, true);
-  assert.equal(history.handlePopState(), false, "the landing pop is our own leave");
-  assert.equal(history.leaving, false);
-});
-
-test("a leftover entry surfacing under the user's back with nothing open keeps leaving", () => {
-  const h = harness();
-  h.open();
-  h.capsuleNavigates();
-  h.closeByHand();
-  h.flush();
-  h.settle();
-  // Bare desktop, our entry beneath the user: back pops it and no layer is touched.
-  h.userBack();
-  assert.deepEqual(h.entries, [HOST]);
-  assert.equal(h.log.includes("onBack"), false);
-});
-
-test("a layer opened while a leave is in flight re-arms when the traversal lands, without closing it", () => {
-  const h = harness();
-  h.open();
-  h.closeByHand();
-  // Traversal still pending: state is ours, so no second push.
-  h.open();
-  assert.deepEqual(h.log, ["push", "back"]);
-  h.flush();
-  // Our own leave lands: the layer that opened meanwhile stays and gets an
-  // entry again.
-  assert.deepEqual(h.log, ["push", "back", "push"]);
-  assert.equal(h.layers, 1);
-  assert.deepEqual(h.entries, [HOST, STAGE_HISTORY_STATE]);
-});
-
-test("close, reopen and close again before the leave lands: one back(), Home stays", () => {
-  const h = harness();
-  h.open();
-  h.closeByHand();
-  h.open();
-  h.closeByHand();
-  assert.deepEqual(h.log, ["push", "back"]);
-  h.flush();
-  h.settle();
-  assert.deepEqual(h.log, ["push", "back"]);
-  assert.deepEqual(h.entries, [HOST]);
 });

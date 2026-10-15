@@ -130,7 +130,7 @@ const state = { errors: [] };
 // The healthy fixture holds the event stream open. The closed-stream run ends
 // it at once and holds summary replies, so a reconnect's summary refresh can
 // land while a finger holds a Dock tile.
-const fixture = { closeEventStream: false, holdSummaries: false, heldSummaries: [], summaryReplies: 0 };
+const fixture = { closeEventStream: false, holdSummaries: false, heldSummaries: [], summaryReplies: 0, libraryRoots: false };
 
 function releaseHeldSummaries() {
   fixture.holdSummaries = false;
@@ -523,6 +523,13 @@ async function handleApi(req, res, url) {
     json(res, 200, { saved: true });
     return true;
   }
+  // Only for the Back probe: with roots, Library reaches the point where it
+  // would add history entries of its own.
+  if (fixture.libraryRoots && url.pathname === "/api/provider/object/roots" && req.method === "POST") {
+    await readBody(req);
+    json(res, 200, { status: "ok", data: { roots: [{ id: "documents", uri: "localhost://Users/fixture/Documents", name: "Documents" }] } });
+    return true;
+  }
   if (url.pathname.startsWith("/api/")) {
     // Capsule APIs are out of scope: the capsule shows its own empty/error
     // state and the shell around it is what this smoke measures.
@@ -907,6 +914,111 @@ function promptCloseFailures(run) {
   return probe.closed ? [] : [`${label}: a fresh tap on Close right after a tap opened ${probe.target} must close it. Got ${JSON.stringify(probe)}`];
 }
 
+// Back races on the history-driven stage (Chromium; WebKit uses buttons).
+// libraryOwnHistory: an app frame adds no history entry of its own on a phone,
+//   so one Back sends Library home instead of stepping Library's history.
+// reopenAfterClose: an app closed by hand then reopened; one Back sends it home
+//   and Home stays.
+// reopenedLayer: a sheet Back just closed, reopened at once, is a new layer;
+//   the next Back closes it.
+async function probeBackRaces(page, frame) {
+  const mode = await frame.evaluate(() => document.body.dataset.stageHistory || "");
+  if (mode !== "history") {
+    return null;
+  }
+  const back = () => frame.evaluate(() => history.back());
+  const windowState = (target) => frame.evaluate((target) => {
+    const node = document.querySelector(`.window[data-target="${target}"]`);
+    return {
+      home: location.href.includes("/apps/home-gui/"),
+      present: Boolean(node),
+      onStage: Boolean(node && !node.classList.contains("hidden") && node.dataset.spaceVisible !== "false"),
+    };
+  }, target);
+  const discard = (target) => frame.evaluate(async (target) => {
+    const core = await import(new URL("./shell-core.js?v=home-20260813a", location.href).href);
+    const windows = await import(new URL("./shell-windows.js?v=home-20260813a", location.href).href);
+    for (const entry of [...core.shellState.windows.values()]) {
+      if (entry.targetId === target) {
+        await windows.closeWindow(entry.id);
+      }
+    }
+  }, target);
+
+  fixture.libraryRoots = true;
+  let libraryOwnHistory;
+  try {
+    await openTarget(frame, "library");
+    await waitFor(
+      () => Promise.resolve(page.frames().find((f) => f.url().includes("/apps/library/")))
+        .then((f) => f?.evaluate(() => document.documentElement.dataset.elFormFactor === "phone" && !document.querySelector(".library-shell.hidden, #library-shell.hidden")).catch(() => false)),
+      BOOT_TIMEOUT_MS,
+      "Library on the phone stage",
+    );
+    await sleep(SHEET_SETTLE_MS);
+    const libraryFrame = page.frames().find((f) => f.url().includes("/apps/library/"));
+    const libraryState = await libraryFrame.evaluate(() => history.state?.schema || null);
+    await back();
+    await sleep(SHEET_SETTLE_MS);
+    libraryOwnHistory = { libraryState, after: await windowState("library") };
+  } finally {
+    fixture.libraryRoots = false;
+  }
+  await discard("library");
+  await sleep(SURFACE_SETTLE_MS);
+
+  await openTarget(frame, "system");
+  await closeWindow(frame, "system");
+  await openTarget(frame, "system");
+  await back();
+  await sleep(SHEET_SETTLE_MS);
+  const reopenAfterClose = await windowState("system");
+  await discard("system");
+  await sleep(SURFACE_SETTLE_MS);
+
+  await LAYER_OPENERS.about.open(frame);
+  await sleep(SHEET_SETTLE_MS);
+  const closedWithinMs = await frame.evaluate(async () => {
+    const popovers = await import(new URL("./shell-popovers.js?v=home-20260813a", location.href).href);
+    const about = popovers.registeredStageLayers().find((entry) => entry.id === "about");
+    const node = document.querySelector(about.selector);
+    const open = () => (about.isOpen ? about.isOpen() === true : Boolean(node && !node.hidden && node.getClientRects().length));
+    const started = performance.now();
+    history.back();
+    while (open() && performance.now() - started < 2500) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    return Math.round(performance.now() - started);
+  });
+  await LAYER_OPENERS.about.open(frame);
+  const reopenedBefore = await readLayer(frame, "about");
+  await back();
+  const reopenedAfter = await waitLayerClosed(frame, "about");
+  const reopenedLayer = { closedWithinMs, before: reopenedBefore, after: reopenedAfter };
+
+  return { libraryOwnHistory, reopenAfterClose, reopenedLayer };
+}
+
+function backRaceFailures(run) {
+  const probe = run.backRaces;
+  if (!probe) {
+    return [];
+  }
+  const label = `${run.engine}/${run.profile}/back-races`;
+  const failures = [];
+  const { libraryOwnHistory, reopenAfterClose, reopenedLayer } = probe;
+  if (libraryOwnHistory.libraryState || !libraryOwnHistory.after.home || libraryOwnHistory.after.onStage) {
+    failures.push(`${label}: Library must add no history entry on a phone, and one Back must send it home. Got ${JSON.stringify(libraryOwnHistory)}`);
+  }
+  if (!reopenAfterClose.home || reopenAfterClose.onStage) {
+    failures.push(`${label}: an app closed by hand and reopened must go home on one Back, Home staying. Got ${JSON.stringify(reopenAfterClose)}`);
+  }
+  if (!reopenedLayer.before.open || reopenedLayer.after.open || !reopenedLayer.after.home) {
+    failures.push(`${label}: a sheet reopened right after Back closed it must close on the next Back. Got ${JSON.stringify(reopenedLayer)}`);
+  }
+  return failures;
+}
+
 // The shell ignores a press on Close at the spot that opened the window for a
 // moment after it opens (ghost-click guard, shell-windows.js). This smoke
 // opens windows with synthetic clicks, so that spot is wherever the last real
@@ -1082,6 +1194,7 @@ async function runProfile(browser, engineId, profile, origin) {
   let homeEditProbe = null;
   let backProbe = null;
   let promptCloseProbe = null;
+  let backRacesProbe = null;
   let bootRetries = 0;
   try {
     let booted;
@@ -1142,6 +1255,7 @@ async function runProfile(browser, engineId, profile, origin) {
       homeEditProbe = await probePhoneHomeEdit(page, frame, dir);
       backProbe = await probePhoneBack(frame);
       promptCloseProbe = await probePromptTouchClose(frame);
+      backRacesProbe = await probeBackRaces(page, frame);
     }
     for (const [target] of FIRST_PARTY_APPS) {
       if (target === "assistant") {
@@ -1168,7 +1282,7 @@ async function runProfile(browser, engineId, profile, origin) {
   } finally {
     await context.close();
   }
-  return { engine: engineId, profile: profile.id, viewport: profile.viewport, surfaces, dock: dockProbe, stage: stageProbe, keyboard: keyboardProbe, spotlight: spotlightProbe, sheetHandles: sheetHandleProbe, link: linkProbe, touchMenu: touchMenuProbe, home: homeProbe, homeEdit: homeEditProbe, back: backProbe, promptClose: promptCloseProbe, bootRetries };
+  return { engine: engineId, profile: profile.id, viewport: profile.viewport, surfaces, dock: dockProbe, stage: stageProbe, keyboard: keyboardProbe, spotlight: spotlightProbe, sheetHandles: sheetHandleProbe, link: linkProbe, touchMenu: touchMenuProbe, home: homeProbe, homeEdit: homeEditProbe, back: backProbe, promptClose: promptCloseProbe, backRaces: backRacesProbe, bootRetries };
 }
 
 // Soft keyboard: only the host page sees it, so the host relays its height
@@ -2354,11 +2468,12 @@ function sourceTruths() {
   const guiIndex = readFileSync(join(repoRoot, "capsules/home-gui/browser/index.html"), "utf8");
   const guiStyle = readFileSync(join(repoRoot, "capsules/home-gui/browser/style.css"), "utf8");
   const viewportFit = (html) => /<meta\s+name="viewport"\s+content="[^"]*viewport-fit=cover[^"]*"/.test(html);
-  // A 100vh line is a fallback when the next line repeats it with 100dvh;
-  // any other 100vh is bare and wrong on phones.
+  // A 100vh line is a fallback when the same declaration also exists with
+  // 100dvh: on the next line, or in a phone-scoped rule (desktop keeps its
+  // original 100vh untouched). Any other 100vh is bare and wrong on phones.
   const styleLines = guiStyle.split("\n");
-  const bareViewportHeightUnits = styleLines.filter((line, index) =>
-    line.includes("100vh") && !(styleLines[index + 1] || "").includes(line.replace("100vh", "100dvh").trim())).length;
+  const bareViewportHeightUnits = styleLines.filter((line) =>
+    line.includes("100vh") && !guiStyle.includes(line.replace("100vh", "100dvh").trim())).length;
   return {
     viewportFitCover: { home: viewportFit(homeIndex), gui: viewportFit(guiIndex) },
     bareViewportHeightUnits,
@@ -2483,7 +2598,7 @@ try {
         }
         const run = await runProfile(browser, engineId, profile, origin);
         report.runs.push(run);
-        failures.push(...shellFailures(run), ...phoneDockFailures(run), ...phoneStageFailures(run), ...phoneKeyboardFailures(run), ...phoneSpotlightFailures(run), ...phoneSheetHandleFailures(run), ...phoneLinkFailures(run), ...phoneTouchMenuFailures(run), ...phoneHomeFailures(run), ...phoneHomeEditFailures(run), ...phoneBackFailures(run), ...promptCloseFailures(run));
+        failures.push(...shellFailures(run), ...phoneDockFailures(run), ...phoneStageFailures(run), ...phoneKeyboardFailures(run), ...phoneSpotlightFailures(run), ...phoneSheetHandleFailures(run), ...phoneLinkFailures(run), ...phoneTouchMenuFailures(run), ...phoneHomeFailures(run), ...phoneHomeEditFailures(run), ...phoneBackFailures(run), ...promptCloseFailures(run), ...backRaceFailures(run));
         console.log(`[home-phone-layout] ${engineId}/${profile.id} ${summarize(run)}`);
       }
       const closedStream = await runClosedStream(browser, engineId, origin);

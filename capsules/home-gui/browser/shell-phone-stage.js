@@ -3,9 +3,9 @@
    Back: the shell keeps at most one history entry of its own (model in
    shell-phone-stage-history.js). It is pushed when the first layer (a window
    on the stage or any registered Back layer: sheets, rails, menus, About,
-   Mission Control, the Assistant room) opens on a phone and consumed again
-   when the last layer closes, so the bare desktop never traps back — the host
-   page's own history is left alone. popstate closes exactly one layer: the
+   Mission Control, the Assistant room) opens on a phone; the shell never
+   calls back() while anything is open, and a Back that pops a leftover entry
+   with nothing open is finished as "leave Home". popstate closes exactly one layer: the
    open layer that paints on top (one stacking order over every registered
    layer), through the close it registered, and that layer stops counting at
    once while its hide animates. With no layer open, the window that is
@@ -20,7 +20,6 @@
 
 import { HOME_GUI_HOST_SELECTORS, shellState } from "./shell-core.js?v=home-20260813a";
 import {
-  LEAVE_SETTLE_MS,
   STAGE_HISTORY_STATE,
   createStageHistory,
   isStageHistoryState,
@@ -79,9 +78,21 @@ function layerOpen(layer, doc) {
   return layer.isOpen ? layer.isOpen() === true : shown(layerNode(layer, doc));
 }
 
-// Layers whose close is in flight: one Back already took them.
-const closing = new Set();
+// Layers whose close is in flight: one Back already took them. Each maps to
+// its settle; a layer leaves the set the moment it is seen closed, so the same
+// surface opened again afterwards is a new layer Back can take.
+const closing = new Map();
 let onLayerSettled = () => {};
+
+// Called on every shell DOM change: settles each closing layer that is gone.
+export function releaseClosedLayers(doc = document) {
+  for (const [id, settle] of [...closing]) {
+    const layer = registeredStageLayers().find((entry) => entry.id === id);
+    if (!layer || !layerOpen(layer, doc)) {
+      settle();
+    }
+  }
+}
 
 // z-indexed ancestors of a node, outermost first.
 function stackingPath(node, view) {
@@ -142,18 +153,29 @@ export function stageLayerCount(doc = document) {
 // animation included), or after LAYER_CLOSE_TIMEOUT_MS if it never goes.
 export function closeStageLayer(layer, doc = document) {
   const view = doc.defaultView;
-  closing.add(layer.id);
   const started = Date.now();
   return new Promise((resolve) => {
-    const check = () => {
-      if (layerOpen(layer, doc) && Date.now() - started < LAYER_CLOSE_TIMEOUT_MS) {
-        view.setTimeout(check, 32);
+    let timer = 0;
+    const settle = () => {
+      if (closing.get(layer.id) !== settle) {
         return;
       }
+      view.clearTimeout(timer);
       closing.delete(layer.id);
       onLayerSettled();
       resolve();
     };
+    // DOM changes settle it at once (releaseClosedLayers); this poll covers a
+    // close that changes no observed attribute.
+    const check = () => {
+      if (layerOpen(layer, doc) && Date.now() - started < LAYER_CLOSE_TIMEOUT_MS) {
+        timer = view.setTimeout(check, 32);
+        return;
+      }
+      settle();
+    };
+    closing.get(layer.id)?.();
+    closing.set(layer.id, settle);
     try {
       layer.close();
     } catch (_error) {
@@ -255,6 +277,17 @@ export function stageHistorySupported(view = window) {
 
 export function bindPhoneStage(doc = document, view = window) {
   bindTitleSwipe(doc);
+  let onChange = () => {};
+  const observer = new view.MutationObserver(() => {
+    releaseClosedLayers(doc);
+    onChange();
+  });
+  observer.observe(doc.body, {
+    attributes: true,
+    attributeFilter: ["class", "hidden"],
+    childList: true,
+    subtree: true,
+  });
   if (!stageHistorySupported(view)) {
     doc.body.dataset.stageHistory = "buttons";
     return null;
@@ -266,7 +299,6 @@ export function bindPhoneStage(doc = document, view = window) {
     pushState: () => view.history.pushState(STAGE_HISTORY_STATE, ""),
     back: () => view.history.back(),
     onBack: () => closeTopStageLayer(doc),
-    defer: (fn) => view.setTimeout(fn, LEAVE_SETTLE_MS),
   });
   let scheduled = false;
   const sync = () => {
@@ -281,13 +313,9 @@ export function bindPhoneStage(doc = document, view = window) {
   };
   // A layer whose close timed out counts again; let the history catch up.
   onLayerSettled = schedule;
-  new view.MutationObserver(schedule).observe(doc.body, {
-    attributes: true,
-    attributeFilter: ["class", "hidden"],
-    childList: true,
-    subtree: true,
-  });
+  onChange = schedule;
   view.addEventListener("popstate", () => {
+    releaseClosedLayers(doc);
     stageHistory.handlePopState();
   });
   view.addEventListener("resize", schedule);
