@@ -68,7 +68,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   raises its soft open-file limit to the hard limit, at most 10240, when it
   starts, and the Browser local exit keeps accepting after an accept error.
 
-## [0.8.0] - 2026-10-16
+## [0.8.0] - 2026-10-15
 
 ### Security
 
