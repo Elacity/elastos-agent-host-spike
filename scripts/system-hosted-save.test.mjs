@@ -225,7 +225,7 @@ function updateFixture(overrides = {}) {
     runtimeUpdateNode: panel, runtimeUpdateButton: button, runtimeUpdateStatusNode: status,
     runtimeUpdate: undefined, runtimeUpdatePending: null, runtimeUpdateBusy: false,
     runtimeUpdateActive: true, runtimeUpdateTimer: 0, runtimeUpdateReconnects: 0,
-    runtimeUpdateRequests: new Set(), runtimeUpdateRestartSeen: false,
+    runtimeUpdateRequests: new Set(), runtimeUpdateInProgressSeen: false,
     RUNTIME_UPDATE_RESTART_TEXT: source.match(/RUNTIME_UPDATE_RESTART_TEXT = "([^"]+)"/)?.[1],
     RUNTIME_UPDATE_RESTART_POLLS: Number(source.match(/RUNTIME_UPDATE_RESTART_POLLS = (\d+)/)?.[1]),
     systemSummaryInFlight: null, homeParentOrigin: "https://home.example",
@@ -451,8 +451,7 @@ test("matching queue confirmation and controller state prove progress after slow
   assert.match(f.status.textContent, /Checking the signed update/);
   f.context.refreshSystemSummary = async () => { throw new TypeError("response lost"); };
   await f.context.pollRuntimeUpdate();
-  assert.match(f.status.textContent, /report update progress/);
-  assert(!f.status.textContent.includes("restarting"));
+  assert.equal(f.status.textContent, "Restarting to finish the update. Home is usually back within two minutes.");
   f.context.renderRuntimeUpdate({ ...f.offer, controller: { id, phase: "restarting" } });
   assert.equal(f.status.textContent, "Restarting to finish the update. Home is usually back within two minutes.");
   await f.context.pollRuntimeUpdate();
@@ -533,7 +532,7 @@ test("Home update polling binds host messages, stops at auth refusal, and closes
   assert.equal(f.context.runtimeUpdateTimer, timer);
   f.listeners.get("message")({ source: f.top, origin: "https://home.example", data: message });
   assert.equal(f.timers.get(f.context.runtimeUpdateTimer).delay, 0);
-  f.context.renderRuntimeUpdate({ ...f.offer, can_apply: false, controller: { phase: "staging" } });
+  f.context.renderRuntimeUpdate({ ...f.offer, can_apply: false, controller: { phase: "ready" } });
   assert.equal(f.timers.get(f.context.runtimeUpdateTimer).delay, 5000);
   f.context.refreshSystemSummary = async () => { const error = new Error("expired"); error.status = 403; throw error; };
   f.timers.clear();
@@ -577,93 +576,66 @@ test("System explains the restart wait, outlasts the controller restart budget, 
   assert.equal(failed.status.textContent, "The update failed.");
 });
 
-test("a restart gets its full polling budget, and only an observed restart enables reload", async () => {
+test("the restart gets the full polling budget however long the download took", async () => {
   const f = updateFixture();
   await f.context.onRuntimeUpdateApply();
   const id = f.context.runtimeUpdatePending.intent.request_id;
-  f.context.renderRuntimeUpdate({ ...f.offer, controller: { id, phase: "downloading", message: "Downloading the update (88 MB)." } });
-  f.context.runtimeUpdatePending.polls = 85;
-  f.context.runtimeUpdateReconnects = 85;
-  f.context.renderRuntimeUpdate({ ...f.offer, controller: { id, phase: "restarting" } });
+  f.context.refreshSystemSummary = async () => f.context.renderRuntimeUpdate(
+    { ...f.offer, controller: { id, phase: "downloading", message: "Downloading the update (88 MB)." } });
+  await f.advance(600_000);
   f.context.refreshSystemSummary = async () => { throw new TypeError("connection refused"); };
   await f.advance(130_000);
-  assert(f.timers.size > 0, "download polls do not shorten the restart wait");
-  const transient = updateFixture();
-  await transient.context.onRuntimeUpdateApply();
-  const tid = transient.context.runtimeUpdatePending.intent.request_id;
-  transient.context.renderRuntimeUpdate({ ...transient.offer, controller: { id: tid, phase: "downloading" } });
-  for (const status of [503, 403]) {
-    transient.context.refreshSystemSummary = async () => { const error = new Error("down"); error.status = status; throw error; };
-    await transient.context.pollRuntimeUpdate();
-  }
-  assert.equal(transient.context.window.location.reloads, 0, "a transient error is not a restart");
-  assert.match(transient.status.textContent, /access has changed/);
-  const failed = updateFixture();
-  await failed.context.onRuntimeUpdateApply();
-  const fid = failed.context.runtimeUpdatePending.intent.request_id;
-  failed.context.renderRuntimeUpdate({ ...failed.offer, controller: { id: fid, phase: "restarting" } });
-  failed.context.renderRuntimeUpdate({ ...failed.offer, controller: { id: fid, phase: "failed", message: "The update failed." } });
-  failed.context.refreshSystemSummary = async () => { const error = new Error("expired"); error.status = 403; throw error; };
-  await failed.context.pollRuntimeUpdate();
-  assert.equal(failed.context.window.location.reloads, 0, "a failed update does not reload on a later refusal");
-  const missed = updateFixture();
-  await missed.context.onRuntimeUpdateApply();
-  const mid = missed.context.runtimeUpdatePending.intent.request_id;
-  missed.context.renderRuntimeUpdate({ ...missed.offer, controller: { id: mid, phase: "downloading" } });
-  missed.context.renderRuntimeUpdate({ ...missed.offer, controller: { id: mid, phase: "updated", message: "Home is up to date." } });
-  assert.equal(missed.context.window.location.reloads, 1, "this page's own update finishing reloads even if the restart poll was missed");
+  assert(f.timers.size > 0, "a long download does not shorten the restart wait");
+  assert.equal(f.status.textContent, "Restarting to finish the update. Home is usually back within two minutes.");
 });
 
-test("Home vanishing mid-update counts as the restart even when the restarting poll was missed", async () => {
+test("once an update is in progress, the update finishing or a session refusal reloads once; failed never does", async () => {
   const refused = () => { throw new TypeError("connection refused"); };
   const status = code => () => { const error = new Error("session"); error.status = code; throw error; };
+  const back = (f, id, phase) => () => f.context.renderRuntimeUpdate(
+    { ...f.offer, available: false, controller: { id, phase, message: "Home is up to date." } });
   for (const own of [true, false]) {
-    for (const [code, back] of [[401, null], [403, null], [null, "updated"], [null, "restored"]]) {
+    for (const [seen, steps, reloads] of [
+      ["downloading", f => [status(401)], 1],
+      ["downloading", f => [status(403)], 1],
+      ["verifying", (f, id) => [back(f, id, "updated")], 1],
+      ["downloading", f => [refused, refused, status(401)], 1],
+      ["restarting", (f, id) => [refused, back(f, id, "restored")], 1],
+      ["staging", (f, id) => [back(f, id, "failed"), status(401)], 0],
+    ]) {
       const f = updateFixture();
       let id = "another-tab-request";
       if (own) {
         await f.context.onRuntimeUpdateApply();
         id = f.context.runtimeUpdatePending.intent.request_id;
       }
-      f.context.renderRuntimeUpdate({ ...f.offer, controller: { id, phase: "downloading", message: "Downloading the update (88 MB)." } });
-      f.context.refreshSystemSummary = async () => refused();
-      f.timers.clear();
+      f.context.renderRuntimeUpdate({ ...f.offer, controller: { id, phase: seen } });
+      const label = `${own ? "own" : "seen"} ${seen} -> ${steps(f, id).length} steps -> ${reloads}`;
+      for (const step of steps(f, id)) {
+        f.context.refreshSystemSummary = async () => step();
+        f.timers.clear();
+        await f.context.pollRuntimeUpdate();
+        if (step === refused) assert.equal(f.status.textContent, "Restarting to finish the update. Home is usually back within two minutes.", label);
+        if (step === refused) assert.equal(f.timers.get(f.context.runtimeUpdateTimer).delay, 2000, label);
+      }
+      assert.equal(f.context.window.location.reloads, reloads, label);
+      if (reloads) assert.equal(f.timers.size, 0, label);
+      f.context.renderRuntimeUpdate({ ...f.offer, controller: { id, phase: "updated" } });
       await f.context.pollRuntimeUpdate();
-      assert.equal(f.status.textContent, "Restarting to finish the update. Home is usually back within two minutes.");
-      assert.equal(f.timers.get(f.context.runtimeUpdateTimer).delay, 2000);
-      f.context.refreshSystemSummary = back
-        ? async () => f.context.renderRuntimeUpdate({ ...f.offer, available: false, controller: { id, phase: back, message: "Home is up to date." } })
-        : async () => status(code)();
-      await f.advance(2_000);
-      assert.equal(f.context.window.location.reloads, 1, `${own ? "own" : "seen"} downloading -> refused -> ${code ?? back}`);
-      assert.equal(f.timers.size, 0);
-      assert.equal(f.posts.filter(post => post.method === "POST").length, own ? 1 : 0, "the reload replays no update request");
+      assert.equal(f.context.window.location.reloads, reloads, `at most one reload: ${label}`);
+      assert.equal(f.posts.filter(post => post.method === "POST").length, own ? 1 : 0, `no resend: ${label}`);
     }
   }
-  const blip = updateFixture();
-  await blip.context.onRuntimeUpdateApply();
-  const id = blip.context.runtimeUpdatePending.intent.request_id;
-  blip.context.renderRuntimeUpdate({ ...blip.offer, controller: { id, phase: "downloading" } });
-  blip.context.refreshSystemSummary = async () => refused();
-  await blip.context.pollRuntimeUpdate();
-  blip.context.refreshSystemSummary = async () => blip.context.renderRuntimeUpdate({ ...blip.offer, controller: { id, phase: "downloading" } });
-  await blip.context.pollRuntimeUpdate();
-  blip.context.refreshSystemSummary = async () => status(403)();
-  await blip.context.pollRuntimeUpdate();
-  assert.equal(blip.context.window.location.reloads, 0, "Home still downloading after a blip has not restarted");
-  const failed = updateFixture();
-  await failed.context.onRuntimeUpdateApply();
-  const fid = failed.context.runtimeUpdatePending.intent.request_id;
-  failed.context.renderRuntimeUpdate({ ...failed.offer, controller: { id: fid, phase: "verifying" } });
-  failed.context.refreshSystemSummary = async () => refused();
-  await failed.context.pollRuntimeUpdate();
-  failed.context.refreshSystemSummary = async () => failed.context.renderRuntimeUpdate(
-    { ...failed.offer, controller: { id: fid, phase: "failed", message: "The update failed." } });
-  await failed.context.pollRuntimeUpdate();
-  failed.context.refreshSystemSummary = async () => status(401)();
-  await failed.context.pollRuntimeUpdate();
-  assert.equal(failed.context.window.location.reloads, 0, "a failed update never reloads");
-  assert.equal(failed.posts.filter(post => post.method === "POST").length, 1);
+  const fresh = updateFixture();
+  fresh.context.refreshSystemSummary = async () => status(401)();
+  await fresh.context.pollRuntimeUpdate();
+  assert.match(fresh.status.textContent, /access has changed/, "a page that saw no update in progress keeps the dead-end message");
+  fresh.context.renderRuntimeUpdate({ ...fresh.offer, controller: { id: "earlier", phase: "updated" } });
+  assert.equal(fresh.context.window.location.reloads, 0, "nor does an earlier update's result reload it");
+  const queued = updateFixture();
+  await queued.context.onRuntimeUpdateApply();
+  queued.context.renderRuntimeUpdate({ ...queued.offer, controller: { id: "earlier-update", phase: "updated" } });
+  assert.equal(queued.context.window.location.reloads, 0, "an earlier update's result does not reload a queued request");
 });
 
 test("an auth refusal right after a restart reloads once instead of a dead end", async () => {

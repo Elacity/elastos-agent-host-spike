@@ -130,8 +130,11 @@ let runtimeUpdateBusy = false;
 let runtimeUpdateActive = true;
 let runtimeUpdateTimer = 0;
 let runtimeUpdateReconnects = 0;
-// Set once this page has seen Home restart for an update; the page reloads at most once per load.
-let runtimeUpdateRestartSeen = false;
+// Set once this page has seen an update in progress (its own request accepted, or a controller phase
+// from staging to restarting). Home may finish restarting between two polls, so the page does not try
+// to observe the restart itself: after this, the update finishing or Home refusing this page's old
+// session reloads the page once. A reloaded page starts with it false, so it reloads at most once.
+let runtimeUpdateInProgressSeen = false;
 const RUNTIME_UPDATE_RESTART_TEXT = "Restarting to finish the update. Home is usually back within two minutes.";
 // Polls are 2 s apart while Home restarts: 150 polls outlast the controller's 120 s restart budget with margin.
 const RUNTIME_UPDATE_RESTART_POLLS = 150;
@@ -3887,22 +3890,22 @@ function renderRuntimeUpdate(update) {
   runtimeUpdateNode.hidden = !configured && !runtimeUpdatePending;
   const controller = runtimeUpdate?.controller;
   const phase = readText(controller?.phase);
-  // This page's own request finishing as updated or restored also proves Home restarted under it.
-  const ownRequestBack = runtimeUpdatePending?.dispatched && controller?.id === runtimeUpdatePending.intent.request_id;
+  // With a request of its own pending, only that request's result is this page's update finishing;
+  // a result left from an earlier update can still be on display before the controller takes it.
+  const finishes = ["updated", "restored"].includes(phase)
+    && (!runtimeUpdatePending || controller?.id === runtimeUpdatePending.intent.request_id);
   if (runtimeUpdatePending && (controller?.id === runtimeUpdatePending.intent.request_id
     && ["updated", "restored", "failed"].includes(phase))) {
     runtimeUpdatePending = null;
     runtimeUpdateReconnects = 0;
   }
-  if (phase === "restarting") markRuntimeUpdateRestart();
-  // Home answering with a failure or with work before the restart has not restarted under this page.
-  if (["failed", "staging", "downloading", "verifying"].includes(phase)) runtimeUpdateRestartSeen = false;
-  if ((runtimeUpdateRestartSeen || ownRequestBack) && ["updated", "restored"].includes(phase)) {
+  if (["staging", "downloading", "verifying", "restarting"].includes(phase)) markRuntimeUpdateInProgress();
+  // A failed update keeps the current Home and its assets: never reload for it.
+  if (phase === "failed") runtimeUpdateInProgressSeen = false;
+  if (runtimeUpdateInProgressSeen && finishes) {
     // The new (or restored) Home serves different assets; load them instead of running stale code.
-    runtimeUpdateActive = false;
-    window.clearTimeout(runtimeUpdateTimer);
     showRuntimeUpdateStatus(readText(controller.message) || "Home is back. Reloading System…");
-    window.location.reload();
+    reloadForRuntimeUpdate();
     return;
   }
   const choice = runtimeUpdatePending?.intent || runtimeUpdate;
@@ -3955,21 +3958,27 @@ function runtimeUpdateProgressPhase() {
     && ["staging", "downloading", "verifying", "restarting"].includes(phase)) {
     runtimeUpdatePending.dispatched = true;
     runtimeUpdatePending.phase = phase;
-    if (phase === "restarting") markRuntimeUpdateRestart();
   }
   return runtimeUpdatePending.phase || "checking";
 }
 
-function markRuntimeUpdateRestart() {
-  if (runtimeUpdateRestartSeen) return;
-  // The restart gets its own full budget, whatever the download already used.
-  runtimeUpdateRestartSeen = true;
+function markRuntimeUpdateInProgress() {
+  if (runtimeUpdateInProgressSeen) return;
+  // From here a lost Home is most likely its restart: it gets the full restart budget.
+  runtimeUpdateInProgressSeen = true;
   runtimeUpdateReconnects = 0;
   if (runtimeUpdatePending) runtimeUpdatePending.polls = 0;
 }
 
+function reloadForRuntimeUpdate() {
+  runtimeUpdateInProgressSeen = false;
+  runtimeUpdateActive = false;
+  window.clearTimeout(runtimeUpdateTimer);
+  window.location.reload();
+}
+
 function runtimeUpdatePollLimit() {
-  return runtimeUpdateRestartSeen ? RUNTIME_UPDATE_RESTART_POLLS : 90;
+  return runtimeUpdateInProgressSeen ? RUNTIME_UPDATE_RESTART_POLLS : 90;
 }
 
 function runtimeUpdateCanApply() {
@@ -3988,7 +3997,8 @@ function scheduleRuntimeUpdateRefresh(delay) {
   window.clearTimeout(runtimeUpdateTimer);
   if (!runtimeUpdateActive || (runtimeUpdate !== undefined && runtimeUpdate?.configured !== true && !runtimeUpdatePending)) return;
   runtimeUpdateTimer = window.setTimeout(pollRuntimeUpdate,
-    document.hidden ? 30_000 : delay ?? (runtimeUpdateRestartSeen || runtimeUpdate?.controller?.phase === "restarting" ? 2_000 : 5_000));
+    document.hidden ? 30_000 : delay ?? (runtimeUpdate?.controller?.phase === "restarting"
+      || (runtimeUpdateInProgressSeen && runtimeUpdateReconnects > 0) ? 2_000 : 5_000));
 }
 
 async function pollRuntimeUpdate() {
@@ -4013,19 +4023,11 @@ async function pollRuntimeUpdate() {
     }
   } catch (error) {
     if (!runtimeUpdateActive) return;
-    // "restarting" is published just before Home stops and can fall between polls. Home vanishing
-    // (no HTTP answer at all) after the update download began is that restart; the controller always
-    // downloads between "staging" and the stop, so a lost answer during staging is not one.
-    const lastPhase = runtimeUpdatePending ? runtimeUpdatePending.phase : readText(runtimeUpdate?.controller?.phase);
-    if (error.status === undefined && ["downloading", "verifying"].includes(lastPhase)) {
-      markRuntimeUpdateRestart();
-    }
-    if ((error.status === 401 || error.status === 403) && runtimeUpdateRestartSeen) {
+    if ((error.status === 401 || error.status === 403) && runtimeUpdateInProgressSeen) {
       // The restarted Home no longer accepts this page's session token. A reload is a plain GET that
       // asks Home for a fresh session (or its sign-in); no update request is replayed, and the next
-      // load starts with runtimeUpdateRestartSeen false, so a second refusal stops below.
-      runtimeUpdateActive = false;
-      window.location.reload();
+      // load starts with runtimeUpdateInProgressSeen false, so a second refusal stops below.
+      reloadForRuntimeUpdate();
       return;
     }
     if (error.status === 401 || error.status === 403) {
@@ -4039,7 +4041,7 @@ async function pollRuntimeUpdate() {
       showRuntimeUpdateStatus("Home has not reconnected. Open Home again to check the update.");
       return;
     }
-    showRuntimeUpdateStatus(runtimeUpdateRestartSeen || runtimeUpdateProgressPhase() === "restarting"
+    showRuntimeUpdateStatus(runtimeUpdateInProgressSeen || runtimeUpdateProgressPhase() === "restarting"
       ? RUNTIME_UPDATE_RESTART_TEXT
       : runtimeUpdatePending?.dispatched ? "Waiting for Home to report update progress. Reconnecting…"
         : runtimeUpdatePending ? "Waiting for Home to confirm the update. Reconnecting…"
@@ -4082,6 +4084,7 @@ async function onRuntimeUpdateApply() {
         if (runtimeUpdatePending !== pending || !runtimeUpdateActive) return;
         if (reply?.id !== intent.request_id || reply?.phase !== "queued") throw new Error("Update queue confirmation is unavailable.");
         pending.dispatched = true;
+        markRuntimeUpdateInProgress();
         if (pending.phase === "checking") pending.phase = "queued";
         break;
       } catch (error) {
