@@ -576,6 +576,73 @@ fn every_interrupted_restoration_prefix_resumes_without_losing_new_data() {
 }
 
 #[test]
+fn a_failed_previous_start_is_retried_only_on_the_unchanged_restored_release() {
+    for running in [false, true] {
+        let fixture = RestartFixture::new();
+        let writer = fixture.activated();
+        assert!(writer.retire_previous_start().is_err());
+        started(&writer, false);
+        assert!(writer.retire_previous_start().is_err());
+        writer.restore_for_restart().unwrap();
+        assert!(writer.retire_previous_start().is_err());
+        let failed = if running {
+            started(&writer, true)
+        } else {
+            writer.claim_start(true).unwrap()
+        };
+        fixture.write_new_owner_data();
+        writer.retire_previous_start().unwrap();
+        let retired = writer.restart_record().unwrap();
+        assert_eq!(retired.phase, RestartPhase::Restored);
+        assert!(retired.generation.is_empty() && retired.pid.is_none());
+        assert!(retired.process_start.is_none());
+        fixture.assert_release(&writer, true);
+        fixture.assert_new_owner_data();
+        // Only the new claim's generation may start; the failed one is refused.
+        let retry = writer.claim_start(true).unwrap();
+        assert_ne!(retry.generation, failed.generation);
+        assert!(authorize_host_start_with_generation(
+            &fixture.data,
+            &fixture.binary,
+            Some(&failed.generation),
+            PREVIOUS_PID
+        )
+        .is_err());
+        writer
+            .record_started(
+                &retry.generation,
+                PREVIOUS_PID,
+                "Sat Oct 3 11:22:34 2026".into(),
+            )
+            .unwrap();
+        writer
+            .record_ready(&retry.generation, PREVIOUS_PID)
+            .unwrap();
+        assert!(writer.retire_previous_start().is_err());
+        writer.finish_restart().unwrap();
+        assert_no_transaction_scratch(&writer);
+    }
+    // A changed release file keeps the claim and every file in place.
+    let fixture = RestartFixture::new();
+    let writer = fixture.activated();
+    started(&writer, false);
+    writer.restore_for_restart().unwrap();
+    started(&writer, true);
+    fs::write(
+        &writer.destinations[&ReleaseFile::Components],
+        b"foreign components",
+    )
+    .unwrap();
+    let before = fixture.snapshot();
+    assert!(writer.retire_previous_start().is_err());
+    assert_eq!(fixture.snapshot(), before);
+    assert_eq!(
+        writer.restart_record().unwrap().phase,
+        RestartPhase::PreviousRunning
+    );
+}
+
+#[test]
 fn restart_journal_refuses_malformed_identity_and_phase_before_any_file_change() {
     use serde_json::{json, Value};
     type Mutation = (&'static str, fn(&mut Value));
@@ -823,7 +890,7 @@ fn controller_transaction_refusals_keep_the_controller_recovery_owner() {
         refuse_pending_home_start(&fixture.data, &fixture.binary),
     ] {
         let message = result.unwrap_err().to_string();
-        assert!(message.contains("retained update controller"), "{message}");
+        assert!(message.contains("`elastos home --browser`"), "{message}");
         assert!(!message.contains("`elastos update`"), "{message}");
         assert_eq!(fixture.snapshot(), before);
     }

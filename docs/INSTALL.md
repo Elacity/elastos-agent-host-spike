@@ -293,20 +293,17 @@ again before starting Home. Runtime owns the saved transaction and verifies its
 files before recovery. Keep the installation files and data in place.
 
 A Home with an installed update controller keeps its controller Runtime and
-private receipt in the data directory. If restart recovery requires that
-controller, set `ELASTOS_RECOVERY_DATA` to the data directory shown in the local
-message and run:
-
-```bash
-"${ELASTOS_RECOVERY_DATA}/update-controller/runtime" __update-controller \
-  --receipt "${ELASTOS_RECOVERY_DATA}/update-controller/receipt.json"
-```
-
-The controller verifies its signed Runtime, retained launch settings and saved
-release before it starts Home. Keep this terminal open. Initial startup has a
-120-second limit; update and rollback startup have a 30-second limit. A startup
-failure names the private `update-controller/runtime.log` file to inspect
-before trying again. The receipt keeps Home paths, locale, desktop opener settings and Runtime launch
+private receipt in the data directory. If a Home restart was interrupted, run
+`elastos home --browser`. It hands recovery to that retained controller, which
+verifies its signed Runtime, retained launch settings and saved release before
+it starts Home. When the start of the restored previous release failed, the
+controller starts that release again, at most twice per run, and clears the
+recovery files once Home is ready. It never starts the failed new release again.
+Keep this terminal open. Every Home start, first or after an update, has a
+120-second limit. Each start appends its output under a header to the private
+`update-controller/runtime.log` file, so a failed update start stays readable
+after the rollback; a startup failure names that file. The receipt keeps Home
+paths, locale, desktop opener settings and Runtime launch
 bindings. It also retains the configured Wallet price API key, which Wallet reads
 from the environment. Other provider and Browser settings stay in their installed
 private configuration files. Keep the receipt's owner-only permissions and

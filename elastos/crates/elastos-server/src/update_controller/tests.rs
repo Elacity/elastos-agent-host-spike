@@ -320,7 +320,7 @@ fn alternate_binary_refuses_installed_recovery_before_start_or_offline_migration
             let (target, plan, backup) = host_fence_migration_target(&fixture);
             let before = fixture.snapshot();
             let expected = if restarting {
-                "retained update controller"
+                "`elastos home --browser`"
             } else {
                 "Run `elastos update` again"
             };
@@ -2427,10 +2427,10 @@ fn controller_copy_refusals_preserve_the_previous_controller_and_foreign_target(
 }
 
 #[test]
-fn log_rotation_checks_private_ownership_before_truncation() {
+fn start_log_checks_private_ownership_and_keeps_earlier_starts() {
     for tamper in ["unsafe mode", "hard link", "symlink"] {
         let fixture = PrivateFixture::new();
-        let log = fixture.directory.join("runtime.log");
+        let log = fixture.directory.join(RUNTIME_LOG);
         let other = fixture.directory.join("foreign-log");
         fixture.file(&other, b"foreign retained log", 0o600);
         match tamper {
@@ -2439,7 +2439,10 @@ fn log_rotation_checks_private_ownership_before_truncation() {
             "symlink" => symlink(&other, &log).unwrap(),
             _ => unreachable!(),
         }
-        assert!(open_private_log(&log).is_err(), "{tamper}");
+        assert!(
+            open_start_log(&fixture.directory, "Home 0.7.0 start", "a").is_err(),
+            "{tamper}"
+        );
         assert_eq!(fs::read(&log).unwrap(), b"foreign retained log", "{tamper}");
         assert_eq!(
             fs::read(&other).unwrap(),
@@ -2448,10 +2451,41 @@ fn log_rotation_checks_private_ownership_before_truncation() {
         );
     }
     let fixture = PrivateFixture::new();
-    let log = fixture.directory.join("runtime.log");
-    fixture.file(&log, b"previous bounded log", 0o600);
-    drop(open_private_log(&log).unwrap());
-    assert!(fs::read(&log).unwrap().is_empty());
+    let log = fixture.directory.join(RUNTIME_LOG);
+    fixture.file(&log, b"failed update start evidence\n", 0o600);
+    let mut file = open_start_log(
+        &fixture.directory,
+        "Home 0.7.0 rollback start",
+        &"b".repeat(32),
+    )
+    .unwrap();
+    file.write_all(b"rollback output\n").unwrap();
+    drop(file);
+    let text = fs::read_to_string(&log).unwrap();
+    assert!(
+        text.starts_with(&format!(
+            "failed update start evidence\n\n=== Home 0.7.0 rollback start; generation {}; unix time ",
+            "b".repeat(32)
+        )),
+        "{text}"
+    );
+    assert!(text.ends_with(" ===\nrollback output\n"), "{text}");
+    // Past its bound the log moves aside once, keeping the latest earlier starts.
+    File::options()
+        .write(true)
+        .open(&log)
+        .unwrap()
+        .set_len(MAX_RUNTIME_LOG + 1)
+        .unwrap();
+    drop(open_start_log(&fixture.directory, "Home 0.7.0 start", &"c".repeat(32)).unwrap());
+    let previous = fixture.directory.join(PREVIOUS_RUNTIME_LOG);
+    assert_eq!(fs::metadata(&previous).unwrap().len(), MAX_RUNTIME_LOG + 1);
+    assert!(fs::read(&previous)
+        .unwrap()
+        .starts_with(b"failed update start evidence\n"));
+    assert!(fs::read_to_string(&log)
+        .unwrap()
+        .starts_with("\n=== Home 0.7.0 start; generation "));
 }
 
 #[tokio::test]
@@ -2956,7 +2990,7 @@ async fn recovery_with_an_owned_ready_child_publishes_its_terminal_result() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn initial_home_readiness_has_a_finite_budget_beyond_the_restart_limit() {
+async fn every_home_start_has_one_finite_readiness_budget() {
     let fixture = PrivateFixture::new();
     publish_retained_receipt(&fixture);
     let capsule = fixture.data.join("capsules/home");
@@ -3011,42 +3045,30 @@ async fn initial_home_readiness_has_a_finite_budget_beyond_the_restart_limit() {
     };
 
     let binary_hash = digest(b"signed fixture Runtime");
-    for restarting in [false, true] {
-        let started = tokio::time::Instant::now();
-        let message = {
-            let proof = controller.wait_ready(
-                &generation,
-                "0.7.0",
-                &binary_hash,
-                readiness_budget(restarting),
-            );
-            tokio::pin!(proof);
-            if !restarting {
-                tokio::select! {
-                    result = &mut proof => panic!("initial readiness ended before 31 seconds: {result:?}"),
-                    _ = tokio::time::sleep(Duration::from_secs(31)) => {},
-                }
-            }
-            proof.await.unwrap_err().to_string()
-        };
-        let expected = Duration::from_secs(if restarting { 30 } else { 120 });
-        assert!(started.elapsed() >= expected);
-        assert!(started.elapsed() <= expected + Duration::from_millis(50));
-        assert!(
-            message.contains(&format!("within {} seconds", expected.as_secs())),
-            "{message}"
-        );
-        assert!(!controller.host_ready);
-        assert_eq!(controller.child.as_ref().unwrap().pid(), pid);
-        assert!(controller
-            .child
-            .as_ref()
-            .unwrap()
-            .observed_exit()
-            .unwrap()
-            .is_none());
-        assert!(!fixture.directory.join(STATUS).exists());
-    }
+    let started = tokio::time::Instant::now();
+    let message = {
+        let proof = controller.wait_ready(&generation, "0.7.0", &binary_hash, READY_TIMEOUT);
+        tokio::pin!(proof);
+        // A slow device's Home (45 s) is still inside the budget.
+        tokio::select! {
+            result = &mut proof => panic!("readiness ended before 45 seconds: {result:?}"),
+            _ = tokio::time::sleep(Duration::from_secs(45)) => {},
+        }
+        proof.await.unwrap_err().to_string()
+    };
+    assert!(started.elapsed() >= Duration::from_secs(120));
+    assert!(started.elapsed() <= Duration::from_secs(120) + Duration::from_millis(50));
+    assert!(message.contains("within 120 seconds"), "{message}");
+    assert!(!controller.host_ready);
+    assert_eq!(controller.child.as_ref().unwrap().pid(), pid);
+    assert!(controller
+        .child
+        .as_ref()
+        .unwrap()
+        .observed_exit()
+        .unwrap()
+        .is_none());
+    assert!(!fixture.directory.join(STATUS).exists());
     // Restore wall time for the operating system's signal delivery and reap.
     tokio::time::resume();
     controller.stop_child().await.unwrap();
@@ -3171,29 +3193,61 @@ impl crate::update::RestartOwner for RealRestartOwner {
 
 #[tokio::test]
 async fn real_controller_loader_failure_restores_previous_home_once() {
-    real_controller_restart_failure("loader").await;
+    real_controller_restart_failure("loader", 0).await;
 }
 
 #[tokio::test]
 async fn real_controller_crash_before_readiness_restores_previous_home_once() {
-    real_controller_restart_failure("crash").await;
+    real_controller_restart_failure("crash", 0).await;
 }
 
 #[tokio::test]
 async fn real_controller_hung_start_restores_previous_home_once() {
-    real_controller_restart_failure("hung").await;
+    real_controller_restart_failure("hung", 0).await;
 }
 
-async fn real_controller_restart_failure(failure: &str) {
-    let fixture = PrivateFixture::new();
-    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
-    let previous = format!(
-        "#!/bin/sh\nexec {} --exact {} --ignored --nocapture\n",
-        quote(std::env::current_exe().unwrap().to_str().unwrap()),
-        quote(&format!(
+/// A rollback start as slow as Home on a busy Jetson still restores the previous Home.
+#[tokio::test]
+async fn real_controller_rollback_start_taking_45_seconds_restores_previous_home() {
+    real_controller_restart_failure("crash", 45).await;
+}
+
+struct RestartScenario {
+    fixture: PrivateFixture,
+    owner: RealRestartOwner,
+    request: UpdateRequest,
+    fetch: crate::update::FetchFn,
+    old: Vec<(PathBuf, Vec<u8>)>,
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Shell lines that export `settings` and exec the real fixture Home below.
+fn fixture_home_exec(settings: &str) -> String {
+    format!(
+        "export {settings}\nexec {} --exact {} --ignored --nocapture\n",
+        shell_quote(std::env::current_exe().unwrap().to_str().unwrap()),
+        shell_quote(&format!(
             "{}::restart_home_fixture",
             module_path!().split_once("::").unwrap().1
         )),
+    )
+}
+
+/// Home runs the installed previous release (0.7.0) and the owner approved a signed
+/// 0.7.1 whose Runtime is `candidate`. After a restart the previous fixture Home
+/// answers only after `previous_delay` seconds.
+async fn restart_scenario(
+    candidate: impl FnOnce(&PrivateFixture) -> String,
+    previous_delay: u64,
+    candidate_budget: Option<Duration>,
+) -> RestartScenario {
+    let fixture = PrivateFixture::new();
+    let previous = format!(
+        "#!/bin/sh\n{}",
+        fixture_home_exec(&format!("RESTART_FIXTURE_READY_DELAY={previous_delay}"))
     );
     crate::test_support::write_from_child(&fixture.binary, &previous, 0o755);
     let home = fixture.data.join("capsules/home");
@@ -3235,20 +3289,7 @@ async fn real_controller_restart_failure(failure: &str) {
     fixture.publish_installed_release_with_components(&components(b"old support"));
     publish_retained_receipt(&fixture);
 
-    let interpreter = fixture.data.join("candidate-interpreter");
-    let candidate = if failure == "loader" {
-        // A real interpreter admits --version, then disappears before the Home exec.
-        // Signed candidate bytes remain unchanged throughout activation and rollback.
-        symlink("/bin/sh", &interpreter).unwrap();
-        format!(
-            "#!{}\n/bin/rm {}\nprintf 'elastos 0.7.1\\n'\n",
-            interpreter.display(),
-            quote(interpreter.to_str().unwrap())
-        )
-    } else {
-        format!("#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'elastos 0.7.1\\n'; exit 0; fi\nprintf 'candidate\\n' >> candidate-starts\n{}\n",
-            if failure == "crash" { "exit 7" } else { "exec /bin/sleep 60" })
-    };
+    let candidate = candidate(&fixture);
     let candidate_components = components(b"new support");
     let descriptor =
         |bytes: &[u8]| json!({"cid":raw_cid(bytes),"sha256":digest(bytes),"size":bytes.len()});
@@ -3297,7 +3338,7 @@ async fn real_controller_restart_failure(failure: &str) {
             host_ready: false,
             carrier: None,
             carrier_close: None,
-            test_readiness: Some(Duration::from_secs(3)),
+            test_readiness: candidate_budget,
         },
         starts: Vec::new(),
         stops: 0,
@@ -3308,7 +3349,7 @@ async fn real_controller_restart_failure(failure: &str) {
     owner.controller.start_initial().await.unwrap();
     owner.controller.request = Some(request.clone());
     write_private(&fixture.directory.join(ACTIVE_REQUEST), &request).unwrap();
-    let old_paths = [
+    let old = [
         fixture.binary.clone(),
         fixture.data.join("components.json"),
         fixture.data.join("sources.json"),
@@ -3317,14 +3358,58 @@ async fn real_controller_restart_failure(failure: &str) {
         fixture.data.join("bin/fixture-provider"),
         home.join("capsule.json"),
         home.join("browser/index.html"),
-    ];
-    let old = old_paths.map(|path| {
+    ]
+    .map(|path| {
         let bytes = fs::read(&path).unwrap();
         (path, bytes)
-    });
+    })
+    .to_vec();
+    RestartScenario {
+        fixture,
+        owner,
+        request,
+        fetch,
+        old,
+    }
+}
+
+fn crash_candidate(_: &PrivateFixture) -> String {
+    "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'elastos 0.7.1\\n'; exit 0; fi\nprintf 'candidate\\n' >> candidate-starts\nprintf 'candidate start evidence\\n' >&2\nexit 7\n".into()
+}
+
+async fn real_controller_restart_failure(failure: &str, previous_delay: u64) {
+    let RestartScenario {
+        fixture,
+        mut owner,
+        request,
+        fetch,
+        old,
+    } = restart_scenario(
+        |fixture| match failure {
+            // A real interpreter admits --version, then disappears before the Home exec.
+            // Signed candidate bytes remain unchanged throughout activation and rollback.
+            "loader" => {
+                let interpreter = fixture.data.join("candidate-interpreter");
+                symlink("/bin/sh", &interpreter).unwrap();
+                format!(
+                    "#!{}\n/bin/rm {}\nprintf 'elastos 0.7.1\\n'\n",
+                    interpreter.display(),
+                    shell_quote(interpreter.to_str().unwrap())
+                )
+            }
+            "crash" => crash_candidate(fixture),
+            _ => "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'elastos 0.7.1\\n'; exit 0; fi\nprintf 'candidate\\n' >> candidate-starts\nprintf 'candidate start evidence\\n' >&2\nexec /bin/sleep 60\n".into(),
+        },
+        previous_delay,
+        Some(Duration::from_secs(3)),
+    )
+    .await;
+    let interpreter = fixture.data.join("candidate-interpreter");
+    let started = std::time::Instant::now();
     let result =
         crate::update::run_restarting_update(&fixture.data, &fetch, request.head_cid, &mut owner)
             .await;
+    assert!(started.elapsed() >= Duration::from_secs(previous_delay));
     owner.controller.publish_apply_result(&result).unwrap();
     let error = format!("{:#}", result.unwrap_err());
     assert!(
@@ -3400,6 +3485,20 @@ async fn real_controller_restart_failure(failure: &str) {
             b"candidate\n"
         );
     }
+    // The failed update start's log survives the rollback start that followed it.
+    let log = fs::read_to_string(fixture.directory.join(RUNTIME_LOG)).unwrap();
+    let first = log.find("=== Home 0.7.0 start; generation ").unwrap();
+    let update = log
+        .find("=== Home 0.7.1 update start; generation ")
+        .unwrap();
+    let rollback = log
+        .find("=== Home 0.7.0 rollback start; generation ")
+        .unwrap();
+    assert!(first < update && update < rollback, "{log}");
+    if failure != "loader" {
+        let evidence = log.find("candidate start evidence").unwrap();
+        assert!(update < evidence && evidence < rollback, "{log}");
+    }
     if let Some((pid, birth)) = &owner.candidate_process {
         if let Some(birth) = birth {
             assert!(child::generation_gone(*pid, birth).unwrap());
@@ -3417,22 +3516,7 @@ async fn real_controller_restart_failure(failure: &str) {
         fs::read(fixture.data.join("owner-data")).unwrap(),
         b"new owner data"
     );
-    for parent in [&fixture.data, &fixture.data.join("installation")] {
-        for name in [
-            ".elastos.update-journal.json",
-            ".elastos.update-journal.tmp",
-            ".elastos.update-stage",
-            ".elastos.update-rollback",
-            ".elastos.update-support",
-        ] {
-            assert!(
-                !parent.join(name).exists(),
-                "{}",
-                parent.join(name).display()
-            );
-        }
-    }
-    assert!(!InstallTransaction::has_pending_recovery(&fixture.binary));
+    assert_no_recovery_files(&fixture);
     // Repeated controller reconciliation retains the ready Home and consumes no new start.
     for _ in 0..2 {
         owner.controller.reconcile_pending().await.unwrap();
@@ -3452,6 +3536,220 @@ async fn real_controller_restart_failure(failure: &str) {
         .is_none());
 }
 
+fn assert_no_recovery_files(fixture: &PrivateFixture) {
+    for parent in [&fixture.data, &fixture.data.join("installation")] {
+        for name in [
+            ".elastos.update-journal.json",
+            ".elastos.update-journal.tmp",
+            ".elastos.update-stage",
+            ".elastos.update-rollback",
+            ".elastos.update-support",
+        ] {
+            assert!(
+                !parent.join(name).exists(),
+                "{}",
+                parent.join(name).display()
+            );
+        }
+    }
+    assert!(!InstallTransaction::has_pending_recovery(&fixture.binary));
+}
+
+/// A new release whose Home needs 45 s, like Home on a busy Jetson, is accepted.
+#[tokio::test]
+async fn real_controller_accepts_a_new_home_ready_after_45_seconds() {
+    let RestartScenario {
+        fixture,
+        mut owner,
+        request,
+        fetch,
+        ..
+    } = restart_scenario(
+        |_| {
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'elastos 0.7.1\\n'; exit 0; fi\n{}",
+                fixture_home_exec(
+                    "RESTART_FIXTURE_ROLE=candidate RESTART_FIXTURE_VERSION=0.7.1 RESTART_FIXTURE_READY_DELAY=45"
+                )
+            )
+        },
+        0,
+        None,
+    )
+    .await;
+    let started = std::time::Instant::now();
+    let result =
+        crate::update::run_restarting_update(&fixture.data, &fetch, request.head_cid, &mut owner)
+            .await;
+    owner.controller.publish_apply_result(&result).unwrap();
+    result.unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(45));
+    assert_eq!(owner.starts, [RestartPhase::CandidateStartClaimed]);
+    assert!(owner.controller.host_ready);
+    let projected = status(&fixture.data).unwrap().unwrap();
+    assert_eq!(projected.phase, "updated");
+    assert_eq!(projected.current_version, "0.7.1");
+    assert_eq!(
+        projected.host_pid,
+        Some(owner.controller.child.as_ref().unwrap().pid())
+    );
+    assert_eq!(
+        fs::read(fixture.data.join("candidate-starts")).unwrap(),
+        b"start\n"
+    );
+    assert!(fixture.data.join("candidate-ready").exists());
+    assert!(!fixture.data.join("previous-starts").exists());
+    assert_eq!(
+        fs::read(fixture.data.join("bin/fixture-provider")).unwrap(),
+        b"new support"
+    );
+    assert_no_recovery_files(&fixture);
+    owner.controller.stop_child().await.unwrap();
+}
+
+/// The candidate crashes and the in-process rollback start exits while `previous-fail`
+/// exists: the journal is left at previous_running with a dead pid, as on the Jetson.
+async fn dead_previous_start() -> (PrivateFixture, Vec<(PathBuf, Vec<u8>)>) {
+    let RestartScenario {
+        fixture,
+        mut owner,
+        request,
+        fetch,
+        old,
+    } = restart_scenario(crash_candidate, 0, Some(Duration::from_secs(3))).await;
+    fixture.file(&fixture.data.join("previous-fail"), b"", 0o600);
+    let result =
+        crate::update::run_restarting_update(&fixture.data, &fetch, request.head_cid, &mut owner)
+            .await;
+    owner.controller.publish_apply_result(&result).unwrap();
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(
+        error.contains("previous Home did not become ready; retain recovery journal"),
+        "{error}"
+    );
+    let projected = status(&fixture.data).unwrap().unwrap();
+    assert_eq!(projected.phase, "failed");
+    assert!(
+        projected.message.contains("`elastos home --browser`"),
+        "{}",
+        projected.message
+    );
+    let record = InstallTransaction::acquire(&fixture.data, &fixture.binary)
+        .unwrap()
+        .restart_record()
+        .unwrap();
+    assert_eq!(record.phase, RestartPhase::PreviousRunning);
+    assert!(child::generation_gone(
+        record.pid.unwrap(),
+        record.process_start.as_deref().unwrap()
+    )
+    .unwrap());
+    assert!(owner.controller.child.is_none());
+    (fixture, old)
+}
+
+/// What `elastos home --browser` execs for a pending restart: the retained controller
+/// with its receipt and the held lease.
+fn retained_controller(fixture: &PrivateFixture) -> Controller {
+    let handoff = restart_recovery_handoff(&fixture.data, &fixture.binary)
+        .unwrap()
+        .unwrap();
+    assert_eq!(handoff.receipt, fixture.directory.join(RECEIPT));
+    assert_eq!(handoff.controller, fixture.controller());
+    assert!(acquire_lease(&fixture.directory).is_err());
+    drop(handoff);
+    Controller {
+        receipt: read_private_json(&fixture.directory.join(RECEIPT)).unwrap(),
+        directory: fixture.directory.clone(),
+        child: None,
+        request: None,
+        previous_binary_sha256: String::new(),
+        previous_version: String::new(),
+        generation: String::new(),
+        host_ready: false,
+        carrier: None,
+        carrier_close: None,
+        test_readiness: None,
+    }
+}
+
+async fn assert_recovered(
+    fixture: &PrivateFixture,
+    mut controller: Controller,
+    old: &[(PathBuf, Vec<u8>)],
+    previous_starts: usize,
+) {
+    controller.reconcile_pending().await.unwrap();
+    controller.complete_reconciliation().await.unwrap();
+    assert!(controller.host_ready);
+    let projected = status(&fixture.data).unwrap().unwrap();
+    assert_eq!(projected.phase, "restored");
+    assert_eq!(projected.current_version, "0.7.0");
+    assert_no_recovery_files(fixture);
+    assert!(restart_recovery_handoff(&fixture.data, &fixture.binary)
+        .unwrap()
+        .is_none());
+    assert!(!fixture.directory.join(ACTIVE_REQUEST).exists());
+    assert_eq!(
+        fs::read_to_string(fixture.data.join("previous-starts"))
+            .unwrap()
+            .lines()
+            .count(),
+        previous_starts
+    );
+    assert!(fixture.data.join("previous-ready").exists());
+    for (path, bytes) in old {
+        assert_eq!(&fs::read(path).unwrap(), bytes, "{}", path.display());
+    }
+    // The failed new release was never started again.
+    assert_eq!(
+        fs::read(fixture.data.join("candidate-starts")).unwrap(),
+        b"candidate\n"
+    );
+    controller.stop_child().await.unwrap();
+}
+
+#[tokio::test]
+async fn home_recovers_the_previous_release_after_its_start_died() {
+    let (fixture, old) = dead_previous_start().await;
+    fs::remove_file(fixture.data.join("previous-fail")).unwrap();
+    let controller = retained_controller(&fixture);
+    assert_recovered(&fixture, controller, &old, 2).await;
+}
+
+#[tokio::test]
+async fn repeated_previous_start_failure_keeps_recovery_files_and_says_so() {
+    let (fixture, old) = dead_previous_start().await;
+    let mut controller = retained_controller(&fixture);
+    let error = format!("{:#}", controller.reconcile_pending().await.unwrap_err());
+    assert!(
+        error
+            .contains("The previous Home did not start after 2 attempts. Recovery files are kept.")
+            && error.contains("`elastos home --browser`"),
+        "{error}"
+    );
+    assert!(controller.child.is_none());
+    assert!(InstallTransaction::has_pending_recovery(&fixture.binary));
+    assert!(fixture.directory.join(ACTIVE_REQUEST).exists());
+    assert_eq!(
+        fs::read_to_string(fixture.data.join("previous-starts"))
+            .unwrap()
+            .lines()
+            .count(),
+        3
+    );
+    let log = fs::read_to_string(fixture.directory.join(RUNTIME_LOG)).unwrap();
+    assert_eq!(log.matches("=== Home 0.7.0 rollback start;").count(), 3);
+    assert_eq!(log.matches("fixture previous start refused").count(), 3);
+    for (path, bytes) in &old {
+        assert_eq!(&fs::read(path).unwrap(), bytes, "{}", path.display());
+    }
+    // Not a dead end: once the cause is gone, the next run recovers.
+    fs::remove_file(fixture.data.join("previous-fail")).unwrap();
+    let controller = retained_controller(&fixture);
+    assert_recovered(&fixture, controller, &old, 4).await;
+}
+
 #[tokio::test]
 #[ignore = "real child Home for controller restart failure tests"]
 async fn restart_home_fixture() {
@@ -3462,6 +3760,11 @@ async fn restart_home_fixture() {
     let data = std::env::current_dir().unwrap();
     let generation = std::env::var("ELASTOS_UPDATE_GENERATION").unwrap();
     let restarting = std::env::var("ELASTOS_UPDATE_RESTART").unwrap() == "1";
+    let setting =
+        |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.into());
+    let role = setting("RESTART_FIXTURE_ROLE", "previous");
+    let version = setting("RESTART_FIXTURE_VERSION", "0.7.0");
+    let delay: u64 = setting("RESTART_FIXTURE_READY_DELAY", "0").parse().unwrap();
     let mut term =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
     child::watch_parent().unwrap();
@@ -3493,10 +3796,19 @@ async fn restart_home_fixture() {
         OpenOptions::new()
             .append(true)
             .create(true)
-            .open(data.join("previous-starts"))
+            .open(data.join(format!("{role}-starts")))
             .unwrap()
             .write_all(b"start\n")
             .unwrap();
+        if role == "previous" && data.join("previous-fail").exists() {
+            eprintln!("fixture previous start refused");
+            std::process::exit(9);
+        }
+        // A slow device's Home: nothing answers until the delay has passed.
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(delay)) => {},
+            _ = term.recv() => return,
+        }
     }
     // A private ephemeral port, away from the operator's Home, reported to the controller.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3511,10 +3823,14 @@ async fn restart_home_fixture() {
         "binary_sha256":digest(&fs::read(data.join("installed-runtime")).unwrap())
     })).unwrap();
     let document = fs::read(data.join("capsules/home/browser/index.html")).unwrap();
+    let ready = restarting.then(|| data.join(format!("{role}-ready")));
     let router = Router::new()
         .route(
             "/api/health",
-            get(|| async { Json(json!({"version":"0.7.0"})) }),
+            get(move || {
+                let version = version.clone();
+                async move { Json(json!({ "version": version })) }
+            }),
         )
         .route(
             "/api/auth/attach",
@@ -3527,13 +3843,13 @@ async fn restart_home_fixture() {
             "/home/",
             get(move || {
                 let document = document.clone();
-                let data = data.clone();
+                let ready = ready.clone();
                 async move {
-                    if restarting {
+                    if let Some(ready) = ready {
                         OpenOptions::new()
                             .append(true)
                             .create(true)
-                            .open(data.join("previous-ready"))
+                            .open(ready)
                             .unwrap()
                             .write_all(b"ready\n")
                             .unwrap();

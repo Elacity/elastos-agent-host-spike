@@ -1300,6 +1300,10 @@ async fn run() -> anyhow::Result<()> {
         status: false,
         json: false,
     });
+    if matches!(&command, Commands::Home { browser: true, .. }) {
+        // A pending Home restart belongs to the retained controller; this execs it.
+        elastos_server::update_controller::resume_restart_recovery()?;
+    }
     if matches!(
         &command,
         Commands::Serve { .. } | Commands::Gateway { .. } | Commands::Home { browser: true, .. }
