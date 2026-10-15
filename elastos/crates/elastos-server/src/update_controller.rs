@@ -1092,6 +1092,10 @@ impl Controller {
                 bail!("Home exited before it became ready.");
             }
             if process_start(pid).as_deref() != Some(start.as_str()) {
+                // A Home that exits between the two checks no longer has a start time.
+                if child.observed_exit()?.is_some() {
+                    bail!("Home exited before it became ready.");
+                }
                 bail!("Home process generation changed.");
             }
             let home_port = BROWSER_HOME_PORT;
