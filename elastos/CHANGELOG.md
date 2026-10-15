@@ -109,6 +109,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   fixed Carrier port also listens on that port over IPv6, so its ticket stays
   the same across restarts (#336).
 - Browser shows "Starting Browser…" while it starts, and no longer shows white bars around the page.
+- Browser opens on a new install. Setup now records the Browser helpers it installs, so opening Browser no longer downloads them again and fails with "another writer owns the installation lock". Browser also no longer fails to open when another program uses one of the local ports it picked.
 - Chat: the message box returns to one line after you send, People → Message reuses the open Chat window, and Open Inbox in People works.
 - In the Assistant, Edit on a message you just sent opens the editor, and Delete asks in the message itself, then removes it. Before, Edit did nothing until the chat was reopened, and Delete did nothing.
 - In the Assistant, the end of each reply and its buttons stay above the message box, so you no longer scroll down to read the last lines.
