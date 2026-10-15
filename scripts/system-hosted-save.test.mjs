@@ -225,7 +225,9 @@ function updateFixture(overrides = {}) {
     runtimeUpdateNode: panel, runtimeUpdateButton: button, runtimeUpdateStatusNode: status,
     runtimeUpdate: undefined, runtimeUpdatePending: null, runtimeUpdateBusy: false,
     runtimeUpdateActive: true, runtimeUpdateTimer: 0, runtimeUpdateReconnects: 0,
-    runtimeUpdateRequests: new Set(),
+    runtimeUpdateRequests: new Set(), runtimeUpdateRestartSeen: false,
+    RUNTIME_UPDATE_RESTART_TEXT: source.match(/RUNTIME_UPDATE_RESTART_TEXT = "([^"]+)"/)?.[1],
+    RUNTIME_UPDATE_RESTART_POLLS: Number(source.match(/RUNTIME_UPDATE_RESTART_POLLS = (\d+)/)?.[1]),
     systemSummaryInFlight: null, homeParentOrigin: "https://home.example",
     document: { hidden: false, addEventListener: (type, handler) => listeners.set(`document:${type}`, handler) },
     window: {
@@ -233,6 +235,7 @@ function updateFixture(overrides = {}) {
       addEventListener: (type, handler) => listeners.set(type, handler),
       setTimeout: (handler, delay) => { timers.set(++timerId, { handler, delay, due: now + delay }); return timerId; },
       clearTimeout: id => timers.delete(id),
+      location: { reloads: 0, reload() { this.reloads += 1; } },
     },
     readText: value => typeof value === "string" ? value.trim() : "",
     setTextFields: (field, value) => fields.set(field, value),
@@ -450,9 +453,9 @@ test("matching queue confirmation and controller state prove progress after slow
   assert.match(f.status.textContent, /report update progress/);
   assert(!f.status.textContent.includes("restarting"));
   f.context.renderRuntimeUpdate({ ...f.offer, controller: { id, phase: "restarting" } });
-  assert.match(f.status.textContent, /Home is restarting/);
+  assert.equal(f.status.textContent, "Restarting to finish the update. Home is usually back within two minutes.");
   await f.context.pollRuntimeUpdate();
-  assert.match(f.status.textContent, /Home is restarting/);
+  assert.equal(f.status.textContent, "Restarting to finish the update. Home is usually back within two minutes.");
 });
 
 test("only a matching queue reply confirms dispatch and an ambiguous deadline preserves the exact retry", async () => {
@@ -529,8 +532,8 @@ test("Home update polling binds host messages, stops at auth refusal, and closes
   assert.equal(f.context.runtimeUpdateTimer, timer);
   f.listeners.get("message")({ source: f.top, origin: "https://home.example", data: message });
   assert.equal(f.timers.get(f.context.runtimeUpdateTimer).delay, 0);
-  f.context.renderRuntimeUpdate({ ...f.offer, can_apply: false, controller: { phase: "restarting" } });
-  assert.equal(f.timers.get(f.context.runtimeUpdateTimer).delay, 2000);
+  f.context.renderRuntimeUpdate({ ...f.offer, can_apply: false, controller: { phase: "staging" } });
+  assert.equal(f.timers.get(f.context.runtimeUpdateTimer).delay, 5000);
   f.context.refreshSystemSummary = async () => { const error = new Error("expired"); error.status = 403; throw error; };
   f.timers.clear();
   await f.context.pollRuntimeUpdate();
@@ -540,6 +543,50 @@ test("Home update polling binds host messages, stops at auth refusal, and closes
   f.listeners.get("pagehide")();
   f.context.scheduleRuntimeUpdateRefresh();
   assert.equal(f.timers.size, 0);
+});
+
+test("System explains the restart wait, outlasts the controller restart budget, and reloads once when Home is back", async () => {
+  for (const back of ["updated", "restored"]) {
+    const f = updateFixture();
+    await f.context.onRuntimeUpdateApply();
+    const id = f.context.runtimeUpdatePending.intent.request_id;
+    f.context.renderRuntimeUpdate({ ...f.offer, controller: { id, phase: "restarting" } });
+    assert.equal(f.status.textContent, "Restarting to finish the update. Home is usually back within two minutes.");
+    assert.equal(f.timers.get(f.context.runtimeUpdateTimer).delay, 2000);
+    f.context.refreshSystemSummary = async () => { throw new TypeError("connection refused"); };
+    await f.advance(130_000);
+    assert.equal(f.status.textContent, "Restarting to finish the update. Home is usually back within two minutes.");
+    assert(f.timers.size > 0, "System still polls after the 120 s controller restart budget");
+    assert.equal(f.context.window.location.reloads, 0);
+    f.context.refreshSystemSummary = async () => f.context.renderRuntimeUpdate(
+      { ...f.offer, available: false, controller: { id, phase: back, message: "Home is up to date." } });
+    await f.advance(2_000);
+    assert.equal(f.context.window.location.reloads, 1);
+    assert.equal(f.timers.size, 0, "the reloading page stops polling");
+    const fresh = updateFixture();
+    fresh.context.renderRuntimeUpdate({ ...fresh.offer, controller: { id, phase: back, message: "Home is up to date." } });
+    assert.equal(fresh.context.window.location.reloads, 0, "the reloaded page does not reload again");
+  }
+  const failed = updateFixture();
+  await failed.context.onRuntimeUpdateApply();
+  const id = failed.context.runtimeUpdatePending.intent.request_id;
+  failed.context.renderRuntimeUpdate({ ...failed.offer, controller: { id, phase: "restarting" } });
+  failed.context.renderRuntimeUpdate({ ...failed.offer, controller: { id, phase: "failed", message: "The update failed." } });
+  assert.equal(failed.context.window.location.reloads, 0, "a failed update keeps the current page");
+  assert.equal(failed.status.textContent, "The update failed.");
+});
+
+test("an auth refusal right after a restart reloads once instead of a dead end", async () => {
+  const f = updateFixture();
+  await f.context.onRuntimeUpdateApply();
+  const id = f.context.runtimeUpdatePending.intent.request_id;
+  f.context.renderRuntimeUpdate({ ...f.offer, controller: { id, phase: "restarting" } });
+  f.context.refreshSystemSummary = async () => { const error = new Error("session"); error.status = 401; throw error; };
+  f.timers.clear();
+  await f.context.pollRuntimeUpdate();
+  assert.equal(f.context.window.location.reloads, 1);
+  assert.equal(f.timers.size, 0);
+  assert.equal(f.posts.filter(post => post.method === "POST").length, 1, "the reload replays no update request");
 });
 
 test("Home update summary refreshes share one bounded request", async () => {
