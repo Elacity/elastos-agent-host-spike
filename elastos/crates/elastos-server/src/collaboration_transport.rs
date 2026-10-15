@@ -23,7 +23,7 @@ pub(crate) struct CollaborationTransportDriver {
     core: Arc<CollaborationCore>,
     network: JoinedCollaborationNetwork,
     home_delivery: Option<SharedHomeDelivery>,
-    gossip: Mutex<SharedRetrySchedule>,
+    gossip: Mutex<GossipSchedule>,
 }
 
 const SHARED_FAST_RETRY_WINDOW_SECS: u64 = 3;
@@ -36,8 +36,7 @@ const MAX_SHARED_DELIVERY_BYTES: usize = MAX_COLLABORATION_TRANSPORT_FRAME_BYTES
 // The Shared JSON payload bound plus Carrier's result envelope and newline.
 pub(crate) const MAX_SHARED_CARRIER_REPLY_BYTES: usize = MAX_SHARED_DELIVERY_BYTES + 64;
 const HOME_DELIVERY_TIMEOUT: Duration = Duration::from_secs(2);
-/// Schedule key for the gossip plane: one broadcast reaches every Home.
-const GOSSIP_PLANE: &str = "gossip";
+const MAX_SHARED_GOSSIP_RETRY: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 struct SharedHomeDelivery {
@@ -51,6 +50,24 @@ struct SharedHomeDelivery {
 struct SharedRetrySchedule {
     attempts: HashMap<(String, String), Instant>,
     next: usize,
+}
+
+/// When each pending original last went out over gossip, and how often.
+#[derive(Default)]
+struct GossipSchedule {
+    sent: HashMap<String, (Instant, u32)>,
+}
+
+/// Wait after `sends` gossip broadcasts of one original. Presence keeps the
+/// slow cadence; a Shared post backs off 5, 10, 20, 40, then 60 s until a
+/// Home receipt.
+fn gossip_resend_interval(shared: bool, sends: u32) -> Duration {
+    if !shared {
+        return SHARED_CUSTODY_RETRY;
+    }
+    SHARED_CUSTODY_RETRY
+        .saturating_mul(1 << sends.saturating_sub(1).min(4))
+        .min(MAX_SHARED_GOSSIP_RETRY)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -301,7 +318,7 @@ impl CollaborationTransportDriver {
             core,
             network,
             home_delivery: None,
-            gossip: Mutex::new(SharedRetrySchedule::default()),
+            gossip: Mutex::new(GossipSchedule::default()),
         }
     }
 
@@ -364,57 +381,58 @@ impl CollaborationTransportDriver {
         Ok(summary)
     }
 
-    /// Broadcasts Presence every cycle and each Shared post once, then again
-    /// on the slow cadence until its first Home receipt. Gossip reaches Homes
-    /// that no presence or Discovery lists and no direct dial reaches.
+    /// Broadcasts each pending original at once, then resends it until a
+    /// receipt settles it: Presence every 5 s, a Shared post with back-off
+    /// (`gossip_resend_interval`). Gossip reaches Homes that no presence or
+    /// Discovery lists and no direct dial reaches. A bootstrap node only
+    /// forwards and sends nothing.
     async fn retry_gossip_once(
         &self,
         now: u64,
     ) -> anyhow::Result<CollaborationOutgoingRetrySummary> {
-        if !self.core.community_membership().joined() {
+        if !self.core.community_membership().joined()
+            || self
+                .core
+                .is_bootstrap_endpoint(&self.core.local_device_did())
+        {
             return Ok(CollaborationOutgoingRetrySummary::default());
         }
-        let pending = self.core.pending_outgoing(now)?;
-        let bootstrap = self
-            .core
-            .is_bootstrap_endpoint(&self.core.local_device_did());
         let attempted_at = Instant::now();
         let selected = {
             let mut schedule = self
                 .gossip
                 .lock()
-                .map_err(|_| anyhow::anyhow!("Shared gossip schedule lock poisoned"))?;
-            let live = pending
+                .map_err(|_| anyhow::anyhow!("gossip schedule lock poisoned"))?;
+            // A Shared post leaves gossip at its first Home receipt; direct
+            // delivery keeps it pending for the other Homes.
+            let live = self
+                .core
+                .pending_outgoing(now)?
+                .into_iter()
+                .filter(|message| !message.shared_chat() || !message.remote_acceptance_recorded())
+                .collect::<Vec<_>>();
+            let hashes = live
                 .iter()
-                .filter(|message| message.shared_chat() && !message.remote_acceptance_recorded())
-                .map(|message| message.envelope_sha256().to_string())
+                .map(|message| message.envelope_sha256())
                 .collect::<HashSet<_>>();
             schedule
-                .attempts
-                .retain(|(hash, _), _| live.contains(hash.as_str()));
+                .sent
+                .retain(|hash, _| hashes.contains(hash.as_str()));
             let mut shared = 0;
-            pending
-                .into_iter()
+            live.into_iter()
                 .filter(|message| {
-                    if !message.shared_chat() {
-                        return true;
-                    }
-                    if bootstrap
-                        || shared == MAX_CUSTODY_RETRIES_PER_CYCLE
-                        || !live.contains(message.envelope_sha256())
-                    {
+                    if message.shared_chat() && shared == MAX_CUSTODY_RETRIES_PER_CYCLE {
                         return false;
                     }
-                    let due = schedule
-                        .attempts
-                        .get(&(
-                            message.envelope_sha256().to_string(),
-                            GOSSIP_PLANE.to_string(),
-                        ))
-                        .is_none_or(|last| {
-                            attempted_at.duration_since(*last) >= SHARED_CUSTODY_RETRY
-                        });
-                    shared += usize::from(due);
+                    let due =
+                        schedule
+                            .sent
+                            .get(message.envelope_sha256())
+                            .is_none_or(|(last, sends)| {
+                                attempted_at.duration_since(*last)
+                                    >= gossip_resend_interval(message.shared_chat(), *sends)
+                            });
+                    shared += usize::from(due && message.shared_chat());
                     due
                 })
                 .collect::<Vec<_>>()
@@ -422,19 +440,17 @@ impl CollaborationTransportDriver {
         let mut summary = CollaborationOutgoingRetrySummary::default();
         for outgoing in selected {
             self.core.community_membership().require_joined()?;
-            if outgoing.shared_chat() {
-                // Recorded per send, so a cycle cut short leaves the rest due.
-                self.gossip
+            // Recorded per send, so a cycle cut short leaves the rest due.
+            {
+                let mut schedule = self
+                    .gossip
                     .lock()
-                    .map_err(|_| anyhow::anyhow!("Shared gossip schedule lock poisoned"))?
-                    .attempts
-                    .insert(
-                        (
-                            outgoing.envelope_sha256().to_string(),
-                            GOSSIP_PLANE.to_string(),
-                        ),
-                        attempted_at,
-                    );
+                    .map_err(|_| anyhow::anyhow!("gossip schedule lock poisoned"))?;
+                let entry = schedule
+                    .sent
+                    .entry(outgoing.envelope_sha256().to_string())
+                    .or_insert((attempted_at, 0));
+                *entry = (attempted_at, entry.1.saturating_add(1));
             }
             summary.attempted += 1;
             let frame = self
@@ -1669,6 +1685,116 @@ mod tests {
         assert!(ac.record_remote_acceptance(&receipt, NOW + 1).is_err());
         assert!(!ac.pending_outgoing(NOW + 1).unwrap()[0].remote_acceptance_recorded());
         assert_eq!(ac.summary().unwrap().remotely_accepted_outgoing, 0);
+    }
+
+    #[test]
+    fn shared_gossip_backs_off_to_a_minute_and_presence_keeps_five_seconds() {
+        let shared = (1..=7)
+            .map(|sends| gossip_resend_interval(true, sends).as_secs())
+            .collect::<Vec<_>>();
+        assert_eq!(shared, [5, 10, 20, 40, 60, 60, 60]);
+        assert!((1..=7).all(|sends| gossip_resend_interval(false, sends) == SHARED_CUSTODY_RETRY));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unanswered_gossip_resends_on_its_schedule_not_every_cycle() {
+        let a = Fixture::new();
+        let ac = a.core();
+        let presence = prepare_metadata(&a, &ac, "unanswered-presence");
+        let post = prepare_outgoing(&ac, "unanswered-post", serde_json::json!({"body":"hi"}));
+        for message in [&presence, &post] {
+            ac.acknowledge_outgoing_product_projection(message.envelope_sha256())
+                .unwrap();
+        }
+        // No Home answers and every broadcast fails, as with an overloaded seed.
+        let carrier = FakeCarrier::new();
+        let driver = a.driver(ac.clone(), carrier.clone()).await;
+        let mut ticks = HashMap::<String, Vec<u32>>::new();
+        let mut seen = 1;
+        // 400 worker cycles of 500 ms: 200 s.
+        for tick in 0..400 {
+            driver.retry_outgoing_once(NOW).await.unwrap();
+            let requests = carrier.requests();
+            for request in &requests[seen..] {
+                let frame = crate::collaboration_protocol::verify_collaboration_transport_frame(
+                    request["message"].as_str().unwrap().as_bytes(),
+                )
+                .unwrap();
+                ticks
+                    .entry(collaboration_message_envelope_sha256(
+                        frame.envelope_bytes(),
+                    ))
+                    .or_default()
+                    .push(tick);
+            }
+            seen = requests.len();
+            tokio::time::advance(SHARED_CUSTODY_FAST_RETRY).await;
+        }
+        let gaps = |hash: &str| {
+            ticks[hash]
+                .windows(2)
+                .map(|pair| (pair[1] - pair[0]) / 2)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ticks[presence.envelope_sha256()][0], 0);
+        assert_eq!(
+            gaps(presence.envelope_sha256()),
+            vec![5; 39],
+            "Presence: every 5 s"
+        );
+        assert_eq!(ticks[post.envelope_sha256()][0], 0);
+        assert_eq!(gaps(post.envelope_sha256()), [5, 10, 20, 40, 60, 60]);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_node_admits_and_sends_nothing_and_consumes_the_topic() {
+        let (seed, _) = generate_keypair();
+        let a = bootstrap_fixture(&seed);
+        let mut s = peer_fixture(&a);
+        s.device_key = seed;
+        let sc = s.core();
+        let (home, _) = generate_keypair();
+        let (_, post) = remote_message(&a, home.clone(), "Shared post");
+        let ac = a.core();
+        let outgoing = prepare_outgoing(&ac, "home-post", serde_json::json!({"body":"hi"}));
+        let receipt =
+            sign_collaboration_transport_frame(&home, &remote_receipt(&a, &outgoing, home.clone()))
+                .unwrap();
+        let frames = vec![
+            gossip(&presence_frame(&a, &home, NOW)),
+            gossip(&sign_collaboration_transport_frame(&home, &post).unwrap()),
+            gossip(&receipt),
+        ];
+        let own = prepare_metadata(&s, &sc, "seed-presence");
+        sc.acknowledge_outgoing_product_projection(own.envelope_sha256())
+            .unwrap();
+        let carrier = FakeCarrier::new();
+        carrier.push([remembered(&a.profile)]);
+        let driver = s.driver(sc.clone(), carrier.clone()).await;
+        carrier.push([peek(0, 3, frames), ack(0, 3)]);
+        // The Carrier forwards the topic; the Core only advances past it.
+        assert_eq!(
+            driver.process_incoming_once(NOW).await.unwrap(),
+            CollaborationIncomingOnceOutcome::Acknowledged(CollaborationIncomingOnceSummary {
+                deterministic_rejections: 3,
+                ..CollaborationIncomingOnceSummary::default()
+            })
+        );
+        assert_eq!(driver.retry_outgoing_once(NOW).await.unwrap().attempted, 0);
+        assert_eq!(
+            request_ops(&carrier),
+            [
+                "remember_peer",
+                "gossip_join_exact",
+                "gossip_peek",
+                "gossip_ack"
+            ]
+        );
+        let summary = sc.summary().unwrap();
+        assert_eq!(
+            summary.pending_product_handoffs + summary.replay_tombstones,
+            0
+        );
     }
 
     #[tokio::test]
