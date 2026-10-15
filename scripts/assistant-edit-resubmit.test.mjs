@@ -230,6 +230,43 @@ test("Edit on a queued follow-up sent in this view resubmits that message", asyn
   assert.deepEqual(app.errors, []);
 });
 
+test("A reply that has just streamed offers Delete and Regenerate without a redraw", async t => {
+  const app = await openAssistant(t);
+  await app.send("First question", "Reply 1");
+  const reply = text => app.frame.locator(".agent-msg-agent").filter({ hasText: text });
+  // A marker survives only while the transcript is not redrawn.
+  await reply("Reply 1").evaluate(row => { row.dataset.fixtureStreamed = "1"; });
+  await app.send("Second question", "Reply 2");
+  await reply("Reply 2").evaluate(row => { row.dataset.fixtureStreamed = "1"; });
+  await until(() => app.creates.length === 2, "second run created");
+  for (const text of ["Reply 1", "Reply 2"]) {
+    const row = reply(text);
+    assert.equal(await row.getAttribute("data-fixture-streamed"), "1", `${text} is the streamed row`);
+    await row.hover();
+    await row.getByRole("button", { name: "Delete" }).waitFor({ state: "attached", timeout: 5000 });
+    assert.ok(await row.getByRole("button", { name: "Regenerate reply" }).isEnabled(), `${text} offers Regenerate`);
+  }
+  const question = reply("Reply 1").getByRole("group", { name: "Delete this message?" });
+  await reply("Reply 1").getByRole("button", { name: "Delete" }).click();
+  await question.getByRole("button", { name: "Delete" }).click();
+  await app.savedTranscript([["user", "First question"], ["user", "Second question"], ["agent", "Reply 2"]]);
+  assert.deepEqual(await app.replyTexts(), ["Reply 2"], "Delete removes the reply it was offered on");
+  assert.deepEqual(app.errors, []);
+});
+
+test("A streamed reply whose provider keeps no copy still offers Delete and Regenerate", async t => {
+  const app = await openAssistant(t, { eventsPage: async () => ({ next_cursor: 2, has_more: false, events: [
+    { sequence: 1, kind: "text_delta", data: { text: "Shown once" } },
+    { sequence: 2, kind: "completed", terminal: true, data: { output_retained: false } }] }) });
+  await app.send("Question", "Shown once");
+  const row = app.frame.locator(".agent-msg-agent").filter({ hasText: "Shown once" });
+  await row.hover();
+  await row.getByRole("button", { name: "Delete" }).waitFor({ state: "attached", timeout: 5000 });
+  assert.ok(await row.getByRole("button", { name: "Regenerate reply" }).isEnabled());
+  assert.equal(await row.getAttribute("data-msg-index"), "1");
+  assert.deepEqual(app.errors, []);
+});
+
 /** A long streamed reply (paragraphs, code block); page `hold` waits on `gate`. */
 function longReply({ hold = -1, gate = null } = {}) {
   const parts = [];
