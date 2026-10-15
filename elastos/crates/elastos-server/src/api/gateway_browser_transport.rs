@@ -1223,44 +1223,30 @@ mod tests {
 
     #[test]
     fn turn_ports_skip_a_block_another_program_holds() {
-        let generation = format!("sha256:{}", "7".repeat(64));
-        let relays = |host: &str| {
-            select_port_block(&generation, "turn-relay", 43100, 43227, 8, host, true).unwrap()
-        };
-        let first = relays("127.0.0.1");
-        // Any program's listener on one relay port moves the session to a free block.
-        let held_tcp = std::net::TcpListener::bind(("127.0.0.1", first.0 + 3)).unwrap();
-        let second = relays("127.0.0.1");
-        assert_ne!(second, first);
-        assert_eq!((second.0 - 43100) % 8, 0);
-        assert_eq!(second.1, second.0 + 7);
-        assert!(second.1 <= 43227);
-        // A UDP holder counts as well: relays use both.
-        let held_udp = std::net::UdpSocket::bind(("127.0.0.1", second.1)).unwrap();
-        let third = relays("127.0.0.1");
-        assert!(third != first && third != second);
-        drop((held_tcp, held_udp));
-        // A relay host this machine cannot bind keeps the generation's block.
-        let remote = relays("192.0.2.10");
-        let _local = std::net::TcpListener::bind(("127.0.0.1", remote.0));
-        assert_eq!(relays("192.0.2.10"), remote);
-        // The TURN listener is one bindable port of its range.
-        let listener = || {
-            select_port_block(
-                &generation,
-                "turn-listener",
-                43000,
-                43031,
-                1,
-                "127.0.0.1",
-                false,
-            )
-            .unwrap()
-        };
-        let port = listener();
-        assert_eq!(port.0, port.1);
-        let _held = std::net::TcpListener::bind(("127.0.0.1", port.0)).unwrap();
-        assert_ne!(listener(), port);
+        // Ports the OS gives other programs, as it may inside the configured ranges.
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        for (label, held, size, relay) in [
+            ("turn-relay", tcp.local_addr().unwrap().port(), 8, true),
+            ("turn-relay", udp.local_addr().unwrap().port(), 8, true),
+            ("turn-listener", tcp.local_addr().unwrap().port(), 1, false),
+        ] {
+            // Four blocks; the last one holds the port.
+            let (start, end) = (held - (4 * size - 1), held);
+            let select = |generation: &str, host: &str| {
+                select_port_block(generation, label, start, end, size, host, relay).unwrap()
+            };
+            let busy = (held - (size - 1), held);
+            // A relay host this machine cannot bind keeps the generation's block.
+            let generation = (0..)
+                .map(|n| format!("generation-{n}"))
+                .find(|generation| select(generation, "192.0.2.10") == busy)
+                .unwrap();
+            let chosen = select(&generation, "127.0.0.1");
+            assert_ne!(chosen, busy, "{label}");
+            assert_eq!((chosen.0 - start) % size, 0, "{label}");
+            assert_eq!(chosen.1, chosen.0 + size - 1, "{label}");
+        }
     }
 
     #[test]
