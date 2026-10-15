@@ -23,7 +23,7 @@ const until = async (predicate, label) => {
     `eventsPage(after_sequence)`, when given, serves every run's events pages instead. */
 async function openAssistant(t, { firstReply = null, eventsPage = null } = {}) {
   let stored = { schema, revision: 0, document: { v: 1, liveOfferId: offerId, sessions: [] } };
-  const creates = [], errors = [];
+  const creates = [], errors = [], cancels = [];
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, "http://fixture");
     const headers = { "access-control-allow-origin": "null", "access-control-allow-headers": "content-type,x-elastos-home-token",
@@ -61,6 +61,10 @@ async function openAssistant(t, { firstReply = null, eventsPage = null } = {}) {
           creates.push(body);
           json({ status: "ok", data: { schema: "elastos.model.run/v1", run_id: `run:sha256:${String(creates.length).repeat(64)}`,
             offer_id: offerId, operation: "text.generate", status: "running", sequence_cursor: 0 } }); return;
+        }
+        if (url.pathname === "/api/provider/model/runs_cancel") {
+          cancels.push(body);
+          json({ status: "ok", data: { schema: "elastos.model.run/v1", run_id: body.run_id, status: "cancelling" } }); return;
         }
         if (url.pathname === "/api/provider/model/runs_events") {
           if (eventsPage) {
@@ -112,7 +116,7 @@ async function openAssistant(t, { firstReply = null, eventsPage = null } = {}) {
   const texts = async locator => (await locator.allTextContents()).map(text => text.trim());
   const saved = () => JSON.stringify(stored.document.sessions?.[0]?.messages?.map(message => [message.role, message.text]));
   return {
-    page, frame, composer, userRows, replies, creates, errors,
+    page, frame, composer, userRows, replies, creates, cancels, errors,
     userTexts: () => texts(userRows.locator(".agent-msg-body")),
     replyTexts: () => texts(replies),
     send: async (question, reply) => {
@@ -264,6 +268,31 @@ test("A streamed reply whose provider keeps no copy still offers Delete and Rege
   await row.getByRole("button", { name: "Delete" }).waitFor({ state: "attached", timeout: 5000 });
   assert.ok(await row.getByRole("button", { name: "Regenerate reply" }).isEnabled());
   assert.equal(await row.getAttribute("data-msg-index"), "1");
+  assert.deepEqual(app.errors, []);
+});
+
+test("A reply stopped before its run settles still offers Delete and Regenerate", async t => {
+  let release;
+  const settled = new Promise(done => { release = done; });
+  const app = await openAssistant(t, { eventsPage: async after => {
+    if (after === 0) return { next_cursor: 1, has_more: false,
+      events: [{ sequence: 1, kind: "text_delta", data: { text: "Partial words" } }] };
+    await settled;
+    return { next_cursor: 2, has_more: false,
+      events: [{ sequence: 2, kind: "settlement_unknown", terminal: true, data: {} }] };
+  } });
+  t.after(() => release());
+  await app.send("Question", "Partial words");
+  const capsule = app.page.frames().find(frame => frame.url().includes("/apps/assistant/"));
+  await capsule.evaluate(async () => { void (await import("/apps/assistant/agent-live.js")).abortLiveChatStream(); });
+  await until(() => app.cancels.length === 1, "Stop sends one cancel");
+  release();
+  const row = app.frame.locator(".agent-msg-agent").filter({ hasText: "Partial words" });
+  await row.hover();
+  await row.getByRole("button", { name: "Delete" }).waitFor({ state: "attached", timeout: 5000 });
+  assert.equal(await row.getAttribute("data-msg-index"), "1");
+  await app.frame.locator('.agent-msg-agent .agent-msg-action[data-regenerate]:not([disabled])').waitFor({ state: "attached", timeout: 5000 });
+  assert.equal(await app.frame.locator(".agent-msg-agent").count(), 1, "one row for the saved partial");
   assert.deepEqual(app.errors, []);
 });
 
