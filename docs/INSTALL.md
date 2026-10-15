@@ -305,8 +305,8 @@ start of the restored previous release failed, the controller starts that
 release again, at most twice per run, and clears the recovery files once Home
 is ready. It never starts the failed new release again. Keep this terminal
 open. Every Home start, with or without `--browser`, first or after an update,
-waits up to 120 seconds for its Runtime. Each
-start appends its output under a header to the private
+gives its newly started Runtime up to 120 seconds to become ready. Each start
+through the update controller appends its output under a header to the private
 `update-controller/runtime.log` file, so a failed update start stays readable
 after the rollback; a startup failure names that file.
 
