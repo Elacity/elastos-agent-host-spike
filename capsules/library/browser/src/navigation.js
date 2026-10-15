@@ -23,13 +23,26 @@ export function createLibraryNavigation({
   // On a phone stage the shell owns the system Back: an entry of this frame's
   // own would take Back before the shell sees it (joint session history). The
   // shell's layout message (elastos-theme.js) names the stage, so an embedded
-  // Library adds no entry until it knows it is not on a phone.
+  // Library adds no entry until it knows it is not on a phone, and when the
+  // shell resets its stage to a phone it drops the entries it made (the
+  // in-app Back and Forward keep their stacks) and tells the shell, which
+  // arms its own Back only after that (APP_HISTORY_MESSAGE in
+  // home-gui/browser/shell-phone-stage.js).
+  const APP_HISTORY_MESSAGE = "elastos:app-history";
+  let dropping = false;
+
   function onPhoneStage() {
     return typeof document !== "undefined" && document.documentElement?.dataset.elFormFactor === "phone";
   }
 
   function stageKnown() {
     return window.parent === window || Boolean(document.documentElement?.dataset.elFormFactor);
+  }
+
+  function announceHistory(held) {
+    if (window.parent !== window) {
+      window.parent.postMessage({ type: APP_HISTORY_MESSAGE, held }, "*");
+    }
   }
 
   function browserHistoryAvailable() {
@@ -63,14 +76,27 @@ export function createLibraryNavigation({
     syncNavigationButtons();
   }
 
-  // Embedded: install once the shell names a non-phone stage, also when a
-  // phone stage later becomes a tablet or desktop.
+  // Embedded: follow the shell's stage resets. A phone drops this frame's
+  // entries; a tablet or desktop installs them.
   let watchingStage = false;
   function watchStage() {
     if (watchingStage || window.parent === window || typeof MutationObserver !== "function") return;
     watchingStage = true;
-    new MutationObserver(() => installBrowserHistory())
-      .observe(document.documentElement, { attributes: true, attributeFilter: ["data-el-form-factor"] });
+    new MutationObserver(() => {
+      if (onPhoneStage()) {
+        dropBrowserHistory();
+      } else {
+        installBrowserHistory();
+      }
+    }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-el-form-factor"] });
+  }
+
+  // Steps back over every entry this frame pushed, onto the entry it had
+  // when it loaded (the guard); handleBrowserPopState finishes the drop.
+  function dropBrowserHistory() {
+    if (dropping || state.historyIndex < 0) return;
+    dropping = true;
+    window.history.go(-(state.historyIndex + 1));
   }
 
   function installBrowserHistory() {
@@ -83,6 +109,7 @@ export function createLibraryNavigation({
     window.history.replaceState(libraryHistoryGuardState(state.currentUri), "", window.location.href);
     window.history.pushState(libraryHistoryState(entry), "", window.location.href);
     syncNavigationStacksFromHistory();
+    announceHistory(true);
   }
 
   function pushBrowserHistory(uri) {
@@ -98,13 +125,15 @@ export function createLibraryNavigation({
 
   async function handleBrowserPopState(event) {
     const data = event.state || {};
-    // Entries made before this became a phone stage: a Back that lands on one
-    // of them was meant for the shell, so pass it on instead of navigating
-    // (and past the guard: on a phone the user is leaving).
-    if (onPhoneStage() && (data.schema === LIBRARY_HISTORY_SCHEMA || data.schema === LIBRARY_HISTORY_GUARD_SCHEMA)) {
-      window.history.back();
+    if (dropping) {
+      dropping = false;
+      state.historyEntries = [];
+      state.historyIndex = -1;
+      announceHistory(false);
       return;
     }
+    // The shell owns Back on a phone stage; this frame holds no entries there.
+    if (onPhoneStage()) return;
     if (data.schema === LIBRARY_HISTORY_GUARD_SCHEMA) {
       const entry = state.historyEntries[state.historyIndex] || createHistoryEntry(state.currentUri);
       window.history.pushState(libraryHistoryState(entry), "", window.location.href);

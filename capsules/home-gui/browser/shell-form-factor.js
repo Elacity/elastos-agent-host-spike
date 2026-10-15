@@ -40,13 +40,27 @@ export function classifyFormFactor(width, height = Number.POSITIVE_INFINITY, coa
   return FORM_FACTORS.desktop;
 }
 
-export function formFactor(view = window) {
+// Live size class of a viewport. The shell itself reads formFactor(), the
+// committed one.
+export function measuredFormFactor(view = window) {
   return classifyFormFactor(view.innerWidth, view.innerHeight, isCoarsePointer(view));
+}
+
+// The form factor is decided at load and changes only through one clean
+// stage reset when the viewport crosses the phone boundary (bindFormFactor),
+// so no surface ever morphs between phone and desktop while it holds state.
+let committed = null;
+
+export function formFactor(view = window) {
+  return committed && committed.view === view ? committed.factor : measuredFormFactor(view);
 }
 
 export function isPhone(view = window) {
   return formFactor(view) === FORM_FACTORS.phone;
 }
+
+// Dispatched on the view whenever the committed form factor changes.
+export const FORM_FACTOR_EVENT = "elastos:form-factor";
 
 // Pointer class comes from media features, never from the user agent: a
 // tablet with a trackpad is fine-pointer, a touch laptop is coarse.
@@ -60,14 +74,43 @@ export function isCoarsePointer(view = window) {
 // and relays it (home:keyboard-inset, home/browser/home-keyboard-inset.js).
 let relayedKeyboardInset = 0;
 
-// Takes the host's measurement; anything but a finite number clears it.
+// Takes the host's measurement; anything but a finite number clears it. A
+// viewport across the phone boundary is the stage reset's to commit, so the
+// inset then follows the committed form factor.
 export function relayKeyboardInset(inset, doc = document, view = window) {
   relayedKeyboardInset = Number.isFinite(inset) ? Math.max(0, Math.round(inset)) : 0;
-  return syncFormFactor(doc, view);
+  if (!crossesPhoneBoundary(view)) {
+    return syncFormFactor(doc, view);
+  }
+  const factor = formFactor(view);
+  const applied = factor === FORM_FACTORS.phone ? relayedKeyboardInset : 0;
+  doc.documentElement.style.setProperty("--keyboard-inset", `${applied}px`);
+  return { factor, coarse: isCoarsePointer(view), inset: applied };
 }
 
+// Notification Centre and Control Centre are groups on the desktop (base
+// semantics) and non-modal sheets on a phone; the clock opens the
+// Notification Centre.
+const PHONE_DIALOGS = Object.freeze(["#notification-center", "#control-centre"]);
+
+function applyPhoneSemantics(doc, phone) {
+  for (const selector of PHONE_DIALOGS) {
+    const node = doc.querySelector?.(selector);
+    node?.setAttribute("role", phone ? "dialog" : "group");
+    if (phone) {
+      node?.setAttribute("aria-modal", "false");
+    } else {
+      node?.removeAttribute("aria-modal");
+    }
+  }
+  doc.querySelector?.("#clock")?.setAttribute("aria-haspopup", phone ? "dialog" : "true");
+}
+
+// Commits the viewport's form factor and applies it.
 export function syncFormFactor(doc = document, view = window) {
-  const factor = formFactor(view);
+  const previous = committed && committed.view === view ? committed.factor : null;
+  const factor = measuredFormFactor(view);
+  committed = { view, factor };
   const coarse = isCoarsePointer(view);
   doc.body.dataset.formFactor = factor;
   doc.body.dataset.pointer = coarse ? "coarse" : "fine";
@@ -76,13 +119,46 @@ export function syncFormFactor(doc = document, view = window) {
   // inset.
   const inset = factor === FORM_FACTORS.phone ? relayedKeyboardInset : 0;
   doc.documentElement.style.setProperty("--keyboard-inset", `${inset}px`);
+  if (previous !== factor) {
+    applyPhoneSemantics(doc, factor === FORM_FACTORS.phone);
+    if (typeof view.CustomEvent === "function") {
+      view.dispatchEvent(new view.CustomEvent(FORM_FACTOR_EVENT, { detail: { factor, previous } }));
+    }
+  }
   return { factor, coarse, inset };
 }
 
-// Keeps the body dataset and --keyboard-inset current. Returns an unbind.
-export function bindFormFactor(doc = document, view = window) {
-  const sync = () => syncFormFactor(doc, view);
-  sync();
+// Whether the viewport now lies on the other side of the phone boundary from
+// the committed form factor.
+export function crossesPhoneBoundary(view = window) {
+  return (measuredFormFactor(view) === FORM_FACTORS.phone) !== isPhone(view);
+}
+
+// Commits the form factor at load and keeps the body dataset and
+// --keyboard-inset current. A resize that crosses the phone boundary runs
+// `reset(commit)` instead: one clean stage reset that calls commit() itself
+// once the old stage is gone. Resizes during a reset wait for it and are
+// judged again afterwards. Returns an unbind.
+export function bindFormFactor(doc = document, view = window, { reset = null } = {}) {
+  let running = false;
+  const sync = () => {
+    if (running) {
+      return;
+    }
+    if (!reset || !crossesPhoneBoundary(view)) {
+      syncFormFactor(doc, view);
+      return;
+    }
+    running = true;
+    Promise.resolve()
+      .then(() => reset(() => syncFormFactor(doc, view)))
+      .catch(() => {})
+      .then(() => {
+        running = false;
+        sync();
+      });
+  };
+  syncFormFactor(doc, view);
   view.addEventListener("resize", sync);
   return () => {
     view.removeEventListener("resize", sync);

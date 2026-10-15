@@ -14,6 +14,14 @@
    their own close (registerStageLayer in shell-popovers.js); the phone smoke
    fails on a Home host surface that has none.
 
+   Form factor: decided at load. A resize or rotation across the phone
+   boundary runs one clean stage reset (resetPhoneStage) before any new input
+   is handled: fullscreen Spaces are left, every open registered layer closes
+   through its own close, the shell's history entry is dropped and re-armed
+   for the new mode, and app frames drop their own history before a phone
+   stage arms (APP_HISTORY_MESSAGE). Back therefore only ever runs in a
+   stable form factor; app windows stay open.
+
    Swipe: a downward drag on the title bar opens Mission Control as the app
    switcher. It starts on the title bar only — capsule frames own their own
    touches — and cancels on horizontal drift. Presentation only. */
@@ -26,8 +34,10 @@ import {
 } from "./shell-phone-stage-history.js?v=home-20260813a";
 import { isPhone } from "./shell-form-factor.js?v=home-20260813a";
 import { minimizeWindow } from "./shell-windows.js?v=home-20260813a";
+import { exitFullscreenStage } from "./shell-stages.js?v=home-20260813a";
 import { isExposeOpen, openExpose } from "./shell-expose.js?v=home-20260813a";
 import { registeredStageLayers } from "./shell-popovers.js?v=home-20260813a";
+import { isDismissing } from "./shell-motion.js?v=home-20260813a";
 
 // A title-bar drag this far down opens the switcher…
 export const TITLE_SWIPE_DOWN_PX = 48;
@@ -47,6 +57,14 @@ const STAGE_CHROME = Object.freeze([
 export const LAYER_HOST_SELECTORS = Object.freeze(
   HOME_GUI_HOST_SELECTORS.filter((selector) => !STAGE_CHROME.includes(selector)),
 );
+// A stage reset waits this long for the history to settle (the shell's own
+// back(), app frames dropping their entries) before it moves on.
+export const RESET_HISTORY_TIMEOUT_MS = 1500;
+// An app frame that holds browser-history entries of its own says so
+// ({ type, held: true }) and says { held: false } once it dropped them; a
+// phone stage arms its history only after every holder dropped (Library,
+// capsules/library/browser/src/navigation.js).
+export const APP_HISTORY_MESSAGE = "elastos:app-history";
 // A close that never lands stops holding its layer after this long.
 export const LAYER_CLOSE_TIMEOUT_MS = 2000;
 
@@ -84,11 +102,18 @@ function layerOpen(layer, doc) {
 const closing = new Map();
 let onLayerSettled = () => {};
 
+// The close has landed: the layer is gone, or its close was a shared leave
+// animation (shell-motion.js) that a reopen cancelled, so it is open again
+// as a new layer.
+function closeLanded(layer, settle, doc) {
+  return !layerOpen(layer, doc) || (settle.viaMotion && !isDismissing(layerNode(layer, doc)));
+}
+
 // Called on every shell DOM change: settles each closing layer that is gone.
 export function releaseClosedLayers(doc = document) {
   for (const [id, settle] of [...closing]) {
     const layer = registeredStageLayers().find((entry) => entry.id === id);
-    if (!layer || !layerOpen(layer, doc)) {
+    if (!layer || closeLanded(layer, settle, doc)) {
       settle();
     }
   }
@@ -168,7 +193,7 @@ export function closeStageLayer(layer, doc = document) {
     // DOM changes settle it at once (releaseClosedLayers); this poll covers a
     // close that changes no observed attribute.
     const check = () => {
-      if (layerOpen(layer, doc) && Date.now() - started < LAYER_CLOSE_TIMEOUT_MS) {
+      if (!closeLanded(layer, settle, doc) && Date.now() - started < LAYER_CLOSE_TIMEOUT_MS) {
         timer = view.setTimeout(check, 32);
         return;
       }
@@ -181,6 +206,7 @@ export function closeStageLayer(layer, doc = document) {
     } catch (_error) {
       // A close that throws leaves the layer open; the timeout releases it.
     }
+    settle.viaMotion = isDismissing(layerNode(layer, doc));
     check();
   });
 }
@@ -275,6 +301,110 @@ export function stageHistorySupported(view = window) {
   return !webkit;
 }
 
+// The bound stage: its history model (null on WebKit) and whether a reset is
+// running.
+const stage = { history: null, resetting: false };
+// App frames that hold browser-history entries of their own.
+const historyHolders = new Set();
+
+function trackAppHistory(event, doc) {
+  if (event.data?.type !== APP_HISTORY_MESSAGE || typeof event.data.held !== "boolean") {
+    return;
+  }
+  const fromFrame = [...doc.querySelectorAll("iframe")].some((frame) => frame.contentWindow === event.source);
+  if (!fromFrame) {
+    return;
+  }
+  if (event.data.held) {
+    historyHolders.add(event.source);
+  } else {
+    historyHolders.delete(event.source);
+  }
+}
+
+function liveHolders(doc) {
+  const frames = new Set([...doc.querySelectorAll("iframe")].map((frame) => frame.contentWindow));
+  for (const holder of historyHolders) {
+    if (!frames.has(holder)) {
+      historyHolders.delete(holder);
+    }
+  }
+  return historyHolders.size;
+}
+
+function settled(predicate, view, timeoutMs = RESET_HISTORY_TIMEOUT_MS) {
+  const started = Date.now();
+  return new Promise((resolve) => {
+    const check = () => {
+      if (predicate() || Date.now() - started >= timeoutMs) {
+        resolve();
+        return;
+      }
+      view.setTimeout(check, 32);
+    };
+    check();
+  });
+}
+
+const RESET_BLOCKED_INPUT = Object.freeze([
+  "pointerdown", "pointerup", "click", "dblclick", "contextmenu", "touchstart", "touchend",
+  "keydown", "keyup", "wheel",
+]);
+
+// Nothing new reaches the shell or a capsule frame until the reset is done.
+function blockInput(doc, view) {
+  const swallow = (event) => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+  for (const type of RESET_BLOCKED_INPUT) {
+    view.addEventListener(type, swallow, { capture: true, passive: false });
+  }
+  const wasInert = doc.body.inert;
+  doc.body.inert = true;
+  doc.body.dataset.stageReset = "running";
+  return () => {
+    for (const type of RESET_BLOCKED_INPUT) {
+      view.removeEventListener(type, swallow, { capture: true });
+    }
+    doc.body.inert = wasInert;
+    delete doc.body.dataset.stageReset;
+  };
+}
+
+// One clean stage reset across the phone boundary; `commit` switches the
+// committed form factor (shell-form-factor.js bindFormFactor).
+export async function resetPhoneStage(commit, doc = document, view = window) {
+  const leavingPhone = isPhone(view);
+  const unblock = blockInput(doc, view);
+  stage.resetting = true;
+  try {
+    for (const entry of [...shellState.windows.values()]) {
+      if (entry?.fullscreenStage) {
+        exitFullscreenStage(entry.id);
+      }
+    }
+    // Top-most first, each through its own close; then wait out any close a
+    // Back already started.
+    for (const layer of openStageLayers(doc).reverse()) {
+      await closeStageLayer(layer, doc);
+    }
+    await settled(() => closing.size === 0, view, LAYER_CLOSE_TIMEOUT_MS);
+    if (stage.history && leavingPhone && isStageHistoryState(view.history.state)) {
+      view.history.back();
+      await settled(() => !isStageHistoryState(view.history.state), view);
+    }
+    commit();
+    if (stage.history && !leavingPhone && isPhone(view)) {
+      await settled(() => liveHolders(doc) === 0, view);
+    }
+  } finally {
+    stage.resetting = false;
+    stage.history?.sync();
+    unblock();
+  }
+}
+
 export function bindPhoneStage(doc = document, view = window) {
   bindTitleSwipe(doc);
   let onChange = () => {};
@@ -288,6 +418,7 @@ export function bindPhoneStage(doc = document, view = window) {
     childList: true,
     subtree: true,
   });
+  view.addEventListener("message", (event) => trackAppHistory(event, doc));
   if (!stageHistorySupported(view)) {
     doc.body.dataset.stageHistory = "buttons";
     return null;
@@ -295,11 +426,14 @@ export function bindPhoneStage(doc = document, view = window) {
   doc.body.dataset.stageHistory = "history";
   const stageHistory = createStageHistory({
     onOurEntry: () => isStageHistoryState(view.history.state),
-    layerCount: () => (isPhone(view) ? stageLayerCount(doc) : 0),
+    // Nothing arms while a reset runs: app frames may still be dropping
+    // their entries below ours.
+    layerCount: () => (isPhone(view) && !stage.resetting ? stageLayerCount(doc) : 0),
     pushState: () => view.history.pushState(STAGE_HISTORY_STATE, ""),
     back: () => view.history.back(),
     onBack: () => closeTopStageLayer(doc),
   });
+  stage.history = stageHistory;
   let scheduled = false;
   const sync = () => {
     scheduled = false;
@@ -316,8 +450,12 @@ export function bindPhoneStage(doc = document, view = window) {
   onChange = schedule;
   view.addEventListener("popstate", () => {
     releaseClosedLayers(doc);
+    // The reset's own traversal, or a Back pressed while input is blocked:
+    // the reset re-arms for the new form factor when it is done.
+    if (stage.resetting) {
+      return;
+    }
     stageHistory.handlePopState();
   });
-  view.addEventListener("resize", schedule);
   return stageHistory;
 }

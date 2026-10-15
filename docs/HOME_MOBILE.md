@@ -40,11 +40,25 @@ the same fact. Every touch or narrow change keys on the phone class
 mirrors `classifyFormFactor()`), never on the pointer, hover or width alone:
 tablet and desktop keep the desktop shell byte-for-byte, whatever the pointer.
 
+The form factor is decided at load and the shell never morphs between phone
+and desktop while state exists. A resize or rotation that crosses the phone
+boundary runs one clean stage reset (`resetPhoneStage()` in
+`shell-phone-stage.js`) before any new input is handled: input is blocked
+(`body[data-stage-reset="running"]`), fullscreen Spaces are left, every open
+registered layer closes through its own close, the shell's history entry is
+dropped (leaving the phone) or re-armed (entering it), and app frames drop
+their own history before a phone stage arms (`elastos:app-history`). Only
+then is the new class committed (`formFactor()` returns the committed class),
+so Back only ever runs in a stable form factor. App windows stay open.
+
 ## Viewport truth (M1)
 
-- Both `index.html` files declare `viewport-fit=cover` (safe areas become
-  real on iOS) and `interactive-widget=resizes-visual` (Android Chrome shrinks
-  only the visual viewport for the soft keyboard, like iOS).
+- The `index.html` files ship the base viewport tag. While the shell's
+  committed class is a phone it tells the host (`home:form-factor`) and the
+  host page adds `viewport-fit=cover` (safe areas become real on iOS) and
+  `interactive-widget=resizes-visual` (Android Chrome shrinks only the visual
+  viewport for the soft keyboard, like iOS); off a phone the base tag returns
+  unchanged, so iPad and desktop keep their viewport policy.
 - Only the top-level document's visual viewport shrinks for the soft
   keyboard; a framed document's visual viewport is its layout viewport. So the
   host page measures the covered height (`home/browser/home-keyboard-inset.js`)
@@ -118,7 +132,7 @@ For the desktop (the Home grid on the phone profiles), the launcher (tablet
 only), the app menu, Spotlight, Control Centre, Notification Centre,
 Mission Control, the Assistant face and one window per first-party app it
 records targets under 44 px, text under 12 px and horizontal overflow, plus
-the source truths that need no browser (`viewport-fit=cover` in both
+the source truths that need no browser (the base viewport tag in both
 `index.html` files, bare `100vh` count, `backdrop-filter` count). It writes
 `report.json` and a screenshot per surface to `HOME_PHONE_SMOKE_OUT` (default
 a temp directory).
@@ -253,7 +267,10 @@ would be; no `image-set()` variant.
 - App frames add no history entries on a phone: Library (the one capsule
   with its own history) waits for the shell's layout message and keeps its
   folder history in memory on a phone stage, so Back never steps inside an
-  app frame first. On desktop and tablet it keeps browser history as before.
+  app frame first. On desktop and tablet it keeps browser history as before
+  and tells the shell it holds entries; a stage reset to the phone steps it
+  back over them (`history.go`) and it reports them dropped before the
+  shell arms its own entry.
 - **WebKit fallback (recorded per plan).** Safari and every iOS browser
   record nested frame loads as joint steps and, seen from the shell frame,
   one `history.back()` after a `pushState` took the shell frame itself to
@@ -269,7 +286,10 @@ would be; no `image-set()` variant.
   rotation to landscape and back with the window still filling the stage.
   Its Back-race step checks that Library adds no entry and goes home on one
   Back, that an app closed by hand and reopened goes home on one Back, and
-  that a sheet reopened right after Back closes on the next Back.
+  that an animated sheet reopened before its close settles closes on the
+  next Back. Its stage-reset steps resize a fullscreen window into the phone
+  (one Back sends it home), and go phone → desktop → Library folder → phone
+  (each Back closes exactly one layer and Home stays).
 
 ## Sheets (M4)
 
@@ -293,8 +313,9 @@ would be; no `image-set()` variant.
   and Spotlight end in a 44 px Close handle at the thumb end; a tap closes, a
   48 px drag up closes, a shorter drag snaps back. Every sheet also closes
   on Escape and on system back.
-- The bar sheets are non-modal dialogs (`role="dialog"`,
-  `aria-modal="false"`) because the bar and Dock stay live while one is
+- On a phone the bar sheets are non-modal dialogs (`role="dialog"`,
+  `aria-modal="false"`, set by `shell-form-factor.js`; tablet and desktop
+  keep the base `role="group"`) because the bar and Dock stay live while one is
   open; each bar opener announces the popup and whether it is open.
   Spotlight keeps focus in its field. The shell document never scrolls, so
   no scroll lock is needed behind a sheet.

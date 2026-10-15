@@ -154,7 +154,7 @@ import {
 } from "./shell-connector-sheet.js?v=home-20260813a";
 import { bindFormFactor, isPhone } from "./shell-form-factor.js?v=home-20260813a";
 import { bindPhoneDock } from "./shell-phone-dock.js?v=home-20260813a";
-import { bindPhoneStage } from "./shell-phone-stage.js?v=home-20260813a";
+import { bindPhoneStage, resetPhoneStage } from "./shell-phone-stage.js?v=home-20260813a";
 import { bindCapsuleLayout } from "./shell-capsule-layout.js?v=home-20260813a";
 import { bindTouchLongPress } from "./shell-touch.js?v=home-20260813a";
 
@@ -1207,7 +1207,8 @@ export function bindHomeGuiInteractions(options = {}) {
 
   // Size class, pointer class and soft-keyboard inset before any surface
   // binds, so CSS keyed on body[data-form-factor] is right on first paint.
-  bindFormFactor();
+  // Crossing the phone boundary later is one clean stage reset.
+  bindFormFactor(document, window, { reset: (commit) => resetPhoneStage(commit) });
   // Phone Dock tuck/peek handle; a no-op on tablet and desktop.
   bindPhoneDock();
   // Phone system-back history and the title-bar swipe to the switcher.

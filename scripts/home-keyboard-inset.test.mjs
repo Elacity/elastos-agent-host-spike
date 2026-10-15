@@ -1,11 +1,44 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { readFileSync } from "node:fs";
+
 import {
   KEYBOARD_INSET_MESSAGE,
+  applyPhoneViewport,
   bindKeyboardInsetRelay,
   keyboardInset,
+  phoneViewportContent,
 } from "../capsules/home/browser/home-keyboard-inset.js";
+
+const BASE_VIEWPORT = "width=device-width, initial-scale=1";
+
+test("the viewport tag ships as the base tag and takes the phone variant only through the phone check", () => {
+  for (const page of ["../capsules/home/browser/index.html", "../capsules/home-gui/browser/index.html"]) {
+    const html = readFileSync(new URL(page, import.meta.url), "utf8");
+    assert.match(html, new RegExp(`<meta name="viewport" content="${BASE_VIEWPORT}" />`), page);
+  }
+  const phone = phoneViewportContent(BASE_VIEWPORT, true);
+  assert.equal(phone, `${BASE_VIEWPORT}, viewport-fit=cover, interactive-widget=resizes-visual`);
+  assert.equal(phoneViewportContent(phone, true), phone, "idempotent");
+  assert.equal(phoneViewportContent(phone, false), BASE_VIEWPORT, "off a phone the base tag returns byte for byte");
+  let content = BASE_VIEWPORT;
+  let writes = 0;
+  const meta = {
+    getAttribute: () => content,
+    setAttribute: (_name, value) => {
+      writes += 1;
+      content = value;
+    },
+  };
+  const doc = { querySelector: () => meta };
+  applyPhoneViewport(false, doc);
+  assert.equal(writes, 0, "a desktop never touches the tag");
+  applyPhoneViewport(true, doc);
+  assert.equal(content, phone);
+  applyPhoneViewport(false, doc);
+  assert.equal(content, BASE_VIEWPORT);
+});
 
 function listenerTarget() {
   const listeners = new Map();

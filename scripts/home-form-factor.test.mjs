@@ -207,3 +207,68 @@ test("bindFormFactor syncs now and on resize, and unbinds cleanly", () => {
     assert.equal(entries.length, 0, `listener left bound: ${key}`);
   }
 });
+
+test("crossing the phone boundary is one stage reset; the form factor changes only through its commit", async () => {
+  const doc = fakeDocument();
+  const view = fakeView({ width: 390, height: 844 });
+  const resets = [];
+  const unbind = bindFormFactor(doc, view, { reset: (commit) => new Promise((resolve) => resets.push({ commit, resolve })) });
+  assert.equal(formFactor(view), "phone");
+
+  view.innerWidth = 1280;
+  view.innerHeight = 800;
+  view.fire("window", "resize");
+  await Promise.resolve();
+  assert.equal(resets.length, 1, "one reset per crossing");
+  assert.equal(isPhone(view), true, "the old form factor holds until the reset commits");
+  assert.equal(doc.body.dataset.formFactor, "phone");
+  relayKeyboardInset(300, doc, view);
+  assert.equal(isPhone(view), true, "a keyboard relay never commits a crossing");
+  relayKeyboardInset(0, doc, view);
+  view.fire("window", "resize");
+  await Promise.resolve();
+  assert.equal(resets.length, 1, "resizes during a reset wait for it");
+
+  resets[0].commit();
+  assert.equal(formFactor(view), "desktop");
+  assert.equal(doc.body.dataset.formFactor, "desktop");
+  resets[0].resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(resets.length, 1, "a settled viewport starts no second reset");
+
+  view.innerWidth = 1000;
+  view.fire("window", "resize");
+  await Promise.resolve();
+  assert.equal(resets.length, 1, "tablet and desktop are one side of the boundary");
+  assert.equal(doc.body.dataset.formFactor, "tablet");
+  unbind();
+});
+
+test("Notification Centre and Control Centre keep their base roles off a phone", () => {
+  const node = () => {
+    const attrs = new Map();
+    return {
+      attrs,
+      setAttribute: (name, value) => attrs.set(name, value),
+      removeAttribute: (name) => attrs.delete(name),
+    };
+  };
+  const nodes = { "#notification-center": node(), "#control-centre": node(), "#clock": node() };
+  const doc = { ...fakeDocument(), querySelector: (selector) => nodes[selector] || null };
+  const view = fakeView({ width: 390, height: 844 });
+  syncFormFactor(doc, view);
+  assert.equal(nodes["#notification-center"].attrs.get("role"), "dialog");
+  assert.equal(nodes["#control-centre"].attrs.get("aria-modal"), "false");
+  assert.equal(nodes["#clock"].attrs.get("aria-haspopup"), "dialog");
+  view.innerWidth = 1280;
+  syncFormFactor(doc, view);
+  for (const selector of ["#notification-center", "#control-centre"]) {
+    assert.equal(nodes[selector].attrs.get("role"), "group", selector);
+    assert.equal(nodes[selector].attrs.has("aria-modal"), false, selector);
+  }
+  assert.equal(nodes["#clock"].attrs.get("aria-haspopup"), "true");
+  const template = readFileSync(new URL("../capsules/home-gui/browser/home-gui-template.html", import.meta.url), "utf8");
+  for (const id of ["notification-center", "control-centre"]) {
+    assert.match(template, new RegExp(`id="${id}"\\s+class="${id}"\\s+role="group"\\s+aria-label=`), `${id} ships its base role`);
+  }
+});

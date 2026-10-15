@@ -6,7 +6,7 @@
    misuse. The shared theme runtime (capsules/_shared/elastos-theme.js) applies
    it as html[data-el-form-factor] and html[data-el-pointer]. */
 
-import { formFactor, isCoarsePointer } from "./shell-form-factor.js?v=home-20260813a";
+import { FORM_FACTOR_EVENT, formFactor, isCoarsePointer } from "./shell-form-factor.js?v=home-20260813a";
 
 export const SHELL_LAYOUT_MESSAGE = "elastos:shell-layout";
 
@@ -82,6 +82,7 @@ export function bindCapsuleLayout(doc = document, view = window) {
   doc.addEventListener("visibilitychange", postToAllFrames);
   doc.addEventListener("transitionend", handleTransitionEnd, true);
   view.addEventListener("resize", postToAllFrames);
+  view.addEventListener(FORM_FACTOR_EVENT, postToAllFrames);
   view.addEventListener("message", handleLayoutRequest);
   postToAllFrames();
   return () => {
@@ -90,6 +91,7 @@ export function bindCapsuleLayout(doc = document, view = window) {
     doc.removeEventListener("visibilitychange", postToAllFrames);
     doc.removeEventListener("transitionend", handleTransitionEnd, true);
     view.removeEventListener("resize", postToAllFrames);
+    view.removeEventListener(FORM_FACTOR_EVENT, postToAllFrames);
     view.removeEventListener("message", handleLayoutRequest);
   };
 }

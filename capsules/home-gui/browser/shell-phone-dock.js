@@ -5,7 +5,7 @@
    Dock's contents, pins and running state are untouched. docs/HOME_MOBILE.md. */
 
 import { launcher, shellState, taskbarTargets } from "./shell-core.js?v=home-20260813a";
-import { isPhone } from "./shell-form-factor.js?v=home-20260813a";
+import { FORM_FACTOR_EVENT, isPhone } from "./shell-form-factor.js?v=home-20260813a";
 import { registerStageLayer } from "./shell-popovers.js?v=home-20260813a";
 
 export const PHONE_DOCK_TUCKED_CLASS = "phone-dock-tucked";
@@ -114,6 +114,7 @@ export function bindPhoneDock(doc = document, view = window) {
     }
   });
   view.addEventListener("resize", () => syncPhoneDock(doc, view));
+  view.addEventListener(FORM_FACTOR_EVENT, () => syncPhoneDock(doc, view));
   if (taskbarTargets) {
     taskbarTargets.addEventListener("scroll", () => syncDockEdgeFades(taskbarTargets), { passive: true });
     new view.ResizeObserver(() => syncDockEdgeFades(taskbarTargets)).observe(taskbarTargets);

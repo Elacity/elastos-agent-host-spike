@@ -88,7 +88,7 @@ import {
 import { inboxRailAvailable, showInboxRail } from "./shell-inbox-rail.js?v=home-20260813a";
 import { closeExpose, isExposeOpen } from "./shell-expose.js?v=home-20260813a";
 import { syncPhoneDock } from "./shell-phone-dock.js?v=home-20260813a";
-import { isPhone } from "./shell-form-factor.js?v=home-20260813a";
+import { FORM_FACTOR_EVENT, isPhone } from "./shell-form-factor.js?v=home-20260813a";
 import {
   PHONE_ASSISTANT_TARGET,
   PHONE_DOCK_SLOTS,
@@ -107,7 +107,6 @@ import {
 import {
   bindPhoneHomeEdit,
   enterPhoneHomeEdit,
-  exitPhoneHomeEdit,
   isPhoneHomeDragging,
   isPhoneHomeEditing,
 } from "./shell-phone-home-edit.js?v=home-20260813a";
@@ -3022,22 +3021,22 @@ export function bindShellSurfaceDom(options = {}) {
   setupDock();
   syncDockAutoHide();
   bindDockAutoHideReveal();
-  let phoneLayout = isPhone();
   bindPhoneHomePager({
     openAgent: openPhoneHomeAgent,
     editing: isPhoneHomeEditing,
     resized: () => {
-      if (!shellState.currentSummary) {
-        return;
+      if (shellState.currentSummary) {
+        renderPhoneHome(shellState.currentSummary);
       }
-      // Crossing into or out of the phone swaps the Dock's rows.
-      if (isPhone() !== phoneLayout) {
-        phoneLayout = isPhone();
-        exitPhoneHomeEdit();
-        renderTaskbar(shellState.currentSummary);
-      }
-      renderPhoneHome(shellState.currentSummary);
     },
+  });
+  // A stage reset across the phone boundary swaps the Dock's rows; Home edit
+  // is a Back layer, so the reset has already closed it.
+  window.addEventListener(FORM_FACTOR_EVENT, () => {
+    if (shellState.currentSummary) {
+      renderTaskbar(shellState.currentSummary);
+      renderPhoneHome(shellState.currentSummary);
+    }
   });
   bindPhoneHomeEdit({
     active: isPhone,

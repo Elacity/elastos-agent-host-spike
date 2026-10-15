@@ -10,8 +10,10 @@
 // ratchet: no surface may get worse than the baseline pinned below. Each
 // mobile PR lowers its baseline rows; nothing here ever raises one.
 //
-// Source truths that do not need a browser (viewport-fit, bare 100vh) are
-// asserted here too so the report is one document.
+// Source truths that do not need a browser (the base viewport meta, bare
+// 100vh) are asserted here too so the report is one document. The base meta
+// stays `width=device-width, initial-scale=1`; on a phone the host rewrites it
+// to add viewport-fit=cover, which each profile checks in the browser.
 
 import { createServer } from "node:http";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -34,6 +36,9 @@ const BOOT_TIMEOUT_MS = 20_000;
 const SURFACE_SETTLE_MS = 400;
 // Launcher and sheets animate in; measure after the motion finishes.
 const SHEET_SETTLE_MS = 900;
+// The viewport meta every page ships, and what the host adds on a phone only.
+const BASE_VIEWPORT_CONTENT = "width=device-width, initial-scale=1";
+const PHONE_VIEWPORT_FIT = "viewport-fit=cover";
 
 const homeAuthorityToken = "fixture-home-authority-token";
 const homeGuiToken = "fixture-home-gui-launch-token";
@@ -134,6 +139,10 @@ const state = { errors: [] };
 // it at once and holds summary replies, so a reconnect's summary refresh can
 // land while a finger holds a Dock tile.
 const fixture = { closeEventStream: false, holdSummaries: false, heldSummaries: [], summaryReplies: 0, libraryRoots: false };
+const LIBRARY_FIXTURE_ROOTS = Object.freeze([
+  { id: "documents", uri: "localhost://Users/fixture/Documents", name: "Documents", label: "Documents" },
+  { id: "downloads", uri: "localhost://Users/fixture/Downloads", name: "Downloads", label: "Downloads" },
+]);
 
 function releaseHeldSummaries() {
   fixture.holdSummaries = false;
@@ -526,11 +535,12 @@ async function handleApi(req, res, url) {
     json(res, 200, { saved: true });
     return true;
   }
-  // Only for the Back probe: with roots, Library reaches the point where it
-  // would add history entries of its own.
+  // Only for the Back probes: with roots, Library reaches the point where it
+  // would add history entries of its own; a second root is a second folder
+  // to move to.
   if (fixture.libraryRoots && url.pathname === "/api/provider/object/roots" && req.method === "POST") {
     await readBody(req);
-    json(res, 200, { status: "ok", data: { roots: [{ id: "documents", uri: "localhost://Users/fixture/Documents", name: "Documents" }] } });
+    json(res, 200, { status: "ok", data: { roots: LIBRARY_FIXTURE_ROOTS } });
     return true;
   }
   if (url.pathname.startsWith("/api/")) {
@@ -922,28 +932,36 @@ function promptCloseFailures(run) {
   return probe.closed ? [] : [`${label}: a fresh tap on Close right after a tap opened ${probe.target} must close it. Got ${JSON.stringify(probe)}`];
 }
 
-// Back races on the history-driven stage (Chromium; WebKit uses buttons).
-// libraryOwnHistory: an app frame adds no history entry of its own on a phone,
-//   so one Back sends Library home instead of stepping Library's history.
-// reopenAfterClose: an app closed by hand then reopened; one Back sends it home
-//   and Home stays.
-// reopenedLayer: a sheet Back just closed, reopened at once, is a new layer;
-//   the next Back closes it.
-async function probeBackRaces(page, frame) {
-  const mode = await frame.evaluate(() => document.body.dataset.stageHistory || "");
-  if (mode !== "history") {
-    return null;
-  }
-  const back = () => frame.evaluate(() => history.back());
-  const windowState = (target) => frame.evaluate((target) => {
+// One Back as the system button takes it: a joint-session-history step.
+function historyBack(frame) {
+  return frame.evaluate(() => history.back());
+}
+
+// An app window as Back sees it, and the stage around it.
+function stageWindowState(frame, target) {
+  return frame.evaluate(async (target) => {
+    const stage = await import(new URL("./shell-phone-stage.js?v=home-20260813a", location.href).href);
     const node = document.querySelector(`.window[data-target="${target}"]`);
     return {
       home: location.href.includes("/apps/home-gui/"),
+      formFactor: document.body.dataset.formFactor || null,
       present: Boolean(node),
       onStage: Boolean(node && !node.classList.contains("hidden") && node.dataset.spaceVisible !== "false"),
+      fullscreenWindows: document.querySelectorAll('.window[data-fullscreen-stage="true"]').length,
+      openLayers: stage.openStageLayers(document).map((entry) => entry.id),
+      layerCount: typeof stage.stageLayerCount === "function" ? stage.stageLayerCount(document) : null,
     };
   }, target);
-  const discard = (target) => frame.evaluate(async (target) => {
+}
+
+// The top-level page is still Home and its shell frame is still attached.
+function homeState(page, frame) {
+  return { url: page.url(), shellFrame: !frame.isDetached() && homeGuiFrame(page) === frame };
+}
+
+// Closes every window of an app through the shell, wherever it is.
+function discardWindows(frame, target) {
+  return frame.evaluate(async (target) => {
     const core = await import(new URL("./shell-core.js?v=home-20260813a", location.href).href);
     const windows = await import(new URL("./shell-windows.js?v=home-20260813a", location.href).href);
     for (const entry of [...core.shellState.windows.values()]) {
@@ -952,6 +970,21 @@ async function probeBackRaces(page, frame) {
       }
     }
   }, target);
+}
+
+// Back races on the history-driven stage (Chromium; WebKit uses buttons).
+// libraryOwnHistory: an app frame adds no history entry of its own on a phone,
+//   so one Back sends Library home instead of stepping Library's history.
+// reopenAfterClose: an app closed by hand then reopened; one Back sends it home
+//   and Home stays.
+// reopenedLayer: Control Centre, whose close animates, reopened in the same
+//   task as the Back that started closing it (before the stage's settlement
+//   poll) is a new layer; it stays open and the next Back closes it.
+async function probeBackRaces(page, frame) {
+  const mode = await frame.evaluate(() => document.body.dataset.stageHistory || "");
+  if (mode !== "history") {
+    return null;
+  }
 
   fixture.libraryRoots = true;
   let libraryOwnHistory;
@@ -966,43 +999,61 @@ async function probeBackRaces(page, frame) {
     await sleep(SHEET_SETTLE_MS);
     const libraryFrame = page.frames().find((f) => f.url().includes("/apps/library/"));
     const libraryState = await libraryFrame.evaluate(() => history.state?.schema || null);
-    await back();
+    await historyBack(frame);
     await sleep(SHEET_SETTLE_MS);
-    libraryOwnHistory = { libraryState, after: await windowState("library") };
+    libraryOwnHistory = { libraryState, after: await stageWindowState(frame, "library") };
   } finally {
     fixture.libraryRoots = false;
   }
-  await discard("library");
+  await discardWindows(frame, "library");
   await sleep(SURFACE_SETTLE_MS);
 
   await openTarget(frame, "system");
   await closeWindow(frame, "system");
   await openTarget(frame, "system");
-  await back();
+  await historyBack(frame);
   await sleep(SHEET_SETTLE_MS);
-  const reopenAfterClose = await windowState("system");
-  await discard("system");
+  const reopenAfterClose = await stageWindowState(frame, "system");
+  await discardWindows(frame, "system");
   await sleep(SURFACE_SETTLE_MS);
 
-  await LAYER_OPENERS.about.open(frame);
-  await sleep(SHEET_SETTLE_MS);
-  const closedWithinMs = await frame.evaluate(async () => {
-    const popovers = await import(new URL("./shell-popovers.js?v=home-20260813a", location.href).href);
-    const about = popovers.registeredStageLayers().find((entry) => entry.id === "about");
-    const node = document.querySelector(about.selector);
-    const open = () => (about.isOpen ? about.isOpen() === true : Boolean(node && !node.hidden && node.getClientRects().length));
-    const started = performance.now();
-    history.back();
-    while (open() && performance.now() - started < 2500) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-    return Math.round(performance.now() - started);
-  });
-  await LAYER_OPENERS.about.open(frame);
-  const reopenedBefore = await readLayer(frame, "about");
-  await back();
-  const reopenedAfter = await waitLayerClosed(frame, "about");
-  const reopenedLayer = { closedWithinMs, before: reopenedBefore, after: reopenedAfter };
+  // Reduced motion makes every close synchronous (shell-motion.js); the race
+  // needs Control Centre's leave animation, so motion is on for this step.
+  const homeUrl = page.url();
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  let reopenedLayer;
+  try {
+    await LAYER_OPENERS["control-centre"].open(frame);
+    await sleep(SHEET_SETTLE_MS);
+    const race = await frame.evaluate(async (timeoutMs) => {
+      const centre = await import(new URL("./shell-control-centre.js?v=home-20260813a", location.href).href);
+      const panel = document.querySelector("#control-centre");
+      return new Promise((resolve) => {
+        // Added after the shell's own popstate listener, so the shell's Back
+        // has started the close when this runs; reopen in that same task.
+        const reopen = () => {
+          clearTimeout(timer);
+          const closing = Boolean(panel && !panel.hidden && panel.classList.contains("menubar-card-leaving"));
+          centre.showControlCentre();
+          resolve({ popstate: true, closing, reopened: Boolean(panel && !panel.hidden) });
+        };
+        const timer = setTimeout(() => {
+          window.removeEventListener("popstate", reopen);
+          resolve({ popstate: false });
+        }, timeoutMs);
+        window.addEventListener("popstate", reopen, { once: true });
+        history.back();
+      });
+    }, LAYER_CLOSE_WAIT_MS);
+    // Past the leave animation's own timer: a cancelled close must not land.
+    await sleep(SHEET_SETTLE_MS);
+    const before = await readLayer(frame, "control-centre");
+    await historyBack(frame);
+    const after = await waitLayerClosed(frame, "control-centre");
+    reopenedLayer = { race, before, after, homeUrl, home: homeState(page, frame) };
+  } finally {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+  }
 
   return { libraryOwnHistory, reopenAfterClose, reopenedLayer };
 }
@@ -1021,10 +1072,299 @@ function backRaceFailures(run) {
   if (!reopenAfterClose.home || reopenAfterClose.onStage) {
     failures.push(`${label}: an app closed by hand and reopened must go home on one Back, Home staying. Got ${JSON.stringify(reopenAfterClose)}`);
   }
-  if (!reopenedLayer.before.open || reopenedLayer.after.open || !reopenedLayer.after.home) {
-    failures.push(`${label}: a sheet reopened right after Back closed it must close on the next Back. Got ${JSON.stringify(reopenedLayer)}`);
+  if (!reopenedLayer.race.popstate || !reopenedLayer.race.closing) {
+    failures.push(`${label}: Control Centre must be reopened while Back's animated close is still in flight to test it. Got ${JSON.stringify(reopenedLayer)}`);
+  } else if (!reopenedLayer.race.reopened || !reopenedLayer.before.open || !reopenedLayer.before.openLayers.includes("control-centre")) {
+    failures.push(`${label}: Control Centre reopened during Back's close must stay open as a new layer. Got ${JSON.stringify(reopenedLayer)}`);
+  } else if (reopenedLayer.after.open || !reopenedLayer.after.home || reopenedLayer.home.url !== reopenedLayer.homeUrl || !reopenedLayer.home.shellFrame) {
+    failures.push(`${label}: a sheet reopened during Back's close must close on the next Back, Home staying. Got ${JSON.stringify(reopenedLayer)}`);
   }
   return failures;
+}
+
+// Form-factor change: the shell decides phone, tablet or desktop at load, and
+// a resize or rotation across the phone boundary runs one clean stage reset
+// (body[data-stage-reset="running"] in the Home GUI frame) before new input.
+// Played on a fine-pointer window, as a desktop browser resized narrow.
+// fullscreenToPhone: a fullscreen Space entered with the green control leaves
+//   fullscreen when the window becomes a phone; the app stays on the stage and
+//   one Back sends it home, Home staying.
+// libraryAcrossStages: Library opened on a phone moves to another folder on the
+//   desktop (its own history entries there); back on the phone with Control
+//   Centre over it, each Back closes exactly the top layer, Library keeps its
+//   folder and Home stays.
+// The host page's viewport meta gains viewport-fit=cover on the phone and
+// returns to the base content off it.
+const STAGE_RESET_DESKTOP = Object.freeze({ width: 1280, height: 800 });
+const STAGE_RESET_PHONE = PROFILES.find((profile) => profile.id === "phone-portrait").viewport;
+// Each open layer's close and each history traversal in a reset is bounded by
+// the shell (shell-phone-stage.js LAYER_CLOSE_TIMEOUT_MS, RESET_HISTORY_TIMEOUT_MS).
+const STAGE_RESET_TIMEOUT_MS = 10_000;
+const LIBRARY_HISTORY_SCHEMA = "elastos.library.history/v1";
+
+// The reset has finished and committed `expectedFactor`.
+async function waitStageReset(frame, expectedFactor) {
+  const startedAt = Date.now();
+  let seen = null;
+  while (Date.now() - startedAt <= STAGE_RESET_TIMEOUT_MS) {
+    seen = await frame.evaluate(() => ({
+      stageReset: document.body.dataset.stageReset ?? null,
+      formFactor: document.body.dataset.formFactor || null,
+    }));
+    if (seen.stageReset === null && seen.formFactor === expectedFactor) {
+      return seen;
+    }
+    await sleep(50);
+  }
+  throw new Error(`timed out after ${STAGE_RESET_TIMEOUT_MS} ms waiting for the stage reset to commit form factor ${expectedFactor}: ${JSON.stringify({ seen, pageErrors })}`);
+}
+
+// Resizes across the phone boundary and waits the reset out. `runs` counts how
+// often data-stage-reset was set, synchronous resets included.
+async function resizeAcrossBoundary(page, frame, viewport, expectedFactor) {
+  const from = await frame.evaluate(() => {
+    window.__smokeStageResetObserver?.disconnect();
+    window.__smokeStageResetRuns = 0;
+    window.__smokeStageResetObserver = new MutationObserver((records) => {
+      for (const record of records) {
+        if (record.oldValue === null) {
+          window.__smokeStageResetRuns += 1;
+        }
+      }
+    });
+    window.__smokeStageResetObserver.observe(document.body, {
+      attributes: true,
+      attributeFilter: ["data-stage-reset"],
+      attributeOldValue: true,
+    });
+    return document.body.dataset.formFactor || null;
+  });
+  const startedAt = Date.now();
+  await page.setViewportSize(viewport);
+  await waitStageReset(frame, expectedFactor);
+  const durationMs = Date.now() - startedAt;
+  await sleep(SURFACE_SETTLE_MS);
+  const runs = await frame.evaluate(() => {
+    window.__smokeStageResetObserver.disconnect();
+    return window.__smokeStageResetRuns;
+  });
+  return { from, to: expectedFactor, runs, durationMs };
+}
+
+function libraryFrameOf(page) {
+  return page.frames().find((candidate) => candidate.url().includes("/apps/library/")) || null;
+}
+
+// Library's stage, its own history entry and the folder its sidebar marks.
+async function libraryStageState(page) {
+  const library = libraryFrameOf(page);
+  if (!library) {
+    return null;
+  }
+  return library.evaluate(() => ({
+    formFactor: document.documentElement.dataset.elFormFactor || null,
+    ownEntry: history.state?.schema || null,
+    folder: document.querySelector('.place[data-active="true"]')?.dataset.uri || null,
+  })).catch(() => null);
+}
+
+async function probeFullscreenToPhone(page, frame) {
+  const target = "system";
+  const homeUrl = page.url();
+  const desktopMeta = await settledHostViewportMeta(page, false);
+  await openWindow(frame, target);
+  await waitWindowGuard(frame, target, "controlGuardUntil");
+  await frame.locator(`.window[data-target="${target}"] [data-action="maximize"]`).first().click();
+  const fullscreenEntered = await waitFor(
+    () => frame.locator(`.window[data-target="${target}"][data-fullscreen-stage="true"]`).count().then((count) => count > 0),
+    SHEET_SETTLE_MS * 2,
+    `${target} in a fullscreen Space`,
+  ).then(() => true, () => false);
+  await sleep(SURFACE_SETTLE_MS);
+  const before = await stageWindowState(frame, target);
+  const reset = await resizeAcrossBoundary(page, frame, STAGE_RESET_PHONE, "phone");
+  const afterReset = await stageWindowState(frame, target);
+  const phoneMeta = await settledHostViewportMeta(page, true);
+  const stageHistory = await frame.evaluate(() => document.body.dataset.stageHistory || "");
+  let afterBack = null;
+  if (stageHistory === "history") {
+    await historyBack(frame);
+    await sleep(SHEET_SETTLE_MS);
+    afterBack = { ...(await stageWindowState(frame, target)), ...homeState(page, frame) };
+  }
+  await discardWindows(frame, target);
+  await sleep(SURFACE_SETTLE_MS);
+  return { target, homeUrl, fullscreenEntered, before, reset, afterReset, desktopMeta, phoneMeta, stageHistory, afterBack };
+}
+
+// Starts on the phone stage (where probeFullscreenToPhone ends).
+async function probeLibraryAcrossStages(page, frame) {
+  const stageHistory = await frame.evaluate(() => document.body.dataset.stageHistory || "");
+  if (stageHistory !== "history") {
+    return null;
+  }
+  const homeUrl = page.url();
+  const [startFolder, otherFolder] = LIBRARY_FIXTURE_ROOTS.map((root) => root.uri);
+  const snapshot = async () => ({
+    ...(await stageWindowState(frame, "library")),
+    centreOpen: (await readLayer(frame, "control-centre")).open,
+    library: await libraryStageState(page),
+    ...homeState(page, frame),
+  });
+  fixture.libraryRoots = true;
+  try {
+    await openTarget(frame, "library");
+    await waitFor(
+      () => libraryStageState(page).then((library) => library?.formFactor === "phone" && library.folder === startFolder),
+      BOOT_TIMEOUT_MS,
+      "Library in its first folder on the phone stage",
+    );
+    const opened = await snapshot();
+
+    const toDesktop = await resizeAcrossBoundary(page, frame, STAGE_RESET_DESKTOP, "desktop");
+    const desktopMeta = await settledHostViewportMeta(page, false);
+    const ownEntryInstalled = await waitFor(
+      () => libraryStageState(page).then((library) => library?.formFactor === "desktop" && library.ownEntry === LIBRARY_HISTORY_SCHEMA),
+      SHEET_SETTLE_MS * 2,
+      "Library's own history entry on the desktop",
+    ).then(() => true, () => false);
+    await libraryFrameOf(page).evaluate((uri) => document.querySelector(`.place[data-uri="${uri}"]`)?.click(), otherFolder);
+    await waitFor(
+      () => libraryStageState(page).then((library) => library?.folder === otherFolder),
+      SHEET_SETTLE_MS * 2,
+      "Library in its second folder",
+    ).catch(() => {});
+    const desktop = { ownEntryInstalled, ...(await snapshot()) };
+
+    const toPhone = await resizeAcrossBoundary(page, frame, STAGE_RESET_PHONE, "phone");
+    await waitFor(
+      () => libraryStageState(page).then((library) => library?.formFactor === "phone"),
+      SHEET_SETTLE_MS * 2,
+      "Library back on the phone stage",
+    ).catch(() => {});
+    const phoneMeta = await settledHostViewportMeta(page, true);
+    await LAYER_OPENERS["control-centre"].open(frame);
+    await sleep(SHEET_SETTLE_MS);
+    const twoLayers = await snapshot();
+
+    await historyBack(frame);
+    await waitLayerClosed(frame, "control-centre");
+    await sleep(SURFACE_SETTLE_MS);
+    const firstBack = await snapshot();
+    await historyBack(frame);
+    await sleep(SHEET_SETTLE_MS);
+    const secondBack = await snapshot();
+    await sleep(SHEET_SETTLE_MS);
+    const settled = await snapshot();
+    await discardWindows(frame, "library");
+    await sleep(SURFACE_SETTLE_MS);
+    return {
+      homeUrl, startFolder, otherFolder, opened, toDesktop, desktopMeta, desktop, toPhone, phoneMeta,
+      twoLayers, firstBack, secondBack, settled,
+    };
+  } finally {
+    fixture.libraryRoots = false;
+  }
+}
+
+// A fine-pointer desktop window that a person narrows to a phone and widens
+// again: its own context, so no profile's stage is disturbed.
+async function runStageReset(browser, engineId, origin) {
+  const context = await browser.newContext({
+    viewport: STAGE_RESET_DESKTOP,
+    deviceScaleFactor: 1,
+    isMobile: false,
+    hasTouch: false,
+    reducedMotion: "reduce",
+  });
+  try {
+    const { page, frame } = await bootHome(context, origin);
+    const bootFactor = await frame.evaluate(() => document.body.dataset.formFactor || null);
+    const fullscreenToPhone = await probeFullscreenToPhone(page, frame);
+    const libraryAcrossStages = await probeLibraryAcrossStages(page, frame);
+    return { engine: engineId, bootFactor, fullscreenToPhone, libraryAcrossStages };
+  } finally {
+    await context.close();
+  }
+}
+
+function stageResetFailures(run) {
+  const label = `${run.engine}/stage-reset`;
+  const failures = [];
+  const resetFailures = (step, reset) => (reset.runs === 1
+    ? []
+    : [`${label}/${step}: a resize across the phone boundary (${reset.from} -> ${reset.to}) must run exactly one stage reset. Got ${JSON.stringify(reset)}`]);
+  const metaFailures = (step, content, phone) => (viewportMetaFits(content, phone)
+    ? []
+    : [`${label}/${step}: the host page's viewport meta must ${phone ? `add ${PHONE_VIEWPORT_FIT} on a phone` : `be "${BASE_VIEWPORT_CONTENT}" off a phone`}. Got ${JSON.stringify(content)}`]);
+  if (run.bootFactor !== "desktop") {
+    failures.push(`${label}: a ${STAGE_RESET_DESKTOP.width}x${STAGE_RESET_DESKTOP.height} fine-pointer window must load as the desktop. Got ${JSON.stringify(run.bootFactor)}`);
+  }
+
+  const fullscreen = run.fullscreenToPhone;
+  const fullscreenLabel = `${label}/fullscreen-to-phone`;
+  failures.push(...metaFailures("fullscreen-to-phone/desktop", fullscreen.desktopMeta, false));
+  if (!fullscreen.fullscreenEntered || fullscreen.before.fullscreenWindows === 0) {
+    failures.push(`${fullscreenLabel}: the green control must put ${fullscreen.target} in a fullscreen Space on the desktop before the resize. Got ${JSON.stringify(fullscreen.before)}`);
+  } else {
+    failures.push(...resetFailures("fullscreen-to-phone", fullscreen.reset));
+    if (fullscreen.afterReset.fullscreenWindows !== 0 || !fullscreen.afterReset.present || !fullscreen.afterReset.onStage) {
+      failures.push(`${fullscreenLabel}: becoming a phone must leave every fullscreen Space and keep ${fullscreen.target} open on the stage. Got ${JSON.stringify(fullscreen.afterReset)}`);
+    }
+    failures.push(...metaFailures("fullscreen-to-phone/phone", fullscreen.phoneMeta, true));
+    const back = fullscreen.afterBack;
+    if (back && (!back.home || back.onStage || back.url !== fullscreen.homeUrl || !back.shellFrame)) {
+      failures.push(`${fullscreenLabel}: one Back after the reset must send ${fullscreen.target} home, Home staying. Got ${JSON.stringify({ homeUrl: fullscreen.homeUrl, afterBack: back })}`);
+    }
+  }
+
+  const library = run.libraryAcrossStages;
+  if (!library) {
+    return failures;
+  }
+  const libraryLabel = `${label}/library-across-stages`;
+  const inFolder = (state) => state.library?.folder === library.otherFolder;
+  failures.push(...resetFailures("library-across-stages/to-desktop", library.toDesktop));
+  failures.push(...metaFailures("library-across-stages/desktop", library.desktopMeta, false));
+  if (!library.desktop.present || !library.desktop.onStage) {
+    failures.push(`${libraryLabel}: Library must stay open across the reset to the desktop. Got ${JSON.stringify(library.desktop)}`);
+  }
+  if (!library.desktop.ownEntryInstalled || !inFolder(library.desktop) || library.desktop.library?.ownEntry !== LIBRARY_HISTORY_SCHEMA) {
+    failures.push(`${libraryLabel}: on the desktop Library must hold its own history entry and move to ${library.otherFolder} to test it. Got ${JSON.stringify(library.desktop)}`);
+    return failures;
+  }
+  failures.push(...resetFailures("library-across-stages/to-phone", library.toPhone));
+  failures.push(...metaFailures("library-across-stages/phone", library.phoneMeta, true));
+  const { twoLayers, firstBack, secondBack, settled } = library;
+  if (!twoLayers.onStage || !twoLayers.centreOpen || twoLayers.openLayers.join() !== "control-centre"
+    || (twoLayers.layerCount !== null && twoLayers.layerCount !== 2) || !inFolder(twoLayers)) {
+    failures.push(`${libraryLabel}: back on the phone, Library in ${library.otherFolder} with Control Centre over it must be exactly two layers. Got ${JSON.stringify(twoLayers)}`);
+    return failures;
+  }
+  if (firstBack.centreOpen || !firstBack.onStage || firstBack.openLayers.length !== 0 || !inFolder(firstBack)
+    || firstBack.url !== library.homeUrl || !firstBack.shellFrame) {
+    failures.push(`${libraryLabel}: the first Back must close Control Centre alone and leave Library in its folder. Got ${JSON.stringify(firstBack)}`);
+  }
+  if (secondBack.onStage || !secondBack.home || secondBack.openLayers.length !== 0 || !inFolder(secondBack)
+    || secondBack.url !== library.homeUrl || !secondBack.shellFrame) {
+    failures.push(`${libraryLabel}: the second Back must send Library home without stepping its folders, Home staying. Got ${JSON.stringify(secondBack)}`);
+  }
+  if (settled.onStage !== secondBack.onStage || settled.openLayers.join() !== secondBack.openLayers.join()
+    || settled.layerCount !== secondBack.layerCount || settled.library?.folder !== secondBack.library?.folder
+    || settled.url !== library.homeUrl || !settled.shellFrame) {
+    failures.push(`${libraryLabel}: nothing may change after the second Back settles. Got ${JSON.stringify({ secondBack, settled })}`);
+  }
+  return failures;
+}
+
+// A window control pressed too soon after the window opened is ignored
+// (ghost-click guard, shell-windows.js `closeGuardUntil`/`controlGuardUntil`).
+async function waitWindowGuard(frame, target, key) {
+  const guardMs = await frame.evaluate(({ target, key }) => {
+    const until = Number(document.querySelector(`.window[data-target="${target}"]`)?.dataset[key]);
+    return Number.isFinite(until) ? Math.max(0, Math.ceil(until - performance.now())) : 0;
+  }, { target, key });
+  await sleep(guardMs);
 }
 
 // The shell ignores a press on Close at the spot that opened the window for a
@@ -1035,11 +1375,7 @@ function backRaceFailures(run) {
 async function closeWindow(frame, target) {
   const closeButton = frame.locator(`.window[data-target="${target}"] [data-action="close"]`);
   if (await closeButton.count()) {
-    const guardMs = await frame.evaluate((target) => {
-      const until = Number(document.querySelector(`.window[data-target="${target}"]`)?.dataset.closeGuardUntil);
-      return Number.isFinite(until) ? Math.max(0, Math.ceil(until - performance.now())) : 0;
-    }, target);
-    await sleep(guardMs);
+    await waitWindowGuard(frame, target, "closeGuardUntil");
     await closeButton.first().click();
   }
   await waitFor(
@@ -1203,6 +1539,7 @@ async function runProfile(browser, engineId, profile, origin) {
   let backProbe = null;
   let promptCloseProbe = null;
   let backRacesProbe = null;
+  let viewportMeta = null;
   let bootRetries = 0;
   try {
     let booted;
@@ -1222,6 +1559,7 @@ async function runProfile(browser, engineId, profile, origin) {
       booted = await bootHome(context, origin);
     }
     const { page, frame } = booted;
+    viewportMeta = await settledHostViewportMeta(page, profile.id.startsWith("phone"));
     await recordPointerEvents(frame);
     for (const surface of SHELL_SURFACES) {
       if (surface.phone === false && profile.id.startsWith("phone")) {
@@ -1290,7 +1628,7 @@ async function runProfile(browser, engineId, profile, origin) {
   } finally {
     await context.close();
   }
-  return { engine: engineId, profile: profile.id, viewport: profile.viewport, surfaces, dock: dockProbe, stage: stageProbe, keyboard: keyboardProbe, spotlight: spotlightProbe, sheetHandles: sheetHandleProbe, link: linkProbe, touchMenu: touchMenuProbe, home: homeProbe, homeEdit: homeEditProbe, back: backProbe, promptClose: promptCloseProbe, backRaces: backRacesProbe, bootRetries };
+  return { engine: engineId, profile: profile.id, viewport: profile.viewport, viewportMeta, surfaces, dock: dockProbe, stage: stageProbe, keyboard: keyboardProbe, spotlight: spotlightProbe, sheetHandles: sheetHandleProbe, link: linkProbe, touchMenu: touchMenuProbe, home: homeProbe, homeEdit: homeEditProbe, back: backProbe, promptClose: promptCloseProbe, backRaces: backRacesProbe, bootRetries };
 }
 
 // Soft keyboard: only the host page sees it, so the host relays its height
@@ -2471,11 +2809,48 @@ function phoneDockFailures(run) {
   return failures;
 }
 
+// The host page's viewport meta content as the browser has it now.
+function hostViewportMeta(page) {
+  return page.evaluate(() => document.querySelector('meta[name="viewport"]')?.getAttribute("content") ?? null);
+}
+
+function viewportMetaFits(content, phone) {
+  return phone ? Boolean(content?.includes(PHONE_VIEWPORT_FIT)) : content === BASE_VIEWPORT_CONTENT;
+}
+
+// The host rewrites the meta when its own form factor changes; give it a
+// moment, then report what is there.
+async function settledHostViewportMeta(page, phone) {
+  const startedAt = Date.now();
+  let content = await hostViewportMeta(page);
+  while (!viewportMetaFits(content, phone) && Date.now() - startedAt < SURFACE_SETTLE_MS) {
+    await sleep(50);
+    content = await hostViewportMeta(page);
+  }
+  return content;
+}
+
+function viewportMetaFailures(run) {
+  const phone = run.profile.startsWith("phone");
+  if (viewportMetaFits(run.viewportMeta, phone)) {
+    return [];
+  }
+  return [`${run.engine}/${run.profile}/viewport-meta: the host page's viewport meta must ${phone ? `add ${PHONE_VIEWPORT_FIT} on a phone` : `be "${BASE_VIEWPORT_CONTENT}" off a phone`}. Got ${JSON.stringify(run.viewportMeta)}`];
+}
+
 function sourceTruths() {
-  const homeIndex = readFileSync(join(repoRoot, "capsules/home/browser/index.html"), "utf8");
-  const guiIndex = readFileSync(join(repoRoot, "capsules/home-gui/browser/index.html"), "utf8");
-  const guiStyle = readFileSync(join(repoRoot, "capsules/home-gui/browser/style.css"), "utf8");
-  const viewportFit = (html) => /<meta\s+name="viewport"\s+content="[^"]*viewport-fit=cover[^"]*"/.test(html);
+  const homeIndexPath = "capsules/home/browser/index.html";
+  const guiIndexPath = "capsules/home-gui/browser/index.html";
+  const guiTemplatePath = "capsules/home-gui/browser/home-gui-template.html";
+  const read = (path) => readFileSync(join(repoRoot, path), "utf8");
+  const guiStyle = read("capsules/home-gui/browser/style.css");
+  const viewportMetas = (html) => [...html.matchAll(/<meta\s+name="viewport"\s+content="([^"]*)"/g)].map((match) => match[1]);
+  // Each page ships the base content byte for byte; the template is a body
+  // fragment and may carry no meta, but never another viewport.
+  const baseViewport = (html, required) => {
+    const metas = viewportMetas(html);
+    return (required ? metas.length === 1 : metas.length <= 1) && metas.every((content) => content === BASE_VIEWPORT_CONTENT);
+  };
   // A 100vh line is a fallback when the same declaration also exists with
   // 100dvh: on the next line, or in a phone-scoped rule (desktop keeps its
   // original 100vh untouched). Any other 100vh is bare and wrong on phones.
@@ -2483,12 +2858,22 @@ function sourceTruths() {
   const bareViewportHeightUnits = styleLines.filter((line) =>
     line.includes("100vh") && !guiStyle.includes(line.replace("100vh", "100dvh").trim())).length;
   return {
-    viewportFitCover: { home: viewportFit(homeIndex), gui: viewportFit(guiIndex) },
+    baseViewportMeta: {
+      [homeIndexPath]: baseViewport(read(homeIndexPath), true),
+      [guiIndexPath]: baseViewport(read(guiIndexPath), true),
+      [guiTemplatePath]: baseViewport(read(guiTemplatePath), false),
+    },
     bareViewportHeightUnits,
     viewportHeightFallbacks: (guiStyle.match(/\b100vh\b/g) || []).length - bareViewportHeightUnits,
     dynamicViewportHeightUnits: (guiStyle.match(/\b100dvh\b/g) || []).length,
     backdropFilters: (guiStyle.match(/backdrop-filter\s*:/g) || []).length,
   };
+}
+
+function sourceFailures(source) {
+  return Object.entries(source.baseViewportMeta)
+    .filter(([, base]) => !base)
+    .map(([path]) => `source/${path}: the viewport meta must stay exactly content="${BASE_VIEWPORT_CONTENT}"; the host adds ${PHONE_VIEWPORT_FIT} at runtime on a phone only`);
 }
 
 // The shell posts its size class to every capsule frame (elastos:shell-layout);
@@ -2586,8 +2971,8 @@ const requestedProfiles = (process.env.HOME_PHONE_SMOKE_PROFILES || PROFILES.map
 
 const origin = await listen();
 mkdirSync(outputRoot, { recursive: true });
-const report = { generatedAt: new Date().toISOString(), origin, source: sourceTruths(), runs: [], closedStreamRuns: [] };
-const failures = [];
+const report = { generatedAt: new Date().toISOString(), origin, source: sourceTruths(), runs: [], closedStreamRuns: [], stageResetRuns: [] };
+const failures = sourceFailures(report.source);
 const skippedEngines = [];
 try {
   const imported = await import(playwrightSpecifier());
@@ -2606,13 +2991,17 @@ try {
         }
         const run = await runProfile(browser, engineId, profile, origin);
         report.runs.push(run);
-        failures.push(...shellFailures(run), ...phoneDockFailures(run), ...phoneStageFailures(run), ...phoneKeyboardFailures(run), ...phoneSpotlightFailures(run), ...phoneSheetHandleFailures(run), ...phoneLinkFailures(run), ...phoneTouchMenuFailures(run), ...phoneHomeFailures(run), ...phoneHomeEditFailures(run), ...phoneBackFailures(run), ...promptCloseFailures(run), ...backRaceFailures(run));
+        failures.push(...shellFailures(run), ...viewportMetaFailures(run), ...phoneDockFailures(run), ...phoneStageFailures(run), ...phoneKeyboardFailures(run), ...phoneSpotlightFailures(run), ...phoneSheetHandleFailures(run), ...phoneLinkFailures(run), ...phoneTouchMenuFailures(run), ...phoneHomeFailures(run), ...phoneHomeEditFailures(run), ...phoneBackFailures(run), ...promptCloseFailures(run), ...backRaceFailures(run));
         console.log(`[home-phone-layout] ${engineId}/${profile.id} ${summarize(run)}`);
       }
       const closedStream = await runClosedStream(browser, engineId, origin);
       report.closedStreamRuns.push(closedStream);
       failures.push(...closedStreamFailures(closedStream));
       console.log(`[home-phone-layout] ${engineId}/phone-portrait/closed-stream tile_redrawn_after_ms=${closedStream.tileRemovedAfterMs} menu=${closedStream.menu.open ? closedStream.menu.title : "shut"} windows=${closedStream.windowsBefore}->${closedStream.windowsAfter}`);
+      const stageReset = await runStageReset(browser, engineId, origin);
+      report.stageResetRuns.push(stageReset);
+      failures.push(...stageResetFailures(stageReset));
+      console.log(`[home-phone-layout] ${engineId}/stage-reset boot=${stageReset.bootFactor} fullscreen_to_phone=${stageReset.fullscreenToPhone.reset.runs}x/${stageReset.fullscreenToPhone.reset.durationMs}ms back=${stageReset.fullscreenToPhone.afterBack ? "history" : "skipped"} library_across_stages=${stageReset.libraryAcrossStages ? "probed" : "skipped (buttons)"}`);
     } finally {
       await browser.close().catch(() => {});
     }
@@ -2634,7 +3023,7 @@ try {
   const source = report.source;
   console.log(
     `home-phone-layout-smoke: PASS engines=${report.runs.map((run) => run.engine).filter((value, index, all) => all.indexOf(value) === index).join("+")} ` +
-      `viewport_fit=${source.viewportFitCover.home && source.viewportFitCover.gui ? "cover" : "none"} ` +
+      `viewport_meta=${Object.values(source.baseViewportMeta).every(Boolean) ? "base" : "changed"} ` +
       `bare_100vh=${source.bareViewportHeightUnits} backdrop_filters=${source.backdropFilters} ` +
       `boot_retries=${report.runs.reduce((sum, run) => sum + run.bootRetries, 0)} ` +
       `${skippedEngines.length ? `skipped=${skippedEngines.join(",")} (not installed) ` : ""}report=${join(outputRoot, "report.json")}`,
