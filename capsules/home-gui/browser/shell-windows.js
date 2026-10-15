@@ -727,6 +727,9 @@ function clearWindowCloseGuard(node) {
   delete node.dataset.closeGuardIssuedAt;
 }
 
+// A ghost click replays the opening press: no new press, same spot. Any later
+// press or move far enough from that spot (a mouse moving to Close, or a touch
+// tap on Close, which has no pointermove) is a fresh gesture.
 function clearWindowCloseGuardIfPointerMoved(node) {
   const originX = Number.parseFloat(node.dataset.closeGuardPointerX || "NaN");
   const originY = Number.parseFloat(node.dataset.closeGuardPointerY || "NaN");
@@ -735,13 +738,13 @@ function clearWindowCloseGuardIfPointerMoved(node) {
     !Number.isFinite(originX) ||
     !Number.isFinite(originY) ||
     !Number.isFinite(issuedAt) ||
-    shellState.lastPointerMove.at <= issuedAt
+    shellState.lastPointer.at <= issuedAt
   ) {
     return;
   }
   const distance = Math.hypot(
-    shellState.lastPointerMove.x - originX,
-    shellState.lastPointerMove.y - originY,
+    shellState.lastPointer.x - originX,
+    shellState.lastPointer.y - originY,
   );
   if (distance >= WINDOW_CLOSE_GUARD_MOVE_PX) {
     clearWindowCloseGuard(node);

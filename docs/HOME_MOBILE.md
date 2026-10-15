@@ -25,11 +25,11 @@ Pointer class comes from `(pointer: coarse)` and `(hover: none)`, never from
 the user agent string. A tablet with a trackpad is a fine-pointer tablet; a
 touch laptop under 640 px is a phone.
 
-A phone held sideways is still a phone: a coarse-pointer viewport whose
-height is at most 640 px keeps the phone class (844 × 390 is a phone, not a
-tablet), so rotating with a window open does not change the layout family. A
-short desktop window with a mouse stays desktop; height only counts on a
-coarse pointer.
+A phone held sideways is still a phone: a coarse-pointer viewport up to
+1100 px wide whose height is at most 500 px keeps the phone class (844 × 390
+is a phone, not a tablet), so rotating with a window open does not change the
+layout family. A 1024 × 600 tablet stays a tablet, and a short desktop window
+with a mouse stays desktop; height only counts on a coarse pointer.
 
 The single source of truth for the class in JavaScript is
 `shell-form-factor.js`; `shouldOpenMaximizedByDefault()` in `shell-core.js`

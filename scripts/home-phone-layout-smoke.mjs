@@ -865,9 +865,51 @@ async function openWindow(frame, target) {
   await sleep(SHEET_SETTLE_MS);
 }
 
-// The shell ignores a close tap at the pointer spot that opened the window
-// for a moment after it opens (ghost-click guard, shell-windows.js). This smoke
-// opens windows with synthetic clicks, so the spot is wherever the last real
+// A real tap on an app, then a real tap on Close while the open ghost-close
+// guard is still armed: a fresh touch elsewhere is not a ghost click, so the
+// window must close at once (a touch tap carries no pointermove).
+async function probePromptTouchClose(frame, target = "library") {
+  await frame.locator(`.taskbar-item[data-target="${target}"]:visible, .phone-home-app[data-target="${target}"]:visible`).first().tap();
+  await waitFor(
+    () => frame.locator(`.window[data-target="${target}"] [data-action="close"]`).count().then((count) => count > 0),
+    BOOT_TIMEOUT_MS,
+    `${target} window`,
+  );
+  const guardLeftMs = await frame.evaluate((target) => {
+    const until = Number(document.querySelector(`.window[data-target="${target}"]`)?.dataset.closeGuardUntil);
+    return Number.isFinite(until) ? Math.round(until - performance.now()) : 0;
+  }, target);
+  await frame.locator(`.window[data-target="${target}"] [data-action="close"]`).first().tap();
+  let closed = true;
+  try {
+    await waitFor(
+      () => frame.locator(`.window[data-target="${target}"]`).count().then((count) => count === 0),
+      SHEET_SETTLE_MS,
+      `${target} closed by a prompt tap`,
+    );
+  } catch (_error) {
+    closed = false;
+    await closeWindow(frame, target);
+  }
+  await sleep(SURFACE_SETTLE_MS);
+  return { target, guardLeftMs, closed };
+}
+
+function promptCloseFailures(run) {
+  const probe = run.promptClose;
+  if (!probe) {
+    return [];
+  }
+  const label = `${run.engine}/${run.profile}/prompt-close`;
+  if (probe.guardLeftMs <= 0) {
+    return [`${label}: the Close tap must land while the open guard is armed to test it. Got ${JSON.stringify(probe)}`];
+  }
+  return probe.closed ? [] : [`${label}: a fresh tap on Close right after a tap opened ${probe.target} must close it. Got ${JSON.stringify(probe)}`];
+}
+
+// The shell ignores a press on Close at the spot that opened the window for a
+// moment after it opens (ghost-click guard, shell-windows.js). This smoke
+// opens windows with synthetic clicks, so that spot is wherever the last real
 // click landed — often the previous window's close button, the very pixel
 // tapped next. Wait the guard out instead of tapping into it.
 async function closeWindow(frame, target) {
@@ -1039,6 +1081,7 @@ async function runProfile(browser, engineId, profile, origin) {
   let homeProbe = null;
   let homeEditProbe = null;
   let backProbe = null;
+  let promptCloseProbe = null;
   let bootRetries = 0;
   try {
     let booted;
@@ -1098,6 +1141,7 @@ async function runProfile(browser, engineId, profile, origin) {
     if (profile.id.startsWith("phone")) {
       homeEditProbe = await probePhoneHomeEdit(page, frame, dir);
       backProbe = await probePhoneBack(frame);
+      promptCloseProbe = await probePromptTouchClose(frame);
     }
     for (const [target] of FIRST_PARTY_APPS) {
       if (target === "assistant") {
@@ -1124,7 +1168,7 @@ async function runProfile(browser, engineId, profile, origin) {
   } finally {
     await context.close();
   }
-  return { engine: engineId, profile: profile.id, viewport: profile.viewport, surfaces, dock: dockProbe, stage: stageProbe, keyboard: keyboardProbe, spotlight: spotlightProbe, sheetHandles: sheetHandleProbe, link: linkProbe, touchMenu: touchMenuProbe, home: homeProbe, homeEdit: homeEditProbe, back: backProbe, bootRetries };
+  return { engine: engineId, profile: profile.id, viewport: profile.viewport, surfaces, dock: dockProbe, stage: stageProbe, keyboard: keyboardProbe, spotlight: spotlightProbe, sheetHandles: sheetHandleProbe, link: linkProbe, touchMenu: touchMenuProbe, home: homeProbe, homeEdit: homeEditProbe, back: backProbe, promptClose: promptCloseProbe, bootRetries };
 }
 
 // Soft keyboard: only the host page sees it, so the host relays its height
@@ -2439,7 +2483,7 @@ try {
         }
         const run = await runProfile(browser, engineId, profile, origin);
         report.runs.push(run);
-        failures.push(...shellFailures(run), ...phoneDockFailures(run), ...phoneStageFailures(run), ...phoneKeyboardFailures(run), ...phoneSpotlightFailures(run), ...phoneSheetHandleFailures(run), ...phoneLinkFailures(run), ...phoneTouchMenuFailures(run), ...phoneHomeFailures(run), ...phoneHomeEditFailures(run), ...phoneBackFailures(run));
+        failures.push(...shellFailures(run), ...phoneDockFailures(run), ...phoneStageFailures(run), ...phoneKeyboardFailures(run), ...phoneSpotlightFailures(run), ...phoneSheetHandleFailures(run), ...phoneLinkFailures(run), ...phoneTouchMenuFailures(run), ...phoneHomeFailures(run), ...phoneHomeEditFailures(run), ...phoneBackFailures(run), ...promptCloseFailures(run));
         console.log(`[home-phone-layout] ${engineId}/${profile.id} ${summarize(run)}`);
       }
       const closedStream = await runClosedStream(browser, engineId, origin);

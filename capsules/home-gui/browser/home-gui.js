@@ -1119,25 +1119,12 @@ async function toggleHomeGuiFullscreen() {
   }
 }
 
-function trackPointerDown(event) {
+// Last press or move: where the pointer is, for the window close guard.
+function trackPointer(event) {
   shellState.lastPointer = {
     x: event.clientX,
     y: event.clientY,
     at: window.performance ? window.performance.now() : Date.now(),
-  };
-}
-
-function trackPointerMove(event) {
-  const at = window.performance ? window.performance.now() : Date.now();
-  shellState.lastPointer = {
-    x: event.clientX,
-    y: event.clientY,
-    at,
-  };
-  shellState.lastPointerMove = {
-    x: event.clientX,
-    y: event.clientY,
-    at,
   };
 }
 
@@ -1325,7 +1312,7 @@ export function bindHomeGuiInteractions(options = {}) {
   });
 
   document.addEventListener("pointermove", (event) => {
-    trackPointerMove(event);
+    trackPointer(event);
     continueTargetDrag(event);
     updateDesktopMarquee(event);
   });
@@ -1341,7 +1328,7 @@ export function bindHomeGuiInteractions(options = {}) {
   });
 
   document.addEventListener("pointerdown", (event) => {
-    trackPointerDown(event);
+    trackPointer(event);
     const now = window.performance ? window.performance.now() : Date.now();
     if (
       shellState.contextMenuOpen &&
