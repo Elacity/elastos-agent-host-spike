@@ -1991,6 +1991,109 @@ async fn test_full_recovery_bundle_sanitizes_malformed_wallet_restore_after_reas
     assert!(!serialized.contains("private_key_hex"));
 }
 
+/// A completed outcome recorded before ids bound the attempt (v1 id) still
+/// answers a repeat import, so an upgraded Home does not restore over newer data.
+#[tokio::test]
+async fn test_full_recovery_repeat_import_honours_v1_completed_outcome() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(wallet_test_state(dir.path()).await);
+    let owner = passkey_authority_with_name(dir.path(), Some("owner"));
+    let owner_principal =
+        crate::auth::load_principal_for_proof_binding(dir.path(), &owner.proof_binding_id).unwrap();
+    let export =
+        export_full_recovery_bundle_response(&app, dir.path(), &owner, &owner_principal).await;
+    assert_eq!(export.status(), StatusCode::OK);
+    let bundle: Value = serde_json::from_slice(
+        &axum::body::to_bytes(export.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let imported_outcomes = || {
+        crate::auth::load_auth_state(dir.path())
+            .unwrap()
+            .audit
+            .into_iter()
+            .filter(|event| event.event_type == "auth.full_recovery_bundle.imported")
+            .collect::<Vec<_>>()
+    };
+    // The first import's outcome is held back (fault) and recorded instead
+    // under the v1 id an older runtime wrote, through the normal append.
+    crate::auth::inject_recovery_reassignment_test_fault(
+        dir.path(),
+        crate::auth::RecoveryReassignmentTestFault::PostCommitOutcomeAudit,
+    );
+    let (status, first) = import_raw_full_recovery_bundle(
+        &app,
+        &owner.system_token,
+        &owner_principal.principal_id,
+        &owner_principal.localhost_root,
+        &bundle,
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["runtime_audit"]["status"], "incomplete", "{first}");
+    assert!(imported_outcomes().is_empty());
+    let held: elastos_runtime::auth::RuntimeAuditEventV1 = serde_json::from_slice(
+        &base64::Engine::decode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            first["runtime_audit"]["retry_token"].as_str().unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let field = |name: &str| {
+        held.reason
+            .split(&format!("{name}="))
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    let expected_count: usize = field("expected_count").parse().unwrap();
+    let bundle_sha256 = field("bundle_sha256");
+    let mut v1 = held.clone();
+    v1.event_id = crate::api::auth_gateway::full_recovery_outcome_audit_id(
+        bundle["bundle_id"].as_str().unwrap(),
+        &owner_principal.principal_id,
+        "complete",
+        "none",
+        expected_count,
+        expected_count,
+        &bundle_sha256,
+        None,
+    );
+    crate::auth::append_signed_full_recovery_outcome_audit_event(
+        dir.path(),
+        crate::auth::sign_audit_event(dir.path(), v1).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(imported_outcomes().len(), 1);
+
+    let (status, repeated) = import_raw_full_recovery_bundle(
+        &app,
+        &owner.system_token,
+        &owner_principal.principal_id,
+        &owner_principal.localhost_root,
+        &bundle,
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{repeated}");
+    assert_eq!(
+        repeated["runtime_audit"]["status"], "complete",
+        "{repeated}"
+    );
+    assert_eq!(
+        imported_outcomes().len(),
+        1,
+        "the repeat import restored again instead of reading the v1 outcome"
+    );
+}
+
 /// The owner lost every passkey and guest registration is off. The operator
 /// arms a code on this computer; the sign-in screen registers a new passkey
 /// bound to the owner's Recovery Kit, and the usual full import then restores.

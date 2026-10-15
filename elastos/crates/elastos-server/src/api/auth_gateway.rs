@@ -1768,7 +1768,7 @@ async fn full_recovery_bundle_import_inner(
         );
     }
     let expected_wallet_count = recovery_set.keys.len();
-    let completed_audit_id = |proof_binding_id: Option<&str>, session_id: &str| {
+    let completed_audit_id = |attempt: Option<(Option<&str>, &str)>| {
         full_recovery_outcome_audit_id(
             bundle_id,
             bundle_principal,
@@ -1777,8 +1777,7 @@ async fn full_recovery_bundle_import_inner(
             expected_wallet_count,
             expected_wallet_count,
             &bundle_sha256,
-            proof_binding_id,
-            session_id,
+            attempt,
         )
     };
     if let Some(terminal_event) = recovery_terminal_retry_event(&state.data_dir, headers)? {
@@ -1793,7 +1792,10 @@ async fn full_recovery_bundle_import_inner(
         }
         validate_recovery_terminal_retry_event(
             &terminal_event,
-            &completed_audit_id(context.proof_binding_id.as_deref(), &context.session_id),
+            &completed_audit_id(Some((
+                context.proof_binding_id.as_deref(),
+                &context.session_id,
+            ))),
             bundle_principal,
             context.proof_binding_id.as_deref(),
             &context.session_id,
@@ -1843,11 +1845,13 @@ async fn full_recovery_bundle_import_inner(
     if !input.reassign_to_current_principal {
         if let Some(completed_event) =
             crate::auth::find_signed_full_recovery_outcome_audit_event(&state.data_dir, |event| {
-                event.event_id
-                    == completed_audit_id(
-                        event.proof_binding_id.as_deref(),
-                        event.session_id.as_deref().unwrap_or_default(),
-                    )
+                // Outcomes recorded before ids bound the attempt keep their v1 id.
+                event.event_id == completed_audit_id(None)
+                    || event.event_id
+                        == completed_audit_id(Some((
+                            event.proof_binding_id.as_deref(),
+                            event.session_id.as_deref().unwrap_or_default(),
+                        )))
             })?
         {
             let principal = require_active_passkey_principal_for_context(state, &context)?;
@@ -1981,8 +1985,10 @@ async fn full_recovery_bundle_import_inner(
         wallet_restore.expected_count,
         wallet_restore.imported_count,
         &bundle_sha256,
-        outcome_event.proof_binding_id.as_deref(),
-        outcome_event.session_id.as_deref().unwrap_or_default(),
+        Some((
+            outcome_event.proof_binding_id.as_deref(),
+            outcome_event.session_id.as_deref().unwrap_or_default(),
+        )),
     );
     let signed_outcome_event = crate::auth::sign_audit_event(&state.data_dir, outcome_event)?;
     #[cfg(test)]
@@ -2494,11 +2500,13 @@ fn wallet_adapter_error_is_invalid_response(err: &anyhow::Error) -> bool {
         || message.contains("invalid Wallet provider v2 response")
 }
 
-/// One id per recovery attempt: the same Kit may be recovered again on this
-/// Home (lost passkey), and each attempt's proof binding and session get their
-/// own signed outcome instead of colliding with an earlier one.
+/// One id per recovery attempt (`attempt` = its proof binding and session): the
+/// same Kit may be recovered again on this Home (lost passkey), and each attempt
+/// gets its own signed outcome instead of colliding with an earlier one.
+/// `None` gives the v1 id that outcomes recorded before ids bound the attempt
+/// carry.
 #[allow(clippy::too_many_arguments)]
-fn full_recovery_outcome_audit_id(
+pub(in crate::api) fn full_recovery_outcome_audit_id(
     bundle_id: &str,
     principal_id: &str,
     wallet_status: &str,
@@ -2506,11 +2514,13 @@ fn full_recovery_outcome_audit_id(
     expected_count: usize,
     imported_count: usize,
     bundle_sha256: &str,
-    proof_binding_id: Option<&str>,
-    session_id: &str,
+    attempt: Option<(Option<&str>, &str)>,
 ) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"elastos.full-recovery-bundle.outcome-audit.v2");
+    digest.update(match attempt {
+        Some(_) => b"elastos.full-recovery-bundle.outcome-audit.v2",
+        None => b"elastos.full-recovery-bundle.outcome-audit.v1",
+    });
     let expected_count = expected_count.to_string();
     let imported_count = imported_count.to_string();
     for value in [
@@ -2521,11 +2531,15 @@ fn full_recovery_outcome_audit_id(
         expected_count.as_bytes(),
         imported_count.as_bytes(),
         bundle_sha256.as_bytes(),
-        proof_binding_id.unwrap_or_default().as_bytes(),
-        session_id.as_bytes(),
     ] {
         digest.update([0]);
         digest.update(value);
+    }
+    if let Some((proof_binding_id, session_id)) = attempt {
+        for value in [proof_binding_id.unwrap_or_default(), session_id] {
+            digest.update([0]);
+            digest.update(value.as_bytes());
+        }
     }
     format!("audit:full-recovery:{}", hex::encode(digest.finalize()))
 }
