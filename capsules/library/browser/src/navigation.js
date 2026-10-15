@@ -112,16 +112,23 @@ export function createLibraryNavigation({
     announceHistory(false);
   }
 
+  // The drop has landed once the current entry is no longer one this frame
+  // pushed (it is the guard, or older). A pop onto one of its own entries
+  // (a Back pressed meanwhile) is not the drop.
+  function dropLanded(entryState) {
+    return entryState?.schema !== LIBRARY_HISTORY_SCHEMA;
+  }
+
   // The shell asks again when an acknowledgement is late: answer from this
   // frame's own history, never from a guess. Nothing held: say so again. The
-  // traversal already landed on the guard: finish the drop now. Otherwise
-  // start it (a no-op while one is in flight; its popstate answers).
+  // traversal already landed: finish the drop now. Otherwise start it (a
+  // no-op while one is in flight; its popstate answers).
   function answerDropRequest() {
     if (state.historyIndex < 0) {
       announceHistory(false);
       return;
     }
-    if (dropping && window.history.state?.schema === LIBRARY_HISTORY_GUARD_SCHEMA) {
+    if (dropping && dropLanded(window.history.state)) {
       finishDrop();
       return;
     }
@@ -155,7 +162,9 @@ export function createLibraryNavigation({
   async function handleBrowserPopState(event) {
     const data = event.state || {};
     if (dropping) {
-      finishDrop();
+      if (dropLanded(event.state)) {
+        finishDrop();
+      }
       return;
     }
     // The shell owns Back on a phone stage; this frame holds no entries there.

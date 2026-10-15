@@ -152,7 +152,7 @@ import {
   retireConnectorSheet,
   showConnectorSheet,
 } from "./shell-connector-sheet.js?v=home-20260813a";
-import { bindFormFactor, isPhone } from "./shell-form-factor.js?v=home-20260813a";
+import { bindFormFactor, FORM_FACTOR_EVENT, isPhone } from "./shell-form-factor.js?v=home-20260813a";
 import { bindPhoneDock } from "./shell-phone-dock.js?v=home-20260813a";
 import { bindPhoneStage, resetPhoneStage } from "./shell-phone-stage.js?v=home-20260813a";
 import { bindCapsuleLayout } from "./shell-capsule-layout.js?v=home-20260813a";
@@ -330,6 +330,8 @@ function startHomeGuiClock() {
     return;
   }
   shellState.clockTimer = window.setInterval(updateClock, 30_000);
+  // The phone bar's clock is date and time spans; a stage reset re-renders it.
+  window.addEventListener(FORM_FACTOR_EVENT, updateClock);
 }
 
 function stopHomeGuiClock() {

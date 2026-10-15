@@ -147,6 +147,11 @@ test("the shell's drop request is answered from the frame's own history, never b
   library.fromShell({ type: "elastos:app-history", drop: true });
   assert.equal(pending.length, 1, "one drop traversal, not one per request");
   assert.deepEqual(library.posted.at(-1), { type: "elastos:app-history", held: true }, "no answer while the traversal is pending");
+  // A pop onto one of Library's own entries (a Back pressed meanwhile) is not
+  // the drop landing.
+  await library.nav.handleBrowserPopState({ state: library.entries[1].state });
+  assert.deepEqual(library.posted.at(-1), { type: "elastos:app-history", held: true }, "no answer for a pop onto an own entry");
+  assert.equal(library.state.historyIndex >= 0, true);
 
   // The traversal landed but its popstate is late: a repeated request is
   // answered from history.state.

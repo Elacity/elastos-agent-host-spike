@@ -14,6 +14,7 @@ import {
   dismissWithMotion,
   prepareSurfaceOpen,
 } from "./shell-motion.js?v=home-20260813a";
+import { isPhone } from "./shell-form-factor.js?v=home-20260813a";
 import { registerStageLayer } from "./shell-popovers.js?v=home-20260813a";
 
 /* System chrome: the ElastOS brand at the far left of the bar is the system
@@ -256,8 +257,9 @@ export function formatMenubarClock(now = new Date()) {
   return `${date} ${time}`;
 }
 
-/* Date and time render as separate spans so the phone bar can drop the date
-   in CSS (iPhone status bar: time only) without waiting for the next tick. */
+/* On the phone the date and time render as separate spans so the phone bar
+   can drop the date in CSS (iPhone status bar: time only) without waiting for
+   the next tick. Tablet and desktop keep the base chip: one text node. */
 export function menubarClockParts(now = new Date()) {
   const parts = new Intl.DateTimeFormat(undefined, {
     weekday: "short",
@@ -283,9 +285,26 @@ export function menubarClockParts(now = new Date()) {
 export function updateClock() {
   const now = new Date();
   if (clockNode) {
-    const { date, time } = menubarClockParts(now);
-    clockNode.querySelector(".toolbar-clock-date").textContent = date;
-    clockNode.querySelector(".toolbar-clock-time").textContent = time;
+    renderClock(clockNode, now);
   }
   renderNcTimeChrome(now);
+}
+
+function renderClock(node, now) {
+  if (!isPhone()) {
+    node.textContent = formatMenubarClock(now);
+    return;
+  }
+  const { date, time } = menubarClockParts(now);
+  let dateNode = node.querySelector(".toolbar-clock-date");
+  let timeNode = node.querySelector(".toolbar-clock-time");
+  if (!dateNode || !timeNode) {
+    dateNode = node.ownerDocument.createElement("span");
+    dateNode.className = "toolbar-clock-date";
+    timeNode = node.ownerDocument.createElement("span");
+    timeNode.className = "toolbar-clock-time";
+    node.replaceChildren(dateNode, " ", timeNode);
+  }
+  dateNode.textContent = date;
+  timeNode.textContent = time;
 }

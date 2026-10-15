@@ -1413,9 +1413,37 @@ async function probeResetOwnerReports(page, frame) {
     await historyBack(frame);
     await sleep(SHEET_SETTLE_MS);
     const afterBack = { ...(await stageWindowState(frame, "library")), library: await libraryStageState(page), ...homeState(page, frame) };
+
+    // The drop lands but its popstate never reaches Library: only the shell's
+    // drop request ({ drop: true }), answered from history.state, can get the
+    // acknowledgement. Without it the reset would wait every attempt and the
+    // shell stay unarmed.
+    await resizeAcrossBoundary(page, frame, STAGE_RESET_DESKTOP, "desktop");
+    await openWindow(frame, "library");
+    await waitFor(
+      () => libraryStageState(page).then((library) => library?.formFactor === "desktop" && library.ownEntry === LIBRARY_HISTORY_SCHEMA),
+      SHEET_SETTLE_MS * 2,
+      "Library holding its own entry again on the desktop",
+    );
+    await libraryFrameOf(page).evaluate(() => {
+      window.__smokeSwallowedPops = 0;
+      window.addEventListener("popstate", (event) => {
+        if (window.__smokeSwallowedPops === 0) {
+          window.__smokeSwallowedPops += 1;
+          event.stopImmediatePropagation();
+        }
+      }, { capture: true });
+    });
+    const silentReset = await resizeAcrossBoundary(page, frame, STAGE_RESET_PHONE, "phone");
+    const silent = {
+      reset: silentReset,
+      swallowed: await libraryFrameOf(page).evaluate(() => window.__smokeSwallowedPops),
+      library: await libraryStageState(page),
+      shellEntry: await shellOwnsEntry(frame),
+    };
     await discardWindows(frame, "library");
     await sleep(SURFACE_SETTLE_MS);
-    return { stageHistory, homeUrl, limits, phoneAria, toDesktop, toPhone: { otherFolder, held, acknowledged, afterBack } };
+    return { stageHistory, homeUrl, limits, phoneAria, toDesktop, toPhone: { otherFolder, held, acknowledged, afterBack, silent } };
   } finally {
     fixture.libraryRoots = false;
   }
@@ -1460,7 +1488,7 @@ function resetOwnerReportFailures(label, probe) {
   } else if (toDesktop.durationMs < limits.timeoutMs || toDesktop.shellEntry || toDesktop.afterBack.url !== probe.homeUrl || !toDesktop.afterBack.shellFrame) {
     failures.push(`${label}/own-entry: a back() that never lands must hold the reset for its full ${limits.timeoutMs} ms, then recover: the entry is no longer the shell's and a Back keeps Home. Got ${JSON.stringify({ homeUrl: probe.homeUrl, limits, toDesktop })}`);
   }
-  const { held, acknowledged, afterBack, otherFolder } = toPhone;
+  const { held, acknowledged, afterBack, otherFolder, silent } = toPhone;
   const waitedMs = limits.timeoutMs * limits.attempts;
   if (held.drops !== 1 || held.library?.ownEntry !== LIBRARY_HISTORY_SCHEMA) {
     failures.push(`${label}/app-ack: Library must start exactly one drop and still hold its entry while its traversal is held. Got ${JSON.stringify(held)}`);
@@ -1472,6 +1500,12 @@ function resetOwnerReportFailures(label, probe) {
     failures.push(`${label}/app-ack: once Library's traversal lands (back on its load-time guard entry) it must acknowledge and the shell arm. Got ${JSON.stringify(acknowledged)}`);
   } else if (afterBack.onStage || !afterBack.home || afterBack.library?.folder !== otherFolder || afterBack.url !== probe.homeUrl || !afterBack.shellFrame) {
     failures.push(`${label}/app-ack: one Back must then send Library home in its folder, Home staying. Got ${JSON.stringify(afterBack)}`);
+  }
+  if (silent.swallowed !== 1) {
+    failures.push(`${label}/app-request: Library's drop popstate must be withheld once to test the drop request. Got ${JSON.stringify(silent)}`);
+  } else if (silent.reset.runs !== 1 || silent.reset.durationMs >= waitedMs
+    || silent.library?.ownEntry === LIBRARY_HISTORY_SCHEMA || !silent.shellEntry) {
+    failures.push(`${label}/app-request: a drop that landed without its popstate must be acknowledged on the shell's drop request (before ${waitedMs} ms) and the shell arm. Got ${JSON.stringify(silent)}`);
   }
   return failures;
 }
