@@ -170,9 +170,10 @@ where
 async fn wait_for_managed_runtime_ready(
     coords_path: &Path,
     expected_version: &str,
+    budget: Duration,
 ) -> Option<RuntimeCoords> {
     let ready = poll_until_ready(
-        RUNTIME_READY_TIMEOUT,
+        budget,
         || Ok(None::<()>),
         || managed_runtime_ready(coords_path, expected_version),
     )
@@ -1121,14 +1122,22 @@ async fn ensure_managed_runtime(
         ManagedRuntimeStart::Owner(guard) => guard,
         ManagedRuntimeStart::Waiter => {
             let expected = env!("ELASTOS_VERSION");
-            if let Some(coords) = wait_for_managed_runtime_ready(&coords_path, expected).await {
+            // The owner may still be in setup before its own readiness wait starts,
+            // so wait as long as its lock lasts.
+            if let Some(coords) = wait_for_managed_runtime_ready(
+                &coords_path,
+                expected,
+                MANAGED_RUNTIME_START_LOCK_LIFETIME,
+            )
+            .await
+            {
                 terminate_sibling_managed_runtime_children(runtime_kind, coords.pid);
                 return Ok(coords);
             }
             anyhow::bail!(
                 "managed {} runtime start is already in progress but did not become ready within {} seconds",
                 surface_name,
-                RUNTIME_READY_TIMEOUT.as_secs()
+                MANAGED_RUNTIME_START_LOCK_LIFETIME.as_secs()
             );
         }
     };
@@ -1231,8 +1240,12 @@ async fn ensure_managed_runtime(
                 surface_name, pid
             );
         }
-        if let Some(coords) =
-            wait_for_managed_runtime_ready(&coords_path, env!("ELASTOS_VERSION")).await
+        if let Some(coords) = wait_for_managed_runtime_ready(
+            &coords_path,
+            env!("ELASTOS_VERSION"),
+            RUNTIME_READY_TIMEOUT,
+        )
+        .await
         {
             terminate_sibling_managed_runtime_children(runtime_kind, coords.pid);
             drop(start_guard);
