@@ -143,5 +143,6 @@ export function bindTouchLongPress(root, {
     }
   }, true);
 
-  return { swallowNextClick };
+  // `cancel` forgets a press in progress (a stage reset): no menu opens.
+  return { swallowNextClick, cancel };
 }

@@ -271,4 +271,6 @@ test("Notification Centre and Control Centre keep their base roles off a phone",
   for (const id of ["notification-center", "control-centre"]) {
     assert.match(template, new RegExp(`id="${id}"\\s+class="${id}"\\s+role="group"\\s+aria-label=`), `${id} ships its base role`);
   }
+  const search = template.slice(template.indexOf('id="toolbar-spotlight"'), template.indexOf("</button>", template.indexOf('id="toolbar-spotlight"')));
+  assert.doesNotMatch(search, /aria-(haspopup|expanded|controls)/, "Search ships its base markup; only the phone adds popup semantics (shell-spotlight.js)");
 });

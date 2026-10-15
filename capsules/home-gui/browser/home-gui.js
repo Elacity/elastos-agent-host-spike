@@ -26,7 +26,7 @@ import {
   shouldIgnoreDesktopKeydown,
   targetById,
 } from "./shell-core.js?v=home-20260813a";
-import { registerStageLayer } from "./shell-popovers.js?v=home-20260813a";
+import { registerStageGesture, registerStageLayer } from "./shell-popovers.js?v=home-20260813a";
 import {
   bindIdentityMenu,
   clearIdentitySurface,
@@ -1219,6 +1219,7 @@ export function bindHomeGuiInteractions(options = {}) {
   // desktop icons keep their own long-press, which also arms the touch drag.
   // Tablet and desktop keep the browser's own touch behaviour.
   const touchLongPress = bindTouchLongPress(document, { skip: ".desktop-shortcut", active: isPhone });
+  registerStageGesture("long-press", touchLongPress.cancel);
 
   // The brand button itself toggles the ElastOS menu (bound in
   // bindIdentityMenu); the go-home action lives inside it as Show desktop.

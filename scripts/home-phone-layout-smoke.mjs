@@ -977,9 +977,16 @@ function discardWindows(frame, target) {
 //   so one Back sends Library home instead of stepping Library's history.
 // reopenAfterClose: an app closed by hand then reopened; one Back sends it home
 //   and Home stays.
-// reopenedLayer: Control Centre, whose close animates, reopened in the same
-//   task as the Back that started closing it (before the stage's settlement
-//   poll) is a new layer; it stays open and the next Back closes it.
+// reopenedLayers: Control Centre and Spotlight, whose closes animate (Spotlight
+//   animates its inner panel, not the registered #spotlight), reopened over an
+//   app in the same task as the Back that started closing them (before the
+//   stage's settlement poll) are new layers: each stays open, the next Back
+//   closes it and the app stays on the stage.
+const REOPEN_RACES = Object.freeze([
+  { id: "control-centre", module: "shell-control-centre.js", open: "showControlCentre", leaving: "#control-centre", leavingClass: "menubar-card-leaving" },
+  { id: "spotlight", module: "shell-spotlight.js", open: "showSpotlight", leaving: "#spotlight .spotlight-panel", leavingClass: "launcher-leaving" },
+]);
+
 async function probeBackRaces(page, frame) {
   const mode = await frame.evaluate(() => document.body.dataset.stageHistory || "");
   if (mode !== "history") {
@@ -1018,44 +1025,50 @@ async function probeBackRaces(page, frame) {
   await sleep(SURFACE_SETTLE_MS);
 
   // Reduced motion makes every close synchronous (shell-motion.js); the race
-  // needs Control Centre's leave animation, so motion is on for this step.
+  // needs the leave animations, so motion is on for this step.
   const homeUrl = page.url();
   await page.emulateMedia({ reducedMotion: "no-preference" });
-  let reopenedLayer;
+  const reopenedLayers = [];
   try {
-    await LAYER_OPENERS["control-centre"].open(frame);
-    await sleep(SHEET_SETTLE_MS);
-    const race = await frame.evaluate(async (timeoutMs) => {
-      const centre = await import(new URL("./shell-control-centre.js?v=home-20260813a", location.href).href);
-      const panel = document.querySelector("#control-centre");
-      return new Promise((resolve) => {
-        // Added after the shell's own popstate listener, so the shell's Back
-        // has started the close when this runs; reopen in that same task.
-        const reopen = () => {
-          clearTimeout(timer);
-          const closing = Boolean(panel && !panel.hidden && panel.classList.contains("menubar-card-leaving"));
-          centre.showControlCentre();
-          resolve({ popstate: true, closing, reopened: Boolean(panel && !panel.hidden) });
-        };
-        const timer = setTimeout(() => {
-          window.removeEventListener("popstate", reopen);
-          resolve({ popstate: false });
-        }, timeoutMs);
-        window.addEventListener("popstate", reopen, { once: true });
-        history.back();
-      });
-    }, LAYER_CLOSE_WAIT_MS);
-    // Past the leave animation's own timer: a cancelled close must not land.
-    await sleep(SHEET_SETTLE_MS);
-    const before = await readLayer(frame, "control-centre");
-    await historyBack(frame);
-    const after = await waitLayerClosed(frame, "control-centre");
-    reopenedLayer = { race, before, after, homeUrl, home: homeState(page, frame) };
+    await openTarget(frame, "system");
+    for (const spec of REOPEN_RACES) {
+      await LAYER_OPENERS[spec.id].open(frame);
+      await sleep(SHEET_SETTLE_MS);
+      const race = await frame.evaluate(async ({ spec, timeoutMs }) => {
+        const owner = await import(new URL(`./${spec.module}?v=home-20260813a`, location.href).href);
+        const leaving = document.querySelector(spec.leaving);
+        return new Promise((resolve) => {
+          // Added after the shell's own popstate listener, so the shell's Back
+          // has started the close when this runs; reopen in that same task.
+          const reopen = () => {
+            clearTimeout(timer);
+            const closing = Boolean(leaving?.classList.contains(spec.leavingClass));
+            owner[spec.open]();
+            resolve({ popstate: true, closing, reopened: Boolean(leaving && !leaving.classList.contains(spec.leavingClass)) });
+          };
+          const timer = setTimeout(() => {
+            window.removeEventListener("popstate", reopen);
+            resolve({ popstate: false });
+          }, timeoutMs);
+          window.addEventListener("popstate", reopen, { once: true });
+          history.back();
+        });
+      }, { spec, timeoutMs: LAYER_CLOSE_WAIT_MS });
+      // Past the leave animation's own timer: a cancelled close must not land.
+      await sleep(SHEET_SETTLE_MS);
+      const before = await readLayer(frame, spec.id);
+      await historyBack(frame);
+      const after = await waitLayerClosed(frame, spec.id);
+      const app = await stageWindowState(frame, "system");
+      reopenedLayers.push({ id: spec.id, race, before, after, app, homeUrl, home: homeState(page, frame) });
+    }
   } finally {
     await page.emulateMedia({ reducedMotion: "reduce" });
   }
+  await discardWindows(frame, "system");
+  await sleep(SURFACE_SETTLE_MS);
 
-  return { libraryOwnHistory, reopenAfterClose, reopenedLayer };
+  return { libraryOwnHistory, reopenAfterClose, reopenedLayers };
 }
 
 function backRaceFailures(run) {
@@ -1065,19 +1078,21 @@ function backRaceFailures(run) {
   }
   const label = `${run.engine}/${run.profile}/back-races`;
   const failures = [];
-  const { libraryOwnHistory, reopenAfterClose, reopenedLayer } = probe;
+  const { libraryOwnHistory, reopenAfterClose, reopenedLayers } = probe;
   if (libraryOwnHistory.libraryState || !libraryOwnHistory.after.home || libraryOwnHistory.after.onStage) {
     failures.push(`${label}: Library must add no history entry on a phone, and one Back must send it home. Got ${JSON.stringify(libraryOwnHistory)}`);
   }
   if (!reopenAfterClose.home || reopenAfterClose.onStage) {
     failures.push(`${label}: an app closed by hand and reopened must go home on one Back, Home staying. Got ${JSON.stringify(reopenAfterClose)}`);
   }
-  if (!reopenedLayer.race.popstate || !reopenedLayer.race.closing) {
-    failures.push(`${label}: Control Centre must be reopened while Back's animated close is still in flight to test it. Got ${JSON.stringify(reopenedLayer)}`);
-  } else if (!reopenedLayer.race.reopened || !reopenedLayer.before.open || !reopenedLayer.before.openLayers.includes("control-centre")) {
-    failures.push(`${label}: Control Centre reopened during Back's close must stay open as a new layer. Got ${JSON.stringify(reopenedLayer)}`);
-  } else if (reopenedLayer.after.open || !reopenedLayer.after.home || reopenedLayer.home.url !== reopenedLayer.homeUrl || !reopenedLayer.home.shellFrame) {
-    failures.push(`${label}: a sheet reopened during Back's close must close on the next Back, Home staying. Got ${JSON.stringify(reopenedLayer)}`);
+  for (const reopened of reopenedLayers) {
+    if (!reopened.race.popstate || !reopened.race.closing) {
+      failures.push(`${label}: ${reopened.id} must be reopened while Back's animated close is still in flight to test it. Got ${JSON.stringify(reopened)}`);
+    } else if (!reopened.race.reopened || reopened.before.state !== "open" || !reopened.before.openLayers.includes(reopened.id)) {
+      failures.push(`${label}: ${reopened.id} reopened during Back's close must stay open as a new layer. Got ${JSON.stringify(reopened)}`);
+    } else if (reopened.after.open || !reopened.app.onStage || !reopened.after.home || reopened.home.url !== reopened.homeUrl || !reopened.home.shellFrame) {
+      failures.push(`${label}: ${reopened.id} reopened during Back's close must close on the next Back, the app beneath staying on the stage and Home staying. Got ${JSON.stringify(reopened)}`);
+    }
   }
   return failures;
 }
@@ -1267,6 +1282,200 @@ async function probeLibraryAcrossStages(page, frame) {
   }
 }
 
+// The Search button's popup semantics, which only the phone has.
+function searchButtonAria(frame) {
+  return frame.evaluate(() => {
+    const button = document.querySelector("#toolbar-spotlight");
+    return Object.fromEntries(["aria-haspopup", "aria-controls", "aria-expanded"].map((name) => [name, button?.getAttribute(name) ?? null]));
+  });
+}
+
+function shellOwnsEntry(frame) {
+  return frame.evaluate(() => history.state?.elastosStage === true);
+}
+
+// Starts on the phone stage (where probeLibraryAcrossStages ends). Each step
+// of a reset is reported by its owner, never inferred from a timeout:
+// toDesktop: a title-bar press on a phone app, held across the resize to the
+//   desktop and released while the reset runs, is cancelled by the reset: a
+//   later move opens no Mission Control. On the history stage the shell's own
+//   back() is held, so the reset waits its full history timeout (no early
+//   success) and recovers: the entry is no longer the shell's and a Back on
+//   the desktop keeps Home. Search loses its popup semantics off the phone.
+// toPhone (history stage): Library holds its own entries on the desktop and
+//   its drop traversal is held, so it cannot acknowledge. The reset asks it
+//   again, waits every attempt, and leaves the shell unarmed while Library
+//   holds; once the traversal lands Library acknowledges, the shell arms, and
+//   one Back sends Library home in its folder, Home staying.
+async function probeResetOwnerReports(page, frame) {
+  const homeUrl = page.url();
+  const stageHistory = await frame.evaluate(() => document.body.dataset.stageHistory || "");
+  const limits = await frame.evaluate(async () => {
+    const stage = await import(new URL("./shell-phone-stage.js?v=home-20260813a", location.href).href);
+    const popovers = await import(new URL("./shell-popovers.js?v=home-20260813a", location.href).href);
+    return {
+      timeoutMs: stage.RESET_HISTORY_TIMEOUT_MS,
+      attempts: stage.RESET_HISTORY_ATTEMPTS,
+      gestures: popovers.registeredStageGestures(),
+    };
+  });
+  const phoneAria = await searchButtonAria(frame);
+
+  await openTarget(frame, "system");
+  const armed = stageHistory === "history" ? await shellOwnsEntry(frame) : null;
+  const head = await frame.locator('.window[data-target="system"] .window-head').first().boundingBox();
+  if (stageHistory === "history") {
+    await frame.evaluate(() => {
+      window.__smokeHeldBacks = 0;
+      history.back = () => {
+        window.__smokeHeldBacks += 1;
+      };
+    });
+  }
+  const x = head.x + head.width / 2;
+  const y = head.y + head.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  const resetStarted = Date.now();
+  const resizing = page.setViewportSize(STAGE_RESET_DESKTOP);
+  await waitFor(
+    () => frame.evaluate(() => document.body.dataset.stageReset === "running").catch(() => false),
+    SHEET_SETTLE_MS,
+    "the reset to the desktop running",
+  ).catch(() => {});
+  const releasedDuringReset = await frame.evaluate(() => document.body.dataset.stageReset === "running");
+  await page.mouse.up();
+  await resizing;
+  await waitStageReset(frame, "desktop");
+  const toDesktopMs = Date.now() - resetStarted;
+  await sleep(SURFACE_SETTLE_MS);
+  await page.mouse.move(x, y + 200, { steps: 8 });
+  await sleep(SHEET_SETTLE_MS);
+  const toDesktop = {
+    armed,
+    releasedDuringReset,
+    durationMs: toDesktopMs,
+    missionControl: await frame.evaluate(() => document.body.classList.contains("expose-active")),
+    aria: await searchButtonAria(frame),
+    heldBacks: stageHistory === "history" ? await frame.evaluate(() => window.__smokeHeldBacks) : null,
+    shellEntry: stageHistory === "history" ? await shellOwnsEntry(frame) : null,
+  };
+  if (stageHistory === "history") {
+    await frame.evaluate(() => {
+      delete history.back;
+    });
+    await historyBack(frame);
+    await sleep(SHEET_SETTLE_MS);
+    toDesktop.afterBack = homeState(page, frame);
+  }
+  await discardWindows(frame, "system");
+  await sleep(SURFACE_SETTLE_MS);
+  if (stageHistory !== "history") {
+    return { stageHistory, homeUrl, limits, phoneAria, toDesktop, toPhone: null };
+  }
+
+  const [, otherFolder] = LIBRARY_FIXTURE_ROOTS.map((root) => root.uri);
+  fixture.libraryRoots = true;
+  try {
+    await openWindow(frame, "library");
+    await waitFor(
+      () => libraryStageState(page).then((library) => library?.formFactor === "desktop" && library.ownEntry === LIBRARY_HISTORY_SCHEMA),
+      BOOT_TIMEOUT_MS,
+      "Library holding its own history entry on the desktop",
+    );
+    await libraryFrameOf(page).evaluate((uri) => document.querySelector(`.place[data-uri="${uri}"]`)?.click(), otherFolder);
+    await waitFor(
+      () => libraryStageState(page).then((library) => library?.folder === otherFolder),
+      SHEET_SETTLE_MS * 2,
+      "Library in its second folder",
+    );
+    await libraryFrameOf(page).evaluate(() => {
+      window.__smokeHeldGo = [];
+      history.go = (delta) => window.__smokeHeldGo.push(delta);
+    });
+    const reset = await resizeAcrossBoundary(page, frame, STAGE_RESET_PHONE, "phone");
+    const held = {
+      reset,
+      drops: await libraryFrameOf(page).evaluate(() => window.__smokeHeldGo.length),
+      library: await libraryStageState(page),
+      window: await stageWindowState(frame, "library"),
+      shellEntry: await shellOwnsEntry(frame),
+    };
+    await libraryFrameOf(page).evaluate(() => {
+      delete history.go;
+      for (const delta of window.__smokeHeldGo.splice(0)) {
+        history.go(delta);
+      }
+    });
+    const armedAfterAck = await waitFor(() => shellOwnsEntry(frame), SHEET_SETTLE_MS * 2, "the shell arming once Library acknowledged")
+      .then(() => true, () => false);
+    const acknowledged = { armed: armedAfterAck, library: await libraryStageState(page) };
+    await historyBack(frame);
+    await sleep(SHEET_SETTLE_MS);
+    const afterBack = { ...(await stageWindowState(frame, "library")), library: await libraryStageState(page), ...homeState(page, frame) };
+    await discardWindows(frame, "library");
+    await sleep(SURFACE_SETTLE_MS);
+    return { stageHistory, homeUrl, limits, phoneAria, toDesktop, toPhone: { otherFolder, held, acknowledged, afterBack } };
+  } finally {
+    fixture.libraryRoots = false;
+  }
+}
+
+// Every phone gesture registers the cancel a stage reset calls.
+const RESET_CANCELLED_GESTURES = Object.freeze([
+  "title-swipe",
+  "long-press",
+  "dock-handle",
+  "home-edit-drag",
+  "sheet-handle:control-centre-handle",
+  "sheet-handle:notification-center-handle",
+  "sheet-handle:spotlight-handle",
+]);
+
+function resetOwnerReportFailures(label, probe) {
+  const failures = [];
+  const { limits, phoneAria, toDesktop, toPhone } = probe;
+  const unregistered = RESET_CANCELLED_GESTURES.filter((id) => !limits.gestures.includes(id));
+  if (unregistered.length > 0) {
+    failures.push(`${label}/gesture-cancel: every phone gesture must register its cancel for the stage reset. Missing ${JSON.stringify(unregistered)} of ${JSON.stringify(limits.gestures)}`);
+  }
+  if (phoneAria["aria-haspopup"] !== "dialog" || phoneAria["aria-controls"] !== "spotlight" || phoneAria["aria-expanded"] !== "false") {
+    failures.push(`${label}/search-aria: on the phone Search must name Spotlight as its dialog popup, collapsed. Got ${JSON.stringify(phoneAria)}`);
+  }
+  if (Object.values(toDesktop.aria).some((value) => value !== null)) {
+    failures.push(`${label}/search-aria: off the phone Search must keep the base button markup (no popup semantics). Got ${JSON.stringify(toDesktop.aria)}`);
+  }
+  // Only the history stage holds the reset long enough (its held back()) to
+  // release inside it for certain; the button stage still checks the move.
+  if (!toDesktop.releasedDuringReset && probe.stageHistory === "history") {
+    failures.push(`${label}/gesture-cancel: the title-bar press must be released while the reset runs to test it. Got ${JSON.stringify(toDesktop)}`);
+  } else if (toDesktop.missionControl) {
+    failures.push(`${label}/gesture-cancel: a title-bar press cancelled by the reset must not open Mission Control on a later move. Got ${JSON.stringify(toDesktop)}`);
+  }
+  if (probe.stageHistory !== "history") {
+    return failures;
+  }
+  if (!toDesktop.armed || toDesktop.heldBacks !== 1) {
+    failures.push(`${label}/own-entry: the phone app must arm the shell's entry and the reset must call back() once to test it. Got ${JSON.stringify(toDesktop)}`);
+  } else if (toDesktop.durationMs < limits.timeoutMs || toDesktop.shellEntry || toDesktop.afterBack.url !== probe.homeUrl || !toDesktop.afterBack.shellFrame) {
+    failures.push(`${label}/own-entry: a back() that never lands must hold the reset for its full ${limits.timeoutMs} ms, then recover: the entry is no longer the shell's and a Back keeps Home. Got ${JSON.stringify({ homeUrl: probe.homeUrl, limits, toDesktop })}`);
+  }
+  const { held, acknowledged, afterBack, otherFolder } = toPhone;
+  const waitedMs = limits.timeoutMs * limits.attempts;
+  if (held.drops !== 1 || held.library?.ownEntry !== LIBRARY_HISTORY_SCHEMA) {
+    failures.push(`${label}/app-ack: Library must start exactly one drop and still hold its entry while its traversal is held. Got ${JSON.stringify(held)}`);
+  } else if (held.reset.runs !== 1 || held.reset.durationMs < waitedMs - SURFACE_SETTLE_MS) {
+    failures.push(`${label}/app-ack: a frame that has not acknowledged must hold the reset for every attempt (${waitedMs} ms), never count as success. Got ${JSON.stringify(held.reset)}`);
+  } else if (held.shellEntry || !held.window.onStage) {
+    failures.push(`${label}/app-ack: while Library holds its entries the shell must stay unarmed, Library on the stage. Got ${JSON.stringify(held)}`);
+  } else if (!acknowledged.armed || acknowledged.library?.ownEntry === LIBRARY_HISTORY_SCHEMA) {
+    failures.push(`${label}/app-ack: once Library's traversal lands (back on its load-time guard entry) it must acknowledge and the shell arm. Got ${JSON.stringify(acknowledged)}`);
+  } else if (afterBack.onStage || !afterBack.home || afterBack.library?.folder !== otherFolder || afterBack.url !== probe.homeUrl || !afterBack.shellFrame) {
+    failures.push(`${label}/app-ack: one Back must then send Library home in its folder, Home staying. Got ${JSON.stringify(afterBack)}`);
+  }
+  return failures;
+}
+
 // A fine-pointer desktop window that a person narrows to a phone and widens
 // again: its own context, so no profile's stage is disturbed.
 async function runStageReset(browser, engineId, origin) {
@@ -1282,7 +1491,8 @@ async function runStageReset(browser, engineId, origin) {
     const bootFactor = await frame.evaluate(() => document.body.dataset.formFactor || null);
     const fullscreenToPhone = await probeFullscreenToPhone(page, frame);
     const libraryAcrossStages = await probeLibraryAcrossStages(page, frame);
-    return { engine: engineId, bootFactor, fullscreenToPhone, libraryAcrossStages };
+    const ownerReports = await probeResetOwnerReports(page, frame);
+    return { engine: engineId, bootFactor, fullscreenToPhone, libraryAcrossStages, ownerReports };
   } finally {
     await context.close();
   }
@@ -1317,6 +1527,8 @@ function stageResetFailures(run) {
       failures.push(`${fullscreenLabel}: one Back after the reset must send ${fullscreen.target} home, Home staying. Got ${JSON.stringify({ homeUrl: fullscreen.homeUrl, afterBack: back })}`);
     }
   }
+
+  failures.push(...resetOwnerReportFailures(`${label}/owner-reports`, run.ownerReports));
 
   const library = run.libraryAcrossStages;
   if (!library) {
@@ -2492,20 +2704,18 @@ async function probePhoneBack(frame) {
   };
 }
 
-// One registered layer as Back sees it: open by its own isOpen (or shown),
-// and how many layers Back would count right now.
+// One registered layer as Back sees it: its own reported state (open while it
+// is on screen at all, leaving included), and the layers Back would count.
 function readLayer(frame, id) {
   return frame.evaluate(async (id) => {
     const popovers = await import(new URL("./shell-popovers.js?v=home-20260813a", location.href).href);
     const stage = await import(new URL("./shell-phone-stage.js?v=home-20260813a", location.href).href);
     const layer = popovers.registeredStageLayers().find((entry) => entry.id === id);
-    const node = layer ? document.querySelector(layer.selector) : null;
-    const open = layer?.isOpen
-      ? layer.isOpen() === true
-      : Boolean(node && !node.hidden && node.getClientRects().length > 0);
+    const state = layer ? stage.stageLayerState(layer, document) : "closed";
     return {
       home: location.href.includes("/apps/home-gui/"),
-      open,
+      state,
+      open: state !== "closed",
       openLayers: stage.openStageLayers(document).map((entry) => entry.id),
       windows: Array.from(document.querySelectorAll(".window")).filter((node) => !node.classList.contains("hidden")).length,
     };

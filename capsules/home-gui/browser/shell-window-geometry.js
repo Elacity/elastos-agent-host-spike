@@ -12,6 +12,7 @@ import {
   endShellInteraction,
 } from "./shell-core.js?v=home-20260813a";
 import { isPhone } from "./shell-form-factor.js?v=home-20260813a";
+import { registerStageGesture } from "./shell-popovers.js?v=home-20260813a";
 
 const WINDOW_MIN_VISIBLE_DRAG_WIDTH = 96;
 const WINDOW_MIN_VISIBLE_DRAG_HEIGHT = 32;
@@ -350,6 +351,9 @@ export function attachWindowDrag(windowNode, handle, focusWindow, onWindowGeomet
     };
     beginShellInteraction();
     handle.setPointerCapture(event.pointerId);
+    // One pointer drags or resizes at a time; a stage reset ends it as a cancel.
+    const pointerId = event.pointerId;
+    registerStageGesture("window-geometry", () => stopDrag({ type: "pointercancel", pointerId }));
   });
 
   handle.addEventListener("pointermove", (event) => {
@@ -440,6 +444,8 @@ export function attachWindowResize(windowNode, focusWindow, onWindowGeometryChan
       };
       beginShellInteraction();
       handle.setPointerCapture(event.pointerId);
+      const pointerId = event.pointerId;
+      registerStageGesture("window-geometry", () => stopResize({ type: "pointercancel", pointerId }));
     });
 
     handle.addEventListener("pointermove", (event) => {

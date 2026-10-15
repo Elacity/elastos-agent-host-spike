@@ -43,13 +43,26 @@ tablet and desktop keep the desktop shell byte-for-byte, whatever the pointer.
 The form factor is decided at load and the shell never morphs between phone
 and desktop while state exists. A resize or rotation that crosses the phone
 boundary runs one clean stage reset (`resetPhoneStage()` in
-`shell-phone-stage.js`) before any new input is handled: input is blocked
+`shell-phone-stage.js`) before any new input is handled: every gesture in
+progress (title-bar swipe, long-press, sheet and Dock handles, Home edit
+drags, window drags) is cancelled through the cancel it registered
+(`registerStageGesture`), input is blocked
 (`body[data-stage-reset="running"]`), fullscreen Spaces are left, every open
 registered layer closes through its own close, the shell's history entry is
 dropped (leaving the phone) or re-armed (entering it), and app frames drop
 their own history before a phone stage arms (`elastos:app-history`). Only
 then is the new class committed (`formFactor()` returns the committed class),
 so Back only ever runs in a stable form factor. App windows stay open.
+
+Each step is reported by its owner, never inferred from a timeout. A layer
+reports open, closing or closed from the element its close animates
+(`registerStageLayer` `state`; Spotlight reads its inner panel), so a layer
+reopened mid-dismiss is a fresh open layer at once. An app frame that holds
+history acknowledges its drop (`{ held: false }`) once its traversal landed
+and answers the shell's repeated request (`{ drop: true }`); until it does,
+the shell's Back stays unarmed. A timeout starts a recovery: the shell's own
+entry that never left is made not the shell's in place, and a frame that
+never answers is asked again and keeps the stage unarmed.
 
 ## Viewport truth (M1)
 

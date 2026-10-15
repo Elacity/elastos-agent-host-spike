@@ -25,9 +25,10 @@ export function createLibraryNavigation({
   // shell's layout message (elastos-theme.js) names the stage, so an embedded
   // Library adds no entry until it knows it is not on a phone, and when the
   // shell resets its stage to a phone it drops the entries it made (the
-  // in-app Back and Forward keep their stacks) and tells the shell, which
-  // arms its own Back only after that (APP_HISTORY_MESSAGE in
-  // home-gui/browser/shell-phone-stage.js).
+  // in-app Back and Forward keep their stacks). It acknowledges once its
+  // traversal landed, and answers the shell's drop request ({ drop: true })
+  // the same way, so the shell arms its own Back only after that
+  // (APP_HISTORY_MESSAGE in home-gui/browser/shell-phone-stage.js).
   const APP_HISTORY_MESSAGE = "elastos:app-history";
   let dropping = false;
 
@@ -89,6 +90,11 @@ export function createLibraryNavigation({
         installBrowserHistory();
       }
     }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-el-form-factor"] });
+    window.addEventListener("message", (event) => {
+      if (event.source === window.parent && event.data?.type === APP_HISTORY_MESSAGE && event.data.drop === true) {
+        answerDropRequest();
+      }
+    });
   }
 
   // Steps back over every entry this frame pushed, onto the entry it had
@@ -97,6 +103,29 @@ export function createLibraryNavigation({
     if (dropping || state.historyIndex < 0) return;
     dropping = true;
     window.history.go(-(state.historyIndex + 1));
+  }
+
+  function finishDrop() {
+    dropping = false;
+    state.historyEntries = [];
+    state.historyIndex = -1;
+    announceHistory(false);
+  }
+
+  // The shell asks again when an acknowledgement is late: answer from this
+  // frame's own history, never from a guess. Nothing held: say so again. The
+  // traversal already landed on the guard: finish the drop now. Otherwise
+  // start it (a no-op while one is in flight; its popstate answers).
+  function answerDropRequest() {
+    if (state.historyIndex < 0) {
+      announceHistory(false);
+      return;
+    }
+    if (dropping && window.history.state?.schema === LIBRARY_HISTORY_GUARD_SCHEMA) {
+      finishDrop();
+      return;
+    }
+    dropBrowserHistory();
   }
 
   function installBrowserHistory() {
@@ -126,10 +155,7 @@ export function createLibraryNavigation({
   async function handleBrowserPopState(event) {
     const data = event.state || {};
     if (dropping) {
-      dropping = false;
-      state.historyEntries = [];
-      state.historyIndex = -1;
-      announceHistory(false);
+      finishDrop();
       return;
     }
     // The shell owns Back on a phone stage; this frame holds no entries there.

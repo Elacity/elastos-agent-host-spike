@@ -1294,8 +1294,8 @@ assert(
       spotlight.hidden === false &&
       spotlightInput === document.activeElement &&
       spotlight.getAttribute("aria-hidden") === "false" &&
-      spotlightInvoker.getAttribute("aria-expanded") === "true",
-    "Home Spotlight did not open, focus the search field and mark its bar button expanded",
+      ["aria-haspopup", "aria-controls", "aria-expanded"].every((name) => spotlightInvoker.getAttribute(name) === null),
+    "Home Spotlight did not open and focus the search field, or its desktop bar button gained popup semantics",
     {
       hidden: spotlight.hidden,
       activeElement: document.activeElement?.selector || null,
@@ -1346,8 +1346,11 @@ assert(
   touchedRow.dispatch("pointerdown", { pointerType: "touch" });
   spotlightPanel.dispatch("animationend", { target: spotlightPanel });
   assert(
-    shellSpotlight.spotlightOpen() === true,
-    "Home Spotlight on the phone must not open a result when a finger lands on it (the touch may be a scroll)",
+    shellSpotlight.spotlightOpen() === true &&
+      spotlightInvoker.getAttribute("aria-haspopup") === "dialog" &&
+      spotlightInvoker.getAttribute("aria-controls") === "spotlight" &&
+      spotlightInvoker.getAttribute("aria-expanded") === "true",
+    "Home Spotlight on the phone must not open a result when a finger lands on it (the touch may be a scroll), and its bar button must be marked expanded",
   );
   touchedRow.dispatch("click");
   spotlightPanel.dispatch("animationend", { target: spotlightPanel });
@@ -1384,8 +1387,8 @@ assert(
   assert(
     shellSpotlight.spotlightOpen() === false &&
       document.activeElement === spotlightInvoker &&
-      spotlightInvoker.getAttribute("aria-expanded") === "false",
-    "Home Spotlight did not close on Escape, restore focus and mark its bar button collapsed",
+      ["aria-haspopup", "aria-controls", "aria-expanded"].every((name) => spotlightInvoker.getAttribute(name) === null),
+    "Home Spotlight did not close on Escape and restore focus, or its desktop bar button gained popup semantics",
     {
       hidden: spotlight.hidden,
       activeElement: document.activeElement?.selector || null,

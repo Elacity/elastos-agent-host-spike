@@ -158,6 +158,16 @@ test("pointercancel (the browser took the gesture to scroll) cancels", () => {
   assert.equal(received.length, 0);
 });
 
+test("cancel (a stage reset) forgets a held press: no menu, no swallowed click", () => {
+  const { api, dispatch, advance, received } = harness();
+  dispatch("pointerdown");
+  api.cancel();
+  advance(LONG_PRESS_MS);
+  dispatch("pointerup");
+  assert.equal(received.length, 0);
+  assert.equal(dispatch("click").defaultPrevented, false);
+});
+
 test("a mouse is left to the browser's own right-click", () => {
   const { dispatch, advance, received, pendingTimers } = harness();
   dispatch("pointerdown", { pointerType: "mouse" });

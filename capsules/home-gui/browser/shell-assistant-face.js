@@ -26,6 +26,7 @@
 
 import {
   closeOtherShellPopovers,
+  LAYER_STATE,
   registerShellPopover,
   registerStageLayer,
 } from "./shell-popovers.js?v=home-20260813a";
@@ -617,7 +618,9 @@ export function bindAssistantFace(dependencies) {
   registerShellPopover(FACE_ID, () => hideAssistantFace({ instant: true }));
   registerStageLayer("assistant", {
     selector: "#assistant-space",
-    isOpen: () => Boolean(spaceEl && !spaceEl.hidden) || assistantFaceActive() || Boolean(taskbarEl()?.dataset.assistantMorph),
+    state: () => (Boolean(spaceEl && !spaceEl.hidden) || assistantFaceActive() || Boolean(taskbarEl()?.dataset.assistantMorph)
+      ? LAYER_STATE.open
+      : LAYER_STATE.closed),
     close: () => dismissAssistantForBack(),
   });
   bindAgentSpace({

@@ -6,7 +6,7 @@
 
 import { launcher, shellState, taskbarTargets } from "./shell-core.js?v=home-20260813a";
 import { FORM_FACTOR_EVENT, isPhone } from "./shell-form-factor.js?v=home-20260813a";
-import { registerStageLayer } from "./shell-popovers.js?v=home-20260813a";
+import { LAYER_STATE, registerStageGesture, registerStageLayer } from "./shell-popovers.js?v=home-20260813a";
 
 export const PHONE_DOCK_TUCKED_CLASS = "phone-dock-tucked";
 export const PHONE_DOCK_PEEK_CLASS = "phone-dock-peek";
@@ -95,6 +95,7 @@ function bindHandle(handle, doc) {
   };
   handle.addEventListener("pointerup", release);
   handle.addEventListener("pointercancel", release);
+  registerStageGesture("dock-handle", release);
 }
 
 export function bindPhoneDock(doc = document, view = window) {
@@ -105,7 +106,7 @@ export function bindPhoneDock(doc = document, view = window) {
   doc.querySelector("#phone-dock-scrim")?.addEventListener("click", () => hidePhoneDockPeek(doc));
   registerStageLayer("dock-peek", {
     selector: "#phone-dock-scrim",
-    isOpen: () => doc.body.classList.contains(PHONE_DOCK_PEEK_CLASS),
+    state: () => (doc.body.classList.contains(PHONE_DOCK_PEEK_CLASS) ? LAYER_STATE.open : LAYER_STATE.closed),
     close: () => hidePhoneDockPeek(doc),
   });
   doc.addEventListener("keydown", (event) => {

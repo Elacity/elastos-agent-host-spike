@@ -9,6 +9,11 @@ import {
   SHEET_DRAG_DOWN,
   SHEET_DRAG_UP,
 } from "../capsules/home-gui/browser/shell-sheet-handle.js";
+// The same module instance the handle registers with (same specifier).
+import {
+  cancelStageGestures,
+  registeredStageGestures,
+} from "../capsules/home-gui/browser/shell-popovers.js?v=home-20260813a";
 
 function fakeNode() {
   const listeners = new Map();
@@ -99,6 +104,25 @@ test("a cancelled drag snaps back", () => {
   handle.dispatch("pointerup", { clientY: 300 });
   assert.equal(closes(), 0);
   assert.equal(sheet.style.translate, undefined);
+});
+
+test("a stage reset cancels a drag in progress: the sheet snaps back and the release does nothing", () => {
+  const handle = fakeNode();
+  handle.id = "reset-handle";
+  const sheet = fakeNode();
+  let closed = 0;
+  bindSheetHandle(handle, { sheet, direction: SHEET_DRAG_UP, tapCloses: true, close: () => { closed += 1; } });
+  const closes = () => closed;
+  assert.ok(registeredStageGestures().includes("sheet-handle:reset-handle"), "each handle registers its own cancel");
+  handle.dispatch("pointerdown", { clientY: 400 });
+  handle.dispatch("pointermove", { clientY: 300 });
+  assert.equal(sheet.style.translate, "0 -100px");
+  cancelStageGestures();
+  assert.equal(sheet.style.translate, undefined);
+  handle.dispatch("pointermove", { clientY: 200 });
+  handle.dispatch("pointerup", { clientY: 200 });
+  assert.equal(sheet.style.translate, undefined, "a move after the reset does not drag");
+  assert.equal(closes(), 0, "a release after the reset does not close");
 });
 
 test("pressing the handle keeps focus where it was", () => {

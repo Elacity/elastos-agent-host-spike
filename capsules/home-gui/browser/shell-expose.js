@@ -20,6 +20,7 @@ import {
 } from "./shell-windows.js?v=home-20260813a";
 import {
   closeOtherShellPopovers,
+  LAYER_STATE,
   registerEscapeHandler,
   registerShellPopover,
   registerStageLayer,
@@ -2065,7 +2066,8 @@ export function bindExpose() {
     // Ranked by its shelf, which paints above every Home sheet while open.
     registerStageLayer("mission-control", {
       selector: ".mission-spaces-shelf",
-      isOpen: () => active || missionExiting,
+      // The exit zoom is its close; openExpose finishes it before reopening.
+      state: () => (missionExiting ? LAYER_STATE.closing : active ? LAYER_STATE.open : LAYER_STATE.closed),
       close: () => closeExpose(),
     });
     registered = true;

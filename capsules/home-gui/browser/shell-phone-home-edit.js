@@ -9,7 +9,7 @@
    docs/HOME_MOBILE.md. */
 
 import { LONG_PRESS_DRIFT_PX, LONG_PRESS_MS } from "./shell-touch.js?v=home-20260813a";
-import { registerStageLayer } from "./shell-popovers.js?v=home-20260813a";
+import { LAYER_STATE, registerStageGesture, registerStageLayer } from "./shell-popovers.js?v=home-20260813a";
 import {
   appendPhoneHomePage,
   currentPhoneHomePage,
@@ -409,8 +409,13 @@ export function bindPhoneHomeEdit(dependencies) {
   }
   registerStageLayer("home-edit", {
     selector: ".phone-home-editbar",
-    isOpen: () => editing,
+    state: () => (editing ? LAYER_STATE.open : LAYER_STATE.closed),
     close: () => exitPhoneHomeEdit(),
+  });
+  // A held press or a lifted icon from before a stage reset is put back.
+  registerStageGesture("home-edit-drag", () => {
+    cancelDrag();
+    clearPress();
   });
   for (const host of [root, taskbar]) {
     host.addEventListener("pointerdown", onPointerDown);

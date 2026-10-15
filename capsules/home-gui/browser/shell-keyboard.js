@@ -32,6 +32,7 @@ import {
 import {
   closeOtherShellPopovers,
   handleShellEscape,
+  LAYER_STATE,
   registerEscapeHandler,
   registerShellPopover,
   registerStageLayer,
@@ -262,7 +263,7 @@ export function bindShellKeyboard() {
   });
   registerStageLayer("window-switcher", {
     selector: "#window-switcher",
-    isOpen: () => switcherState.open === true,
+    state: () => (switcherState.open === true ? LAYER_STATE.open : LAYER_STATE.closed),
     close: () => closeSwitcher(),
   });
   registerStageLayer("shortcuts", { selector: "#shortcuts-overlay", close: () => hideShortcutsOverlay() });

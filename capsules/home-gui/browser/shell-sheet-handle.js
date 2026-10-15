@@ -5,6 +5,8 @@
    short. With `tapCloses` the handle is a button, so a tap, Enter or Space
    closes too. Hidden off phone. docs/HOME_MOBILE.md. */
 
+import { registerStageGesture } from "./shell-popovers.js?v=home-20260813a";
+
 // A drag this far toward the sheet's origin dismisses it; shorter snaps back.
 export const SHEET_DISMISS_DRAG_PX = 48;
 // Movement under this is still a tap.
@@ -32,17 +34,34 @@ export function bindSheetHandle(handle, { sheet, direction, close, tapCloses = f
   }
   handle.dataset.sheetHandleBound = "true";
   let startY = null;
+  let pointerId = null;
   let dragged = false;
 
   const settle = () => {
     startY = null;
+    pointerId = null;
     sheet.style.removeProperty("translate");
   };
+
+  // A stage reset puts a sheet held mid-drag back and forgets the press, so
+  // a later release or move neither drags nor closes it.
+  registerStageGesture(`sheet-handle:${handle.id || sheet.id}`, () => {
+    if (startY === null) {
+      return;
+    }
+    try {
+      handle.releasePointerCapture?.(pointerId);
+    } catch (_error) {
+      // Capture may already be gone.
+    }
+    settle();
+  });
 
   handle.addEventListener("pointerdown", (event) => {
     // Keeps focus (and a soft keyboard) where it was; the click still fires.
     event.preventDefault();
     startY = event.clientY;
+    pointerId = event.pointerId;
     dragged = false;
     handle.setPointerCapture?.(event.pointerId);
   });
