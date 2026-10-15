@@ -218,7 +218,7 @@ impl CollaborationHistoryService {
             .filter(|peer| peer.endpoint_did != local_endpoint)
             .collect::<Vec<_>>();
         if remote.is_empty() {
-            self.inner.product.set_history_status(false);
+            self.inner.product.set_history_no_other_participants();
             return Ok(());
         }
         let round_complete = {
@@ -788,14 +788,9 @@ mod tests {
         a.product.set_community_connected(true);
         a.service.fetch_once(now).await.unwrap();
         assert!(a.product.conversation_transport_view().available);
-        assert_eq!(
-            a.product
-                .conversation_transport_view()
-                .history
-                .unwrap()
-                .status,
-            "unavailable"
-        );
+        let alone = a.product.conversation_transport_view().history.unwrap();
+        assert_eq!(alone.status, "unavailable");
+        assert_eq!(alone.detail, "No other members are online right now.");
         let mut fixtures = Vec::new();
         for _ in 0..5 {
             let peer = fixture("history-fair", "community", now).await;
