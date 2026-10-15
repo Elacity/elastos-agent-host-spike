@@ -144,7 +144,8 @@ async function resourceReply(assistant, offer, label) {
 async function resourceLifecycle(assistant, offer, context) {
   stage = "finite_resource_lifecycle";
   subcheck = "owner_configure";
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await resizeInstalledHome(page, { width: 1440, height: 900 });
+  await reopenInstalledAssistant(page);
   await assistant.locator("#agent-harness-new-chat").click();
   await configureTokens(assistant, 1024);
   const longPrompt = "Write a numbered list from 1 to 1000. Each item must say hello and give one detail. Continue the list without an introduction or conclusion.";
@@ -229,7 +230,8 @@ async function repairJourney(assistant, offer) {
   const other = fixture.models[1];
   assert.notEqual(other.cid, cid);
   assert.notEqual(other.model_sha256, fixture.model_sha256);
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await resizeInstalledHome(page, { width: 1440, height: 900 });
+  await reopenInstalledAssistant(page);
   stage = "model_stop_get_different";
   subcheck = "stop_real_stream";
   await assistant.locator("#agent-harness-new-chat").click();
