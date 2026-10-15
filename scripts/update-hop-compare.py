@@ -3233,7 +3233,9 @@ def cli_home_system_journey(processes, manifest, home_path, publish, root):
 
 
 def cli_provider_warnings(home_path):
-    """Provider warnings and errors of the current Home start (the controller truncates the log per start)."""
+    """Provider warnings and errors in the controller's Home log. Older controllers truncate it per
+    start; newer ones append each start under a header, so a set difference against an earlier
+    read still names only the warnings of the starts since then."""
     text = (home_path / CLI_DATA / "update-controller/runtime.log").read_text(errors="replace")
     lines = (re.sub(r"\x1b\[[0-9;]*m", "", line) for line in text.splitlines())
     return sorted({match[1].strip() for line in lines

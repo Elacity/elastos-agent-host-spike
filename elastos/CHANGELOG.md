@@ -6,6 +6,12 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Fixed
+
+- A System update no longer rolls back, or leaves Home stopped, on a device where Home takes longer than 30 seconds to start, such as a Jetson. Every Home start now has up to 2 minutes.
+- If Home could not start after a failed update put the previous version back, `elastos home --browser` now starts that version again and finishes the recovery. The failed update is not installed again.
+- The update log keeps the output of every Home start, so the reason a new version failed to start is still there after Home goes back to the previous version.
+
 ### Developer detail
 
 - `scripts/release-publish.sh` publishes a final version `X.Y.Z` on `stable`

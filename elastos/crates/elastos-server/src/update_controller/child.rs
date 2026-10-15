@@ -13,6 +13,9 @@ const GRACE_PERIOD: Duration = Duration::from_secs(12);
 const REAP_PERIOD: Duration = Duration::from_secs(2);
 const POLL_PERIOD: Duration = Duration::from_millis(20);
 const DROP_PERIOD: Duration = Duration::from_millis(200);
+// Darwin: a leader in exit is neither signalable (EPERM) nor yet waitable.
+#[cfg(target_os = "macos")]
+const EXIT_SETTLE_PERIOD: Duration = Duration::from_millis(500);
 
 pub(crate) struct OwnedChild {
     child: Option<Child>,
@@ -205,9 +208,23 @@ pub(crate) fn signal_group(pid: u32, signal: libc::c_int) -> io::Result<()> {
         return Ok(());
     }
     #[cfg(target_os = "macos")]
-    if completed_group_after_signal_denial(&error, || observe_exit(pid), || group_descendants(pid))?
     {
-        return Ok(());
+        let settled = std::time::Instant::now() + EXIT_SETTLE_PERIOD;
+        if completed_group_after_signal_denial(
+            &error,
+            || observe_exit(pid),
+            || group_descendants(pid),
+            || {
+                let now = std::time::Instant::now();
+                if now >= settled {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(5).min(settled - now));
+                true
+            },
+        )? {
+            return Ok(());
+        }
     }
     Err(error)
 }
@@ -217,12 +234,18 @@ fn completed_group_after_signal_denial(
     error: &io::Error,
     mut observe: impl FnMut() -> io::Result<Option<ExitStatus>>,
     descendants: impl FnOnce() -> io::Result<Vec<u32>>,
+    mut settle: impl FnMut() -> bool,
 ) -> io::Result<bool> {
     if error.raw_os_error() != Some(libc::EPERM) {
         return Ok(false);
     }
-    let Some(exited) = observe()? else {
-        return Ok(false);
+    // A leader still in exit becomes waitable within `settle`'s bound.
+    let exited = loop {
+        match observe()? {
+            Some(exited) => break exited,
+            None if settle() => {}
+            None => return Ok(false),
+        }
     };
     if !descendants()?.is_empty() {
         return Ok(false);
@@ -698,6 +721,7 @@ mod tests {
     fn signal_denial_requires_stable_exited_direct_child_and_empty_proved_group() {
         for case in [
             "complete",
+            "exit settling",
             "other errno",
             "live child",
             "not direct child",
@@ -714,7 +738,6 @@ mod tests {
                 libc::EPERM
             });
             let before = match case {
-                "live child" => Ok(None),
                 "not direct child" => Err(io::Error::from_raw_os_error(libc::ECHILD)),
                 "uncertain exit" => Err(io::Error::from_raw_os_error(libc::EPERM)),
                 _ => Ok(Some(ExitStatus::from_raw(0))),
@@ -725,14 +748,24 @@ mod tests {
                 "changed exit event" => Ok(Some(ExitStatus::from_raw(7 << 8))),
                 _ => Ok(Some(ExitStatus::from_raw(0))),
             };
-            let mut observations = vec![after, before];
+            // Popped from the end; an exhausted list observes a leader still running.
+            let mut observations = match case {
+                "live child" => Vec::new(),
+                "exit settling" => vec![after, before, Ok(None)],
+                _ => vec![after, before],
+            };
+            let mut settles = 0;
             let result = completed_group_after_signal_denial(
                 &error,
-                || observations.pop().unwrap(),
+                || observations.pop().unwrap_or(Ok(None)),
                 || match case {
                     "remaining descendant" => Ok(vec![42]),
                     "uncertain group" => Err(io::Error::from_raw_os_error(libc::EPERM)),
                     _ => Ok(Vec::new()),
+                },
+                || {
+                    settles += 1;
+                    settles <= 2
                 },
             );
             if matches!(
@@ -741,8 +774,19 @@ mod tests {
             ) {
                 assert!(result.is_err(), "{case}");
             } else {
-                assert_eq!(result.unwrap(), case == "complete", "{case}");
+                assert_eq!(
+                    result.unwrap(),
+                    matches!(case, "complete" | "exit settling"),
+                    "{case}"
+                );
             }
+            // Only a leader not yet waitable waits, and only within the bound.
+            let expected = match case {
+                "live child" => 3,
+                "exit settling" => 1,
+                _ => 0,
+            };
+            assert_eq!(settles, expected, "{case}");
         }
     }
 
