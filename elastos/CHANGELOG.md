@@ -39,7 +39,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   `signer_did` or `prev_head_cid` is not plain data, and its printed commands
   carry every value as one shell word.
 - CI's update journey starts from the release users run now (the pin in
-  `scripts/update-hop-previous-release.json`, now 0.8.0-alpha.17).
+  `scripts/update-hop-previous-release.json`).
   Before alpha.15 it started from 0.8.0-alpha.8 and never ran the alpha.14 to
   alpha.15 hop, which Apple Silicon and Linux ARM64 refused for the new
   `browser-vm-image` strategy.
