@@ -355,6 +355,13 @@ impl CollaborationChatProductPort {
         }
     }
 
+    pub(crate) fn set_history_no_other_participants(&self) {
+        if let Ok(mut status) = self.history_status.lock() {
+            status.status = "unavailable".to_string();
+            status.detail = "No other members are online right now.".to_string();
+        }
+    }
+
     pub(crate) fn set_history_status(&self, available: bool) {
         if let Ok(mut status) = self.history_status.lock() {
             status.status = if available {
