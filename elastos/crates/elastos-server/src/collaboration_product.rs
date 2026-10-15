@@ -355,10 +355,11 @@ impl CollaborationChatProductPort {
         }
     }
 
-    pub(crate) fn set_history_no_other_participants(&self) {
+    /// History is unavailable for a known reason the person can act on.
+    pub(crate) fn set_history_unavailable(&self, detail: &str) {
         if let Ok(mut status) = self.history_status.lock() {
             status.status = "unavailable".to_string();
-            status.detail = "No other members are online right now.".to_string();
+            status.detail = detail.to_string();
         }
     }
 

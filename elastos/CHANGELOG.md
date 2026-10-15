@@ -62,8 +62,13 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   `ci-release-policy-test.py` checks they use the same runner, Rust toolchain
   and targets, and that the job's path filter covers every file the build
   calls, loads or packages.
+- The Browser VM's web egress bridge allows 128 sessions and its media/TURN
+  bridge 16; the `ELASTOS_BROWSER_VM_EGRESS_MAX_SESSIONS` setting is removed
+  (a value saved in `browser-engine-adapter.json` is ignored). The Runtime
+  raises its soft open-file limit to the hard limit, at most 10240, when it
+  starts, and the Browser local exit keeps accepting after an accept error.
 
-## [0.8.0] - 2026-10-15
+## [0.8.0] - 2026-10-16
 
 ### Security
 
@@ -93,13 +98,15 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   submissions.
 - Known issue: on the Jetson, getting a model is slow (Qwen takes about 43 minutes). The first Qwen reply takes about 22 seconds and the second about 3.6 seconds.
 - Known issue: Browser runs only on Apple Silicon Macs.
-- Known issue: Updating to this version in System from an earlier test version on a slow device such as a Jetson can still fail, because the earlier version runs the update; use the install command there.
+- Known issue: Updating to this version in System from a test version older than 0.8.0-alpha.18 on a slow device such as a Jetson can still fail, because that older version runs the update; use the install command there.
 - Community posts reach members again without turning on Discovery, also across networks: they travel through the seed's Community node. Posts are signed, but that node can read them in transit until the relay arrives in 0.8.1. Direct messages across networks need that relay. Contact requests across networks, and showing as online in People, still need Discovery on.
 - Upgrading from 0.7.1 or earlier: run the install command once. System update cannot move these Homes to 0.8.0, because releases are now signed with a new key (#186). Your Home keeps its data.
 - A Browser session now lasts until you close it, until Home stops answering for 5 minutes, until Runtime stops, or 12 hours (it used to close after 10 minutes).
 - Browser Settings no longer shows Agent access, which no agent can use yet (#290), and hides the engine choice when there is only one engine. The default engine is called Automatic.
 - If a model download is interrupted, Home now resumes it by itself a few times before asking you to Retry.
 - A model's memory check now says: "This device has enough memory for this model. Replies also need some of it free when the model runs."
+- Community: a post whose delivery could not be confirmed now says "Delivery unconfirmed" instead of "Expired". When no other member is online, Community says "No other members are online right now.", and with Discovery off it says "Turn on Discovery in People to load earlier Community posts."
+- Browser uses a standard title bar, so you can drag its window by the title bar.
 
 ### Fixed
 
@@ -109,8 +116,11 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   fixed Carrier port also listens on that port over IPv6, so its ticket stays
   the same across restarts (#336).
 - Browser shows "Starting Browser…" while it starts, and no longer shows white bars around the page.
+- Browser opens on a new install. Setup now records the Browser helpers it installs, so opening Browser no longer downloads them again and fails with "another writer owns the installation lock". Browser also no longer fails to open when another program uses one of the local ports it picked.
+- Browser shows images and fonts on busy news sites such as BBC and the Guardian. Before, Browser allowed only 16 connections at a time, so many pictures and fonts timed out.
+- Home no longer uses about a third of the CPU while Browser is open: it now checks Browser's status once a second and ignores changes to its timers.
 - Chat: the message box returns to one line after you send, People → Message reuses the open Chat window, and Open Inbox in People works.
-- In the Assistant, Edit on a message you just sent opens the editor, and Delete asks in the message itself, then removes it. Before, Edit did nothing until the chat was reopened, and Delete did nothing.
+- In the Assistant, Edit on a message you just sent opens the editor, and Delete asks in the message itself, then removes it. A reply that just finished, or that you stopped, offers Delete and Regenerate right away. Before, Edit did nothing until the chat was reopened, and Delete did nothing.
 - In the Assistant, the end of each reply and its buttons stay above the message box, so you no longer scroll down to read the last lines.
 - First-run setup: the welcome sheet no longer disappears. Opening a step shrinks it to a small card that you click to continue, and it comes back after you save the Recovery Kit.
 - From this version on, a System update gives Home up to 2 minutes to start, so it no longer fails, or leaves Home stopped, on a slower device such as a Jetson. If the previous version was put back but could not start, `elastos home --browser` starts it again. The update log keeps the output of every start.
