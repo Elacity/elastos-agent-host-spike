@@ -865,9 +865,19 @@ async function openWindow(frame, target) {
   await sleep(SHEET_SETTLE_MS);
 }
 
+// The shell ignores a close tap at the pointer spot that opened the window
+// for a moment after it opens (ghost-click guard, shell-windows.js). This smoke
+// opens windows with synthetic clicks, so the spot is wherever the last real
+// click landed — often the previous window's close button, the very pixel
+// tapped next. Wait the guard out instead of tapping into it.
 async function closeWindow(frame, target) {
   const closeButton = frame.locator(`.window[data-target="${target}"] [data-action="close"]`);
   if (await closeButton.count()) {
+    const guardMs = await frame.evaluate((target) => {
+      const until = Number(document.querySelector(`.window[data-target="${target}"]`)?.dataset.closeGuardUntil);
+      return Number.isFinite(until) ? Math.max(0, Math.ceil(until - performance.now())) : 0;
+    }, target);
+    await sleep(guardMs);
     await closeButton.first().click();
   }
   await waitFor(
