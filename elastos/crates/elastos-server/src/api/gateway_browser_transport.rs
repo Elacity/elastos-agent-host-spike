@@ -130,8 +130,7 @@ pub(in crate::api::gateway) fn prepare_browser_vz_transport_launch(
         config.turn_port_start,
         config.turn_port_end,
         1,
-        &config.turn_listen_host,
-        false,
+        |min, max| ports_bindable_here(&config.turn_listen_host, min, max, false),
     )?;
     let (relay_port_min, relay_port_max) = select_port_block(
         binding.generation,
@@ -139,8 +138,7 @@ pub(in crate::api::gateway) fn prepare_browser_vz_transport_launch(
         config.turn_relay_port_start,
         config.turn_relay_port_end,
         config.turn_relay_block_size,
-        &config.turn_relay_host,
-        true,
+        |min, max| ports_bindable_here(&config.turn_relay_host, min, max, true),
     )?;
     let expires_at_unix_secs = current_unix_secs()?
         .checked_add(config.ttl_secs)
@@ -1004,18 +1002,17 @@ fn validate_transport_target(value: &str, require_loopback: bool) -> Result<Stri
     Ok(parsed.to_string())
 }
 
-/// The generation's hashed block of ports, or the next block this host can bind
-/// now. The configured ranges overlap the OS ephemeral ports (macOS 49152-65535,
-/// Linux 32768-60999), so any program's listener can hold a hashed port. The
-/// supervisor's preflight checks the chosen block again before TURN starts.
+/// The generation's hashed block of ports, or the next block that is
+/// `bindable` now. The configured ranges overlap the OS ephemeral ports (macOS
+/// 49152-65535, Linux 32768-60999), so any program's listener can hold a hashed
+/// port. The supervisor's preflight checks the chosen block again before TURN starts.
 fn select_port_block(
     generation: &str,
     label: &str,
     start: u16,
     end: u16,
     block_size: u16,
-    host: &str,
-    udp: bool,
+    bindable: impl Fn(u16, u16) -> bool,
 ) -> Result<(u16, u16), String> {
     validate_port_range(label, start, end)?;
     let available = u32::from(end) - u32::from(start) + 1;
@@ -1036,7 +1033,7 @@ fn select_port_block(
     };
     Ok((0..blocks)
         .map(block)
-        .find(|&(min, max)| ports_bindable_here(host, min, max, udp))
+        .find(|&(min, max)| bindable(min, max))
         .unwrap_or_else(|| block(0)))
 }
 
@@ -1223,30 +1220,36 @@ mod tests {
 
     #[test]
     fn turn_ports_skip_a_block_another_program_holds() {
-        // Ports the OS gives other programs, as it may inside the configured ranges.
+        // Four blocks of eight relay ports.
+        let select = |generation: &str, bindable: &dyn Fn(u16, u16) -> bool| {
+            select_port_block(generation, "turn-relay", 43100, 43131, 8, bindable).unwrap()
+        };
+        for n in 0..8 {
+            let generation = format!("generation-{n}");
+            let hashed = select(&generation, &|_, _| true);
+            assert_eq!((hashed.0 - 43100) % 8, 0);
+            assert_eq!(hashed.1, hashed.0 + 7);
+            // Another program holds a port of the hashed block: the next block.
+            let next = if hashed.0 == 43124 {
+                (43100, 43107)
+            } else {
+                (hashed.0 + 8, hashed.1 + 8)
+            };
+            assert_eq!(select(&generation, &|min, _| min != hashed.0), next);
+            // Nothing free: the hashed block, whose busy port the supervisor names.
+            assert_eq!(select(&generation, &|_, _| false), hashed);
+        }
+        // The probe sees another program's TCP listener, and its UDP socket for
+        // relays. A host this machine cannot bind is its remote supervisor's to check.
         let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        for (label, held, size, relay) in [
-            ("turn-relay", tcp.local_addr().unwrap().port(), 8, true),
-            ("turn-relay", udp.local_addr().unwrap().port(), 8, true),
-            ("turn-listener", tcp.local_addr().unwrap().port(), 1, false),
-        ] {
-            // Four blocks; the last one holds the port.
-            let (start, end) = (held - (4 * size - 1), held);
-            let select = |generation: &str, host: &str| {
-                select_port_block(generation, label, start, end, size, host, relay).unwrap()
-            };
-            let busy = (held - (size - 1), held);
-            // A relay host this machine cannot bind keeps the generation's block.
-            let generation = (0..)
-                .map(|n| format!("generation-{n}"))
-                .find(|generation| select(generation, "192.0.2.10") == busy)
-                .unwrap();
-            let chosen = select(&generation, "127.0.0.1");
-            assert_ne!(chosen, busy, "{label}");
-            assert_eq!((chosen.0 - start) % size, 0, "{label}");
-            assert_eq!(chosen.1, chosen.0 + size - 1, "{label}");
-        }
+        let (tcp, udp) = (
+            tcp.local_addr().unwrap().port(),
+            udp.local_addr().unwrap().port(),
+        );
+        assert!(!ports_bindable_here("127.0.0.1", tcp, tcp, false));
+        assert!(!ports_bindable_here("127.0.0.1", udp, udp, true));
+        assert!(ports_bindable_here("192.0.2.10", tcp, tcp, true));
     }
 
     #[test]
