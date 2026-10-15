@@ -9,10 +9,15 @@ export const KEYBOARD_INSET_MESSAGE = "home:keyboard-inset";
 
 // Height of the soft keyboard (or any other visual-viewport occlusion) in CSS
 // px. The layout viewport keeps its height while the visual viewport shrinks
-// and may scroll; the difference is what covers the bottom of the page.
+// and may scroll; the difference is what covers the bottom of the page. A
+// pinch-zoomed viewport also shrinks without anything covering the page, so
+// while zoomed there is no inset to report.
 export function keyboardInset(view = window) {
   const visual = view.visualViewport;
   if (!visual || !Number.isFinite(visual.height) || !Number.isFinite(view.innerHeight)) {
+    return 0;
+  }
+  if (Number.isFinite(visual.scale) && visual.scale > 1.01) {
     return 0;
   }
   const offsetTop = Number.isFinite(visual.offsetTop) ? visual.offsetTop : 0;

@@ -17,7 +17,8 @@ export const FORM_FACTORS = Object.freeze({
 
 // A phone held sideways is still a phone: 844 × 390 with a coarse pointer
 // keeps the phone layout instead of turning into a tablet. A short desktop
-// window with a mouse does not, so height only counts on coarse pointers.
+// window with a mouse does not, so height only counts on coarse pointers, and
+// only up to tablet width: a short window on a wide touch laptop stays desktop.
 export function classifyFormFactor(width, height = Number.POSITIVE_INFINITY, coarse = false) {
   if (!Number.isFinite(width)) {
     return FORM_FACTORS.desktop;
@@ -25,7 +26,7 @@ export function classifyFormFactor(width, height = Number.POSITIVE_INFINITY, coa
   if (width <= PHONE_MAX_WIDTH) {
     return FORM_FACTORS.phone;
   }
-  if (coarse && Number.isFinite(height) && height <= PHONE_MAX_WIDTH) {
+  if (coarse && width <= TABLET_MAX_WIDTH && Number.isFinite(height) && height <= PHONE_MAX_WIDTH) {
     return FORM_FACTORS.phone;
   }
   if (width <= TABLET_MAX_WIDTH) {

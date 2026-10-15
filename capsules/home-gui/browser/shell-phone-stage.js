@@ -32,6 +32,7 @@ import { hideNotificationCenter } from "./shell-notifications.js?v=home-20260813
 import { hideInboxRail } from "./shell-inbox-rail.js?v=home-20260813a";
 import { hideWalletRail } from "./shell-wallet-rail.js?v=home-20260813a";
 import { dismissAssistantForBack, hideAssistantFace } from "./shell-assistant-face.js?v=home-20260813a";
+import { hideSetupSheet } from "./shell-setup-sheet.js?v=home-20260813a";
 
 // A title-bar drag this far down opens the switcher…
 export const TITLE_SWIPE_DOWN_PX = 48;
@@ -39,8 +40,10 @@ export const TITLE_SWIPE_DOWN_PX = 48;
 export const TITLE_SWIPE_DRIFT_PX = 32;
 
 // Sheets that count as a layer over the stage, top-most first, each with the
-// closer its module already exposes.
+// closer its module already exposes. The welcome sheet is foreground unless it
+// has yielded to a card behind the Assistant.
 const SHEETS = Object.freeze([
+  { selector: "#setup-sheet", close: () => hideSetupSheet() },
   { selector: "#desktop-context-menu", close: () => hideDesktopContextMenu() },
   { selector: "#assistant-space", close: () => dismissAssistantForBack() },
   { selector: "#control-centre", close: () => hideControlCentre() },
@@ -80,18 +83,23 @@ export function stageLayerCount(doc = document) {
   return visibleWindowCount() + openSheetCount(doc) + (isExposeOpen() ? 1 : 0);
 }
 
-// Closes the top layer and reports how many remain. The long-press menu and
-// the Assistant room sit above the Escape registry: the Agent room is not a
-// desktop Space, so the fullscreen-stage Escape handler would otherwise take
-// the back and leave the room up.
+// Closes the top layer and reports how many remain. The welcome sheet, the
+// long-press menu and the Assistant room sit above the Escape registry: the
+// Agent room is not a desktop Space, so the fullscreen-stage Escape handler
+// would otherwise take the back and leave the room up.
+const OVERLAYS = Object.freeze(["#desktop-context-menu", "#assistant-space"]);
+
+function sheetOpen(doc, selector) {
+  const node = doc.querySelector(selector);
+  return Boolean(node && !node.hidden);
+}
+
 export function closeTopStageLayer(doc = document) {
-  const overlay = SHEETS.find((sheet) => {
-    if (sheet.selector !== "#desktop-context-menu" && sheet.selector !== "#assistant-space") {
-      return false;
-    }
-    const node = doc.querySelector(sheet.selector);
-    return node && !node.hidden;
-  });
+  const setup = doc.querySelector("#setup-sheet");
+  const setupForeground = sheetOpen(doc, "#setup-sheet") && !setup.classList.contains("is-yielded");
+  const overlay = setupForeground
+    ? SHEETS[0]
+    : SHEETS.find((sheet) => OVERLAYS.includes(sheet.selector) && sheetOpen(doc, sheet.selector));
   if (overlay) {
     overlay.close();
     return stageLayerCount(doc);

@@ -1761,10 +1761,10 @@ function phoneSheetHandleFailures(run) {
   return failures;
 }
 
-// System back on a phone with nothing else on the stage. The Assistant room
-// and the long-press menu each have to close, and Home has to stay. Then an
-// off-Space window that is still the active one must not be the window Back
-// minimises.
+// System back on a phone with nothing else on the stage. The long-press menu,
+// the welcome sheet over the Assistant room, and then the room each have to
+// close in that order, and Home has to stay. Then an off-Space window that is
+// still the active one must not be the window Back minimises.
 async function openTarget(frame, target) {
   await frame.evaluate((target) => {
     const button = document.querySelector(`.taskbar-item[data-target="${target}"]`)
@@ -1789,11 +1789,13 @@ async function probePhoneBack(frame) {
       spaceVisible: node.dataset.spaceVisible || "",
       active: node.classList.contains("window-active"),
     }));
+    const welcome = document.querySelector("#setup-sheet");
     return {
       home: location.href.includes("/apps/home-gui/"),
       stageHistory: document.body.dataset.stageHistory || "",
       menuOpen: Boolean(menu && !menu.hidden),
       assistantOpen: Boolean(space && !space.hidden),
+      welcomeOpen: Boolean(welcome && !welcome.hidden),
       windows,
     };
   });
@@ -1824,6 +1826,20 @@ async function probePhoneBack(frame) {
     await frame.evaluate(() => document.querySelector("#assistant-toggle")?.click());
     await sleep(ASSISTANT_OPEN_WAIT_MS);
   }
+  // The welcome sheet in front of the room: Back takes the sheet first.
+  await frame.evaluate(() => {
+    const welcome = document.querySelector("#setup-sheet");
+    if (welcome) {
+      welcome.classList.remove("is-yielded");
+      welcome.hidden = false;
+    }
+  });
+  await sleep(SHEET_SETTLE_MS);
+  const welcomeBefore = await read();
+  await systemBack();
+  await sleep(SHEET_SETTLE_MS);
+  const welcomeAfter = await read();
+
   const assistantBefore = await read();
   await systemBack();
   await sleep(ASSISTANT_OPEN_WAIT_MS);
@@ -1860,14 +1876,14 @@ async function probePhoneBack(frame) {
       await closeWindow(frame, target);
     }
   }
-  return { menuBefore, menuAfter, assistantBefore, assistantAfter, spaceSetup, spaceAfter };
+  return { menuBefore, menuAfter, welcomeBefore, welcomeAfter, assistantBefore, assistantAfter, spaceSetup, spaceAfter };
 }
 
 function phoneBackFailures(run) {
   if (!run.back) {
     return [];
   }
-  const { menuBefore, menuAfter, assistantBefore, assistantAfter, spaceSetup, spaceAfter } = run.back;
+  const { menuBefore, menuAfter, welcomeBefore, welcomeAfter, assistantBefore, assistantAfter, spaceSetup, spaceAfter } = run.back;
   const label = `${run.engine}/${run.profile}/back`;
   const failures = [];
   if (!menuBefore.menuOpen) {
@@ -1875,6 +1891,12 @@ function phoneBackFailures(run) {
   }
   if (!menuAfter.home || menuAfter.menuOpen) {
     failures.push(`${label}: Back must close the long-press menu and leave Home. Got ${JSON.stringify(menuAfter)}`);
+  }
+  if (!welcomeBefore.welcomeOpen || !welcomeBefore.assistantOpen) {
+    failures.push(`${label}: the welcome sheet must be open over the Assistant before Back. Got ${JSON.stringify(welcomeBefore)}`);
+  }
+  if (!welcomeAfter.home || welcomeAfter.welcomeOpen || !welcomeAfter.assistantOpen) {
+    failures.push(`${label}: Back must close the welcome sheet first and keep the Assistant. Got ${JSON.stringify(welcomeAfter)}`);
   }
   if (!assistantBefore.assistantOpen) {
     failures.push(`${label}: Assistant must be open before Back. Got ${JSON.stringify(assistantBefore)}`);

@@ -147,9 +147,10 @@ without browsers.
 
 CSS keys the phone size class on one media list that mirrors
 `classifyFormFactor()`: `(max-width: 640px)`, or a coarse/hover-less pointer
-with `(max-height: 640px)`. A phone held sideways therefore keeps the phone
-shell. The entropy check derives the list from `PHONE_MAX_WIDTH`, so the two
-readers cannot drift apart.
+with `(max-height: 640px)` up to `(max-width: 1100px)`. A phone held sideways
+therefore keeps the phone shell, and a short window on a wide touch laptop
+stays desktop. `scripts/home-form-factor.test.mjs` derives the list from
+`PHONE_MAX_WIDTH` and `TABLET_MAX_WIDTH`, so the two readers cannot drift apart.
 
 Bar:
 

@@ -535,6 +535,10 @@ export function hideAssistantFace({ instant = false } = {}) {
   if (instant || reducedMotion()) {
     setHandover(false);
     closeAssistantSpace({ instant: true });
+    // clearTimers() cancelled the steps that drop the transient pill width.
+    taskbar.classList.remove("is-dock-width-easing");
+    taskbar.style.removeProperty("width");
+    taskbar.style.removeProperty("--dock-width-ms");
     finish();
     return;
   }

@@ -46,6 +46,8 @@ test("keyboard inset is the visual-viewport shortfall, never negative", () => {
   assert.equal(keyboardInset(fakeView({ height: 844, visual: { height: 508, offsetTop: 100 } })), 236, "scrolled visual viewport");
   assert.equal(keyboardInset(fakeView({ height: 844, visual: { height: 900, offsetTop: 0 } })), 0, "clamped at zero");
   assert.equal(keyboardInset(fakeView({ height: 844, visual: { height: 507.6, offsetTop: 0 } })), 336, "rounded to whole px");
+  assert.equal(keyboardInset(fakeView({ height: 900, visual: { height: 450, offsetTop: 0, scale: 2 } })), 0, "pinch zoom covers nothing");
+  assert.equal(keyboardInset(fakeView({ height: 844, visual: { height: 508, offsetTop: 0, scale: 1 } })), 336, "unzoomed keyboard");
 });
 
 test("the relay posts the inset now and on each change, once per value", () => {
