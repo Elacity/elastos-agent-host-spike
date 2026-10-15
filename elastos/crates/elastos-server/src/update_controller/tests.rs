@@ -3238,15 +3238,19 @@ fn fixture_home_exec(settings: &str) -> String {
 
 /// Home runs the installed previous release (0.7.0) and the owner approved a signed
 /// 0.7.1 whose Runtime is `candidate`. After a restart the previous fixture Home
-/// answers only after `previous_delay` seconds.
+/// answers only after `previous_delay` seconds. The previous wrapper runs under the
+/// `previous-interpreter` link, so a test can make its spawn fail.
 async fn restart_scenario(
     candidate: impl FnOnce(&PrivateFixture) -> String,
     previous_delay: u64,
     candidate_budget: Option<Duration>,
 ) -> RestartScenario {
     let fixture = PrivateFixture::new();
+    let interpreter = fixture.data.join("previous-interpreter");
+    symlink("/bin/sh", &interpreter).unwrap();
     let previous = format!(
-        "#!/bin/sh\n{}",
+        "#!{}\n{}",
+        interpreter.display(),
         fixture_home_exec(&format!("RESTART_FIXTURE_READY_DELAY={previous_delay}"))
     );
     crate::test_support::write_from_child(&fixture.binary, &previous, 0o755);
@@ -3707,6 +3711,69 @@ async fn assert_recovered(
         b"candidate\n"
     );
     controller.stop_child().await.unwrap();
+}
+
+/// The rollback start cannot even spawn: the stopped claim has no process receipt,
+/// so it returns to `restored` and the next run starts the previous release.
+#[tokio::test]
+async fn unspawnable_rollback_start_is_started_by_the_next_run() {
+    let RestartScenario {
+        fixture,
+        mut owner,
+        request,
+        fetch,
+        old,
+    } = restart_scenario(
+        |_| "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'elastos 0.7.1\\n'; exit 0; fi\nprintf 'candidate\\n' >> candidate-starts\n/bin/rm previous-interpreter\nexit 7\n".into(),
+        0,
+        Some(Duration::from_secs(3)),
+    )
+    .await;
+    let result =
+        crate::update::run_restarting_update(&fixture.data, &fetch, request.head_cid, &mut owner)
+            .await;
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(
+        error.contains("previous Home did not become ready; retain recovery journal")
+            && error.contains("spawn owned update child"),
+        "{error}"
+    );
+    assert_eq!(
+        InstallTransaction::acquire(&fixture.data, &fixture.binary)
+            .unwrap()
+            .restart_record()
+            .unwrap()
+            .phase,
+        RestartPhase::Restored
+    );
+    assert!(!fixture.data.join("previous-starts").exists());
+    symlink("/bin/sh", fixture.data.join("previous-interpreter")).unwrap();
+    let controller = retained_controller(&fixture);
+    assert_recovered(&fixture, controller, &old, 1).await;
+}
+
+/// A previous start claimed without a process receipt may still have a child, so
+/// recovery keeps every file for operator repair.
+#[tokio::test]
+async fn unreceipted_previous_claim_keeps_recovery_files() {
+    let (fixture, _) = dead_previous_start().await;
+    {
+        let transaction = InstallTransaction::acquire(&fixture.data, &fixture.binary).unwrap();
+        transaction.retire_previous_start().unwrap();
+        assert_eq!(
+            transaction.claim_start(true).unwrap().phase,
+            RestartPhase::PreviousStartClaimed
+        );
+    }
+    let mut controller = retained_controller(&fixture);
+    let before = fixture.snapshot();
+    let error = format!("{:#}", controller.reconcile_pending().await.unwrap_err());
+    assert!(
+        error.contains("claimed without a process receipt"),
+        "{error}"
+    );
+    assert_eq!(fixture.snapshot(), before);
+    assert!(controller.child.is_none());
 }
 
 #[tokio::test]

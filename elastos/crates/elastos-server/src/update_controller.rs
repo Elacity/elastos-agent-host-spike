@@ -1355,7 +1355,11 @@ impl Controller {
                     .is_some_and(|request| request.id == record.plan.request_id),
             "Pending recovery belongs to a different controller."
         );
-        if matches!(record.phase, RestartPhase::CandidateStartClaimed) {
+        // A claim without a process receipt may still have a running child.
+        if matches!(
+            record.phase,
+            RestartPhase::CandidateStartClaimed | RestartPhase::PreviousStartClaimed
+        ) {
             bail!("Home start was claimed without a process receipt. Retain recovery files for operator repair.");
         }
         // The pipe closes on controller death. A new owner proves exact generation absence.
@@ -1398,12 +1402,9 @@ impl Controller {
             "update-recovery",
             "offline",
         )?;
-        if matches!(
-            record.phase,
-            RestartPhase::PreviousStartClaimed | RestartPhase::PreviousRunning
-        ) {
-            // The failed previous generation is gone (above) and its parent pipe
-            // stops any unrecorded child; the restored release is started again.
+        if record.phase == RestartPhase::PreviousRunning {
+            // The failed previous generation is gone (proved above); the restored
+            // release is started again.
             transaction.retire_previous_start()?;
         } else {
             transaction.restore_for_restart()?;
@@ -1429,21 +1430,18 @@ impl Controller {
                 return Ok(());
             };
             self.stop_child().await?;
-            if attempt == PREVIOUS_START_ATTEMPTS {
+            let last = attempt == PREVIOUS_START_ATTEMPTS;
+            // No later owner can prove a claim without a process receipt gone.
+            if !last || transaction.restart_record()?.phase == RestartPhase::PreviousStartClaimed {
+                crate::update::retire_stopped_previous_start(transaction)?;
+            }
+            if last {
                 return Err(error.context(format!(
                     "The previous Home did not start after {PREVIOUS_START_ATTEMPTS} attempts. Recovery files are kept. Check {}, then run `elastos home --browser` to try again.",
                     self.directory.join(RUNTIME_LOG).display()
                 )));
             }
             eprintln!("The previous Home did not start ({error:#}). Trying again.");
-            let offline = crate::host_lock::acquire_host_process_lock(
-                &self.receipt.data_dir,
-                "update-recovery",
-                "offline",
-            )?;
-            transaction.retire_previous_start()?;
-            crate::update::verify_restart_support(transaction)?;
-            drop(offline);
             attempt += 1;
         }
     }

@@ -1864,6 +1864,10 @@ async fn run_upgrade_with_restart(
                     .stop()
                     .await
                     .context("previous Home cleanup failed; retain recovery journal")?;
+                // No later owner can prove a claim without a process receipt gone.
+                if transaction.restart_record()?.phase == RestartPhase::PreviousStartClaimed {
+                    retire_stopped_previous_start(&transaction)?;
+                }
                 return Err(previous_error
                     .context("previous Home did not become ready; retain recovery journal"));
             }
@@ -1940,6 +1944,22 @@ pub(crate) fn finish_ready_restart(transaction: &InstallTransaction) -> anyhow::
     let record = transaction.restart_record()?;
     let pid = record.pid.context("ready host identity is missing")?;
     transaction.record_ready(&record.generation, pid)
+}
+
+/// The owner stopped its failed previous Home, which proves that generation gone,
+/// so the restored release may be claimed and started again.
+pub(crate) fn retire_stopped_previous_start(
+    transaction: &InstallTransaction,
+) -> anyhow::Result<()> {
+    let offline = crate::host_lock::acquire_host_process_lock(
+        transaction.data_dir(),
+        "update-recovery",
+        "offline",
+    )?;
+    transaction.retire_previous_start()?;
+    verify_restart_support(transaction)?;
+    drop(offline);
+    Ok(())
 }
 
 async fn wait_for_runtime_host_release(data_dir: &Path) -> anyhow::Result<()> {
