@@ -5601,7 +5601,7 @@ const BROWSER_SESSION_CLOCK_FIELDS: [&str; 3] =
 fn browser_sessions_cursor_value(status: &serde_json::Value) -> serde_json::Value {
     let mut status = status.clone();
     if let Some(sessions) = status
-        .get_mut("sessions")
+        .pointer_mut("/lifecycle/sessions")
         .and_then(serde_json::Value::as_array_mut)
     {
         for session in sessions
@@ -8672,7 +8672,11 @@ mod home_events_pacing_tests {
             browser_sessions: serde_json::json!({
                 "schema": "elastos.browser.session-capacity/v1",
                 "total_sessions": 1,
-                "sessions": [session],
+                // Shape of browser_gateway_session_status.
+                "lifecycle": {
+                    "schema": "elastos.browser.lifecycle-status/v1",
+                    "sessions": [session],
+                },
             }),
         }
     }
