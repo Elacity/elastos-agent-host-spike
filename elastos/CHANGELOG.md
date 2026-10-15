@@ -106,7 +106,6 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - If a model download is interrupted, Home now resumes it by itself a few times before asking you to Retry.
 - A model's memory check now says: "This device has enough memory for this model. Replies also need some of it free when the model runs."
 - Community: a post whose delivery could not be confirmed now says "Delivery unconfirmed" instead of "Expired". When no other member is online, Community says "No other members are online right now.", and with Discovery off it says "Turn on Discovery in People to load earlier Community posts."
-- Browser uses a standard title bar, so you can drag its window by the title bar.
 
 ### Fixed
 
@@ -115,7 +114,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   one (no container bridge, LAN or loopback addresses), and a Runtime on a
   fixed Carrier port also listens on that port over IPv6, so its ticket stays
   the same across restarts (#336).
-- Browser shows "Starting Browser…" while it starts, and no longer shows white bars around the page.
+- Browser shows "Starting Browser…" while it starts, no longer shows white bars around the page, and has a standard title bar, so you can drag its window.
 - Browser opens on a new install. Setup now records the Browser helpers it installs, so opening Browser no longer downloads them again and fails with "another writer owns the installation lock". Browser also no longer fails to open when another program uses one of the local ports it picked.
 - Browser shows images and fonts on busy news sites such as BBC and the Guardian. Before, Browser allowed only 16 connections at a time, so many pictures and fonts timed out.
 - Home no longer uses about a third of the CPU while Browser is open: it now checks Browser's status once a second and ignores changes to its timers.
