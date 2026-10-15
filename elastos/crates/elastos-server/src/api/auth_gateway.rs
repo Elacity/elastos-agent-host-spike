@@ -1768,22 +1768,32 @@ async fn full_recovery_bundle_import_inner(
         );
     }
     let expected_wallet_count = recovery_set.keys.len();
-    let completed_audit_id = full_recovery_outcome_audit_id(
-        bundle_id,
-        bundle_principal,
-        WALLET_RESTORE_COMPLETE,
-        WALLET_RESTORE_REASON_NONE,
-        expected_wallet_count,
-        expected_wallet_count,
-        &bundle_sha256,
-    );
+    let completed_audit_id = |proof_binding_id: Option<&str>, session_id: &str| {
+        full_recovery_outcome_audit_id(
+            bundle_id,
+            bundle_principal,
+            WALLET_RESTORE_COMPLETE,
+            WALLET_RESTORE_REASON_NONE,
+            expected_wallet_count,
+            expected_wallet_count,
+            &bundle_sha256,
+            proof_binding_id,
+            session_id,
+        )
+    };
     if let Some(terminal_event) = recovery_terminal_retry_event(&state.data_dir, headers)? {
         if input.reassign_to_current_principal {
-            anyhow::bail!("Recovery terminal retry cannot reassign a principal root");
+            // The reassignment already committed; this retry only records its
+            // signed outcome. It may name the reassigned root, never another one.
+            let principal = require_active_passkey_principal_for_context(state, &context)?;
+            if principal.principal_id != bundle_principal || principal.localhost_root != bundle_root
+            {
+                anyhow::bail!("Recovery terminal retry principal/root binding mismatch");
+            }
         }
         validate_recovery_terminal_retry_event(
             &terminal_event,
-            &completed_audit_id,
+            &completed_audit_id(context.proof_binding_id.as_deref(), &context.session_id),
             bundle_principal,
             context.proof_binding_id.as_deref(),
             &context.session_id,
@@ -1821,15 +1831,25 @@ async fn full_recovery_bundle_import_inner(
                 imported_count: expected_wallet_count,
                 reason_code: WALLET_RESTORE_REASON_NONE,
             },
-            people_identity_restore: None,
+            people_identity_restore: Some(recorded_people_identity_restore(
+                &state.data_dir,
+                &bundle,
+                bundle_principal,
+                bundle_root,
+            )),
             runtime_audit,
         })?);
     }
     if !input.reassign_to_current_principal {
-        if let Some(completed_event) = crate::auth::load_signed_full_recovery_outcome_audit_event(
-            &state.data_dir,
-            &completed_audit_id,
-        )? {
+        if let Some(completed_event) =
+            crate::auth::find_signed_full_recovery_outcome_audit_event(&state.data_dir, |event| {
+                event.event_id
+                    == completed_audit_id(
+                        event.proof_binding_id.as_deref(),
+                        event.session_id.as_deref().unwrap_or_default(),
+                    )
+            })?
+        {
             let principal = require_active_passkey_principal_for_context(state, &context)?;
             if principal.principal_id != input.principal_id
                 || principal.localhost_root != input.localhost_root
@@ -1840,7 +1860,7 @@ async fn full_recovery_bundle_import_inner(
             // authenticated session can read its result without repeating import.
             validate_completed_recovery_outcome(
                 &completed_event,
-                &completed_audit_id,
+                &completed_event.event_id,
                 bundle_principal,
                 expected_wallet_count,
                 &bundle_sha256,
@@ -1860,7 +1880,12 @@ async fn full_recovery_bundle_import_inner(
                     imported_count: expected_wallet_count,
                     reason_code: WALLET_RESTORE_REASON_NONE,
                 },
-                people_identity_restore: None,
+                people_identity_restore: Some(recorded_people_identity_restore(
+                    &state.data_dir,
+                    &bundle,
+                    bundle_principal,
+                    bundle_root,
+                )),
                 runtime_audit: FullRecoveryRuntimeAuditOutcomeV2 {
                     status: RUNTIME_AUDIT_COMPLETE,
                     reason_code: RUNTIME_AUDIT_REASON_NONE,
@@ -1956,6 +1981,8 @@ async fn full_recovery_bundle_import_inner(
         wallet_restore.expected_count,
         wallet_restore.imported_count,
         &bundle_sha256,
+        outcome_event.proof_binding_id.as_deref(),
+        outcome_event.session_id.as_deref().unwrap_or_default(),
     );
     let signed_outcome_event = crate::auth::sign_audit_event(&state.data_dir, outcome_event)?;
     #[cfg(test)]
@@ -2163,6 +2190,54 @@ fn restore_people_identity_from_full_bundle(
         proof_binding_id,
     ) {
         Ok(outcome) => outcome,
+        Err(err) => FullRecoveryPeopleIdentityOutcomeV1 {
+            status: "incomplete",
+            profile_did: None,
+            rebound_device: false,
+            contact_store_restored: false,
+            reason: Some(format!("{err:#}")),
+        },
+    }
+}
+
+/// Reports, without writing, the People identity an earlier attempt of this
+/// recovery restored. A signed complete outcome only exists when that restore
+/// did not fail, and re-applying the Kit's Profile could roll back a newer
+/// revision, so a retry reads the restored Profile instead.
+fn recorded_people_identity_restore(
+    data_dir: &std::path::Path,
+    bundle: &Value,
+    principal_id: &str,
+    localhost_root: &str,
+) -> FullRecoveryPeopleIdentityOutcomeV1 {
+    let Some(people_identity) = bundle.get("people_identity") else {
+        return FullRecoveryPeopleIdentityOutcomeV1 {
+            status: "absent",
+            profile_did: None,
+            rebound_device: false,
+            contact_store_restored: false,
+            reason: None,
+        };
+    };
+    match crate::collaboration_profile_authority::load_profile_authority(
+        data_dir,
+        principal_id,
+        localhost_root,
+    ) {
+        Ok(Some(profile)) => FullRecoveryPeopleIdentityOutcomeV1 {
+            status: "restored",
+            profile_did: Some(profile.document().profile_did.clone()),
+            rebound_device: false,
+            contact_store_restored: people_identity.get("contact_store_state").is_some(),
+            reason: None,
+        },
+        Ok(None) => FullRecoveryPeopleIdentityOutcomeV1 {
+            status: "incomplete",
+            profile_did: None,
+            rebound_device: false,
+            contact_store_restored: false,
+            reason: Some("restored Profile authority not found".to_string()),
+        },
         Err(err) => FullRecoveryPeopleIdentityOutcomeV1 {
             status: "incomplete",
             profile_did: None,
@@ -2419,6 +2494,10 @@ fn wallet_adapter_error_is_invalid_response(err: &anyhow::Error) -> bool {
         || message.contains("invalid Wallet provider v2 response")
 }
 
+/// One id per recovery attempt: the same Kit may be recovered again on this
+/// Home (lost passkey), and each attempt's proof binding and session get their
+/// own signed outcome instead of colliding with an earlier one.
+#[allow(clippy::too_many_arguments)]
 fn full_recovery_outcome_audit_id(
     bundle_id: &str,
     principal_id: &str,
@@ -2427,9 +2506,11 @@ fn full_recovery_outcome_audit_id(
     expected_count: usize,
     imported_count: usize,
     bundle_sha256: &str,
+    proof_binding_id: Option<&str>,
+    session_id: &str,
 ) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"elastos.full-recovery-bundle.outcome-audit.v1");
+    digest.update(b"elastos.full-recovery-bundle.outcome-audit.v2");
     let expected_count = expected_count.to_string();
     let imported_count = imported_count.to_string();
     for value in [
@@ -2440,6 +2521,8 @@ fn full_recovery_outcome_audit_id(
         expected_count.as_bytes(),
         imported_count.as_bytes(),
         bundle_sha256.as_bytes(),
+        proof_binding_id.unwrap_or_default().as_bytes(),
+        session_id.as_bytes(),
     ] {
         digest.update([0]);
         digest.update(value);
