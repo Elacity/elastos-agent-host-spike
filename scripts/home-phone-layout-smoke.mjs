@@ -1849,33 +1849,95 @@ async function probePhoneBack(frame) {
     await sleep(ASSISTANT_OPEN_WAIT_MS);
   }
 
-  // Every Home surface that can be a Back layer, from the shell's own list:
-  // open it from bare Home, Back once, and it must be gone with Home still
-  // here. A surface added to HOME_GUI_HOST_SELECTORS without an opener below
-  // fails here, so Back cannot silently miss it.
-  const layerSelectors = await frame.evaluate(async () => {
+  // Every registered Back layer: open it alone from bare Home, Back once, and
+  // exactly that layer must close (none open before or after but it) with Home
+  // still here. Every Home host surface must be a registered layer, and every
+  // registered layer needs an opener below, so Back cannot silently miss one.
+  const registry = await frame.evaluate(async () => {
+    const popovers = await import(new URL("./shell-popovers.js?v=home-20260813a", location.href).href);
     const stage = await import(new URL("./shell-phone-stage.js?v=home-20260813a", location.href).href);
-    return [...stage.LAYER_SELECTORS];
+    const layers = popovers.registeredStageLayers().map(({ id, selector }) => ({ id, selector }));
+    const registered = new Set(layers.map((layer) => document.querySelector(layer.selector)).filter(Boolean));
+    const unregistered = stage.LAYER_HOST_SELECTORS
+      .filter((selector) => document.querySelector(selector) && !registered.has(document.querySelector(selector)));
+    return { layers, unregistered };
   });
   const layers = [];
-  for (const selector of layerSelectors) {
-    const present = await frame.evaluate((selector) => Boolean(document.querySelector(selector)), selector);
-    if (!present) {
-      layers.push({ selector, present: false });
+  for (const { id, selector } of registry.layers) {
+    const presence = await frame.evaluate((selector) => {
+      const base = selector.replace(/:not\(\[hidden\]\)$/, "");
+      const menubar = document.querySelector("#toolbar-menubar");
+      return {
+        present: Boolean(document.querySelector(base)),
+        // App menus live in the bar's menubar, which a phone never shows.
+        phoneHidden: base === ".toolbar-menu-popover" && Boolean(menubar) && menubar.getClientRects().length === 0,
+      };
+    }, selector);
+    if (presence.phoneHidden) {
+      layers.push({ id, selector, present: true, phoneHidden: true });
       continue;
     }
-    const opener = LAYER_OPENERS[selector];
+    if (!presence.present && !LAYER_OPENERS[id]?.creates) {
+      layers.push({ id, selector, present: false });
+      continue;
+    }
+    const opener = LAYER_OPENERS[id];
     if (!opener) {
-      layers.push({ selector, present: true, opener: false });
+      layers.push({ id, selector, present: true, opener: false });
       continue;
     }
-    await opener(frame);
-    await sleep(SHEET_SETTLE_MS);
-    const before = await readLayer(frame, selector);
+    await opener.open(frame);
+    await sleep(opener.wait ?? SHEET_SETTLE_MS);
+    const before = await readLayer(frame, id);
     await systemBack();
+    const after = await waitLayerClosed(frame, id);
+    layers.push({ id, selector, present: true, opener: true, before, after });
+  }
+
+  // Two layers at once: the yielded welcome card under Mission Control. Back
+  // closes Mission Control, the one on top, and leaves the card alone.
+  await openTarget(frame, "library");
+  await setWelcome(frame, { open: true, yielded: true });
+  await callShellModule(frame, "shell-expose.js", "openExpose");
+  await sleep(SHEET_SETTLE_MS);
+  const overviewBefore = { overview: await readLayer(frame, "mission-control"), welcome: await readLayer(frame, "setup-sheet") };
+  await systemBack();
+  await waitLayerClosed(frame, "mission-control");
+  const overviewAfter = { overview: await readLayer(frame, "mission-control"), welcome: await readLayer(frame, "setup-sheet") };
+  await setWelcome(frame, { open: false });
+  await sleep(SHEET_SETTLE_MS);
+
+  // A fullscreen Space with the bar's identity menu open: Back closes the
+  // menu and nothing else; the Space stays fullscreen.
+  const fullscreenSetup = await frame.evaluate(async () => {
+    const core = await import(new URL("./shell-core.js?v=home-20260813a", location.href).href);
+    const stages = await import(new URL("./shell-stages.js?v=home-20260813a", location.href).href);
+    const id = core.shellState.activeWindowId;
+    if (!id) {
+      return null;
+    }
+    stages.enterFullscreenStage(id);
+    return { id };
+  });
+  await sleep(SHEET_SETTLE_MS);
+  const readFullscreen = () => frame.evaluate(async (id) => {
+    const stages = await import(new URL("./shell-stages.js?v=home-20260813a", location.href).href);
+    const active = stages.getActiveStageId();
+    return { activeStage: active, fullscreen: Boolean(id) && !stages.isDesktopSpace(active) };
+  }, fullscreenSetup?.id || null);
+  await LAYER_OPENERS["identity-menu"].open(frame);
+  await sleep(SHEET_SETTLE_MS);
+  const fullscreenBefore = { ...(await readFullscreen()), menu: await readLayer(frame, "identity-menu") };
+  await systemBack();
+  await waitLayerClosed(frame, "identity-menu");
+  await sleep(SHEET_SETTLE_MS);
+  const fullscreenAfter = { ...(await readFullscreen()), menu: await readLayer(frame, "identity-menu") };
+  if (fullscreenSetup) {
+    await frame.evaluate(async (id) => {
+      const stages = await import(new URL("./shell-stages.js?v=home-20260813a", location.href).href);
+      stages.exitFullscreenStage(id);
+    }, fullscreenSetup.id);
     await sleep(SHEET_SETTLE_MS);
-    const after = await readLayer(frame, selector);
-    layers.push({ selector, present: true, opener: true, before, after });
   }
 
   await openTarget(frame, "library");
@@ -1907,18 +1969,52 @@ async function probePhoneBack(frame) {
   }
   return {
     menuBefore, menuAfter, welcomeBefore, welcomeAfter, assistantBefore, assistantAfter,
-    layers, spaceSetup, spaceAfter,
+    unregistered: registry.unregistered, layers,
+    overviewBefore, overviewAfter, fullscreenSetup, fullscreenBefore, fullscreenAfter,
+    spaceSetup, spaceAfter,
   };
 }
 
-function readLayer(frame, selector) {
-  return frame.evaluate((selector) => {
-    const node = document.querySelector(selector);
+// One registered layer as Back sees it: open by its own isOpen (or shown),
+// and how many layers Back would count right now.
+function readLayer(frame, id) {
+  return frame.evaluate(async (id) => {
+    const popovers = await import(new URL("./shell-popovers.js?v=home-20260813a", location.href).href);
+    const stage = await import(new URL("./shell-phone-stage.js?v=home-20260813a", location.href).href);
+    const layer = popovers.registeredStageLayers().find((entry) => entry.id === id);
+    const node = layer ? document.querySelector(layer.selector) : null;
+    const open = layer?.isOpen
+      ? layer.isOpen() === true
+      : Boolean(node && !node.hidden && node.getClientRects().length > 0);
     return {
       home: location.href.includes("/apps/home-gui/"),
-      shown: Boolean(node && !node.hidden && node.getClientRects().length > 0),
+      open,
+      openLayers: stage.openStageLayers(document).map((entry) => entry.id),
     };
-  }, selector);
+  }, id);
+}
+
+// Back settles when the layer's hide has really finished.
+async function waitLayerClosed(frame, id) {
+  const startedAt = Date.now();
+  let state = await readLayer(frame, id);
+  while (state.open && Date.now() - startedAt < LAYER_CLOSE_WAIT_MS) {
+    await sleep(100);
+    state = await readLayer(frame, id);
+  }
+  return state;
+}
+const LAYER_CLOSE_WAIT_MS = 2500;
+
+function setWelcome(frame, { open, yielded = false }) {
+  return frame.evaluate(({ open, yielded }) => {
+    const sheet = document.querySelector("#setup-sheet");
+    if (!sheet) {
+      return;
+    }
+    sheet.classList.toggle("is-yielded", Boolean(open && yielded));
+    sheet.hidden = !open;
+  }, { open, yielded });
 }
 
 async function callShellModule(frame, file, call) {
@@ -1928,22 +2024,25 @@ async function callShellModule(frame, file, call) {
   }, { file, call });
 }
 
-// How a person opens each Home surface; keyed by HOME_GUI_HOST_SELECTORS.
+// How a person opens each registered Back layer, keyed by its layer id.
+// `creates`: the surface is built on open, so it is absent until then.
 const LAYER_OPENERS = Object.freeze({
-  ".launcher": (frame) => callShellModule(frame, "shell-surface.js", "showLauncher"),
-  "#desktop-context-menu": (frame) => longPressDockApp(frame),
-  "#notification-center": (frame) => callShellModule(frame, "shell-notifications.js", "toggleNotificationCenter"),
-  "#control-centre": (frame) => callShellModule(frame, "shell-control-centre.js", "showControlCentre"),
-  "#wallet-rail": (frame) => callShellModule(frame, "shell-wallet-rail.js", "showWalletRail"),
-  "#inbox-rail": (frame) => callShellModule(frame, "shell-inbox-rail.js", "showInboxRail"),
-  "#setup-sheet": (frame) => frame.evaluate(() => {
-    const sheet = document.querySelector("#setup-sheet");
-    sheet.classList.remove("is-yielded");
-    sheet.hidden = false;
-  }),
-  "#spotlight": (frame) => callShellModule(frame, "shell-spotlight.js", "showSpotlight"),
-  "#shortcuts-overlay": (frame) => callShellModule(frame, "shell-keyboard.js", "toggleShortcutsOverlay"),
-  "#about-overlay": (frame) => frame.evaluate(() => document.querySelector("#identity-menu-about")?.click()),
+  launcher: { open: (frame) => callShellModule(frame, "shell-surface.js", "showLauncher") },
+  "context-menu": { open: (frame) => longPressDockApp(frame) },
+  "notification-center": { open: (frame) => callShellModule(frame, "shell-notifications.js", "toggleNotificationCenter") },
+  "control-centre": { open: (frame) => callShellModule(frame, "shell-control-centre.js", "showControlCentre") },
+  "wallet-rail": { open: (frame) => callShellModule(frame, "shell-wallet-rail.js", "showWalletRail") },
+  "inbox-rail": { open: (frame) => callShellModule(frame, "shell-inbox-rail.js", "showInboxRail") },
+  "setup-sheet": { open: (frame) => setWelcome(frame, { open: true }) },
+  spotlight: { open: (frame) => callShellModule(frame, "shell-spotlight.js", "showSpotlight") },
+  shortcuts: { open: (frame) => callShellModule(frame, "shell-keyboard.js", "toggleShortcutsOverlay") },
+  about: { open: (frame) => frame.evaluate(() => document.querySelector("#identity-menu-about")?.click()) },
+  "identity-menu": { open: (frame) => frame.evaluate(() => document.querySelector("#toolbar-home")?.click()) },
+  "mission-control": { creates: true, open: (frame) => callShellModule(frame, "shell-expose.js", "openExpose") },
+  assistant: {
+    wait: ASSISTANT_OPEN_WAIT_MS,
+    open: (frame) => frame.evaluate(() => document.querySelector("#assistant-toggle")?.click()),
+  },
 });
 
 function phoneBackFailures(run) {
@@ -1952,7 +2051,8 @@ function phoneBackFailures(run) {
   }
   const {
     menuBefore, menuAfter, welcomeBefore, welcomeAfter, assistantBefore, assistantAfter,
-    layers, spaceSetup, spaceAfter,
+    unregistered, layers, overviewBefore, overviewAfter, fullscreenSetup, fullscreenBefore, fullscreenAfter,
+    spaceSetup, spaceAfter,
   } = run.back;
   const label = `${run.engine}/${run.profile}/back`;
   const failures = [];
@@ -1968,26 +2068,41 @@ function phoneBackFailures(run) {
   if (!welcomeAfter.home || welcomeAfter.welcomeOpen || !welcomeAfter.assistantOpen) {
     failures.push(`${label}: Back must close the welcome sheet first and keep the Assistant. Got ${JSON.stringify(welcomeAfter)}`);
   }
-  for (const layer of layers) {
-    if (!layer.present) {
-      continue;
-    }
-    if (!layer.opener) {
-      failures.push(`${label}: ${layer.selector} is a Back layer with no opener in LAYER_OPENERS`);
-      continue;
-    }
-    if (!layer.before.shown) {
-      failures.push(`${label}: ${layer.selector} must be open before Back. Got ${JSON.stringify(layer.before)}`);
-    }
-    if (!layer.after.home || layer.after.shown) {
-      failures.push(`${label}: Back must close ${layer.selector} and leave Home. Got ${JSON.stringify(layer.after)}`);
-    }
-  }
   if (!assistantBefore.assistantOpen) {
     failures.push(`${label}: Assistant must be open before Back. Got ${JSON.stringify(assistantBefore)}`);
   }
   if (!assistantAfter.home || assistantAfter.assistantOpen) {
     failures.push(`${label}: Back must close Assistant and leave Home. Got ${JSON.stringify(assistantAfter)}`);
+  }
+  for (const selector of unregistered) {
+    failures.push(`${label}: Home surface ${selector} is not a registered Back layer (registerStageLayer)`);
+  }
+  for (const layer of layers) {
+    if (!layer.present || layer.phoneHidden) {
+      continue;
+    }
+    if (!layer.opener) {
+      failures.push(`${label}: Back layer ${layer.id} has no opener in LAYER_OPENERS`);
+      continue;
+    }
+    if (!layer.before.open || layer.before.openLayers.join() !== layer.id) {
+      failures.push(`${label}: ${layer.id} must be the only open layer before Back. Got ${JSON.stringify(layer.before)}`);
+    }
+    if (!layer.after.home || layer.after.open || layer.after.openLayers.length !== 0) {
+      failures.push(`${label}: one Back must close ${layer.id} alone and leave Home. Got ${JSON.stringify(layer.after)}`);
+    }
+  }
+  if (!overviewBefore.overview.open || !overviewBefore.welcome.open) {
+    failures.push(`${label}: Mission Control must be open over the yielded welcome card before Back. Got ${JSON.stringify(overviewBefore)}`);
+  }
+  if (!overviewAfter.overview.home || overviewAfter.overview.open || !overviewAfter.welcome.open) {
+    failures.push(`${label}: Back must close Mission Control and keep the welcome card. Got ${JSON.stringify(overviewAfter)}`);
+  }
+  if (!fullscreenSetup || !fullscreenBefore.fullscreen || !fullscreenBefore.menu.open) {
+    failures.push(`${label}: a fullscreen Space with the identity menu open is required before Back. Got ${JSON.stringify({ fullscreenSetup, fullscreenBefore })}`);
+  } else if (!fullscreenAfter.menu.home || fullscreenAfter.menu.open || !fullscreenAfter.fullscreen
+    || fullscreenAfter.activeStage !== fullscreenBefore.activeStage) {
+    failures.push(`${label}: Back must close the identity menu and keep the fullscreen Space. Got ${JSON.stringify({ fullscreenBefore, fullscreenAfter })}`);
   }
   if (!spaceSetup) {
     failures.push(`${label}: two windows are required to check an off-Space Back`);

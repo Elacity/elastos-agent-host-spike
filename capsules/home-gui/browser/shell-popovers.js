@@ -55,22 +55,27 @@ export function handleShellEscape() {
   return true;
 }
 
-/* The phone's Back closes one layer by sending it the Escape a keyboard user
-   would press there. The ordered stack above is skipped for that event: it
-   ranks surfaces for a key with no target, and Back already chose its target.
-   Returns whether a handler claimed the key. */
-const stageBackEscapes = new WeakSet();
+/* Back layers (the phone's system Back). Every surface a person can dismiss
+   registers once, next to its own close function:
+   - selector: the element whose stacking order ranks the layer; it also ties
+     the layer to HOME_GUI_HOST_SELECTORS so a host surface cannot be missed;
+   - isOpen (optional): on screen right now; default is "the element is shown";
+   - close: the same dismissal as the surface's own Close (animation included).
+   The phone stage closes exactly one layer per Back and treats it as open
+   until isOpen() turns false, so an animated hide is one layer until it has
+   really gone. No Escape is synthesised: a raw Escape would also reach the
+   ordered stack above (and, say, leave a fullscreen Space). */
+const stageLayers = new Map();
 
-export function dispatchStageBackEscape(target) {
-  const view = target.ownerDocument?.defaultView || globalThis;
-  const event = new view.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-  stageBackEscapes.add(event);
-  target.dispatchEvent(event);
-  return event.defaultPrevented;
+export function registerStageLayer(id, { selector, isOpen = null, close } = {}) {
+  if (typeof id !== "string" || !id || typeof selector !== "string" || !selector || typeof close !== "function") {
+    return;
+  }
+  stageLayers.set(id, { id, selector, isOpen: typeof isOpen === "function" ? isOpen : null, close });
 }
 
-export function isStageBackEscape(event) {
-  return stageBackEscapes.has(event);
+export function registeredStageLayers() {
+  return [...stageLayers.values()];
 }
 
 export function closeOtherShellPopovers(exceptId) {

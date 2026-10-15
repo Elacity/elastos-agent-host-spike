@@ -14,6 +14,7 @@ import {
   dismissWithMotion,
   prepareSurfaceOpen,
 } from "./shell-motion.js?v=home-20260813a";
+import { registerStageLayer } from "./shell-popovers.js?v=home-20260813a";
 
 /* System chrome: the ElastOS brand at the far left of the bar is the system
    menu (the macOS Apple-menu position) — show desktop, fullscreen, System,
@@ -212,6 +213,10 @@ export function bindIdentityMenu() {
   }
   identityMenuBound = true;
   bindIdentityMenuInvoker(toolbarHomeButton);
+  registerStageLayer("identity-menu", {
+    selector: "#toolbar-identity-menu",
+    close: () => closeIdentityMenu({ restoreFocus: false }),
+  });
   toolbarIdentityMenu.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       event.preventDefault();

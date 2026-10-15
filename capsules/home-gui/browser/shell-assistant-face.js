@@ -27,6 +27,7 @@
 import {
   closeOtherShellPopovers,
   registerShellPopover,
+  registerStageLayer,
 } from "./shell-popovers.js?v=home-20260813a";
 import {
   agentStageId,
@@ -612,6 +613,11 @@ export function bindAssistantFace(dependencies) {
   spaceEl = document.querySelector("#assistant-space");
   frame = document.querySelector("#assistant-space-frame");
   registerShellPopover(FACE_ID, () => hideAssistantFace({ instant: true }));
+  registerStageLayer("assistant", {
+    selector: "#assistant-space",
+    isOpen: () => Boolean(spaceEl && !spaceEl.hidden) || assistantFaceActive() || Boolean(taskbarEl()?.dataset.assistantMorph),
+    close: () => dismissAssistantForBack(),
+  });
   bindAgentSpace({
     available: () => Boolean(toggleEl()) && !toggleEl().hidden,
     busy: () => Boolean(taskbarEl()?.dataset.assistantMorph),

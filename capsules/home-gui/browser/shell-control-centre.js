@@ -2,6 +2,7 @@ import {
   closeOtherShellPopovers,
   registerEscapeHandler,
   registerShellPopover,
+  registerStageLayer,
 } from "./shell-popovers.js?v=home-20260813a";
 import {
   dismissWithMotion,
@@ -93,6 +94,7 @@ export function bindControlCentre() {
   }
   if (!registered) {
     registerShellPopover("control-centre", () => hideControlCentre({ restoreFocus: false }));
+    registerStageLayer("control-centre", { selector: "#control-centre", close: () => hideControlCentre({ restoreFocus: false }) });
     registerEscapeHandler("control-centre", {
       priority: 80,
       isActive: () => controlCentreOpen(),

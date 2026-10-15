@@ -78,6 +78,7 @@ import {
 import {
   closeOtherShellPopovers,
   registerShellPopover,
+  registerStageLayer,
   setOverlayOpen,
 } from "./shell-popovers.js?v=home-20260813a";
 import {
@@ -2996,6 +2997,8 @@ export function bindShellSurfaceDom(options = {}) {
   registerShellPopover("launcher", () => hideLauncher());
   registerShellPopover("context-menu", () => hideDesktopContextMenu());
   registerShellPopover("notification-toast", () => hideHomeNotificationToast());
+  registerStageLayer("launcher", { selector: "#launcher", close: () => hideLauncher() });
+  registerStageLayer("context-menu", { selector: "#desktop-context-menu", close: () => hideDesktopContextMenu() });
   // The launcher is a modal dialog: Tab cycles inside the popover until it is
   // dismissed.
   launcher?.addEventListener("keydown", (event) => {

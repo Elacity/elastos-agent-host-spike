@@ -22,6 +22,7 @@ import {
   closeOtherShellPopovers,
   registerEscapeHandler,
   registerShellPopover,
+  registerStageLayer,
 } from "./shell-popovers.js?v=home-20260813a";
 import {
   addDesktopSpace,
@@ -2055,6 +2056,12 @@ export function bindExpose() {
       priority: 60,
       isActive: () => active || missionExiting,
       dismiss: () => closeExpose(),
+    });
+    // Ranked by its shelf, which paints above every Home sheet while open.
+    registerStageLayer("mission-control", {
+      selector: ".mission-spaces-shelf",
+      isOpen: () => active || missionExiting,
+      close: () => closeExpose(),
     });
     registered = true;
   }

@@ -16,6 +16,7 @@ import {
   dismissWithMotion,
   prepareSurfaceOpen,
 } from "./shell-motion.js?v=home-20260813a";
+import { registerStageLayer } from "./shell-popovers.js?v=home-20260813a";
 import { bindSheetHandle, SHEET_DRAG_UP } from "./shell-sheet-handle.js?v=home-20260813a";
 
 /* Spotlight: shell-wide search (macOS anatomy — dimmed backdrop, centered
@@ -379,6 +380,7 @@ export function bindSpotlight() {
   if (!spotlight || !spotlightInput) {
     return;
   }
+  registerStageLayer("spotlight", { selector: "#spotlight", close: () => hideSpotlight() });
   spotlightInput.addEventListener("input", () => {
     runSearch(spotlightInput.value);
   });

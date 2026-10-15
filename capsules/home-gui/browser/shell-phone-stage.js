@@ -2,16 +2,17 @@
 
    Back: the shell keeps at most one history entry of its own (model in
    shell-phone-stage-history.js). It is pushed when the first layer (a window
-   on the stage, Mission Control, the Assistant room, or any visible Home
-   surface other than the bar, Dock and desktop) opens on a phone and consumed
-   again when the last layer closes, so the bare desktop never traps back —
-   the host page's own history is left alone. popstate closes the top layer:
-   the top-most open surface gets the Escape a keyboard user would press there
-   (or the shell's ordered Escape stack, if the surface has no Escape of its
-   own), then Mission Control, then the window that is actually on this Space
-   goes home (minimise; the capsule keeps running). A window parked on another
-   Space is not that window. The surfaces come from HOME_GUI_HOST_SELECTORS,
-   so a new Home surface is a Back layer without a second list.
+   on the stage or any registered Back layer: sheets, rails, menus, About,
+   Mission Control, the Assistant room) opens on a phone and consumed again
+   when the last layer closes, so the bare desktop never traps back — the host
+   page's own history is left alone. popstate closes exactly one layer: the
+   open layer that paints on top (one stacking order over every registered
+   layer), through the close it registered, and that layer stops counting at
+   once while its hide animates. With no layer open, the window that is
+   actually on this Space goes home (minimise; the capsule keeps running). A
+   window parked on another Space is not that window. Layers register next to
+   their own close (registerStageLayer in shell-popovers.js); the phone smoke
+   fails on a Home host surface that has none.
 
    Swipe: a downward drag on the title bar opens Mission Control as the app
    switcher. It starts on the title bar only — capsule frames own their own
@@ -25,9 +26,8 @@ import {
 } from "./shell-phone-stage-history.js?v=home-20260813a";
 import { isPhone } from "./shell-form-factor.js?v=home-20260813a";
 import { minimizeWindow } from "./shell-windows.js?v=home-20260813a";
-import { closeExpose, isExposeOpen, openExpose } from "./shell-expose.js?v=home-20260813a";
-import { dispatchStageBackEscape } from "./shell-popovers.js?v=home-20260813a";
-import { assistantFaceActive, dismissAssistantForBack } from "./shell-assistant-face.js?v=home-20260813a";
+import { isExposeOpen, openExpose } from "./shell-expose.js?v=home-20260813a";
+import { registeredStageLayers } from "./shell-popovers.js?v=home-20260813a";
 
 // A title-bar drag this far down opens the switcher…
 export const TITLE_SWIPE_DOWN_PX = 48;
@@ -35,7 +35,8 @@ export const TITLE_SWIPE_DOWN_PX = 48;
 export const TITLE_SWIPE_DRIFT_PX = 32;
 
 // Always on screen, so never a layer. The notification toast is a passing
-// notice that dismisses itself, not something Back has to close.
+// notice that dismisses itself, not something Back has to close. Every other
+// host surface must be a registered layer.
 const STAGE_CHROME = Object.freeze([
   ".desktop-backdrop",
   ".toolbar",
@@ -43,11 +44,11 @@ const STAGE_CHROME = Object.freeze([
   ".taskbar",
   "#home-notification-toast",
 ]);
-export const LAYER_SELECTORS = Object.freeze(
+export const LAYER_HOST_SELECTORS = Object.freeze(
   HOME_GUI_HOST_SELECTORS.filter((selector) => !STAGE_CHROME.includes(selector)),
 );
-// The Assistant room lives outside the host surfaces (it is its own frame).
-const ASSISTANT_ROOM = "#assistant-space";
+// A close that never lands stops holding its layer after this long.
+export const LAYER_CLOSE_TIMEOUT_MS = 2000;
 
 // On the stage: not minimised, and still in the Space the Dock is showing.
 export function windowOnStage(entry) {
@@ -69,32 +70,63 @@ function shown(node) {
   return Boolean(node && !node.hidden && node.getClientRects().length > 0);
 }
 
-function assistantOpen(doc) {
-  return shown(doc.querySelector(ASSISTANT_ROOM)) || assistantFaceActive();
+function layerNode(layer, doc) {
+  return doc.querySelector(layer.selector);
 }
 
-// Open layers as { node, close } with the top-most last: by z-index, then by
-// document order (a later sibling paints above an earlier one).
-export function openStageLayers(doc = document) {
-  const layers = LAYER_SELECTORS.map((selector) => doc.querySelector(selector))
-    .filter(shown)
-    .map((node) => ({ node, close: () => closeSurface(doc, node) }));
-  if (assistantOpen(doc)) {
-    const node = doc.querySelector(ASSISTANT_ROOM);
-    layers.push({ node, close: () => dismissAssistantForBack() });
-  }
-  const view = doc.defaultView;
-  const z = (node) => {
-    const value = node && view ? Number.parseInt(view.getComputedStyle(node).zIndex, 10) : 0;
-    return Number.isFinite(value) ? value : 0;
-  };
-  return layers.sort((a, b) => {
-    const byZ = z(a.node) - z(b.node);
-    if (byZ !== 0 || !a.node || !b.node) {
-      return byZ;
+function layerOpen(layer, doc) {
+  return layer.isOpen ? layer.isOpen() === true : shown(layerNode(layer, doc));
+}
+
+// Layers whose close is in flight: one Back already took them.
+const closing = new Set();
+let onLayerSettled = () => {};
+
+// z-indexed ancestors of a node, outermost first.
+function stackingPath(node, view) {
+  const path = [];
+  for (let el = node; el && el.nodeType === 1; el = el.parentElement) {
+    const z = Number.parseInt(view.getComputedStyle(el).zIndex, 10);
+    if (Number.isFinite(z)) {
+      path.unshift({ el, z });
     }
-    return a.node.compareDocumentPosition(b.node) & 4 ? -1 : 1;
-  });
+  }
+  return path;
+}
+
+function documentOrder(a, b) {
+  return a.compareDocumentPosition(b) & 4 ? -1 : 1;
+}
+
+// Negative when `a` paints below `b`. Walks both stacking paths to the first
+// context they do not share: a higher z wins there, then the later element in
+// the document; inside one context the nested surface is on top.
+export function compareStacking(a, b, view) {
+  if (!a || !b) {
+    return a ? 1 : b ? -1 : 0;
+  }
+  const pa = stackingPath(a, view);
+  const pb = stackingPath(b, view);
+  for (let index = 0; index < Math.min(pa.length, pb.length); index += 1) {
+    if (pa[index].el === pb[index].el) {
+      continue;
+    }
+    return pa[index].z !== pb[index].z ? pa[index].z - pb[index].z : documentOrder(pa[index].el, pb[index].el);
+  }
+  if (pa.length !== pb.length) {
+    return pa.length - pb.length;
+  }
+  return a === b ? 0 : documentOrder(a, b);
+}
+
+// Open layers that Back has not taken yet, top-most last.
+export function openStageLayers(doc = document) {
+  const view = doc.defaultView;
+  return registeredStageLayers()
+    .filter((layer) => !closing.has(layer.id) && layerOpen(layer, doc))
+    .map((layer) => ({ layer, node: layerNode(layer, doc) }))
+    .sort((a, b) => compareStacking(a.node, b.node, view))
+    .map(({ layer }) => layer);
 }
 
 export function openSheetCount(doc = document) {
@@ -102,28 +134,39 @@ export function openSheetCount(doc = document) {
 }
 
 export function stageLayerCount(doc = document) {
-  return visibleWindowCount() + openSheetCount(doc) + (isExposeOpen() ? 1 : 0);
+  return visibleWindowCount() + openSheetCount(doc);
 }
 
-// The surface's own Escape first. A surface that only answers the shell's
-// ordered Escape stack (Quick Look, the window switcher) neither claims that
-// key nor closes, so it gets a plain Escape.
-function closeSurface(doc, node) {
-  const claimed = dispatchStageBackEscape(node);
-  if (!claimed && shown(node)) {
-    doc.body.dispatchEvent(new doc.defaultView.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
-  }
+// Runs the layer's own close and resolves once it is really gone (its hide
+// animation included), or after LAYER_CLOSE_TIMEOUT_MS if it never goes.
+export function closeStageLayer(layer, doc = document) {
+  const view = doc.defaultView;
+  closing.add(layer.id);
+  const started = Date.now();
+  return new Promise((resolve) => {
+    const check = () => {
+      if (layerOpen(layer, doc) && Date.now() - started < LAYER_CLOSE_TIMEOUT_MS) {
+        view.setTimeout(check, 32);
+        return;
+      }
+      closing.delete(layer.id);
+      onLayerSettled();
+      resolve();
+    };
+    try {
+      layer.close();
+    } catch (_error) {
+      // A close that throws leaves the layer open; the timeout releases it.
+    }
+    check();
+  });
 }
 
-// Closes the top layer and reports how many remain.
+// Closes exactly one layer, the top-most, and reports how many remain.
 export function closeTopStageLayer(doc = document) {
   const top = openStageLayers(doc).at(-1);
   if (top) {
-    top.close();
-    return stageLayerCount(doc);
-  }
-  if (isExposeOpen()) {
-    closeExpose();
+    void closeStageLayer(top, doc);
     return stageLayerCount(doc);
   }
   const active = shellState.windows.get(shellState.activeWindowId);
@@ -234,6 +277,8 @@ export function bindPhoneStage(doc = document, view = window) {
       view.queueMicrotask ? view.queueMicrotask(sync) : Promise.resolve().then(sync);
     }
   };
+  // A layer whose close timed out counts again; let the history catch up.
+  onLayerSettled = schedule;
   new view.MutationObserver(schedule).observe(doc.body, {
     attributes: true,
     attributeFilter: ["class", "hidden"],

@@ -19,6 +19,7 @@ import { openTarget } from "./shell-windows.js?v=home-20260813a";
 import {
   closeOtherShellPopovers,
   registerShellPopover,
+  registerStageLayer,
   setOverlayOpen,
 } from "./shell-popovers.js?v=home-20260813a";
 
@@ -141,6 +142,7 @@ export function bindQuickLook() {
     return;
   }
   registerShellPopover("quick-look", () => hideQuickLook());
+  registerStageLayer("quick-look", { selector: "#quick-look", isOpen: () => isQuickLookOpen(), close: () => hideQuickLook() });
   closeButton?.addEventListener("click", () => hideQuickLook());
   openButton?.addEventListener("click", () => openEntry());
   panel.addEventListener("click", (event) => {

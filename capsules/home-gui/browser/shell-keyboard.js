@@ -32,9 +32,9 @@ import {
 import {
   closeOtherShellPopovers,
   handleShellEscape,
-  isStageBackEscape,
   registerEscapeHandler,
   registerShellPopover,
+  registerStageLayer,
   setOverlayOpen,
 } from "./shell-popovers.js?v=home-20260813a";
 import {
@@ -260,6 +260,12 @@ export function bindShellKeyboard() {
     isActive: () => Boolean(shortcutsOverlay && !shortcutsOverlay.hidden),
     dismiss: () => hideShortcutsOverlay(),
   });
+  registerStageLayer("window-switcher", {
+    selector: "#window-switcher",
+    isOpen: () => switcherState.open === true,
+    close: () => closeSwitcher(),
+  });
+  registerStageLayer("shortcuts", { selector: "#shortcuts-overlay", close: () => hideShortcutsOverlay() });
   registerEscapeHandler("window-switcher", {
     priority: 85,
     isActive: () => switcherState.open === true,
@@ -298,9 +304,8 @@ export function bindShellKeyboard() {
       if (!homeGuiOwnsKeys()) {
         return;
       }
-      // Escape from the Home welcome sheet or its card is the sheet's own Close,
-      // and the phone's Back aims its Escape at one layer, which closes itself.
-      if (event.key === "Escape" && !event.target?.closest?.("#setup-sheet") && !isStageBackEscape(event)) {
+      // Escape from the Home welcome sheet or its card is the sheet's own Close.
+      if (event.key === "Escape" && !event.target?.closest?.("#setup-sheet")) {
         if (handleShellEscape()) {
           event.preventDefault();
           event.stopPropagation();

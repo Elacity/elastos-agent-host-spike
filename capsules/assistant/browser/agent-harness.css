@@ -2873,9 +2873,10 @@ html[data-agent-reasoning="off"] .agent-thinking {
 }
 
 /* Phone: the composer keeps Home's Dock gutter, so the Dock → composer morph
-   holds its width end to end. */
+   holds its width end to end. Keyed on the phone form factor Home pushes, not
+   width alone: a narrow Assistant window on a desktop keeps its column. */
 @media (max-width: 640px) {
-  .taskbar.is-agent-face {
+  :root[data-el-form-factor="phone"] .taskbar.is-agent-face {
     width: min(720px, calc(100vw - 20px));
     max-width: calc(100vw - 20px);
   }

@@ -14,6 +14,7 @@ import { showInboxRail } from "./shell-inbox-rail.js?v=home-20260813a";
 import {
   closeOtherShellPopovers,
   registerShellPopover,
+  registerStageLayer,
 } from "./shell-popovers.js?v=home-20260813a";
 import {
   dismissWithMotion,
@@ -365,6 +366,10 @@ export function bindNotificationCenter() {
   }
   if (!registered) {
     registerShellPopover("notification-center", () => hideNotificationCenter({ restoreFocus: false }));
+    registerStageLayer("notification-center", {
+      selector: "#notification-center",
+      close: () => hideNotificationCenter({ restoreFocus: false }),
+    });
     registered = true;
   }
   clockNode.addEventListener("click", () => {

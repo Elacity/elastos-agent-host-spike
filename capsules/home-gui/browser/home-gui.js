@@ -26,6 +26,7 @@ import {
   shouldIgnoreDesktopKeydown,
   targetById,
 } from "./shell-core.js?v=home-20260813a";
+import { registerStageLayer } from "./shell-popovers.js?v=home-20260813a";
 import {
   bindIdentityMenu,
   clearIdentitySurface,
@@ -1039,6 +1040,7 @@ function bindAboutOverlay() {
     return;
   }
   aboutOverlayBound = true;
+  registerStageLayer("about", { selector: "#about-overlay", close: () => hideAboutOverlay() });
   document.querySelector("#identity-menu-about")?.addEventListener("click", () => {
     showAboutOverlay();
   });
