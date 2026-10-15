@@ -6213,17 +6213,15 @@ body.assistant-space-active #inbox-rail {
      !important pair answers the desktop unified-sidebar rules, which are
      !important. */
   .window .window-head,
-  .window.window-chrome-unified-sidebar .window-head,
-  .window.window-chrome-unified-toolbar .window-head {
+  .window.window-chrome-unified-sidebar .window-head {
     background: linear-gradient(var(--panel-strong), var(--panel-strong)) var(--frame-fill) !important;
     box-shadow: inset 0 -1px 0 var(--hairline) !important;
   }
 
-  /* Unified modes float the head over the capsule's safe-top on the desktop;
-     on a phone the capsule's main column starts at the very top, so the head
-     goes in flow here too. */
-  .window.window-chrome-unified-sidebar .window-head,
-  .window.window-chrome-unified-toolbar .window-head {
+  /* Unified-sidebar floats the head over the capsule's safe-top on the
+     desktop; on a phone the capsule's main column starts at the very top, so
+     the head goes in flow here too. */
+  .window.window-chrome-unified-sidebar .window-head {
     position: relative;
     width: 100%;
     height: var(--phone-window-head-h);
@@ -6291,8 +6289,7 @@ body.assistant-space-active #inbox-rail {
   }
 
   .window .window-head-draggable,
-  .window.window-chrome-unified-sidebar .window-head-draggable,
-  .window.window-chrome-unified-toolbar .window-head-draggable {
+  .window.window-chrome-unified-sidebar .window-head-draggable {
     grid-column: 2;
     grid-row: 1;
     min-height: 0;
@@ -6303,9 +6300,7 @@ body.assistant-space-active #inbox-rail {
   .window .window-head-icon,
   .window .window-head-title,
   .window.window-chrome-unified-sidebar .window-head-icon,
-  .window.window-chrome-unified-sidebar .window-head-title,
-  .window.window-chrome-unified-toolbar .window-head-icon,
-  .window.window-chrome-unified-toolbar .window-head-title {
+  .window.window-chrome-unified-sidebar .window-head-title {
     display: block;
   }
 
