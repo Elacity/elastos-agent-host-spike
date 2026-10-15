@@ -1891,7 +1891,10 @@ async function probePhoneBack(frame) {
     const before = await readLayer(frame, id);
     await systemBack();
     const after = await waitLayerClosed(frame, id);
-    layers.push({ id, selector, present: true, opener: true, before, after });
+    await sleep(SHEET_SETTLE_MS);
+    const settled = await readLayer(frame, id);
+    await opener.cleanup?.(frame);
+    layers.push({ id, selector, present: true, opener: true, before, after: { ...after, windows: settled.windows } });
   }
 
   // Two layers at once: the yielded welcome card under Mission Control. Back
@@ -1990,6 +1993,7 @@ function readLayer(frame, id) {
       home: location.href.includes("/apps/home-gui/"),
       open,
       openLayers: stage.openStageLayers(document).map((entry) => entry.id),
+      windows: Array.from(document.querySelectorAll(".window")).filter((node) => !node.classList.contains("hidden")).length,
     };
   }, id);
 }
@@ -2039,6 +2043,16 @@ const LAYER_OPENERS = Object.freeze({
   about: { open: (frame) => frame.evaluate(() => document.querySelector("#identity-menu-about")?.click()) },
   "identity-menu": { open: (frame) => frame.evaluate(() => document.querySelector("#toolbar-home")?.click()) },
   "mission-control": { creates: true, open: (frame) => callShellModule(frame, "shell-expose.js", "openExpose") },
+  // Peeking the Dock needs an app on the stage (the Dock is tucked under it);
+  // Back must take the peek and leave the app where it is.
+  "dock-peek": {
+    open: async (frame) => {
+      await openTarget(frame, "system");
+      await callShellModule(frame, "shell-phone-dock.js", "peekPhoneDock");
+    },
+    cleanup: (frame) => closeWindow(frame, "system"),
+  },
+  "home-edit": { open: (frame) => callShellModule(frame, "shell-phone-home-edit.js", "enterPhoneHomeEdit") },
   assistant: {
     wait: ASSISTANT_OPEN_WAIT_MS,
     open: (frame) => frame.evaluate(() => document.querySelector("#assistant-toggle")?.click()),
@@ -2088,8 +2102,9 @@ function phoneBackFailures(run) {
     if (!layer.before.open || layer.before.openLayers.join() !== layer.id) {
       failures.push(`${label}: ${layer.id} must be the only open layer before Back. Got ${JSON.stringify(layer.before)}`);
     }
-    if (!layer.after.home || layer.after.open || layer.after.openLayers.length !== 0) {
-      failures.push(`${label}: one Back must close ${layer.id} alone and leave Home. Got ${JSON.stringify(layer.after)}`);
+    if (!layer.after.home || layer.after.open || layer.after.openLayers.length !== 0
+      || layer.after.windows !== layer.before.windows) {
+      failures.push(`${label}: one Back must close ${layer.id} alone and leave Home. Got ${JSON.stringify({ before: layer.before, after: layer.after })}`);
     }
   }
   if (!overviewBefore.overview.open || !overviewBefore.welcome.open) {

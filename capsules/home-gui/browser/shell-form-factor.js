@@ -8,6 +8,10 @@
 // TABLET_MAX_WIDTH is a tablet; anything wider is the desktop.
 export const PHONE_MAX_WIDTH = 640;
 export const TABLET_MAX_WIDTH = 1100;
+// A landscape phone's viewport is at most ~430 px tall (the largest phones,
+// browser bars included); a 7-inch tablet or a short touch-laptop window is
+// 550 px or more. Coarse viewports this short are phones held sideways.
+export const PHONE_LANDSCAPE_MAX_HEIGHT = 500;
 
 export const FORM_FACTORS = Object.freeze({
   phone: "phone",
@@ -17,8 +21,9 @@ export const FORM_FACTORS = Object.freeze({
 
 // A phone held sideways is still a phone: 844 × 390 with a coarse pointer
 // keeps the phone layout instead of turning into a tablet. A short desktop
-// window with a mouse does not, so height only counts on coarse pointers, and
-// only up to tablet width: a short window on a wide touch laptop stays desktop.
+// window with a mouse does not, so height only counts on coarse pointers, only
+// as short as a landscape phone, and only up to tablet width: a 1024 × 600
+// tablet or a short window on a wide touch laptop stays tablet or desktop.
 export function classifyFormFactor(width, height = Number.POSITIVE_INFINITY, coarse = false) {
   if (!Number.isFinite(width)) {
     return FORM_FACTORS.desktop;
@@ -26,7 +31,7 @@ export function classifyFormFactor(width, height = Number.POSITIVE_INFINITY, coa
   if (width <= PHONE_MAX_WIDTH) {
     return FORM_FACTORS.phone;
   }
-  if (coarse && width <= TABLET_MAX_WIDTH && Number.isFinite(height) && height <= PHONE_MAX_WIDTH) {
+  if (coarse && width <= TABLET_MAX_WIDTH && Number.isFinite(height) && height <= PHONE_LANDSCAPE_MAX_HEIGHT) {
     return FORM_FACTORS.phone;
   }
   if (width <= TABLET_MAX_WIDTH) {

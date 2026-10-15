@@ -5836,10 +5836,11 @@ body.assistant-space-active #inbox-rail {
 }
 
 /* Phone size class. Mirrors classifyFormFactor() in shell-form-factor.js
-   (PHONE_MAX_WIDTH / coarse-pointer landscape up to TABLET_MAX_WIDTH) so a
-   rotated phone keeps the phone shell instead of becoming a 390 px-tall
-   desktop, and a short window on a wide touch laptop stays desktop. */
-@media (max-width: 640px), (pointer: coarse) and (max-height: 640px) and (max-width: 1100px), (hover: none) and (max-height: 640px) and (max-width: 1100px) {
+   (PHONE_MAX_WIDTH / coarse-pointer landscape no taller than
+   PHONE_LANDSCAPE_MAX_HEIGHT, up to TABLET_MAX_WIDTH) so a rotated phone keeps
+   the phone shell instead of becoming a 390 px-tall desktop, while a short
+   tablet or touch-laptop window stays tablet or desktop. */
+@media (max-width: 640px), (pointer: coarse) and (max-height: 500px) and (max-width: 1100px), (hover: none) and (max-height: 500px) and (max-width: 1100px) {
   /* Phone bar: 44 px tall; every control is a 44×44 hit box around the same
      22 px glyph. Wallet and Overview leave the bar — Control Centre keeps
      them one tap away (Quick open / Overview) — so brand · inbox · search ·

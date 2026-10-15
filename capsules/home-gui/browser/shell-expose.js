@@ -24,6 +24,7 @@ import {
   registerShellPopover,
   registerStageLayer,
 } from "./shell-popovers.js?v=home-20260813a";
+import { isPhone } from "./shell-form-factor.js?v=home-20260813a";
 import {
   addDesktopSpace,
   assignWindowToDesktop,
@@ -1130,10 +1131,11 @@ function syncMissionSpaceMetrics(spaceCount = 0) {
   const aspect = stageW / stageH;
   // Aim ~102px preview height; widen the card so aspect matches the display.
   const previewH = 102;
-  // Portrait stages (phone) size the thumb by height: the landscape width
-  // floor would make a 160 px-wide portrait thumb ~350 px tall.
+  // A portrait phone sizes the thumb by height: the landscape width floor
+  // would make a 160 px-wide portrait thumb ~350 px tall. Every other
+  // viewport keeps the desktop geometry.
   let thumbW =
-    aspect < 1
+    aspect < 1 && isPhone()
       ? Math.round(Math.max(MISSION_PORTRAIT_THUMB_MIN_W, previewH * aspect))
       : Math.round(Math.min(240, Math.max(160, previewH * aspect)));
   // Shrink thumbs so Spaces (+ add) use the full display width before scrolling.

@@ -147,10 +147,12 @@ without browsers.
 
 CSS keys the phone size class on one media list that mirrors
 `classifyFormFactor()`: `(max-width: 640px)`, or a coarse/hover-less pointer
-with `(max-height: 640px)` up to `(max-width: 1100px)`. A phone held sideways
-therefore keeps the phone shell, and a short window on a wide touch laptop
-stays desktop. `scripts/home-form-factor.test.mjs` derives the list from
-`PHONE_MAX_WIDTH` and `TABLET_MAX_WIDTH`, so the two readers cannot drift apart.
+with `(max-height: 500px)` up to `(max-width: 1100px)`. A phone held sideways
+(at most ~430 px tall) therefore keeps the phone shell, while a 1024 × 600
+tablet or a short window on a wide touch laptop does not.
+`scripts/home-form-factor.test.mjs` derives the list from `PHONE_MAX_WIDTH`,
+`PHONE_LANDSCAPE_MAX_HEIGHT` and `TABLET_MAX_WIDTH`, so the two readers cannot
+drift apart.
 
 Bar:
 

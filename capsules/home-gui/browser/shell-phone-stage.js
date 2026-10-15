@@ -20,6 +20,7 @@
 
 import { HOME_GUI_HOST_SELECTORS, shellState } from "./shell-core.js?v=home-20260813a";
 import {
+  LEAVE_SETTLE_MS,
   STAGE_HISTORY_STATE,
   createStageHistory,
   isStageHistoryState,
@@ -265,6 +266,7 @@ export function bindPhoneStage(doc = document, view = window) {
     pushState: () => view.history.pushState(STAGE_HISTORY_STATE, ""),
     back: () => view.history.back(),
     onBack: () => closeTopStageLayer(doc),
+    defer: (fn) => view.setTimeout(fn, LEAVE_SETTLE_MS),
   });
   let scheduled = false;
   const sync = () => {

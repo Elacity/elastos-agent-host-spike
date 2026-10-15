@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   FORM_FACTORS,
+  PHONE_LANDSCAPE_MAX_HEIGHT,
   PHONE_MAX_WIDTH,
   TABLET_MAX_WIDTH,
   bindFormFactor,
@@ -80,15 +81,17 @@ test("a phone held sideways stays a phone; a short desktop window does not", () 
   assert.equal(classifyFormFactor(844, 390, false), "tablet", "fine pointer, short window");
   assert.equal(classifyFormFactor(1280, 600, false), "desktop", "short laptop window with a mouse");
   assert.equal(classifyFormFactor(1180, 820, true), "desktop", "tablet landscape is not a phone");
-  assert.equal(classifyFormFactor(1100, 640, true), "phone", "height at the boundary counts");
+  assert.equal(classifyFormFactor(1100, 500, true), "phone", "height at the boundary counts");
+  assert.equal(classifyFormFactor(1024, 600, true), "tablet", "a 7-inch tablet or short touch-laptop window is not a phone");
+  assert.equal(classifyFormFactor(932, 501, true), "tablet", "just over a landscape phone's height");
   assert.equal(classifyFormFactor(700), "tablet", "height defaults to unknown");
   assert.equal(classifyFormFactor(1440, 600, true), "desktop", "short window on a wide touch laptop");
-  assert.equal(classifyFormFactor(1101, 640, true), "desktop", "coarse landscape stops at tablet width");
+  assert.equal(classifyFormFactor(1101, 500, true), "desktop", "coarse landscape stops at tablet width");
 });
 
 test("the CSS phone media list mirrors classifyFormFactor", () => {
   const css = readFileSync(new URL("../capsules/home-gui/browser/style.css", import.meta.url), "utf8");
-  const landscape = `(max-height: ${PHONE_MAX_WIDTH}px) and (max-width: ${TABLET_MAX_WIDTH}px)`;
+  const landscape = `(max-height: ${PHONE_LANDSCAPE_MAX_HEIGHT}px) and (max-width: ${TABLET_MAX_WIDTH}px)`;
   const list = `@media (max-width: ${PHONE_MAX_WIDTH}px), (pointer: coarse) and ${landscape}, (hover: none) and ${landscape} {`;
   assert.ok(css.includes(list), `style.css keeps the phone media list ${list}`);
 });

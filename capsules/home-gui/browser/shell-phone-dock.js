@@ -6,6 +6,7 @@
 
 import { launcher, shellState, taskbarTargets } from "./shell-core.js?v=home-20260813a";
 import { isPhone } from "./shell-form-factor.js?v=home-20260813a";
+import { registerStageLayer } from "./shell-popovers.js?v=home-20260813a";
 
 export const PHONE_DOCK_TUCKED_CLASS = "phone-dock-tucked";
 export const PHONE_DOCK_PEEK_CLASS = "phone-dock-peek";
@@ -102,6 +103,11 @@ export function bindPhoneDock(doc = document, view = window) {
     bindHandle(handle, doc);
   }
   doc.querySelector("#phone-dock-scrim")?.addEventListener("click", () => hidePhoneDockPeek(doc));
+  registerStageLayer("dock-peek", {
+    selector: "#phone-dock-scrim",
+    isOpen: () => doc.body.classList.contains(PHONE_DOCK_PEEK_CLASS),
+    close: () => hidePhoneDockPeek(doc),
+  });
   doc.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && doc.body.classList.contains(PHONE_DOCK_PEEK_CLASS)) {
       hidePhoneDockPeek(doc);
