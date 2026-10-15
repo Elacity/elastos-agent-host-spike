@@ -39,10 +39,9 @@ const MAX_REFUSED: usize = 8;
 const LEASE_ENV: &str = "ELASTOS_UPDATE_CONTROLLER_LEASE";
 const HOST_ENV: &str = "ELASTOS_UPDATE_CONTROLLER_HOST";
 const MAX_PRIVATE_JSON: u64 = 256 * 1024;
-// Every Home start, first or after an update, gets this one budget. Home on a slow
-// device (Jetson: 22-30 s idle, kubo alone 12 s) must not be rolled back for being slow.
-// One update is bounded by a candidate start plus one rollback start.
-const READY_TIMEOUT: Duration = Duration::from_secs(120);
+// Every Home start shares runtime_control::RUNTIME_READY_TIMEOUT. One update is
+// bounded by a candidate start plus one rollback start.
+use crate::runtime_control::RUNTIME_READY_TIMEOUT as READY_TIMEOUT;
 // A recovery run starts the restored previous release at most this often, so it
 // stays within the same bound as one update's candidate and rollback starts.
 const PREVIOUS_START_ATTEMPTS: usize = 2;
