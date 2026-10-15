@@ -80,6 +80,8 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 - An owner (admin) can add another passkey, such as a second device or a security key, in System → Accounts → Add passkey. You confirm with your current passkey first, and the new passkey opens the same account as an admin (#338).
 
+- Home on a phone: a phone-sized browser (or a phone turned sideways) gets a touch layout instead of the desktop squeezed to its width — a 44 px bar, a Dock and pages of apps, one app at a time full screen with a title bar, swipe down on the title bar for the app switcher, long-press menus, sheets with drag handles, and the stage kept above the on-screen keyboard. On Android the system Back gesture closes the top sheet, menu or room first, then sends the open app home; on iPhone the on-screen buttons do this. Desktop and tablet windows keep the desktop shell (#116, #92).
+
 ### Changed
 
 - When an update cannot be applied from this version (the release uses a
