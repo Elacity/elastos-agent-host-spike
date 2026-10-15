@@ -357,6 +357,7 @@ test("Home update freezes one exact passkey intent and retries a lost response w
   f.context.renderRuntimeUpdate({ ...f.offer, available: false, controller: { phase: "updated", id: intent.request_id, message: "Home is up to date." } });
   assert.equal(f.context.runtimeUpdatePending, null);
   assert.equal(f.status.textContent, "Home is up to date.");
+  assert.equal(f.context.window.location.reloads, 1, "the finished update loads the new System");
 });
 
 test("Home update keeps an ambiguous submission pending and stops bounded progress recovery", async () => {
@@ -574,6 +575,43 @@ test("System explains the restart wait, outlasts the controller restart budget, 
   failed.context.renderRuntimeUpdate({ ...failed.offer, controller: { id, phase: "failed", message: "The update failed." } });
   assert.equal(failed.context.window.location.reloads, 0, "a failed update keeps the current page");
   assert.equal(failed.status.textContent, "The update failed.");
+});
+
+test("a restart gets its full polling budget, and only an observed restart enables reload", async () => {
+  const f = updateFixture();
+  await f.context.onRuntimeUpdateApply();
+  const id = f.context.runtimeUpdatePending.intent.request_id;
+  f.context.renderRuntimeUpdate({ ...f.offer, controller: { id, phase: "downloading", message: "Downloading the update (88 MB)." } });
+  f.context.runtimeUpdatePending.polls = 85;
+  f.context.runtimeUpdateReconnects = 85;
+  f.context.renderRuntimeUpdate({ ...f.offer, controller: { id, phase: "restarting" } });
+  f.context.refreshSystemSummary = async () => { throw new TypeError("connection refused"); };
+  await f.advance(130_000);
+  assert(f.timers.size > 0, "download polls do not shorten the restart wait");
+  const transient = updateFixture();
+  await transient.context.onRuntimeUpdateApply();
+  const tid = transient.context.runtimeUpdatePending.intent.request_id;
+  transient.context.renderRuntimeUpdate({ ...transient.offer, controller: { id: tid, phase: "downloading" } });
+  for (const status of [503, 403]) {
+    transient.context.refreshSystemSummary = async () => { const error = new Error("down"); error.status = status; throw error; };
+    await transient.context.pollRuntimeUpdate();
+  }
+  assert.equal(transient.context.window.location.reloads, 0, "a transient error is not a restart");
+  assert.match(transient.status.textContent, /access has changed/);
+  const failed = updateFixture();
+  await failed.context.onRuntimeUpdateApply();
+  const fid = failed.context.runtimeUpdatePending.intent.request_id;
+  failed.context.renderRuntimeUpdate({ ...failed.offer, controller: { id: fid, phase: "restarting" } });
+  failed.context.renderRuntimeUpdate({ ...failed.offer, controller: { id: fid, phase: "failed", message: "The update failed." } });
+  failed.context.refreshSystemSummary = async () => { const error = new Error("expired"); error.status = 403; throw error; };
+  await failed.context.pollRuntimeUpdate();
+  assert.equal(failed.context.window.location.reloads, 0, "a failed update does not reload on a later refusal");
+  const missed = updateFixture();
+  await missed.context.onRuntimeUpdateApply();
+  const mid = missed.context.runtimeUpdatePending.intent.request_id;
+  missed.context.renderRuntimeUpdate({ ...missed.offer, controller: { id: mid, phase: "downloading" } });
+  missed.context.renderRuntimeUpdate({ ...missed.offer, controller: { id: mid, phase: "updated", message: "Home is up to date." } });
+  assert.equal(missed.context.window.location.reloads, 1, "this page's own update finishing reloads even if the restart poll was missed");
 });
 
 test("an auth refusal right after a restart reloads once instead of a dead end", async () => {

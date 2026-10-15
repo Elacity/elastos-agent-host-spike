@@ -3887,19 +3887,22 @@ function renderRuntimeUpdate(update) {
   runtimeUpdateNode.hidden = !configured && !runtimeUpdatePending;
   const controller = runtimeUpdate?.controller;
   const phase = readText(controller?.phase);
-  if (phase === "restarting") runtimeUpdateRestartSeen = true;
-  if (runtimeUpdateRestartSeen && ["updated", "restored"].includes(phase)) {
+  // This page's own request finishing as updated or restored also proves Home restarted under it.
+  const ownRequestBack = runtimeUpdatePending?.dispatched && controller?.id === runtimeUpdatePending.intent.request_id;
+  if (runtimeUpdatePending && (controller?.id === runtimeUpdatePending.intent.request_id
+    && ["updated", "restored", "failed"].includes(phase))) {
+    runtimeUpdatePending = null;
+    runtimeUpdateReconnects = 0;
+  }
+  if (phase === "restarting") markRuntimeUpdateRestart();
+  if (phase === "failed") runtimeUpdateRestartSeen = false;
+  if ((runtimeUpdateRestartSeen || ownRequestBack) && ["updated", "restored"].includes(phase)) {
     // The new (or restored) Home serves different assets; load them instead of running stale code.
     runtimeUpdateActive = false;
     window.clearTimeout(runtimeUpdateTimer);
     showRuntimeUpdateStatus(readText(controller.message) || "Home is back. Reloading System…");
     window.location.reload();
     return;
-  }
-  if (runtimeUpdatePending && (controller?.id === runtimeUpdatePending.intent.request_id
-    && ["updated", "restored", "failed"].includes(phase))) {
-    runtimeUpdatePending = null;
-    runtimeUpdateReconnects = 0;
   }
   const choice = runtimeUpdatePending?.intent || runtimeUpdate;
   const inProgress = runtimeUpdatePending || ["staging", "downloading", "verifying", "restarting"].includes(phase);
@@ -3951,9 +3954,17 @@ function runtimeUpdateProgressPhase() {
     && ["staging", "downloading", "verifying", "restarting"].includes(phase)) {
     runtimeUpdatePending.dispatched = true;
     runtimeUpdatePending.phase = phase;
-    if (phase === "restarting") runtimeUpdateRestartSeen = true;
+    if (phase === "restarting") markRuntimeUpdateRestart();
   }
   return runtimeUpdatePending.phase || "checking";
+}
+
+function markRuntimeUpdateRestart() {
+  if (runtimeUpdateRestartSeen) return;
+  // The restart gets its own full budget, whatever the download already used.
+  runtimeUpdateRestartSeen = true;
+  runtimeUpdateReconnects = 0;
+  if (runtimeUpdatePending) runtimeUpdatePending.polls = 0;
 }
 
 function runtimeUpdatePollLimit() {
@@ -4001,8 +4012,6 @@ async function pollRuntimeUpdate() {
     }
   } catch (error) {
     if (!runtimeUpdateActive) return;
-    // Home going away while it runs this page's update is most likely its restart: wait the restart budget.
-    if (runtimeUpdatePending?.dispatched && error.status !== 401 && error.status !== 403) runtimeUpdateRestartSeen = true;
     if ((error.status === 401 || error.status === 403) && runtimeUpdateRestartSeen) {
       // The restarted Home no longer accepts this page's session token. A reload is a plain GET that
       // asks Home for a fresh session (or its sign-in); no update request is replayed, and the next
