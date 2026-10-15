@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::Duration;
@@ -125,20 +126,55 @@ impl Drop for ManagedRuntimeStartGuard {
     }
 }
 
+/// Every Home or managed Runtime start, first or after an update, gets this one
+/// readiness budget. A slow device (Jetson: Runtime ready after 49-79 s) must not
+/// fail a start for being slow.
+pub(crate) const RUNTIME_READY_TIMEOUT: Duration = Duration::from_secs(120);
+
+enum StartWait<T, E> {
+    Ready(T),
+    Exited(E),
+    TimedOut,
+}
+
+/// Polls `probe` every 200 ms until it returns a value, `exited` reports an exit,
+/// or `budget` has passed.
+async fn poll_until_ready<T, E, Fut>(
+    budget: Duration,
+    mut exited: impl FnMut() -> anyhow::Result<Option<E>>,
+    mut probe: impl FnMut() -> Fut,
+) -> anyhow::Result<StartWait<T, E>>
+where
+    Fut: Future<Output = Option<T>>,
+{
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        if let Some(status) = exited()? {
+            return Ok(StartWait::Exited(status));
+        }
+        if let Some(ready) = probe().await {
+            return Ok(StartWait::Ready(ready));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(StartWait::TimedOut);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 async fn wait_for_managed_runtime_ready(
     coords_path: &Path,
     expected_version: &str,
-    timeout: Duration,
 ) -> Option<RuntimeCoords> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        if let Some(coords) = managed_runtime_ready(coords_path, expected_version).await {
-            return Some(coords);
-        }
-        if std::time::Instant::now() > deadline {
-            return None;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+    let ready = poll_until_ready(
+        RUNTIME_READY_TIMEOUT,
+        || Ok(None::<()>),
+        || managed_runtime_ready(coords_path, expected_version),
+    )
+    .await;
+    match ready {
+        Ok(StartWait::Ready(coords)) => Some(coords),
+        _ => None,
     }
 }
 
@@ -1080,16 +1116,14 @@ async fn ensure_managed_runtime(
         ManagedRuntimeStart::Owner(guard) => guard,
         ManagedRuntimeStart::Waiter => {
             let expected = env!("ELASTOS_VERSION");
-            if let Some(coords) =
-                wait_for_managed_runtime_ready(&coords_path, expected, Duration::from_secs(45))
-                    .await
-            {
+            if let Some(coords) = wait_for_managed_runtime_ready(&coords_path, expected).await {
                 terminate_sibling_managed_runtime_children(runtime_kind, coords.pid);
                 return Ok(coords);
             }
             anyhow::bail!(
-                "managed {} runtime start is already in progress but did not become ready within 45s",
-                surface_name
+                "managed {} runtime start is already in progress but did not become ready within {} seconds",
+                surface_name,
+                RUNTIME_READY_TIMEOUT.as_secs()
             );
         }
     };
@@ -1192,21 +1226,18 @@ async fn ensure_managed_runtime(
                 surface_name, pid
             );
         }
-        if let Some(coords) = wait_for_managed_runtime_ready(
-            &coords_path,
-            env!("ELASTOS_VERSION"),
-            Duration::from_secs(45),
-        )
-        .await
+        if let Some(coords) =
+            wait_for_managed_runtime_ready(&coords_path, env!("ELASTOS_VERSION")).await
         {
             terminate_sibling_managed_runtime_children(runtime_kind, coords.pid);
             drop(start_guard);
             return Ok(coords);
         }
         anyhow::bail!(
-            "managed {} runtime child {} did not become ready within 45s",
+            "managed {} runtime child {} did not become ready within {} seconds",
             surface_name,
-            pid
+            pid,
+            RUNTIME_READY_TIMEOUT.as_secs()
         );
     }
 
@@ -1328,30 +1359,31 @@ async fn ensure_managed_runtime(
     let expected_version = env!("ELASTOS_VERSION");
 
     // 6. Wait for runtime to become ready (coords file + health check)
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        if let Some(status) = child
-            .observed_exit()
-            .map_err(|e| anyhow::anyhow!("Failed to check runtime status: {}", e))?
-        {
-            anyhow::bail!(
-                "{}",
-                format_runtime_start_exit_message(surface_name, &log_path, status)
-            );
-        }
-        if std::time::Instant::now() > deadline {
-            anyhow::bail!(
-                "{}",
-                format_runtime_start_timeout_message(surface_name, &log_path)
-            );
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        if let Some(coords) = managed_runtime_ready(&coords_path, expected_version).await {
+    let ready = poll_until_ready(
+        RUNTIME_READY_TIMEOUT,
+        || {
+            child
+                .observed_exit()
+                .map_err(|e| anyhow::anyhow!("Failed to check runtime status: {}", e))
+        },
+        || managed_runtime_ready(&coords_path, expected_version),
+    )
+    .await?;
+    match ready {
+        StartWait::Ready(coords) => {
             terminate_sibling_managed_runtime_children(runtime_kind, coords.pid);
             child.ready();
             drop(start_guard);
-            return Ok(coords);
+            Ok(coords)
         }
+        StartWait::Exited(status) => anyhow::bail!(
+            "{}",
+            format_runtime_start_exit_message(surface_name, &log_path, status)
+        ),
+        StartWait::TimedOut => anyhow::bail!(
+            "{}",
+            format_runtime_start_timeout_message(surface_name, &log_path)
+        ),
     }
 }
 
@@ -1397,15 +1429,17 @@ fn format_runtime_start_exit_message(
 fn format_runtime_start_timeout_message(surface_name: &str, log_path: &Path) -> String {
     if let Some(summary) = summarize_runtime_start_failure(log_path) {
         format!(
-            "{} runtime did not become ready within 30s.\n{}\nCheck log: {}",
+            "{} runtime did not become ready within {} seconds.\n{}\nCheck log: {}",
             surface_name,
+            RUNTIME_READY_TIMEOUT.as_secs(),
             summary,
             log_path.display()
         )
     } else {
         format!(
-            "{} runtime did not become ready within 30s.\nCheck log: {}",
+            "{} runtime did not become ready within {} seconds.\nCheck log: {}",
             surface_name,
+            RUNTIME_READY_TIMEOUT.as_secs(),
             log_path.display()
         )
     }
@@ -1478,6 +1512,49 @@ fn reserve_managed_chat_addr() -> std::io::Result<String> {
 mod tests {
     use super::*;
     use axum::{routing::get, Json, Router};
+
+    // A Runtime on a Jetson is ready after 49-79 s; every managed start waits
+    // RUNTIME_READY_TIMEOUT for it, and stops waiting once that budget is spent.
+    #[tokio::test(start_paused = true)]
+    async fn managed_start_waits_the_shared_budget_for_a_slow_runtime() {
+        let started = tokio::time::Instant::now();
+        let slow = Duration::from_secs(79);
+        let ready = poll_until_ready(
+            RUNTIME_READY_TIMEOUT,
+            || Ok(None::<()>),
+            || async move { (started.elapsed() >= slow).then_some("coords") },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(ready, StartWait::Ready("coords")));
+        assert!(started.elapsed() >= slow);
+
+        let started = tokio::time::Instant::now();
+        let never = poll_until_ready(
+            RUNTIME_READY_TIMEOUT,
+            || Ok(None::<()>),
+            || async { None::<()> },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(never, StartWait::TimedOut));
+        let waited = started.elapsed();
+        assert!(waited >= RUNTIME_READY_TIMEOUT);
+        assert!(waited < RUNTIME_READY_TIMEOUT + Duration::from_secs(1));
+
+        let mut polls = 0;
+        let exited = poll_until_ready(
+            RUNTIME_READY_TIMEOUT,
+            || {
+                polls += 1;
+                Ok((polls == 3).then_some(1))
+            },
+            || async { None::<()> },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(exited, StartWait::Exited(1)));
+    }
 
     #[test]
     fn runtime_start_failure_summary_surfaces_setup_guidance_for_checksum_mismatch() {

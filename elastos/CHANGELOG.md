@@ -98,7 +98,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   submissions.
 - Known issue: on the Jetson, getting a model is slow (Qwen takes about 43 minutes). The first Qwen reply takes about 22 seconds and the second about 3.6 seconds.
 - Known issue: Browser runs only on Apple Silicon Macs.
-- Known issue: Updating to this version in System from a test version older than 0.8.0-alpha.18 on a slow device such as a Jetson can still fail, because that older version runs the update; use the install command there.
+- Known issue: Updating to this version in System from a test version older than 0.8.0-alpha.18 on a slow device such as a Jetson can still fail, because that older version runs the update. If Home is then stuck, follow "Recover an interrupted update" in `docs/INSTALL.md`.
 - Community posts reach members again without turning on Discovery, also across networks: they travel through the seed's Community node. Posts are signed, but that node can read them in transit until the relay arrives in 0.8.1. Direct messages across networks need that relay. Contact requests across networks, and showing as online in People, still need Discovery on.
 - Upgrading from 0.7.1 or earlier: run the install command once. System update cannot move these Homes to 0.8.0, because releases are now signed with a new key (#186). Your Home keeps its data.
 - A Browser session now lasts until you close it, until Home stops answering for 5 minutes, until Runtime stops, or 12 hours (it used to close after 10 minutes).
@@ -110,6 +110,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Fixed
 
+- `elastos home` without `--browser`, and other commands that start a Runtime, now wait up to 120 seconds for it, the same as `elastos home --browser`. Before, they gave up after 30 seconds, so Home failed to start on a slow device such as a Jetson.
 - When sign-in fails, the lock screen now says why in one line and what to do next, instead of showing nothing (#338).
 - The publisher's Carrier ticket lists only its public addresses when it has
   one (no container bridge, LAN or loopback addresses), and a Runtime on a

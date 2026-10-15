@@ -304,7 +304,8 @@ retained launch settings and saved release before it starts Home. When the
 start of the restored previous release failed, the controller starts that
 release again, at most twice per run, and clears the recovery files once Home
 is ready. It never starts the failed new release again. Keep this terminal
-open. Every Home start, first or after an update, has a 120-second limit. Each
+open. Every Home start, with or without `--browser`, first or after an update,
+waits up to 120 seconds for its Runtime. Each
 start appends its output under a header to the private
 `update-controller/runtime.log` file, so a failed update start stays readable
 after the rollback; a startup failure names that file.
@@ -321,12 +322,20 @@ message and run the retained controller:
 ```
 
 If it reports that the previous Home start was already attempted, the previous
-release is already back in place but its start failed. Stop every `elastos`
-process of this Home. Then, in the `.elastos.update-journal.json` file next to
-the installed `elastos` binary, set `restart.phase` from `previous_running` (or
-`previous_start_claimed`) to `restored`, `restart.generation` to `""`, and
-`restart.pid` and `restart.process_start` to `null`. Keep every other file in
-place and run the command above again, when the device is otherwise idle.
+release is already back in place. Stop every `elastos` process of this Home and
+move these files into a folder of your own (keep them; do not delete them):
+
+- next to the installed `elastos` binary: `.elastos.update-journal.json`,
+  `.elastos.update-stage` and `.elastos.update-rollback`
+- in the data directory: `.elastos.update-stage`, `.elastos.update-rollback`,
+  `.elastos.update-support` and `update-controller/active-request.json`
+- in the data directory's `installation` folder: `.elastos.update-stage` and
+  `.elastos.update-rollback`
+
+Then run the install command
+(`curl -fsSL https://elastos.elacitylabs.com/install.sh | bash`). It installs
+the current release and runs `elastos setup`, and keeps your data directory and
+identity. Start Home with `elastos home --browser`.
 
 The receipt keeps Home paths, locale, desktop opener settings and Runtime launch
 bindings. It also retains the configured Wallet price API key, which Wallet reads
