@@ -1413,6 +1413,10 @@ for (const entry of shellCore.shellState.windows.values()) {
 const browserEntry = [...shellCore.shellState.windows.values()].find((entry) => entry.targetId === "browser");
 {
   const browserHead = browserEntry.node.querySelector(".window-head");
+  browserEntry.node.offsetWidth = 800;
+  browserEntry.node.offsetHeight = 600;
+  browserEntry.node.style.left = "200px";
+  browserEntry.node.style.top = "100px";
   const leftBefore = browserEntry.node.style.left;
   const topBefore = browserEntry.node.style.top;
   browserHead.dispatch("pointerdown", { pointerId: 41, clientX: 400, clientY: 120, target: browserHead });
@@ -1421,7 +1425,8 @@ const browserEntry = [...shellCore.shellState.windows.values()].find((entry) => 
   assert(
     browserEntry.node.dataset.windowChromeMode === "standard" &&
       !browserEntry.node.classList.contains("window-chrome-unified-toolbar") &&
-      (browserEntry.node.style.left !== leftBefore || browserEntry.node.style.top !== topBefore),
+      browserEntry.node.style.left === "260px" &&
+      browserEntry.node.style.top === "160px",
     "Browser window title bar must be a standard Home title bar that drags the window",
     { left: [leftBefore, browserEntry.node.style.left], top: [topBefore, browserEntry.node.style.top] },
   );
