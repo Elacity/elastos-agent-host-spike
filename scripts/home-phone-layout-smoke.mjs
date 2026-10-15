@@ -1849,6 +1849,17 @@ async function probePhoneBack(frame) {
     await sleep(ASSISTANT_OPEN_WAIT_MS);
   }
 
+  // About from bare Home is a layer of its own: Back closes it and Home stays.
+  await frame.evaluate(() => document.querySelector("#identity-menu-about")?.click());
+  await sleep(SHEET_SETTLE_MS);
+  const aboutBefore = await frame.evaluate(() => !document.querySelector("#about-overlay")?.hidden);
+  await systemBack();
+  await sleep(SHEET_SETTLE_MS);
+  const aboutAfter = await frame.evaluate(() => ({
+    home: location.href.includes("/apps/home-gui/"),
+    aboutOpen: !document.querySelector("#about-overlay")?.hidden,
+  }));
+
   await openTarget(frame, "library");
   await openTarget(frame, "documents");
   const spaceSetup = await frame.evaluate(() => {
@@ -1876,14 +1887,20 @@ async function probePhoneBack(frame) {
       await closeWindow(frame, target);
     }
   }
-  return { menuBefore, menuAfter, welcomeBefore, welcomeAfter, assistantBefore, assistantAfter, spaceSetup, spaceAfter };
+  return {
+    menuBefore, menuAfter, welcomeBefore, welcomeAfter, assistantBefore, assistantAfter,
+    aboutBefore, aboutAfter, spaceSetup, spaceAfter,
+  };
 }
 
 function phoneBackFailures(run) {
   if (!run.back) {
     return [];
   }
-  const { menuBefore, menuAfter, welcomeBefore, welcomeAfter, assistantBefore, assistantAfter, spaceSetup, spaceAfter } = run.back;
+  const {
+    menuBefore, menuAfter, welcomeBefore, welcomeAfter, assistantBefore, assistantAfter,
+    aboutBefore, aboutAfter, spaceSetup, spaceAfter,
+  } = run.back;
   const label = `${run.engine}/${run.profile}/back`;
   const failures = [];
   if (!menuBefore.menuOpen) {
@@ -1897,6 +1914,12 @@ function phoneBackFailures(run) {
   }
   if (!welcomeAfter.home || welcomeAfter.welcomeOpen || !welcomeAfter.assistantOpen) {
     failures.push(`${label}: Back must close the welcome sheet first and keep the Assistant. Got ${JSON.stringify(welcomeAfter)}`);
+  }
+  if (!aboutBefore) {
+    failures.push(`${label}: About must open from the identity menu before Back`);
+  }
+  if (!aboutAfter.home || aboutAfter.aboutOpen) {
+    failures.push(`${label}: Back must close About and leave Home. Got ${JSON.stringify(aboutAfter)}`);
   }
   if (!assistantBefore.assistantOpen) {
     failures.push(`${label}: Assistant must be open before Back. Got ${JSON.stringify(assistantBefore)}`);

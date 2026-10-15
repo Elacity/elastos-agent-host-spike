@@ -40,12 +40,20 @@ export const TITLE_SWIPE_DOWN_PX = 48;
 export const TITLE_SWIPE_DRIFT_PX = 32;
 
 // Sheets that count as a layer over the stage, top-most first, each with the
-// closer its module already exposes. The welcome sheet is foreground unless it
-// has yielded to a card behind the Assistant.
+// closer its module already exposes. About's closer lives in the entry
+// module, so Back presses its own Close button. `overlay` sheets sit above the
+// shell's Escape registry (see closeTopStageLayer); the welcome sheet only
+// while it is in front, not when it has yielded to a card behind the
+// Assistant.
 const SHEETS = Object.freeze([
-  { selector: "#setup-sheet", close: () => hideSetupSheet() },
-  { selector: "#desktop-context-menu", close: () => hideDesktopContextMenu() },
-  { selector: "#assistant-space", close: () => dismissAssistantForBack() },
+  { selector: "#about-overlay", overlay: true, close: (doc) => doc.querySelector("#about-close")?.click() },
+  {
+    selector: "#setup-sheet",
+    overlay: (node) => !node.classList.contains("is-yielded"),
+    close: () => hideSetupSheet(),
+  },
+  { selector: "#desktop-context-menu", overlay: true, close: () => hideDesktopContextMenu() },
+  { selector: "#assistant-space", overlay: true, close: () => dismissAssistantForBack() },
   { selector: "#control-centre", close: () => hideControlCentre() },
   { selector: "#notification-center", close: () => hideNotificationCenter() },
   { selector: "#spotlight", close: () => hideSpotlight() },
@@ -83,25 +91,22 @@ export function stageLayerCount(doc = document) {
   return visibleWindowCount() + openSheetCount(doc) + (isExposeOpen() ? 1 : 0);
 }
 
-// Closes the top layer and reports how many remain. The welcome sheet, the
-// long-press menu and the Assistant room sit above the Escape registry: the
-// Agent room is not a desktop Space, so the fullscreen-stage Escape handler
-// would otherwise take the back and leave the room up.
-const OVERLAYS = Object.freeze(["#desktop-context-menu", "#assistant-space"]);
-
-function sheetOpen(doc, selector) {
+// Closes the top layer and reports how many remain. About, the welcome sheet,
+// the long-press menu and the Assistant room sit above the Escape registry:
+// the Agent room is not a desktop Space, so the fullscreen-stage Escape
+// handler would otherwise take the back and leave the room up.
+function openNode(doc, selector) {
   const node = doc.querySelector(selector);
-  return Boolean(node && !node.hidden);
+  return node && !node.hidden ? node : null;
 }
 
 export function closeTopStageLayer(doc = document) {
-  const setup = doc.querySelector("#setup-sheet");
-  const setupForeground = sheetOpen(doc, "#setup-sheet") && !setup.classList.contains("is-yielded");
-  const overlay = setupForeground
-    ? SHEETS[0]
-    : SHEETS.find((sheet) => OVERLAYS.includes(sheet.selector) && sheetOpen(doc, sheet.selector));
+  const overlay = SHEETS.find((sheet) => {
+    const node = sheet.overlay ? openNode(doc, sheet.selector) : null;
+    return Boolean(node) && (sheet.overlay === true || sheet.overlay(node));
+  });
   if (overlay) {
-    overlay.close();
+    overlay.close(doc);
     return stageLayerCount(doc);
   }
   // The shell's ordered Escape registry first (modal, menus, Mission Control…).
@@ -112,12 +117,9 @@ export function closeTopStageLayer(doc = document) {
     closeExpose();
     return stageLayerCount(doc);
   }
-  const openSheet = SHEETS.find((sheet) => {
-    const node = doc.querySelector(sheet.selector);
-    return node && !node.hidden;
-  });
+  const openSheet = SHEETS.find((sheet) => openNode(doc, sheet.selector));
   if (openSheet) {
-    openSheet.close();
+    openSheet.close(doc);
     return stageLayerCount(doc);
   }
   const active = shellState.windows.get(shellState.activeWindowId);
