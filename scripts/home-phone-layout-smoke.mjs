@@ -112,17 +112,20 @@ const BASELINE = {
     // The 24 px handle that brings the Dock back over a window, by design.
     window: { targets: 1, text: 0 },
   },
+  // A tablet keeps the desktop shell byte-for-byte (phone-only touch
+  // layout), so its targets are the desktop's: recorded, not gated. Text
+  // stays gated.
   tablet: {
-    desktop: { targets: 8, text: 2 },
-    launcher: { targets: 9, text: 2 },
+    desktop: { targets: null, text: 2 },
+    launcher: { targets: null, text: 2 },
     "context-menu": { targets: null, text: null },
-    spotlight: { targets: 8, text: 2 },
+    spotlight: { targets: null, text: 2 },
     "spotlight-results": { targets: null, text: null },
-    "control-centre": { targets: 30, text: 8 },
-    notifications: { targets: 9, text: 42 },
-    "mission-control": { targets: 1, text: 1 },
-    "assistant-face": { targets: 1, text: 1 },
-    window: { targets: 13, text: 2 },
+    "control-centre": { targets: null, text: 8 },
+    notifications: { targets: null, text: 42 },
+    "mission-control": { targets: null, text: 1 },
+    "assistant-face": { targets: null, text: 1 },
+    window: { targets: null, text: 2 },
   },
 };
 
@@ -882,11 +885,16 @@ async function probePromptTouchClose(frame, target = "library") {
     BOOT_TIMEOUT_MS,
     `${target} window`,
   );
-  const guardLeftMs = await frame.evaluate((target) => {
-    const until = Number(document.querySelector(`.window[data-target="${target}"]`)?.dataset.closeGuardUntil);
-    return Number.isFinite(until) ? Math.round(until - performance.now()) : 0;
+  // Sample the guard at the Close press itself, not before the tap is issued.
+  await frame.evaluate((target) => {
+    window.__promptCloseGuardMs = null;
+    const node = document.querySelector(`.window[data-target="${target}"]`);
+    node?.querySelector('[data-action="close"]')?.addEventListener("pointerdown", () => {
+      window.__promptCloseGuardMs = Math.round(Number(node.dataset.closeGuardUntil) - performance.now());
+    }, { once: true, capture: true });
   }, target);
   await frame.locator(`.window[data-target="${target}"] [data-action="close"]`).first().tap();
+  const guardLeftMs = await frame.evaluate(() => window.__promptCloseGuardMs ?? 0);
   let closed = true;
   try {
     await waitFor(

@@ -218,22 +218,14 @@ async function run() {
     const mobile = await page.evaluate(() => {
       const rows = document.getElementById("entry-rows").getBoundingClientRect();
       const detail = document.getElementById("entry-detail").getBoundingClientRect();
-      const lastRow = [...document.querySelectorAll("#entry-rows .entry-row")].at(-1).getBoundingClientRect();
       return {
         splitColumns: getComputedStyle(document.getElementById("entry-split")).gridTemplateColumns,
         rowsTop: rows.top,
-        rowsBottom: rows.bottom,
-        lastRowBottom: lastRow.bottom,
         detailTop: detail.top,
       };
     });
     assert(mobile.splitColumns === "520px" || mobile.splitColumns.split(" ").length === 1, "mobile must stack the list/detail split", mobile);
     assert(mobile.detailTop > mobile.rowsTop, "mobile detail must sit below the list", mobile);
-    assert(
-      mobile.rowsBottom - mobile.lastRowBottom <= 16 && mobile.detailTop - mobile.rowsBottom <= 1,
-      "mobile list must fit its requests so the detail reads directly beneath, not mid-screen",
-      mobile,
-    );
     await noHorizontalOverflow(page, "mobile");
 
     // Phone stage: the phone bar carries no app menu, so the filters are a
@@ -245,11 +237,21 @@ async function run() {
         const rect = node.getBoundingClientRect();
         return { top: Math.round(rect.top), left: Math.round(rect.left), right: Math.round(rect.right), bottom: Math.round(rect.bottom), height: Math.round(rect.height) };
       };
+      const lastRow = [...document.querySelectorAll("#entry-rows .entry-row")].at(-1);
       return {
         segments: [...document.querySelectorAll(".summary-card[data-filter]")].map(box),
         rows: box(document.getElementById("entry-rows")),
+        lastRow: box(lastRow),
+        detail: box(document.getElementById("entry-detail")),
       };
     });
+    // On a phone (only) the list is as tall as its requests, so the detail
+    // reads directly beneath; a narrow desktop window keeps its fixed split.
+    assert(
+      phone.rows.bottom - phone.lastRow.bottom <= 16 && phone.detail.top - phone.rows.bottom <= 1,
+      "phone list must fit its requests so the detail reads directly beneath, not mid-screen",
+      phone,
+    );
     const phoneActions = await page.evaluate(() =>
       [...document.querySelectorAll("#refresh, #entry-detail .entry-action")].map((button) => Math.round(button.getBoundingClientRect().height)));
     assert(phoneActions.length >= 2 && phoneActions.every((height) => height >= 44), "phone Refresh and request actions must be 44 px targets", phoneActions);

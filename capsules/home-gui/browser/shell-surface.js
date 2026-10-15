@@ -2118,7 +2118,7 @@ function handleContextMenuKeydown(event) {
 function renderContextMenu(target, { sheet = false } = {}) {
   desktopContextMenu.replaceChildren();
   const title = target.kind === "target" ? targetTitle(shellState.currentSummary, target.targetId) : "";
-  desktopContextMenu.setAttribute("aria-label", title ? `${title} actions` : "Home actions");
+  desktopContextMenu.setAttribute("aria-label", sheet && title ? `${title} actions` : "Home actions");
   // A sheet sits away from the pressed icon, so it names what it acts on.
   if (sheet && title) {
     const heading = document.createElement("div");
