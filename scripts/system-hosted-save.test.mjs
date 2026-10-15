@@ -614,6 +614,58 @@ test("a restart gets its full polling budget, and only an observed restart enabl
   assert.equal(missed.context.window.location.reloads, 1, "this page's own update finishing reloads even if the restart poll was missed");
 });
 
+test("Home vanishing mid-update counts as the restart even when the restarting poll was missed", async () => {
+  const refused = () => { throw new TypeError("connection refused"); };
+  const status = code => () => { const error = new Error("session"); error.status = code; throw error; };
+  for (const own of [true, false]) {
+    for (const [code, back] of [[401, null], [403, null], [null, "updated"], [null, "restored"]]) {
+      const f = updateFixture();
+      let id = "another-tab-request";
+      if (own) {
+        await f.context.onRuntimeUpdateApply();
+        id = f.context.runtimeUpdatePending.intent.request_id;
+      }
+      f.context.renderRuntimeUpdate({ ...f.offer, controller: { id, phase: "downloading", message: "Downloading the update (88 MB)." } });
+      f.context.refreshSystemSummary = async () => refused();
+      f.timers.clear();
+      await f.context.pollRuntimeUpdate();
+      assert.equal(f.status.textContent, "Restarting to finish the update. Home is usually back within two minutes.");
+      assert.equal(f.timers.get(f.context.runtimeUpdateTimer).delay, 2000);
+      f.context.refreshSystemSummary = back
+        ? async () => f.context.renderRuntimeUpdate({ ...f.offer, available: false, controller: { id, phase: back, message: "Home is up to date." } })
+        : async () => status(code)();
+      await f.advance(2_000);
+      assert.equal(f.context.window.location.reloads, 1, `${own ? "own" : "seen"} downloading -> refused -> ${code ?? back}`);
+      assert.equal(f.timers.size, 0);
+      assert.equal(f.posts.filter(post => post.method === "POST").length, own ? 1 : 0, "the reload replays no update request");
+    }
+  }
+  const blip = updateFixture();
+  await blip.context.onRuntimeUpdateApply();
+  const id = blip.context.runtimeUpdatePending.intent.request_id;
+  blip.context.renderRuntimeUpdate({ ...blip.offer, controller: { id, phase: "downloading" } });
+  blip.context.refreshSystemSummary = async () => refused();
+  await blip.context.pollRuntimeUpdate();
+  blip.context.refreshSystemSummary = async () => blip.context.renderRuntimeUpdate({ ...blip.offer, controller: { id, phase: "downloading" } });
+  await blip.context.pollRuntimeUpdate();
+  blip.context.refreshSystemSummary = async () => status(403)();
+  await blip.context.pollRuntimeUpdate();
+  assert.equal(blip.context.window.location.reloads, 0, "Home still downloading after a blip has not restarted");
+  const failed = updateFixture();
+  await failed.context.onRuntimeUpdateApply();
+  const fid = failed.context.runtimeUpdatePending.intent.request_id;
+  failed.context.renderRuntimeUpdate({ ...failed.offer, controller: { id: fid, phase: "verifying" } });
+  failed.context.refreshSystemSummary = async () => refused();
+  await failed.context.pollRuntimeUpdate();
+  failed.context.refreshSystemSummary = async () => failed.context.renderRuntimeUpdate(
+    { ...failed.offer, controller: { id: fid, phase: "failed", message: "The update failed." } });
+  await failed.context.pollRuntimeUpdate();
+  failed.context.refreshSystemSummary = async () => status(401)();
+  await failed.context.pollRuntimeUpdate();
+  assert.equal(failed.context.window.location.reloads, 0, "a failed update never reloads");
+  assert.equal(failed.posts.filter(post => post.method === "POST").length, 1);
+});
+
 test("an auth refusal right after a restart reloads once instead of a dead end", async () => {
   const f = updateFixture();
   await f.context.onRuntimeUpdateApply();
