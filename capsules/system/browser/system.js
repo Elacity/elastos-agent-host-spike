@@ -3895,7 +3895,8 @@ function renderRuntimeUpdate(update) {
     runtimeUpdateReconnects = 0;
   }
   if (phase === "restarting") markRuntimeUpdateRestart();
-  if (phase === "failed") runtimeUpdateRestartSeen = false;
+  // Home answering with a failure or with work before the restart has not restarted under this page.
+  if (["failed", "staging", "downloading", "verifying"].includes(phase)) runtimeUpdateRestartSeen = false;
   if ((runtimeUpdateRestartSeen || ownRequestBack) && ["updated", "restored"].includes(phase)) {
     // The new (or restored) Home serves different assets; load them instead of running stale code.
     runtimeUpdateActive = false;
@@ -3987,7 +3988,7 @@ function scheduleRuntimeUpdateRefresh(delay) {
   window.clearTimeout(runtimeUpdateTimer);
   if (!runtimeUpdateActive || (runtimeUpdate !== undefined && runtimeUpdate?.configured !== true && !runtimeUpdatePending)) return;
   runtimeUpdateTimer = window.setTimeout(pollRuntimeUpdate,
-    document.hidden ? 30_000 : delay ?? (runtimeUpdate?.controller?.phase === "restarting" ? 2_000 : 5_000));
+    document.hidden ? 30_000 : delay ?? (runtimeUpdateRestartSeen || runtimeUpdate?.controller?.phase === "restarting" ? 2_000 : 5_000));
 }
 
 async function pollRuntimeUpdate() {
@@ -4012,6 +4013,13 @@ async function pollRuntimeUpdate() {
     }
   } catch (error) {
     if (!runtimeUpdateActive) return;
+    // "restarting" is published just before Home stops and can fall between polls. Home vanishing
+    // (no HTTP answer at all) after the update download began is that restart; the controller always
+    // downloads between "staging" and the stop, so a lost answer during staging is not one.
+    const lastPhase = runtimeUpdatePending ? runtimeUpdatePending.phase : readText(runtimeUpdate?.controller?.phase);
+    if (error.status === undefined && ["downloading", "verifying"].includes(lastPhase)) {
+      markRuntimeUpdateRestart();
+    }
     if ((error.status === 401 || error.status === 403) && runtimeUpdateRestartSeen) {
       // The restarted Home no longer accepts this page's session token. A reload is a plain GET that
       // asks Home for a fresh session (or its sign-in); no update request is replayed, and the next
@@ -4031,7 +4039,7 @@ async function pollRuntimeUpdate() {
       showRuntimeUpdateStatus("Home has not reconnected. Open Home again to check the update.");
       return;
     }
-    showRuntimeUpdateStatus(runtimeUpdateProgressPhase() === "restarting"
+    showRuntimeUpdateStatus(runtimeUpdateRestartSeen || runtimeUpdateProgressPhase() === "restarting"
       ? RUNTIME_UPDATE_RESTART_TEXT
       : runtimeUpdatePending?.dispatched ? "Waiting for Home to report update progress. Reconnecting…"
         : runtimeUpdatePending ? "Waiting for Home to confirm the update. Reconnecting…"
