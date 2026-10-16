@@ -22,6 +22,9 @@ const communitySection = document.querySelector("#community-membership");
 const communityButton = document.querySelector("#community-toggle");
 let communityMembership = null;
 let communityBusy = false;
+const communityPresenceRow = document.querySelector("#community-presence-row");
+const communityPresenceOptions = [...document.querySelectorAll("#community-presence [data-presence-mode]")];
+let communityPresenceBusy = false;
 const themeSegment = document.querySelector("#theme-segment");
 const accentPickerNode = document.querySelector("#accent-picker");
 const accentCustomPopover = document.querySelector("#accent-custom-popover");
@@ -204,6 +207,7 @@ async function boot() {
   configureAppearancePreferences();
   configureGuestAccess();
   configureCommunityMembership();
+  configureCommunityPresence();
   configureAiProvider();
   configurePasskeyAccess();
   configureRecoveryAccess();
@@ -390,6 +394,7 @@ async function refreshSystemSummary() {
     if (runtimeUpdateActive) {
       renderSystemSummary(systemSummary);
       await refreshCommunityMembership();
+      await refreshCommunityPresence();
     }
   })();
   try { await systemSummaryInFlight; }
@@ -772,6 +777,74 @@ async function onGuestRegistrationChange() {
     showGuestRegistrationStatus(String(error.message || error), "error");
   } finally {
     setGuestRegistrationControlState();
+  }
+}
+
+function configureCommunityPresence() {
+  for (const option of communityPresenceOptions) {
+    option.addEventListener("click", () => updateCommunityPresence(option.dataset.presenceMode));
+  }
+}
+
+// Never shows as Hidden; requested, Later or no answer yet shows no choice.
+function communityPresenceMode(state) {
+  return state === "refused" ? "hidden" : state;
+}
+
+function setCommunityPresenceOptions(mode, disabled) {
+  for (const option of communityPresenceOptions) {
+    const current = option.dataset.presenceMode === mode;
+    option.classList.toggle("active", current);
+    option.setAttribute("aria-checked", current ? "true" : "false");
+    option.disabled = disabled;
+  }
+}
+
+// The calling person's own choice; nobody can set it for someone else.
+// Runtime returns the mode only, never the grant behind it.
+function renderCommunityPresence(presence) {
+  if (!presence || presence.schema !== "elastos.community-presence/v1"
+      || typeof presence.configured !== "boolean" || typeof presence.joined !== "boolean") {
+    throw new Error("Community setting is unavailable.");
+  }
+  if (communityPresenceRow) communityPresenceRow.hidden = !presence.configured;
+  setCommunityPresenceOptions(
+    communityPresenceMode(presence.community_presence),
+    communityPresenceBusy || !presence.joined || !hasShellAccess(),
+  );
+}
+
+async function refreshCommunityPresence() {
+  if (communityPresenceBusy || communityPresenceOptions.length === 0) return;
+  try {
+    renderCommunityPresence(await fetchRuntimeUpdateJson({ headers: shellHeaders() }, "/api/apps/system/community/presence"));
+    setHiddenFields("community-presence-status", true);
+  } catch (error) {
+    setCommunityPresenceOptions(null, true);
+    setTextFields("community-presence-status", publicSystemError(error, "Community setting is unavailable."));
+    setHiddenFields("community-presence-status", false);
+  }
+}
+
+async function updateCommunityPresence(mode) {
+  if (communityPresenceBusy || !hasShellAccess()) return;
+  const previous = communityPresenceOptions.find((option) => option.getAttribute("aria-checked") === "true");
+  communityPresenceBusy = true;
+  setCommunityPresenceOptions(mode, true);
+  setHiddenFields("community-presence-status", true);
+  try {
+    const presence = await fetchRuntimeUpdateJson({
+      method: "POST",
+      headers: shellHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ mode }),
+    }, "/api/apps/system/community/presence");
+    communityPresenceBusy = false;
+    renderCommunityPresence(presence);
+  } catch (error) {
+    communityPresenceBusy = false;
+    setCommunityPresenceOptions(previous?.dataset.presenceMode ?? null, !hasShellAccess());
+    setTextFields("community-presence-status", publicSystemError(error, "Community setting could not be changed."));
+    setHiddenFields("community-presence-status", false);
   }
 }
 
