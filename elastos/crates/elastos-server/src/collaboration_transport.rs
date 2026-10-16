@@ -2213,7 +2213,10 @@ mod tests {
         assert_eq!(core.summary().unwrap().pending_product_handoffs, 1);
         core.acknowledge_product_handoff(&collaboration_message_envelope_sha256(&envelope))
             .unwrap();
-        assert_eq!(core.summary().unwrap().replay_tombstones, 1);
+        // Presence is suppressed in memory until its expiry, not tombstoned,
+        // so after the ack its receipt replay is no longer a durable record.
+        assert_eq!(core.summary().unwrap().replay_tombstones, 0);
+        *carrier.durable_incoming_before_send.lock().unwrap() = None;
 
         carrier.push([peek(0, 1, vec![gossip(&frame)])]);
         carrier.push_failure("receipt send failed");

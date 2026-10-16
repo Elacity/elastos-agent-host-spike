@@ -143,7 +143,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - First-run setup: the welcome sheet no longer disappears. Opening a step shrinks it to a small card that you click to continue, and it comes back after you save the Recovery Kit.
 - From this version on, every Home start gives its newly started Runtime up to 2 minutes to become ready: a System update, `elastos home --browser`, and `elastos home` without `--browser` (which gave up after 30 seconds). So Home no longer fails to start, or is left stopped by an update, on a slower device such as a Jetson. If the previous version was put back but could not start, `elastos home --browser` starts it again. The update log keeps the output of every update start.
 - During an update, System says that Home is restarting and how long it usually takes, and reloads by itself when the update is done.
-- Community posts are no longer held up by an overloaded Community node: Homes resend unanswered posts and presence less often, and the node only forwards them. A Home that shows Community unreachable now reconnects by itself instead of staying unreachable until Home restarts.
+- Community posts are no longer held up by an overloaded Community node: Homes resend unanswered posts and presence less often, and the node only forwards them. A Home that shows Community unreachable now reconnects by itself instead of staying unreachable until Home restarts. Presence from other Homes can no longer fill Community and stop new posts arriving.
 
 ## [0.8.0-alpha.21] - 2026-10-16
 
