@@ -1884,29 +1884,28 @@ impl CollaborationCore {
 
     pub(crate) fn acknowledge_product_handoff(&self, envelope_hash: &str) -> anyhow::Result<()> {
         validate_sha256_label(envelope_hash)?;
-        self.with_mutation(None, |state| {
-            if self.recent_presence_entry(envelope_hash).is_some()
-                || state.incoming_tombstones.iter().any(|entry| {
-                    self.verify_receipt_envelope(entry.acceptance_receipt.as_bytes())
-                        .map(|receipt| {
-                            receipt.envelope().payload.message_envelope_sha256 == envelope_hash
-                        })
-                        .unwrap_or(false)
-                })
-            {
-                return Ok(Mutation {
-                    value: (),
-                    changed: false,
-                });
-            }
-            let index = state
-                .incoming
-                .iter()
-                .position(|entry| {
-                    collaboration_message_envelope_sha256(entry.envelope.as_bytes())
-                        == envelope_hash
-                })
-                .context("pending collaboration product handoff was not found")?;
+        // A persisted pending record always wins over the in-memory presence
+        // set, and presence is remembered only after its removal is durable.
+        let acknowledged_presence = self.with_mutation(None, |state| {
+            let Some(index) = state.incoming.iter().position(|entry| {
+                collaboration_message_envelope_sha256(entry.envelope.as_bytes()) == envelope_hash
+            }) else {
+                if self.recent_presence_entry(envelope_hash).is_some()
+                    || state.incoming_tombstones.iter().any(|entry| {
+                        self.verify_receipt_envelope(entry.acceptance_receipt.as_bytes())
+                            .map(|receipt| {
+                                receipt.envelope().payload.message_envelope_sha256 == envelope_hash
+                            })
+                            .unwrap_or(false)
+                    })
+                {
+                    return Ok(Mutation {
+                        value: None,
+                        changed: false,
+                    });
+                }
+                anyhow::bail!("pending collaboration product handoff was not found");
+            };
             if state.incoming.len() + state.incoming_tombstones.len()
                 > MAX_INCOMING_RECORDS_AND_TOMBSTONES
             {
@@ -1918,28 +1917,28 @@ impl CollaborationCore {
                 record.acceptance_receipt.as_bytes(),
                 verified.message(),
             )?;
+            let accepted_at = receipt.envelope().payload.accepted_at;
             let payload = &verified.message().envelope().payload;
-            if payload.payload_type == crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE {
-                self.remember_presence(
-                    envelope_hash,
-                    record.acceptance_receipt,
-                    payload.expires_at,
-                    receipt.envelope().payload.accepted_at,
-                );
-            } else {
-                state.incoming_tombstones.push(IncomingTombstone {
-                    acceptance_receipt: record.acceptance_receipt,
-                    retain_until: tombstone_retention_deadline(
-                        receipt.envelope().payload.accepted_at,
-                    ),
-                });
-            }
+            let value =
+                if payload.payload_type == crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE {
+                    Some((record.acceptance_receipt, payload.expires_at, accepted_at))
+                } else {
+                    state.incoming_tombstones.push(IncomingTombstone {
+                        acceptance_receipt: record.acceptance_receipt,
+                        retain_until: tombstone_retention_deadline(accepted_at),
+                    });
+                    None
+                };
             ensure_state_fits(state)?;
             Ok(Mutation {
-                value: (),
+                value,
                 changed: true,
             })
-        })
+        })?;
+        if let Some((receipt, expires_at, accepted_at)) = acknowledged_presence {
+            self.remember_presence(envelope_hash, receipt, expires_at, accepted_at);
+        }
+        Ok(())
     }
 
     fn recent_presence_entry(&self, envelope_hash: &str) -> Option<(String, u64)> {
@@ -6086,6 +6085,27 @@ mod tests {
             assert!(transport_incoming(&core, &post, now).product_handoff_pending());
             acknowledge_all_handoffs(&core);
         }
+    }
+
+    #[test]
+    fn failed_presence_acknowledgement_keeps_its_slot_until_a_retry_removes_it() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let presence_ttl = crate::collaboration_presence::PRESENCE_TTL_SECS;
+        let frame = remote_presence_frame(&fixture, &generate_keypair().0, NOW, presence_ttl);
+        transport_incoming(&core, &frame, NOW);
+        let hash = core.pending_product_handoffs().unwrap()[0]
+            .authorized_message()
+            .message()
+            .envelope_sha256()
+            .to_string();
+        core.inject_write_fault(WriteFault::BeforeWrite);
+        assert!(core.acknowledge_product_handoff(&hash).is_err());
+        assert_eq!(core.pending_product_handoffs().unwrap().len(), 1);
+        core.acknowledge_product_handoff(&hash).unwrap();
+        assert!(core.pending_product_handoffs().unwrap().is_empty());
+        assert_eq!(core.summary().unwrap().replay_tombstones, 0);
+        core.acknowledge_product_handoff(&hash).unwrap();
     }
 
     #[test]
