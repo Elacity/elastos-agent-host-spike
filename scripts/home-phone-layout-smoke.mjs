@@ -1780,6 +1780,7 @@ async function runProfile(browser, engineId, profile, origin) {
   let sheetHandleProbe = null;
   let linkProbe = null;
   let touchMenuProbe = null;
+  let inboxOpenProbe = null;
   let homeProbe = null;
   let homeEditProbe = null;
   let backProbe = null;
@@ -1842,6 +1843,7 @@ async function runProfile(browser, engineId, profile, origin) {
     if (profile.id === "phone-portrait") {
       sheetHandleProbe = await probeSheetHandles(page, frame);
       touchMenuProbe = await probeTouchMenu(page, frame, dir);
+      inboxOpenProbe = await probeInboxOpenClosesRail(page, frame);
     }
     if (profile.id.startsWith("phone")) {
       homeEditProbe = await probePhoneHomeEdit(page, frame, dir);
@@ -1874,7 +1876,37 @@ async function runProfile(browser, engineId, profile, origin) {
   } finally {
     await context.close();
   }
-  return { engine: engineId, profile: profile.id, viewport: profile.viewport, viewportMeta, surfaces, dock: dockProbe, stage: stageProbe, keyboard: keyboardProbe, spotlight: spotlightProbe, sheetHandles: sheetHandleProbe, link: linkProbe, touchMenu: touchMenuProbe, home: homeProbe, homeEdit: homeEditProbe, back: backProbe, promptClose: promptCloseProbe, backRaces: backRacesProbe, bootRetries };
+  return { engine: engineId, profile: profile.id, viewport: profile.viewport, viewportMeta, surfaces, dock: dockProbe, stage: stageProbe, keyboard: keyboardProbe, spotlight: spotlightProbe, sheetHandles: sheetHandleProbe, link: linkProbe, touchMenu: touchMenuProbe, inboxOpen: inboxOpenProbe, home: homeProbe, homeEdit: homeEditProbe, back: backProbe, promptClose: promptCloseProbe, backRaces: backRacesProbe, bootRetries };
+}
+
+// Open on an Inbox rail entry reaches Home as the host's open-target command
+// (#92): the rail must close and the target window must be the one on show.
+async function probeInboxOpenClosesRail(page, frame) {
+  const target = "system";
+  await callShellModule(frame, "shell-inbox-rail.js", "showInboxRail");
+  await waitFor(
+    () => frame.evaluate(() => document.querySelector("#inbox-rail")?.hidden === false),
+    SURFACE_SETTLE_MS * 10,
+    "inbox rail open",
+  );
+  await page.evaluate((message) => {
+    document.getElementById("active-shell-frame").contentWindow.postMessage(message, "*");
+  }, { type: "home:gui-command", command: "open-target", target, query: {} });
+  const read = () => frame.evaluate((target) => {
+    const win = document.querySelector(`.window[data-target="${target}"]`);
+    return {
+      railHidden: document.querySelector("#inbox-rail").hidden === true,
+      windowVisible: Boolean(win) && !win.classList.contains("hidden") && win.getClientRects().length > 0,
+    };
+  }, target);
+  await waitFor(
+    () => read().then((state) => state.railHidden && state.windowVisible),
+    SURFACE_SETTLE_MS * 10,
+    "inbox Open closes the rail and shows the target",
+  );
+  const state = await read();
+  await closeWindow(frame, target);
+  return { target, ...state };
 }
 
 // Soft keyboard: only the host page sees it, so the host relays its height
