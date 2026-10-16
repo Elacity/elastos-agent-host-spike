@@ -761,9 +761,18 @@ impl App {
         self.config.access_mode == AccessMode::Shell
     }
 
+    /// The page is on screen: not hidden, and in the shell its window is
+    /// shown (not minimized or switched away).
+    fn view_visible(&self) -> bool {
+        chat_view_visible(
+            self.document.hidden(),
+            self.is_shell_mode(),
+            self.shell_visible.get(),
+        )
+    }
+
     fn can_mark_read(&self, conversation_id: Option<&str>) -> bool {
-        !self.document.hidden()
-            && (!self.is_shell_mode() || self.shell_visible.get())
+        self.view_visible()
             && self
                 .state
                 .borrow()
@@ -822,9 +831,7 @@ impl App {
     /// Tells Runtime this person has the Community view open. Runtime
     /// announces only if their grant allows it; Chat never holds the grant.
     async fn send_presence_heartbeat(&self) {
-        let page_visible = window()
-            .and_then(|window| window.document())
-            .is_some_and(|document| !document.hidden());
+        let page_visible = self.view_visible();
         let due = {
             let state = self.state.borrow();
             presence_heartbeat_due(
@@ -5718,6 +5725,26 @@ mod tests {
     }
 
     #[test]
+    fn presence_heartbeat_stops_while_shell_hides_chat_and_resumes_when_shown() {
+        use super::{chat_view_visible as visible, presence_heartbeat_due as due};
+        let tick = |shell_visible| {
+            due(
+                true,
+                Some("while_open"),
+                visible(false, true, shell_visible),
+            )
+        };
+        assert!(tick(true));
+        // Minimized window or phone app switch: the iframe stays alive.
+        assert!(!tick(false));
+        assert!(tick(true));
+        // A hidden document stops it regardless of the shell.
+        assert!(!due(true, Some("while_open"), visible(true, true, true)));
+        // Outside the shell only the document decides.
+        assert!(due(true, Some("while_open"), visible(false, false, false)));
+    }
+
+    #[test]
     fn runtime_delivery_changes_refresh_known_community_rows_without_new_sequence() {
         use super::CommunityDeliveryState::{Accepted, Expired, Sending, Unknown};
         let object = |seq, is_own| ConversationObjectView {
@@ -7543,6 +7570,12 @@ fn presence_heartbeat_due(
     page_visible: bool,
 ) -> bool {
     community_open && page_visible && matches!(presence, Some("always" | "while_open"))
+}
+
+/// Chat is on screen: the document is shown and, in the shell, the shell
+/// reports Chat's window visible.
+fn chat_view_visible(document_hidden: bool, shell_mode: bool, shell_visible: bool) -> bool {
+    !document_hidden && (!shell_mode || shell_visible)
 }
 
 /// Which of (the "Show me in Community" line, the "Hidden from members"
