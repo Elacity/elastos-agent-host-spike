@@ -612,6 +612,10 @@ async fn run_community_link_watchdog<L: CommunityLink>(
                     }
                 }
             }
+            watchdog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .step_finished(tokio::time::Instant::now());
         },
     )
     .await;

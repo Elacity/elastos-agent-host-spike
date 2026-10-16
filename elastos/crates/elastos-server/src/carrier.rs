@@ -128,11 +128,16 @@ const MAX_CARRIER_OBJECT_IMPORT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_REMOTE_RECEIPT_REPLICA_SUMMARY_ROWS: usize = 5;
 const GOSSIP_SEND_TIMEOUT: Duration = Duration::from_millis(1_500);
 const GOSSIP_JOIN_PEERS_TIMEOUT: Duration = Duration::from_millis(1_500);
-/// Bounds one topic subscription during gossip recovery. Subscribing only
-/// queues a Join on the local actor, so it stalls only when that actor does.
+/// Bounds one topic subscription. Subscribing only queues a Join on the local
+/// actor, so it stalls only when that actor does; a stalled actor must not
+/// hold the gossip state lock that recovery and shutdown need.
 const GOSSIP_SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(5);
-/// A stalled gossip actor never answers shutdown; it is dropped after this.
-const GOSSIP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+/// Bounds one hand-off to the local gossip actor (a connection, a shutdown);
+/// a stalled actor never answers either.
+const GOSSIP_ACTOR_TIMEOUT: Duration = Duration::from_secs(2);
+/// A gossip recovery that cannot take the state within this gives up rather
+/// than running later, right after another one.
+const GOSSIP_RECOVERY_START_TIMEOUT: Duration = Duration::from_secs(2);
 /// A consumer that joins a CID topic after the holder announced still needs a
 /// window for DHT/mDNS to form a gossip neighbor and for the signed fetch
 /// ticket to arrive. One absolute deadline covers late holders. Operator peer
@@ -497,7 +502,15 @@ impl CarrierGossipHandler {
 
 impl ProtocolHandler for CarrierGossipHandler {
     async fn accept(&self, connection: iroh::endpoint::Connection) -> Result<(), AcceptError> {
-        ProtocolHandler::accept(&self.current(), connection).await
+        // Bounded, so a waiting accept never keeps a replaced actor alive.
+        let gossip = self.current();
+        match tokio::time::timeout(GOSSIP_ACTOR_TIMEOUT, gossip.handle_connection(connection)).await
+        {
+            Ok(handled) => handled.map_err(AcceptError::from_err),
+            Err(_) => Err(AcceptError::from_err(std::io::Error::other(
+                "gossip actor did not take the connection",
+            ))),
+        }
     }
 
     async fn shutdown(&self) {
@@ -635,7 +648,7 @@ impl CarrierNode {
             task.abort();
             let _ = task.await;
         }
-        match tokio::time::timeout(GOSSIP_SHUTDOWN_TIMEOUT, gossip.shutdown()).await {
+        match tokio::time::timeout(GOSSIP_ACTOR_TIMEOUT, gossip.shutdown()).await {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
                 tracing::warn!(error = %err, "carrier gossip shutdown failed during runtime shutdown");
@@ -974,7 +987,8 @@ async fn connect_ticket_endpoints(
     for addr in endpoints {
         match endpoint.connect(addr.clone(), iroh_gossip::ALPN).await {
             Ok(conn) => {
-                gossip.handle_connection(conn).await.ok();
+                let _ = tokio::time::timeout(GOSSIP_ACTOR_TIMEOUT, gossip.handle_connection(conn))
+                    .await;
                 let peer_id = addr.id.to_string();
                 connected.push(peer_id.clone());
                 let mut known = peers.lock().await;
@@ -1212,23 +1226,10 @@ async fn register_topic_state(
 /// consumer cursors stay; its neighbours are relearned from the new join.
 async fn rejoin_topic(state: &mut GossipState, topic_name: &str, join: TopicJoin) -> Result<()> {
     state.topic_peers.lock().await.remove(topic_name);
-    let joined = match join {
-        TopicJoin::Direct(peers) => {
-            tokio::time::timeout(
-                GOSSIP_SUBSCRIBE_TIMEOUT,
-                join_gossip_topic_direct(state, topic_name, peers),
-            )
-            .await
-        }
-        TopicJoin::Discovered => {
-            tokio::time::timeout(
-                GOSSIP_SUBSCRIBE_TIMEOUT,
-                join_gossip_topic(state, topic_name, false),
-            )
-            .await
-        }
-    };
-    joined.map_err(|_| anyhow::anyhow!("gossip subscription timed out"))?
+    match join {
+        TopicJoin::Direct(peers) => join_gossip_topic_direct(state, topic_name, peers).await,
+        TopicJoin::Discovered => join_gossip_topic(state, topic_name, false).await,
+    }
 }
 
 /// Leaves one topic and joins it again with the peers it was joined with.
@@ -1257,7 +1258,7 @@ async fn rebuild_carrier_gossip(state: &mut GossipState) -> Result<usize> {
     anyhow::ensure!(!state.closed, "Carrier gossip is shut down");
     // Leave first, so the old actor's Disconnects precede the new Joins.
     let previous = state.gossip.clone();
-    if tokio::time::timeout(GOSSIP_SHUTDOWN_TIMEOUT, previous.shutdown())
+    if tokio::time::timeout(GOSSIP_ACTOR_TIMEOUT, previous.shutdown())
         .await
         .is_err()
     {
@@ -1304,13 +1305,15 @@ async fn join_gossip_topic_direct(
             bootstrap_peers.len()
         );
     }
-    let joined = state
-        .gossip
-        .subscribe_with_opts(
+    let joined = tokio::time::timeout(
+        GOSSIP_SUBSCRIBE_TIMEOUT,
+        state.gossip.subscribe_with_opts(
             topic,
             iroh_gossip::api::JoinOptions::with_bootstrap(bootstrap_peers.clone()),
-        )
-        .await?;
+        ),
+    )
+    .await
+    .context("gossip subscription timed out")??;
     let (iroh_sender, iroh_receiver) = joined.split();
     let dtt_sender =
         distributed_topic_tracker::GossipSender::new(iroh_sender, TimeoutConfig::default());
@@ -1377,11 +1380,15 @@ async fn join_gossip_topic(
         topic_name,
         bootstrap_peers.len()
     );
-    let topic = state
-        .gossip
-        .subscribe_and_join_with_auto_discovery_no_wait(record_publisher)
-        .await?;
-    let (sender, receiver) = topic.split().await?;
+    let (sender, receiver) = tokio::time::timeout(GOSSIP_SUBSCRIBE_TIMEOUT, async {
+        let topic = state
+            .gossip
+            .subscribe_and_join_with_auto_discovery_no_wait(record_publisher)
+            .await?;
+        topic.split().await
+    })
+    .await
+    .context("gossip subscription timed out")??;
     state
         .buffers
         .lock()
@@ -7316,11 +7323,14 @@ impl CarrierGossipProvider {
     /// Runtime-only Community recovery (`gossip_rejoin`, `gossip_rebuild`);
     /// capsule resources never name these operations. Each runs on its own
     /// task, so a caller that stops waiting (shutdown, Community leave)
-    /// cannot leave a topic half joined.
+    /// cannot leave a topic half joined, and starts within
+    /// `GOSSIP_RECOVERY_START_TIMEOUT` or not at all.
     async fn recover_gossip(&self, rebuild: bool, topic: String) -> serde_json::Value {
         let state = self.state.clone();
         let recovery = tokio::spawn(async move {
-            let mut state = state.lock().await;
+            let mut state = tokio::time::timeout(GOSSIP_RECOVERY_START_TIMEOUT, state.lock())
+                .await
+                .context("Carrier gossip is busy")?;
             if rebuild {
                 rebuild_carrier_gossip(&mut state)
                     .await
@@ -18553,6 +18563,21 @@ pub(crate) mod tests {
         assert!(
             frames_flow(&provider2, &provider1, topic, before).await,
             "frames leave the rebuilt actor"
+        );
+
+        // A recovery that cannot take the gossip state gives up instead of
+        // running later, right after another one.
+        let held = node2.gossip_state.lock().await;
+        let busy = provider2
+            .send_raw(&serde_json::json!({"op": "gossip_rebuild"}))
+            .await
+            .unwrap();
+        drop(held);
+        assert_eq!(busy["code"], "recovery_failed", "{busy}");
+        let before = remote_frames(&provider2, topic).await;
+        assert!(
+            frames_flow(&provider1, &provider2, topic, before).await,
+            "a refused recovery leaves the link alone"
         );
 
         shutdown_test_carrier_node(node2).await;

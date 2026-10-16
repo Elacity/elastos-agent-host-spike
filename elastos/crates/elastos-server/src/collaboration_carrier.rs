@@ -634,6 +634,13 @@ impl CommunityLinkWatchdog {
         self.last_step_at = Some(now);
         Some((step, fault))
     }
+
+    /// Counts the rest before the next step from when this one finished.
+    pub(crate) fn step_finished(&mut self, now: Instant) {
+        if self.last_step_at.is_some() {
+            self.last_step_at = Some(now);
+        }
+    }
 }
 
 fn random_collaboration_consumer_id() -> anyhow::Result<String> {
