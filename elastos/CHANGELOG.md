@@ -11,6 +11,23 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - `elastos serve --capsule` starts its initial MicroVM capsule with a VM-bound
   Capsule session instead of a Shell session, because the guest can read its
   boot token; capability approval stays with the shell (#387).
+- Community presence is a capability grant, not Discovery (#410). The
+  Runtime mints a token for the person's principal (action `message`,
+  resource `elastos://chat/presence/<network>/<conversation>/always` or
+  `/while-open`, no expiry) only when they answer the Inbox card
+  (`community-presence-always|open|later|never:<issued_at>`) or System
+  (`/api/apps/system/community/presence`, `{mode}`); it lives in their
+  owner-only `.AppData/ElastOS/Home/community-presence.json` and no route
+  returns it. Every Runtime tick (`/always`) and Chat heartbeat
+  (`POST /api/apps/chat-room/presence`, `/while-open`) runs all twelve checks
+  through the new `CapabilityManager::validate_recurring`, which audits every
+  failure and one success per token per hour. Hidden, mode and Profile changes
+  revoke; an epoch bump silences every grant. The Home-shell heartbeat route
+  is removed. Community's People list adds members with unexpired presence,
+  one row per Profile DID. Undo: after Undo, Community presence follows the
+  Discovery switch in People again. If you chose Hidden or Only while open in
+  alpha.23 and Discovery is on, you will be announced; turn Discovery off in
+  People to stay hidden.
 - A Community bootstrap node (its Carrier endpoint is one of the verified
   profile's bootstrap peers, the seed's Community node) runs iroh-gossip as the
   hub: 512 active and 1024 passive neighbours instead of the default 5 and 30,
@@ -121,13 +138,13 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - Known issues: Browser runs only on Apple Silicon Macs, takes about 5 seconds to close, and has no Chinese, Japanese or Korean fonts. On the Jetson, getting Qwen takes about 43 minutes; its first reply takes about 22 seconds and the next about 3.6 seconds.
 - Known issue: Updating to this version in System from a test version older than 0.8.0-alpha.18 on a slow device such as a Jetson can still fail, because that older version runs the update. If Home is then stuck, follow "Recover an interrupted update" in `docs/INSTALL.md`.
 - Known issues: on a Mac under memory pressure, a model can refuse to start for lack of free memory; close other apps and try again. Restoring a Recovery Kit a second time on the same Home shows an error, although the Profile is restored. After `elastos update` or Undo in a terminal, run `~/.local/bin/elastos home --browser` to start Home and reconnect Community.
-- Community posts reach members again without turning on Discovery, also across networks: they travel through the seed's Community node. Posts are signed, but that node can read them in transit until the relay arrives in 0.8.1. Direct messages across networks need that relay. Contact requests across networks, and showing as online in People, still need Discovery on.
+- Community posts reach members again without turning on Discovery, also across networks: they travel through the seed's Community node. Posts are signed, but that node can read them in transit until the relay arrives in 0.8.1. Direct messages across networks need that relay. Contact requests across networks still need Discovery on.
 - Upgrading from 0.7.1 or earlier: run the install command once. System update cannot move these Homes to 0.8.0, because releases are now signed with a new key (#186). Your Home keeps its data.
 - A Browser session now lasts until you close it, until Home stops answering for 5 minutes, until Runtime stops, or 12 hours (it used to close after 10 minutes).
 - Browser Settings no longer shows Agent access, which no agent can use yet (#290), and hides the engine choice when there is only one engine. The default engine is called Automatic.
 - If a model download is interrupted, Home now resumes it by itself a few times before asking you to Retry.
 - A model's memory check now says: "This device has enough memory for this model. Replies also need some of it free when the model runs."
-- Community: a post whose delivery could not be confirmed now says "Delivery unconfirmed" instead of "Expired". When no other member is online, Community says "No other members are online right now.", and with Discovery off it says "Turn on Discovery in People to load earlier Community posts."
+- Community: a post whose delivery could not be confirmed says "Delivery unconfirmed". Inbox asks you once whether members see you online: Always, Only while Community is open, Later or Never; shown, earlier posts load without Discovery. Change it in System → Community. After Undo, Community presence follows the Discovery switch in People again. If you chose Hidden or Only while open in alpha.23 and Discovery is on, you will be announced; turn Discovery off in People to stay hidden.
 
 ### Fixed
 

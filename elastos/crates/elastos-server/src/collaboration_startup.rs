@@ -259,6 +259,7 @@ pub async fn start_collaboration_runtime_service(
     configuration: CollaborationStartupConfiguration,
     carrier: Option<Arc<dyn Provider>>,
     provider_registry: Arc<elastos_runtime::provider::ProviderRegistry>,
+    capability_manager: Option<Arc<elastos_runtime::capability::CapabilityManager>>,
 ) -> anyhow::Result<Option<CollaborationRuntimeService>> {
     let CollaborationNetworkConfiguration::Configured {
         profile,
@@ -286,7 +287,10 @@ pub async fn start_collaboration_runtime_service(
     .await?
     .with_community_membership(core.community_membership().clone());
     let product_port = CollaborationChatProductPort::new(core.clone())?;
-    let presence_port = CollaborationPresenceProductPort::new(core.clone())?;
+    // The Runtime's own capability manager: the presence grant is a token it
+    // mints for the deciding person and validates on every announcement.
+    let presence_port = CollaborationPresenceProductPort::new(core.clone())?
+        .with_capability_manager(capability_manager);
     let history_service = CollaborationHistoryService::new(
         product_port.clone(),
         presence_port.clone(),
@@ -321,7 +325,6 @@ pub async fn start_collaboration_runtime_service(
     let presence_task = tokio::spawn(run_runtime_owned_presence_worker(
         data_root.to_path_buf(),
         presence_port.clone(),
-        discovery_service.clone(),
         presence_shutdown_rx,
     ));
     let history_task = tokio::spawn(run_collaboration_history_worker(
@@ -739,7 +742,6 @@ pub(crate) async fn run_collaboration_discovery_sync_worker(
 async fn run_runtime_owned_presence_worker(
     data_root: PathBuf,
     presence_port: CollaborationPresenceProductPort,
-    discovery_service: CollaborationDiscoveryService,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(
@@ -759,9 +761,10 @@ async fn run_runtime_owned_presence_worker(
         if let Err(err) = crate::api::gateway::publish_runtime_owned_presence(
             &data_root,
             &presence_port,
-            Some(&discovery_service),
             now_secs(),
-        ) {
+        )
+        .await
+        {
             tracing::debug!(error = %err, "runtime presence refresh failed");
         }
     }
@@ -1513,6 +1516,7 @@ mod tests {
             isolated,
             None,
             Arc::new(ProviderRegistry::new()),
+            None,
         )
         .await
         .unwrap()
@@ -1528,6 +1532,7 @@ mod tests {
             configuration,
             None,
             Arc::new(ProviderRegistry::new()),
+            None,
         )
         .await
         .unwrap();
@@ -1555,6 +1560,7 @@ mod tests {
             configuration,
             Some(carrier.clone()),
             Arc::new(ProviderRegistry::new()),
+            None,
         )
         .await
         .unwrap()
@@ -2359,6 +2365,7 @@ mod tests {
             missing_configuration,
             None,
             Arc::new(ProviderRegistry::new()),
+            None,
         )
         .await
         .is_err());
@@ -2386,6 +2393,7 @@ mod tests {
             configuration,
             Some(carrier.clone()),
             Arc::new(ProviderRegistry::new()),
+            None,
         )
         .await
         .unwrap()
@@ -2424,6 +2432,7 @@ mod tests {
             same_configuration,
             Some(restart_carrier.clone()),
             Arc::new(ProviderRegistry::new()),
+            None,
         )
         .await
         .unwrap()
@@ -2449,6 +2458,7 @@ mod tests {
             configuration,
             Some(carrier.clone()),
             Arc::new(ProviderRegistry::new()),
+            None,
         )
         .await
         .unwrap()
@@ -2493,6 +2503,7 @@ mod tests {
             configuration,
             Some(carrier.clone()),
             Arc::new(ProviderRegistry::new()),
+            None,
         )
         .await
         .unwrap()
@@ -2974,6 +2985,7 @@ mod tests {
             configuration,
             Some(carrier.clone()),
             Arc::new(ProviderRegistry::new()),
+            None,
         )
         .await
         .unwrap()

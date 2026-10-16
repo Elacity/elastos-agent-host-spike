@@ -29,9 +29,9 @@ pub(crate) const MAX_HISTORY_RESPONSE_BYTES: usize = MAX_CONVERSATION_HISTORY_BY
 pub(crate) const MAX_HISTORY_CARRIER_REPLY_BYTES: usize = MAX_HISTORY_RESPONSE_BYTES + 64;
 const MAX_PEERS_PER_PASS: usize = 4;
 const PEER_TIMEOUT: Duration = Duration::from_secs(5);
-// History requests carry this Home's own signed presence, which the Runtime
-// publishes only while Discovery is on.
-const DISCOVERY_OFF_DETAIL: &str = "Turn on Discovery in People to load earlier Community posts.";
+// History requests carry this Home's own signed presence, which exists only
+// for people who granted Community presence.
+const NOT_SHOWN_DETAIL: &str = "Show yourself in Community to load earlier posts.";
 const ALONE_DETAIL: &str = "No other members are online right now.";
 
 #[derive(Clone)]
@@ -213,12 +213,11 @@ impl CollaborationHistoryService {
             .iter()
             .find(|peer| peer.endpoint_did == local_endpoint);
         let Some(local) = local else {
-            // Discovery off is a fact only the publisher knows; before its first
-            // pass, or while its presence is still projecting, keep searching.
+            // Nobody chosen is a fact only the publisher knows; before its
+            // first pass, or while its presence is still projecting, keep
+            // searching.
             if self.inner.presence.local_publication() == Some(false) {
-                self.inner
-                    .product
-                    .set_history_unavailable(DISCOVERY_OFF_DETAIL);
+                self.inner.product.set_history_unavailable(NOT_SHOWN_DETAIL);
             } else {
                 self.inner.product.set_history_searching();
             }
@@ -794,9 +793,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn history_without_own_presence_asks_for_discovery_only_when_it_is_off() {
-        // Discovery off: this Home publishes no presence of its own, so it has
-        // nothing to sign a history request with, whoever else is online.
+    async fn history_without_own_presence_asks_for_show_me_only_when_nobody_chose_it() {
+        // Nobody here chose Show me: this Home publishes no presence of its
+        // own, so it has nothing to sign a history request with, whoever else
+        // is online. The status never mentions Discovery.
         let now = now_secs();
         let root = tempfile::tempdir().unwrap();
         let product = test_chat_product_port(root.path(), "history-off", "community");
@@ -834,14 +834,14 @@ mod tests {
             detail(),
             (
                 "unavailable".to_string(),
-                "Turn on Discovery in People to load earlier Community posts.".to_string()
+                "Show yourself in Community to load earlier posts.".to_string()
             )
         );
-        // Discovery switched on: presence is published but not yet projected.
+        // Show me chosen: presence is published but not yet projected.
         presence.record_local_publication(Some(true));
         service.fetch_once(now).await.unwrap();
         assert_eq!(detail().0, "searching");
-        // A publisher pass that failed leaves the switch unknown.
+        // A publisher pass that failed leaves the choice unknown.
         presence.record_local_publication(None);
         service.fetch_once(now).await.unwrap();
         assert_eq!(detail().0, "searching");

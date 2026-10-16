@@ -754,6 +754,10 @@ pub(super) async fn chat_room_session_start(
             Ok(context) => context,
             Err(err) => return room_service_error_response(err),
         };
+    // Chat asks once, on Community open; a refusal or an open card is kept.
+    let _ = gateway_collaboration_presence::request_community_presence(&state, &context, false);
+    let community_presence =
+        gateway_collaboration_presence::community_presence_state(&state, &context);
     let secure = request_uses_tls(&headers);
     let data_dir = state.data_dir.clone();
     let transport = room_transport_view(&state);
@@ -817,6 +821,7 @@ pub(super) async fn chat_room_session_start(
             if let Some(cards) = cards.as_ref() {
                 poll.apply_participant_cards(cards);
             }
+            poll.community_presence = community_presence;
             let mut response = Json(ChatRoomSessionStartResponse {
                 status: "connected".to_string(),
                 display_name: output.display_name,
@@ -1555,16 +1560,29 @@ fn participant_card_directory(
         local_profile_did: local_profile_did.map(str::to_string),
         ..ParticipantCardDirectory::default()
     };
-    // Presence exists only for people who chose Discovery; everyone else
-    // shows their last Community message time instead.
+    // Members whose Home announced Community presence; everyone else shows
+    // their last Community message time instead.
     let now = now_ts();
     if let Some(snapshot) = presence_port.and_then(|port| port.snapshot(now).ok()) {
-        directory.present = snapshot
+        for record in snapshot
             .records()
             .iter()
             .filter(|record| record.expires_at() > now)
-            .map(|record| record.sender_profile_did().to_string())
-            .collect();
+        {
+            directory
+                .present
+                .entry(record.sender_profile_did().to_string())
+                .and_modify(|member: &mut PresentMember| {
+                    if record.last_seen_at() > member.last_seen_at {
+                        member.display_name = record.display_name().to_string();
+                        member.last_seen_at = record.last_seen_at();
+                    }
+                })
+                .or_insert_with(|| PresentMember {
+                    display_name: record.display_name().to_string(),
+                    last_seen_at: record.last_seen_at(),
+                });
+        }
     }
     let Some(authority) = authority else {
         return directory;
@@ -1893,6 +1911,9 @@ pub(super) async fn room_service_poll(
             Err(err) => return room_service_error_response(err),
         },
     };
+    let community_presence = launch_context.as_ref().and_then(|context| {
+        gateway_collaboration_presence::community_presence_state(&state, context)
+    });
     match tokio::task::spawn_blocking(move || {
         let mut poll = match port {
             Some(port) => port.conversation_poll_with_read_intent(
@@ -1964,6 +1985,7 @@ pub(super) async fn room_service_poll(
             if let Some(cards) = cards.as_ref() {
                 view.apply_participant_cards(cards);
             }
+            view.community_presence = community_presence;
             Json(view).into_response()
         }
         Ok(Err(err)) => room_service_error_response(err),
