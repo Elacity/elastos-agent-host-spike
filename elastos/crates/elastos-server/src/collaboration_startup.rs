@@ -3374,7 +3374,8 @@ mod tests {
             rebuild_heals: true,
             ..FakeLinkScript::default()
         });
-        run_link_watchdog_for(&link, 900).await;
+        // Stops between two 5 s ticks, so the last read is at 900 s.
+        run_link_watchdog_for(&link, 902).await;
         assert_eq!(
             link.steps(),
             [
@@ -3395,10 +3396,10 @@ mod tests {
             presence: true,
             ..FakeLinkScript::default()
         });
-        run_link_watchdog_for(&presence, 1800).await;
+        run_link_watchdog_for(&presence, 1802).await;
         assert!(presence.steps().is_empty());
-        // Presence from 15 s to 1785 s; the last read is at 1795 s.
-        assert_eq!(presence.frames(), 119);
+        // Presence from 15 s to 1800 s; the last read is at 1800 s.
+        assert_eq!(presence.frames(), 120);
 
         // Discovery is off everywhere: a peer and no frame at all.
         let quiet = FakeCommunityLink::new(FakeLinkScript {
