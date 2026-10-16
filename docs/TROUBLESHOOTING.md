@@ -109,12 +109,14 @@ peer every second with no further `start to dial`.
 
 Runtime's Community link watchdog clears it. A joined Home with no Community
 peer for 60 seconds leaves and rejoins the Community topic; a minute later it
-replaces its Carrier gossip actor, and it keeps replacing it while no peer
-returns, waiting twice as long each time up to five minutes. The same steps
-run once when peers stay listed but no frame arrives for 60 seconds although
-someone else was online. The Home's log names each step and its reason
-(`Community link looks dead`, `rebuilding Carrier gossip`,
-`Community link recovered`). A bootstrap Runtime never runs these steps.
+replaces its Carrier gossip actor, and it keeps repairing while no peer
+returns, waiting twice as long each time up to five minutes. A Home replaces
+its gossip actor at most six times per start (each replacement leaves a small
+address lookup behind in iroh); after that it only rejoins, and restarting
+Home allows replacements again. A quiet Community with a peer listed is left
+alone. The Home's log names each step (`Community link looks dead`,
+`rebuilding Carrier gossip`, `rebuilds are capped`, `Community link
+recovered`). A bootstrap Runtime never runs these steps.
 
 ### `discovery relay outbox delivery failed … discovery advertisement is not active`
 

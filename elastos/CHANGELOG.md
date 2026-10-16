@@ -8,17 +8,19 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Fixed
 
-- A Home whose Community connection stops working recovers by itself.
-  Before, Community could stay unreachable until the Home was restarted.
+- A Home that shows **Community unreachable** reconnects by itself. Before,
+  it could stay unreachable until the Home was restarted.
 
 ### Developer detail
 
 - Runtime's Community link watchdog (`CommunityLinkWatchdog`) repairs a joined
-  Home's Community link whatever stalled it: with no Community peer, or with
-  peers but no frame for 60 seconds after one arrived while someone else was
-  online, it rejoins the topic, then replaces Carrier's gossip actor a minute
-  later. With no peer it keeps replacing it, waiting twice as long each time
-  up to five minutes; a bootstrap node never does. Carrier's Runtime-only
+  Home that has had no Community peer for 60 seconds, whatever stalled it: it
+  rejoins the topic, then replaces Carrier's gossip actor a minute later, and
+  keeps repairing while no peer returns, waiting twice as long each time up to
+  five minutes. It replaces the actor at most six times per process
+  (`MAX_COMMUNITY_GOSSIP_REBUILDS`; each replacement leaves an iroh address
+  lookup behind), then only rejoins. A quiet Community with a peer listed and
+  a bootstrap node never get a step. Carrier's Runtime-only
   `gossip_topic_health`, `gossip_rejoin` and `gossip_rebuild` operations carry
   it, and Carrier shutdown no longer waits forever on a stalled gossip actor.
 - `scripts/release-publish.sh` publishes a final version `X.Y.Z` on `stable`

@@ -244,17 +244,6 @@ impl CollaborationPresenceProductPort {
         self.read_model.snapshot(now)
     }
 
-    /// Whether a person on another Home is online now, so that Home's next
-    /// presence refresh is due within its cadence. Errors read as nobody.
-    pub(crate) fn someone_else_online(&self, now: u64) -> bool {
-        let local_device_did = self.core.local_device_did();
-        self.history_participants(now).is_ok_and(|participants| {
-            participants
-                .iter()
-                .any(|participant| participant.endpoint_did != local_device_did)
-        })
-    }
-
     pub(crate) fn history_participants(&self, now: u64) -> anyhow::Result<Vec<HistoryParticipant>> {
         let state = self
             .read_model

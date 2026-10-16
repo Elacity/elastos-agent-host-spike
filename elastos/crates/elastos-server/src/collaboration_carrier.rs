@@ -23,13 +23,16 @@ const COLLABORATION_TOPIC_PREFIX: &str = "__elastos_internal/collaboration-v1/";
 const COLLABORATION_RECEIVE_BATCH_SIZE: usize = 32;
 const MAX_RECEIVE_RESPONSE_BYTES: usize =
     MAX_COLLABORATION_TRANSPORT_FRAME_BYTES * COLLABORATION_RECEIVE_BATCH_SIZE + 64 * 1024;
-/// Silence after which a joined Home treats its Community link as dead.
-/// Runtime presence is refreshed every 15 s and lives 45 s
-/// (`RUNTIME_OWNED_PRESENCE_CADENCE`, `PRESENCE_TTL_SECS`), so 60 s with no
-/// frame while someone was online is four missed refreshes.
+/// How long a joined Home may have no Community peer before it repairs the
+/// link. Gossip neighbours come back within seconds of a working dial, and
+/// the missing-peer rejoin retries every second, so a minute is a dead link.
 pub(crate) const COMMUNITY_LINK_SILENCE: Duration = Duration::from_secs(60);
-/// Longest wait between gossip rebuilds while a Home has no Community peer.
+/// Longest wait between repairs while a Home stays without a Community peer.
 const MAX_COMMUNITY_LINK_RETRY: Duration = Duration::from_secs(300);
+/// Most gossip rebuilds one process makes. Each rebuild leaves an address
+/// lookup and its eviction task on the endpoint (iroh 1.0.2 cannot remove
+/// them), so after this many the watchdog only rejoins until Home restarts.
+pub(crate) const MAX_COMMUNITY_GOSSIP_REBUILDS: u32 = 6;
 
 /// An exact collaboration-network Carrier subscription.
 ///
@@ -495,40 +498,23 @@ pub(crate) enum CommunityLinkStep {
     Rebuild,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CommunityLinkFault {
-    /// Joined, with no Community peer.
-    NoPeers,
-    /// Peers listed and someone was online, but no frame arrives.
-    Silent,
-}
-
-impl CommunityLinkFault {
-    pub(crate) fn reason(self) -> &'static str {
-        match self {
-            Self::NoPeers => "no Community peer",
-            Self::Silent => "no Community frame although someone was online",
-        }
-    }
-}
-
-/// Decides when a joined Home repairs a Community link that stays dead,
+/// Repairs a joined Home whose Community link has had no peer for a while,
 /// whatever stalled it: first a topic rejoin, then a new gossip actor.
 ///
-/// A quiet Community is normal (Discovery off means a Home announces
-/// nothing), so silence counts only after frames arrived while someone else
-/// was online. Silence with peers listed gets one rejoin and one rebuild;
-/// a frame re-arms it. No peer and no frame keeps rebuilding with a doubling
-/// wait up to `MAX_COMMUNITY_LINK_RETRY`. Two steps are never closer than
-/// one silence, whatever re-armed the watchdog in between.
+/// Only a missing peer counts: a quiet Community is normal (Discovery off
+/// means a Home announces nothing), and frames from a peer prove the link
+/// even before the peer list shows it. While no peer returns it keeps
+/// repairing with a doubling wait up to `MAX_COMMUNITY_LINK_RETRY`; two
+/// steps are never closer than one silence, counted from when the last one
+/// finished. After `MAX_COMMUNITY_GOSSIP_REBUILDS` rebuilds it only rejoins.
 pub(crate) struct CommunityLinkWatchdog {
     silence: Duration,
     observed_at: Option<Instant>,
     received_frames: Option<u64>,
-    expected_since: Option<Instant>,
     no_peers_since: Option<Instant>,
     last_step_at: Option<Instant>,
     steps: u32,
+    rebuilds: u32,
 }
 
 impl CommunityLinkWatchdog {
@@ -537,22 +523,21 @@ impl CommunityLinkWatchdog {
             silence,
             observed_at: None,
             received_frames: None,
-            expected_since: None,
             no_peers_since: None,
             last_step_at: None,
             steps: 0,
+            rebuilds: 0,
         }
     }
 
-    /// `health` is `None` when Carrier did not answer. `someone_online` is
-    /// asked only when new frames arrived.
+    /// `health` is `None` when Carrier did not answer, which counts as no peer.
     pub(crate) fn observe(
         &mut self,
         health: Option<CommunityLinkHealth>,
         now: Instant,
-        someone_online: impl FnOnce() -> bool,
-    ) -> Option<(CommunityLinkStep, CommunityLinkFault)> {
-        // A gap (Community left, or a long cycle) starts every window again.
+    ) -> Option<CommunityLinkStep> {
+        // A gap (Community left, or a long cycle) starts the window again;
+        // the rest between steps and the process's rebuild count remain.
         if self
             .observed_at
             .is_some_and(|at| now.duration_since(at) > self.silence / 2)
@@ -560,56 +545,29 @@ impl CommunityLinkWatchdog {
             *self = Self {
                 received_frames: self.received_frames,
                 last_step_at: self.last_step_at,
+                rebuilds: self.rebuilds,
                 ..Self::new(self.silence)
             };
         }
         self.observed_at = Some(now);
-        let peer_count = health.map_or(0, |health| health.peer_count);
-        if let Some(health) = health {
-            if self
-                .received_frames
+        let frames_arrived = health.is_some_and(|health| {
+            self.received_frames
                 .is_some_and(|frames| frames != health.received_frames)
-            {
-                // Frames prove the link, whatever the peer list says.
-                if self.steps > 0 {
-                    tracing::info!(
-                        steps = self.steps,
-                        "Community link recovered: frames arrive again"
-                    );
-                }
-                self.steps = 0;
-                self.no_peers_since = None;
-                self.expected_since = someone_online().then_some(now);
-            }
+        });
+        if let Some(health) = health {
             self.received_frames = Some(health.received_frames);
         }
-        if peer_count == 0 {
-            self.no_peers_since.get_or_insert(now);
-        } else {
-            self.no_peers_since = None;
-        }
-        let (since, fault) = match (self.no_peers_since, self.expected_since) {
-            (Some(since), _) => (since, CommunityLinkFault::NoPeers),
-            (None, Some(since)) => (since, CommunityLinkFault::Silent),
-            (None, None) => {
-                self.steps = 0;
-                return None;
+        if health.is_some_and(|health| health.peer_count > 0) || frames_arrived {
+            if self.steps > 0 {
+                tracing::info!(steps = self.steps, "Community link recovered");
             }
-        };
+            self.steps = 0;
+            self.no_peers_since = None;
+            return None;
+        }
+        let since = *self.no_peers_since.get_or_insert(now);
         let wait = match self.steps {
             0 | 1 => self.silence,
-            _ if fault == CommunityLinkFault::Silent => {
-                // After the rebuild, quiet with peers listed is normal: wait
-                // one silence for frames, then rest until a frame re-arms.
-                if self
-                    .last_step_at
-                    .is_none_or(|at| now.duration_since(at) >= self.silence)
-                {
-                    self.expected_since = None;
-                    self.steps = 0;
-                }
-                return None;
-            }
             steps => self
                 .silence
                 .saturating_mul(1 << (steps - 1).min(8))
@@ -625,14 +583,23 @@ impl CommunityLinkWatchdog {
         if now.duration_since(anchor) < wait || !rested {
             return None;
         }
-        let step = if self.steps == 0 {
-            CommunityLinkStep::Rejoin
-        } else {
+        let step = if self.steps > 0 && self.rebuilds < MAX_COMMUNITY_GOSSIP_REBUILDS {
+            self.rebuilds += 1;
             CommunityLinkStep::Rebuild
+        } else {
+            if self.steps > 0 && self.rebuilds == MAX_COMMUNITY_GOSSIP_REBUILDS {
+                self.rebuilds += 1;
+                tracing::info!(
+                    max_rebuilds = MAX_COMMUNITY_GOSSIP_REBUILDS,
+                    "Carrier gossip rebuilds are capped until this Home restarts; \
+                     the Community link watchdog only rejoins from now on"
+                );
+            }
+            CommunityLinkStep::Rejoin
         };
         self.steps = self.steps.saturating_add(1);
         self.last_step_at = Some(now);
-        Some((step, fault))
+        Some(step)
     }
 
     /// Counts the rest before the next step from when this one finished.
