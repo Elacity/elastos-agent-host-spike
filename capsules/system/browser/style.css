@@ -1037,6 +1037,10 @@ code {
   margin-top: 10px;
 }
 
+[data-field="recovery-note"] {
+  overflow-wrap: anywhere;
+}
+
 .recovery-pending {
   display: flex;
   align-items: center;
