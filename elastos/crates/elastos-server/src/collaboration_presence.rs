@@ -23,7 +23,7 @@ use crate::esp_binding::{esp_request_binding, EspRequestBinding};
 
 pub(crate) const PRESENCE_PAYLOAD_TYPE: &str = "elastos.chat.presence/v1";
 const PRESENCE_RESOURCE: &str = "elastos://chat/presence";
-const PRESENCE_TTL_SECS: u64 = 45;
+pub(crate) const PRESENCE_TTL_SECS: u64 = 45;
 const PRESENCE_STATE_SCHEMA: &str = "elastos.chat.presence-state/v1";
 const PRESENCE_STATE_PARENT: &str = "collaboration/default-conversation-presence";
 const PRESENCE_STATE_FILE: &str = "presence-v1.json";

@@ -33,6 +33,7 @@ use crate::collaboration_rate_limit::{
     CommunitySendRateLimited, HeldFrame, HeldFrames, HoldOutcome, ProfileRateLimiter,
     COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE, COMMUNITY_RATE_WINDOW_SECS,
     COMMUNITY_RECEIVES_PER_SENDER_PER_WINDOW, COMMUNITY_SENDS_PER_WINDOW,
+    PRESENCE_RECEIVES_PER_SENDER_PER_WINDOW,
 };
 use crate::esp_binding::{esp_request_binding, EspRequestBinding, ESP_REQUEST_BINDING_SCHEMA};
 use crate::host_lock::FileLock;
@@ -71,6 +72,7 @@ pub(crate) struct CollaborationCore {
     /// Counted from stored outgoing messages, so only a saved message counts.
     sends_per_window: usize,
     receive_rate: ProfileRateLimiter,
+    presence_receive_rate: ProfileRateLimiter,
     /// Serializes receive-rate admission through its durable commit and count.
     receive_admission_mutex: Mutex<()>,
     held: HeldFrames,
@@ -447,6 +449,10 @@ impl CollaborationCore {
             sends_per_window: COMMUNITY_SENDS_PER_WINDOW,
             receive_rate: ProfileRateLimiter::new(
                 COMMUNITY_RECEIVES_PER_SENDER_PER_WINDOW,
+                COMMUNITY_RATE_WINDOW_SECS,
+            ),
+            presence_receive_rate: ProfileRateLimiter::new(
+                PRESENCE_RECEIVES_PER_SENDER_PER_WINDOW,
                 COMMUNITY_RATE_WINDOW_SECS,
             ),
             receive_admission_mutex: Mutex::new(()),
@@ -1213,6 +1219,34 @@ impl CollaborationCore {
                     .sender_profile_did
                     .clone()
             });
+        // Presence replaces itself every 15 s: a sender over its presence
+        // limit loses the frame quietly, and a presence that claims a longer
+        // life than an honest one is refused, so presence replay tombstones
+        // stay a few per sender and drain within minutes.
+        let payload = &incoming.message().envelope().payload;
+        let presence_sender = (payload.payload_type
+            == crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE)
+            .then(|| payload.sender_profile_did.clone());
+        if presence_sender.is_some()
+            && payload.expires_at.saturating_sub(payload.created_at)
+                > crate::collaboration_presence::PRESENCE_TTL_SECS
+        {
+            return Ok(CollaborationTransportIngestion::Rejected(
+                CollaborationTransportRejection::InvalidMessage,
+            ));
+        }
+        if let Some(sender_profile_did) = &presence_sender {
+            if self
+                .presence_receive_rate
+                .check(sender_profile_did, now)
+                .is_err()
+            {
+                tracing::debug!("Community presence dropped: sender is over its limit");
+                return Ok(CollaborationTransportIngestion::Rejected(
+                    CollaborationTransportRejection::SenderRateLimited,
+                ));
+            }
+        }
         if let Some(sender_profile_did) = &rate_limited_sender {
             if self.receive_rate.check(sender_profile_did, now).is_err() {
                 return self.hold_refused(
@@ -1240,6 +1274,9 @@ impl CollaborationCore {
             .map_err(|_| CollaborationTransportRetryableError)?;
         if let Some(sender_profile_did) = &rate_limited_sender {
             self.receive_rate.record(sender_profile_did, now);
+        }
+        if let Some(sender_profile_did) = &presence_sender {
+            self.presence_receive_rate.record(sender_profile_did, now);
         }
         Ok(CollaborationTransportIngestion::Incoming(
             transport_incoming_acceptance(accepted),
@@ -1785,7 +1822,10 @@ impl CollaborationCore {
                 let receipt = self.verify_receipt_envelope(entry.acceptance_receipt.as_bytes())?;
                 conflicting.push((
                     index,
-                    tombstone_retention_deadline(receipt.envelope().payload.accepted_at),
+                    tombstone_retention_deadline(
+                        receipt.envelope().payload.accepted_at,
+                        authorized.message().envelope().payload.expires_at,
+                    ),
                 ));
             }
         }
@@ -1824,7 +1864,10 @@ impl CollaborationCore {
                 let receipt = self.verify_receipt_envelope(entry.acceptance_receipt.as_bytes())?;
                 malformed.push((
                     index,
-                    tombstone_retention_deadline(receipt.envelope().payload.accepted_at),
+                    tombstone_retention_deadline(
+                        receipt.envelope().payload.accepted_at,
+                        authorized.message().envelope().payload.expires_at,
+                    ),
                 ));
             }
         }
@@ -1875,7 +1918,10 @@ impl CollaborationCore {
             )?;
             state.incoming_tombstones.push(IncomingTombstone {
                 acceptance_receipt: record.acceptance_receipt,
-                retain_until: tombstone_retention_deadline(receipt.envelope().payload.accepted_at),
+                retain_until: tombstone_retention_deadline(
+                    receipt.envelope().payload.accepted_at,
+                    verified.message().envelope().payload.expires_at,
+                ),
             });
             ensure_state_fits(state)?;
             Ok(Mutation {
@@ -2592,7 +2638,7 @@ impl CollaborationCore {
             if payload.network_id != self.authority.network_id()
                 || payload.conversation_id != self.authority.grant().grant().conversation_id
                 || payload.recipient_endpoint_did != self.authority.local_device_did()
-                || entry.retain_until != tombstone_retention_deadline(payload.accepted_at)
+                || !tombstone_retention_is_bound(entry.retain_until, payload.accepted_at)
             {
                 anyhow::bail!("collaboration replay tombstone binding is invalid");
             }
@@ -3157,10 +3203,22 @@ fn stored_message_expiry(envelope: &str) -> anyhow::Result<u64> {
     )
 }
 
-fn tombstone_retention_deadline(accepted_at: u64) -> u64 {
+/// Intake refuses a message once its `expires_at` has passed, so its replay
+/// tombstone only has to outlive that expiry (plus skew for a clock that steps
+/// back). The maximum lifetime after acceptance stays the cap.
+fn tombstone_retention_deadline(accepted_at: u64, expires_at: u64) -> u64 {
     accepted_at
         .saturating_add(MAX_COLLABORATION_MESSAGE_LIFETIME_SECS)
+        .min(expires_at)
         .saturating_add(MAX_COLLABORATION_CLOCK_SKEW_SECS * 2)
+}
+
+/// A retained deadline must lie between the earliest possible expiry (intake
+/// needs `expires_at > accepted_at`) and the lifetime cap.
+fn tombstone_retention_is_bound(retain_until: u64, accepted_at: u64) -> bool {
+    (tombstone_retention_deadline(accepted_at, accepted_at.saturating_add(1))
+        ..=tombstone_retention_deadline(accepted_at, u64::MAX))
+        .contains(&retain_until)
 }
 
 fn now_secs() -> u64 {
@@ -3908,7 +3966,7 @@ mod tests {
                         .unwrap(),
                 )
                 .unwrap(),
-                retain_until: tombstone_retention_deadline(NOW),
+                retain_until: tombstone_retention_deadline(NOW, NOW + TTL),
             });
         }
         core.validate_state(&state).unwrap();
@@ -5894,6 +5952,128 @@ mod tests {
         accept(&over, NOW + COMMUNITY_RATE_WINDOW_SECS);
     }
 
+    fn remote_presence_frame(fixture: &Fixture, key: &SigningKey, now: u64, ttl: u64) -> Vec<u8> {
+        let prepared = fixture
+            .authority(key.clone())
+            .prepare_outgoing(
+                SERVICE,
+                crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+                serde_json::json!({}),
+                now,
+                ttl,
+            )
+            .unwrap();
+        wrap_transport_frame(fixture, key, prepared.envelope_bytes())
+    }
+
+    fn acknowledge_all_handoffs(core: &CollaborationCore) {
+        for handoff in core.pending_product_handoffs().unwrap() {
+            core.acknowledge_product_handoff(
+                handoff.authorized_message().message().envelope_sha256(),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn steady_presence_from_twenty_peers_never_exhausts_intake() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let peers = (0..20).map(|_| generate_keypair().0).collect::<Vec<_>>();
+        let presence_ttl = crate::collaboration_presence::PRESENCE_TTL_SECS;
+        let mut now = NOW;
+        let mut most_tombstones = 0;
+        // Two simulated hours of presence every 15 s from each peer.
+        while now < NOW + 2 * 60 * 60 {
+            for peer in &peers {
+                let frame = remote_presence_frame(&fixture, peer, now, presence_ttl);
+                assert!(transport_incoming(&core, &frame, now).product_handoff_pending());
+            }
+            acknowledge_all_handoffs(&core);
+            most_tombstones = most_tombstones.max(core.summary().unwrap().replay_tombstones);
+            now += 15;
+        }
+        // Each tombstone drains at expiry + 2 * skew, about two minutes.
+        let drain = presence_ttl + 2 * MAX_COLLABORATION_CLOCK_SKEW_SECS;
+        assert!(most_tombstones <= peers.len() * (drain / 15 + 1));
+        let (_, post) = remote_transport_message(&fixture, peers[0].clone(), now);
+        assert!(transport_incoming(&core, &post, now).product_handoff_pending());
+    }
+
+    #[test]
+    fn hostile_presence_flood_cannot_exhaust_intake_or_spend_chat_budget() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let hostile = generate_keypair().0;
+        let presence_ttl = crate::collaboration_presence::PRESENCE_TTL_SECS;
+        // Five simulated minutes at 50 presence frames per second.
+        for second in 0..5 * 60 {
+            let now = NOW + second;
+            for _ in 0..50 {
+                let frame = remote_presence_frame(&fixture, &hostile, now, presence_ttl);
+                match core.ingest_transport_frame(&frame, now).unwrap() {
+                    CollaborationTransportIngestion::Incoming(_) => {}
+                    CollaborationTransportIngestion::Rejected(reason) => {
+                        assert_eq!(reason, CollaborationTransportRejection::SenderRateLimited);
+                    }
+                    other => panic!("unexpected presence outcome {other:?}"),
+                }
+            }
+            // A presence claiming a longer life than an honest one is refused.
+            let long_lived = remote_presence_frame(&fixture, &hostile, now, TTL);
+            assert_eq!(
+                transport_rejection(&core, &long_lived, now),
+                CollaborationTransportRejection::InvalidMessage
+            );
+            acknowledge_all_handoffs(&core);
+        }
+        let now = NOW + 5 * 60;
+        assert!(core.summary().unwrap().replay_tombstones <= 2 * 12);
+        assert!(core.held.take(now).is_empty());
+        // Others' posts still arrive, and the flood spent none of the
+        // hostile sender's chat budget.
+        for _ in 0..3 {
+            let (_, post) = remote_transport_message(&fixture, generate_keypair().0, now);
+            assert!(transport_incoming(&core, &post, now).product_handoff_pending());
+        }
+        for _ in 0..COMMUNITY_RECEIVES_PER_SENDER_PER_WINDOW {
+            let (_, post) = remote_transport_message(&fixture, hostile.clone(), now);
+            assert!(transport_incoming(&core, &post, now).product_handoff_pending());
+            acknowledge_all_handoffs(&core);
+        }
+    }
+
+    #[test]
+    fn replay_tombstones_outlive_their_frame_and_expired_frames_are_refused() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let (_, post) = remote_transport_message(&fixture, generate_keypair().0, NOW);
+        let receipt = transport_incoming(&core, &post, NOW)
+            .acceptance_receipt_bytes()
+            .to_vec();
+        acknowledge_all_handoffs(&core);
+        // A replay within the post's lifetime is answered with its original
+        // receipt and is not admitted again.
+        let replay = transport_incoming(&core, &post, NOW + TTL - 1);
+        assert!(!replay.product_handoff_pending());
+        assert_eq!(replay.acceptance_receipt_bytes(), receipt);
+        assert!(core.pending_product_handoffs().unwrap().is_empty());
+        let retain_until = core.load_state().unwrap().unwrap().incoming_tombstones[0].retain_until;
+        assert_eq!(
+            retain_until,
+            NOW + TTL + 2 * MAX_COLLABORATION_CLOCK_SKEW_SECS
+        );
+        // Once the post expires, intake refuses it before and after its
+        // tombstone drains.
+        for now in [NOW + TTL, retain_until + 1] {
+            assert_eq!(
+                transport_rejection(&core, &post, now),
+                CollaborationTransportRejection::InvalidMessage
+            );
+            assert!(core.pending_product_handoffs().unwrap().is_empty());
+        }
+    }
+
     #[test]
     fn transport_dispatch_and_pure_message_rejections_are_deterministic() {
         let fixture = Fixture::new();
@@ -7249,7 +7429,7 @@ mod tests {
             .to_string()
             .contains("reused"));
 
-        let retention_deadline = tombstone_retention_deadline(NOW);
+        let retention_deadline = tombstone_retention_deadline(NOW, NOW + TTL);
         restarted
             .with_mutation(Some(retention_deadline), |_| {
                 Ok(Mutation {
@@ -7838,14 +8018,21 @@ mod tests {
             .contains("tombstone binding"));
         fs::write(core.state_path(), &original).unwrap();
 
-        for delta in [-1_i64, 1_i64] {
+        let accepted_at = serde_json::from_str::<SignedCollaborationAcceptanceReceipt>(
+            &serde_json::from_slice::<CoreState>(&original)
+                .unwrap()
+                .incoming_tombstones[0]
+                .acceptance_receipt,
+        )
+        .unwrap()
+        .payload
+        .accepted_at;
+        for retain_until in [
+            tombstone_retention_deadline(accepted_at, accepted_at),
+            tombstone_retention_deadline(accepted_at, u64::MAX) + 1,
+        ] {
             let mut altered_retention: CoreState = serde_json::from_slice(&original).unwrap();
-            let retain_until = altered_retention.incoming_tombstones[0].retain_until;
-            altered_retention.incoming_tombstones[0].retain_until = if delta < 0 {
-                retain_until - 1
-            } else {
-                retain_until + 1
-            };
+            altered_retention.incoming_tombstones[0].retain_until = retain_until;
             fs::write(
                 core.state_path(),
                 canonical_state_bytes(&altered_retention).unwrap(),
