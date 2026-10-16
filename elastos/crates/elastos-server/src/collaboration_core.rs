@@ -5995,7 +5995,7 @@ mod tests {
         }
         // Each tombstone drains at expiry + 2 * skew, about two minutes.
         let drain = presence_ttl + 2 * MAX_COLLABORATION_CLOCK_SKEW_SECS;
-        assert!(most_tombstones <= peers.len() * (drain / 15 + 1));
+        assert!(most_tombstones <= peers.len() * (drain as usize / 15 + 1));
         let (_, post) = remote_transport_message(&fixture, peers[0].clone(), now);
         assert!(transport_incoming(&core, &post, now).product_handoff_pending());
     }
@@ -6063,15 +6063,20 @@ mod tests {
             retain_until,
             NOW + TTL + 2 * MAX_COLLABORATION_CLOCK_SKEW_SECS
         );
-        // Once the post expires, intake refuses it before and after its
-        // tombstone drains.
-        for now in [NOW + TTL, retain_until + 1] {
-            assert_eq!(
-                transport_rejection(&core, &post, now),
-                CollaborationTransportRejection::InvalidMessage
-            );
-            assert!(core.pending_product_handoffs().unwrap().is_empty());
-        }
+        // Until the tombstone drains a replay only gets its receipt back; after
+        // that, intake refuses the expired post outright.
+        assert!(!transport_incoming(&core, &post, retain_until).product_handoff_pending());
+        assert_eq!(
+            transport_rejection(&core, &post, retain_until + 1),
+            CollaborationTransportRejection::InvalidMessage
+        );
+        assert!(core.pending_product_handoffs().unwrap().is_empty());
+        // A frame never seen before is refused once its expiry has passed.
+        let (_, late) = remote_transport_message(&fixture, generate_keypair().0, NOW);
+        assert_eq!(
+            transport_rejection(&core, &late, NOW + TTL),
+            CollaborationTransportRejection::InvalidMessage
+        );
     }
 
     #[test]
@@ -6874,7 +6879,9 @@ mod tests {
                 "elastos.chat.message/v1",
                 serde_json::json!({"body":"original live message"}),
                 now - 1_000,
-                TTL,
+                // Still live at `now`: a tombstone reserves an identity only
+                // for its message's own lifetime.
+                2_000,
             )
             .unwrap();
         core.accept_incoming_from_signed_source_for_test(original.envelope_bytes(), now - 999)
