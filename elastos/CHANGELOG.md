@@ -9,11 +9,13 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 ### Developer detail
 
 - Runtime's Community link watchdog (`CommunityLinkWatchdog`) repairs a joined
-  Home's Community link whatever stalled it: with no Community peer, or with
-  peers but no frame for 60 seconds after one arrived while someone else was
-  online, it rejoins the topic, then replaces Carrier's gossip actor a minute
-  later. With no peer it keeps replacing it, waiting twice as long each time
-  up to five minutes; a bootstrap node never does. Carrier's Runtime-only
+  Home that has had no Community peer for 60 seconds, whatever stalled it: it
+  rejoins the topic, then replaces Carrier's gossip actor a minute later, and
+  keeps repairing while no peer returns, waiting twice as long each time up to
+  five minutes. It replaces the actor at most six times per process
+  (`MAX_COMMUNITY_GOSSIP_REBUILDS`; each replacement leaves an iroh address
+  lookup behind), then only rejoins. A quiet Community with a peer listed and
+  a bootstrap node never get a step. Carrier's Runtime-only
   `gossip_topic_health`, `gossip_rejoin` and `gossip_rebuild` operations carry
   it, and Carrier shutdown no longer waits forever on a stalled gossip actor.
 - `scripts/release-publish.sh` publishes a final version `X.Y.Z` on `stable`
@@ -134,7 +136,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - First-run setup: the welcome sheet no longer disappears. Opening a step shrinks it to a small card that you click to continue, and it comes back after you save the Recovery Kit.
 - From this version on, every Home start gives its newly started Runtime up to 2 minutes to become ready: a System update, `elastos home --browser`, and `elastos home` without `--browser` (which gave up after 30 seconds). So Home no longer fails to start, or is left stopped by an update, on a slower device such as a Jetson. If the previous version was put back but could not start, `elastos home --browser` starts it again. The update log keeps the output of every update start.
 - During an update, System says that Home is restarting and how long it usually takes, and reloads by itself when the update is done.
-- Community posts are no longer held up by an overloaded Community node: Homes resend unanswered posts and presence less often, and the node only forwards them. A Home whose Community connection stops working now recovers by itself instead of staying unreachable until Home restarts.
+- Community posts are no longer held up by an overloaded Community node: Homes resend unanswered posts and presence less often, and the node only forwards them. A Home that shows Community unreachable now reconnects by itself instead of staying unreachable until Home restarts.
 
 ## [0.8.0-alpha.21] - 2026-10-16
 
@@ -196,7 +198,7 @@ Release candidate for 0.8.0 on the test channel, with the same notes.
 - First-run setup: the welcome sheet no longer disappears. Opening a step shrinks it to a small card that you click to continue, and it comes back after you save the Recovery Kit.
 - From this version on, every Home start gives its newly started Runtime up to 2 minutes to become ready: a System update, `elastos home --browser`, and `elastos home` without `--browser` (which gave up after 30 seconds). So Home no longer fails to start, or is left stopped by an update, on a slower device such as a Jetson. If the previous version was put back but could not start, `elastos home --browser` starts it again. The update log keeps the output of every update start.
 - During an update, System says that Home is restarting and how long it usually takes, and reloads by itself when the update is done.
-- Community posts are no longer held up by an overloaded Community node: Homes resend unanswered posts and presence less often, and the node only forwards them. A Home whose Community connection stops working now recovers by itself instead of staying unreachable until Home restarts.
+- Community posts are no longer held up by an overloaded Community node: Homes resend unanswered posts and presence less often, and the node only forwards them. A Home that shows Community unreachable now reconnects by itself instead of staying unreachable until Home restarts.
 
 ## [0.8.0-alpha.20] - 2026-10-15
 
