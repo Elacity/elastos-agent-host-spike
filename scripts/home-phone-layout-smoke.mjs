@@ -468,21 +468,6 @@ async function handleApi(req, res, url) {
     }
     return true;
   }
-  if (url.pathname === "/api/apps/home/collaboration/presence" && req.method === "POST") {
-    if (!requireToken(req, homeAuthorityToken, res)) return true;
-    await readBody(req);
-    json(res, 200, {
-      schema: "elastos.people.discovery/v1",
-      configured: false,
-      enabled: false,
-      status: "unconfigured",
-      status_message: "Discovery isn’t available on this Home.",
-      discovered_count: 0,
-      discovered_peers: [],
-      request_count: 0,
-    });
-    return true;
-  }
   if (url.pathname === "/api/apps/home/runtime/ensure" && req.method === "POST") {
     json(res, 200, { ready: true });
     return true;
