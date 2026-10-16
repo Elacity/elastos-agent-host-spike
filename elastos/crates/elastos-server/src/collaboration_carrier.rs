@@ -1,12 +1,14 @@
 //! Internal Carrier transport for one verified collaboration network.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use elastos_runtime::provider::Provider;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use tokio::time::Instant;
 
 use crate::collaboration_network::{
     validate_collaboration_bootstrap_peer, CollaborationBootstrapPeer,
@@ -21,6 +23,13 @@ const COLLABORATION_TOPIC_PREFIX: &str = "__elastos_internal/collaboration-v1/";
 const COLLABORATION_RECEIVE_BATCH_SIZE: usize = 32;
 const MAX_RECEIVE_RESPONSE_BYTES: usize =
     MAX_COLLABORATION_TRANSPORT_FRAME_BYTES * COLLABORATION_RECEIVE_BATCH_SIZE + 64 * 1024;
+/// Silence after which a joined Home treats its Community link as dead.
+/// Runtime presence is refreshed every 15 s and lives 45 s
+/// (`RUNTIME_OWNED_PRESENCE_CADENCE`, `PRESENCE_TTL_SECS`), so 60 s with no
+/// frame while someone was online is four missed refreshes.
+pub(crate) const COMMUNITY_LINK_SILENCE: Duration = Duration::from_secs(60);
+/// Longest wait between gossip rebuilds while a Home has no Community peer.
+const MAX_COMMUNITY_LINK_RETRY: Duration = Duration::from_secs(300);
 
 /// An exact collaboration-network Carrier subscription.
 ///
@@ -100,6 +109,28 @@ struct LocalTicketData {
 struct TopicPeersData {
     topic: String,
     peers: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TopicHealthData {
+    topic: String,
+    peer_count: usize,
+    received_frames: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RebuildData {
+    topics: usize,
+}
+
+/// One reading of the Community topic in Carrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CommunityLinkHealth {
+    pub(crate) peer_count: usize,
+    /// Frames received from peers since the topic was joined.
+    pub(crate) received_frames: u64,
 }
 
 #[derive(Deserialize)]
@@ -226,12 +257,7 @@ impl JoinedCollaborationNetwork {
         Ok(!self.topic_peers().await?.peers.is_empty())
     }
 
-    /// Repair only missing peers from the verified profile. The Runtime owns
-    /// the retry cadence; a healthy mesh never receives another Join here.
-    pub(crate) async fn restore_missing_bootstrap_peers(&self) -> anyhow::Result<()> {
-        if self.bootstrap_node_ids.is_empty() {
-            return Ok(());
-        }
+    async fn local_node_id(&self) -> anyhow::Result<String> {
         let response = self
             .carrier
             .send_raw(&serde_json::json!({ "op": "get_ticket" }))
@@ -244,11 +270,21 @@ impl JoinedCollaborationNetwork {
             connect_ticket: local.ticket,
         })
         .context("Carrier local endpoint identity is inconsistent")?;
+        Ok(local.node_id)
+    }
+
+    /// Repair only missing peers from the verified profile. The Runtime owns
+    /// the retry cadence; a healthy mesh never receives another Join here.
+    pub(crate) async fn restore_missing_bootstrap_peers(&self) -> anyhow::Result<()> {
+        if self.bootstrap_node_ids.is_empty() {
+            return Ok(());
+        }
+        let local_node_id = self.local_node_id().await?;
         let connected = self.topic_peers().await?;
         let missing = self
             .bootstrap_node_ids
             .iter()
-            .filter(|node_id| *node_id != &local.node_id && !connected.peers.contains(node_id))
+            .filter(|node_id| *node_id != &local_node_id && !connected.peers.contains(node_id))
             .collect::<Vec<_>>();
         if missing.is_empty() {
             return Ok(());
@@ -382,6 +418,221 @@ impl JoinedCollaborationNetwork {
             anyhow::bail!("Carrier gossip_ack returned an invalid collaboration range");
         }
         Ok(())
+    }
+}
+
+/// What the Community link watchdog needs from Carrier.
+pub(crate) trait CommunityLink {
+    /// Only a Home repairs its own link. A bootstrap node (the seed's
+    /// Community node) has nobody to rejoin, and its rebuild would cut every
+    /// Home at once.
+    async fn recovers_its_link(&self) -> anyhow::Result<bool>;
+    async fn link_health(&self) -> anyhow::Result<CommunityLinkHealth>;
+    /// Leaves the Community topic and joins it again with its bootstrap peers.
+    async fn rejoin(&self) -> anyhow::Result<()>;
+    /// Replaces Carrier's gossip actor; returns how many topics joined again.
+    async fn rebuild_gossip(&self) -> anyhow::Result<usize>;
+}
+
+impl CommunityLink for JoinedCollaborationNetwork {
+    async fn recovers_its_link(&self) -> anyhow::Result<bool> {
+        if self.bootstrap_node_ids.is_empty() {
+            return Ok(false);
+        }
+        let local_node_id = self.local_node_id().await?;
+        Ok(!self.bootstrap_node_ids.contains(&local_node_id))
+    }
+
+    async fn link_health(&self) -> anyhow::Result<CommunityLinkHealth> {
+        let response = self
+            .carrier
+            .send_raw(&serde_json::json!({
+                "op": "gossip_topic_health",
+                "topic": self.topic,
+            }))
+            .await
+            .context("Carrier topic health failed for collaboration network")?;
+        require_bounded_response(&response)?;
+        let health: TopicHealthData = require_ok_response(response, "gossip_topic_health")?;
+        if health.topic != self.topic {
+            anyhow::bail!("Carrier returned a mismatched collaboration topic health");
+        }
+        Ok(CommunityLinkHealth {
+            peer_count: health.peer_count,
+            received_frames: health.received_frames,
+        })
+    }
+
+    async fn rejoin(&self) -> anyhow::Result<()> {
+        let response = self
+            .carrier
+            .send_raw(&serde_json::json!({ "op": "gossip_rejoin", "topic": self.topic }))
+            .await
+            .context("Carrier gossip_rejoin failed for collaboration network")?;
+        require_bounded_response(&response)?;
+        let joined: JoinExactData = require_ok_response(response, "gossip_rejoin")?;
+        if joined.topic != self.topic {
+            anyhow::bail!("Carrier returned a mismatched collaboration rejoin");
+        }
+        Ok(())
+    }
+
+    async fn rebuild_gossip(&self) -> anyhow::Result<usize> {
+        let response = self
+            .carrier
+            .send_raw(&serde_json::json!({ "op": "gossip_rebuild" }))
+            .await
+            .context("Carrier gossip_rebuild failed for collaboration network")?;
+        require_bounded_response(&response)?;
+        let rebuilt: RebuildData = require_ok_response(response, "gossip_rebuild")?;
+        Ok(rebuilt.topics)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommunityLinkStep {
+    Rejoin,
+    Rebuild,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommunityLinkFault {
+    /// Joined, with no Community peer.
+    NoPeers,
+    /// Peers listed and someone was online, but no frame arrives.
+    Silent,
+}
+
+impl CommunityLinkFault {
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::NoPeers => "no Community peer",
+            Self::Silent => "no Community frame although someone was online",
+        }
+    }
+}
+
+/// Decides when a joined Home repairs a Community link that stays dead,
+/// whatever stalled it: first a topic rejoin, then a new gossip actor.
+///
+/// A quiet Community is normal (Discovery off means a Home announces
+/// nothing), so silence counts only after frames arrived while someone else
+/// was online. Silence with peers listed gets one rejoin and one rebuild;
+/// a frame re-arms it. No peer and no frame keeps rebuilding with a doubling
+/// wait up to `MAX_COMMUNITY_LINK_RETRY`. Two steps are never closer than
+/// one silence, whatever re-armed the watchdog in between.
+pub(crate) struct CommunityLinkWatchdog {
+    silence: Duration,
+    observed_at: Option<Instant>,
+    received_frames: Option<u64>,
+    expected_since: Option<Instant>,
+    no_peers_since: Option<Instant>,
+    last_step_at: Option<Instant>,
+    steps: u32,
+}
+
+impl CommunityLinkWatchdog {
+    pub(crate) fn new(silence: Duration) -> Self {
+        Self {
+            silence,
+            observed_at: None,
+            received_frames: None,
+            expected_since: None,
+            no_peers_since: None,
+            last_step_at: None,
+            steps: 0,
+        }
+    }
+
+    /// `health` is `None` when Carrier did not answer. `someone_online` is
+    /// asked only when new frames arrived.
+    pub(crate) fn observe(
+        &mut self,
+        health: Option<CommunityLinkHealth>,
+        now: Instant,
+        someone_online: impl FnOnce() -> bool,
+    ) -> Option<(CommunityLinkStep, CommunityLinkFault)> {
+        // A gap (Community left, or a long cycle) starts every window again.
+        if self
+            .observed_at
+            .is_some_and(|at| now.duration_since(at) > self.silence / 2)
+        {
+            *self = Self {
+                received_frames: self.received_frames,
+                last_step_at: self.last_step_at,
+                ..Self::new(self.silence)
+            };
+        }
+        self.observed_at = Some(now);
+        let peer_count = health.map_or(0, |health| health.peer_count);
+        if let Some(health) = health {
+            if self
+                .received_frames
+                .is_some_and(|frames| frames != health.received_frames)
+            {
+                // Frames prove the link, whatever the peer list says.
+                if self.steps > 0 {
+                    tracing::info!(
+                        steps = self.steps,
+                        "Community link recovered: frames arrive again"
+                    );
+                }
+                self.steps = 0;
+                self.no_peers_since = None;
+                self.expected_since = someone_online().then_some(now);
+            }
+            self.received_frames = Some(health.received_frames);
+        }
+        if peer_count == 0 {
+            self.no_peers_since.get_or_insert(now);
+        } else {
+            self.no_peers_since = None;
+        }
+        let (since, fault) = match (self.no_peers_since, self.expected_since) {
+            (Some(since), _) => (since, CommunityLinkFault::NoPeers),
+            (None, Some(since)) => (since, CommunityLinkFault::Silent),
+            (None, None) => {
+                self.steps = 0;
+                return None;
+            }
+        };
+        let wait = match self.steps {
+            0 | 1 => self.silence,
+            _ if fault == CommunityLinkFault::Silent => {
+                // After the rebuild, quiet with peers listed is normal: wait
+                // one silence for frames, then rest until a frame re-arms.
+                if self
+                    .last_step_at
+                    .is_none_or(|at| now.duration_since(at) >= self.silence)
+                {
+                    self.expected_since = None;
+                    self.steps = 0;
+                }
+                return None;
+            }
+            steps => self
+                .silence
+                .saturating_mul(1 << (steps - 1).min(8))
+                .min(MAX_COMMUNITY_LINK_RETRY),
+        };
+        let anchor = match (self.steps, self.last_step_at) {
+            (0, _) | (_, None) => since,
+            (_, Some(at)) => at,
+        };
+        let rested = self
+            .last_step_at
+            .is_none_or(|at| now.duration_since(at) >= self.silence);
+        if now.duration_since(anchor) < wait || !rested {
+            return None;
+        }
+        let step = if self.steps == 0 {
+            CommunityLinkStep::Rejoin
+        } else {
+            CommunityLinkStep::Rebuild
+        };
+        self.steps = self.steps.saturating_add(1);
+        self.last_step_at = Some(now);
+        Some((step, fault))
     }
 }
 
