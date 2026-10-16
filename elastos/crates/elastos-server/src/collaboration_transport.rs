@@ -446,6 +446,21 @@ impl CollaborationTransportDriver {
         let mut summary = CollaborationOutgoingRetrySummary::default();
         for outgoing in selected {
             self.core.community_membership().require_joined()?;
+            // A queued announcement goes out only while its person's grant
+            // still validates: Hidden, a revoke or an epoch bump stops it.
+            // The Runtime always wires the presence port (collaboration
+            // startup); a bare driver carries no Product port to consult.
+            if let (Some((principal_id, profile_did)), Some(delivery)) =
+                (outgoing.presence_sender(), &self.home_delivery)
+            {
+                if !delivery
+                    .presence
+                    .queued_presence_allowed(principal_id, profile_did, now)
+                    .await?
+                {
+                    continue;
+                }
+            }
             // Recorded per send, so a cycle cut short leaves the rest due.
             {
                 let mut schedule = self
@@ -592,6 +607,7 @@ mod tests {
         SignedCollaborationNetworkProfile, VerifiedCollaborationNetworkProfile,
         COLLABORATION_NETWORK_PROFILE_SCHEMA, COLLABORATION_NETWORK_PROFILE_SIGNATURE_DOMAIN,
     };
+    use crate::collaboration_presence_grant::PresenceDecision;
     use crate::collaboration_protocol::sign_collaboration_transport_frame;
     use crate::esp_binding::{esp_request_binding, EspRequestBinding};
     use elastos_common::collaboration_protocol::{
@@ -918,6 +934,115 @@ mod tests {
         .unwrap()
     }
 
+    const PRESENCE_PRINCIPAL: &str = "runtime-principal";
+
+    /// A presence port whose person has granted "Always", as on a Home.
+    async fn granted_presence_port(
+        fixture: &Fixture,
+        core: Arc<CollaborationCore>,
+    ) -> (
+        CollaborationPresenceProductPort,
+        Arc<crate::collaboration_presence_grant::PresenceAuthority>,
+    ) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fixture.data_root, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+        crate::auth::store_test_principal_root_protection(&fixture.data_root, PRESENCE_PRINCIPAL);
+        let authority = crate::collaboration_presence_grant::test_authority();
+        let port = CollaborationPresenceProductPort::new(core)
+            .unwrap()
+            .with_presence_authority(authority.clone());
+        set_presence(fixture, &port, &authority, PresenceDecision::Always).await;
+        (port, authority)
+    }
+
+    async fn granted_presence_driver(
+        fixture: &Fixture,
+        core: Arc<CollaborationCore>,
+        carrier: Arc<dyn Provider>,
+    ) -> (
+        CollaborationTransportDriver,
+        CollaborationPresenceProductPort,
+        Arc<crate::collaboration_presence_grant::PresenceAuthority>,
+    ) {
+        let (port, authority) = granted_presence_port(fixture, core.clone()).await;
+        let driver = fixture
+            .driver(core, carrier)
+            .await
+            .with_home_delivery(port.clone(), Arc::new(ProviderRegistry::new()))
+            .await
+            .unwrap();
+        (driver, port, authority)
+    }
+
+    async fn set_presence(
+        fixture: &Fixture,
+        port: &CollaborationPresenceProductPort,
+        authority: &crate::collaboration_presence_grant::PresenceAuthority,
+        decision: PresenceDecision,
+    ) {
+        let profile = fixture
+            .authority(fixture.device_key.clone())
+            .sender_profile_for_test()
+            .unwrap();
+        crate::collaboration_presence_grant::set_presence_grant(
+            authority,
+            &fixture.data_root,
+            PRESENCE_PRINCIPAL,
+            &profile.document().profile_did,
+            &port.presence_scope(),
+            decision,
+            NOW,
+        )
+        .await
+        .unwrap();
+    }
+
+    fn queued_presence(fixture: &Fixture, core: &CollaborationCore, request_id: &str) {
+        let presence = prepare_metadata(fixture, core, request_id);
+        core.acknowledge_outgoing_product_projection(presence.envelope_sha256())
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_queued_presence_is_not_sent_after_hidden() {
+        let a = Fixture::new();
+        let ac = a.core();
+        let (driver, port, authority) =
+            granted_presence_driver(&a, ac.clone(), FakeCarrier::new()).await;
+        queued_presence(&a, &ac, "granted-presence");
+        assert_eq!(driver.retry_outgoing_once(NOW).await.unwrap().attempted, 1);
+        // Hidden lands while the announcement is still queued and live; the
+        // next send, as after a reconnect, discloses nothing.
+        set_presence(&a, &port, &authority, PresenceDecision::Hidden).await;
+        tokio::time::advance(SHARED_CUSTODY_RETRY).await;
+        assert_eq!(
+            driver.retry_outgoing_once(NOW + 5).await.unwrap().attempted,
+            0
+        );
+        assert!(ac.pending_outgoing(NOW + 5).unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_queued_presence_is_not_sent_after_an_epoch_bump() {
+        let a = Fixture::new();
+        let ac = a.core();
+        let (driver, _port, authority) =
+            granted_presence_driver(&a, ac.clone(), FakeCarrier::new()).await;
+        queued_presence(&a, &ac, "granted-presence");
+        assert_eq!(driver.retry_outgoing_once(NOW).await.unwrap().attempted, 1);
+        authority.manager().revoke_all("test epoch");
+        tokio::time::advance(SHARED_CUSTODY_RETRY).await;
+        assert_eq!(
+            driver.retry_outgoing_once(NOW + 5).await.unwrap().attempted,
+            0
+        );
+        assert!(ac.pending_outgoing(NOW + 5).unwrap().is_empty());
+    }
+
     fn remote_receipt(
         fixture: &Fixture,
         outgoing: &crate::collaboration_core::DurableOutgoingMessage,
@@ -1074,7 +1199,7 @@ mod tests {
         stall: bool,
     ) -> (CollaborationTransportDriver, Arc<Plane>) {
         let registry = Arc::new(ProviderRegistry::new());
-        let presence = CollaborationPresenceProductPort::new(core.clone()).unwrap();
+        let (presence, _authority) = granted_presence_port(fixture, core.clone()).await;
         let plane = Arc::new(Plane {
             source: core.local_device_did(),
             peers,
@@ -1714,7 +1839,8 @@ mod tests {
         }
         // No Home answers and every broadcast fails, as with an overloaded seed.
         let carrier = FakeCarrier::new();
-        let driver = a.driver(ac.clone(), carrier.clone()).await;
+        let (driver, _port, _authority) =
+            granted_presence_driver(&a, ac.clone(), carrier.clone()).await;
         let mut ticks = HashMap::<String, Vec<u32>>::new();
         let mut seen = 1;
         // 400 worker cycles of 500 ms: 200 s.

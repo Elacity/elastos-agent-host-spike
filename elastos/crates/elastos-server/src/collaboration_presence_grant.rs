@@ -424,6 +424,43 @@ pub(crate) async fn presence_grant(
     }
 }
 
+/// The send boundary: may a queued announcement of this person still go out?
+/// Validates the person's current grant, for the publisher its recorded mode
+/// names, exactly as `presence_grant` does, so Hidden, a refusal, a revoke
+/// or an epoch bump stops an announcement already queued.
+pub(crate) async fn queued_presence_allowed(
+    authority: &PresenceAuthority,
+    data_dir: &std::path::Path,
+    principal_id: &str,
+    profile_did: &str,
+    scope: &PresenceScope,
+    now: u64,
+) -> bool {
+    let Some(mode) = load_file(data_dir, principal_id).ok().and_then(|file| {
+        file.grants
+            .into_iter()
+            .find(|grant| &grant.scope == scope)
+            .map(|grant| grant.mode)
+    }) else {
+        return false;
+    };
+    let publisher = match mode {
+        PresenceMode::Always => PresencePublisher::Runtime,
+        PresenceMode::WhileOpen => PresencePublisher::CommunityOpen,
+    };
+    presence_grant(
+        authority,
+        data_dir,
+        principal_id,
+        profile_did,
+        scope,
+        publisher,
+        now,
+    )
+    .await
+    .is_some()
+}
+
 /// Records the person's own answer, from Inbox or System → Community only.
 /// Always and Only-while-open mint a token for `principal_id`; any change
 /// revokes the token it replaces (persisted before this returns).

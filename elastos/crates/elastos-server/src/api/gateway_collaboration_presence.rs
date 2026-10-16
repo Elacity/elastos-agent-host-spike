@@ -401,7 +401,11 @@ async fn set_community_presence(
         decision,
         now_ts(),
     )
-    .await
+    .await?;
+    // Announcements queued under the previous answer never go out; a
+    // current grant re-announces on its next tick.
+    port.retire_outgoing_presence(&context.principal_id)?;
+    Ok(())
 }
 
 fn community_presence_response(state: &GatewayState, context: &HomeLaunchTokenContext) -> Response {

@@ -111,6 +111,9 @@ pub(crate) struct DurableOutgoingMessage {
     created_at: u64,
     shared_chat: bool,
     accepted_endpoints: Vec<String>,
+    /// A presence announcement's principal and sender Profile DID; the send
+    /// boundary re-validates that principal's grant before each send.
+    presence_sender: Option<(String, String)>,
 }
 
 pub(crate) struct PendingOutgoingProductProjection {
@@ -148,6 +151,12 @@ impl DurableOutgoingMessage {
 
     pub(crate) fn remote_acceptance_recorded(&self) -> bool {
         !self.accepted_endpoints.is_empty()
+    }
+
+    pub(crate) fn presence_sender(&self) -> Option<(&str, &str)> {
+        self.presence_sender
+            .as_ref()
+            .map(|(principal, profile_did)| (principal.as_str(), profile_did.as_str()))
     }
 }
 
@@ -1626,6 +1635,34 @@ impl CollaborationCore {
             .collect()
     }
 
+    pub(crate) fn data_root(&self) -> &Path {
+        &self.data_root
+    }
+
+    /// Drops every queued presence announcement of `principal_id`, so a
+    /// revoked, refused or hidden grant is never sent again. Presence is a
+    /// short-lived announcement and keeps no replay record.
+    pub(crate) fn retire_outgoing_presence(&self, principal_id: &str) -> anyhow::Result<usize> {
+        self.with_mutation(None, |state| {
+            let before = state.outgoing.len();
+            state.outgoing.retain(|entry| {
+                entry.operation.principal != principal_id
+                    || serde_json::from_str::<SignedCollaborationMessage>(&entry.envelope).map_or(
+                        true,
+                        |message| {
+                            message.payload.payload_type
+                                != crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE
+                        },
+                    )
+            });
+            let retired = before - state.outgoing.len();
+            Ok(Mutation {
+                value: retired,
+                changed: retired > 0,
+            })
+        })
+    }
+
     pub(crate) fn acknowledge_outgoing_product_projection(
         &self,
         envelope_hash: &str,
@@ -3095,6 +3132,14 @@ fn outgoing_handle(
                     .map(|receipt| receipt.accepting_endpoint_did().to_string())
             })
             .collect(),
+        presence_sender: (verified.envelope().payload.payload_type
+            == crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE)
+            .then(|| {
+                (
+                    entry.operation.principal.clone(),
+                    verified.envelope().payload.sender_profile_did.clone(),
+                )
+            }),
     }
 }
 
