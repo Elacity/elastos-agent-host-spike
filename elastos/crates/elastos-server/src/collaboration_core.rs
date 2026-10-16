@@ -43,6 +43,10 @@ const CORE_STATE_DIR: &str = "collaboration/default-conversation";
 const CORE_STATE_FILE: &str = "state-v1.json";
 const CORE_LOCK_FILE: &str = "state-v1.lock";
 const HISTORY_STATE_FILE: &str = "history-v1.json";
+/// Early drain deadlines for replay tombstones, keyed by receipt hash. Kept
+/// apart from the state file so released binaries still load that file.
+const TOMBSTONE_DRAIN_FILE: &str = "tombstone-drain-v1.json";
+const MAX_TOMBSTONE_DRAIN_BYTES: usize = 1024 * 1024;
 const HISTORY_STATE_SCHEMA: &str = "elastos.collaboration.conversation-history/v1";
 const CORE_NAMESPACE_DOMAIN: &[u8] = b"elastos.collaboration.default-conversation-state.v1";
 pub(crate) const DEFAULT_CONVERSATION_SEND_METHOD: &str = "message.send";
@@ -80,6 +84,7 @@ pub(crate) struct CollaborationCore {
     receipt_verifications: Mutex<SignedBytesCache<VerifiedCollaborationAcceptanceReceipt>>,
     bound_receipt_verifications: Mutex<SignedBytesCache<VerifiedCollaborationAcceptanceReceipt>>,
     verified_state: Mutex<Option<(Vec<u8>, CoreState)>>,
+    tombstone_drain: Mutex<Option<HashMap<String, u64>>>,
     #[cfg(test)]
     verification_misses: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -460,6 +465,7 @@ impl CollaborationCore {
             message_verifications: Mutex::new(SignedBytesCache::new()),
             receipt_verifications: Mutex::new(SignedBytesCache::new()),
             bound_receipt_verifications: Mutex::new(SignedBytesCache::new()),
+            tombstone_drain: Mutex::new(None),
             verified_state: Mutex::new(None),
             #[cfg(test)]
             verification_misses: std::sync::atomic::AtomicUsize::new(0),
@@ -1822,7 +1828,7 @@ impl CollaborationCore {
                 let receipt = self.verify_receipt_envelope(entry.acceptance_receipt.as_bytes())?;
                 conflicting.push((
                     index,
-                    tombstone_retention_deadline(
+                    tombstone_drain_deadline(
                         receipt.envelope().payload.accepted_at,
                         authorized.message().envelope().payload.expires_at,
                     ),
@@ -1830,12 +1836,9 @@ impl CollaborationCore {
             }
         }
         let changed = !conflicting.is_empty();
-        for (index, retain_until) in conflicting.into_iter().rev() {
+        for (index, drain_at) in conflicting.into_iter().rev() {
             let entry = state.incoming.remove(index);
-            state.incoming_tombstones.push(IncomingTombstone {
-                acceptance_receipt: entry.acceptance_receipt,
-                retain_until,
-            });
+            self.push_tombstone(state, entry.acceptance_receipt, drain_at)?;
         }
         Ok(changed)
     }
@@ -1864,7 +1867,7 @@ impl CollaborationCore {
                 let receipt = self.verify_receipt_envelope(entry.acceptance_receipt.as_bytes())?;
                 malformed.push((
                     index,
-                    tombstone_retention_deadline(
+                    tombstone_drain_deadline(
                         receipt.envelope().payload.accepted_at,
                         authorized.message().envelope().payload.expires_at,
                     ),
@@ -1872,12 +1875,9 @@ impl CollaborationCore {
             }
         }
         changed |= !malformed.is_empty();
-        for (index, retain_until) in malformed.into_iter().rev() {
+        for (index, drain_at) in malformed.into_iter().rev() {
             let entry = state.incoming.remove(index);
-            state.incoming_tombstones.push(IncomingTombstone {
-                acceptance_receipt: entry.acceptance_receipt,
-                retain_until,
-            });
+            self.push_tombstone(state, entry.acceptance_receipt, drain_at)?;
         }
         Ok(changed)
     }
@@ -1916,13 +1916,11 @@ impl CollaborationCore {
                 record.acceptance_receipt.as_bytes(),
                 verified.message(),
             )?;
-            state.incoming_tombstones.push(IncomingTombstone {
-                acceptance_receipt: record.acceptance_receipt,
-                retain_until: tombstone_retention_deadline(
-                    receipt.envelope().payload.accepted_at,
-                    verified.message().envelope().payload.expires_at,
-                ),
-            });
+            let drain_at = tombstone_drain_deadline(
+                receipt.envelope().payload.accepted_at,
+                verified.message().envelope().payload.expires_at,
+            );
+            self.push_tombstone(state, record.acceptance_receipt, drain_at)?;
             ensure_state_fits(state)?;
             Ok(Mutation {
                 value: (),
@@ -1950,8 +1948,12 @@ impl CollaborationCore {
                 product_handoff_pending: true,
             }));
         }
+        let drain = self.tombstone_drain()?;
         if let Some(entry) = state.incoming_tombstones.iter().find(|entry| {
             entry.retain_until >= now
+                && drain
+                    .get(&tombstone_key(&entry.acceptance_receipt))
+                    .is_none_or(|drain_at| *drain_at >= now)
                 && self
                     .verify_receipt_envelope(entry.acceptance_receipt.as_bytes())
                     .map(|receipt| {
@@ -2159,6 +2161,7 @@ impl CollaborationCore {
             .lock()
             .map_err(|_| anyhow::anyhow!("collaboration state verification cache poisoned"))? =
             Some((canonical_state_bytes(state)?, state.clone()));
+        self.write_tombstone_drain(state);
         Ok(())
     }
 
@@ -2195,7 +2198,110 @@ impl CollaborationCore {
                 now,
             )?;
         }
-        prune_terminal_state(state, now)
+        let drain = self.tombstone_drain()?;
+        prune_terminal_state(state, now, &drain)
+    }
+
+    /// Adds a replay tombstone. `retain_until` keeps the format released
+    /// binaries validate; `drain_at` goes to the sidecar this binary prunes by.
+    fn push_tombstone(
+        &self,
+        state: &mut CoreState,
+        acceptance_receipt: String,
+        drain_at: u64,
+    ) -> anyhow::Result<()> {
+        let receipt = self.verify_receipt_envelope(acceptance_receipt.as_bytes())?;
+        let retain_until = tombstone_retention_deadline(receipt.envelope().payload.accepted_at);
+        self.tombstone_drain
+            .lock()
+            .map_err(|_| anyhow::anyhow!("collaboration tombstone drain cache poisoned"))?
+            .get_or_insert_with(|| self.read_tombstone_drain())
+            .insert(tombstone_key(&acceptance_receipt), drain_at);
+        state.incoming_tombstones.push(IncomingTombstone {
+            acceptance_receipt,
+            retain_until,
+        });
+        Ok(())
+    }
+
+    fn tombstone_drain(&self) -> anyhow::Result<HashMap<String, u64>> {
+        Ok(self
+            .tombstone_drain
+            .lock()
+            .map_err(|_| anyhow::anyhow!("collaboration tombstone drain cache poisoned"))?
+            .get_or_insert_with(|| self.read_tombstone_drain())
+            .clone())
+    }
+
+    fn tombstone_drain_path(&self) -> PathBuf {
+        self.state_dir.join(TOMBSTONE_DRAIN_FILE)
+    }
+
+    /// A missing or unreadable sidecar only means tombstones wait for their
+    /// persisted 24-hour deadline, which is always safe.
+    fn read_tombstone_drain(&self) -> HashMap<String, u64> {
+        let read = || -> anyhow::Result<HashMap<String, u64>> {
+            let path = self.tombstone_drain_path();
+            validate_owner_only_regular_file(&path, &fs::symlink_metadata(&path)?)?;
+            let mut options = OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NOFOLLOW);
+            }
+            let mut bytes = Vec::new();
+            options
+                .open(&path)?
+                .take(MAX_TOMBSTONE_DRAIN_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)?;
+            anyhow::ensure!(bytes.len() <= MAX_TOMBSTONE_DRAIN_BYTES);
+            Ok(serde_json::from_slice(&bytes)?)
+        };
+        read().unwrap_or_default()
+    }
+
+    /// Keeps only the current tombstones' entries. A failed write leaves the
+    /// longer persisted deadline in force, so it is logged, not fatal.
+    fn write_tombstone_drain(&self, state: &CoreState) {
+        let write = || -> anyhow::Result<()> {
+            let mut cache = self
+                .tombstone_drain
+                .lock()
+                .map_err(|_| anyhow::anyhow!("collaboration tombstone drain cache poisoned"))?;
+            let drain = cache.get_or_insert_with(|| self.read_tombstone_drain());
+            let live = state
+                .incoming_tombstones
+                .iter()
+                .map(|entry| tombstone_key(&entry.acceptance_receipt))
+                .collect::<HashSet<_>>();
+            drain.retain(|key, _| live.contains(key));
+            let bytes = serde_json::to_vec(&*drain)?;
+            let temp = self
+                .state_dir
+                .join(format!(".{TOMBSTONE_DRAIN_FILE}.{}.tmp", random_hex_128()?));
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+            }
+            let result = (|| -> anyhow::Result<()> {
+                let mut file = options.open(&temp)?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+                fs::rename(&temp, self.tombstone_drain_path())?;
+                Ok(())
+            })();
+            if result.is_err() {
+                let _ = fs::remove_file(&temp);
+            }
+            result
+        };
+        if let Err(error) = write() {
+            tracing::warn!(%error, "Community replay drain sidecar was not written");
+        }
     }
 
     fn load_state(&self) -> anyhow::Result<Option<CoreState>> {
@@ -2638,7 +2744,7 @@ impl CollaborationCore {
             if payload.network_id != self.authority.network_id()
                 || payload.conversation_id != self.authority.grant().grant().conversation_id
                 || payload.recipient_endpoint_did != self.authority.local_device_did()
-                || !tombstone_retention_is_bound(entry.retain_until, payload.accepted_at)
+                || entry.retain_until != tombstone_retention_deadline(payload.accepted_at)
             {
                 anyhow::bail!("collaboration replay tombstone binding is invalid");
             }
@@ -3099,7 +3205,11 @@ fn validate_sha256_label(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn prune_terminal_state(state: &mut CoreState, now: u64) -> anyhow::Result<bool> {
+fn prune_terminal_state(
+    state: &mut CoreState,
+    now: u64,
+    drain: &HashMap<String, u64>,
+) -> anyhow::Result<bool> {
     let outgoing_before = state.outgoing.len();
     let tombstones_before = state.incoming_tombstones.len();
     let mut retained_outgoing = Vec::with_capacity(state.outgoing.len());
@@ -3114,9 +3224,12 @@ fn prune_terminal_state(state: &mut CoreState, now: u64) -> anyhow::Result<bool>
         }
     }
     state.outgoing = retained_outgoing;
-    state
-        .incoming_tombstones
-        .retain(|entry| entry.retain_until >= now);
+    state.incoming_tombstones.retain(|entry| {
+        entry.retain_until >= now
+            && drain
+                .get(&tombstone_key(&entry.acceptance_receipt))
+                .is_none_or(|drain_at| *drain_at >= now)
+    });
     Ok(state.outgoing.len() != outgoing_before
         || state.incoming_tombstones.len() != tombstones_before)
 }
@@ -3203,22 +3316,24 @@ fn stored_message_expiry(envelope: &str) -> anyhow::Result<u64> {
     )
 }
 
-/// Intake refuses a message once its `expires_at` has passed, so its replay
-/// tombstone only has to outlive that expiry (plus skew for a clock that steps
-/// back). The maximum lifetime after acceptance stays the cap.
-fn tombstone_retention_deadline(accepted_at: u64, expires_at: u64) -> u64 {
+/// The persisted `retain_until`. Released binaries require exactly this value,
+/// so it stays fixed for Undo; the earlier drain lives in a sidecar.
+fn tombstone_retention_deadline(accepted_at: u64) -> u64 {
     accepted_at
         .saturating_add(MAX_COLLABORATION_MESSAGE_LIFETIME_SECS)
-        .min(expires_at)
         .saturating_add(MAX_COLLABORATION_CLOCK_SKEW_SECS * 2)
 }
 
-/// A retained deadline must lie between the earliest possible expiry (intake
-/// needs `expires_at > accepted_at`) and the lifetime cap.
-fn tombstone_retention_is_bound(retain_until: u64, accepted_at: u64) -> bool {
-    (tombstone_retention_deadline(accepted_at, accepted_at.saturating_add(1))
-        ..=tombstone_retention_deadline(accepted_at, u64::MAX))
-        .contains(&retain_until)
+/// Intake refuses a message once its `expires_at` has passed, so its replay
+/// tombstone only has to outlive that expiry (plus skew for a clock that steps
+/// back). The maximum lifetime after acceptance stays the cap.
+fn tombstone_drain_deadline(accepted_at: u64, expires_at: u64) -> u64 {
+    tombstone_retention_deadline(accepted_at)
+        .min(expires_at.saturating_add(MAX_COLLABORATION_CLOCK_SKEW_SECS * 2))
+}
+
+fn tombstone_key(acceptance_receipt: &str) -> String {
+    hex::encode(Sha256::digest(acceptance_receipt.as_bytes()))
 }
 
 fn now_secs() -> u64 {
@@ -3966,7 +4081,7 @@ mod tests {
                         .unwrap(),
                 )
                 .unwrap(),
-                retain_until: tombstone_retention_deadline(NOW, NOW + TTL),
+                retain_until: tombstone_retention_deadline(NOW),
             });
         }
         core.validate_state(&state).unwrap();
@@ -6058,16 +6173,12 @@ mod tests {
         assert!(!replay.product_handoff_pending());
         assert_eq!(replay.acceptance_receipt_bytes(), receipt);
         assert!(core.pending_product_handoffs().unwrap().is_empty());
-        let retain_until = core.load_state().unwrap().unwrap().incoming_tombstones[0].retain_until;
-        assert_eq!(
-            retain_until,
-            NOW + TTL + 2 * MAX_COLLABORATION_CLOCK_SKEW_SECS
-        );
+        let drain_at = NOW + TTL + 2 * MAX_COLLABORATION_CLOCK_SKEW_SECS;
         // Until the tombstone drains a replay only gets its receipt back; after
         // that, intake refuses the expired post outright.
-        assert!(!transport_incoming(&core, &post, retain_until).product_handoff_pending());
+        assert!(!transport_incoming(&core, &post, drain_at).product_handoff_pending());
         assert_eq!(
-            transport_rejection(&core, &post, retain_until + 1),
+            transport_rejection(&core, &post, drain_at + 1),
             CollaborationTransportRejection::InvalidMessage
         );
         assert!(core.pending_product_handoffs().unwrap().is_empty());
@@ -6077,6 +6188,77 @@ mod tests {
             transport_rejection(&core, &late, NOW + TTL),
             CollaborationTransportRejection::InvalidMessage
         );
+    }
+
+    #[test]
+    fn tombstone_drain_sidecar_keeps_state_loadable_after_undo_and_redo() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let (_, post) = remote_transport_message(&fixture, generate_keypair().0, NOW);
+        transport_incoming(&core, &post, NOW);
+        acknowledge_all_handoffs(&core);
+        let state_bytes = fs::read(core.state_path()).unwrap();
+        let drain_bytes = fs::read(core.tombstone_drain_path()).unwrap();
+
+        // Undo: the state file keeps exactly the released format and the
+        // 24-hour `retain_until` the released validator requires (that
+        // validator is unchanged here), and it never reads the sidecar.
+        let written: CoreState = serde_json::from_slice(&state_bytes).unwrap();
+        assert_eq!(written.incoming_tombstones.len(), 1);
+        assert_eq!(
+            written.incoming_tombstones[0].retain_until,
+            tombstone_retention_deadline(NOW)
+        );
+        assert_eq!(
+            serde_json::to_value(&written.incoming_tombstones[0])
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .len(),
+            2
+        );
+        core.validate_state(&written).unwrap();
+        let drain: HashMap<String, u64> = serde_json::from_slice(&drain_bytes).unwrap();
+        assert_eq!(
+            drain.get(&tombstone_key(
+                &written.incoming_tombstones[0].acceptance_receipt
+            )),
+            Some(&(NOW + TTL + 2 * MAX_COLLABORATION_CLOCK_SKEW_SECS))
+        );
+
+        // State written by a released binary has no sidecar: it loads and
+        // its tombstones keep the full 24 hours.
+        fs::remove_file(core.tombstone_drain_path()).unwrap();
+        let legacy = fixture.core();
+        let after_drain = NOW + TTL + 2 * MAX_COLLABORATION_CLOCK_SKEW_SECS + 1;
+        legacy
+            .with_mutation(Some(after_drain), |_| {
+                Ok(Mutation {
+                    value: (),
+                    changed: false,
+                })
+            })
+            .unwrap();
+        assert_eq!(legacy.summary().unwrap().replay_tombstones, 1);
+        assert!(!transport_incoming(&legacy, &post, after_drain).product_handoff_pending());
+
+        // Redo with the sidecar back: the tombstone drains at its frame's expiry.
+        write_owner_only(&core.tombstone_drain_path(), &drain_bytes);
+        let redone = fixture.core();
+        redone
+            .with_mutation(Some(after_drain), |_| {
+                Ok(Mutation {
+                    value: (),
+                    changed: false,
+                })
+            })
+            .unwrap();
+        assert_eq!(redone.summary().unwrap().replay_tombstones, 0);
+        assert!(serde_json::from_slice::<HashMap<String, u64>>(
+            &fs::read(redone.tombstone_drain_path()).unwrap()
+        )
+        .unwrap()
+        .is_empty());
     }
 
     #[test]
@@ -7436,7 +7618,7 @@ mod tests {
             .to_string()
             .contains("reused"));
 
-        let retention_deadline = tombstone_retention_deadline(NOW, NOW + TTL);
+        let retention_deadline = tombstone_drain_deadline(NOW, NOW + TTL);
         restarted
             .with_mutation(Some(retention_deadline), |_| {
                 Ok(Mutation {
@@ -8025,21 +8207,14 @@ mod tests {
             .contains("tombstone binding"));
         fs::write(core.state_path(), &original).unwrap();
 
-        let accepted_at = serde_json::from_str::<SignedCollaborationAcceptanceReceipt>(
-            &serde_json::from_slice::<CoreState>(&original)
-                .unwrap()
-                .incoming_tombstones[0]
-                .acceptance_receipt,
-        )
-        .unwrap()
-        .payload
-        .accepted_at;
-        for retain_until in [
-            tombstone_retention_deadline(accepted_at, accepted_at),
-            tombstone_retention_deadline(accepted_at, u64::MAX) + 1,
-        ] {
+        for delta in [-1_i64, 1_i64] {
             let mut altered_retention: CoreState = serde_json::from_slice(&original).unwrap();
-            altered_retention.incoming_tombstones[0].retain_until = retain_until;
+            let retain_until = altered_retention.incoming_tombstones[0].retain_until;
+            altered_retention.incoming_tombstones[0].retain_until = if delta < 0 {
+                retain_until - 1
+            } else {
+                retain_until + 1
+            };
             fs::write(
                 core.state_path(),
                 canonical_state_bytes(&altered_retention).unwrap(),
