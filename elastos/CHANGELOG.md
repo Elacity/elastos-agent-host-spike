@@ -8,6 +8,13 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Developer detail
 
+- A Community bootstrap node (its Carrier endpoint is one of the verified
+  profile's bootstrap peers, the seed's Community node) runs iroh-gossip as the
+  hub: 512 active and 1024 passive neighbours instead of the default 5 and 30,
+  so a sixth Home joining or restarting no longer evicts a Home that reaches
+  the Community only through the hub. Homes keep the default. The Community
+  link watchdog now counts only listed peers; frames that trickle in without
+  a peer no longer mark the link healthy.
 - Runtime's Community link watchdog (`CommunityLinkWatchdog`) repairs a joined
   Home that has had no Community peer for 60 seconds, whatever stalled it: it
   rejoins the topic, then replaces Carrier's gossip actor a minute later, and

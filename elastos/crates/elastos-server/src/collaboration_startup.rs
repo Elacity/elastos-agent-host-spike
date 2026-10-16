@@ -74,6 +74,23 @@ pub struct CollaborationStartupConfiguration {
     configuration: CollaborationNetworkConfiguration,
 }
 
+impl CollaborationStartupConfiguration {
+    /// Node ids of the verified Community profile's bootstrap peers; empty
+    /// when this Home is isolated. Carrier runs as the Community hub when its
+    /// own endpoint is one of them.
+    pub fn community_bootstrap_node_ids(&self) -> Vec<String> {
+        match &self.configuration {
+            CollaborationNetworkConfiguration::Isolated => Vec::new(),
+            CollaborationNetworkConfiguration::Configured { profile, .. } => profile
+                .profile()
+                .bootstrap_peers
+                .iter()
+                .map(|peer| peer.node_id.clone())
+                .collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 impl CollaborationStartupConfiguration {
     pub(crate) fn is_isolated_for_test(&self) -> bool {
@@ -560,6 +577,8 @@ async fn run_community_link_watchdog<L: CommunityLink>(
                 .await
                 .ok()
                 .and_then(Result::ok);
+            // Frames that trickle in without a peer are shown, never trusted.
+            let received_frames = health.map(|health| health.received_frames);
             let step = watchdog
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -576,6 +595,7 @@ async fn run_community_link_watchdog<L: CommunityLink>(
                 CommunityLinkStep::Rejoin => {
                     tracing::info!(
                         reason,
+                        received_frames,
                         silence_secs,
                         "Community link looks dead; leaving and rejoining the Community topic"
                     );
@@ -591,6 +611,7 @@ async fn run_community_link_watchdog<L: CommunityLink>(
                 CommunityLinkStep::Rebuild => {
                     tracing::info!(
                         reason,
+                        received_frames,
                         silence_secs,
                         "Community link still dead after a rejoin; rebuilding Carrier gossip"
                     );
@@ -3420,14 +3441,27 @@ mod tests {
         run_link_watchdog_for(&last_publisher, 1800).await;
         assert_eq!(last_publisher.frames(), 3);
         assert!(last_publisher.steps().is_empty());
+    }
 
-        // Frames prove the link even while no peer is listed.
+    #[tokio::test(start_paused = true)]
+    async fn community_link_watchdog_repairs_a_home_without_peers_while_frames_trickle_in() {
+        // The hub evicted this Home: no neighbour listed, yet a presence frame
+        // still arrives every 15 s. Frames do not count as a link.
         let unlisted = FakeCommunityLink::new(FakeLinkScript {
             presence: true,
             ..FakeLinkScript::default()
         });
-        run_link_watchdog_for(&unlisted, 1800).await;
-        assert!(unlisted.steps().is_empty());
+        run_link_watchdog_for(&unlisted, 302).await;
+        assert!(unlisted.frames() > 0, "frames kept arriving");
+        assert_eq!(
+            unlisted.steps(),
+            [
+                (CommunityLinkStep::Rejoin, 60),
+                (CommunityLinkStep::Rebuild, 120),
+                (CommunityLinkStep::Rebuild, 240),
+            ],
+            "the 60 s spacing and backoff hold although frames arrive"
+        );
     }
 
     #[tokio::test(start_paused = true)]
