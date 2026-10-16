@@ -3021,7 +3021,7 @@ async function onRecoveryDownload(options = {}) {
     if (!isActive()) return false;
     const bundle = await exportFullRecoveryBundle(status, isActive);
     if (!isActive()) return false;
-    downloadRecoveryKit(bundle);
+    const fileName = downloadRecoveryKit(bundle);
     if (recoveryPasswordInput) {
       recoveryPasswordInput.value = "";
     }
@@ -3029,14 +3029,14 @@ async function onRecoveryDownload(options = {}) {
     const peopleIdentity = bundle && bundle.included && bundle.included.people_identity;
     showRecoveryNote(
       peopleIdentity
-        ? "Recovery Kit downloaded. Store it offline; it includes your signed People identity."
-        : "Recovery Kit downloaded. Store it offline.",
+        ? `Recovery Kit downloaded as ${fileName}. Store it offline; it includes your signed People identity.`
+        : `Recovery Kit downloaded as ${fileName}. Store it offline.`,
       "success"
     );
     setRecoveryButton("Download Recovery Kit", false);
     notifyHomeSummaryChanged();
     await refreshSystemSummary().catch(() => {
-      showRecoveryNote("Recovery Kit downloaded. Store it offline. Refresh System to update setup status.", "success");
+      showRecoveryNote(`Recovery Kit downloaded as ${fileName}. Store it offline. Refresh System to update setup status.`, "success");
     });
     return true;
   } catch (error) {
@@ -3308,17 +3308,28 @@ function recoveryDownloadPassword() {
   return readText(recoveryPasswordInput && recoveryPasswordInput.value);
 }
 
+// The whole principal goes into the file name (no ellipsis), with characters
+// some file systems refuse replaced; the name is returned so System shows it.
+function recoveryKitFileName(kit) {
+  const principal = readText(kit && kit.principal_id)
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 128) || "principal";
+  return `elastos-recovery-${principal}.json`;
+}
+
 function downloadRecoveryKit(kit) {
-  const principal = shortText(readText(kit && kit.principal_id), 12) || "principal";
+  const fileName = recoveryKitFileName(kit);
   const blob = new Blob([JSON.stringify(kit, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `elastos-recovery-${principal}.json`;
+  anchor.download = fileName;
   document.body.append(anchor);
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+  return fileName;
 }
 
 function setRecoveryButton(label, disabled) {
