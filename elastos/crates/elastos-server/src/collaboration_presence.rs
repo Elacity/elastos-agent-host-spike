@@ -40,8 +40,12 @@ pub struct CollaborationPresenceProductPort {
     core: Arc<CollaborationCore>,
     read_model: Arc<PresenceReadModel>,
     /// The Runtime publisher's last pass: `Some(true)` it announced someone,
-    /// `Some(false)` it read Discovery off for everyone, `None` unknown.
+    /// `Some(false)` nobody here has a presence grant, `None` unknown.
     local_publication: Arc<std::sync::Mutex<Option<bool>>>,
+    /// Mints and validates Community presence grants with the Runtime's
+    /// capability manager. `None` (standalone gateway, most tests): no grant
+    /// can be made or honoured, so nobody is announced.
+    presence_authority: Option<Arc<crate::collaboration_presence_grant::PresenceAuthority>>,
 }
 
 #[derive(Clone)]
@@ -148,7 +152,49 @@ impl CollaborationPresenceProductPort {
             core,
             read_model,
             local_publication: Arc::new(std::sync::Mutex::new(None)),
+            presence_authority: None,
         })
+    }
+
+    pub(crate) fn with_capability_manager(
+        mut self,
+        capability_manager: Option<Arc<elastos_runtime::capability::CapabilityManager>>,
+    ) -> Self {
+        self.presence_authority = capability_manager.map(|manager| {
+            Arc::new(crate::collaboration_presence_grant::PresenceAuthority::new(
+                manager,
+            ))
+        });
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_presence_authority(
+        mut self,
+        authority: Arc<crate::collaboration_presence_grant::PresenceAuthority>,
+    ) -> Self {
+        self.presence_authority = Some(authority);
+        self
+    }
+
+    pub(crate) fn presence_authority(
+        &self,
+    ) -> Option<&Arc<crate::collaboration_presence_grant::PresenceAuthority>> {
+        self.presence_authority.as_ref()
+    }
+
+    /// Leaving Community stops presence for everyone on this Home.
+    pub(crate) fn community_joined(&self) -> bool {
+        self.core.community_membership().joined()
+    }
+
+    /// The scope a presence grant names: this Community conversation.
+    pub(crate) fn presence_scope(&self) -> crate::collaboration_presence_grant::PresenceScope {
+        let (network_id, conversation_id) = self.core.conversation_scope();
+        crate::collaboration_presence_grant::PresenceScope {
+            network_id: network_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+        }
     }
 
     pub(crate) fn record_local_publication(&self, state: Option<bool>) {
@@ -157,7 +203,8 @@ impl CollaborationPresenceProductPort {
         }
     }
 
-    /// `Some(false)`: the Runtime announces nobody here, so Discovery is off.
+    /// `Some(false)`: the Runtime announces nobody here, because nobody on
+    /// this Home has granted Community presence.
     pub(crate) fn local_publication(&self) -> Option<bool> {
         self.local_publication.lock().ok().and_then(|state| *state)
     }

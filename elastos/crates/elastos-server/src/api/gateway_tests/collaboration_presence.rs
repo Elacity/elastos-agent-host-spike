@@ -14,7 +14,8 @@ fn configured_presence_state(
     let presence = crate::collaboration_presence::CollaborationPresenceProductPort::new(
         chat.test_core().clone(),
     )
-    .unwrap();
+    .unwrap()
+    .with_presence_authority(crate::collaboration_presence_grant::test_authority());
     let mut state = test_state(data_dir);
     state.collaboration_chat_product_port = Some(chat);
     state.collaboration_presence_product_port = Some(presence.clone());
@@ -63,7 +64,7 @@ fn file_snapshot(root: &std::path::Path) -> BTreeMap<String, Vec<u8>> {
 }
 
 fn capsule_request(method: &str, uri: &str, token: &str, body: impl Into<Body>) -> Request<Body> {
-    let origin = if uri == "/api/apps/home/collaboration/presence" {
+    let origin = if uri.starts_with("/api/apps/home/") {
         "http://localhost:61180"
     } else {
         "null"
@@ -502,7 +503,8 @@ async fn collaboration_presence_routes_are_capsule_scoped_and_unconfigured_is_pu
     let state = test_state(dir.path());
     let _ = elastos_identity::load_or_create_did(dir.path()).unwrap();
     let authority = passkey_authority_with_name(dir.path(), Some("Alice"));
-    let unbound_home_token = issue_home_launch_token(dir.path(), HOME_CAPSULE_ID).unwrap();
+    let chat_token = app_token_for_authority(dir.path(), CHAT_ROOM_CAPSULE_ID, &authority);
+    let unbound_chat_token = issue_home_launch_token(dir.path(), CHAT_ROOM_CAPSULE_ID).unwrap();
     let before = file_snapshot(dir.path());
     let app = gateway_router(state);
 
@@ -510,8 +512,8 @@ async fn collaboration_presence_routes_are_capsule_scoped_and_unconfigured_is_pu
         app.clone()
             .oneshot(capsule_request(
                 "POST",
-                "/api/apps/home/collaboration/presence",
-                &unbound_home_token,
+                "/api/apps/chat-room/presence",
+                &unbound_chat_token,
                 "{}",
             ))
             .await
@@ -524,8 +526,8 @@ async fn collaboration_presence_routes_are_capsule_scoped_and_unconfigured_is_pu
         .clone()
         .oneshot(capsule_request(
             "POST",
-            "/api/apps/home/collaboration/presence",
-            &authority.home_token,
+            "/api/apps/chat-room/presence",
+            &chat_token,
             "{}",
         ))
         .await
@@ -533,21 +535,6 @@ async fn collaboration_presence_routes_are_capsule_scoped_and_unconfigured_is_pu
     assert_eq!(heartbeat.status(), StatusCode::CONFLICT);
     assert_eq!(
         response_text(heartbeat).await,
-        "Save your Profile before turning on Discovery"
-    );
-    let discovery = app
-        .clone()
-        .oneshot(capsule_request(
-            "POST",
-            "/api/apps/people/discovery",
-            &authority.people_token,
-            r#"{"enabled":true}"#,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(discovery.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        response_text(discovery).await,
         "Save your Profile before turning on Discovery"
     );
     assert_eq!(file_snapshot(dir.path()), before);
@@ -558,8 +545,8 @@ async fn collaboration_presence_routes_are_capsule_scoped_and_unconfigured_is_pu
         .clone()
         .oneshot(capsule_request(
             "POST",
-            "/api/apps/home/collaboration/presence",
-            &authority.home_token,
+            "/api/apps/chat-room/presence",
+            &chat_token,
             "{}",
         ))
         .await
@@ -591,12 +578,18 @@ async fn collaboration_presence_routes_are_capsule_scoped_and_unconfigured_is_pu
     assert_eq!(file_snapshot(dir.path()), after_profile);
     assert!(!dir.path().join("collaboration").exists());
 
-    for token in [&authority.people_token, &authority.system_token] {
+    // Only Chat's own launch token drives the heartbeat; the Home shell's
+    // old route is gone.
+    for token in [
+        &authority.home_token,
+        &authority.people_token,
+        &authority.system_token,
+    ] {
         assert_eq!(
             app.clone()
                 .oneshot(capsule_request(
                     "POST",
-                    "/api/apps/home/collaboration/presence",
+                    "/api/apps/chat-room/presence",
                     token,
                     "{}",
                 ))
@@ -606,6 +599,19 @@ async fn collaboration_presence_routes_are_capsule_scoped_and_unconfigured_is_pu
             StatusCode::FORBIDDEN
         );
     }
+    assert_ne!(
+        app.clone()
+            .oneshot(capsule_request(
+                "POST",
+                "/api/apps/home/collaboration/presence",
+                &authority.home_token,
+                "{}",
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
     for token in [&authority.home_token, &authority.system_token] {
         assert_eq!(
             app.clone()
@@ -623,32 +629,38 @@ async fn collaboration_presence_routes_are_capsule_scoped_and_unconfigured_is_pu
     }
 }
 
+async fn set_system_presence(app: &Router, token: &str, mode: &str) -> (StatusCode, String) {
+    let response = app
+        .clone()
+        .oneshot(capsule_request(
+            "POST",
+            "/api/apps/system/community/presence",
+            token,
+            json!({ "mode": mode }).to_string(),
+        ))
+        .await
+        .unwrap();
+    let status = response.status();
+    (status, response_text(response).await)
+}
+
 #[tokio::test]
 async fn heartbeat_is_strict_proof_bound_and_coalesces_exact_presentation() {
-    const NETWORK: &str = "gateway-presence-heartbeat";
     let dir = tempfile::tempdir().unwrap();
-    let (mut state, presence) = configured_presence_state(dir.path());
-    let (runtime_device_key, _) = elastos_identity::load_or_create_did(dir.path()).unwrap();
-    // Presence and Discovery ship together out of collaboration startup, and
-    // presence now asks Discovery whether this person consented — so a test
-    // about heartbeats needs the same pairing production has, or it asserts
-    // announcements nobody agreed to.
-    let (trusted_key, _) = elastos_runtime::signature::generate_keypair();
-    state.collaboration_discovery_service = Some(
-        crate::collaboration_discovery_runtime::CollaborationDiscoveryService::new(
-            ed25519_dalek::SigningKey::from_bytes(&runtime_device_key.to_bytes()),
-            super::home_system::configured_discovery_network_profile_for_test(
-                &trusted_key,
-                NETWORK,
-            ),
-            Arc::new(elastos_runtime::provider::ProviderRegistry::new()),
-        )
-        .await
-        .unwrap(),
-    );
+    let (state, presence) = configured_presence_state(dir.path());
+    let _ = elastos_identity::load_or_create_did(dir.path()).unwrap();
     let authority = passkey_authority_with_name(dir.path(), Some("Alice"));
     install_signed_profile(dir.path(), &authority, "Alice");
+    let chat_token = app_token_for_authority(dir.path(), CHAT_ROOM_CAPSULE_ID, &authority);
     let app = gateway_router(state);
+    let heartbeat = || {
+        app.clone().oneshot(capsule_request(
+            "POST",
+            "/api/apps/chat-room/presence",
+            &chat_token,
+            "{}",
+        ))
+    };
 
     for body in [
         r#"{"request_id":"caller"}"#,
@@ -664,8 +676,8 @@ async fn heartbeat_is_strict_proof_bound_and_coalesces_exact_presentation() {
             app.clone()
                 .oneshot(capsule_request(
                     "POST",
-                    "/api/apps/home/collaboration/presence",
-                    &authority.home_token,
+                    "/api/apps/chat-room/presence",
+                    &chat_token,
                     body,
                 ))
                 .await
@@ -680,7 +692,7 @@ async fn heartbeat_is_strict_proof_bound_and_coalesces_exact_presentation() {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/apps/home/collaboration/presence")
+                    .uri("/api/apps/chat-room/presence")
                     .body(Body::from("{}"))
                     .unwrap(),
             )
@@ -690,51 +702,32 @@ async fn heartbeat_is_strict_proof_bound_and_coalesces_exact_presentation() {
         StatusCode::FORBIDDEN
     );
 
-    // Having a Profile is not consent to be found. Until Discovery is on,
-    // an authorized heartbeat succeeds and announces nothing: the person
-    // asked for that, so it is not an error, and nothing leaves the Home.
-    let quiet = app
-        .clone()
-        .oneshot(capsule_request(
-            "POST",
-            "/api/apps/home/collaboration/presence",
-            &authority.home_token,
-            "{}",
-        ))
-        .await
-        .unwrap();
+    // Having a Profile is not consent to be shown. Until the person grants
+    // it, an authorized heartbeat succeeds and announces nothing.
+    let quiet = heartbeat().await.unwrap();
     assert_eq!(quiet.status(), StatusCode::OK);
     assert_eq!(response_json(quiet).await["queued"], false);
-    assert!(
-        presence
-            .pending_outgoing_presences(crate::auth::now_ts())
-            .unwrap()
-            .is_empty(),
-        "a Home with Discovery off queues no announcement"
+    assert!(presence
+        .pending_outgoing_presences(crate::auth::now_ts())
+        .unwrap()
+        .is_empty());
+
+    // "Always" is the Runtime timer's grant: Chat asks only for
+    // `/while-open` and does not present it.
+    let (status, body) = set_system_presence(&app, &authority.system_token, "always").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        response_json(heartbeat().await.unwrap()).await["queued"],
+        false
     );
 
-    let discovery = app
-        .clone()
-        .oneshot(capsule_request(
-            "POST",
-            "/api/apps/people/discovery",
-            &authority.people_token,
-            r#"{"enabled":true}"#,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(discovery.status(), StatusCode::OK);
-
-    let response = app
-        .clone()
-        .oneshot(capsule_request(
-            "POST",
-            "/api/apps/home/collaboration/presence",
-            &authority.home_token,
-            "{}",
-        ))
-        .await
-        .unwrap();
+    let (status, body) = set_system_presence(&app, &authority.system_token, "while_open").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // The status route reports the mode, never the token.
+    let status_body: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status_body["community_presence"], "while_open");
+    assert!(!body.contains("token"), "{body}");
+    let response = heartbeat().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response_json(response).await["queued"], true);
     let now = crate::auth::now_ts();
@@ -747,19 +740,151 @@ async fn heartbeat_is_strict_proof_bound_and_coalesces_exact_presentation() {
         now + 1,
     )
     .unwrap();
+    assert_eq!(heartbeat().await.unwrap().status(), StatusCode::OK);
+    assert_eq!(presence.pending_outgoing_presences(now).unwrap().len(), 2);
+
+    // Hidden revokes: the very next heartbeat announces nothing.
+    let (status, body) = set_system_presence(&app, &authority.system_token, "hidden").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        app.oneshot(capsule_request(
+        response_json(heartbeat().await.unwrap()).await["queued"],
+        false
+    );
+
+    // An epoch bump silences the grant on the next heartbeat too.
+    let (status, _) = set_system_presence(&app, &authority.system_token, "while_open").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        response_json(heartbeat().await.unwrap()).await["queued"],
+        true
+    );
+    presence
+        .presence_authority()
+        .unwrap()
+        .manager()
+        .revoke_all("test epoch");
+    assert_eq!(
+        response_json(heartbeat().await.unwrap()).await["queued"],
+        false
+    );
+}
+
+#[tokio::test]
+async fn only_the_persons_inbox_or_system_answer_mints_a_presence_grant() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, presence) = configured_presence_state(dir.path());
+    let _ = elastos_identity::load_or_create_did(dir.path()).unwrap();
+    let authority = passkey_authority_with_name(dir.path(), Some("Alice"));
+    install_signed_profile(dir.path(), &authority, "Alice");
+    let chat_token = app_token_for_authority(dir.path(), CHAT_ROOM_CAPSULE_ID, &authority);
+    let inbox_token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &authority);
+    let app = gateway_router(state);
+    let grants = || {
+        presence
+            .presence_authority()
+            .unwrap()
+            .manager()
+            .audit_log()
+            .recent_events(10_000)
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    elastos_runtime::primitives::audit::AuditEvent::CapabilityGrant { .. }
+                )
+            })
+            .count()
+    };
+
+    // Chat cannot choose: the System route refuses its token.
+    let (status, _) = set_system_presence(&app, &chat_token, "always").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(grants(), 0);
+
+    // Chat files the request; it mints nothing.
+    let asked = app
+        .clone()
+        .oneshot(capsule_request(
             "POST",
-            "/api/apps/home/collaboration/presence",
-            &authority.home_token,
-            "{}",
+            "/api/apps/chat-room/community-presence/request",
+            &chat_token,
+            Body::empty(),
         ))
         .await
-        .unwrap()
-        .status(),
-        StatusCode::OK
+        .unwrap();
+    assert_eq!(asked.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(asked).await["community_presence"],
+        "requested"
     );
-    assert_eq!(presence.pending_outgoing_presences(now).unwrap().len(), 2);
+    assert_eq!(grants(), 0);
+
+    let summary = app
+        .clone()
+        .oneshot(capsule_request(
+            "GET",
+            "/api/apps/inbox/summary",
+            &inbox_token,
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let summary = response_json(summary).await;
+    let card = summary["notifications"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["kind"] == "community_presence_request")
+        .expect("the Inbox shows the request")
+        .clone();
+    assert!(!card.to_string().contains("token\":"), "{card}");
+    let always = card["action_ref"]["action_id"].as_str().unwrap();
+    let issued_at = always.strip_prefix("community-presence-always:").unwrap();
+    let inbox_action = |token: &str, action: String| {
+        app.clone().oneshot(capsule_request(
+            "POST",
+            "/api/apps/inbox/actions",
+            token,
+            json!({ "action_id": action }).to_string(),
+        ))
+    };
+
+    // The Inbox action route takes only Inbox's token.
+    let wrong = inbox_action(&chat_token, format!("community-presence-open:{issued_at}"))
+        .await
+        .unwrap();
+    assert_ne!(wrong.status(), StatusCode::OK);
+    assert_eq!(grants(), 0);
+
+    let answered = inbox_action(&inbox_token, format!("community-presence-open:{issued_at}"))
+        .await
+        .unwrap();
+    assert_eq!(answered.status(), StatusCode::OK);
+    assert_eq!(grants(), 1);
+    // The answered card is closed.
+    let again = inbox_action(
+        &inbox_token,
+        format!("community-presence-always:{issued_at}"),
+    )
+    .await
+    .unwrap();
+    assert_ne!(again.status(), StatusCode::OK);
+    assert_eq!(grants(), 1);
+
+    let status = app
+        .clone()
+        .oneshot(capsule_request(
+            "GET",
+            "/api/apps/system/community/presence",
+            &authority.system_token,
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let body = response_text(status).await;
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["community_presence"], "while_open");
+    assert!(!body.contains("token"), "{body}");
 }
 
 #[tokio::test]
@@ -782,11 +907,12 @@ async fn corrupt_profile_state_is_an_internal_presence_error_without_detail() {
     std::fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
     std::fs::write(profile_path, b"{corrupt").unwrap();
 
+    let chat_token = app_token_for_authority(dir.path(), CHAT_ROOM_CAPSULE_ID, &authority);
     let response = gateway_router(state)
         .oneshot(capsule_request(
             "POST",
-            "/api/apps/home/collaboration/presence",
-            &authority.home_token,
+            "/api/apps/chat-room/presence",
+            &chat_token,
             "{}",
         ))
         .await
