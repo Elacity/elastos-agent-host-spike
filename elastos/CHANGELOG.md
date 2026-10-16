@@ -6,8 +6,21 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ## [Unreleased]
 
+### Fixed
+
+- A Home whose Community connection stops working recovers by itself.
+  Before, Community could stay unreachable until the Home was restarted.
+
 ### Developer detail
 
+- Runtime's Community link watchdog (`CommunityLinkWatchdog`) repairs a joined
+  Home's Community link whatever stalled it: with no Community peer, or with
+  peers but no frame for 60 seconds after one arrived while someone else was
+  online, it rejoins the topic, then replaces Carrier's gossip actor a minute
+  later. With no peer it keeps replacing it, waiting twice as long each time
+  up to five minutes; a bootstrap node never does. Carrier's Runtime-only
+  `gossip_topic_health`, `gossip_rejoin` and `gossip_rebuild` operations carry
+  it, and Carrier shutdown no longer waits forever on a stalled gossip actor.
 - `scripts/release-publish.sh` publishes a final version `X.Y.Z` on `stable`
   from its tag `vX.Y.Z` on `main` (#335). See docs/VERSIONING.md.
 - A signed components manifest whose schema this Runtime does not know, or
