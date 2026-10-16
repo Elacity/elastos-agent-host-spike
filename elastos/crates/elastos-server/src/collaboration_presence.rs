@@ -197,6 +197,40 @@ impl CollaborationPresenceProductPort {
         }
     }
 
+    /// Drops this person's queued presence announcements.
+    pub(crate) fn retire_outgoing_presence(&self, principal_id: &str) -> anyhow::Result<()> {
+        self.core.retire_outgoing_presence(principal_id)?;
+        Ok(())
+    }
+
+    /// The send boundary for a queued announcement: sends only while the
+    /// person's current grant validates; otherwise retires their queue.
+    pub(crate) async fn queued_presence_allowed(
+        &self,
+        principal_id: &str,
+        profile_did: &str,
+        now: u64,
+    ) -> anyhow::Result<bool> {
+        let allowed = match self.presence_authority() {
+            Some(authority) if self.community_joined() => {
+                crate::collaboration_presence_grant::queued_presence_allowed(
+                    authority,
+                    self.core.data_root(),
+                    principal_id,
+                    profile_did,
+                    &self.presence_scope(),
+                    now,
+                )
+                .await
+            }
+            _ => false,
+        };
+        if !allowed {
+            self.retire_outgoing_presence(principal_id)?;
+        }
+        Ok(allowed)
+    }
+
     pub(crate) fn record_local_publication(&self, state: Option<bool>) {
         if let Ok(mut current) = self.local_publication.lock() {
             *current = state;
