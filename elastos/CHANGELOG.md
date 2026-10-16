@@ -8,6 +8,9 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Developer detail
 
+- `elastos serve --capsule` starts its initial MicroVM capsule with a VM-bound
+  Capsule session instead of a Shell session, because the guest can read its
+  boot token; capability approval stays with the shell (#387).
 - A Community bootstrap node (its Carrier endpoint is one of the verified
   profile's bootstrap peers, the seed's Community node) runs iroh-gossip as the
   hub: 512 active and 1024 passive neighbours instead of the default 5 and 30,
@@ -97,7 +100,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 - An owner (admin) can add another passkey, such as a second device or a security key, in System → Accounts → Add passkey. You confirm with your current passkey first, and the new passkey opens the same account as an admin (#338).
 
-- Home on a phone (or a phone turned sideways) gets a touch layout: a Dock and pages of apps, one app at a time full screen, swipe down on its title bar for the app switcher, long-press menus, sheets with drag handles, and the screen kept above the keyboard. On Android, Back closes the top sheet or menu first, then sends the open app home; on iPhone the on-screen buttons do this. Desktop and tablet keep the desktop shell (#116, #92).
+- Home has a touch layout for phone-sized screens, 640 px wide or less: a Dock and pages of apps, one app at a time full screen, swipe down on its title bar for the app switcher, long-press menus, sheets with drag handles, and the screen kept above the keyboard. Desktop and tablet keep the desktop shell. Opening your Home from a phone needs an HTTPS address for your Home, which 0.8.0 does not set up yet (#116, #92).
 
 ### Changed
 
@@ -115,9 +118,9 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   senders, and Discovery relay caps of 4 listings per Home, 8 contact requests
   per sender and 16 per Home. The relay admits only the signing Home's own
   submissions.
-- Known issue: on the Jetson, getting a model is slow (Qwen takes about 43 minutes). The first Qwen reply takes about 22 seconds and the second about 3.6 seconds.
-- Known issue: Browser runs only on Apple Silicon Macs.
+- Known issues: Browser runs only on Apple Silicon Macs, takes about 5 seconds to close, and has no Chinese, Japanese or Korean fonts. On the Jetson, getting Qwen takes about 43 minutes; its first reply takes about 22 seconds and the next about 3.6 seconds.
 - Known issue: Updating to this version in System from a test version older than 0.8.0-alpha.18 on a slow device such as a Jetson can still fail, because that older version runs the update. If Home is then stuck, follow "Recover an interrupted update" in `docs/INSTALL.md`.
+- Known issues: on a Mac under memory pressure, a model can refuse to start for lack of free memory; close other apps and try again. Restoring a Recovery Kit a second time on the same Home shows an error, although the Profile is restored. After `elastos update` or Undo in a terminal, run `~/.local/bin/elastos home --browser` to start Home and reconnect Community.
 - Community posts reach members again without turning on Discovery, also across networks: they travel through the seed's Community node. Posts are signed, but that node can read them in transit until the relay arrives in 0.8.1. Direct messages across networks need that relay. Contact requests across networks, and showing as online in People, still need Discovery on.
 - Upgrading from 0.7.1 or earlier: run the install command once. System update cannot move these Homes to 0.8.0, because releases are now signed with a new key (#186). Your Home keeps its data.
 - A Browser session now lasts until you close it, until Home stops answering for 5 minutes, until Runtime stops, or 12 hours (it used to close after 10 minutes).
@@ -159,7 +162,7 @@ Release candidate for 0.8.0 on the test channel, with the same notes.
 
 - An owner (admin) can add another passkey, such as a second device or a security key, in System → Accounts → Add passkey. You confirm with your current passkey first, and the new passkey opens the same account as an admin (#338).
 
-- Home on a phone (or a phone turned sideways) gets a touch layout: a Dock and pages of apps, one app at a time full screen, swipe down on its title bar for the app switcher, long-press menus, sheets with drag handles, and the screen kept above the keyboard. On Android, Back closes the top sheet or menu first, then sends the open app home; on iPhone the on-screen buttons do this. Desktop and tablet keep the desktop shell (#116, #92).
+- Home has a touch layout for phone-sized screens, 640 px wide or less: a Dock and pages of apps, one app at a time full screen, swipe down on its title bar for the app switcher, long-press menus, sheets with drag handles, and the screen kept above the keyboard. Desktop and tablet keep the desktop shell. Opening your Home from a phone needs an HTTPS address for your Home, which 0.8.0 does not set up yet (#116, #92).
 
 ### Changed
 
@@ -177,9 +180,9 @@ Release candidate for 0.8.0 on the test channel, with the same notes.
   senders, and Discovery relay caps of 4 listings per Home, 8 contact requests
   per sender and 16 per Home. The relay admits only the signing Home's own
   submissions.
-- Known issue: on the Jetson, getting a model is slow (Qwen takes about 43 minutes). The first Qwen reply takes about 22 seconds and the second about 3.6 seconds.
-- Known issue: Browser runs only on Apple Silicon Macs.
+- Known issues: Browser runs only on Apple Silicon Macs, takes about 5 seconds to close, and has no Chinese, Japanese or Korean fonts. On the Jetson, getting Qwen takes about 43 minutes; its first reply takes about 22 seconds and the next about 3.6 seconds.
 - Known issue: Updating to this version in System from a test version older than 0.8.0-alpha.18 on a slow device such as a Jetson can still fail, because that older version runs the update. If Home is then stuck, follow "Recover an interrupted update" in `docs/INSTALL.md`.
+- Known issues: on a Mac under memory pressure, a model can refuse to start for lack of free memory; close other apps and try again. Restoring a Recovery Kit a second time on the same Home shows an error, although the Profile is restored. After `elastos update` or Undo in a terminal, run `~/.local/bin/elastos home --browser` to start Home and reconnect Community.
 - Community posts reach members again without turning on Discovery, also across networks: they travel through the seed's Community node. Posts are signed, but that node can read them in transit until the relay arrives in 0.8.1. Direct messages across networks need that relay. Contact requests across networks, and showing as online in People, still need Discovery on.
 - Upgrading from 0.7.1 or earlier: run the install command once. System update cannot move these Homes to 0.8.0, because releases are now signed with a new key (#186). Your Home keeps its data.
 - A Browser session now lasts until you close it, until Home stops answering for 5 minutes, until Runtime stops, or 12 hours (it used to close after 10 minutes).
