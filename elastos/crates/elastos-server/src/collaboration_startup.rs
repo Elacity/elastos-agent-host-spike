@@ -2815,10 +2815,8 @@ mod tests {
             assert!(!worker.is_finished());
             assert_eq!(*carrier.pending_ops.lock().unwrap(), ["gossip_send"]);
             assert_eq!(core.summary().unwrap().pending_product_handoffs, 0);
-            assert_eq!(
-                core.summary().unwrap().replay_tombstones,
-                if blocked_outgoing { 1 } else { 2 }
-            );
+            // Only the chat leaves a replay tombstone; presence leaves none.
+            assert_eq!(core.summary().unwrap().replay_tombstones, 1);
             let requests = carrier.requests();
             assert_eq!(
                 requests
