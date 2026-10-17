@@ -12080,6 +12080,9 @@ async fn home_external_link_names_the_launched_app_and_the_exact_address() {
         "elastos://doc",
         "https://user:pass@example.com/",
         "https://example.com/\u{7}",
+        // Home's own pages (the request's Host) open inside Home.
+        "http://localhost:61180/apps/home/",
+        "http://localhost:61180/api/apps/home/summary",
     ] {
         let (status, body) = home_external_link_raw(
             &app,

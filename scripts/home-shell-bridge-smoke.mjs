@@ -1349,6 +1349,7 @@ sendChildMessage("null", walletFrameWindow, {
     () => ({ schema: "elastos.home.external-link.result/v1", app_id: "people", app_title: "People", url: "javascript:alert(1)" }),
     () => ({ schema: "elastos.home.external-link.result/v1", app_id: "people", app_title: "People", url: "https://Example.com" }),
     () => ({ schema: "elastos.home.external-link.result/v1", app_id: "people", app_title: "People", url: "https://u@example.com/" }),
+    () => ({ schema: "elastos.home.external-link.result/v1", app_id: "people", app_title: "People", url: "http://localhost:61180/apps/home/" }),
     (body) => ({ schema: "elastos.home.external-link.result/v1", app_id: "people", app_title: "People", url: body.url, extra: 1 }),
   ]) {
     externalLinkResult = forged;

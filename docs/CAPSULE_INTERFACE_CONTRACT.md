@@ -95,7 +95,8 @@ Home, with its own launch token and the link's own text. Home then:
   app from its signed Home launch under the same Home session, never from the
   message, and accepts only an absolute `http:`/`https:` address with a host,
   no user name or password, no control characters, at most 2048 bytes, in its
-  canonical ASCII form. It never fetches the address;
+  canonical ASCII form, and refuses Home's own origin (Home pages open inside
+  Home). It never fetches the address;
 - shows its own sheet over every frame: the app's name, the host and the whole
   address (wrapped, never shortened), with **Open link** and **Cancel**. Focus
   starts on Cancel; Escape and the backdrop cancel;

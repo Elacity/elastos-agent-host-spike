@@ -25,7 +25,7 @@ function hasExactKeys(value, keys) {
 
 // The Runtime result, accepted only when it names the asking app and its
 // address is already the canonical http(s) form this browser would open.
-function validatedResult(result, appId) {
+function validatedResult(result, appId, homeOrigin) {
   if (
     !result || typeof result !== "object" || Array.isArray(result)
     || !hasExactKeys(result, ["schema", "app_id", "app_title", "url"])
@@ -51,6 +51,7 @@ function validatedResult(result, appId) {
     || parsed.password
     || !parsed.hostname
     || parsed.href !== result.url
+    || parsed.origin === homeOrigin
   ) {
     return null;
   }
@@ -155,7 +156,9 @@ export function createHomeExternalLinkPrompt({
       if (active?.requestId !== requestId || active.phase !== "checking") {
         return false;
       }
-      const checked = isLive(active.homeToken) ? validatedResult(result, active.appId) : null;
+      const checked = isLive(active.homeToken)
+        ? validatedResult(result, active.appId, windowRef.location?.origin)
+        : null;
       if (!checked) {
         active = null;
         return false;

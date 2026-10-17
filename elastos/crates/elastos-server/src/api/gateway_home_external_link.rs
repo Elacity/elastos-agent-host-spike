@@ -40,7 +40,9 @@ pub(super) async fn home_external_link(
         Ok(app) => app,
         Err(err) => return (StatusCode::FORBIDDEN, err.to_string()).into_response(),
     };
-    let url = match exact_external_web_link(&input.url) {
+    let url = match home_browser_origin(&headers)
+        .and_then(|home_origin| exact_external_web_link(&input.url, &home_origin))
+    {
         Ok(url) => url,
         Err(err) => return (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     };
@@ -90,7 +92,8 @@ fn home_external_link_app(
 
 /// The one address Home may show and open: an absolute http(s) URL with a
 /// host, no credentials and no control characters, in canonical ASCII form.
-fn exact_external_web_link(raw: &str) -> anyhow::Result<String> {
+/// Home's own pages open inside Home, never in a browser tab.
+fn exact_external_web_link(raw: &str, home_origin: &str) -> anyhow::Result<String> {
     if raw.is_empty()
         || raw.len() > MAX_EXTERNAL_LINK_BYTES
         || raw.trim() != raw
@@ -108,6 +111,9 @@ fn exact_external_web_link(raw: &str) -> anyhow::Result<String> {
     if parsed.host_str().is_none_or(str::is_empty) {
         anyhow::bail!("invalid web link");
     }
+    if parsed.origin().ascii_serialization() == home_origin {
+        anyhow::bail!("Home's own pages open inside Home");
+    }
     let href = String::from(parsed);
     if href.len() > MAX_EXTERNAL_LINK_BYTES || !href.is_ascii() {
         anyhow::bail!("invalid web link");
@@ -119,20 +125,29 @@ fn exact_external_web_link(raw: &str) -> anyhow::Result<String> {
 mod tests {
     use super::exact_external_web_link;
 
+    const HOME: &str = "http://localhost:61180";
+
+    fn check(raw: &str) -> anyhow::Result<String> {
+        exact_external_web_link(raw, HOME)
+    }
+
     #[test]
     fn only_exact_http_links_leave_elastos() {
         assert_eq!(
-            exact_external_web_link("https://Example.com/a b?q=1#x").unwrap(),
+            check("https://Example.com/a b?q=1#x").unwrap(),
             "https://example.com/a%20b?q=1#x"
         );
         assert_eq!(
-            exact_external_web_link("http://xn--bcher-kva.example/").unwrap(),
+            check("http://xn--bcher-kva.example/").unwrap(),
             "http://xn--bcher-kva.example/"
         );
         assert_eq!(
-            exact_external_web_link("https://bücher.example/").unwrap(),
+            check("https://bücher.example/").unwrap(),
             "https://xn--bcher-kva.example/"
         );
+        // Another port or scheme on the same host is not Home.
+        assert!(check("http://localhost:8080/").is_ok());
+        assert!(check("https://localhost:61180/").is_ok());
         for refused in [
             "",
             "javascript:alert(1)",
@@ -151,19 +166,18 @@ mod tests {
             "https://example.com/ ",
             "/relative",
             "not a url",
+            "http://localhost:61180/apps/home/",
+            "HTTP://LOCALHOST:61180/api/apps/home/summary",
         ] {
-            assert!(
-                exact_external_web_link(refused).is_err(),
-                "{refused:?} must not open"
-            );
+            assert!(check(refused).is_err(), "{refused:?} must not open");
         }
         let longest = format!("https://example.com/{}", "a".repeat(2048 - 20));
         assert_eq!(longest.len(), 2048);
-        assert_eq!(exact_external_web_link(&longest).unwrap(), longest);
-        assert!(exact_external_web_link(&format!("{longest}a")).is_err());
+        assert_eq!(check(&longest).unwrap(), longest);
+        assert!(check(&format!("{longest}a")).is_err());
         // Normalisation may not grow an address past the bound.
         let grows = format!("https://example.com/{}x", " ".repeat(2048 - 21));
         assert_eq!(grows.len(), 2048);
-        assert!(exact_external_web_link(&grows).is_err());
+        assert!(check(&grows).is_err());
     }
 }
