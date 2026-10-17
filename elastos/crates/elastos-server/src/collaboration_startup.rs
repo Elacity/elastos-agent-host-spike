@@ -491,7 +491,8 @@ async fn run_collaboration_worker(
             COLLABORATION_LIVE_CADENCE,
             || async {
                 let now = now_secs();
-                project_collaboration_outgoing(&product_port, &presence_port, &data_root, now);
+                project_collaboration_outgoing(&product_port, &presence_port, &data_root, now)
+                    .await;
                 if driver.retry_outgoing_once(now).await.is_err() {
                     tracing::warn!("collaboration outgoing retry cycle failed");
                 }
@@ -524,7 +525,8 @@ async fn run_collaboration_worker(
                     &presence_port,
                     &data_root,
                     now_secs(),
-                );
+                )
+                .await;
             }
         ),
         run_community_periodic(
@@ -805,7 +807,7 @@ async fn run_collaboration_history_worker(
     }
 }
 
-fn project_collaboration_outgoing(
+async fn project_collaboration_outgoing(
     product_port: &CollaborationChatProductPort,
     presence_port: &CollaborationPresenceProductPort,
     data_root: &Path,
@@ -830,7 +832,10 @@ fn project_collaboration_outgoing(
     match presence_port.pending_outgoing_presences(now) {
         Ok(presences) => {
             for presence in &presences {
-                if let Err(err) = presence_port.project_prepared_presence(presence, now) {
+                if let Err(err) = presence_port
+                    .project_authorized_presence(presence, now)
+                    .await
+                {
                     tracing::warn!(
                         diagnostic = %bounded_presence_projection_diagnostic(&err),
                         "collaboration presence outgoing projection cycle failed"
@@ -845,7 +850,7 @@ fn project_collaboration_outgoing(
     }
 }
 
-fn project_collaboration_handoffs(
+async fn project_collaboration_handoffs(
     product_port: &CollaborationChatProductPort,
     presence_port: &CollaborationPresenceProductPort,
     data_root: &Path,
@@ -873,7 +878,11 @@ fn project_collaboration_handoffs(
     match presence_port.pending_presences() {
         Ok(handoffs) => {
             for handoff in &handoffs {
-                if presence_port.project_handoff(handoff, now).is_err() {
+                if presence_port
+                    .project_authorized_handoff(handoff, now)
+                    .await
+                    .is_err()
+                {
                     tracing::warn!("collaboration presence projection cycle failed");
                 }
             }
@@ -890,14 +899,14 @@ async fn run_collaboration_worker_cycle_with_presence(
     data_root: &Path,
     now: u64,
 ) {
-    project_collaboration_outgoing(product_port, presence_port, data_root, now);
+    project_collaboration_outgoing(product_port, presence_port, data_root, now).await;
     if driver.retry_outgoing_once(now).await.is_err() {
         tracing::warn!("collaboration outgoing retry cycle failed");
     }
     if driver.process_incoming_once(now).await.is_err() {
         tracing::warn!("collaboration incoming cycle failed");
     }
-    project_collaboration_handoffs(product_port, presence_port, data_root, now);
+    project_collaboration_handoffs(product_port, presence_port, data_root, now).await;
 }
 
 #[cfg(test)]
@@ -1104,6 +1113,56 @@ mod tests {
             vec![crate::crypto::encode_signing_key_did(endpoint_key)],
         )
         .unwrap()
+    }
+
+    async fn grant_local_presence(
+        data_dir: &Path,
+        port: &CollaborationPresenceProductPort,
+        principal: &str,
+        now: u64,
+    ) -> (
+        crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument,
+        crate::collaboration_presence_grant::GrantedPresence,
+    ) {
+        use crate::collaboration_presence_grant::{
+            set_presence_grant, store_test_profile, PresenceDecision,
+        };
+        crate::auth::store_test_principal_root_protection(data_dir, principal);
+        let (key, _) = generate_keypair();
+        let profile = crate::collaboration_profile_authority::signed_profile_document_for_test(
+            &key,
+            "Local",
+            None,
+            1,
+            None,
+            now,
+            vec![port.test_core().local_device_did()],
+        )
+        .unwrap();
+        store_test_profile(data_dir, principal, &key, &profile);
+        set_presence_grant(
+            port.presence_authority().unwrap(),
+            data_dir,
+            principal,
+            &profile.document().profile_did,
+            &port.presence_scope(),
+            PresenceDecision::Always,
+            now,
+        )
+        .await
+        .unwrap();
+        let grant = crate::collaboration_presence_grant::presence_grant(
+            port.presence_authority().unwrap(),
+            data_dir,
+            principal,
+            &profile.document().profile_did,
+            &port.presence_scope(),
+            crate::collaboration_presence_grant::PresencePublisher::Runtime,
+            now,
+        )
+        .await
+        .unwrap();
+        (profile, grant)
     }
 
     struct ConfigMaterial {
@@ -1318,7 +1377,14 @@ mod tests {
     }
 
     fn configured_root(with_grant: bool) -> (tempfile::TempDir, ConfigMaterial) {
-        let temp = tempfile::tempdir().unwrap();
+        let mut builder = tempfile::Builder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(fs::Permissions::from_mode(0o700));
+        }
+        let temp = builder.tempdir().unwrap();
+        crate::collaboration_core::ensure_owner_only_directory(temp.path()).unwrap();
         let material = config_material(with_grant);
         write_config(
             temp.path(),
@@ -1554,13 +1620,14 @@ mod tests {
         carrier.push_for("gossip_send", [send_remote()]);
         carrier.push_for("gossip_peek", [peek(0, 0, Vec::new())]);
         carrier.push_for("gossip_ack", [ack(0, 0, false)]);
+        let presence_authority = crate::collaboration_presence_grant::test_authority();
         let mut service = start_collaboration_runtime_service(
             temp.path(),
             device_key,
             configuration,
             Some(carrier.clone()),
             Arc::new(ProviderRegistry::new()),
-            None,
+            Some(presence_authority.manager().clone()),
         )
         .await
         .unwrap()
@@ -1618,9 +1685,13 @@ mod tests {
         ));
 
         let now = now_secs();
-        let person_profile = service
-            .chat_product_port()
-            .test_person_profile("Local", None);
+        let (person_profile, presence_grant) = grant_local_presence(
+            temp.path(),
+            &service_presence_port,
+            "runtime-principal",
+            now,
+        )
+        .await;
         let binding = chat_message_request_binding(
             "startup-product-request",
             "runtime-principal",
@@ -1643,7 +1714,7 @@ mod tests {
         let presence = service_presence_port
             .prepare_presence(
                 presence_request_binding(
-                    "startup-presence-request",
+                    &presence_grant.bind_request_id("startup-presence-request"),
                     "runtime-principal",
                     &person_profile,
                 )
@@ -1747,7 +1818,9 @@ mod tests {
             .unwrap(),
         );
         let chat_port = CollaborationChatProductPort::new(core.clone()).unwrap();
-        let presence_port = CollaborationPresenceProductPort::new(core.clone()).unwrap();
+        let presence_port = CollaborationPresenceProductPort::new(core.clone())
+            .unwrap()
+            .with_presence_authority(crate::collaboration_presence_grant::test_authority());
         let gateway_state = crate::api::gateway::GatewayState {
             provider_registry: None,
             collaboration_chat_product_port: Some(chat_port.clone()),
@@ -1763,10 +1836,14 @@ mod tests {
             .as_ref()
             .unwrap();
         assert!(gateway_presence_port.test_shares_core_with(chat_port.test_core()));
-        let person_profile = chat_port.test_person_profile("Local", None);
-        let binding =
-            presence_request_binding("local-presence", "runtime-principal", &person_profile)
-                .unwrap();
+        let (person_profile, presence_grant) =
+            grant_local_presence(temp.path(), &presence_port, "runtime-principal", NOW).await;
+        let binding = presence_request_binding(
+            &presence_grant.bind_request_id("local-presence"),
+            "runtime-principal",
+            &person_profile,
+        )
+        .unwrap();
         gateway_presence_port
             .prepare_presence(binding, &person_profile, NOW)
             .unwrap();
@@ -1775,7 +1852,10 @@ mod tests {
         let joined = join_collaboration_network(carrier.clone(), &profile)
             .await
             .unwrap();
-        let driver = CollaborationTransportDriver::new(core.clone(), joined);
+        let driver = CollaborationTransportDriver::new(core.clone(), joined)
+            .with_home_delivery(presence_port.clone(), Arc::new(ProviderRegistry::new()))
+            .await
+            .unwrap();
         carrier.push([send_remote(), peek(0, 0, Vec::new()), ack(0, 0, false)]);
         run_collaboration_worker_cycle_with_presence(
             &driver,
@@ -2245,8 +2325,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn worker_handoff_failure_does_not_block_later_chat_or_presence_and_retries_next_cycle() {
+    #[tokio::test]
+    async fn worker_handoff_failure_does_not_block_later_chat_or_presence_and_retries_next_cycle() {
         let (temp, _) = configured_root(true);
         let configuration =
             load_and_accept_collaboration_startup_configuration(temp.path()).unwrap();
@@ -2315,7 +2395,7 @@ mod tests {
             crate::room_service::CollaborationProjectionWriteFault::BeforeFileSync,
         )
         .unwrap();
-        project_collaboration_handoffs(&product, &presence, temp.path(), now);
+        project_collaboration_handoffs(&product, &presence, temp.path(), now).await;
         let pending = product.pending_messages().unwrap();
         assert_eq!(pending.len(), 1);
         assert!(presence.pending_presences().unwrap().is_empty());
@@ -2335,7 +2415,7 @@ mod tests {
         assert_eq!(core.summary().unwrap().pending_product_handoffs, 1);
         // One attempt per handoff in this bounded cycle; the genuine IO failure
         // retains its original until the next cycle completes its durable work.
-        project_collaboration_handoffs(&product, &presence, temp.path(), now);
+        project_collaboration_handoffs(&product, &presence, temp.path(), now).await;
         assert_eq!(core.summary().unwrap().pending_product_handoffs, 0);
         let completed = product
             .conversation_poll(temp.path(), &session.token, 0)
@@ -2343,7 +2423,7 @@ mod tests {
         assert_eq!(completed.objects.len(), 2);
         assert_eq!(completed.objects[0].seq, first_poll.objects[0].seq);
         assert_eq!(completed.objects[1].body.as_deref(), Some("retry first"));
-        project_collaboration_handoffs(&product, &presence, temp.path(), now);
+        project_collaboration_handoffs(&product, &presence, temp.path(), now).await;
         assert_eq!(
             product
                 .conversation_poll(temp.path(), &session.token, 0)
@@ -2583,12 +2663,15 @@ mod tests {
             .unwrap(),
         );
         let chat = CollaborationChatProductPort::new(core.clone()).unwrap();
-        let presence = CollaborationPresenceProductPort::new(core.clone()).unwrap();
-        let local_profile = profile_for_endpoint(&key, "Local");
+        let presence = CollaborationPresenceProductPort::new(core.clone())
+            .unwrap()
+            .with_presence_authority(crate::collaboration_presence_grant::test_authority());
+        let (local_profile, presence_grant) =
+            grant_local_presence(temp.path(), &presence, "test-principal", now).await;
         let prepared = presence
             .prepare_presence(
                 presence_request_binding(
-                    "local-history-presence",
+                    &presence_grant.bind_request_id("local-history-presence"),
                     "test-principal",
                     &local_profile,
                 )
@@ -2661,7 +2744,10 @@ mod tests {
         let joined = join_collaboration_network(carrier.clone(), &profile)
             .await
             .unwrap();
-        let driver = CollaborationTransportDriver::new(core, joined);
+        let driver = CollaborationTransportDriver::new(core, joined)
+            .with_home_delivery(presence.clone(), Arc::new(ProviderRegistry::new()))
+            .await
+            .unwrap();
         tokio::time::timeout(
             Duration::from_secs(1),
             run_collaboration_worker_cycle_with_presence(
@@ -2743,12 +2829,20 @@ mod tests {
                 .unwrap(),
             );
             let chat = CollaborationChatProductPort::new(core.clone()).unwrap();
-            let presence = CollaborationPresenceProductPort::new(core.clone()).unwrap();
+            let presence = CollaborationPresenceProductPort::new(core.clone())
+                .unwrap()
+                .with_presence_authority(crate::collaboration_presence_grant::test_authority());
             let local_metadata = if blocked_outgoing {
+                let (local_profile, presence_grant) =
+                    grant_local_presence(temp.path(), &presence, "principal", now).await;
                 let prepared = presence
                     .prepare_presence(
-                        presence_request_binding("blocked-presence", "principal", &local_profile)
-                            .unwrap(),
+                        presence_request_binding(
+                            &presence_grant.bind_request_id("blocked-presence"),
+                            "principal",
+                            &local_profile,
+                        )
+                        .unwrap(),
                         &local_profile,
                         now,
                     )
@@ -2807,7 +2901,10 @@ mod tests {
                     )],
                 );
             }
-            let driver = CollaborationTransportDriver::new(core.clone(), joined);
+            let driver = CollaborationTransportDriver::new(core.clone(), joined)
+                .with_home_delivery(presence.clone(), Arc::new(ProviderRegistry::new()))
+                .await
+                .unwrap();
             let session = crate::room_service::start_local_runtime_session(
                 temp.path(),
                 &local_did,
@@ -3015,16 +3112,6 @@ mod tests {
         // The real Chat projection retains history at the current wall clock.
         let now = now_secs();
         let (device_key, _) = generate_keypair();
-        let local_profile = profile_for_endpoint(&device_key, "Local");
-        let local_did = local_profile.document().profile_did.clone();
-        crate::room_service::seed_room_owner(
-            temp.path(),
-            &local_profile,
-            crate::room_service::RoomOwnerSeedInput {
-                title: "Chat".to_string(),
-            },
-        )
-        .unwrap();
         let core = Arc::new(
             CollaborationCore::new(
                 temp.path(),
@@ -3035,6 +3122,21 @@ mod tests {
             )
             .unwrap(),
         );
+        let product_port = CollaborationChatProductPort::new(core.clone()).unwrap();
+        let presence_port = CollaborationPresenceProductPort::new(core.clone())
+            .unwrap()
+            .with_presence_authority(crate::collaboration_presence_grant::test_authority());
+        let (local_profile, presence_grant) =
+            grant_local_presence(temp.path(), &presence_port, "runtime-principal", now).await;
+        let local_did = local_profile.document().profile_did.clone();
+        crate::room_service::seed_room_owner(
+            temp.path(),
+            &local_profile,
+            crate::room_service::RoomOwnerSeedInput {
+                title: "Chat".to_string(),
+            },
+        )
+        .unwrap();
         let binding = |request_id: &str, payload_type: &str, payload: &serde_json::Value| {
             let authenticated_payload = crate::collaboration_default_conversation::
                 profile_authenticated_conversation_payload(&local_profile, payload.clone())
@@ -3090,12 +3192,10 @@ mod tests {
                 .len(),
             1
         );
-        let product_port = CollaborationChatProductPort::new(core.clone()).unwrap();
-        let presence_port = CollaborationPresenceProductPort::new(core.clone()).unwrap();
         let presence = presence_port
             .prepare_presence(
                 presence_request_binding(
-                    "startup-worker-presence",
+                    &presence_grant.bind_request_id("startup-worker-presence"),
                     "runtime-principal",
                     &local_profile,
                 )
@@ -3142,7 +3242,10 @@ mod tests {
         let joined = join_collaboration_network(carrier.clone(), &profile)
             .await
             .unwrap();
-        let driver = CollaborationTransportDriver::new(core.clone(), joined);
+        let driver = CollaborationTransportDriver::new(core.clone(), joined)
+            .with_home_delivery(presence_port.clone(), Arc::new(ProviderRegistry::new()))
+            .await
+            .unwrap();
         carrier.push_for(
             "gossip_send",
             [
@@ -3151,7 +3254,14 @@ mod tests {
             ],
         );
         carrier.push_for("gossip_peek", [FakeReply::Error("peek failed")]);
-        run_collaboration_worker_cycle(&driver, &product_port, temp.path(), now + 1).await;
+        run_collaboration_worker_cycle_with_presence(
+            &driver,
+            &product_port,
+            &presence_port,
+            temp.path(),
+            now + 1,
+        )
+        .await;
         assert_eq!(core.pending_outgoing(now + 1).unwrap().len(), 2);
         assert!(core
             .pending_outgoing_product_projections(now + 1)
@@ -3181,7 +3291,14 @@ mod tests {
             accept_shared(&core, &remote_authority, incoming.envelope_bytes(), now + 1).unwrap();
         // Unanswered gossip waits 5 s before a resend, so these cycles send none.
         carrier.push([peek(0, 0, Vec::new()), FakeReply::Error("ack failed")]);
-        run_collaboration_worker_cycle(&driver, &product_port, temp.path(), now + 1).await;
+        run_collaboration_worker_cycle_with_presence(
+            &driver,
+            &product_port,
+            &presence_port,
+            temp.path(),
+            now + 1,
+        )
+        .await;
         assert_eq!(core.summary().unwrap().pending_product_handoffs, 0);
         assert_eq!(core.summary().unwrap().remotely_accepted_outgoing, 0);
         assert_eq!(core.pending_outgoing(now + 1).unwrap().len(), 2);
@@ -3204,7 +3321,14 @@ mod tests {
             receipt,
         );
         carrier.push([peek(0, 0, Vec::new()), ack(0, 0, false)]);
-        run_collaboration_worker_cycle(&driver, &product_port, temp.path(), now + 1).await;
+        run_collaboration_worker_cycle_with_presence(
+            &driver,
+            &product_port,
+            &presence_port,
+            temp.path(),
+            now + 1,
+        )
+        .await;
         assert_eq!(core.summary().unwrap().pending_product_handoffs, 0);
         assert_eq!(core.pending_outgoing(now + 1).unwrap().len(), 2);
         assert_eq!(
@@ -3227,7 +3351,14 @@ mod tests {
             ),
             ack(0, 2, true),
         ]);
-        run_collaboration_worker_cycle(&driver, &product_port, temp.path(), now + 1).await;
+        run_collaboration_worker_cycle_with_presence(
+            &driver,
+            &product_port,
+            &presence_port,
+            temp.path(),
+            now + 1,
+        )
+        .await;
         let pending = core.pending_outgoing(now + 1).unwrap();
         // Shared still owes other Homes' direct delivery; this peer's gossip
         // receipt is durable and ends its gossip.
@@ -3243,7 +3374,14 @@ mod tests {
         assert!(product_port.pending_messages().unwrap().is_empty());
         let before_settled = request_ops(&carrier).len();
         carrier.push([peek(2, 2, Vec::new()), ack(2, 2, false)]);
-        run_collaboration_worker_cycle(&driver, &product_port, temp.path(), now + 1).await;
+        run_collaboration_worker_cycle_with_presence(
+            &driver,
+            &product_port,
+            &presence_port,
+            temp.path(),
+            now + 1,
+        )
+        .await;
         assert_eq!(
             &request_ops(&carrier)[before_settled..],
             &["gossip_peek", "gossip_ack"]

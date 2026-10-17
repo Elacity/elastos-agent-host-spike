@@ -105,17 +105,16 @@ pub(super) async fn chat_room_presence_heartbeat(
         crate::collaboration_presence_grant::PresencePublisher::CommunityOpen,
         now_ts(),
     )
-    .await
-    .is_some();
-    if !granted {
+    .await;
+    let Some(granted) = granted else {
         return Json(HomeCollaborationPresenceResult {
             configured: true,
             queued: false,
             next_heartbeat_after_ms: HOME_PRESENCE_HEARTBEAT_MS,
         })
         .into_response();
-    }
-    if let Err(error) = prepare_person_presence(port, &presentation, now_ts()) {
+    };
+    if let Err(error) = prepare_person_presence(port, &presentation, &granted, now_ts()) {
         return home_error_response(error);
     }
     Json(HomeCollaborationPresenceResult {
@@ -171,7 +170,7 @@ pub(super) async fn people_collaboration_presence(
         .into_response();
     };
     let local_profile_did = &presentation.profile.document().profile_did;
-    let snapshot = match port.snapshot(now) {
+    let snapshot = match port.authorized_snapshot(now).await {
         Ok(snapshot) => snapshot,
         Err(error) => return home_error_response(error),
     };
@@ -402,9 +401,9 @@ async fn set_community_presence(
         now_ts(),
     )
     .await?;
-    // Announcements queued under the previous answer never go out; a
-    // current grant re-announces on its next tick.
-    port.retire_outgoing_presence(&context.principal_id)?;
+    // Each answer retires the previous projection and queued announcements.
+    // The selected publisher prepares fresh presence under the current grant.
+    port.retire_own_presence(&context.principal_id, &profile_did)?;
     Ok(())
 }
 
@@ -492,9 +491,10 @@ pub(super) fn community_presence_request_notification(
 fn prepare_person_presence(
     port: &crate::collaboration_presence::CollaborationPresenceProductPort,
     presentation: &AuthenticatedPresencePresentation,
+    grant: &crate::collaboration_presence_grant::GrantedPresence,
     now: u64,
 ) -> anyhow::Result<()> {
-    let request_id = presence_heartbeat_request_id(presentation, now)?;
+    let request_id = grant.bind_request_id(&presence_heartbeat_request_id(presentation, now)?);
     let operation = crate::collaboration_presence::presence_request_binding(
         &request_id,
         &presentation.principal_id,
@@ -554,7 +554,7 @@ async fn publish_runtime_owned_presence_pass(
         if display_name.is_empty() {
             continue;
         }
-        if community_presence_mode(
+        let granted = community_presence_mode(
             data_dir,
             port,
             &principal.principal_id,
@@ -562,9 +562,8 @@ async fn publish_runtime_owned_presence_pass(
             crate::collaboration_presence_grant::PresencePublisher::Runtime,
             now,
         )
-        .await
-        .is_none()
-        {
+        .await;
+        let Some(granted) = granted else {
             // Someone shown only while Community is open still counts as a
             // grant on this Home for the History hint.
             if crate::collaboration_presence_grant::state(data_dir, &principal.principal_id, &scope)
@@ -575,7 +574,7 @@ async fn publish_runtime_owned_presence_pass(
                 nobody_granted = false;
             }
             continue;
-        }
+        };
         nobody_granted = false;
         let presentation = AuthenticatedPresencePresentation {
             principal_id: principal.principal_id.clone(),
@@ -585,7 +584,7 @@ async fn publish_runtime_owned_presence_pass(
             principal_updated_at: principal.updated_at,
             profile_updated_at: Some(profile.document().updated_at),
         };
-        prepare_person_presence(port, &presentation, now)?;
+        prepare_person_presence(port, &presentation, &granted, now)?;
         published = published.saturating_add(1);
     }
     Ok((published, nobody_granted))
@@ -603,20 +602,30 @@ pub(super) async fn community_presence_mode(
     profile: &crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument,
     publisher: crate::collaboration_presence_grant::PresencePublisher,
     now: u64,
-) -> Option<crate::collaboration_presence_grant::PresenceMode> {
-    if !port.community_joined() {
-        return None;
+) -> Option<crate::collaboration_presence_grant::GrantedPresence> {
+    let granted = match port.presence_authority() {
+        Some(authority) if port.community_joined() => {
+            crate::collaboration_presence_grant::presence_grant(
+                authority,
+                data_dir,
+                principal_id,
+                &profile.document().profile_did,
+                &port.presence_scope(),
+                publisher,
+                now,
+            )
+            .await
+        }
+        _ => None,
+    };
+    if granted.is_none() {
+        // A publisher-mode mismatch can leave the other publisher's grant
+        // valid. The common use gate retires state only when that grant also
+        // fails, including Hidden, revocation and an epoch change.
+        port.retire_denied_current_presence(principal_id, &profile.document().profile_did, now)
+            .await;
     }
-    crate::collaboration_presence_grant::presence_grant(
-        port.presence_authority()?,
-        data_dir,
-        principal_id,
-        &profile.document().profile_did,
-        &port.presence_scope(),
-        publisher,
-        now,
-    )
-    .await
+    granted
 }
 
 fn presence_heartbeat_request_id(
@@ -960,7 +969,7 @@ mod tests {
         // Presence is not a post: it leaves no replay tombstone behind.
         assert_eq!(chat.test_core().summary().unwrap().replay_tombstones, 0);
 
-        // Hidden stops it on the next pass.
+        // The next publisher pass retires both local and queued presence.
         decide(PresenceDecision::Hidden).await.unwrap();
         assert_eq!(
             publish_runtime_owned_presence(temp.path(), &port, now + 15)
@@ -968,6 +977,12 @@ mod tests {
                 .unwrap(),
             0
         );
+        assert!(port.snapshot(now + 15).unwrap().records().is_empty());
+        assert!(chat
+            .test_core()
+            .pending_outgoing(now + 15)
+            .unwrap()
+            .is_empty());
         decide(PresenceDecision::Always).await.unwrap();
 
         // Without the Runtime's capability manager no grant is honoured.

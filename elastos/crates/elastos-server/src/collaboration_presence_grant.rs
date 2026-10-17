@@ -128,6 +128,51 @@ impl PresencePublisher {
     }
 }
 
+/// The publisher and grant generation that authorized preparation. This holds
+/// a digest of the token id, never the bearer token. The existing immutable
+/// request id carries it through persistence and restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GrantedPresence {
+    pub(crate) mode: PresenceMode,
+    generation: String,
+}
+
+impl GrantedPresence {
+    fn from_grant(grant: &PresenceGrant) -> Self {
+        use sha2::{Digest, Sha256};
+        Self {
+            mode: grant.mode,
+            generation: hex::encode(Sha256::digest(grant.token_id.as_bytes())),
+        }
+    }
+
+    fn request_prefix(&self) -> String {
+        format!(
+            "presence:{}:{}:",
+            self.mode.resource_suffix(),
+            self.generation
+        )
+    }
+
+    pub(crate) fn bind_request_id(&self, request_id: &str) -> String {
+        use sha2::{Digest, Sha256};
+        format!(
+            "{}{}",
+            self.request_prefix(),
+            hex::encode(Sha256::digest(request_id.as_bytes()))
+        )
+    }
+
+    fn authorizes_request(&self, request_id: &str) -> bool {
+        let prefix = self.request_prefix();
+        request_id
+            .strip_prefix(prefix.as_str())
+            .is_some_and(|suffix| {
+                suffix.len() == 64 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+    }
+}
+
 /// The Runtime's capability manager plus when each presence token's success
 /// was last audited. Only audit timestamps are remembered: a success never
 /// lets a later call skip validation.
@@ -367,7 +412,7 @@ pub(crate) async fn presence_grant(
     scope: &PresenceScope,
     publisher: PresencePublisher,
     now: u64,
-) -> Option<PresenceMode> {
+) -> Option<GrantedPresence> {
     let file = load_file(data_dir, principal_id).ok()?;
     let grant = file
         .grants
@@ -396,14 +441,32 @@ pub(crate) async fn presence_grant(
         drop_grant(data_dir, principal_id, &grant.token_id);
         return None;
     }
+    if validate_presence_grant(authority, principal_id, scope, &grant, &token, now).await {
+        Some(GrantedPresence::from_grant(&grant))
+    } else {
+        authority.forget(&grant.token_id);
+        drop_grant(data_dir, principal_id, &grant.token_id);
+        None
+    }
+}
+
+/// Check the live capability without changing the holder's grant file.
+async fn validate_presence_grant(
+    authority: &PresenceAuthority,
+    principal_id: &str,
+    scope: &PresenceScope,
+    grant: &PresenceGrant,
+    token: &CapabilityToken,
+    now: u64,
+) -> bool {
     let audit_success = authority.success_audit_due(&grant.token_id, now);
     match authority
         .manager
         .validate_recurring(
-            &token,
+            token,
             principal_id,
             Action::Message,
-            &presence_resource(scope, publisher.mode()),
+            &presence_resource(scope, grant.mode),
             None,
             audit_success,
         )
@@ -413,22 +476,18 @@ pub(crate) async fn presence_grant(
             if audit_success {
                 authority.record_success_audit(&grant.token_id, now);
             }
-            Some(grant.mode)
+            true
         }
         Err(error) => {
             tracing::info!("Community presence grant no longer valid: {error}");
-            authority.forget(&grant.token_id);
-            drop_grant(data_dir, principal_id, &grant.token_id);
-            None
+            false
         }
     }
 }
 
-/// The send boundary: may a queued announcement of this person still go out?
-/// Validates the person's current grant, for the publisher its recorded mode
-/// names, exactly as `presence_grant` does, so Hidden, a refusal, a revoke
-/// or an epoch bump stops an announcement already queued.
-pub(crate) async fn queued_presence_allowed(
+/// Publisher maintenance checks the current grant and retires a failed holder.
+/// Effects use `own_presence_operation_authorized` with their original binding.
+pub(crate) async fn current_presence_grant_usable(
     authority: &PresenceAuthority,
     data_dir: &std::path::Path,
     principal_id: &str,
@@ -459,6 +518,56 @@ pub(crate) async fn queued_presence_allowed(
     )
     .await
     .is_some()
+}
+
+/// An effect presents the generation and publisher that prepared its operation.
+/// A newer valid grant cannot revive work from an older generation. Snapshot
+/// checks pass false for retirement; only lifecycle/effect calls change state.
+pub(crate) async fn own_presence_operation_authorized(
+    authority: &PresenceAuthority,
+    data_dir: &std::path::Path,
+    operation: &crate::esp_binding::EspRequestBinding,
+    profile_did: &str,
+    scope: &PresenceScope,
+    now: u64,
+    retire_denied: bool,
+) -> bool {
+    let principal_id = operation.principal.as_str();
+    let Some(grant) = load_file(data_dir, principal_id)
+        .ok()
+        .and_then(|file| file.grants.into_iter().find(|grant| &grant.scope == scope))
+    else {
+        return false;
+    };
+    if !GrantedPresence::from_grant(&grant).authorizes_request(&operation.request_id) {
+        return false;
+    }
+    let token = match CapabilityToken::from_base64(&grant.token) {
+        Ok(token) if token.id().to_string() == grant.token_id => token,
+        _ => {
+            if retire_denied {
+                authority.forget(&grant.token_id);
+                drop_grant(data_dir, principal_id, &grant.token_id);
+            }
+            return false;
+        }
+    };
+    let allowed = if grant.profile_did != profile_did {
+        if retire_denied {
+            authority
+                .manager
+                .revoke(*token.id(), "profile changed")
+                .await;
+        }
+        false
+    } else {
+        validate_presence_grant(authority, principal_id, scope, &grant, &token, now).await
+    };
+    if !allowed && retire_denied {
+        authority.forget(&grant.token_id);
+        drop_grant(data_dir, principal_id, &grant.token_id);
+    }
+    allowed
 }
 
 /// Records the person's own answer, from Inbox or System → Community only.
@@ -524,6 +633,36 @@ pub(crate) async fn set_presence_grant(
         }),
     }
     save_file(data_dir, principal_id, &file)
+}
+
+/// Store an isolated fixture's actual signed Profile through the protected
+/// principal-root path used by the production reader.
+#[cfg(test)]
+pub(crate) fn store_test_profile(
+    data_dir: &std::path::Path,
+    principal_id: &str,
+    key: &elastos_runtime::signature::SigningKey,
+    profile: &crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument,
+) {
+    let root = crate::auth::principal_localhost_root(principal_id);
+    let path =
+        crate::collaboration_profile_authority::profile_authority_path(data_dir, &root).unwrap();
+    crate::auth::create_owner_only_dir_all(data_dir, path.parent().unwrap()).unwrap();
+    let bundle = serde_json::json!({
+        "schema": crate::collaboration_profile_authority::COLLABORATION_PROFILE_AUTHORITY_BUNDLE_SCHEMA_V1,
+        "profile_signing_seed_hex": hex::encode(key.to_bytes()),
+        "previous_profiles": [],
+        "signed_profile": profile.signed_envelope(),
+    });
+    crate::auth::write_protected_principal_root_object(
+        data_dir,
+        principal_id,
+        &root,
+        &crate::collaboration_profile_authority::profile_authority_object_uri(&root),
+        &path,
+        &serde_json::to_vec(&bundle).unwrap(),
+    )
+    .unwrap();
 }
 
 #[cfg(test)]
@@ -610,6 +749,7 @@ mod tests {
             now,
         )
         .await
+        .map(|grant| grant.mode)
     }
 
     fn held_token(data: &std::path::Path, principal: &str) -> CapabilityToken {

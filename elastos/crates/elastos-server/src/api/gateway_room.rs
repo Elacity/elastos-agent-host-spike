@@ -763,7 +763,10 @@ pub(super) async fn chat_room_session_start(
     let transport = room_transport_view(&state);
     let port = state.collaboration_chat_product_port.clone();
     let discovery_service = state.collaboration_discovery_service.clone();
-    let presence_port = state.collaboration_presence_product_port.clone();
+    let presence_snapshot = match state.collaboration_presence_product_port.as_ref() {
+        Some(port) => port.authorized_snapshot(now_ts()).await.ok(),
+        None => None,
+    };
     match tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let output = if port.is_some() {
             start_configured_chat_room_session(&data_dir, &context)?
@@ -807,7 +810,7 @@ pub(super) async fn chat_room_session_start(
                 authority.as_ref(),
                 read_snapshot.as_ref(),
                 discovery_service.as_ref(),
-                presence_port.as_ref(),
+                presence_snapshot.as_ref(),
                 local_identity.as_ref().map(|(did, _)| did.as_str()),
             ));
         }
@@ -1553,7 +1556,7 @@ fn participant_card_directory(
     discovery_service: Option<
         &crate::collaboration_discovery_runtime::CollaborationDiscoveryService,
     >,
-    presence_port: Option<&crate::collaboration_presence::CollaborationPresenceProductPort>,
+    presence_snapshot: Option<&crate::collaboration_presence::CollaborationPresenceSnapshot>,
     local_profile_did: Option<&str>,
 ) -> ParticipantCardDirectory {
     let mut directory = ParticipantCardDirectory {
@@ -1563,7 +1566,7 @@ fn participant_card_directory(
     // Members whose Home announced Community presence; everyone else shows
     // their last Community message time instead.
     let now = now_ts();
-    if let Some(snapshot) = presence_port.and_then(|port| port.snapshot(now).ok()) {
+    if let Some(snapshot) = presence_snapshot {
         for record in snapshot
             .records()
             .iter()
@@ -1867,7 +1870,10 @@ pub(super) async fn room_service_poll(
     let transport = room_transport_view(&state);
     let port = state.collaboration_chat_product_port.clone();
     let discovery_service = state.collaboration_discovery_service.clone();
-    let presence_port = state.collaboration_presence_product_port.clone();
+    let presence_snapshot = match state.collaboration_presence_product_port.as_ref() {
+        Some(port) => port.authorized_snapshot(now_ts()).await.ok(),
+        None => None,
+    };
     let mut launch_context = None;
     let mut reader_profile = None;
     let token = match port.as_ref() {
@@ -1971,7 +1977,7 @@ pub(super) async fn room_service_poll(
                 authority.as_ref(),
                 read_snapshot.as_ref(),
                 discovery_service.as_ref(),
-                presence_port.as_ref(),
+                presence_snapshot.as_ref(),
                 local_identity.as_ref().map(|(did, _)| did.as_str()),
             ));
         }
