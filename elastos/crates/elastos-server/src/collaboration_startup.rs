@@ -1363,7 +1363,14 @@ mod tests {
     }
 
     fn configured_root(with_grant: bool) -> (tempfile::TempDir, ConfigMaterial) {
-        let temp = tempfile::tempdir().unwrap();
+        let mut builder = tempfile::Builder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(fs::Permissions::from_mode(0o700));
+        }
+        let temp = builder.tempdir().unwrap();
+        crate::collaboration_core::ensure_owner_only_directory(temp.path()).unwrap();
         let material = config_material(with_grant);
         write_config(
             temp.path(),
@@ -3081,16 +3088,6 @@ mod tests {
         // The real Chat projection retains history at the current wall clock.
         let now = now_secs();
         let (device_key, _) = generate_keypair();
-        let local_profile = profile_for_endpoint(&device_key, "Local");
-        let local_did = local_profile.document().profile_did.clone();
-        crate::room_service::seed_room_owner(
-            temp.path(),
-            &local_profile,
-            crate::room_service::RoomOwnerSeedInput {
-                title: "Chat".to_string(),
-            },
-        )
-        .unwrap();
         let core = Arc::new(
             CollaborationCore::new(
                 temp.path(),
@@ -3101,6 +3098,21 @@ mod tests {
             )
             .unwrap(),
         );
+        let product_port = CollaborationChatProductPort::new(core.clone()).unwrap();
+        let presence_port = CollaborationPresenceProductPort::new(core.clone())
+            .unwrap()
+            .with_presence_authority(crate::collaboration_presence_grant::test_authority());
+        let local_profile =
+            grant_local_presence(temp.path(), &presence_port, "runtime-principal", now).await;
+        let local_did = local_profile.document().profile_did.clone();
+        crate::room_service::seed_room_owner(
+            temp.path(),
+            &local_profile,
+            crate::room_service::RoomOwnerSeedInput {
+                title: "Chat".to_string(),
+            },
+        )
+        .unwrap();
         let binding = |request_id: &str, payload_type: &str, payload: &serde_json::Value| {
             let authenticated_payload = crate::collaboration_default_conversation::
                 profile_authenticated_conversation_payload(&local_profile, payload.clone())
@@ -3156,8 +3168,6 @@ mod tests {
                 .len(),
             1
         );
-        let product_port = CollaborationChatProductPort::new(core.clone()).unwrap();
-        let presence_port = CollaborationPresenceProductPort::new(core.clone()).unwrap();
         let presence = presence_port
             .prepare_presence(
                 presence_request_binding(
@@ -3208,7 +3218,10 @@ mod tests {
         let joined = join_collaboration_network(carrier.clone(), &profile)
             .await
             .unwrap();
-        let driver = CollaborationTransportDriver::new(core.clone(), joined);
+        let driver = CollaborationTransportDriver::new(core.clone(), joined)
+            .with_home_delivery(presence_port.clone(), Arc::new(ProviderRegistry::new()))
+            .await
+            .unwrap();
         carrier.push_for(
             "gossip_send",
             [
@@ -3217,7 +3230,14 @@ mod tests {
             ],
         );
         carrier.push_for("gossip_peek", [FakeReply::Error("peek failed")]);
-        run_collaboration_worker_cycle(&driver, &product_port, temp.path(), now + 1).await;
+        run_collaboration_worker_cycle_with_presence(
+            &driver,
+            &product_port,
+            &presence_port,
+            temp.path(),
+            now + 1,
+        )
+        .await;
         assert_eq!(core.pending_outgoing(now + 1).unwrap().len(), 2);
         assert!(core
             .pending_outgoing_product_projections(now + 1)
@@ -3247,7 +3267,14 @@ mod tests {
             accept_shared(&core, &remote_authority, incoming.envelope_bytes(), now + 1).unwrap();
         // Unanswered gossip waits 5 s before a resend, so these cycles send none.
         carrier.push([peek(0, 0, Vec::new()), FakeReply::Error("ack failed")]);
-        run_collaboration_worker_cycle(&driver, &product_port, temp.path(), now + 1).await;
+        run_collaboration_worker_cycle_with_presence(
+            &driver,
+            &product_port,
+            &presence_port,
+            temp.path(),
+            now + 1,
+        )
+        .await;
         assert_eq!(core.summary().unwrap().pending_product_handoffs, 0);
         assert_eq!(core.summary().unwrap().remotely_accepted_outgoing, 0);
         assert_eq!(core.pending_outgoing(now + 1).unwrap().len(), 2);
@@ -3270,7 +3297,14 @@ mod tests {
             receipt,
         );
         carrier.push([peek(0, 0, Vec::new()), ack(0, 0, false)]);
-        run_collaboration_worker_cycle(&driver, &product_port, temp.path(), now + 1).await;
+        run_collaboration_worker_cycle_with_presence(
+            &driver,
+            &product_port,
+            &presence_port,
+            temp.path(),
+            now + 1,
+        )
+        .await;
         assert_eq!(core.summary().unwrap().pending_product_handoffs, 0);
         assert_eq!(core.pending_outgoing(now + 1).unwrap().len(), 2);
         assert_eq!(
@@ -3293,7 +3327,14 @@ mod tests {
             ),
             ack(0, 2, true),
         ]);
-        run_collaboration_worker_cycle(&driver, &product_port, temp.path(), now + 1).await;
+        run_collaboration_worker_cycle_with_presence(
+            &driver,
+            &product_port,
+            &presence_port,
+            temp.path(),
+            now + 1,
+        )
+        .await;
         let pending = core.pending_outgoing(now + 1).unwrap();
         // Shared still owes other Homes' direct delivery; this peer's gossip
         // receipt is durable and ends its gossip.
@@ -3309,7 +3350,14 @@ mod tests {
         assert!(product_port.pending_messages().unwrap().is_empty());
         let before_settled = request_ops(&carrier).len();
         carrier.push([peek(2, 2, Vec::new()), ack(2, 2, false)]);
-        run_collaboration_worker_cycle(&driver, &product_port, temp.path(), now + 1).await;
+        run_collaboration_worker_cycle_with_presence(
+            &driver,
+            &product_port,
+            &presence_port,
+            temp.path(),
+            now + 1,
+        )
+        .await;
         assert_eq!(
             &request_ops(&carrier)[before_settled..],
             &["gossip_peek", "gossip_ack"]

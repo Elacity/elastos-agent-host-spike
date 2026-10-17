@@ -396,14 +396,32 @@ pub(crate) async fn presence_grant(
         drop_grant(data_dir, principal_id, &grant.token_id);
         return None;
     }
+    if validate_presence_grant(authority, principal_id, scope, &grant, &token, now).await {
+        Some(grant.mode)
+    } else {
+        authority.forget(&grant.token_id);
+        drop_grant(data_dir, principal_id, &grant.token_id);
+        None
+    }
+}
+
+/// Check the live capability without changing the holder's grant file.
+async fn validate_presence_grant(
+    authority: &PresenceAuthority,
+    principal_id: &str,
+    scope: &PresenceScope,
+    grant: &PresenceGrant,
+    token: &CapabilityToken,
+    now: u64,
+) -> bool {
     let audit_success = authority.success_audit_due(&grant.token_id, now);
     match authority
         .manager
         .validate_recurring(
-            &token,
+            token,
             principal_id,
             Action::Message,
-            &presence_resource(scope, publisher.mode()),
+            &presence_resource(scope, grant.mode),
             None,
             audit_success,
         )
@@ -413,13 +431,11 @@ pub(crate) async fn presence_grant(
             if audit_success {
                 authority.record_success_audit(&grant.token_id, now);
             }
-            Some(grant.mode)
+            true
         }
         Err(error) => {
             tracing::info!("Community presence grant no longer valid: {error}");
-            authority.forget(&grant.token_id);
-            drop_grant(data_dir, principal_id, &grant.token_id);
-            None
+            false
         }
     }
 }
@@ -460,6 +476,29 @@ pub(crate) async fn own_presence_usable(
     )
     .await
     .is_some()
+}
+
+/// The same live grant check for snapshots; lifecycle paths own retirement.
+pub(crate) async fn own_presence_authorized(
+    authority: &PresenceAuthority,
+    data_dir: &std::path::Path,
+    principal_id: &str,
+    profile_did: &str,
+    scope: &PresenceScope,
+    now: u64,
+) -> bool {
+    let Some(grant) = load_file(data_dir, principal_id)
+        .ok()
+        .and_then(|file| file.grants.into_iter().find(|grant| &grant.scope == scope))
+    else {
+        return false;
+    };
+    let token = match CapabilityToken::from_base64(&grant.token) {
+        Ok(token) if token.id().to_string() == grant.token_id => token,
+        _ => return false,
+    };
+    grant.profile_did == profile_did
+        && validate_presence_grant(authority, principal_id, scope, &grant, &token, now).await
 }
 
 /// Records the person's own answer, from Inbox or System → Community only.

@@ -979,44 +979,81 @@ async fn people_snapshot_filters_local_and_exposes_only_signed_live_remote_prese
     let handoff = local_presence.pending_presences().unwrap().remove(0);
     local_presence.project_handoff(&handoff, now).unwrap();
 
-    let state_before = file_snapshot(local_dir.path());
-    let response = gateway_router(state)
-        .oneshot(capsule_request(
-            "GET",
-            "/api/apps/people/presence",
-            &authority.people_token,
-            Body::empty(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let value = response_json(response).await;
-    assert_eq!(value["schema"], "elastos.people.presence.snapshot/v1");
-    assert_eq!(value["configured"], true);
-    assert_eq!(value["online_count"], 1);
-    assert_eq!(value["online"][0]["display_name"], "Remote");
-    assert_eq!(value["online"][0]["handle"], "remote");
-    let keys = value["online"][0]
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        keys,
-        BTreeSet::from([
-            "profile_did",
-            "display_name",
-            "handle",
-            "last_seen_at",
-            "expires_at",
-        ])
-    );
-    assert_ne!(
-        value["online"][0]["profile_did"],
-        local_profile.document().profile_did
-    );
-    assert_eq!(file_snapshot(local_dir.path()), state_before);
+    let app = gateway_router(state);
+    use crate::collaboration_presence_grant::{set_presence_grant, PresenceDecision};
+    for (decision, epoch, own_visible) in [
+        (None, false, false),
+        (Some(PresenceDecision::Always), false, true),
+        (None, true, false),
+        (Some(PresenceDecision::Hidden), false, false),
+    ] {
+        if let Some(decision) = decision {
+            set_presence_grant(
+                local_presence.presence_authority().unwrap(),
+                local_dir.path(),
+                &authority.principal_id,
+                &local_profile.document().profile_did,
+                &local_presence.presence_scope(),
+                decision,
+                now,
+            )
+            .await
+            .unwrap();
+        }
+        if epoch {
+            local_presence
+                .presence_authority()
+                .unwrap()
+                .manager()
+                .revoke_all("read-only snapshot epoch");
+        }
+        let state_before = file_snapshot(local_dir.path());
+        let snapshot = local_presence.authorized_snapshot(now).await.unwrap();
+        assert_eq!(
+            snapshot.records().iter().any(|record| {
+                record.sender_profile_did() == local_profile.document().profile_did
+            }),
+            own_visible
+        );
+        let response = app
+            .clone()
+            .oneshot(capsule_request(
+                "GET",
+                "/api/apps/people/presence",
+                &authority.people_token,
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = response_json(response).await;
+        assert_eq!(value["schema"], "elastos.people.presence.snapshot/v1");
+        assert_eq!(value["configured"], true);
+        assert_eq!(value["online_count"], 1);
+        assert_eq!(value["online"][0]["display_name"], "Remote");
+        assert_eq!(value["online"][0]["handle"], "remote");
+        let keys = value["online"][0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            BTreeSet::from([
+                "profile_did",
+                "display_name",
+                "handle",
+                "last_seen_at",
+                "expires_at",
+            ])
+        );
+        assert_ne!(
+            value["online"][0]["profile_did"],
+            local_profile.document().profile_did
+        );
+        assert_eq!(file_snapshot(local_dir.path()), state_before);
+    }
 }
 
 #[tokio::test]

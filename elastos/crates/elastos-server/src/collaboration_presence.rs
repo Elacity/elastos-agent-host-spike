@@ -277,6 +277,19 @@ impl CollaborationPresenceProductPort {
         profile_did: &str,
         now: u64,
     ) -> bool {
+        self.check_own_presence(principal_id, profile_did, now, true)
+            .await
+    }
+
+    // Both reads and effects check the same current Profile and live grant.
+    // Only effects retire the holder's state after a denial.
+    async fn check_own_presence(
+        &self,
+        principal_id: &str,
+        profile_did: &str,
+        now: u64,
+        retire_denied: bool,
+    ) -> bool {
         let allowed = async {
             let authority = self.presence_authority()?;
             if !self.community_joined() {
@@ -291,20 +304,32 @@ impl CollaborationPresenceProductPort {
                 &root,
             )
             .ok()??;
-            let granted = crate::collaboration_presence_grant::own_presence_usable(
-                authority,
-                self.core.data_root(),
-                principal_id,
-                &profile.document().profile_did,
-                &self.presence_scope(),
-                now,
-            )
-            .await;
+            let granted = if retire_denied {
+                crate::collaboration_presence_grant::own_presence_usable(
+                    authority,
+                    self.core.data_root(),
+                    principal_id,
+                    &profile.document().profile_did,
+                    &self.presence_scope(),
+                    now,
+                )
+                .await
+            } else {
+                crate::collaboration_presence_grant::own_presence_authorized(
+                    authority,
+                    self.core.data_root(),
+                    principal_id,
+                    &profile.document().profile_did,
+                    &self.presence_scope(),
+                    now,
+                )
+                .await
+            };
             Some(granted && profile.document().profile_did == profile_did)
         }
         .await
         .unwrap_or(false);
-        if !allowed {
+        if !allowed && retire_denied {
             // Denial also retires local state; the next publisher can replace
             // it only after presenting a current grant.
             if let Err(error) = self.retire_own_presence(principal_id, profile_did) {
@@ -315,11 +340,11 @@ impl CollaborationPresenceProductPort {
     }
 
     /// Verify each local record against the live grant at the read boundary.
-    /// The returned records are filtered directly, so even an IO failure while
-    /// retiring denied state cannot expose that state through a snapshot.
+    /// Reads filter denied records; history effects also retire them.
     async fn authorized_records(
         &self,
         now: u64,
+        retire_denied: bool,
     ) -> anyhow::Result<(Vec<(VerifiedPresence, bool)>, bool)> {
         let local = self.core.local_device_did();
         let state = self
@@ -361,14 +386,21 @@ impl CollaborationPresenceProductPort {
                 });
                 let allowed = match principal {
                     Some(principal) => {
-                        self.own_presence_usable(&principal, &presence.sender_profile_did, now)
-                            .await
+                        self.check_own_presence(
+                            &principal,
+                            &presence.sender_profile_did,
+                            now,
+                            retire_denied,
+                        )
+                        .await
                     }
                     None => false,
                 };
                 if !allowed {
-                    self.read_model
-                        .remove_sender(&presence.sender_profile_did)?;
+                    if retire_denied {
+                        self.read_model
+                            .remove_sender(&presence.sender_profile_did)?;
+                    }
                     continue;
                 }
             }
@@ -389,7 +421,7 @@ impl CollaborationPresenceProductPort {
         {
             return Ok(OwnHistoryPresence::Absent);
         }
-        let (records, own_seen) = self.authorized_records(now).await?;
+        let (records, own_seen) = self.authorized_records(now, true).await?;
         if let Some((record, _)) = records.into_iter().find(|(_, own)| *own) {
             return Ok(OwnHistoryPresence::Usable(UsableOwnPresence {
                 envelope: String::from_utf8(record.envelope_bytes)?,
@@ -574,13 +606,13 @@ impl CollaborationPresenceProductPort {
         Ok(outcome)
     }
 
-    /// Every production read removes local records whose live grant fails.
+    /// Reads filter local records whose live grant fails without writing state.
     /// Remote records retain their signed TTL and Profile authority.
     pub(crate) async fn authorized_snapshot(
         &self,
         now: u64,
     ) -> anyhow::Result<CollaborationPresenceSnapshot> {
-        let (records, _) = self.authorized_records(now).await?;
+        let (records, _) = self.authorized_records(now, false).await?;
         let mut records = records
             .into_iter()
             .map(|(record, _)| CollaborationPresenceSnapshotRecord {
