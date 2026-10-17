@@ -995,8 +995,8 @@ function runPasskeySignIn() {
 }
 
 // Sign-in by account name, for a passkey the browser does not offer on the
-// lock face. Home lists only that account's passkeys; an unknown name gets
-// the same kind of answer, so only the authenticator can tell.
+// lock face. Home lists only that account's passkeys, or decoys for a name it
+// does not know; a caller who guesses a real name does learn it has passkeys.
 function runNamedSignIn() {
   if (busy) return Promise.resolve();
   const name = String(accountName?.value || "").split(/\s+/).filter(Boolean).join(" ");
@@ -1050,9 +1050,8 @@ async function signInWithPasskey(name) {
 
 // One plain reason and one next step per failed sign-in; never a status code
 // or server text. Stages: start (begin or status), passkey (the browser),
-// verify (Home checks the passkey), open (Home opens after sign-in). A named
-// sign-in never says whether the account exists: a wrong name and a missing
-// passkey read the same.
+// verify (Home checks the passkey), open (Home opens after sign-in). A wrong
+// account name and a missing passkey get the same message here.
 function signInFailure(stage, error, named = false) {
   const status = Number(error && error.status) || 0;
   const name = String(error && error.name || "");

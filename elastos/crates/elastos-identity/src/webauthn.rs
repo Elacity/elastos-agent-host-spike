@@ -691,9 +691,12 @@ impl IdentityManager {
     ///
     /// The allow-list is every stored credential of `account` for this RP,
     /// because discoverability is unknown. When the name has no eligible
-    /// credential the allow-list is this Home's stable decoys for the name
-    /// instead, with the same shape, so a caller learns whether an account
-    /// exists only by completing a real authenticator ceremony.
+    /// credential the allow-list is this Home's stable decoys for the name,
+    /// sorted the same way and with common credential ID lengths.
+    ///
+    /// Disclosure: a caller who guesses an account name learns whether it has
+    /// passkeys and receives their credential IDs (as every caller did in
+    /// 0.7.1); decoys only stop casual enumeration of unknown names.
     pub fn begin_named_authentication(
         &mut self,
         session_token: &str,
