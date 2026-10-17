@@ -421,6 +421,31 @@ export async function addAccountPasskey(appToken) {
   }
 }
 
+// After a sign-in by account name the browser could not find this passkey, so
+// Home offers Add passkey once in System: only to an admin (the server lets
+// only an admin add one), and only when the Desktop shell is already the
+// active shell. It never changes the person's shell, guests get no System
+// navigation, and nothing here can fail the sign-in.
+export async function offerPasskeyAddAfterSignIn({ flow, homeToken, desktopActive, openSystem }) {
+  if (flow?.signInMethod !== "account_name" || desktopActive !== true || !readText(homeToken)) {
+    return false;
+  }
+  try {
+    const list = await fetchJson("/api/auth/passkeys", {
+      headers: { "x-elastos-home-token": readText(homeToken) },
+    });
+    const current = Array.isArray(list?.passkeys)
+      ? list.passkeys.find((passkey) => passkey?.current === true)
+      : null;
+    if (current?.role !== "admin") return false;
+    await openSystem({ settings: "account", passkey: "add" });
+    return true;
+  } catch (error) {
+    console.error("add-passkey offer failed", error);
+    return false;
+  }
+}
+
 function passkeyAddFailure(stage, error) {
   const status = Number(error && error.status) || 0;
   const name = String(error && error.name || "");

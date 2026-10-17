@@ -98,6 +98,7 @@ const settle = async () => {
 const {
   addAccountPasskey,
   bindHomeUnlock,
+  offerPasskeyAddAfterSignIn,
   recoveryImportIncompleteMessage,
   showHomeUnlock,
 } = await import("./shell-auth.js");
@@ -293,4 +294,66 @@ test("a wrong account name and a missing passkey read the same", async () => {
   element("#home-unlock-secondary").click();
   assert.equal(element(".home-unlock-face").hidden, false, "Back to sign in returns to the lock face");
   assert.equal(element("#home-unlock-account").hidden, true);
+});
+
+test("after an account-name sign-in a CLI-shell person stays on the CLI shell", async () => {
+  const named = { signInMethod: "account_name" };
+  const opened = [];
+  const openSystem = async (query) => { opened.push(query); };
+  routes["/api/auth/passkeys"] = () => ({ body: { passkeys: [
+    { current: false, role: "guest" }, { current: true, role: "admin" },
+  ] } });
+  requests.length = 0;
+  assert.equal(await offerPasskeyAddAfterSignIn({
+    flow: named, homeToken: "signed", desktopActive: false, openSystem,
+  }), false);
+  assert.deepEqual(requests, [], "no shell switch, no System, no lookup on the CLI shell");
+  assert.deepEqual(opened, []);
+
+  // An ordinary passkey sign-in never offers it.
+  assert.equal(await offerPasskeyAddAfterSignIn({
+    flow: null, homeToken: "signed", desktopActive: true, openSystem,
+  }), false);
+  assert.deepEqual(opened, []);
+
+  // An admin already on the Desktop gets the offer once, with no shell change.
+  assert.equal(await offerPasskeyAddAfterSignIn({
+    flow: named, homeToken: "signed", desktopActive: true, openSystem,
+  }), true);
+  assert.deepEqual(opened, [{ settings: "account", passkey: "add" }]);
+  assert.deepEqual(requests.map((request) => request.url), ["/api/auth/passkeys"]);
+
+  // A guest gets no System navigation.
+  routes["/api/auth/passkeys"] = () => ({ body: { passkeys: [{ current: true, role: "guest" }] } });
+  assert.equal(await offerPasskeyAddAfterSignIn({
+    flow: named, homeToken: "signed", desktopActive: true, openSystem,
+  }), false);
+  assert.equal(opened.length, 1);
+
+  // Nothing in the offer can fail the sign-in.
+  routes["/api/auth/passkeys"] = () => ({ body: { passkeys: [{ current: true, role: "admin" }] } });
+  const quiet = console.error;
+  console.error = () => {};
+  try {
+    assert.equal(await offerPasskeyAddAfterSignIn({
+      flow: named, homeToken: "signed", desktopActive: true,
+      openSystem: async () => { throw new Error("System could not open the requested settings"); },
+    }), false);
+    delete routes["/api/auth/passkeys"];
+    assert.equal(await offerPasskeyAddAfterSignIn({
+      flow: named, homeToken: "signed", desktopActive: true, openSystem,
+    }), false);
+  } finally {
+    console.error = quiet;
+  }
+  assert.ok(!requests.some((request) => request.url === "/api/apps/home/active-shell"));
+  // The host wires this offer without any shell change of its own.
+  const { readFileSync } = await import("node:fs");
+  const host = readFileSync(new URL("./home-shell-host.js", import.meta.url), "utf8");
+  const start = host.indexOf("async function showHostAuthGate(");
+  const offer = host.indexOf("offerPasskeyAddAfterSignIn({", start);
+  const end = host.indexOf("\n}\n", offer);
+  assert.ok(start >= 0 && offer > start && end > offer);
+  const branch = host.slice(host.lastIndexOf("} else {", offer), end);
+  assert.doesNotMatch(branch, /activateDesktopShell|active-shell/);
 });
