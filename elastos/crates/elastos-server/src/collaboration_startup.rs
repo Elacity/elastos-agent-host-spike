@@ -1120,7 +1120,10 @@ mod tests {
         port: &CollaborationPresenceProductPort,
         principal: &str,
         now: u64,
-    ) -> crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument {
+    ) -> (
+        crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument,
+        crate::collaboration_presence_grant::GrantedPresence,
+    ) {
         use crate::collaboration_presence_grant::{
             set_presence_grant, store_test_profile, PresenceDecision,
         };
@@ -1148,7 +1151,18 @@ mod tests {
         )
         .await
         .unwrap();
-        profile
+        let grant = crate::collaboration_presence_grant::presence_grant(
+            port.presence_authority().unwrap(),
+            data_dir,
+            principal,
+            &profile.document().profile_did,
+            &port.presence_scope(),
+            crate::collaboration_presence_grant::PresencePublisher::Runtime,
+            now,
+        )
+        .await
+        .unwrap();
+        (profile, grant)
     }
 
     struct ConfigMaterial {
@@ -1671,7 +1685,7 @@ mod tests {
         ));
 
         let now = now_secs();
-        let person_profile = grant_local_presence(
+        let (person_profile, presence_grant) = grant_local_presence(
             temp.path(),
             &service_presence_port,
             "runtime-principal",
@@ -1700,7 +1714,7 @@ mod tests {
         let presence = service_presence_port
             .prepare_presence(
                 presence_request_binding(
-                    "startup-presence-request",
+                    &presence_grant.bind_request_id("startup-presence-request"),
                     "runtime-principal",
                     &person_profile,
                 )
@@ -1822,11 +1836,14 @@ mod tests {
             .as_ref()
             .unwrap();
         assert!(gateway_presence_port.test_shares_core_with(chat_port.test_core()));
-        let person_profile =
+        let (person_profile, presence_grant) =
             grant_local_presence(temp.path(), &presence_port, "runtime-principal", NOW).await;
-        let binding =
-            presence_request_binding("local-presence", "runtime-principal", &person_profile)
-                .unwrap();
+        let binding = presence_request_binding(
+            &presence_grant.bind_request_id("local-presence"),
+            "runtime-principal",
+            &person_profile,
+        )
+        .unwrap();
         gateway_presence_port
             .prepare_presence(binding, &person_profile, NOW)
             .unwrap();
@@ -2649,12 +2666,12 @@ mod tests {
         let presence = CollaborationPresenceProductPort::new(core.clone())
             .unwrap()
             .with_presence_authority(crate::collaboration_presence_grant::test_authority());
-        let local_profile =
+        let (local_profile, presence_grant) =
             grant_local_presence(temp.path(), &presence, "test-principal", now).await;
         let prepared = presence
             .prepare_presence(
                 presence_request_binding(
-                    "local-history-presence",
+                    &presence_grant.bind_request_id("local-history-presence"),
                     "test-principal",
                     &local_profile,
                 )
@@ -2727,7 +2744,10 @@ mod tests {
         let joined = join_collaboration_network(carrier.clone(), &profile)
             .await
             .unwrap();
-        let driver = CollaborationTransportDriver::new(core, joined);
+        let driver = CollaborationTransportDriver::new(core, joined)
+            .with_home_delivery(presence.clone(), Arc::new(ProviderRegistry::new()))
+            .await
+            .unwrap();
         tokio::time::timeout(
             Duration::from_secs(1),
             run_collaboration_worker_cycle_with_presence(
@@ -2813,12 +2833,16 @@ mod tests {
                 .unwrap()
                 .with_presence_authority(crate::collaboration_presence_grant::test_authority());
             let local_metadata = if blocked_outgoing {
-                let local_profile =
+                let (local_profile, presence_grant) =
                     grant_local_presence(temp.path(), &presence, "principal", now).await;
                 let prepared = presence
                     .prepare_presence(
-                        presence_request_binding("blocked-presence", "principal", &local_profile)
-                            .unwrap(),
+                        presence_request_binding(
+                            &presence_grant.bind_request_id("blocked-presence"),
+                            "principal",
+                            &local_profile,
+                        )
+                        .unwrap(),
                         &local_profile,
                         now,
                     )
@@ -3102,7 +3126,7 @@ mod tests {
         let presence_port = CollaborationPresenceProductPort::new(core.clone())
             .unwrap()
             .with_presence_authority(crate::collaboration_presence_grant::test_authority());
-        let local_profile =
+        let (local_profile, presence_grant) =
             grant_local_presence(temp.path(), &presence_port, "runtime-principal", now).await;
         let local_did = local_profile.document().profile_did.clone();
         crate::room_service::seed_room_owner(
@@ -3171,7 +3195,7 @@ mod tests {
         let presence = presence_port
             .prepare_presence(
                 presence_request_binding(
-                    "startup-worker-presence",
+                    &presence_grant.bind_request_id("startup-worker-presence"),
                     "runtime-principal",
                     &local_profile,
                 )

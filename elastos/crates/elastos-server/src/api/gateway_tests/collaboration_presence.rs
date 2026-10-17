@@ -1000,6 +1000,35 @@ async fn people_snapshot_filters_local_and_exposes_only_signed_live_remote_prese
             .await
             .unwrap();
         }
+        if matches!(decision, Some(PresenceDecision::Always)) {
+            let grant = crate::collaboration_presence_grant::presence_grant(
+                local_presence.presence_authority().unwrap(),
+                local_dir.path(),
+                &authority.principal_id,
+                &local_profile.document().profile_did,
+                &local_presence.presence_scope(),
+                crate::collaboration_presence_grant::PresencePublisher::Runtime,
+                now,
+            )
+            .await
+            .unwrap();
+            let prepared = local_presence
+                .prepare_presence(
+                    crate::collaboration_presence::presence_request_binding(
+                        &grant.bind_request_id("local-route-presence"),
+                        &authority.principal_id,
+                        &local_profile,
+                    )
+                    .unwrap(),
+                    &local_profile,
+                    now + 1,
+                )
+                .unwrap();
+            local_presence
+                .project_authorized_presence(&prepared, now + 1)
+                .await
+                .unwrap();
+        }
         if epoch {
             local_presence
                 .presence_authority()
@@ -1135,5 +1164,128 @@ async fn system_mode_changes_retire_projected_and_queued_presence_at_once() {
         .test_core()
         .pending_outgoing(now)
         .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn restarted_presence_get_keeps_legacy_core_bytes_until_lifecycle_repair() {
+    use crate::collaboration_presence_grant::{
+        presence_grant, set_presence_grant, PresenceDecision, PresencePublisher,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (_, presence) = configured_presence_state(dir.path());
+    let authority = passkey_authority_with_profile(dir.path(), "Local");
+    let profile = crate::collaboration_profile_authority::load_profile_authority(
+        dir.path(),
+        &authority.principal_id,
+        &crate::auth::principal_localhost_root(&authority.principal_id),
+    )
+    .unwrap()
+    .unwrap();
+    let now = crate::auth::now_ts();
+    set_presence_grant(
+        presence.presence_authority().unwrap(),
+        dir.path(),
+        &authority.principal_id,
+        &profile.document().profile_did,
+        &presence.presence_scope(),
+        PresenceDecision::Always,
+        now,
+    )
+    .await
+    .unwrap();
+    let grant = presence_grant(
+        presence.presence_authority().unwrap(),
+        dir.path(),
+        &authority.principal_id,
+        &profile.document().profile_did,
+        &presence.presence_scope(),
+        PresencePublisher::Runtime,
+        now,
+    )
+    .await
+    .unwrap();
+    let prepared = presence
+        .prepare_presence(
+            crate::collaboration_presence::presence_request_binding(
+                &grant.bind_request_id("restart-local-presence"),
+                &authority.principal_id,
+                &profile,
+            )
+            .unwrap(),
+            &profile,
+            now,
+        )
+        .unwrap();
+    presence
+        .project_authorized_presence(&prepared, now)
+        .await
+        .unwrap();
+    let remote_dir = tempfile::tempdir().unwrap();
+    let (_, remote) = configured_presence_state(remote_dir.path());
+    presence.test_core().test_store_legacy_product_handoffs(
+        remote.test_core(),
+        &[
+            "elastos.chat.message/v1",
+            crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+        ],
+        now,
+    );
+    // Reopen Core and the presence port before any lifecycle reader. Their
+    // in-memory principal map and verified-state cache both start empty.
+    let (mut state, reopened) = configured_presence_state(dir.path());
+    let reopened = reopened.with_presence_authority(presence.presence_authority().unwrap().clone());
+    reopened
+        .presence_authority()
+        .unwrap()
+        .manager()
+        .revoke_all("restart GET denial");
+    state.collaboration_presence_product_port = Some(reopened.clone());
+    let before = file_snapshot(dir.path());
+    assert!(reopened
+        .authorized_snapshot(now)
+        .await
+        .unwrap()
+        .records()
+        .is_empty());
+    let app = gateway_router(state);
+    for uri in [
+        "/api/apps/people/presence",
+        "/api/apps/system/community/presence",
+    ] {
+        let token = if uri.contains("/people/") {
+            &authority.people_token
+        } else {
+            &authority.system_token
+        };
+        let response = app
+            .clone()
+            .oneshot(capsule_request("GET", uri, token, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = response_json(response).await;
+        if uri.contains("/people/") {
+            assert_eq!(value["online_count"], 0);
+            assert_eq!(value["online"], serde_json::json!([]));
+        }
+        assert_eq!(file_snapshot(dir.path()), before);
+    }
+    assert!(reopened
+        .test_core()
+        .pending_product_handoffs()
+        .unwrap()
+        .is_empty());
+    assert_eq!(reopened.test_core().summary().unwrap().replay_tombstones, 2);
+    assert_ne!(
+        file_snapshot(dir.path()),
+        before,
+        "lifecycle owns durable legacy repair"
+    );
+    assert!(reopened
+        .authorized_snapshot(now)
+        .await
+        .unwrap()
+        .records()
         .is_empty());
 }

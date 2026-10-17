@@ -262,33 +262,19 @@ impl CollaborationPresenceProductPort {
             profiles
         };
         for profile in profiles {
-            self.read_model.remove_sender(&profile)?;
+            self.read_model.remove_sender(&profile, None)?;
         }
-        self.read_model.remove_sender(profile_did)?;
+        self.read_model.remove_sender(profile_did, None)?;
         Ok(())
     }
 
-    /// The one gate for this Home's own presence leaving the Home: is this
-    /// person's grant, for the mode they chose, valid right now? Not joined
-    /// or no capability manager: no.
-    pub(crate) async fn own_presence_usable(
+    /// Publisher maintenance retires a person's state after a current denial.
+    /// Effects separately present their immutable operation binding.
+    pub(crate) async fn retire_denied_current_presence(
         &self,
         principal_id: &str,
         profile_did: &str,
         now: u64,
-    ) -> bool {
-        self.check_own_presence(principal_id, profile_did, now, true)
-            .await
-    }
-
-    // Both reads and effects check the same current Profile and live grant.
-    // Only effects retire the holder's state after a denial.
-    async fn check_own_presence(
-        &self,
-        principal_id: &str,
-        profile_did: &str,
-        now: u64,
-        retire_denied: bool,
     ) -> bool {
         let allowed = async {
             let authority = self.presence_authority()?;
@@ -304,32 +290,22 @@ impl CollaborationPresenceProductPort {
                 &root,
             )
             .ok()??;
-            let granted = if retire_denied {
-                crate::collaboration_presence_grant::own_presence_usable(
-                    authority,
-                    self.core.data_root(),
-                    principal_id,
-                    &profile.document().profile_did,
-                    &self.presence_scope(),
-                    now,
-                )
-                .await
-            } else {
-                crate::collaboration_presence_grant::own_presence_authorized(
-                    authority,
-                    self.core.data_root(),
-                    principal_id,
-                    &profile.document().profile_did,
-                    &self.presence_scope(),
-                    now,
-                )
-                .await
-            };
-            Some(granted && profile.document().profile_did == profile_did)
+            let granted = crate::collaboration_presence_grant::current_presence_grant_usable(
+                authority,
+                self.core.data_root(),
+                principal_id,
+                &profile.document().profile_did,
+                &self.presence_scope(),
+                now,
+            )
+            .await;
+            // A stale effect may name an old Profile; its caller retires only
+            // that operation when the current Profile still has a valid grant.
+            Some(granted)
         }
         .await
         .unwrap_or(false);
-        if !allowed && retire_denied {
+        if !allowed {
             // Denial also retires local state; the next publisher can replace
             // it only after presenting a current grant.
             if let Err(error) = self.retire_own_presence(principal_id, profile_did) {
@@ -337,6 +313,84 @@ impl CollaborationPresenceProductPort {
             }
         }
         allowed
+    }
+
+    async fn check_own_operation(
+        &self,
+        operation: &EspRequestBinding,
+        profile_did: &str,
+        now: u64,
+        retire_denied: bool,
+    ) -> bool {
+        async {
+            let authority = self.presence_authority()?;
+            if !self.community_joined() {
+                return None;
+            }
+            let principal = &operation.principal;
+            let root = crate::auth::principal_localhost_root(principal);
+            let profile = crate::collaboration_profile_authority::load_profile_authority(
+                self.core.data_root(),
+                principal,
+                &root,
+            )
+            .ok()??;
+            Some(
+                crate::collaboration_presence_grant::own_presence_operation_authorized(
+                    authority,
+                    self.core.data_root(),
+                    operation,
+                    &profile.document().profile_did,
+                    &self.presence_scope(),
+                    now,
+                    retire_denied,
+                )
+                .await
+                    && profile.document().profile_did == profile_did,
+            )
+        }
+        .await
+        .unwrap_or(false)
+    }
+
+    fn retire_own_operation(&self, profile_did: &str, envelope_hash: &str) -> anyhow::Result<()> {
+        self.core
+            .retire_outgoing_presence_operation(envelope_hash)?;
+        self.read_model
+            .remove_sender(profile_did, Some(envelope_hash))?;
+        Ok(())
+    }
+
+    pub(crate) async fn own_presence_effect_usable(
+        &self,
+        envelope_hash: &str,
+        profile_did: &str,
+        now: u64,
+    ) -> anyhow::Result<bool> {
+        let operations = self.core.own_presence_operations(now)?;
+        let allowed = match operations.get(envelope_hash) {
+            Some(operation) => {
+                self.check_own_operation(operation, profile_did, now, true)
+                    .await
+            }
+            None => false,
+        };
+        if !allowed {
+            if let Some(operation) = operations.get(envelope_hash).cloned() {
+                // A live replacement grant keeps its own prepared work. No
+                // grant at all, including Hidden, retires every announcement
+                // for this person.
+                if self
+                    .retire_denied_current_presence(&operation.principal, profile_did, now)
+                    .await
+                {
+                    self.retire_own_operation(profile_did, envelope_hash)?;
+                }
+            } else {
+                self.retire_own_operation(profile_did, envelope_hash)?;
+            }
+        }
+        Ok(allowed)
     }
 
     /// Verify each local record against the live grant at the read boundary.
@@ -353,6 +407,7 @@ impl CollaborationPresenceProductPort {
             .unwrap_or_else(|| self.read_model.empty_state());
         let mut records = Vec::new();
         let mut own_seen = false;
+        let mut own_operations = None;
         for record in state.records {
             let presence = self.read_model.verify_record(&record)?;
             if presence.expires_at <= now
@@ -372,22 +427,19 @@ impl CollaborationPresenceProductPort {
                 principal.is_some() || authorized.sender_profile().authorizes_endpoint(&local);
             if own {
                 own_seen = true;
-                // Recover the principal after restart from the durable outgoing
-                // operation. A signed envelope alone grants no local consent.
-                let principal = principal.or_else(|| {
-                    self.core
-                        .pending_outgoing(now)
-                        .ok()?
-                        .iter()
-                        .find_map(|outgoing| {
-                            let (principal, profile) = outgoing.presence_sender()?;
-                            (profile == presence.sender_profile_did).then(|| principal.to_string())
-                        })
-                });
-                let allowed = match principal {
-                    Some(principal) => {
-                        self.check_own_presence(
-                            &principal,
+                // Recovery reads verified operation bindings once, including
+                // after restart. It never persists core handoff repair.
+                if own_operations.is_none() {
+                    own_operations = Some(self.core.own_presence_operations(now)?);
+                }
+                let allowed = match own_operations
+                    .as_ref()
+                    .unwrap()
+                    .get(&presence.envelope_sha256)
+                {
+                    Some(operation) => {
+                        self.check_own_operation(
+                            operation,
                             &presence.sender_profile_did,
                             now,
                             retire_denied,
@@ -398,8 +450,10 @@ impl CollaborationPresenceProductPort {
                 };
                 if !allowed {
                     if retire_denied {
-                        self.read_model
-                            .remove_sender(&presence.sender_profile_did)?;
+                        self.retire_own_operation(
+                            &presence.sender_profile_did,
+                            &presence.envelope_sha256,
+                        )?;
                     }
                     continue;
                 }
@@ -504,8 +558,12 @@ impl CollaborationPresenceProductPort {
     ) -> anyhow::Result<()> {
         self.require_prepared(prepared)?;
         if self
-            .own_presence_usable(&prepared.principal_id, &prepared.sender_profile_did, now)
-            .await
+            .own_presence_effect_usable(
+                &prepared.envelope_sha256,
+                &prepared.sender_profile_did,
+                now,
+            )
+            .await?
         {
             self.own_principals
                 .lock()
@@ -562,20 +620,16 @@ impl CollaborationPresenceProductPort {
             .sender_profile()
             .authorizes_endpoint(&self.core.local_device_did())
         {
-            let principal = self
-                .own_principals
-                .lock()
-                .ok()
-                .and_then(|principals| principals.get(&handoff.sender_profile_did).cloned());
-            let allowed = match principal {
-                Some(principal) => {
-                    self.own_presence_usable(&principal, &handoff.sender_profile_did, now)
-                        .await
-                }
-                None => false,
-            };
+            let allowed = self
+                .own_presence_effect_usable(
+                    &handoff.envelope_sha256,
+                    &handoff.sender_profile_did,
+                    now,
+                )
+                .await?;
             if !allowed {
-                self.read_model.remove_sender(&handoff.sender_profile_did)?;
+                self.read_model
+                    .remove_sender(&handoff.sender_profile_did, Some(&handoff.envelope_sha256))?;
                 self.core
                     .acknowledge_product_handoff(&handoff.envelope_sha256)?;
                 return Ok(());
@@ -946,8 +1000,13 @@ impl PresenceReadModel {
         Ok(outcome)
     }
 
-    /// Removes the record of `profile_did`; true when one was removed.
-    fn remove_sender(&self, profile_did: &str) -> anyhow::Result<bool> {
+    /// An operation denial removes only that operation's current projection.
+    /// A person's explicit answer passes None to remove all their projections.
+    fn remove_sender(
+        &self,
+        profile_did: &str,
+        envelope_hash: Option<&str>,
+    ) -> anyhow::Result<bool> {
         let _in_process = self
             .mutation_mutex
             .lock()
@@ -960,7 +1019,10 @@ impl PresenceReadModel {
         let before = state.records.len();
         state.records.retain(|record| {
             self.verify_record(record)
-                .map(|existing| existing.sender_profile_did != profile_did)
+                .map(|existing| {
+                    existing.sender_profile_did != profile_did
+                        || envelope_hash.is_some_and(|hash| existing.envelope_sha256 != hash)
+                })
                 .unwrap_or(true)
         });
         if state.records.len() == before {

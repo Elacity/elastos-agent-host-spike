@@ -128,6 +128,51 @@ impl PresencePublisher {
     }
 }
 
+/// The publisher and grant generation that authorized preparation. This holds
+/// a digest of the token id, never the bearer token. The existing immutable
+/// request id carries it through persistence and restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GrantedPresence {
+    pub(crate) mode: PresenceMode,
+    generation: String,
+}
+
+impl GrantedPresence {
+    fn from_grant(grant: &PresenceGrant) -> Self {
+        use sha2::{Digest, Sha256};
+        Self {
+            mode: grant.mode,
+            generation: hex::encode(Sha256::digest(grant.token_id.as_bytes())),
+        }
+    }
+
+    fn request_prefix(&self) -> String {
+        format!(
+            "presence:{}:{}:",
+            self.mode.resource_suffix(),
+            self.generation
+        )
+    }
+
+    pub(crate) fn bind_request_id(&self, request_id: &str) -> String {
+        use sha2::{Digest, Sha256};
+        format!(
+            "{}{}",
+            self.request_prefix(),
+            hex::encode(Sha256::digest(request_id.as_bytes()))
+        )
+    }
+
+    fn authorizes_request(&self, request_id: &str) -> bool {
+        let prefix = self.request_prefix();
+        request_id
+            .strip_prefix(prefix.as_str())
+            .is_some_and(|suffix| {
+                suffix.len() == 64 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+    }
+}
+
 /// The Runtime's capability manager plus when each presence token's success
 /// was last audited. Only audit timestamps are remembered: a success never
 /// lets a later call skip validation.
@@ -367,7 +412,7 @@ pub(crate) async fn presence_grant(
     scope: &PresenceScope,
     publisher: PresencePublisher,
     now: u64,
-) -> Option<PresenceMode> {
+) -> Option<GrantedPresence> {
     let file = load_file(data_dir, principal_id).ok()?;
     let grant = file
         .grants
@@ -397,7 +442,7 @@ pub(crate) async fn presence_grant(
         return None;
     }
     if validate_presence_grant(authority, principal_id, scope, &grant, &token, now).await {
-        Some(grant.mode)
+        Some(GrantedPresence::from_grant(&grant))
     } else {
         authority.forget(&grant.token_id);
         drop_grant(data_dir, principal_id, &grant.token_id);
@@ -440,12 +485,9 @@ async fn validate_presence_grant(
     }
 }
 
-/// May this Home use this person's own presence anywhere off the Home right
-/// now (a queued announcement, a history request)? Validates the person's
-/// current grant, for the publisher its recorded mode names, exactly as
-/// `presence_grant` does, so Hidden, a refusal, a revoke or an epoch bump
-/// stops every use of a presence record already signed.
-pub(crate) async fn own_presence_usable(
+/// Publisher maintenance checks the current grant and retires a failed holder.
+/// Effects use `own_presence_operation_authorized` with their original binding.
+pub(crate) async fn current_presence_grant_usable(
     authority: &PresenceAuthority,
     data_dir: &std::path::Path,
     principal_id: &str,
@@ -478,27 +520,54 @@ pub(crate) async fn own_presence_usable(
     .is_some()
 }
 
-/// The same live grant check for snapshots; lifecycle paths own retirement.
-pub(crate) async fn own_presence_authorized(
+/// An effect presents the generation and publisher that prepared its operation.
+/// A newer valid grant cannot revive work from an older generation. Snapshot
+/// checks pass false for retirement; only lifecycle/effect calls change state.
+pub(crate) async fn own_presence_operation_authorized(
     authority: &PresenceAuthority,
     data_dir: &std::path::Path,
-    principal_id: &str,
+    operation: &crate::esp_binding::EspRequestBinding,
     profile_did: &str,
     scope: &PresenceScope,
     now: u64,
+    retire_denied: bool,
 ) -> bool {
+    let principal_id = operation.principal.as_str();
     let Some(grant) = load_file(data_dir, principal_id)
         .ok()
         .and_then(|file| file.grants.into_iter().find(|grant| &grant.scope == scope))
     else {
         return false;
     };
+    if !GrantedPresence::from_grant(&grant).authorizes_request(&operation.request_id) {
+        return false;
+    }
     let token = match CapabilityToken::from_base64(&grant.token) {
         Ok(token) if token.id().to_string() == grant.token_id => token,
-        _ => return false,
+        _ => {
+            if retire_denied {
+                authority.forget(&grant.token_id);
+                drop_grant(data_dir, principal_id, &grant.token_id);
+            }
+            return false;
+        }
     };
-    grant.profile_did == profile_did
-        && validate_presence_grant(authority, principal_id, scope, &grant, &token, now).await
+    let allowed = if grant.profile_did != profile_did {
+        if retire_denied {
+            authority
+                .manager
+                .revoke(*token.id(), "profile changed")
+                .await;
+        }
+        false
+    } else {
+        validate_presence_grant(authority, principal_id, scope, &grant, &token, now).await
+    };
+    if !allowed && retire_denied {
+        authority.forget(&grant.token_id);
+        drop_grant(data_dir, principal_id, &grant.token_id);
+    }
+    allowed
 }
 
 /// Records the person's own answer, from Inbox or System → Community only.
@@ -680,6 +749,7 @@ mod tests {
             now,
         )
         .await
+        .map(|grant| grant.mode)
     }
 
     fn held_token(data: &std::path::Path, principal: &str) -> CapabilityToken {

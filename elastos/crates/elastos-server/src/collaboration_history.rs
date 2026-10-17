@@ -484,9 +484,36 @@ mod tests {
             &profile_key,
             &profile,
         );
+        set_presence_grant(
+            &authority,
+            root.path(),
+            PRINCIPAL,
+            &profile.document().profile_did,
+            &presence.presence_scope(),
+            PresenceDecision::Always,
+            now,
+        )
+        .await
+        .unwrap();
+        let grant = crate::collaboration_presence_grant::presence_grant(
+            &authority,
+            root.path(),
+            PRINCIPAL,
+            &profile.document().profile_did,
+            &presence.presence_scope(),
+            crate::collaboration_presence_grant::PresencePublisher::Runtime,
+            now,
+        )
+        .await
+        .unwrap();
         let prepared = presence
             .prepare_presence(
-                presence_request_binding("history-presence", PRINCIPAL, &profile).unwrap(),
+                presence_request_binding(
+                    &grant.bind_request_id("history-presence"),
+                    PRINCIPAL,
+                    &profile,
+                )
+                .unwrap(),
                 &profile,
                 now,
             )
@@ -1123,10 +1150,26 @@ mod tests {
             )
             .unwrap()
             .unwrap();
+            let grant = crate::collaboration_presence_grant::presence_grant(
+                &a.authority,
+                a.root.path(),
+                PRINCIPAL,
+                &profile.document().profile_did,
+                &a.presence.presence_scope(),
+                crate::collaboration_presence_grant::PresencePublisher::Runtime,
+                now,
+            )
+            .await
+            .unwrap();
             let pending = a
                 .presence
                 .prepare_presence(
-                    presence_request_binding("pending-at-restart", PRINCIPAL, &profile).unwrap(),
+                    presence_request_binding(
+                        &grant.bind_request_id("pending-at-restart"),
+                        PRINCIPAL,
+                        &profile,
+                    )
+                    .unwrap(),
                     &profile,
                     now + 1,
                 )
