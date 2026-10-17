@@ -1018,7 +1018,7 @@ async function runScenario(scenario) {
         });
         parent.postMessage({ type:"elastos:shell-layout", request:true }, new URL(location.href).searchParams.get("home_origin"));
       });
-      const visibility = async expected => frame.waitForFunction(expected => window.fixtureLayouts.at(-1)?.visible === expected, expected);
+      const visibility = async expected => frame.waitForFunction(expected => window.fixtureLayouts.at(-1)?.visible === expected, expected, { polling: 100 });
       await visibility(true);
       for (const style of ["visibility:hidden", "display:none", "opacity:0"]) {
         await page.locator('iframe[title="Chat"]').evaluate((node, style) => { node.style.cssText = style; }, style);
