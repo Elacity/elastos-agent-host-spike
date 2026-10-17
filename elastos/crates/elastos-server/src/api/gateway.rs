@@ -62,6 +62,8 @@ mod gateway_esp;
 mod gateway_frontdoor;
 #[path = "gateway_home_agent.rs"]
 mod gateway_home_agent;
+#[path = "gateway_home_external_link.rs"]
+mod gateway_home_external_link;
 #[path = "gateway_home_runtime.rs"]
 mod gateway_home_runtime;
 #[path = "gateway_home_system.rs"]
@@ -115,6 +117,7 @@ use gateway_browser::browser_runtime_stream_socket_path;
 use gateway_capsule_catalog::*;
 use gateway_collaboration_presence::*;
 use gateway_esp::*;
+use gateway_home_external_link::*;
 pub(crate) use gateway_home_runtime::is_wallet_connector_capsule_id;
 use gateway_home_runtime::*;
 
@@ -1040,6 +1043,7 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
         )
         .route("/api/apps/home/runtime/ensure", post(home_runtime_ensure))
         .route("/api/apps/home/launch", post(home_launch))
+        .route("/api/apps/home/external-link", post(home_external_link))
         .route(
             "/api/apps/home-cli/terminal/contract",
             get(home_cli_terminal_contract),
