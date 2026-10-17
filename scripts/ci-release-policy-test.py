@@ -544,8 +544,8 @@ def validate_dependency_audit(source):
                 raise AssertionError(f"cargo-audit checks every tracked Cargo.lock (failing {failing})")
             if {cwd for cwd, _ in calls} != {str((root / "elastos").resolve())}:
                 raise AssertionError("cargo-audit runs where elastos/.cargo/audit.toml applies")
-            if ["--no-fetch" in args for _, args in calls] != [False] + [True] * (len(locks) - 1):
-                raise AssertionError("cargo-audit fetches the advisory database once per run")
+            if any("--no-fetch" in args for _, args in calls):
+                raise AssertionError("cargo-audit retains online yanked checks for every lockfile")
             if (result.returncode != 0) != (failing is not None):
                 raise AssertionError(f"cargo-audit result ignores {failing or 'a clean run'}")
         # A lockfile listing that prints part of the list and then fails must fail the job.
@@ -1435,7 +1435,7 @@ class ReleasePolicyTests(unittest.TestCase):
                 ("| sha256sum -c -", "| cat", "pinned digest"),
                 (' || failed=1', '', "every tracked Cargo.lock"),
                 ('exit "$failed"', 'exit 0', "result ignores Cargo.lock"),
-                ("            fetch=(--no-fetch)\n", "", "database once")):
+                ('audit --db "$db" --file', 'audit --db "$db" --no-fetch --file', "online yanked")):
             with self.subTest(new=new):
                 self.assertIn(old, SOURCE)
                 with self.assertRaisesRegex(AssertionError, message):
