@@ -39,7 +39,7 @@ import {
   createHomeClipboardHost,
   createHomeClipboardPrompt,
   homeClipboardTargetSupported,
-} from "./home-clipboard-host.js?v=home-20260726a";
+} from "./home-clipboard-host.js?v=home-20261017a";
 import { loadOrCreateHomeBrowserContextId } from "./home-browser-context.js?v=home-20260805a";
 import {
   FORM_FACTOR_MESSAGE,
@@ -52,7 +52,7 @@ import {
   EXTERNAL_LINK_REQUEST_SCHEMA,
   HOME_OPEN_EXTERNAL_TYPE,
   MAX_EXTERNAL_LINK_LENGTH,
-} from "./home-external-link.js?v=home-20261017a";
+} from "./home-external-link.js?v=home-20261017b";
 
 const SUMMARY_REFRESH_DEBOUNCE_MS = 150;
 const SUMMARY_REFRESH_RETRY_MS = 700;
