@@ -424,11 +424,12 @@ pub(crate) async fn presence_grant(
     }
 }
 
-/// The send boundary: may a queued announcement of this person still go out?
-/// Validates the person's current grant, for the publisher its recorded mode
-/// names, exactly as `presence_grant` does, so Hidden, a refusal, a revoke
-/// or an epoch bump stops an announcement already queued.
-pub(crate) async fn queued_presence_allowed(
+/// May this Home use this person's own presence anywhere off the Home right
+/// now (a queued announcement, a history request)? Validates the person's
+/// current grant, for the publisher its recorded mode names, exactly as
+/// `presence_grant` does, so Hidden, a refusal, a revoke or an epoch bump
+/// stops every use of a presence record already signed.
+pub(crate) async fn own_presence_usable(
     authority: &PresenceAuthority,
     data_dir: &std::path::Path,
     principal_id: &str,
@@ -524,6 +525,36 @@ pub(crate) async fn set_presence_grant(
         }),
     }
     save_file(data_dir, principal_id, &file)
+}
+
+/// Store an isolated fixture's actual signed Profile through the protected
+/// principal-root path used by the production reader.
+#[cfg(test)]
+pub(crate) fn store_test_profile(
+    data_dir: &std::path::Path,
+    principal_id: &str,
+    key: &elastos_runtime::signature::SigningKey,
+    profile: &crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument,
+) {
+    let root = crate::auth::principal_localhost_root(principal_id);
+    let path =
+        crate::collaboration_profile_authority::profile_authority_path(data_dir, &root).unwrap();
+    crate::auth::create_owner_only_dir_all(data_dir, path.parent().unwrap()).unwrap();
+    let bundle = serde_json::json!({
+        "schema": crate::collaboration_profile_authority::COLLABORATION_PROFILE_AUTHORITY_BUNDLE_SCHEMA_V1,
+        "profile_signing_seed_hex": hex::encode(key.to_bytes()),
+        "previous_profiles": [],
+        "signed_profile": profile.signed_envelope(),
+    });
+    crate::auth::write_protected_principal_root_object(
+        data_dir,
+        principal_id,
+        &root,
+        &crate::collaboration_profile_authority::profile_authority_object_uri(&root),
+        &path,
+        &serde_json::to_vec(&bundle).unwrap(),
+    )
+    .unwrap();
 }
 
 #[cfg(test)]

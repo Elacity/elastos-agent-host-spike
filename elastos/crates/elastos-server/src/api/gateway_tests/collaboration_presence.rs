@@ -1018,3 +1018,85 @@ async fn people_snapshot_filters_local_and_exposes_only_signed_live_remote_prese
     );
     assert_eq!(file_snapshot(local_dir.path()), state_before);
 }
+
+#[tokio::test]
+async fn system_mode_changes_retire_projected_and_queued_presence_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, presence) = configured_presence_state(dir.path());
+    let _ = elastos_identity::load_or_create_did(dir.path()).unwrap();
+    let authority = passkey_authority_with_name(dir.path(), Some("Alice"));
+    install_signed_profile(dir.path(), &authority, "Alice");
+    let chat_token = app_token_for_authority(dir.path(), CHAT_ROOM_CAPSULE_ID, &authority);
+    let app = gateway_router(state);
+    let now = crate::auth::now_ts();
+    assert_eq!(
+        set_system_presence(&app, &authority.system_token, "always")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        crate::api::gateway::publish_runtime_owned_presence(dir.path(), &presence, now)
+            .await
+            .unwrap(),
+        1
+    );
+    let pending = presence.pending_outgoing_presences(now).unwrap();
+    presence
+        .project_authorized_presence(&pending[0], now)
+        .await
+        .unwrap();
+    assert_eq!(
+        presence
+            .authorized_snapshot(now)
+            .await
+            .unwrap()
+            .records()
+            .len(),
+        1
+    );
+
+    // A mode switch retires the previous answer before its new publisher runs.
+    assert_eq!(
+        set_system_presence(&app, &authority.system_token, "while_open")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert!(presence.snapshot(now).unwrap().records().is_empty());
+    assert!(presence
+        .test_core()
+        .pending_outgoing(now)
+        .unwrap()
+        .is_empty());
+    let heartbeat = app
+        .clone()
+        .oneshot(capsule_request(
+            "POST",
+            "/api/apps/chat-room/presence",
+            &chat_token,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response_json(heartbeat).await["queued"], true);
+    let pending = presence.pending_outgoing_presences(now).unwrap();
+    presence
+        .project_authorized_presence(&pending[0], now)
+        .await
+        .unwrap();
+    assert_eq!(presence.snapshot(now).unwrap().records().len(), 1);
+
+    assert_eq!(
+        set_system_presence(&app, &authority.system_token, "hidden")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert!(presence.snapshot(now).unwrap().records().is_empty());
+    assert!(presence
+        .test_core()
+        .pending_outgoing(now)
+        .unwrap()
+        .is_empty());
+}

@@ -446,17 +446,17 @@ impl CollaborationTransportDriver {
         let mut summary = CollaborationOutgoingRetrySummary::default();
         for outgoing in selected {
             self.core.community_membership().require_joined()?;
-            // A queued announcement goes out only while its person's grant
-            // still validates: Hidden, a revoke or an epoch bump stops it.
-            // The Runtime always wires the presence port (collaboration
-            // startup); a bare driver carries no Product port to consult.
-            if let (Some((principal_id, profile_did)), Some(delivery)) =
-                (outgoing.presence_sender(), &self.home_delivery)
-            {
+            // Every own-presence send presents the grant to the live manager.
+            // A driver without the Runtime's port has no authority to send it.
+            if let Some((principal_id, profile_did)) = outgoing.presence_sender() {
+                let Some(delivery) = &self.home_delivery else {
+                    self.core.retire_outgoing_presence(principal_id)?;
+                    continue;
+                };
                 if !delivery
                     .presence
-                    .queued_presence_allowed(principal_id, profile_did, now)
-                    .await?
+                    .own_presence_usable(principal_id, profile_did, now)
+                    .await
                 {
                     continue;
                 }
@@ -951,6 +951,20 @@ mod tests {
                 .unwrap();
         }
         crate::auth::store_test_principal_root_protection(&fixture.data_root, PRESENCE_PRINCIPAL);
+        let mut seed = fixture.device_key.to_bytes();
+        seed[0] ^= 0xa5;
+        seed[31] ^= 0x5a;
+        let key = SigningKey::from_bytes(&seed);
+        let profile = fixture
+            .authority(fixture.device_key.clone())
+            .sender_profile_for_test()
+            .unwrap();
+        crate::collaboration_presence_grant::store_test_profile(
+            &fixture.data_root,
+            PRESENCE_PRINCIPAL,
+            &key,
+            &profile,
+        );
         let authority = crate::collaboration_presence_grant::test_authority();
         let port = CollaborationPresenceProductPort::new(core)
             .unwrap()
@@ -1041,6 +1055,21 @@ mod tests {
             0
         );
         assert!(ac.pending_outgoing(NOW + 5).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_bare_driver_cannot_send_queued_own_presence() {
+        let a = Fixture::new();
+        let core = a.core();
+        let carrier = FakeCarrier::new();
+        let driver = a.driver(core.clone(), carrier.clone()).await;
+        queued_presence(&a, &core, "bare-driver-presence");
+        assert_eq!(driver.retry_outgoing_once(NOW).await.unwrap().attempted, 0);
+        assert!(core.pending_outgoing(NOW).unwrap().is_empty());
+        assert!(carrier
+            .requests()
+            .iter()
+            .all(|request| request["op"] != "gossip_send"));
     }
 
     fn remote_receipt(
@@ -2404,7 +2433,8 @@ mod tests {
         let receipt = remote_receipt(&fixture, &outgoing[0], recipient.clone());
         let receipt = sign_collaboration_transport_frame(&recipient, &receipt).unwrap();
         let carrier = FakeCarrier::new();
-        let driver = fixture.driver(core.clone(), carrier.clone()).await;
+        let (driver, _presence, _authority) =
+            granted_presence_driver(&fixture, core.clone(), carrier.clone()).await;
         carrier.push([
             serde_json::json!({"status":"ok","data":{"remote_peer_count":1}}),
             serde_json::json!({"status":"ok","broadcast":"local_only","data":{"remote_peer_count":0}}),

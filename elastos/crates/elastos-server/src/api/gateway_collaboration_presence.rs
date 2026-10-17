@@ -171,7 +171,7 @@ pub(super) async fn people_collaboration_presence(
         .into_response();
     };
     let local_profile_did = &presentation.profile.document().profile_did;
-    let snapshot = match port.snapshot(now) {
+    let snapshot = match port.authorized_snapshot(now).await {
         Ok(snapshot) => snapshot,
         Err(error) => return home_error_response(error),
     };
@@ -402,9 +402,9 @@ async fn set_community_presence(
         now_ts(),
     )
     .await?;
-    // Announcements queued under the previous answer never go out; a
-    // current grant re-announces on its next tick.
-    port.retire_outgoing_presence(&context.principal_id)?;
+    // Each answer retires the previous projection and queued announcements.
+    // The selected publisher prepares fresh presence under the current grant.
+    port.retire_own_presence(&context.principal_id, &profile_did)?;
     Ok(())
 }
 
@@ -604,19 +604,29 @@ pub(super) async fn community_presence_mode(
     publisher: crate::collaboration_presence_grant::PresencePublisher,
     now: u64,
 ) -> Option<crate::collaboration_presence_grant::PresenceMode> {
-    if !port.community_joined() {
-        return None;
+    let granted = match port.presence_authority() {
+        Some(authority) if port.community_joined() => {
+            crate::collaboration_presence_grant::presence_grant(
+                authority,
+                data_dir,
+                principal_id,
+                &profile.document().profile_did,
+                &port.presence_scope(),
+                publisher,
+                now,
+            )
+            .await
+        }
+        _ => None,
+    };
+    if granted.is_none() {
+        // A publisher-mode mismatch can leave the other publisher's grant
+        // valid. The common use gate retires state only when that grant also
+        // fails, including Hidden, revocation and an epoch change.
+        port.own_presence_usable(principal_id, &profile.document().profile_did, now)
+            .await;
     }
-    crate::collaboration_presence_grant::presence_grant(
-        port.presence_authority()?,
-        data_dir,
-        principal_id,
-        &profile.document().profile_did,
-        &port.presence_scope(),
-        publisher,
-        now,
-    )
-    .await
+    granted
 }
 
 fn presence_heartbeat_request_id(
@@ -960,7 +970,7 @@ mod tests {
         // Presence is not a post: it leaves no replay tombstone behind.
         assert_eq!(chat.test_core().summary().unwrap().replay_tombstones, 0);
 
-        // Hidden stops it on the next pass.
+        // The next publisher pass retires both local and queued presence.
         decide(PresenceDecision::Hidden).await.unwrap();
         assert_eq!(
             publish_runtime_owned_presence(temp.path(), &port, now + 15)
@@ -968,6 +978,12 @@ mod tests {
                 .unwrap(),
             0
         );
+        assert!(port.snapshot(now + 15).unwrap().records().is_empty());
+        assert!(chat
+            .test_core()
+            .pending_outgoing(now + 15)
+            .unwrap()
+            .is_empty());
         decide(PresenceDecision::Always).await.unwrap();
 
         // Without the Runtime's capability manager no grant is honoured.
