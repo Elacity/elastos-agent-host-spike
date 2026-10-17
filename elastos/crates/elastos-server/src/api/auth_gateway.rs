@@ -650,13 +650,25 @@ pub async fn passkey_authenticate_complete(
     headers: HeaderMap,
     Json(input): Json<PasskeyAuthenticateCompleteRequest>,
 ) -> Response {
-    // Ceremony IDs are server-minted, so the prefix names a named sign-in.
-    let named = input.ceremony_id.starts_with(NAMED_SIGN_IN_CEREMONY_PREFIX);
     match passkey_authenticate_complete_inner(&state, &headers, input).await {
         Ok(response) => passkey_verified_response(&headers, response),
-        Err(err) if named => named_sign_in_error_response(err),
-        Err(err) => auth_error_response(err),
+        Err(err) => passkey_sign_in_failure_response(err),
     }
+}
+
+const PASSKEY_SIGN_IN_FAILURE: &str = "Home could not sign you in with this passkey.";
+
+/// Every failed sign-in completion, anonymous or named, gets the same status
+/// and body; only a busy Home is told apart. A distinct answer for an unknown
+/// credential ID would let anyone holding a list of IDs (such as a named
+/// begin's allow-list) tell real credentials from decoys without an
+/// authenticator. The reason stays in the debug log.
+fn passkey_sign_in_failure_response(err: anyhow::Error) -> Response {
+    if err.is::<elastos_identity::webauthn::CeremonyCapacityExceeded>() {
+        return auth_error_response(err);
+    }
+    tracing::debug!("passkey sign-in completion refused: {err:#}");
+    (StatusCode::FORBIDDEN, PASSKEY_SIGN_IN_FAILURE).into_response()
 }
 
 const NAMED_SIGN_IN_BEGIN_REQUEST_SCHEMA: &str =
@@ -671,8 +683,7 @@ pub struct PasskeyAuthenticateNamedBeginRequest {
     account_name: String,
 }
 
-/// Why a named sign-in was refused. Neither reason depends on whether an
-/// account with that name exists.
+/// Why a named sign-in was refused.
 #[derive(Debug)]
 enum NamedSignInRefused {
     /// Empty, over-long or control characters: refused before any lookup.
@@ -706,12 +717,9 @@ pub async fn passkey_authenticate_named_begin(
     }
 }
 
-/// One plain sentence per named sign-in failure. Only an invalid name and a
-/// busy Home are told apart; nothing says whether the account exists.
+/// A named begin refuses only an invalid name or a busy Home on its own;
+/// every other failure is the generic sign-in failure.
 fn named_sign_in_error_response(err: anyhow::Error) -> Response {
-    if err.is::<elastos_identity::webauthn::CeremonyCapacityExceeded>() {
-        return auth_error_response(err);
-    }
     if matches!(
         err.downcast_ref::<NamedSignInRefused>(),
         Some(NamedSignInRefused::InvalidName)
@@ -722,12 +730,7 @@ fn named_sign_in_error_response(err: anyhow::Error) -> Response {
         )
             .into_response();
     }
-    tracing::debug!("named passkey sign-in refused: {err:#}");
-    (
-        StatusCode::FORBIDDEN,
-        "Home could not sign you in with that account name and passkey.",
-    )
-        .into_response()
+    passkey_sign_in_failure_response(err)
 }
 
 /// Step-up operation and exact intent a passkey add consumes: the same fresh
@@ -5350,10 +5353,84 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(text, PASSKEY_SIGN_IN_FAILURE);
         assert_eq!(
-            text,
-            "Home could not sign you in with that account name and passkey."
+            crate::auth::load_auth_state(root.path())
+                .unwrap()
+                .sessions
+                .len(),
+            sessions_before
         );
+
+        // No existence oracle at completion: a decoy ID and a listed real ID
+        // with a bad signature get byte-identical answers, on an anonymous
+        // and on a named ceremony.
+        let complete = |begin: Value, credential_id: String| {
+            let send = &send;
+            async move {
+                let challenge = begin["options"]["publicKey"]["challenge"].clone();
+                let mut auth_data = Sha256::digest(b"elastos.elacitylabs.com").to_vec();
+                auth_data.push(0x05);
+                auth_data.extend_from_slice(&100u32.to_be_bytes());
+                send(
+                    "/api/auth/passkey/authenticate/complete",
+                    "192.0.2.1:1234",
+                    json!({
+                        "ceremony_id": begin["ceremony_id"],
+                        "response": {
+                            "id": credential_id,
+                            "rawId": credential_id,
+                            "type": "public-key",
+                            "response": {
+                                "clientDataJson": URL_SAFE_NO_PAD.encode(json!({
+                                    "type": "webauthn.get",
+                                    "challenge": challenge,
+                                    "origin": origin,
+                                }).to_string()),
+                                "authenticatorData": URL_SAFE_NO_PAD.encode(&auth_data),
+                                "signature": "AA",
+                                "userHandle": null,
+                            },
+                        },
+                    }),
+                )
+                .await
+            }
+        };
+        let begin_json = |(status, text): (StatusCode, String)| -> Value {
+            assert_eq!(status, StatusCode::OK, "{text}");
+            serde_json::from_str(&text).unwrap()
+        };
+        let decoy_id = decoys[0].clone();
+        let mut answers = Vec::new();
+        for credential_id in [decoy_id.clone(), alice_id.clone()] {
+            let anonymous = begin_json(
+                send(
+                    "/api/auth/passkey/authenticate/begin",
+                    "192.0.2.4:1234",
+                    json!({}),
+                )
+                .await,
+            );
+            answers.push(complete(anonymous, credential_id).await);
+        }
+        for (name, credential_id) in [("Mallory", decoy_id), ("Alice Example", alice_id)] {
+            let begin = begin_json(
+                send(
+                    "/api/auth/passkey/authenticate/named/begin",
+                    "192.0.2.5:1234",
+                    named(name),
+                )
+                .await,
+            );
+            answers.push(complete(begin, credential_id).await);
+        }
+        for answer in &answers {
+            assert_eq!(
+                answer,
+                &(StatusCode::FORBIDDEN, PASSKEY_SIGN_IN_FAILURE.to_string())
+            );
+        }
         assert_eq!(
             crate::auth::load_auth_state(root.path())
                 .unwrap()
