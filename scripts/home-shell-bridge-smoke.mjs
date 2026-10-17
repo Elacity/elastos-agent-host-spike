@@ -2730,10 +2730,32 @@ for (const target of ["people", "inbox"]) sendChildMessage("null", chatFrameWind
   { type: "home:open-target", homeToken: freshChatToken, target, query: {} });
 await new Promise(resolve => setTimeout(resolve, 0));
 assert(openCommands() === beforeProfileActions + 2, "Profile card did not open its exact People and Inbox targets", shellMessages);
+// Stale result inside one app: the old authority's Runtime check is still in
+// flight when the reconnect retires it and the new authority asks. The old
+// result arrives first and is dropped; only the new request shows and opens.
+window.open = recordLinkOpen;
+externalLinkGate = deferred();
+askLink(chatFrameWindow, freshChatToken, "https://example.com/chat-stale");
+await settleLinks();
 sendChildMessage("null", chatFrameWindow, { ...reconnect("chat-commit-refused"), homeToken: freshChatToken });
 const refusedCommitPrepare = await waitForChatPrepare("chat-commit-refused");
 const refusedCommitToken = acknowledgeChat(refusedCommitPrepare, true);
 await waitForShellResponse(chatReplies, "chat-commit-refused");
+askLink(chatFrameWindow, refusedCommitToken, "https://example.com/chat-current");
+await settleLinks();
+assert(linkSheet().hidden, "a link sheet showed before either Runtime check returned", linkSheet());
+const staleAndCurrentChecks = requests.filter((request) => request.url === "/api/apps/home/external-link").slice(-2);
+assert(JSON.stringify(staleAndCurrentChecks.map((request) => request.body.app_token)) ===
+  JSON.stringify([freshChatToken, refusedCommitToken]),
+"the new Chat authority could not ask while the old check was in flight", staleAndCurrentChecks);
+externalLinkGate.resolve();
+externalLinkGate = null;
+await settleLinks();
+assert(JSON.stringify(linkSheet()) === shownLinkSheet("Chat", "example.com", "https://example.com/chat-current"),
+  "the old authority's late result replaced or hid the current request", linkSheet());
+pressLink("open");
+assertOpenedLinks(["https://example.com/chat-current"], "a stale Chat result opened instead of the current one");
+window.open = strictWindowOpen;
 acknowledgeChatCommit(refusedCommitPrepare, false, {});
 const beforeWrongCommitReceipt = openCommands();
 sendChildMessage("null", chatFrameWindow, { type: "home:open-target", target: "inbox", query: {}, homeToken: refusedCommitToken });
