@@ -919,10 +919,17 @@ function linkChecks() {
 function askLink(source, homeToken, url, extra = {}) {
   sendChildMessage("null", source, { type: "home:open-external", url, homeToken, ...extra });
 }
-function pressLink(id, event = { isTrusted: true }) {
+// An Open press lands after Open link's 500 ms guard unless `immediate` is set.
+function pressLink(id, event = { isTrusted: true }, { immediate = id !== "open" } = {}) {
   const node = linkNode(id);
-  for (const listener of node.listeners.get("click") || []) {
-    listener({ target: node, ...event });
+  const clock = Date.now;
+  if (!immediate) Date.now = () => clock() + 600;
+  try {
+    for (const listener of node.listeners.get("click") || []) {
+      listener({ target: node, ...event });
+    }
+  } finally {
+    Date.now = clock;
   }
 }
 function pressLinkKey(key) {
@@ -1384,6 +1391,11 @@ sendChildMessage("null", walletFrameWindow, {
   pressLink("open", { isTrusted: false });
   assert(!linkSheet().hidden, "a synthetic Open click closed the sheet", linkSheet());
   assertOpenedLinks([], "a synthetic Open click opened the link");
+  // Click timing: a real press within 500 ms of the sheet appearing (an app
+  // timing the sheet under a double-click) opens nothing and keeps the sheet.
+  pressLink("open", { isTrusted: true }, { immediate: true });
+  assert(!linkSheet().hidden, "an immediate Open press closed the sheet", linkSheet());
+  assertOpenedLinks([], "an Open press inside the 500 ms guard opened the link");
   pressLink("open");
   assertOpenedLinks([address], "Open link did not open exactly the address shown");
   pressLink("open");

@@ -100,9 +100,12 @@ Home, with its own launch token and the link's own text. Home then:
 - shows its own sheet over every frame: the app's name, the host and the whole
   address (wrapped, never shortened), with **Open link** and **Cancel**. Focus
   starts on Cancel; Escape and the backdrop cancel;
-- opens the shown address only on a trusted press of Open link, in that press,
-  with `window.open(address, "_blank", "noopener,noreferrer")`. Nothing else
-  opens it, and the app is never told what the person chose.
+- opens the shown address only on a trusted press of Open link (click or key)
+  made at least 500 ms after the sheet appeared, in that press, with
+  `window.open(address, "_blank", "noopener,noreferrer")`. An earlier press
+  does nothing, so an app cannot time the sheet under a click already in
+  progress. Nothing else opens it, and the app is never told what the person
+  chose.
 
 One request is handled at a time: while one is being checked or shown, other
 requests are ignored. After Cancel, the same app's requests are ignored for

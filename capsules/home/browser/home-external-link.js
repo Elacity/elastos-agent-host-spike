@@ -15,6 +15,10 @@ const MAX_APP_TITLE_LENGTH = 128;
 // After Cancel, the same app's link requests are ignored for this long, so an
 // app cannot loop the sheet.
 export const EXTERNAL_LINK_CANCEL_COOLDOWN_MS = 3_000;
+// Open link ignores presses for this long after the sheet appears, so an app
+// cannot time the sheet under a click or key press the person already started.
+// A key press activates the button through the same click.
+export const EXTERNAL_LINK_OPEN_GUARD_MS = 500;
 
 function hasExactKeys(value, keys) {
   const actual = Object.keys(value).sort();
@@ -67,7 +71,8 @@ export function createHomeExternalLinkPrompt({
   cancelButton,
   windowRef = globalThis.window,
   isLive = () => true,
-  now = () => Date.now(),
+  // Monotonic, so a wall-clock change cannot shorten the guard or cool-down.
+  now = () => windowRef.performance.now(),
   cooldownMs = EXTERNAL_LINK_CANCEL_COOLDOWN_MS,
 } = {}) {
   if (!root || !appName || !host || !address || !openButton || !cancelButton || !windowRef) {
@@ -104,8 +109,13 @@ export function createHomeExternalLinkPrompt({
   }
 
   openButton.addEventListener("click", (event) => {
-    // A synthetic click never opens; only the person's own press does.
-    if (event?.isTrusted !== true || active?.phase !== "shown") {
+    // A synthetic click never opens; only the person's own press does, and
+    // only once the sheet has been on screen for the guard time.
+    if (
+      event?.isTrusted !== true ||
+      active?.phase !== "shown" ||
+      now() - active.shownAt < EXTERNAL_LINK_OPEN_GUARD_MS
+    ) {
       return;
     }
     const request = close();
@@ -164,6 +174,7 @@ export function createHomeExternalLinkPrompt({
         return false;
       }
       active.phase = "shown";
+      active.shownAt = now();
       active.href = checked.href;
       appName.textContent = checked.appTitle;
       host.textContent = checked.host;
