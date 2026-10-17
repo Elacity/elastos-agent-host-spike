@@ -964,6 +964,14 @@ function assertOpenedLinks(expected, message) {
   pressLink("open");
   assertOpenedLinks(["https://example.com/cli?x=1"], "Open link did not open the Home CLI link once");
   assert(linkSheet().hidden, "the link sheet stayed open after Open link", linkSheet());
+  // Reload: a reloaded Home CLI (same launch token) loses its shown request.
+  askLink(shellFrameWindow, "root-token", "https://example.com/cli-reload");
+  await settleLinks();
+  assert(!linkSheet().hidden, "Home CLI link did not show before reload", linkSheet());
+  sendChildMessage("null", shellFrameWindow, { type: "home:shell-ready", homeToken: "root-token" });
+  assert(linkSheet().hidden, "a reloaded Home CLI kept its link request", linkSheet());
+  pressLink("open");
+  assertOpenedLinks([], "a reloaded Home CLI's link opened");
   window.open = strictWindowOpen;
 }
 for (const listener of windowListeners.get("message") || []) {

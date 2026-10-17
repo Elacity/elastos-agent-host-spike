@@ -1624,6 +1624,8 @@ window.addEventListener("message", (event) => {
   }
   if (data.type === "home:shell-ready") {
     if (context.kind === "shell-frame") {
+      // A reloaded Home CLI cannot inherit its earlier link request.
+      homeExternalLinkPrompt.retire(context.homeToken);
       settleActiveShellReady(context);
       if (context.targetId === HOME_GUI_SHELL_ID) {
         let browserContextId = "";
