@@ -221,3 +221,76 @@ test("recovery says it worked when only the Home's recovery record is missing", 
   assert.match(recoveryImportIncompleteMessage(imported("complete", "absent", "complete")),
     /has no signed Profile or name/);
 });
+
+test("signing in by account name lists that account's passkeys and offers Add passkey after", async () => {
+  const flows = [];
+  await showHomeUnlock((response, flow) => { flows.push({ response, flow }); });
+  const card = element(".home-unlock-card");
+  const account = element("#home-unlock-account");
+  const status = element("#home-unlock-status");
+  assert.equal(account.hidden, true, "the account name is asked only in the fallback");
+  element("#home-unlock-named").click();
+  assert.equal(element(".home-unlock-face").hidden, true);
+  assert.equal(card.hidden, false);
+  assert.equal(account.hidden, false);
+  assert.equal(element("#home-unlock-account-label").hidden, false);
+  assert.equal(element("#home-unlock-title").textContent, "Sign in with your account name");
+  assert.equal(element("#home-unlock-primary").textContent, "Continue");
+  assert.equal(element("#home-unlock-secondary").textContent, "Back to sign in");
+
+  requests.length = 0;
+  account.value = "   ";
+  element("#home-unlock-primary").click();
+  await settle();
+  assert.equal(status.textContent, "Enter your account name as this Home shows it.");
+  assert.equal(requests.length, 0, "an empty name never reaches Home");
+
+  let requested = null;
+  routes["/api/auth/passkey/authenticate/named/begin"] = () => ({
+    body: { ceremony_id: "passkey:authenticate-named:1", options: { publicKey: {
+      challenge: "AA", allowCredentials: [{ type: "public-key", id: "AQ" }],
+    } } },
+  });
+  routes["/api/auth/passkey/authenticate/complete"] = () => ({ body: { home_token: "signed" } });
+  credentials = { get: async (request) => { requested = request; return fakeCredential(); } };
+  account.value = "  Alice   Example ";
+  element("#home-unlock-primary").click();
+  await settle();
+  const begin = requests.find((request) => request.url === "/api/auth/passkey/authenticate/named/begin");
+  assert.deepEqual(begin.body, {
+    schema: "elastos.auth.passkey.authenticate.named.begin.request/v1",
+    account_name: "Alice Example",
+  });
+  assert.deepEqual([...new Uint8Array(requested.publicKey.allowCredentials[0].id)], [1]);
+  const complete = requests.find((request) => request.url === "/api/auth/passkey/authenticate/complete");
+  assert.equal(complete.body.ceremony_id, "passkey:authenticate-named:1");
+  assert.deepEqual(flows.at(-1).flow, { signInMethod: "account_name" },
+    "Home is told to offer Add passkey once");
+  delete routes["/api/auth/passkey/authenticate/named/begin"];
+});
+
+test("a wrong account name and a missing passkey read the same", async () => {
+  await showHomeUnlock(() => {});
+  element("#home-unlock-named").click();
+  const status = element("#home-unlock-status");
+  element("#home-unlock-account").value = "Nobody";
+  routes["/api/auth/passkey/authenticate/named/begin"] = () => ({
+    body: { ceremony_id: "passkey:authenticate-named:2", options: { publicKey: {
+      challenge: "AA", allowCredentials: [{ type: "public-key", id: "Ag" }],
+    } } },
+  });
+  credentials = { get: async () => { throw Object.assign(new Error("none"), { name: "NotAllowedError" }); } };
+  element("#home-unlock-primary").click();
+  await settle();
+  assert.equal(status.textContent,
+    "No passkey for that account name was used. Check the name, then try again with your security key or device.");
+  assert.equal(status.dataset.tone, "muted");
+  routes["/api/auth/passkey/authenticate/named/begin"] = () => ({ status: 422, body: "Enter your account name as this Home shows it." });
+  element("#home-unlock-primary").click();
+  await settle();
+  assert.equal(status.textContent, "Enter your account name as this Home shows it.");
+  delete routes["/api/auth/passkey/authenticate/named/begin"];
+  element("#home-unlock-secondary").click();
+  assert.equal(element(".home-unlock-face").hidden, false, "Back to sign in returns to the lock face");
+  assert.equal(element("#home-unlock-account").hidden, true);
+});
