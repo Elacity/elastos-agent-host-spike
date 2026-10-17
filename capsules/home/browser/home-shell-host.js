@@ -26,7 +26,6 @@ import {
   isHomeAuthError,
   refreshHomeSession,
   requestPasskeyStepUp,
-  offerPasskeyAddAfterSignIn,
   profileReadinessActionTarget,
   showHomeUnlock,
   signOutHome,
@@ -490,15 +489,6 @@ async function showHostAuthGate(options = {}) {
         query.recovery = "import";
       }
       await openTargetFromHomeGui(profileActionTarget, { query });
-    } else {
-      // Never switches the person's shell and never fails the sign-in.
-      await offerPasskeyAddAfterSignIn({
-        flow,
-        homeToken: response?.home_token,
-        desktopActive: activeShellTarget(shellState.currentSummary) === HOME_GUI_SHELL_ID
-          && shellState.activeShellRootTarget === HOME_GUI_SHELL_ID,
-        openSystem: (query) => openTargetFromHomeGui("system", { query }),
-      });
     }
   }, {
     ...options,
