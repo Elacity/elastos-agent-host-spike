@@ -71,6 +71,9 @@ export function createHomeExternalLinkPrompt({
   cancelButton,
   windowRef = globalThis.window,
   isLive = () => true,
+  // True while another Home sheet (the Clipboard prompt) is on screen; the two
+  // never stack, so this request is dropped.
+  otherSheetShown = () => false,
   // Monotonic, so a wall-clock change cannot shorten the guard or cool-down.
   now = () => windowRef.performance.now(),
   cooldownMs = EXTERNAL_LINK_CANCEL_COOLDOWN_MS,
@@ -160,13 +163,13 @@ export function createHomeExternalLinkPrompt({
       active = { requestId, homeToken, appId, phase: "checking", href: "" };
       return requestId;
     },
-    // Shows the Runtime-checked request. Anything stale or malformed is
-    // dropped, and nothing is shown.
+    // Shows the Runtime-checked request. Anything stale or malformed, or a
+    // request that would stack on another Home sheet, is dropped unshown.
     show(requestId, result) {
       if (active?.requestId !== requestId || active.phase !== "checking") {
         return false;
       }
-      const checked = isLive(active.homeToken)
+      const checked = isLive(active.homeToken) && !otherSheetShown()
         ? validatedResult(result, active.appId, windowRef.location?.origin)
         : null;
       if (!checked) {

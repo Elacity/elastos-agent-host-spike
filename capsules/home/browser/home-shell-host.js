@@ -125,25 +125,30 @@ const stalledActiveShellReady = {
   target: "",
   route: "",
 };
+// Home's two sheets (Clipboard and web link) never stack: each refuses to show
+// while the other is on screen.
+const homeClipboardPromptRoot = document.querySelector("#home-clipboard-prompt");
+const homeLinkPromptRoot = document.querySelector("#home-link-prompt");
 const homeClipboardPrompt = createHomeClipboardPrompt({
-  root: document.querySelector("#home-clipboard-prompt"),
+  root: homeClipboardPromptRoot,
   title: document.querySelector("#home-clipboard-title"),
   copy: document.querySelector("#home-clipboard-copy"),
   allowButton: document.querySelector("#home-clipboard-allow"),
   cancelButton: document.querySelector("#home-clipboard-cancel"),
+  otherSheetShown: () => !homeLinkPromptRoot.hidden,
 });
 const homeClipboardHost = createHomeClipboardHost({
   prompt: homeClipboardPrompt,
 });
-const homeClipboardPromptRoot = document.querySelector("#home-clipboard-prompt");
 const homeExternalLinkPrompt = createHomeExternalLinkPrompt({
-  root: document.querySelector("#home-link-prompt"),
+  root: homeLinkPromptRoot,
   appName: document.querySelector("#home-link-app"),
   host: document.querySelector("#home-link-host"),
   address: document.querySelector("#home-link-address"),
   openButton: document.querySelector("#home-link-open"),
   cancelButton: document.querySelector("#home-link-cancel"),
   isLive: externalLinkSenderIsLive,
+  otherSheetShown: () => !homeClipboardPromptRoot.hidden,
 });
 
 function hideHostBootMask() {
@@ -2276,9 +2281,6 @@ function requestExternalLink(context, data) {
     data.url.length > MAX_EXTERNAL_LINK_LENGTH
   ) {
     console.warn("home ignored an open-external message");
-    return;
-  }
-  if (homeClipboardPromptRoot && !homeClipboardPromptRoot.hidden) {
     return;
   }
   const requestId = homeExternalLinkPrompt.begin({

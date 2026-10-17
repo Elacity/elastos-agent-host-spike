@@ -1375,6 +1375,24 @@ sendChildMessage("null", walletFrameWindow, {
   externalLinkResult = null;
   assertOpenedLinks([], "a refused link request opened a window");
 
+  // No stacking: while the Clipboard prompt is on screen, a link request is
+  // dropped, also when the prompt appears during the Runtime check.
+  const clipboardPrompt = elementForSelector("#home-clipboard-prompt");
+  clipboardPrompt.hidden = false;
+  askLink(peopleFrameWindow, people, address);
+  await settleLinks();
+  assert(linkSheet().hidden, "the link sheet stacked on a visible Clipboard prompt", linkSheet());
+  clipboardPrompt.hidden = true;
+  externalLinkGate = deferred();
+  askLink(peopleFrameWindow, people, address);
+  await settleLinks();
+  clipboardPrompt.hidden = false;
+  externalLinkGate.resolve();
+  externalLinkGate = null;
+  await settleLinks();
+  assert(linkSheet().hidden, "the link sheet stacked on a Clipboard prompt shown during its check", linkSheet());
+  clipboardPrompt.hidden = true;
+
   // Source and swap: the sheet names the Runtime's app and keeps request A.
   askLink(peopleFrameWindow, people, address);
   await settleLinks();

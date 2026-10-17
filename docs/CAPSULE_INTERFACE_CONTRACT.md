@@ -110,7 +110,10 @@ Home, with its own launch token and the link's own text. Home then:
 One request is handled at a time: while one is being checked or shown, other
 requests are ignored. After Cancel, the same app's requests are ignored for
 3 seconds. Closing, reloading or reconnecting the app, switching shells or
-signing out closes its request without opening anything.
+signing out closes its request without opening anything. The link sheet and
+Home's Clipboard prompt never stack: a link request is dropped while the
+Clipboard prompt is on screen, and a Clipboard request is refused as `busy`
+while the link sheet is on screen.
 
 ## Invocation Bindings
 
