@@ -81,6 +81,33 @@ Those messages are local adapter details. The durable model is:
 Future Carrier transport must preserve the same schemas, gates, consent path,
 dispatch path, and audit semantics.
 
+### Web links (#430)
+
+App documents have no popup permission (the app CSP sandbox omits
+`allow-popups`). To open a web link, a launched app frame or the `home-cli`
+shell frame posts exactly `{type: "home:open-external", url, homeToken}` to
+Home, with its own launch token and the link's own text. Home then:
+
+- refuses, with no reply and an undetailed log line, a message from any other
+  frame, a token not bound to the sending frame, extra or missing keys, a
+  non-string or empty `url`, or a `url` over 2048 characters;
+- asks the Runtime (`POST /api/apps/home/external-link`). The Runtime names the
+  app from its signed Home launch under the same Home session, never from the
+  message, and accepts only an absolute `http:`/`https:` address with a host,
+  no user name or password, no control characters, at most 2048 bytes, in its
+  canonical ASCII form. It never fetches the address;
+- shows its own sheet over every frame: the app's name, the host and the whole
+  address (wrapped, never shortened), with **Open link** and **Cancel**. Focus
+  starts on Cancel; Escape and the backdrop cancel;
+- opens the shown address only on a trusted press of Open link, in that press,
+  with `window.open(address, "_blank", "noopener,noreferrer")`. Nothing else
+  opens it, and the app is never told what the person chose.
+
+One request is handled at a time: while one is being checked or shown, other
+requests are ignored. After Cancel, the same app's requests are ignored for
+3 seconds. Closing, reloading or reconnecting the app, switching shells or
+signing out closes its request without opening anything.
+
 ## Invocation Bindings
 
 Every declared method remains visible in `/api/capsules/interfaces`, alongside
