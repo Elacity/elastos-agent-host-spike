@@ -913,36 +913,29 @@ async fn test_full_recovery_fresh_export_rejects_envelope_shaped_data_before_mut
             .join("recovery-archive.key");
     assert!(!archive_key_path.exists());
 
-    for _ in 0..2 {
-        let response = app
-            .clone()
-            .oneshot(
-                test_browser_request("localhost:61180", "null")
-                    .method("POST")
-                    .uri("/api/auth/recovery/full-export")
-                    .header("x-elastos-home-token", authority.system_token.as_str())
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        json!({
-                            "schema": "elastos.full-recovery-bundle.export.request/v1",
-                            "principal_id": export_intent["principal_id"],
-                            "localhost_root": export_intent["localhost_root"],
-                            "label": export_intent["label"],
-                            "step_up_token": fresh_token,
-                            "download_password": null
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    // The approval is used before the scan; the replay is refused as used.
+    for (expected_status, expected_text) in [
+        (
+            StatusCode::CONFLICT,
+            "exact verified protection binding is required",
+        ),
+        // The step-up replay refusal keeps its existing status mapping.
+        (StatusCode::INTERNAL_SERVER_ERROR, "already been used"),
+    ] {
+        let response =
+            post_full_recovery_export(&app, &authority, &export_intent, &fresh_token).await;
+        assert_eq!(response.status(), expected_status);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        assert!(String::from_utf8_lossy(&body)
-            .contains("exact verified protection binding is required"));
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains(expected_text), "{body}");
+        if expected_status == StatusCode::CONFLICT {
+            assert!(body.starts_with("Home could not prepare your Recovery Kit: "));
+            assert!(body.ends_with(
+                ". After that, select Download Recovery Kit again; you will approve with your passkey again."
+            ));
+        }
     }
 
     assert_eq!(std::fs::read(&save_path).unwrap(), envelope_bytes);
@@ -955,6 +948,116 @@ async fn test_full_recovery_fresh_export_rejects_envelope_shaped_data_before_mut
     )
     .unwrap()
     .is_none());
+}
+
+async fn post_full_recovery_export(
+    app: &axum::Router,
+    authority: &TestPasskeyAuthority,
+    intent: &Value,
+    step_up_token: &str,
+) -> Response {
+    let mut request = intent.clone();
+    request["schema"] = json!("elastos.full-recovery-bundle.export.request/v1");
+    request["step_up_token"] = json!(step_up_token);
+    app.clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("POST")
+                .uri("/api/auth/recovery/full-export")
+                .header("x-elastos-home-token", authority.system_token.as_str())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(request.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn export_consumes_approval_before_scan_and_survives_long_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(wallet_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("alex"));
+    let principal =
+        crate::auth::load_principal_for_proof_binding(dir.path(), &authority.proof_binding_id)
+            .unwrap();
+    let damaged_uri = format!(
+        "{}/.AppData/LocalHost/GBA/ucity/damaged.sav",
+        principal.localhost_root
+    );
+    let damaged_path =
+        elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &damaged_uri).unwrap();
+    std::fs::create_dir_all(damaged_path.parent().unwrap()).unwrap();
+    let damaged = b"{\n  \"sche\xffma\": \"elastos.principal-root.object/v1\"".to_vec();
+    std::fs::write(&damaged_path, &damaged).unwrap();
+    let intent = json!({
+        "principal_id": authority.principal_id,
+        "localhost_root": principal.localhost_root,
+        "label": "Recovery test",
+        "download_password": null,
+    });
+    let token = step_up_token_for_app_context(
+        dir.path(),
+        SYSTEM_CAPSULE_ID,
+        &authority.system_token,
+        "auth.full-recovery-bundle.export",
+        &intent,
+    );
+    let auth_state_path = crate::auth::auth_state_path(dir.path()).unwrap();
+    let auth_state_before = std::fs::read(&auth_state_path).unwrap();
+    let archive_key_path =
+        elastos_common::localhost::rooted_localhost_fs_path(dir.path(), "ElastOS/System/Auth")
+            .unwrap()
+            .join("recovery-archive.key");
+
+    let refused = post_full_recovery_export(&app, &authority, &intent, &token).await;
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(refused.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        body.starts_with(
+            "Home could not prepare your Recovery Kit: .AppData/LocalHost/GBA/ucity/damaged.sav: \
+             .AppData/LocalHost/GBA/ucity/damaged.sav does not carry the label"
+        ),
+        "{body}"
+    );
+    assert!(body.ends_with(
+        "upload it again in Library. After that, select Download Recovery Kit again; you will \
+         approve with your passkey again."
+    ));
+    let replay = post_full_recovery_export(&app, &authority, &intent, &token).await;
+    assert_ne!(replay.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(replay.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("already been used"));
+    assert_eq!(std::fs::read(&auth_state_path).unwrap(), auth_state_before);
+    assert!(!archive_key_path.exists());
+    assert!(crate::auth::load_principal_root_protection(
+        dir.path(),
+        &authority.principal_id,
+        &principal.localhost_root,
+    )
+    .unwrap()
+    .is_none());
+    assert_eq!(std::fs::read(&damaged_path).unwrap(), damaged);
+
+    // After the person moves the file out, a fresh approval succeeds even
+    // when the scan outlasts the approval's 180 s lifetime.
+    std::fs::remove_file(&damaged_path).unwrap();
+    crate::api::auth_gateway::delay_next_full_recovery_scan_for_test(dir.path());
+    let exported =
+        export_full_recovery_bundle_response(&app, dir.path(), &authority, &principal).await;
+    assert_eq!(exported.status(), StatusCode::OK);
+    assert!(crate::auth::load_principal_root_protection(
+        dir.path(),
+        &authority.principal_id,
+        &principal.localhost_root,
+    )
+    .unwrap()
+    .is_some());
 }
 
 #[tokio::test]

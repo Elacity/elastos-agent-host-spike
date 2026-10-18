@@ -1573,6 +1573,65 @@ fn local_profile_setup_test_fault(data_dir: &std::path::Path, point: &str) -> an
     })
 }
 
+/// Kit export was refused after its approval was used. Names the reason and
+/// tells the person a fresh approval follows.
+#[derive(Debug)]
+pub(in crate::api) struct RecoveryKitPreparationRefused {
+    notice: String,
+}
+
+impl RecoveryKitPreparationRefused {
+    fn from_activation_error(err: anyhow::Error) -> anyhow::Error {
+        let text = err.to_string();
+        let notice = text
+            .strip_prefix(crate::auth::PROTECTED_PRINCIPAL_ROOT_OBJECT_DAMAGED)
+            .and_then(|rest| rest.strip_prefix(": "))
+            .unwrap_or(&text)
+            .trim_end_matches('.')
+            .to_string();
+        Self { notice }.into()
+    }
+}
+
+impl std::fmt::Display for RecoveryKitPreparationRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Home could not prepare your Recovery Kit: {}. After that, select Download Recovery \
+             Kit again; you will approve with your passkey again.",
+            self.notice
+        )
+    }
+}
+
+impl std::error::Error for RecoveryKitPreparationRefused {}
+
+#[cfg(test)]
+static FULL_RECOVERY_SCAN_DELAY_HOOKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Test hook: the next export scan for `data_dir` takes longer than the
+/// approval's lifetime (the step-up validation clock moves 200 s on).
+#[cfg(test)]
+pub(in crate::api) fn delay_next_full_recovery_scan_for_test(data_dir: &std::path::Path) {
+    FULL_RECOVERY_SCAN_DELAY_HOOKS
+        .lock()
+        .unwrap()
+        .insert(data_dir.to_path_buf());
+}
+
+#[cfg(test)]
+fn run_full_recovery_scan_delay_test_hook(data_dir: &std::path::Path) {
+    if FULL_RECOVERY_SCAN_DELAY_HOOKS
+        .lock()
+        .unwrap()
+        .remove(data_dir)
+    {
+        super::gateway::advance_passkey_step_up_clock_for_test(data_dir, 200);
+    }
+}
+
 /// Synchronous so the activation guard never enters the export handler's
 /// async state machine. Export consumes its own bound step-up.
 fn full_recovery_bundle_establish_kit(
@@ -1583,28 +1642,16 @@ fn full_recovery_bundle_establish_kit(
     input: &FullRecoveryBundleExportRequest,
     now: u64,
 ) -> anyhow::Result<RecoveryKitV1> {
-    let protected_object_inventory =
-        principal_root_protected_object_inventory(&state.data_dir, &principal.localhost_root);
-    let protection_activation =
-        crate::auth::begin_declarative_principal_root_protection_activation_migrating_plaintext(
-            &state.data_dir,
-            &principal.principal_id,
-            &principal.localhost_root,
-            &protected_object_inventory,
-        )?;
-    // Same refusal, ahead of the same first write: a Recovery Kit export
-    // must not be the thing that leaves a root protected with plaintext
-    // beside it. Checked before the step-up is consumed so a refusal costs
-    // the person nothing but a message.
-    crate::auth::ensure_online_plaintext_migration_is_possible(
-        &protection_activation.plaintext_objects,
-    )?;
     let intent = serde_json::json!({
         "principal_id": input.principal_id,
         "localhost_root": input.localhost_root,
         "label": input.label,
         "download_password": input.download_password,
     });
+    // The approval is validated and consumed before the scan, so a scan of
+    // any length cannot outlive it. A refusal after this point costs one
+    // more passkey approval: nothing was written yet, and the used approval
+    // cannot be replayed.
     consume_passkey_step_up_token(
         &state.data_dir,
         &input.step_up_token,
@@ -1613,6 +1660,25 @@ fn full_recovery_bundle_establish_kit(
         "auth.full-recovery-bundle.export",
         &intent,
     )?;
+    let protected_object_inventory =
+        principal_root_protected_object_inventory(&state.data_dir, &principal.localhost_root);
+    let protection_activation =
+        crate::auth::begin_declarative_principal_root_protection_activation_migrating_plaintext(
+            &state.data_dir,
+            &principal.principal_id,
+            &principal.localhost_root,
+            &protected_object_inventory,
+        )
+        .map_err(RecoveryKitPreparationRefused::from_activation_error)?;
+    #[cfg(test)]
+    run_full_recovery_scan_delay_test_hook(&state.data_dir);
+    // Same refusal, ahead of the same first write: a Recovery Kit export
+    // must not be the thing that leaves a root protected with plaintext
+    // beside it.
+    crate::auth::ensure_online_plaintext_migration_is_possible(
+        &protection_activation.plaintext_objects,
+    )
+    .map_err(RecoveryKitPreparationRefused::from_activation_error)?;
     let kit = recovery_kit_get_or_create_for_principal(
         state,
         &context.session_id,
@@ -4646,6 +4712,9 @@ pub(in crate::api) fn auth_error_response(err: anyhow::Error) -> Response {
             "Passkey sign-in is busy. Try again shortly.",
         )
             .into_response();
+    }
+    if err.is::<RecoveryKitPreparationRefused>() {
+        return (StatusCode::CONFLICT, err.to_string()).into_response();
     }
     let text = err.to_string();
     let status = if err.is::<PasskeyRegistrationDenied>()
