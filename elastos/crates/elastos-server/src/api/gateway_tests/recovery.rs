@@ -228,9 +228,7 @@ async fn full_recovery_setup_preserves_identity_and_requires_successful_profile_
         &principal.localhost_root,
     )
     .unwrap();
-    assert!(crate::api::auth_gateway::principal_root_recovery_is_ready(
-        &status
-    ));
+    assert!(status.root_encrypted && status.recovery_configured);
     assert!(status
         .required_actions
         .iter()

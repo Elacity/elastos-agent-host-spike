@@ -4363,6 +4363,54 @@ async fn test_recovery_readiness_does_not_claim_profile_coverage() {
 }
 
 #[tokio::test]
+async fn realtime_readiness_opens_no_object() {
+    let dir = tempfile::tempdir().unwrap();
+    let _ = elastos_identity::load_or_create_did(dir.path()).unwrap();
+    let app = gateway_router(wallet_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("owner"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let localhost_root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let documents = elastos_common::localhost::rooted_localhost_fs_path(
+        dir.path(),
+        &format!("{localhost_root}/Documents"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(&documents).unwrap();
+    for index in 0..1_100 {
+        std::fs::write(documents.join(format!("file-{index:04}.txt")), b"x").unwrap();
+    }
+    let before = crate::auth::principal_root_scan_probes(dir.path());
+
+    // The periodic Home stream calls exactly this projection once per poll.
+    assert_eq!(
+        crate::api::auth_gateway::principal_root_recovery_readiness_for_verified_principal(
+            dir.path(),
+            &authority.principal_id,
+            &localhost_root,
+        )
+        .unwrap(),
+        crate::api::auth_gateway::PrincipalRootRecoveryReadiness::Ready
+    );
+    for (path, token, origin) in [
+        (
+            "/api/apps/home/summary",
+            authority.home_token.as_str(),
+            "http://localhost:61180",
+        ),
+        (
+            "/api/apps/people/summary",
+            authority.people_token.as_str(),
+            "null",
+        ),
+    ] {
+        let (status, payload) = home_test_get_json(&app, path, token, origin).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert_recovery_readiness_projection(&payload, "ready", path);
+    }
+    assert_eq!(crate::auth::principal_root_scan_probes(dir.path()), before);
+}
+
+#[tokio::test]
 async fn test_recovery_readiness_projects_unavailable_and_first_profile_fails_closed() {
     let dir = tempfile::tempdir().unwrap();
     let _ = elastos_identity::load_or_create_did(dir.path()).unwrap();

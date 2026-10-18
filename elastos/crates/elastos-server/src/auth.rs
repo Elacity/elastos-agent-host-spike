@@ -85,6 +85,41 @@ static VERIFIED_AUTH_STATE_CACHE: OnceLock<Mutex<HashMap<PathBuf, VerifiedAuthSt
 #[cfg(test)]
 static VERIFY_AUDIT_CHAIN_CALLS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
 
+/// Per-`data_dir` counts of declared-object scan work, so tests can prove
+/// which paths walk or open protected objects.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PrincipalRootScanProbes {
+    pub scans: usize,
+    pub file_opens: usize,
+}
+
+#[cfg(test)]
+static PRINCIPAL_ROOT_SCAN_PROBES: std::sync::LazyLock<
+    Mutex<HashMap<PathBuf, PrincipalRootScanProbes>>,
+> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+fn record_principal_root_scan_probe(
+    data_dir: &Path,
+    record: impl FnOnce(&mut PrincipalRootScanProbes),
+) {
+    let mut probes = PRINCIPAL_ROOT_SCAN_PROBES
+        .lock()
+        .expect("principal-root scan probe lock");
+    record(probes.entry(data_dir.to_path_buf()).or_default());
+}
+
+#[cfg(test)]
+pub(crate) fn principal_root_scan_probes(data_dir: &Path) -> PrincipalRootScanProbes {
+    PRINCIPAL_ROOT_SCAN_PROBES
+        .lock()
+        .expect("principal-root scan probe lock")
+        .get(data_dir)
+        .copied()
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 static VERIFIED_AUTH_STATE_CACHE_FILL_HOOKS: OnceLock<
     Mutex<HashMap<PathBuf, VerifiedAuthStateCacheBoundaryHook>>,
@@ -7045,6 +7080,8 @@ fn collect_declared_principal_root_objects(
     localhost_root: &str,
     inventory: &[PrincipalRootProtectedObjectDeclarationV1],
 ) -> anyhow::Result<Vec<DeclaredPrincipalRootObject>> {
+    #[cfg(test)]
+    record_principal_root_scan_probe(data_dir, |probes| probes.scans += 1);
     if inventory.len() > MAX_PRINCIPAL_ROOT_INVENTORY_DECLARATIONS {
         anyhow::bail!("principal-root protected-object inventory exceeds its declaration bound");
     }
@@ -7097,6 +7134,8 @@ fn collect_declared_principal_root_objects(
         if total_bytes > MAX_MIGRATION_TOTAL_BYTES {
             anyhow::bail!("declared principal-root objects exceed 64 MiB");
         }
+        #[cfg(test)]
+        record_principal_root_scan_probe(data_dir, |probes| probes.file_opens += 1);
         let bytes = std::fs::read(&path)
             .with_context(|| format!("failed to read declared object {path:?}"))?;
         objects.push(DeclaredPrincipalRootObject { object_uri, bytes });

@@ -5986,25 +5986,18 @@ pub(super) fn recovery_readiness_for_context(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
 ) -> RecoveryReadinessSummary {
-    match crate::api::auth_gateway::principal_root_recovery_status_for_verified_principal(
+    use crate::api::auth_gateway::PrincipalRootRecoveryReadiness;
+    match crate::api::auth_gateway::principal_root_recovery_readiness_for_verified_principal(
         data_dir,
         &home_browser_principal_id(context),
         &home_browser_localhost_root(context),
     ) {
-        Ok(recovery) => {
-            let kit_outdated = recovery
-                .required_actions
-                .iter()
-                .any(|action| action == "download_recovery_kit_with_profile");
-            if crate::api::auth_gateway::principal_root_recovery_is_ready(&recovery)
-                && !kit_outdated
-            {
-                RecoveryReadinessSummary::ready()
-            } else if recovery.recovery_configured {
-                RecoveryReadinessSummary::setup_required(RECOVERY_READINESS_REASON_KIT_OUTDATED)
-            } else {
-                RecoveryReadinessSummary::setup_required(RECOVERY_READINESS_REASON_KIT_MISSING)
-            }
+        Ok(PrincipalRootRecoveryReadiness::Ready) => RecoveryReadinessSummary::ready(),
+        Ok(PrincipalRootRecoveryReadiness::KitOutdated) => {
+            RecoveryReadinessSummary::setup_required(RECOVERY_READINESS_REASON_KIT_OUTDATED)
+        }
+        Ok(PrincipalRootRecoveryReadiness::KitMissing) => {
+            RecoveryReadinessSummary::setup_required(RECOVERY_READINESS_REASON_KIT_MISSING)
         }
         Err(_) => RecoveryReadinessSummary::unavailable(),
     }

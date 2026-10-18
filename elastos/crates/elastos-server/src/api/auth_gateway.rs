@@ -1302,19 +1302,8 @@ pub(in crate::api) fn principal_root_recovery_status_for_verified_principal(
     if !recovery_configured {
         required_actions.push("verify_recovery_before_public_guest_hosting".to_string());
     }
-    if let Some(profile) = crate::collaboration_profile_authority::load_profile_authority(
-        data_dir,
-        principal_id,
-        localhost_root,
-    )? {
-        if !protection.protectors.iter().any(|protector| {
-            protector
-                .profile_coverage
-                .as_ref()
-                .is_some_and(|coverage| coverage.profile_did == profile.document().profile_did)
-        }) {
-            required_actions.push("download_recovery_kit_with_profile".to_string());
-        }
+    if !protection_covers_current_profile(data_dir, principal_id, localhost_root, &protection)? {
+        required_actions.push("download_recovery_kit_with_profile".to_string());
     }
     Ok(PrincipalRootRecoveryStatusV1 {
         schema: elastos_runtime::auth::PRINCIPAL_ROOT_RECOVERY_STATUS_SCHEMA.to_string(),
@@ -1329,10 +1318,62 @@ pub(in crate::api) fn principal_root_recovery_status_for_verified_principal(
     })
 }
 
-pub(in crate::api) fn principal_root_recovery_is_ready(
-    recovery: &PrincipalRootRecoveryStatusV1,
-) -> bool {
-    recovery.root_encrypted && recovery.recovery_configured
+/// Whether a protector's Recovery Kit covers the root's current Profile. A
+/// root without a Profile has nothing left to cover.
+fn protection_covers_current_profile(
+    data_dir: &std::path::Path,
+    principal_id: &str,
+    localhost_root: &str,
+    protection: &elastos_runtime::auth::PrincipalRootProtectionV1,
+) -> anyhow::Result<bool> {
+    let Some(profile) = crate::collaboration_profile_authority::load_profile_authority(
+        data_dir,
+        principal_id,
+        localhost_root,
+    )?
+    else {
+        return Ok(true);
+    };
+    Ok(protection.protectors.iter().any(|protector| {
+        protector
+            .profile_coverage
+            .as_ref()
+            .is_some_and(|coverage| coverage.profile_did == profile.document().profile_did)
+    }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::api) enum PrincipalRootRecoveryReadiness {
+    Ready,
+    KitOutdated,
+    KitMissing,
+}
+
+/// The periodic Home stream and the identity summary project Recovery
+/// readiness from the protection record and the Profile authority only. They
+/// open no protected object: the explicit Recovery status does that.
+pub(in crate::api) fn principal_root_recovery_readiness_for_verified_principal(
+    data_dir: &std::path::Path,
+    principal_id: &str,
+    localhost_root: &str,
+) -> anyhow::Result<PrincipalRootRecoveryReadiness> {
+    let Some(protection) =
+        crate::auth::load_principal_root_protection(data_dir, principal_id, localhost_root)?
+    else {
+        return Ok(PrincipalRootRecoveryReadiness::KitMissing);
+    };
+    let recovery_configured = protection
+        .protectors
+        .iter()
+        .any(|protector| protector.verified_at.is_some());
+    if !recovery_configured {
+        return Ok(PrincipalRootRecoveryReadiness::KitMissing);
+    }
+    if protection_covers_current_profile(data_dir, principal_id, localhost_root, &protection)? {
+        Ok(PrincipalRootRecoveryReadiness::Ready)
+    } else {
+        Ok(PrincipalRootRecoveryReadiness::KitOutdated)
+    }
 }
 
 pub fn verify_configured_principal_roots_ready(data_dir: &std::path::Path) -> anyhow::Result<()> {
