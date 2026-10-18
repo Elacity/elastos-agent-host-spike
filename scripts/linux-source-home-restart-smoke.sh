@@ -296,6 +296,8 @@ import pathlib
 import sys
 
 if os.environ.get("ELASTOS_SMOKE_FAIL_UPGRADE") == "1":
+    print("migrating Documents")
+    print("Error: Documents/large.bin is not encrypted and is 17 MiB.")
     raise SystemExit(41)
 empty_receipt = os.environ.get("ELASTOS_SMOKE_EMPTY_UPGRADE_RECEIPT")
 if empty_receipt is not None:
@@ -714,6 +716,13 @@ def linux_active_proof(base):
         raise AssertionError("failed readiness retained its PID file")
     if "home_readiness_parity_failed" not in failed_result.stderr:
         raise AssertionError("failed readiness did not reach Home parity")
+
+    refused = Fixture(base, "refused-upgrade")
+    refused_result = refused.run(env=refused.environment(ELASTOS_SMOKE_FAIL_UPGRADE="1"), ok=False)
+    if "linux-source-home-restart: Error: Documents/large.bin is not encrypted and is 17 MiB." not in refused_result.stderr:
+        raise AssertionError(f"refused upgrade did not print its Error: line: {refused_result.stderr!r}")
+    if "migrating Documents" in refused_result.stderr:
+        raise AssertionError("refused upgrade printed more than its Error: line")
 
     unsafe_fifo = Fixture(base, "unsafe-rollback-fifo")
     fifo = unsafe_fifo.run(

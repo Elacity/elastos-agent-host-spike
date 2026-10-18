@@ -3032,6 +3032,23 @@ async function refreshRecoveryStatus() {
   }
 }
 
+const RECOVERY_ROOT_CHECKED_SENTENCE = "No unencrypted file was found in your protected Home folders, and each file there is labelled for this Home's current key. Each file's contents are checked when you open it.";
+
+function recoveryAttentionNote(status) {
+  const notes = [];
+  if (status?.required_actions?.includes("finish_interrupted_principal_root_migration")) {
+    notes.push("An earlier encryption step did not finish. Home will not start again until it is finished or undone; reinstalling ElastOS does that, and your files are kept.");
+  }
+  const count = Number(status?.objects_needing_attention_count) || 0;
+  const first = Array.isArray(status?.objects_needing_attention) ? status.objects_needing_attention[0] : null;
+  if (count > 0 && first) {
+    // The action already starts with the file's path.
+    const more = count > 1 ? ` And ${count - 1} more.` : "";
+    notes.push(`${count} file(s) in your protected Home folders need attention: ${readText(first.action)}${more}`);
+  }
+  return notes.join(" ");
+}
+
 function setRecoveryStatus(status) {
   if (recoveryProfileStatus === "unavailable") {
     showRecoveryStatus("Unavailable", "error");
@@ -3051,12 +3068,21 @@ function setRecoveryStatus(status) {
     setRecoveryButton("Save complete Recovery Kit", false);
     return;
   }
+  const attention = recoveryAttentionNote(status);
+  if (attention) {
+    showRecoveryStatus("Needs attention", "muted");
+    showRecoveryNote(attention, "muted");
+    const exportReady = status.recovery_configured === true && status.recovery_download_available === true;
+    setRecoveryButton(exportReady ? "Download Recovery Kit" : "Create Recovery Kit", false);
+    return;
+  }
   const configured = status && status.recovery_configured === true;
   const downloadAvailable = status && status.recovery_download_available === true;
   const protectedRoot = status && status.protection_configured === true;
   if (configured && downloadAvailable) {
     showRecoveryStatus("", "success");
-    showRecoveryNote("Saves your Profile, Home recovery authority, and included Wallet keys after passkey verification. Keep your files backed up separately.", "muted");
+    const checked = status.root_encrypted === true ? `${RECOVERY_ROOT_CHECKED_SENTENCE} ` : "";
+    showRecoveryNote(`${checked}Saves your Profile, Home recovery authority, and included Wallet keys after passkey verification. Keep your files backed up separately.`, "muted");
     setRecoveryButton("Download Recovery Kit", false);
     return;
   }

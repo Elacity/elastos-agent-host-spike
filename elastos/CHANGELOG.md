@@ -147,6 +147,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Fixed
 
+- Home now starts, updates and shows Recovery status with large Library files and any number of them. At start Home checks that no file in its protected folders is unencrypted and that each file is labelled for this Home's key; each file's contents are checked when it is opened. A damaged file shows as Blocked in Library, by name, instead of stopping Home (#444).
 - When sign-in fails, the lock screen now says why in one line and what to do next, instead of showing nothing (#338).
 - The publisher's Carrier ticket lists only its public addresses when it has
   one (no container bridge, LAN or loopback addresses), and a Runtime on a

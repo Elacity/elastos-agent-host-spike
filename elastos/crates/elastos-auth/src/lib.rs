@@ -353,6 +353,10 @@ pub struct PrincipalRootRecoveryStatusV1 {
     pub schema: String,
     pub principal_id: String,
     pub localhost_root: String,
+    /// True when the root has protection, no interrupted migration is
+    /// pending, and a header-only scan found no unencrypted file and every
+    /// file labelled for this Home's current key and its own place. File
+    /// contents are not checked here; they are checked when a file is opened.
     pub root_encrypted: bool,
     pub recovery_configured: bool,
     pub recovery_download_available: bool,

@@ -1367,6 +1367,23 @@ if ! "$gateway_bin" principal-root-upgrade \
   --data-dir "$data_dir" \
   --backup-dir "$principal_root_backup_dir" \
   >"$principal_root_upgrade_log" 2>&1; then
+  # The refusal names the file and the action; show its last Error: line only.
+  python3 - "$principal_root_upgrade_log" >&2 2>/dev/null <<'PY' || true
+import os
+import sys
+
+try:
+    with open(sys.argv[1], "rb") as log:
+        log.seek(0, os.SEEK_END)
+        log.seek(max(0, log.tell() - 65536))
+        tail = log.read().decode("utf-8", "replace")
+except OSError:
+    raise SystemExit(0)
+lines = [line for line in tail.splitlines() if line.startswith("Error:")]
+if lines:
+    text = "".join(ch if ch.isprintable() else "?" for ch in lines[-1])[:4096]
+    print(f"mac-source-home-restart: {text}")
+PY
   redacted_error "principal-root upgrade failed; rollback retained for reconciliation"
   exit 1
 fi
