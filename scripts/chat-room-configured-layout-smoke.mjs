@@ -20,6 +20,7 @@ const communityDeliveryMarker = "Own Community message awaiting delivery";
 const interveningPeerMarker = "Peer message before my send response";
 const cursorOwnMarker = "Own message after the unseen peer row";
 const externalLinkUrl = "https://example.invalid/chat-link?from=chat";
+const textLinkUrl = "https://example.invalid/chat-text-link?from=text";
 const brave = process.env.BRAVE_BIN || "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
 const require = createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url));
 const playwrightModule = process.env.ELASTOS_PLAYWRIGHT_MODULE
@@ -242,11 +243,13 @@ function startServer(scenario) {
       poll.objects = [historyMessage(10, "Initial Community row", "2026-03-09T12:00:00Z")];
     }
     if (scenario === "external-link-via-home") {
-      poll.latest_seq = 1;
+      // A Link object (local mode) and a Community Text message that holds a
+      // web address: both must ask Home the same way.
+      poll.latest_seq = 2;
       poll.objects = [{
         ...historyMessage(1, "", "2026-03-09T12:00:00Z"), kind: "link", body: null,
         link: { url: externalLinkUrl, host: "example.com", title: "Example link" },
-      }];
+      }, historyMessage(2, `Read (${textLinkUrl}). <b>not markup</b>`, "2026-03-09T12:01:00Z")];
     }
     if (historyScenario) {
       const details = {
@@ -771,23 +774,46 @@ async function runScenario(scenario) {
 
     if (scenario === "external-link-via-home") {
       await waitForConfiguredChatWithoutLegacyFlash(frame, "external link");
-      const link = frame.locator('#message-list a[data-open-external]');
+      const link = frame.locator('#message-list .link-body a[data-open-external]');
+      const textLink = frame.locator('#message-list a.message-link[data-open-external]');
       await link.waitFor();
-      assert(await link.getAttribute("href") === externalLinkUrl && await link.getAttribute("target") === null,
-        "Chat link keeps its visible href and no popup target");
+      await textLink.waitFor();
+      for (const [element, address] of [[link, externalLinkUrl], [textLink, textLinkUrl]]) {
+        const attributes = await element.evaluate(node => ({
+          href: node.getAttribute("href"), target: node.getAttribute("target"), role: node.getAttribute("role"),
+          tabindex: node.getAttribute("tabindex"), label: node.getAttribute("aria-label"),
+          address: node.dataset.openExternal,
+        }));
+        assert(JSON.stringify(attributes) === JSON.stringify({ href: null, target: null, role: "link", tabindex: "0",
+          label: `Open link: ${address}`, address }), "a Chat web link inside Home has no native navigation", attributes);
+      }
       assert(await link.innerText() === "Example link\nexample.com", "Chat link text changed");
+      const textBody = await textLink.evaluate(node => ({
+        text: node.parentElement.textContent, elements: node.parentElement.querySelectorAll("*").length,
+      }));
+      assert(textBody.text === `Read (${textLinkUrl}). <b>not markup</b>` && textBody.elements === 1,
+        "a Text message renders its address as one link and the rest as plain text", textBody);
       const pagesBefore = context.pages().length;
       const destinationRequests = [];
       const recordDestination = request => {
         if (new URL(request.url()).hostname === "example.invalid") destinationRequests.push(request.url());
       };
       context.on("request", recordDestination);
+      // Real input: a click on each link, then Enter and Space on the
+      // focused Text link. Each activation asks Home exactly once.
       await link.click();
-      await waitFor(async () => (await page.evaluate(() => window.fixtureOpenExternal.length)) === 1);
+      await textLink.click();
+      await textLink.focus();
+      await textLink.press("Enter");
+      await textLink.press(" ");
+      await textLink.click({ button: "middle" });
+      await waitFor(async () => (await page.evaluate(() => window.fixtureOpenExternal.length)) >= 4);
+      await new Promise(resolve => setTimeout(resolve, 300));
       const asked = (await page.evaluate(() => window.fixtureOpenExternal))
         .map(message => JSON.stringify(Object.fromEntries(Object.entries(message).sort())));
-      assert(JSON.stringify(asked) === JSON.stringify([JSON.stringify({ homeToken: "test-token", type: "home:open-external", url: externalLinkUrl })]),
-        "Chat did not send Home exactly the typed request with the link's own address");
+      const request = url => JSON.stringify({ homeToken: "test-token", type: "home:open-external", url });
+      assert(JSON.stringify(asked) === JSON.stringify([externalLinkUrl, textLinkUrl, textLinkUrl, textLinkUrl].map(request)),
+        "Chat did not send Home exactly one typed request per activation with the link's own address", asked);
       await new Promise(resolve => setTimeout(resolve, 300));
       context.off("request", recordDestination);
       assert(context.pages().length === pagesBefore, "Chat opened a window itself");

@@ -1712,14 +1712,7 @@ impl App {
                 let Some(url) = anchor.get_attribute("data-open-external") else {
                     return;
                 };
-                match link_app.open_external_link_from_shell(&url) {
-                    Ok(true) => event.prevent_default(),
-                    Ok(false) => {}
-                    Err(error) => {
-                        link_app.set_error(Some(js_error(error)));
-                        let _ = link_app.render();
-                    }
-                }
+                link_app.activate_external_link(&event, &url);
                 return;
             }
             let Some(anchor) = target.closest("[data-open-uri]").ok().flatten() else {
@@ -1740,6 +1733,30 @@ impl App {
         self.message_list
             .add_event_listener_with_callback("click", link_click.as_ref().unchecked_ref())?;
         link_click.forget();
+
+        // In Home a web link has no href, so the keyboard reaches it only here.
+        let key_app = Rc::clone(self);
+        let link_key = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::wrap(Box::new(
+            move |event: web_sys::KeyboardEvent| {
+                if !key_app.is_shell_mode() || !activates_link_key(&event.key()) {
+                    return;
+                }
+                let Some(link) = event
+                    .target()
+                    .and_then(|value| value.dyn_into::<Element>().ok())
+                    .and_then(|target| target.closest("[data-open-external]").ok().flatten())
+                else {
+                    return;
+                };
+                let Some(url) = link.get_attribute("data-open-external") else {
+                    return;
+                };
+                key_app.activate_external_link(&event, &url);
+            },
+        ));
+        self.message_list
+            .add_event_listener_with_callback("keydown", link_key.as_ref().unchecked_ref())?;
+        link_key.forget();
 
         let library_attach_app = Rc::clone(self);
         let library_attach = Closure::<dyn FnMut(MessageEvent)>::wrap(Box::new(
@@ -3071,19 +3088,37 @@ impl App {
         }))
     }
 
-    /// App documents have no popup permission. Inside Home a web link asks
-    /// Home, which shows the exact address and opens it only when the person
-    /// chooses Open link; the link never navigates Chat itself. Home checks the
-    /// address, so Chat sends it unchanged. Outside Home it navigates normally.
-    fn open_external_link_from_shell(&self, url: &str) -> Result<bool, JsValue> {
-        let Some(home_token) = self.home_token() else {
-            return Ok(false);
+    /// App documents have no popup permission. Inside Home a web link has no
+    /// href and asks Home, which shows the exact address and opens it only when
+    /// the person chooses Open link; the link never navigates Chat itself. Home
+    /// checks the address, so Chat sends it unchanged. Outside Home it is a
+    /// normal anchor and navigates natively.
+    fn activate_external_link(&self, event: &Event, url: &str) {
+        let message =
+            match external_link_request(self.is_shell_mode(), self.home_token().as_deref(), url) {
+                ExternalLinkRequest::Native => return,
+                ExternalLinkRequest::AskHome(message) => Some(message),
+                ExternalLinkRequest::Refuse => None,
+            };
+        event.prevent_default();
+        let asked = message.map_or(Ok(false), |message| self.post_home_message(&message));
+        let error = match asked {
+            Ok(true) => return,
+            Ok(false) => JsValue::from_str(OPEN_LINK_FROM_HOME),
+            Err(error) => error,
         };
-        if !self.is_shell_mode() {
-            return Ok(false);
+        self.set_error(Some(js_error(error)));
+        let _ = self.render();
+    }
+
+    /// A web link element. Inside Home it has no href, so nothing but
+    /// `activate_external_link` can act on it.
+    fn external_link_element(&self, url: &str) -> Result<Element, JsValue> {
+        let link = self.document.create_element("a")?;
+        for (name, value) in external_link_attributes(url, self.is_shell_mode()) {
+            link.set_attribute(name, &value)?;
         }
-        self.post_home_message(&home_open_external_message(url, &home_token))?;
-        Ok(true)
+        Ok(link)
     }
 
     fn open_attachment_in_documents(&self, attachment_id: &str) -> Result<bool, JsValue> {
@@ -4696,7 +4731,20 @@ impl App {
                 }
                 ConversationObjectKind::Text => {
                     body.set_class_name("message-body");
-                    body.set_text_content(object.body.as_deref());
+                    for segment in split_text_links(object.body.as_deref().unwrap_or_default()) {
+                        match segment {
+                            TextSegment::Text(text) => {
+                                // Appends a text node; never parsed as markup.
+                                body.append_with_str_1(text)?;
+                            }
+                            TextSegment::Link(url) => {
+                                let link = self.external_link_element(url)?;
+                                link.set_class_name("message-link");
+                                link.set_text_content(Some(url));
+                                body.append_child(&link)?;
+                            }
+                        }
+                    }
                 }
                 ConversationObjectKind::Emoji => {
                     body.set_class_name("message-body emoji-body");
@@ -4705,16 +4753,15 @@ impl App {
                 ConversationObjectKind::Link => {
                     body.set_class_name("message-body link-body");
                     if let Some(link) = &object.link {
-                        let anchor = self.document.create_element("a")?;
-                        let is_elastos_uri = link.url.starts_with("elastos://");
-                        anchor.set_attribute("href", &link.url)?;
-                        if is_elastos_uri {
+                        let anchor = if link.url.starts_with("elastos://") {
+                            let anchor = self.document.create_element("a")?;
+                            anchor.set_attribute("href", &link.url)?;
                             anchor.set_attribute("data-open-uri", &link.url)?;
                             anchor.set_attribute("aria-label", "Open published document")?;
+                            anchor
                         } else {
-                            anchor.set_attribute("data-open-external", &link.url)?;
-                            anchor.set_attribute("rel", "noopener noreferrer")?;
-                        }
+                            self.external_link_element(&link.url)?
+                        };
 
                         let title = self.document.create_element("div")?;
                         title.set_class_name("link-title");
@@ -5065,6 +5112,141 @@ fn documents_attachment_message(
             "dataUrl": data_url,
         },
     })
+}
+
+const OPEN_LINK_FROM_HOME: &str = "Open Chat from Home to open web links.";
+
+/// One run of a Text message: plain text, or a web address shown as a link.
+#[derive(Debug, PartialEq, Eq)]
+enum TextSegment<'a> {
+    Text(&'a str),
+    Link(&'a str),
+}
+
+/// Splits message text into plain runs and `http://`/`https://` addresses.
+/// An address runs to the next whitespace, minus trailing sentence
+/// punctuation, quotes and unbalanced closing brackets. Nothing else (a bare
+/// `example.com`) is a link. The address is sent unchanged; the Runtime
+/// checks it.
+fn split_text_links(text: &str) -> Vec<TextSegment<'_>> {
+    let mut segments = Vec::new();
+    let mut plain_start = 0;
+    let mut cursor = 0;
+    while let Some((start, scheme_len)) = next_web_scheme(text, cursor) {
+        let rest = &text[start..];
+        let run_end = start + rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let end = start + trim_link_end(&text[start..run_end]).len();
+        if end > start + scheme_len {
+            if plain_start < start {
+                segments.push(TextSegment::Text(&text[plain_start..start]));
+            }
+            segments.push(TextSegment::Link(&text[start..end]));
+            plain_start = end;
+            cursor = end;
+        } else {
+            cursor = start + scheme_len;
+        }
+    }
+    if plain_start < text.len() {
+        segments.push(TextSegment::Text(&text[plain_start..]));
+    }
+    segments
+}
+
+/// The next `http://` or `https://` (any ASCII case) at or after `from` that
+/// does not continue a word, with the scheme's length.
+fn next_web_scheme(text: &str, from: usize) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    (from..bytes.len()).find_map(|index| {
+        if !text.is_char_boundary(index)
+            || text[..index]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_alphanumeric)
+        {
+            return None;
+        }
+        ["https://", "http://"].into_iter().find_map(|scheme| {
+            bytes
+                .get(index..index + scheme.len())
+                .filter(|candidate| candidate.eq_ignore_ascii_case(scheme.as_bytes()))
+                .map(|_| (index, scheme.len()))
+        })
+    })
+}
+
+fn trim_link_end(candidate: &str) -> &str {
+    let mut link = candidate;
+    while let Some(last) = link.chars().next_back() {
+        let opener = match last {
+            ')' => Some('('),
+            ']' => Some('['),
+            '}' => Some('{'),
+            '>' => Some('<'),
+            '.' | ',' | ';' | ':' | '!' | '?' | '"' | '\'' | '\u{2019}' | '\u{201D}' | '\u{BB}' => {
+                None
+            }
+            _ => break,
+        };
+        if let Some(opener) = opener {
+            if link.matches(opener).count() >= link.matches(last).count() {
+                break;
+            }
+        }
+        link = &link[..link.len() - last.len_utf8()];
+    }
+    link
+}
+
+/// Attributes of a web link element. Inside Home the element has no href, so
+/// the browser has no navigation to perform (click, middle-click, keyboard or
+/// context menu); Chat's own handlers ask Home instead. Outside Home it is a
+/// normal anchor.
+fn external_link_attributes(url: &str, shell_mode: bool) -> Vec<(&'static str, String)> {
+    let mut attributes = vec![("data-open-external", url.to_string())];
+    if shell_mode {
+        attributes.extend([
+            ("role", "link".to_string()),
+            ("tabindex", "0".to_string()),
+            ("aria-label", format!("Open link: {url}")),
+        ]);
+    } else {
+        attributes.extend([
+            ("href", url.to_string()),
+            ("rel", "noopener noreferrer".to_string()),
+        ]);
+    }
+    attributes
+}
+
+/// Keys that activate a focused link that has no href.
+fn activates_link_key(key: &str) -> bool {
+    matches!(key, "Enter" | " ")
+}
+
+/// What activating a web link does.
+#[derive(Debug, PartialEq)]
+enum ExternalLinkRequest {
+    /// Outside Home: the anchor navigates natively.
+    Native,
+    /// Inside Home: post this one request to Home, never navigate.
+    AskHome(serde_json::Value),
+    /// Inside Home without a Home session: show an error, never navigate.
+    Refuse,
+}
+
+fn external_link_request(
+    shell_mode: bool,
+    home_token: Option<&str>,
+    url: &str,
+) -> ExternalLinkRequest {
+    match (shell_mode, home_token) {
+        (false, _) => ExternalLinkRequest::Native,
+        (true, Some(home_token)) => {
+            ExternalLinkRequest::AskHome(home_open_external_message(url, home_token))
+        }
+        (true, None) => ExternalLinkRequest::Refuse,
+    }
 }
 
 /// The typed request asking Home to show and, on consent, open one web link.
@@ -5535,20 +5717,21 @@ mod tests {
         DirectConversationView, DirectMessageList, DirectUiState, PendingDirectSend,
     };
     use super::{
-        admitted_home_origin, apply_active_poll_if_current, apply_active_poll_state,
-        apply_direct_refresh_if_current, apply_session_loss, begin_poll_request,
-        chat_control_policy, clear_selected_direct_conversation, commit_direct_selection,
-        commit_requested_direct_selection_if_current, commit_shared_selection,
-        conversation_initial, current_selection_guard, decode_query_value,
-        documents_attachment_message, extract_fragment_param, extract_query_param,
-        format_chat_message_request_id, home_open_external_message, note_composer_edit,
-        object_sender_name, participant_detail, participant_shown_name, pending_chat_request_id,
-        render_projection, resolve_conversation_choice, room_send_error_text,
-        selection_guard_matches, settle_sent_draft, shell_summary_allows_session,
-        switch_composer_draft, AccessMode, AppConfig, AppState, AttachmentView, CommunityState,
-        ConversationObjectKind, ConversationObjectView, ParticipantView, PendingChatSend,
+        activates_link_key, admitted_home_origin, apply_active_poll_if_current,
+        apply_active_poll_state, apply_direct_refresh_if_current, apply_session_loss,
+        begin_poll_request, chat_control_policy, clear_selected_direct_conversation,
+        commit_direct_selection, commit_requested_direct_selection_if_current,
+        commit_shared_selection, conversation_initial, current_selection_guard, decode_query_value,
+        documents_attachment_message, external_link_attributes, external_link_request,
+        extract_fragment_param, extract_query_param, format_chat_message_request_id,
+        home_open_external_message, note_composer_edit, object_sender_name, participant_detail,
+        participant_shown_name, pending_chat_request_id, render_projection,
+        resolve_conversation_choice, room_send_error_text, selection_guard_matches,
+        settle_sent_draft, shell_summary_allows_session, split_text_links, switch_composer_draft,
+        AccessMode, AppConfig, AppState, AttachmentView, CommunityState, ConversationObjectKind,
+        ConversationObjectView, ExternalLinkRequest, ParticipantView, PendingChatSend,
         RenderProjection, RoomPollView, RoomTransportView, ShellSessionBootstrapFailure,
-        ShellSessionStartOutput, SummaryView,
+        ShellSessionStartOutput, SummaryView, TextSegment,
     };
 
     fn two_direct_conversations() -> AppState {
@@ -6446,6 +6629,139 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn text_web_addresses_split_into_links() {
+        use TextSegment::{Link, Text};
+        let cases: &[(&str, &[TextSegment])] = &[
+            ("", &[]),
+            ("no links here", &[Text("no links here")]),
+            ("https://a.example", &[Link("https://a.example")]),
+            (
+                "see https://a.example/x?y=1#z.",
+                &[Text("see "), Link("https://a.example/x?y=1#z"), Text(".")],
+            ),
+            (
+                "end http://a.example/!?;:,",
+                &[Text("end "), Link("http://a.example/"), Text("!?;:,")],
+            ),
+            (
+                "(see https://en.wikipedia.org/wiki/Rust_(language))",
+                &[
+                    Text("(see "),
+                    Link("https://en.wikipedia.org/wiki/Rust_(language)"),
+                    Text(")"),
+                ],
+            ),
+            (
+                "[https://a.example/] {https://b.example} <https://c.example>",
+                &[
+                    Text("["),
+                    Link("https://a.example/"),
+                    Text("] {"),
+                    Link("https://b.example"),
+                    Text("} <"),
+                    Link("https://c.example"),
+                    Text(">"),
+                ],
+            ),
+            (
+                "\"https://a.example\" 'https://b.example' «https://c.example» “https://d.example”",
+                &[
+                    Text("\""),
+                    Link("https://a.example"),
+                    Text("\" '"),
+                    Link("https://b.example"),
+                    Text("' «"),
+                    Link("https://c.example"),
+                    Text("» “"),
+                    Link("https://d.example"),
+                    Text("”"),
+                ],
+            ),
+            (
+                "héllo 🌍 https://exämple.example/päth 日本語",
+                &[
+                    Text("héllo 🌍 "),
+                    Link("https://exämple.example/päth"),
+                    Text(" 日本語"),
+                ],
+            ),
+            (
+                "HTTPS://A.EXAMPLE\nhttp://b.example",
+                &[Link("HTTPS://A.EXAMPLE"), Text("\n"), Link("http://b.example")],
+            ),
+            (
+                "example.com www.example.com ftp://a.example javascript:alert(1) xhttps://a.example https:// http://. https:example",
+                &[Text("example.com www.example.com ftp://a.example javascript:alert(1) xhttps://a.example https:// http://. https:example")],
+            ),
+            (
+                // Markup stays text; the address is sent as typed and the
+                // Runtime decides whether it is valid.
+                "<b>https://a.example/<script>alert(1)</script></b>",
+                &[
+                    Text("<b>"),
+                    Link("https://a.example/<script>alert(1)</script></b>"),
+                ],
+            ),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(&split_text_links(text), expected, "{text:?}");
+            let joined: String = split_text_links(text)
+                .iter()
+                .map(|segment| match segment {
+                    Text(part) | Link(part) => *part,
+                })
+                .collect();
+            assert_eq!(&joined, text, "segments keep every character");
+        }
+    }
+
+    #[test]
+    fn web_links_inside_home_have_no_href() {
+        let url = "https://a.example/x?y=1";
+        let shell = external_link_attributes(url, true);
+        assert_eq!(
+            shell,
+            vec![
+                ("data-open-external", url.to_string()),
+                ("role", "link".to_string()),
+                ("tabindex", "0".to_string()),
+                ("aria-label", format!("Open link: {url}")),
+            ]
+        );
+        assert!(shell.iter().all(|(name, _)| *name != "href"));
+        assert_eq!(
+            external_link_attributes(url, false),
+            vec![
+                ("data-open-external", url.to_string()),
+                ("href", url.to_string()),
+                ("rel", "noopener noreferrer".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn web_link_activation_asks_home_once_or_navigates_nowhere() {
+        let url = "https://a.example/x?y=1";
+        // Click and Enter/Space share one path that yields one request.
+        assert!(activates_link_key("Enter") && activates_link_key(" "));
+        assert!(!activates_link_key("Tab") && !activates_link_key("a"));
+        assert_eq!(
+            external_link_request(true, Some("home-token"), url),
+            ExternalLinkRequest::AskHome(home_open_external_message(url, "home-token"))
+        );
+        // Without a Home session the link only reports an error; it has no
+        // href, so nothing navigates.
+        assert_eq!(
+            external_link_request(true, None, url),
+            ExternalLinkRequest::Refuse
+        );
+        assert_eq!(
+            external_link_request(false, Some("home-token"), url),
+            ExternalLinkRequest::Native
+        );
     }
 
     #[test]
