@@ -919,8 +919,8 @@ async fn test_full_recovery_fresh_export_rejects_envelope_shaped_data_before_mut
             StatusCode::CONFLICT,
             ".AppData/LocalHost/GBA/ucity/rom-id.sav is encrypted, but this Home has no key yet.",
         ),
-        // The step-up replay refusal keeps its existing status mapping.
-        (StatusCode::INTERNAL_SERVER_ERROR, "already been used"),
+        // A replayed approval is refused like other step-up refusals.
+        (StatusCode::FORBIDDEN, "already been used"),
     ] {
         let response =
             post_full_recovery_export(&app, &authority, &export_intent, &fresh_token).await;
@@ -1028,7 +1028,7 @@ async fn export_consumes_approval_before_scan_and_survives_long_scan() {
          approve with your passkey again."
     ));
     let replay = post_full_recovery_export(&app, &authority, &intent, &token).await;
-    assert_ne!(replay.status(), StatusCode::OK);
+    assert_eq!(replay.status(), StatusCode::FORBIDDEN);
     let body = axum::body::to_bytes(replay.into_body(), usize::MAX)
         .await
         .unwrap();

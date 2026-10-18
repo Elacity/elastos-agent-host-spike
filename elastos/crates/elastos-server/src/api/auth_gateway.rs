@@ -4773,6 +4773,7 @@ pub(in crate::api) fn auth_error_response(err: anyhow::Error) -> Response {
         || text.contains("unavailable")
         || text.contains("not configured")
         || text.contains("consumed")
+        || text.contains("already been used")
         || text.contains("disabled")
         || text.contains("not found")
         || text.contains("not active")
