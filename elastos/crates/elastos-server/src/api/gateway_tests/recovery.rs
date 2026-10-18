@@ -881,17 +881,16 @@ async fn test_full_recovery_fresh_export_rejects_envelope_shaped_data_before_mut
     let save_path =
         elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &save_uri).unwrap();
     std::fs::create_dir_all(save_path.parent().unwrap()).unwrap();
-    let envelope = json!({
-        "schema": "elastos.principal-root.object/v1",
-        "principal_id": authority.principal_id,
-        "localhost_root": principal.localhost_root,
-        "data_key_id": "pdek:unbound-envelope",
-        "object_uri": save_uri,
-        "cipher": "aes-256-gcm",
-        "nonce": "AAAAAAAAAAAAAAAA",
-        "ciphertext": "AQIDBAUGBwgJCgsMDQ4PEA"
-    });
-    let envelope_bytes = serde_json::to_vec_pretty(&envelope).unwrap();
+    // The canonical layout every ElastOS writer emits (pretty, fields in
+    // envelope order, ciphertext last), bound to a key this Home never had.
+    let envelope_bytes = format!(
+        "{{\n  \"schema\": \"elastos.principal-root.object/v1\",\n  \"principal_id\": \"{}\",\n  \
+         \"localhost_root\": \"{}\",\n  \"data_key_id\": \"pdek:unbound-envelope\",\n  \
+         \"object_uri\": \"{save_uri}\",\n  \"cipher\": \"aes-256-gcm\",\n  \
+         \"nonce\": \"AAAAAAAAAAAAAAAA\",\n  \"ciphertext\": \"AQIDBAUGBwgJCgsMDQ4PEA\"\n}}",
+        authority.principal_id, principal.localhost_root,
+    )
+    .into_bytes();
     std::fs::write(&save_path, &envelope_bytes).unwrap();
     let export_intent = json!({
         "principal_id": authority.principal_id,

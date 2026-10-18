@@ -52,6 +52,8 @@ const RECOVERY_DESCRIPTOR_SCHEMA: &str = "elastos.principal.root-descriptor/v1";
 const PRINCIPAL_ROOT_OBJECT_SCHEMA: &str = "elastos.principal-root.object/v1";
 pub const PROTECTED_PRINCIPAL_ROOT_OBJECT_NOT_ENCRYPTED: &str =
     "protected principal-root object is not encrypted";
+pub const PROTECTED_PRINCIPAL_ROOT_OBJECT_DAMAGED: &str =
+    "protected principal-root object is damaged";
 const PRINCIPAL_ROOT_OBJECT_AAD_DOMAIN: &str = "elastos.principal-root.object.v1";
 pub const PRINCIPAL_ROOT_MIGRATION_REQUIRED_SCHEMA: &str =
     "elastos.principal-root.migration-required/v1";
@@ -118,6 +120,47 @@ pub(crate) fn principal_root_scan_probes(data_dir: &Path) -> PrincipalRootScanPr
         .get(data_dir)
         .copied()
         .unwrap_or_default()
+}
+
+/// Test hook: replace one selected object's bytes after preflight, just
+/// before migration prepare reads it.
+#[cfg(test)]
+type PrincipalRootPrepareSwap = (String, Vec<u8>);
+
+#[cfg(test)]
+static PRINCIPAL_ROOT_PREPARE_SWAP_HOOKS: std::sync::LazyLock<
+    Mutex<HashMap<PathBuf, PrincipalRootPrepareSwap>>,
+> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+pub(crate) fn inject_principal_root_prepare_swap(
+    data_dir: &Path,
+    object_uri: &str,
+    bytes: Vec<u8>,
+) {
+    PRINCIPAL_ROOT_PREPARE_SWAP_HOOKS
+        .lock()
+        .expect("principal-root prepare swap hook lock")
+        .insert(data_dir.to_path_buf(), (object_uri.to_string(), bytes));
+}
+
+#[cfg(test)]
+fn run_principal_root_prepare_swap_hook(
+    data_dir: &Path,
+    object_uri: &str,
+    path: &Path,
+) -> std::io::Result<()> {
+    let mut hooks = PRINCIPAL_ROOT_PREPARE_SWAP_HOOKS
+        .lock()
+        .expect("principal-root prepare swap hook lock");
+    if hooks
+        .get(data_dir)
+        .is_some_and(|(uri, _)| uri == object_uri)
+    {
+        let (_, bytes) = hooks.remove(data_dir).expect("hook present");
+        std::fs::write(path, bytes)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -5261,14 +5304,13 @@ pub(crate) fn read_protected_principal_root_object(
     else {
         return Ok(None);
     };
-    let bytes = read_principal_root_object_bytes(path)?;
-    decrypt_principal_root_object_bytes(
+    read_protected_principal_root_object_file(
         data_dir,
         principal_id,
         localhost_root,
         object_uri,
+        path,
         &protection,
-        &bytes,
     )
     .map(Some)
 }
@@ -5281,40 +5323,83 @@ fn read_principal_root_object_locked(
     object_uri: &str,
     path: &Path,
 ) -> anyhow::Result<Vec<u8>> {
-    let bytes = read_principal_root_object_bytes(path)?;
     let Some(protection) = load_principal_root_protection(data_dir, principal_id, localhost_root)?
     else {
+        let (mut file, _) = open_principal_root_object_file(path)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .with_context(|| format!("failed to read {path:?}"))?;
         return Ok(bytes);
     };
-    decrypt_principal_root_object_bytes(
+    read_protected_principal_root_object_file(
         data_dir,
         principal_id,
         localhost_root,
         object_uri,
+        path,
         &protection,
-        &bytes,
     )
 }
 
-fn decrypt_principal_root_object_bytes(
+/// Opens a protected object under the root's protection. No byte of the file
+/// leaves here unless the whole envelope passes AES-GCM with its binding. A
+/// file that is not clearly plaintext is never reported as plaintext, so no
+/// caller re-wraps it; a non-canonical but authentic envelope still opens.
+fn read_protected_principal_root_object_file(
     data_dir: &Path,
     principal_id: &str,
     localhost_root: &str,
     object_uri: &str,
+    path: &Path,
     protection: &PrincipalRootProtectionV1,
-    bytes: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
-    let data_key = principal_root_data_key_from_protection(data_dir, protection)?;
-    let envelope: PrincipalRootObjectEnvelopeV1 =
-        serde_json::from_slice(bytes).with_context(|| {
-            format!("{PROTECTED_PRINCIPAL_ROOT_OBJECT_NOT_ENCRYPTED}: {object_uri}")
-        })?;
-    validate_principal_root_object_envelope(
-        &envelope,
+    let (mut file, len) = open_principal_root_object_file(path)?;
+    let expected = PrincipalRootObjectExpectation {
         principal_id,
         localhost_root,
-        &protection.data_key_id,
         object_uri,
+        data_key_id: Some(&protection.data_key_id),
+    };
+    let mut whole_read_budget = MAX_MIGRATION_OBJECT_BYTES;
+    let probe =
+        classify_principal_root_object_file(&mut file, len, &expected, &mut whole_read_budget)
+            .with_context(|| format!("failed to read {path:?}"))?;
+    let damage = match probe.class {
+        PrincipalRootObjectFileClass::Plaintext
+        | PrincipalRootObjectFileClass::UnconfirmedPlaintext => {
+            anyhow::bail!("{PROTECTED_PRINCIPAL_ROOT_OBJECT_NOT_ENCRYPTED}: {object_uri}");
+        }
+        PrincipalRootObjectFileClass::Envelope => PrincipalRootObjectDamage::FailedCheck,
+        PrincipalRootObjectFileClass::Damaged(damage) => damage,
+    };
+    let data_key = principal_root_data_key_from_protection(data_dir, protection)?;
+    let bytes = read_principal_root_object_rest(&mut file, probe.prefix)
+        .with_context(|| format!("failed to read {path:?}"))?;
+    decrypt_principal_root_object_envelope_bytes(&data_key, &expected, &bytes).map_err(|_| {
+        principal_root_object_damaged_error(&PrincipalRootObjectNotice::new(
+            data_dir,
+            localhost_root,
+            object_uri,
+            damage,
+        ))
+    })
+}
+
+/// Full parse, binding and AES-GCM over an envelope's whole bytes.
+fn decrypt_principal_root_object_envelope_bytes(
+    data_key: &[u8; 32],
+    expected: &PrincipalRootObjectExpectation<'_>,
+    bytes: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    let envelope: PrincipalRootObjectEnvelopeV1 = serde_json::from_slice(bytes)?;
+    validate_principal_root_object_envelope(
+        &envelope,
+        expected.principal_id,
+        expected.localhost_root,
+        expected
+            .data_key_id
+            .ok_or_else(|| anyhow!("principal-root object has no key to open it"))?,
+        expected.object_uri,
     )?;
     let nonce = b64_url_decode(&envelope.nonce)?;
     if nonce.len() != 12 {
@@ -5322,35 +5407,92 @@ fn decrypt_principal_root_object_bytes(
     }
     let ciphertext = b64_url_decode(&envelope.ciphertext)?;
     decrypt_aes256_gcm_bytes_with_aad(
-        &data_key,
+        data_key,
         &nonce,
         &ciphertext,
         principal_root_object_aad(&envelope).as_bytes(),
     )
-    .with_context(|| format!("failed to decrypt protected principal-root object: {object_uri}"))
 }
 
-fn read_principal_root_object_bytes(path: &Path) -> anyhow::Result<Vec<u8>> {
+/// Opens a declared object without following a final symlink and requires a
+/// regular file. Returns the file and its length at open.
+fn open_principal_root_object_file(path: &Path) -> anyhow::Result<(File, u64)> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
     options.custom_flags(libc::O_NOFOLLOW);
-    let mut file = match options.open(path) {
-        Ok(file) => file,
-        Err(err) if err.kind() == ErrorKind::NotFound => {
-            return Err(err).with_context(|| format!("failed to read {path:?}"));
-        }
-        Err(err) => return Err(err).with_context(|| format!("failed to read {path:?}")),
-    };
+    let file = options
+        .open(path)
+        .with_context(|| format!("failed to read {path:?}"))?;
     let metadata = file
         .metadata()
         .with_context(|| format!("failed to inspect {path:?}"))?;
     if !metadata.is_file() {
         anyhow::bail!("principal-root object must be a regular file");
     }
+    Ok((file, metadata.len()))
+}
+
+/// Lazy protection of a legacy plaintext Library file. Only a file of at
+/// most 16 MiB whose whole bytes are plaintext is encrypted; damaged or
+/// envelope bytes are never wrapped.
+pub(crate) fn protect_legacy_plaintext_principal_root_object(
+    data_dir: &Path,
+    principal_id: &str,
+    localhost_root: &str,
+    object_uri: &str,
+    path: &Path,
+) -> anyhow::Result<Vec<u8>> {
+    let too_large = || {
+        anyhow!(
+            "{PROTECTED_PRINCIPAL_ROOT_OBJECT_NOT_ENCRYPTED}: {} is not encrypted and is larger \
+             than 16 MiB, so Home will not encrypt it in place. Move it out of {}, then upload \
+             it again in Library.",
+            principal_root_home_relative_path(localhost_root, object_uri),
+            principal_root_disk_folder(data_dir, object_uri),
+        )
+    };
+    let (file, len) = open_principal_root_object_file(path)?;
+    if len > MAX_MIGRATION_OBJECT_BYTES {
+        return Err(too_large());
+    }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .with_context(|| format!("failed to read {path:?}"))?;
+    file.take(MAX_MIGRATION_OBJECT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read legacy plaintext library object {path:?}"))?;
+    if bytes.len() as u64 > MAX_MIGRATION_OBJECT_BYTES {
+        return Err(too_large());
+    }
+    let protection = load_principal_root_protection(data_dir, principal_id, localhost_root)?
+        .ok_or_else(|| anyhow!("principal-root protection is missing"))?;
+    let expected = PrincipalRootObjectExpectation {
+        principal_id,
+        localhost_root,
+        object_uri,
+        data_key_id: Some(&protection.data_key_id),
+    };
+    match classify_principal_root_object_bytes(&bytes, &expected) {
+        PrincipalRootObjectClass::Plaintext => {}
+        PrincipalRootObjectClass::Envelope => {
+            return Err(principal_root_object_changed_error(
+                localhost_root,
+                object_uri,
+            ));
+        }
+        PrincipalRootObjectClass::Damaged(damage) => {
+            return Err(principal_root_object_damaged_error(
+                &PrincipalRootObjectNotice::new(data_dir, localhost_root, object_uri, damage),
+            ));
+        }
+    }
+    write_principal_root_object(
+        data_dir,
+        principal_id,
+        localhost_root,
+        object_uri,
+        path,
+        &bytes,
+    )?;
     Ok(bytes)
 }
 
@@ -6955,12 +7097,25 @@ fn classify_declared_principal_root_objects(
     let mut plaintext_objects = Vec::new();
     let mut envelopes = Vec::new();
     for object in declared {
-        match serde_json::from_slice::<PrincipalRootObjectEnvelopeV1>(&object.bytes) {
-            Ok(envelope) => envelopes.push((object.object_uri, envelope)),
-            Err(_) if looks_like_principal_root_object_envelope(&object.bytes) => {
-                anyhow::bail!("declared principal-root object envelope is malformed");
+        let damaged = |damage| {
+            principal_root_object_damaged_error(&PrincipalRootObjectNotice::new(
+                data_dir,
+                localhost_root,
+                &object.object_uri,
+                damage,
+            ))
+        };
+        match principal_root_object_bytes_shape(&object.bytes) {
+            PrincipalRootObjectShape::Canonical(_) => {
+                let envelope =
+                    serde_json::from_slice::<PrincipalRootObjectEnvelopeV1>(&object.bytes)
+                        .map_err(|_| damaged(PrincipalRootObjectDamage::FailedCheck))?;
+                envelopes.push((object.object_uri, envelope));
             }
-            Err(_) => {
+            PrincipalRootObjectShape::Damaged => {
+                return Err(damaged(PrincipalRootObjectDamage::LabelUnreadable));
+            }
+            PrincipalRootObjectShape::Plaintext => {
                 plaintext_object_count = plaintext_object_count.saturating_add(1);
                 plaintext_objects.push(PrincipalRootMigrationSelectionV1 {
                     object_uri: object.object_uri,
@@ -7054,24 +7209,6 @@ fn verify_classified_principal_root_object_envelopes(
         .context("declared principal-root object envelope authentication failed")?;
     }
     Ok(())
-}
-
-fn looks_like_principal_root_object_envelope(bytes: &[u8]) -> bool {
-    if let Ok(Value::Object(object)) = serde_json::from_slice::<Value>(bytes) {
-        return object
-            .get("schema")
-            .and_then(Value::as_str)
-            .is_some_and(|schema| schema.starts_with("elastos.principal-root.object/"))
-            || ["data_key_id", "nonce", "ciphertext"]
-                .iter()
-                .all(|field| object.contains_key(*field));
-    }
-    std::str::from_utf8(bytes).is_ok_and(|text| {
-        (text.contains("\"schema\"") && text.contains("elastos.principal-root.object/"))
-            || ["\"data_key_id\"", "\"nonce\"", "\"ciphertext\""]
-                .iter()
-                .all(|field| text.contains(field))
-    })
 }
 
 fn collect_declared_principal_root_objects(
@@ -7197,28 +7334,554 @@ fn collect_declared_principal_root_files(
     Ok(())
 }
 
-fn is_bound_principal_root_object_envelope(
-    bytes: &[u8],
-    principal_id: &str,
-    localhost_root: &str,
-    object_uri: &str,
-) -> bool {
-    let Ok(envelope) = serde_json::from_slice::<PrincipalRootObjectEnvelopeV1>(bytes) else {
-        return false;
-    };
-    if validate_principal_root_object_envelope(
-        &envelope,
-        principal_id,
-        localhost_root,
-        &envelope.data_key_id,
-        object_uri,
+// ---------------------------------------------------------------------------
+// Principal-root object classifier (#444).
+//
+// Every ElastOS writer since v0.7.1 emits one canonical layout:
+// `serde_json::to_vec_pretty` of `PrincipalRootObjectEnvelopeV1`, fields in
+// declaration order, `ciphertext` last, no trailing newline. Only that layout
+// is an Envelope. A file that shows any sign of an envelope without being one
+// is Damaged; only a file with no sign at all is Plaintext. Every path that
+// encrypts re-classifies the whole file, including the full parser, so no
+// parsable envelope is ever wrapped again.
+// ---------------------------------------------------------------------------
+
+const CANONICAL_OPENING: &[u8] = b"{\n  \"schema\": \"elastos.principal-root.object/";
+const CANONICAL_OPENING_SHORT: usize = 6;
+const CANONICAL_OPENING_TOLERANCE: usize = 2;
+const CANONICAL_TAIL: &[u8] = b"\"\n}";
+const CANONICAL_FIELDS: [&str; 8] = [
+    "schema",
+    "principal_id",
+    "localhost_root",
+    "data_key_id",
+    "object_uri",
+    "cipher",
+    "nonce",
+    "ciphertext",
+];
+const ENVELOPE_STRONG_MARKERS: [&[u8]; 3] = [
+    b"elastos.principal-root.object/",
+    b"\"ciphertext\"",
+    b"\"data_key_id\"",
+];
+const HEAD_WINDOW_FIRST: usize = 4 * 1024;
+const HEAD_WINDOW_MAX: usize = 64 * 1024;
+const MIN_CIPHERTEXT_B64_LEN: u64 = 22;
+
+/// Why a protected object cannot be opened or treated as plaintext.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PrincipalRootObjectDamage {
+    /// A sign of an envelope, but not the canonical layout.
+    LabelUnreadable,
+    UnsupportedFormat {
+        schema: String,
+        cipher: String,
+    },
+    OtherHome,
+    WrongPlace {
+        label_uri: String,
+    },
+    OtherKey {
+        file_key_id: String,
+        current_key_id: String,
+    },
+    /// An envelope under a root with no protection.
+    NoKey,
+    /// At open only: full parse, base64 or AES-GCM failed.
+    FailedCheck,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PrincipalRootObjectClass {
+    Envelope,
+    Plaintext,
+    Damaged(PrincipalRootObjectDamage),
+}
+
+/// The binding a caller expects a protected object to carry.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PrincipalRootObjectExpectation<'a> {
+    pub principal_id: &'a str,
+    pub localhost_root: &'a str,
+    pub object_uri: &'a str,
+    /// The root's current key id; None when the root has no protection.
+    pub data_key_id: Option<&'a str>,
+}
+
+/// A damaged protected object, named for people. `Display` is the notice
+/// `{path}: {sentence}` used in logs, errors and Recovery status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrincipalRootObjectNotice {
+    pub object_uri: String,
+    /// Home-relative path.
+    pub path: String,
+    /// Absolute parent directory on disk.
+    pub disk_folder: String,
+    pub damage: PrincipalRootObjectDamage,
+    localhost_root: String,
+}
+
+impl PrincipalRootObjectNotice {
+    pub(crate) fn new(
+        data_dir: &Path,
+        localhost_root: &str,
+        object_uri: &str,
+        damage: PrincipalRootObjectDamage,
+    ) -> Self {
+        Self {
+            object_uri: object_uri.to_string(),
+            path: principal_root_home_relative_path(localhost_root, object_uri),
+            disk_folder: principal_root_disk_folder(data_dir, object_uri),
+            damage,
+            localhost_root: localhost_root.to_string(),
+        }
+    }
+
+    pub(crate) fn sentence(&self) -> String {
+        let path = &self.path;
+        let disk_folder = &self.disk_folder;
+        match &self.damage {
+            PrincipalRootObjectDamage::LabelUnreadable => format!(
+                "{path} does not carry the label this Home writes on encrypted files: it may be \
+                 damaged, written by other software, or your own file that looks like one. Home \
+                 will not encrypt, change or delete it. If it opens in Library, copy it to a new \
+                 file there and move the original out of {disk_folder}. Otherwise move it out of \
+                 {disk_folder}; if it is your own unencrypted file, upload it again in Library."
+            ),
+            PrincipalRootObjectDamage::OtherKey {
+                file_key_id,
+                current_key_id,
+            } => format!(
+                "{path} is labelled for key {}, but this Home's key is {}, so Home will not open \
+                 it. Keep it: only a Home with that key can open it. To clear this notice, move \
+                 it out of {disk_folder}.",
+                printable_label(file_key_id),
+                printable_label(current_key_id),
+            ),
+            PrincipalRootObjectDamage::NoKey => format!(
+                "{path} is encrypted, but this Home has no key yet. Import the Recovery Kit it \
+                 was made with in System → Recovery, or move it out of {disk_folder}."
+            ),
+            PrincipalRootObjectDamage::WrongPlace { label_uri } => {
+                let label_path = printable_label(&principal_root_home_relative_path(
+                    &self.localhost_root,
+                    label_uri,
+                ));
+                format!(
+                    "{path} is labelled for {label_path}, so Home will not open it here. It may \
+                     hold the latest copy of {label_path}; keep it. To clear this notice, move it \
+                     out of {disk_folder}."
+                )
+            }
+            PrincipalRootObjectDamage::OtherHome => format!(
+                "{path} is labelled for another Home, so this Home will not open it. To clear \
+                 this notice, move it out of {disk_folder}."
+            ),
+            PrincipalRootObjectDamage::UnsupportedFormat { schema, cipher } => format!(
+                "{path} uses an encryption format this version of Home does not know ({}, {}). \
+                 Home will not open or change it. Update ElastOS, or move it out of \
+                 {disk_folder}.",
+                printable_label(schema),
+                printable_label(cipher),
+            ),
+            PrincipalRootObjectDamage::FailedCheck => format!(
+                "{path} is damaged: its contents failed the integrity check, so Home will not \
+                 open it. Restore it from your own backup, or move it out of {disk_folder}."
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for PrincipalRootObjectNotice {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.path, self.sentence())
+    }
+}
+
+pub(crate) fn principal_root_object_damaged_error(
+    notice: &PrincipalRootObjectNotice,
+) -> anyhow::Error {
+    anyhow!("{PROTECTED_PRINCIPAL_ROOT_OBJECT_DAMAGED}: {notice}")
+}
+
+fn principal_root_object_changed_error(localhost_root: &str, object_uri: &str) -> anyhow::Error {
+    anyhow!(
+        "{} changed while Home was preparing to encrypt it. Nothing was changed; try again.",
+        principal_root_home_relative_path(localhost_root, object_uri)
     )
-    .is_err()
-    {
+}
+
+fn principal_root_home_relative_path(localhost_root: &str, object_uri: &str) -> String {
+    object_uri
+        .strip_prefix(localhost_root)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(object_uri)
+        .to_string()
+}
+
+fn principal_root_disk_folder(data_dir: &Path, object_uri: &str) -> String {
+    rooted_localhost_fs_path(data_dir, object_uri)
+        .as_deref()
+        .and_then(Path::parent)
+        .unwrap_or(data_dir)
+        .display()
+        .to_string()
+}
+
+/// Label values come from the file itself: show them on one line, bounded.
+fn printable_label(value: &str) -> String {
+    const MAX_LABEL_CHARS: usize = 120;
+    let mut printable: String = value
+        .chars()
+        .take(MAX_LABEL_CHARS)
+        .map(|ch| if ch.is_control() { '\u{FFFD}' } else { ch })
+        .collect();
+    if value.chars().count() > MAX_LABEL_CHARS {
+        printable.push('…');
+    }
+    printable
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CanonicalEnvelopeHead {
+    schema: String,
+    principal_id: String,
+    localhost_root: String,
+    data_key_id: String,
+    object_uri: String,
+    cipher: String,
+    nonce: String,
+    /// Bytes up to and including `"ciphertext": "`.
+    len: usize,
+}
+
+enum CanonicalHeadParse {
+    Complete(CanonicalEnvelopeHead),
+    /// The bytes end before the template does; more bytes may complete it.
+    Incomplete,
+    Mismatch,
+}
+
+/// Step A over the head: the template literals byte for byte, each value one
+/// JSON string token decoded on its own (invalid UTF-8 or escapes fail).
+fn parse_canonical_envelope_head(bytes: &[u8]) -> CanonicalHeadParse {
+    let mut pos = 0usize;
+    let mut values = Vec::with_capacity(CANONICAL_FIELDS.len() - 1);
+    for (index, field) in CANONICAL_FIELDS.iter().enumerate() {
+        let literal = if index == 0 {
+            format!("{{\n  \"{field}\": \"")
+        } else {
+            format!("\",\n  \"{field}\": \"")
+        };
+        let literal = literal.as_bytes();
+        let available = &bytes[pos..];
+        if available.len() < literal.len() {
+            return if literal.starts_with(available) {
+                CanonicalHeadParse::Incomplete
+            } else {
+                CanonicalHeadParse::Mismatch
+            };
+        }
+        if &available[..literal.len()] != literal {
+            return CanonicalHeadParse::Mismatch;
+        }
+        pos += literal.len();
+        if index == CANONICAL_FIELDS.len() - 1 {
+            break;
+        }
+        let mut cursor = pos;
+        loop {
+            match bytes.get(cursor) {
+                None => return CanonicalHeadParse::Incomplete,
+                Some(b'\\') => cursor += 2,
+                Some(b'"') => break,
+                Some(_) => cursor += 1,
+            }
+        }
+        match serde_json::from_slice::<String>(&bytes[pos - 1..=cursor]) {
+            Ok(value) => values.push(value),
+            Err(_) => return CanonicalHeadParse::Mismatch,
+        }
+        pos = cursor;
+    }
+    let mut values = values.into_iter();
+    let mut next = || values.next().unwrap_or_default();
+    CanonicalHeadParse::Complete(CanonicalEnvelopeHead {
+        schema: next(),
+        principal_id: next(),
+        localhost_root: next(),
+        data_key_id: next(),
+        object_uri: next(),
+        cipher: next(),
+        nonce: next(),
+        len: pos,
+    })
+}
+
+/// The rest of Step A: the `"\n}` end, a decodable ciphertext length and a
+/// 12-byte nonce. The ciphertext alphabet is checked at open, by decoding.
+fn canonical_envelope_frame_is_valid(head: &CanonicalEnvelopeHead, len: u64, tail: &[u8]) -> bool {
+    if tail != CANONICAL_TAIL {
         return false;
     }
-    b64_url_decode(&envelope.nonce).is_ok_and(|nonce| nonce.len() == 12)
-        && b64_url_decode(&envelope.ciphertext).is_ok_and(|ciphertext| !ciphertext.is_empty())
+    let Some(ciphertext_len) = len.checked_sub(head.len as u64 + CANONICAL_TAIL.len() as u64)
+    else {
+        return false;
+    };
+    ciphertext_len >= MIN_CIPHERTEXT_B64_LEN
+        && ciphertext_len % 4 != 1
+        && b64_url_decode(&head.nonce).is_ok_and(|nonce| nonce.len() == 12)
+}
+
+/// Step B: the canonical head's binding against what the caller expects.
+fn bind_canonical_envelope_head(
+    head: &CanonicalEnvelopeHead,
+    expected: &PrincipalRootObjectExpectation<'_>,
+) -> Result<(), PrincipalRootObjectDamage> {
+    if head.schema != PRINCIPAL_ROOT_OBJECT_SCHEMA || head.cipher != DEFAULT_PRINCIPAL_ROOT_CIPHER {
+        return Err(PrincipalRootObjectDamage::UnsupportedFormat {
+            schema: head.schema.clone(),
+            cipher: head.cipher.clone(),
+        });
+    }
+    if head.principal_id != expected.principal_id || head.localhost_root != expected.localhost_root
+    {
+        return Err(PrincipalRootObjectDamage::OtherHome);
+    }
+    if head.object_uri != expected.object_uri {
+        return Err(PrincipalRootObjectDamage::WrongPlace {
+            label_uri: head.object_uri.clone(),
+        });
+    }
+    let Some(current_key_id) = expected.data_key_id else {
+        return Err(PrincipalRootObjectDamage::NoKey);
+    };
+    if head.data_key_id != current_key_id {
+        return Err(PrincipalRootObjectDamage::OtherKey {
+            file_key_id: head.data_key_id.clone(),
+            current_key_id: current_key_id.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Step C: signs of an envelope, by byte search, independent of UTF-8.
+/// `len` is the file's length; `bytes` are the bytes read from offset 0.
+fn principal_root_object_shows_envelope_sign(bytes: &[u8], len: u64) -> bool {
+    let opening_len = (len.min(CANONICAL_OPENING.len() as u64) as usize).min(bytes.len());
+    let opening = &bytes[..opening_len];
+    let template = &CANONICAL_OPENING[..opening_len];
+    let opening_sign = match opening_len {
+        0 => false,
+        short if short < CANONICAL_OPENING_SHORT => opening == template,
+        _ => {
+            opening
+                .iter()
+                .zip(template)
+                .filter(|(found, wanted)| found != wanted)
+                .count()
+                <= CANONICAL_OPENING_TOLERANCE
+        }
+    };
+    let contains = |needle: &[u8]| memchr::memmem::find(bytes, needle).is_some();
+    opening_sign
+        || ENVELOPE_STRONG_MARKERS
+            .iter()
+            .any(|marker| contains(marker))
+        || (contains(b"\"nonce\"") && contains(b"\"cipher\""))
+}
+
+/// Step D: the full parser accepts an envelope in any layout.
+fn principal_root_object_parses_as_envelope(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<PrincipalRootObjectEnvelopeV1>(bytes).is_ok()
+}
+
+enum PrincipalRootObjectShape {
+    Canonical(CanonicalEnvelopeHead),
+    Damaged,
+    Plaintext,
+}
+
+/// Steps A, C and D over a file's whole bytes, without the binding.
+fn principal_root_object_bytes_shape(bytes: &[u8]) -> PrincipalRootObjectShape {
+    let len = bytes.len() as u64;
+    if let CanonicalHeadParse::Complete(head) =
+        parse_canonical_envelope_head(&bytes[..bytes.len().min(HEAD_WINDOW_MAX)])
+    {
+        let tail = &bytes[bytes.len().saturating_sub(CANONICAL_TAIL.len())..];
+        if canonical_envelope_frame_is_valid(&head, len, tail) {
+            return PrincipalRootObjectShape::Canonical(head);
+        }
+    }
+    if principal_root_object_shows_envelope_sign(bytes, len)
+        || principal_root_object_parses_as_envelope(bytes)
+    {
+        PrincipalRootObjectShape::Damaged
+    } else {
+        PrincipalRootObjectShape::Plaintext
+    }
+}
+
+/// Whole-bytes classification: every path that encrypts requires Plaintext
+/// from this first.
+pub(crate) fn classify_principal_root_object_bytes(
+    bytes: &[u8],
+    expected: &PrincipalRootObjectExpectation<'_>,
+) -> PrincipalRootObjectClass {
+    match principal_root_object_bytes_shape(bytes) {
+        PrincipalRootObjectShape::Canonical(head) => {
+            match bind_canonical_envelope_head(&head, expected) {
+                Ok(()) => PrincipalRootObjectClass::Envelope,
+                Err(damage) => PrincipalRootObjectClass::Damaged(damage),
+            }
+        }
+        PrincipalRootObjectShape::Damaged => {
+            PrincipalRootObjectClass::Damaged(PrincipalRootObjectDamage::LabelUnreadable)
+        }
+        PrincipalRootObjectShape::Plaintext => PrincipalRootObjectClass::Plaintext,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PrincipalRootObjectFileClass {
+    Envelope,
+    Damaged(PrincipalRootObjectDamage),
+    /// Whole bytes read: no sign, and the full parser refused them.
+    Plaintext,
+    /// No sign in the first 64 KiB, not read whole: over 16 MiB, or the
+    /// scan's whole-read budget is spent. Never encrypted on this verdict.
+    UnconfirmedPlaintext,
+}
+
+#[derive(Debug)]
+pub(crate) struct PrincipalRootObjectFileProbe {
+    pub class: PrincipalRootObjectFileClass,
+    /// The bytes read from offset 0, contiguous; the whole file for Plaintext.
+    pub prefix: Vec<u8>,
+    /// Every byte read from the file, including a separate 3-byte tail.
+    /// Tests hold every caller to the design's read bounds with it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub bytes_read: u64,
+}
+
+/// Classifies an open regular file of length `len` while reading as little
+/// as it can: the head grows from 4 KiB up to 64 KiB, continuing where it
+/// stopped; an envelope adds a 3-byte tail. A plaintext candidate is read
+/// whole only when it is at most 16 MiB and fits `whole_read_budget`.
+pub(crate) fn classify_principal_root_object_file(
+    file: &mut File,
+    len: u64,
+    expected: &PrincipalRootObjectExpectation<'_>,
+    whole_read_budget: &mut u64,
+) -> std::io::Result<PrincipalRootObjectFileProbe> {
+    let mut len = len;
+    let mut prefix = Vec::new();
+    let mut bytes_read = 0u64;
+    let window_max = len.min(HEAD_WINDOW_MAX as u64) as usize;
+    let mut target = len.min(HEAD_WINDOW_FIRST as u64) as usize;
+    let head = loop {
+        bytes_read += read_principal_root_object_prefix(file, &mut prefix, target)?;
+        if prefix.len() < target {
+            // The file shrank after it was inspected: judge the bytes it holds.
+            len = prefix.len() as u64;
+        }
+        match parse_canonical_envelope_head(&prefix) {
+            CanonicalHeadParse::Complete(head) => break Some(head),
+            CanonicalHeadParse::Incomplete if prefix.len() == target && target < window_max => {
+                target = (target * 2).min(window_max);
+            }
+            _ => break None,
+        }
+    };
+    let probe = |class, prefix, bytes_read| PrincipalRootObjectFileProbe {
+        class,
+        prefix,
+        bytes_read,
+    };
+
+    if let Some(head) = head {
+        let tail = if prefix.len() as u64 >= len {
+            prefix[prefix.len().saturating_sub(CANONICAL_TAIL.len())..].to_vec()
+        } else {
+            bytes_read += CANONICAL_TAIL.len() as u64;
+            read_principal_root_object_tail(file, len)?
+        };
+        if canonical_envelope_frame_is_valid(&head, len, &tail) {
+            let class = match bind_canonical_envelope_head(&head, expected) {
+                Ok(()) => PrincipalRootObjectFileClass::Envelope,
+                Err(damage) => PrincipalRootObjectFileClass::Damaged(damage),
+            };
+            return Ok(probe(class, prefix, bytes_read));
+        }
+    }
+
+    let label_unreadable =
+        PrincipalRootObjectFileClass::Damaged(PrincipalRootObjectDamage::LabelUnreadable);
+    if principal_root_object_shows_envelope_sign(&prefix, len) {
+        return Ok(probe(label_unreadable, prefix, bytes_read));
+    }
+    let remaining = len.saturating_sub(prefix.len() as u64);
+    if remaining > 0 && len <= MAX_MIGRATION_OBJECT_BYTES && remaining <= *whole_read_budget {
+        *whole_read_budget -= remaining;
+        bytes_read += read_principal_root_object_prefix(file, &mut prefix, len as usize)?;
+        len = prefix.len() as u64;
+    } else if remaining > 0 {
+        bytes_read += read_principal_root_object_prefix(file, &mut prefix, window_max)?;
+        let class = if principal_root_object_shows_envelope_sign(&prefix, len) {
+            label_unreadable
+        } else {
+            PrincipalRootObjectFileClass::UnconfirmedPlaintext
+        };
+        return Ok(probe(class, prefix, bytes_read));
+    }
+    let class = if principal_root_object_shows_envelope_sign(&prefix, len)
+        || principal_root_object_parses_as_envelope(&prefix)
+    {
+        label_unreadable
+    } else {
+        PrincipalRootObjectFileClass::Plaintext
+    };
+    Ok(probe(class, prefix, bytes_read))
+}
+
+/// Reads from where `prefix` ends up to `target` bytes in total, or EOF.
+fn read_principal_root_object_prefix(
+    file: &mut File,
+    prefix: &mut Vec<u8>,
+    target: usize,
+) -> std::io::Result<u64> {
+    use std::io::{Seek, SeekFrom};
+    let start = prefix.len();
+    if start >= target {
+        return Ok(0);
+    }
+    file.seek(SeekFrom::Start(start as u64))?;
+    Read::by_ref(file)
+        .take((target - start) as u64)
+        .read_to_end(prefix)?;
+    Ok((prefix.len() - start) as u64)
+}
+
+fn read_principal_root_object_tail(file: &mut File, len: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::{Seek, SeekFrom};
+    let mut tail = vec![0u8; CANONICAL_TAIL.len()];
+    file.seek(SeekFrom::Start(len.saturating_sub(tail.len() as u64)))?;
+    match file.read_exact(&mut tail) {
+        Ok(()) => Ok(tail),
+        Err(err) if err.kind() == ErrorKind::UnexpectedEof => Ok(Vec::new()),
+        Err(err) => Err(err),
+    }
+}
+
+/// Reads the rest of the file after an already-read prefix.
+fn read_principal_root_object_rest(file: &mut File, prefix: Vec<u8>) -> std::io::Result<Vec<u8>> {
+    use std::io::{Seek, SeekFrom};
+    let mut bytes = prefix;
+    file.seek(SeekFrom::Start(bytes.len() as u64))?;
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 fn validate_principal_root_object_envelope(
@@ -7432,18 +8095,23 @@ fn migrate_principal_root_objects_plan_locked(
         if total_bytes > MAX_MIGRATION_TOTAL_BYTES {
             anyhow::bail!("selected migration objects exceed 64 MiB");
         }
+        #[cfg(test)]
+        run_principal_root_prepare_swap_hook(data_dir, &selection.object_uri, &path)?;
         let plaintext = std::fs::read(&path)?;
-        let plaintext_sha256 = sha256_label(&plaintext);
-        if plaintext_sha256 != selection.plaintext_sha256 {
-            anyhow::bail!("selected migration object plaintext hash mismatch");
-        }
-        if is_bound_principal_root_object_envelope(
-            &plaintext,
-            &plan.principal_id,
-            &plan.localhost_root,
-            &selection.object_uri,
-        ) {
-            anyhow::bail!("selected migration object is already encrypted");
+        let expected = PrincipalRootObjectExpectation {
+            principal_id: &plan.principal_id,
+            localhost_root: &plan.localhost_root,
+            object_uri: &selection.object_uri,
+            data_key_id: Some(&protection.data_key_id),
+        };
+        if classify_principal_root_object_bytes(&plaintext, &expected)
+            != PrincipalRootObjectClass::Plaintext
+            || sha256_label(&plaintext) != selection.plaintext_sha256
+        {
+            return Err(principal_root_object_changed_error(
+                &plan.localhost_root,
+                &selection.object_uri,
+            ));
         }
         let backup_name = format!(
             "{index:03}-{}.encrypted.backup",
@@ -9465,6 +10133,10 @@ pub(crate) fn store_test_principal_root_protection(
     store_principal_root_protection(data_dir, protection.clone()).unwrap();
     protection
 }
+
+#[cfg(test)]
+#[path = "auth/object_class_tests.rs"]
+mod object_class_tests;
 
 #[cfg(test)]
 mod tests {
@@ -11980,8 +12652,11 @@ mod tests {
 
         let migrated = std::fs::read(&path).unwrap();
         assert!(
-            looks_like_principal_root_object_envelope(&migrated),
-            "migrated object must be an envelope"
+            matches!(
+                principal_root_object_bytes_shape(&migrated),
+                PrincipalRootObjectShape::Canonical(_)
+            ),
+            "migrated object must be a canonical envelope"
         );
 
         begin_declarative_principal_root_protection_activation(
@@ -12146,7 +12821,9 @@ mod tests {
         )
         .expect_err("a malformed envelope must not be classified as plaintext");
 
-        assert!(err.to_string().contains("envelope is malformed"));
+        let message = err.to_string();
+        assert!(message.contains(PROTECTED_PRINCIPAL_ROOT_OBJECT_DAMAGED));
+        assert!(message.contains("Documents/malformed.json does not carry the label"));
         assert!(err
             .downcast_ref::<PrincipalRootMigrationRequiredV1>()
             .is_none());
