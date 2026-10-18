@@ -4,6 +4,8 @@
 
 If you find a security vulnerability, please report it privately via [GitHub Security Advisories](https://github.com/Elacity/elastos-runtime/security/advisories/new). Do not open a public issue.
 
+Do not describe an unfixed issue in a public issue, pull request, commit message, or branch name.
+
 ## Current isolation and target boundary
 
 First-party apps run as web projections in the browser's opaque sandboxed
