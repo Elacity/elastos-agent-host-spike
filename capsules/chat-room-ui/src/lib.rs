@@ -3111,14 +3111,35 @@ impl App {
         let _ = self.render();
     }
 
-    /// A web link element. Inside Home it has no href, so nothing but
+    /// A web link card element. Inside Home it has no href, so nothing but
     /// `activate_external_link` can act on it.
-    fn external_link_element(&self, url: &str) -> Result<Element, JsValue> {
+    fn external_link_element(&self, url: &str, title: &str) -> Result<Element, JsValue> {
         let link = self.document.create_element("a")?;
-        for (name, value) in external_link_attributes(url, self.is_shell_mode()) {
+        for (name, value) in external_link_attributes(url, Some(title), self.is_shell_mode()) {
             link.set_attribute(name, &value)?;
         }
         Ok(link)
+    }
+
+    /// Appends a message's text: plain runs as text nodes (never parsed as
+    /// markup) and each web address as a link element. Shared by room Text
+    /// messages and direct messages.
+    fn append_message_text(&self, body: &Element, text: &str) -> Result<(), JsValue> {
+        for node in message_text_nodes(text, self.is_shell_mode()) {
+            match node {
+                MessageTextNode::Text(text) => body.append_with_str_1(text)?,
+                MessageTextNode::Link { text, attributes } => {
+                    let link = self.document.create_element("a")?;
+                    link.set_class_name("message-link");
+                    for (name, value) in attributes {
+                        link.set_attribute(name, &value)?;
+                    }
+                    link.set_text_content(Some(text));
+                    body.append_child(&link)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn open_attachment_in_documents(&self, attachment_id: &str) -> Result<bool, JsValue> {
@@ -4259,7 +4280,7 @@ impl App {
             meta.append_child(&detail)?;
             let body = self.document.create_element("div")?;
             body.set_class_name("message-body");
-            body.set_text_content(Some(&message.text));
+            self.append_message_text(&body, &message.text)?;
             item.append_child(&meta)?;
             item.append_child(&body)?;
             if outgoing
@@ -4731,20 +4752,7 @@ impl App {
                 }
                 ConversationObjectKind::Text => {
                     body.set_class_name("message-body");
-                    for segment in split_text_links(object.body.as_deref().unwrap_or_default()) {
-                        match segment {
-                            TextSegment::Text(text) => {
-                                // Appends a text node; never parsed as markup.
-                                body.append_with_str_1(text)?;
-                            }
-                            TextSegment::Link(url) => {
-                                let link = self.external_link_element(url)?;
-                                link.set_class_name("message-link");
-                                link.set_text_content(Some(url));
-                                body.append_child(&link)?;
-                            }
-                        }
-                    }
+                    self.append_message_text(&body, object.body.as_deref().unwrap_or_default())?;
                 }
                 ConversationObjectKind::Emoji => {
                     body.set_class_name("message-body emoji-body");
@@ -4760,7 +4768,7 @@ impl App {
                             anchor.set_attribute("aria-label", "Open published document")?;
                             anchor
                         } else {
-                            self.external_link_element(&link.url)?
+                            self.external_link_element(&link.url, &link.title)?
                         };
 
                         let title = self.document.create_element("div")?;
@@ -5123,6 +5131,31 @@ enum TextSegment<'a> {
     Link(&'a str),
 }
 
+/// One node of a rendered message body: a text node, or a link element with
+/// its visible address and attributes.
+#[derive(Debug, PartialEq, Eq)]
+enum MessageTextNode<'a> {
+    Text(&'a str),
+    Link {
+        text: &'a str,
+        attributes: Vec<(&'static str, String)>,
+    },
+}
+
+/// The nodes a message body renders as, for room Text and direct messages.
+fn message_text_nodes(text: &str, shell_mode: bool) -> Vec<MessageTextNode<'_>> {
+    split_text_links(text)
+        .into_iter()
+        .map(|segment| match segment {
+            TextSegment::Text(text) => MessageTextNode::Text(text),
+            TextSegment::Link(url) => MessageTextNode::Link {
+                text: url,
+                attributes: external_link_attributes(url, None, shell_mode),
+            },
+        })
+        .collect()
+}
+
 /// Splits message text into plain runs and `http://`/`https://` addresses.
 /// An address runs to the next whitespace, minus trailing sentence
 /// punctuation, quotes and unbalanced closing brackets. Nothing else (a bare
@@ -5176,22 +5209,23 @@ fn next_web_scheme(text: &str, from: usize) -> Option<(usize, usize)> {
 }
 
 fn trim_link_end(candidate: &str) -> &str {
+    const CLOSERS: [char; 4] = [')', ']', '}', '>'];
+    const OPENERS: [char; 4] = ['(', '[', '{', '<'];
+    // Count once; only closers are trimmed, so only their counts change.
+    let openers = OPENERS.map(|opener| candidate.matches(opener).count());
+    let mut closers = CLOSERS.map(|closer| candidate.matches(closer).count());
     let mut link = candidate;
     while let Some(last) = link.chars().next_back() {
-        let opener = match last {
-            ')' => Some('('),
-            ']' => Some('['),
-            '}' => Some('{'),
-            '>' => Some('<'),
-            '.' | ',' | ';' | ':' | '!' | '?' | '"' | '\'' | '\u{2019}' | '\u{201D}' | '\u{BB}' => {
-                None
-            }
-            _ => break,
-        };
-        if let Some(opener) = opener {
-            if link.matches(opener).count() >= link.matches(last).count() {
+        if let Some(pair) = CLOSERS.iter().position(|closer| *closer == last) {
+            if openers[pair] >= closers[pair] {
                 break;
             }
+            closers[pair] -= 1;
+        } else if !matches!(
+            last,
+            '.' | ',' | ';' | ':' | '!' | '?' | '"' | '\'' | '\u{2019}' | '\u{201D}' | '\u{BB}'
+        ) {
+            break;
         }
         link = &link[..link.len() - last.len_utf8()];
     }
@@ -5200,15 +5234,24 @@ fn trim_link_end(candidate: &str) -> &str {
 
 /// Attributes of a web link element. Inside Home the element has no href, so
 /// the browser has no navigation to perform (click, middle-click, keyboard or
-/// context menu); Chat's own handlers ask Home instead. Outside Home it is a
+/// context menu); Chat's own handlers ask Home instead, and the accessible
+/// name keeps any visible title next to the address. Outside Home it is a
 /// normal anchor.
-fn external_link_attributes(url: &str, shell_mode: bool) -> Vec<(&'static str, String)> {
+fn external_link_attributes(
+    url: &str,
+    title: Option<&str>,
+    shell_mode: bool,
+) -> Vec<(&'static str, String)> {
     let mut attributes = vec![("data-open-external", url.to_string())];
     if shell_mode {
+        let label = match title.map(str::trim).filter(|title| !title.is_empty()) {
+            Some(title) => format!("Open link: {title} ({url})"),
+            None => format!("Open link: {url}"),
+        };
         attributes.extend([
             ("role", "link".to_string()),
             ("tabindex", "0".to_string()),
-            ("aria-label", format!("Open link: {url}")),
+            ("aria-label", label),
         ]);
     } else {
         attributes.extend([
@@ -5714,7 +5757,8 @@ fn hex_value(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::direct::{
-        DirectConversationView, DirectMessageList, DirectUiState, PendingDirectSend,
+        DirectConversationView, DirectMessageList, DirectMessageView, DirectUiState,
+        PendingDirectSend,
     };
     use super::{
         activates_link_key, admitted_home_origin, apply_active_poll_if_current,
@@ -5724,14 +5768,14 @@ mod tests {
         commit_shared_selection, conversation_initial, current_selection_guard, decode_query_value,
         documents_attachment_message, external_link_attributes, external_link_request,
         extract_fragment_param, extract_query_param, format_chat_message_request_id,
-        home_open_external_message, note_composer_edit, object_sender_name, participant_detail,
-        participant_shown_name, pending_chat_request_id, render_projection,
+        home_open_external_message, message_text_nodes, note_composer_edit, object_sender_name,
+        participant_detail, participant_shown_name, pending_chat_request_id, render_projection,
         resolve_conversation_choice, room_send_error_text, selection_guard_matches,
         settle_sent_draft, shell_summary_allows_session, split_text_links, switch_composer_draft,
         AccessMode, AppConfig, AppState, AttachmentView, CommunityState, ConversationObjectKind,
-        ConversationObjectView, ExternalLinkRequest, ParticipantView, PendingChatSend,
-        RenderProjection, RoomPollView, RoomTransportView, ShellSessionBootstrapFailure,
-        ShellSessionStartOutput, SummaryView, TextSegment,
+        ConversationObjectView, ExternalLinkRequest, MessageTextNode, ParticipantView,
+        PendingChatSend, RenderProjection, RoomPollView, RoomTransportView,
+        ShellSessionBootstrapFailure, ShellSessionStartOutput, SummaryView, TextSegment,
     };
 
     fn two_direct_conversations() -> AppState {
@@ -6716,12 +6760,19 @@ mod tests {
                 .collect();
             assert_eq!(&joined, text, "segments keep every character");
         }
+        // Many unmatched closers trim in one linear pass.
+        let url = "https://a.example/x_(y)";
+        let text = format!("{url}{}", ")".repeat(100_000));
+        assert_eq!(
+            split_text_links(&text),
+            [Link(url), Text(&text[url.len()..])]
+        );
     }
 
     #[test]
     fn web_links_inside_home_have_no_href() {
         let url = "https://a.example/x?y=1";
-        let shell = external_link_attributes(url, true);
+        let shell = external_link_attributes(url, None, true);
         assert_eq!(
             shell,
             vec![
@@ -6732,14 +6783,64 @@ mod tests {
             ]
         );
         assert!(shell.iter().all(|(name, _)| *name != "href"));
+        // A link card's accessible name keeps its visible title.
+        assert!(external_link_attributes(url, Some("Example"), true)
+            .contains(&("aria-label", format!("Open link: Example ({url})"))));
+        assert!(external_link_attributes(url, Some("  "), true)
+            .contains(&("aria-label", format!("Open link: {url}"))));
         assert_eq!(
-            external_link_attributes(url, false),
+            external_link_attributes(url, Some("Example"), false),
             vec![
                 ("data-open-external", url.to_string()),
                 ("href", url.to_string()),
                 ("rel", "noopener noreferrer".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn direct_message_web_addresses_render_as_links() {
+        // Direct messages render their text with the same nodes as room Text.
+        let url = "https://a.example/dm?x=1";
+        let message: DirectMessageView = serde_json::from_value(serde_json::json!({
+            "message_id": "message:a", "direction": "incoming",
+            "text": format!("look ({url}). <b>hi</b>"), "created_at": 1,
+            "delivery_state": "received",
+        }))
+        .unwrap();
+        let nodes = message_text_nodes(&message.text, true);
+        assert_eq!(
+            nodes,
+            vec![
+                MessageTextNode::Text("look ("),
+                MessageTextNode::Link {
+                    text: url,
+                    attributes: external_link_attributes(url, None, true),
+                },
+                MessageTextNode::Text("). <b>hi</b>"),
+            ]
+        );
+        let links: Vec<_> = nodes
+            .iter()
+            .filter_map(|node| match node {
+                MessageTextNode::Link { attributes, .. } => Some(attributes),
+                MessageTextNode::Text(_) => None,
+            })
+            .collect();
+        assert_eq!(links.len(), 1, "exactly one link element");
+        assert!(links[0].iter().all(|(name, _)| *name != "href"));
+        assert!(links[0].contains(&("role", "link".to_string())));
+        // Without an address the body is one plain text node.
+        assert_eq!(
+            message_text_nodes("plain example.com words", true),
+            vec![MessageTextNode::Text("plain example.com words")]
+        );
+        // Outside Home the same link is a normal anchor.
+        assert!(matches!(
+            &message_text_nodes(url, false)[..],
+            [MessageTextNode::Link { attributes, .. }]
+                if attributes.contains(&("href", url.to_string()))
+        ));
     }
 
     #[test]

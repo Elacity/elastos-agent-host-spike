@@ -21,6 +21,7 @@ const interveningPeerMarker = "Peer message before my send response";
 const cursorOwnMarker = "Own message after the unseen peer row";
 const externalLinkUrl = "https://example.invalid/chat-link?from=chat";
 const textLinkUrl = "https://example.invalid/chat-text-link?from=text";
+const directLinkUrl = "https://example.invalid/chat-direct-link?from=direct";
 const brave = process.env.BRAVE_BIN || "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
 const require = createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url));
 const playwrightModule = process.env.ELASTOS_PLAYWRIGHT_MODULE
@@ -570,7 +571,7 @@ function startServer(scenario) {
           messages: [{
             message_id: "message:fixture-direct",
             direction: "incoming",
-            text: "hello from direct",
+            text: scenario === "external-link-via-home" ? `hello from direct ${directLinkUrl}` : "hello from direct",
             created_at: 1_725_000_000,
             delivery_state: "received",
           }],
@@ -778,14 +779,15 @@ async function runScenario(scenario) {
       const textLink = frame.locator('#message-list a.message-link[data-open-external]');
       await link.waitFor();
       await textLink.waitFor();
-      for (const [element, address] of [[link, externalLinkUrl], [textLink, textLinkUrl]]) {
+      for (const [element, address, label] of [[link, externalLinkUrl, `Open link: Example link (${externalLinkUrl})`],
+        [textLink, textLinkUrl, `Open link: ${textLinkUrl}`]]) {
         const attributes = await element.evaluate(node => ({
           href: node.getAttribute("href"), target: node.getAttribute("target"), role: node.getAttribute("role"),
           tabindex: node.getAttribute("tabindex"), label: node.getAttribute("aria-label"),
           address: node.dataset.openExternal,
         }));
         assert(JSON.stringify(attributes) === JSON.stringify({ href: null, target: null, role: "link", tabindex: "0",
-          label: `Open link: ${address}`, address }), "a Chat web link inside Home has no native navigation", attributes);
+          label, address }), "a Chat web link inside Home has no native navigation", attributes);
       }
       assert(await link.innerText() === "Example link\nexample.com", "Chat link text changed");
       const textBody = await textLink.evaluate(node => ({
@@ -809,11 +811,30 @@ async function runScenario(scenario) {
       await textLink.click({ button: "middle" });
       await waitFor(async () => (await page.evaluate(() => window.fixtureOpenExternal.length)) >= 4);
       await new Promise(resolve => setTimeout(resolve, 300));
-      const asked = (await page.evaluate(() => window.fixtureOpenExternal))
+      const askedHome = async () => (await page.evaluate(() => window.fixtureOpenExternal))
         .map(message => JSON.stringify(Object.fromEntries(Object.entries(message).sort())));
       const request = url => JSON.stringify({ homeToken: "test-token", type: "home:open-external", url });
-      assert(JSON.stringify(asked) === JSON.stringify([externalLinkUrl, textLinkUrl, textLinkUrl, textLinkUrl].map(request)),
-        "Chat did not send Home exactly one typed request per activation with the link's own address", asked);
+      const sharedAsks = [externalLinkUrl, textLinkUrl, textLinkUrl, textLinkUrl].map(request);
+      assert(JSON.stringify(await askedHome()) === JSON.stringify(sharedAsks),
+        "Chat did not send Home exactly one typed request per activation with the link's own address", await askedHome());
+      // A direct message renders its address the same way.
+      await frame.locator('[data-conversation-choice="direct:sha256:fixture-conversation"]').click();
+      await frame.waitForFunction(() => document.body.dataset.chatMode === "direct"
+        && document.querySelector("#message-list")?.textContent.includes("hello from direct"));
+      const directLink = frame.locator('#message-list a.message-link[data-open-external]');
+      assert(await directLink.count() === 1, "a direct message address did not render as exactly one link");
+      const directAttributes = await directLink.evaluate(node => ({
+        href: node.getAttribute("href"), role: node.getAttribute("role"), address: node.dataset.openExternal,
+        text: node.parentElement.textContent,
+      }));
+      assert(JSON.stringify(directAttributes) === JSON.stringify({ href: null, role: "link", address: directLinkUrl,
+        text: `hello from direct ${directLinkUrl}` }), "a direct message link inside Home has no native navigation", directAttributes);
+      await directLink.click();
+      await directLink.press("Enter");
+      await waitFor(async () => (await askedHome()).length >= 6);
+      await new Promise(resolve => setTimeout(resolve, 300));
+      assert(JSON.stringify(await askedHome()) === JSON.stringify([...sharedAsks, request(directLinkUrl), request(directLinkUrl)]),
+        "a direct message link did not ask Home exactly once per activation", await askedHome());
       await new Promise(resolve => setTimeout(resolve, 300));
       context.off("request", recordDestination);
       assert(context.pages().length === pagesBefore, "Chat opened a window itself");
