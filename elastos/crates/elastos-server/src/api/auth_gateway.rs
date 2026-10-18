@@ -1275,19 +1275,42 @@ pub(in crate::api) fn principal_root_recovery_status_for_verified_principal(
         localhost_root,
         &protected_object_inventory,
     )?;
+    let objects_needing_attention_count = inspection.notices.len();
+    let objects_needing_attention = inspection
+        .notices
+        .iter()
+        .take(MAX_RECOVERY_STATUS_ATTENTION_OBJECTS)
+        .map(
+            |notice| elastos_runtime::auth::PrincipalRootObjectAttentionV1 {
+                path: notice.path.clone(),
+                problem: notice.damage.code().to_string(),
+                action: notice.sentence(),
+            },
+        )
+        .collect::<Vec<_>>();
     let Some(protection) = inspection.protection else {
         let mut status = PrincipalRootRecoveryStatusV1::unprotected(
             principal_id.to_string(),
             localhost_root.to_string(),
         );
-        if inspection.plaintext_object_count > 0 {
+        if !inspection.plaintext.is_empty() {
             status
                 .required_actions
                 .insert(0, "migrate_declared_plaintext_objects".to_string());
         }
+        if inspection.pending_journal {
+            status
+                .required_actions
+                .insert(0, "finish_interrupted_principal_root_migration".to_string());
+        }
+        status.objects_needing_attention = objects_needing_attention;
+        status.objects_needing_attention_count = objects_needing_attention_count;
         return Ok(status);
     };
-    let root_encrypted = inspection.plaintext_object_count == 0
+    // Header-level only: contents are authenticated when each file is opened.
+    let root_encrypted = inspection.plaintext.is_empty()
+        && inspection.notices.is_empty()
+        && !inspection.pending_journal
         && inspection.encrypted_object_count == inspection.declared_object_count;
     let protection_configured = !protection.protectors.is_empty();
     let recovery_configured = protection
@@ -1296,7 +1319,10 @@ pub(in crate::api) fn principal_root_recovery_status_for_verified_principal(
         .any(|protector| protector.verified_at.is_some());
     let recovery_download_available = recovery_archive_from_protection(&protection).is_some();
     let mut required_actions = Vec::new();
-    if !root_encrypted {
+    if inspection.pending_journal {
+        required_actions.push("finish_interrupted_principal_root_migration".to_string());
+    }
+    if !inspection.plaintext.is_empty() {
         required_actions.push("migrate_declared_plaintext_objects".to_string());
     }
     if !recovery_configured {
@@ -1315,6 +1341,8 @@ pub(in crate::api) fn principal_root_recovery_status_for_verified_principal(
         protection_configured,
         required_actions,
         crypto: protection.crypto,
+        objects_needing_attention,
+        objects_needing_attention_count,
     })
 }
 
@@ -1376,9 +1404,33 @@ pub(in crate::api) fn principal_root_recovery_readiness_for_verified_principal(
     }
 }
 
-pub fn verify_configured_principal_roots_ready(data_dir: &std::path::Path) -> anyhow::Result<()> {
+/// Start and update readiness. Returns the notices for damaged files, which
+/// do not stop Home; callers print them with
+/// [`principal_root_notice_lines`].
+pub fn verify_configured_principal_roots_ready(
+    data_dir: &std::path::Path,
+) -> anyhow::Result<Vec<String>> {
     let declarations = configured_principal_root_upgrade_declarations(data_dir)?;
     crate::auth::verify_declared_principal_roots_ready(data_dir, &declarations)
+}
+
+const MAX_RECOVERY_STATUS_ATTENTION_OBJECTS: usize = 20;
+const MAX_PRINTED_PRINCIPAL_ROOT_NOTICES: usize = 20;
+
+/// At most 20 notices, then one "and N more" line.
+pub fn principal_root_notice_lines(notices: &[String]) -> Vec<String> {
+    let mut lines: Vec<String> = notices
+        .iter()
+        .take(MAX_PRINTED_PRINCIPAL_ROOT_NOTICES)
+        .cloned()
+        .collect();
+    if notices.len() > MAX_PRINTED_PRINCIPAL_ROOT_NOTICES {
+        lines.push(format!(
+            "and {} more",
+            notices.len() - MAX_PRINTED_PRINCIPAL_ROOT_NOTICES
+        ));
+    }
+    lines
 }
 
 /// Caller first proves the exact installed Home generation is ready and holds
@@ -1494,7 +1546,6 @@ pub(in crate::api) fn initialize_local_profile(
         let activation = crate::auth::begin_declarative_principal_root_protection_activation_migrating_plaintext(
             &state.data_dir, &principal.principal_id, &principal.localhost_root, &inventory,
         )?;
-        crate::auth::ensure_online_plaintext_migration_is_possible(&activation.plaintext_objects)?;
         if crate::auth::load_principal_root_protection(
             &state.data_dir,
             &principal.principal_id,
@@ -1672,13 +1723,6 @@ fn full_recovery_bundle_establish_kit(
         .map_err(RecoveryKitPreparationRefused::from_activation_error)?;
     #[cfg(test)]
     run_full_recovery_scan_delay_test_hook(&state.data_dir);
-    // Same refusal, ahead of the same first write: a Recovery Kit export
-    // must not be the thing that leaves a root protected with plaintext
-    // beside it.
-    crate::auth::ensure_online_plaintext_migration_is_possible(
-        &protection_activation.plaintext_objects,
-    )
-    .map_err(RecoveryKitPreparationRefused::from_activation_error)?;
     let kit = recovery_kit_get_or_create_for_principal(
         state,
         &context.session_id,
@@ -7663,7 +7707,10 @@ mod tests {
         .await
         .expect_err("a valid but wrong Recovery Kit must not activate the root");
 
-        assert!(err.to_string().contains("envelope binding is invalid"));
+        // The header names the root's key, not the kit's: D2, by name.
+        let message = err.to_string();
+        assert!(message.contains(crate::auth::PROTECTED_PRINCIPAL_ROOT_OBJECT_DAMAGED));
+        assert!(message.contains("is labelled for key pdek:"), "{message}");
         assert_eq!(std::fs::read(auth_state_path).unwrap(), auth_state_before);
         assert_eq!(std::fs::read(archive_key_path).unwrap(), archive_key_before);
         assert_eq!(std::fs::read(object_path).unwrap(), object_before);

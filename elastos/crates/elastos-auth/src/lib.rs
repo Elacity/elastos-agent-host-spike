@@ -359,6 +359,26 @@ pub struct PrincipalRootRecoveryStatusV1 {
     pub protection_configured: bool,
     pub required_actions: Vec<String>,
     pub crypto: PrincipalRootCryptoProfileV1,
+    /// Up to 20 protected files whose label is damaged or bound elsewhere.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objects_needing_attention: Vec<PrincipalRootObjectAttentionV1>,
+    /// How many protected files need attention in total.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub objects_needing_attention_count: usize,
+}
+
+/// One protected file that needs attention: its Home-relative path, a
+/// problem code, and the action for the person, as one sentence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrincipalRootObjectAttentionV1 {
+    pub path: String,
+    pub problem: String,
+    pub action: String,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 impl PrincipalRootRecoveryStatusV1 {
@@ -378,6 +398,8 @@ impl PrincipalRootRecoveryStatusV1 {
                 "verify_recovery_before_public_guest_hosting".to_string(),
             ],
             crypto: PrincipalRootCryptoProfileV1::default(),
+            objects_needing_attention: Vec::new(),
+            objects_needing_attention_count: 0,
         }
     }
 }

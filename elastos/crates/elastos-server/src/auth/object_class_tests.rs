@@ -428,7 +428,7 @@ fn classifier_keeps_runtime_and_user_plaintext_plaintext() {
     );
     assert_eq!(notice.path, "Documents/plain");
     assert!(notice.to_string().starts_with(
-        "Documents/plain: Documents/plain does not carry the label this Home writes on encrypted files"
+        "Documents/plain does not carry the label this Home writes on encrypted files"
     ));
     let jwe = br#"{"protected":"eyJhbGciOiJBMjU2S1cifQ","iv":"AxY8DCtDaGlsbGljb3RoZQ","ciphertext":"KDlTtXchhZTGufMYmOYGS4HffxPSUrfmqCHXaI9wOGY","tag":"Mz-VPPyU4RlcuYv1IwIvzw"}"#;
     assert_eq!(fixture.classify(&uri, jwe), label_unreadable());

@@ -917,7 +917,7 @@ async fn test_full_recovery_fresh_export_rejects_envelope_shaped_data_before_mut
     for (expected_status, expected_text) in [
         (
             StatusCode::CONFLICT,
-            "exact verified protection binding is required",
+            ".AppData/LocalHost/GBA/ucity/rom-id.sav is encrypted, but this Home has no key yet.",
         ),
         // The step-up replay refusal keeps its existing status mapping.
         (StatusCode::INTERNAL_SERVER_ERROR, "already been used"),
@@ -1018,8 +1018,8 @@ async fn export_consumes_approval_before_scan_and_survives_long_scan() {
     let body = String::from_utf8_lossy(&body);
     assert!(
         body.starts_with(
-            "Home could not prepare your Recovery Kit: .AppData/LocalHost/GBA/ucity/damaged.sav: \
-             .AppData/LocalHost/GBA/ucity/damaged.sav does not carry the label"
+            "Home could not prepare your Recovery Kit: .AppData/LocalHost/GBA/ucity/damaged.sav \
+             does not carry the label"
         ),
         "{body}"
     );
@@ -2365,4 +2365,207 @@ async fn assert_owner_recovery_restores_same_home(kit_imported_before: bool) {
         .await
         .unwrap();
     assert_eq!(reused.status(), StatusCode::FORBIDDEN);
+}
+
+fn write_protected_test_object(
+    data_dir: &std::path::Path,
+    principal_id: &str,
+    localhost_root: &str,
+    relative: &str,
+    plaintext: &[u8],
+) -> std::path::PathBuf {
+    let uri = format!("{localhost_root}/{relative}");
+    let path = elastos_common::localhost::rooted_localhost_fs_path(data_dir, &uri).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    crate::auth::write_principal_root_object(
+        data_dir,
+        principal_id,
+        localhost_root,
+        &uri,
+        &path,
+        plaintext,
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn recovery_status_reports_pending_journal_and_damage() {
+    // A clean root, with one body-flipped envelope: status reads headers only,
+    // so body damage is not listed, and the JSON has exactly today's fields.
+    let dir = tempfile::tempdir().unwrap();
+    let principal_id = "person:local:status-clean";
+    let protection = crate::auth::store_test_principal_root_protection(dir.path(), principal_id);
+    let root = protection.localhost_root.clone();
+    let flipped_path =
+        write_protected_test_object(dir.path(), principal_id, &root, "Documents/a.txt", b"body");
+    let mut envelope: Value =
+        serde_json::from_slice(&std::fs::read(&flipped_path).unwrap()).unwrap();
+    let ciphertext = envelope["ciphertext"].as_str().unwrap().to_string();
+    let replacement = if ciphertext.starts_with('A') {
+        "B"
+    } else {
+        "A"
+    };
+    envelope["ciphertext"] = json!(format!("{replacement}{}", &ciphertext[1..]));
+    let pretty = format!(
+        "{{\n  \"schema\": {},\n  \"principal_id\": {},\n  \"localhost_root\": {},\n  \
+         \"data_key_id\": {},\n  \"object_uri\": {},\n  \"cipher\": {},\n  \"nonce\": {},\n  \
+         \"ciphertext\": {}\n}}",
+        envelope["schema"],
+        envelope["principal_id"],
+        envelope["localhost_root"],
+        envelope["data_key_id"],
+        envelope["object_uri"],
+        envelope["cipher"],
+        envelope["nonce"],
+        envelope["ciphertext"],
+    );
+    std::fs::write(&flipped_path, pretty).unwrap();
+    let status = crate::api::auth_gateway::principal_root_recovery_status_for_verified_principal(
+        dir.path(),
+        principal_id,
+        &root,
+    )
+    .unwrap();
+    assert!(status.root_encrypted);
+    assert!(status.objects_needing_attention.is_empty());
+    let keys: std::collections::BTreeSet<String> = serde_json::to_value(&status)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "schema",
+            "principal_id",
+            "localhost_root",
+            "root_encrypted",
+            "recovery_configured",
+            "recovery_download_available",
+            "protection_configured",
+            "required_actions",
+            "crypto",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    );
+
+    // A damaged label is listed with its problem and action.
+    let dir = tempfile::tempdir().unwrap();
+    let principal_id = "person:local:status-damaged";
+    let protection = crate::auth::store_test_principal_root_protection(dir.path(), principal_id);
+    let root = protection.localhost_root.clone();
+    let damaged_path =
+        write_protected_test_object(dir.path(), principal_id, &root, "Documents/b.txt", b"body");
+    let mut damaged = std::fs::read(&damaged_path).unwrap();
+    damaged[9] = 0xff;
+    std::fs::write(&damaged_path, &damaged).unwrap();
+    let status = crate::api::auth_gateway::principal_root_recovery_status_for_verified_principal(
+        dir.path(),
+        principal_id,
+        &root,
+    )
+    .unwrap();
+    assert!(!status.root_encrypted);
+    assert_eq!(status.objects_needing_attention_count, 1);
+    assert_eq!(status.objects_needing_attention[0].path, "Documents/b.txt");
+    assert_eq!(
+        status.objects_needing_attention[0].problem,
+        "label_unreadable"
+    );
+    assert!(status.objects_needing_attention[0]
+        .action
+        .starts_with("Documents/b.txt does not carry the label"));
+    assert!(!status
+        .required_actions
+        .iter()
+        .any(|action| action == "migrate_declared_plaintext_objects"));
+
+    // A journal left by an interrupted migration is reported.
+    let dir = tempfile::tempdir().unwrap();
+    let principal_id = "person:local:status-journal";
+    let protection = crate::auth::store_test_principal_root_protection(dir.path(), principal_id);
+    let root = protection.localhost_root.clone();
+    let legacy_uri = format!("{root}/Documents/legacy.txt");
+    let legacy_path =
+        elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &legacy_uri).unwrap();
+    std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+    std::fs::write(&legacy_path, b"legacy plaintext").unwrap();
+    let inventory =
+        crate::api::auth_gateway::principal_root_protected_object_inventory(dir.path(), &root);
+    let activation =
+        crate::auth::begin_declarative_principal_root_protection_activation_migrating_plaintext(
+            dir.path(),
+            principal_id,
+            &root,
+            &inventory,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+    crate::auth::inject_principal_root_migration_test_fault(
+        dir.path(),
+        crate::auth::PrincipalRootMigrationTestFault::JournalPrepared,
+    );
+    assert!(
+        crate::auth::migrate_principal_root_plaintext_objects_under_activation(
+            &activation.guard,
+            dir.path(),
+            principal_id,
+            &root,
+            activation.plaintext_objects.clone(),
+        )
+        .is_err()
+    );
+    drop(activation);
+    let status = crate::api::auth_gateway::principal_root_recovery_status_for_verified_principal(
+        dir.path(),
+        principal_id,
+        &root,
+    )
+    .unwrap();
+    assert!(!status.root_encrypted);
+    assert!(status
+        .required_actions
+        .iter()
+        .any(|action| action == "finish_interrupted_principal_root_migration"));
+}
+
+#[test]
+fn recovery_status_reads_headers_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let principal_id = "person:local:status-headers";
+    let protection = crate::auth::store_test_principal_root_protection(dir.path(), principal_id);
+    let root = protection.localhost_root.clone();
+    write_protected_test_object(
+        dir.path(),
+        principal_id,
+        &root,
+        "Documents/film.mov",
+        &vec![0x44; 100 * 1024 * 1024],
+    );
+    for index in 0..1_100 {
+        write_protected_test_object(
+            dir.path(),
+            principal_id,
+            &root,
+            &format!("Documents/notes/{index:04}.txt"),
+            b"note",
+        );
+    }
+    let before = crate::auth::principal_root_scan_probes(dir.path());
+    let status = crate::api::auth_gateway::principal_root_recovery_status_for_verified_principal(
+        dir.path(),
+        principal_id,
+        &root,
+    )
+    .unwrap();
+    let after = crate::auth::principal_root_scan_probes(dir.path());
+    assert!(status.root_encrypted);
+    assert_eq!(after.file_opens - before.file_opens, 1_101);
+    // Heads only: no body is read, so nothing is decrypted.
+    assert!(after.bytes_read - before.bytes_read <= 1_101 * (4 * 1024 + 3));
 }

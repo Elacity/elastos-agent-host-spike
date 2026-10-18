@@ -4285,6 +4285,66 @@ async fn existing_profile_setup_protects_root_without_claiming_recovery() {
 }
 
 #[tokio::test]
+async fn online_activation_refuses_over_limit_before_protection() {
+    let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let _ = elastos_identity::load_or_create_did(dir.path()).unwrap();
+    let authority = passkey_authority_with_name(dir.path(), Some("Private account label"));
+    let principal =
+        crate::auth::load_principal_for_proof_binding(dir.path(), &authority.proof_binding_id)
+            .unwrap();
+    let uri = format!("{}/Documents/large.bin", principal.localhost_root);
+    let path = elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &uri).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let file = std::fs::File::create(&path).unwrap();
+    file.set_len(17 * 1024 * 1024).unwrap();
+    drop(file);
+    let app = gateway_router(wallet_test_state(dir.path()).await);
+    let response = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("POST")
+                .uri("/api/apps/people/profile")
+                .header("x-elastos-home-token", authority.people_token.as_str())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"display_name": "Confirmed public name"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        body.contains(
+            "Documents/large.bin is not encrypted and is 17 MiB. Home encrypts existing files \
+             of up to 16 MiB in place."
+        ),
+        "{body}"
+    );
+    assert!(crate::auth::load_principal_root_protection(
+        dir.path(),
+        &principal.principal_id,
+        &principal.localhost_root,
+    )
+    .unwrap()
+    .is_none());
+    let large = std::fs::read(&path).unwrap();
+    assert_eq!(large.len(), 17 * 1024 * 1024);
+    assert!(large.iter().all(|byte| *byte == 0), "file left unchanged");
+    assert!(!dir.path().join("backups").exists(), "no migration backup");
+}
+
+#[tokio::test]
 async fn test_recovery_readiness_does_not_claim_profile_coverage() {
     let dir = tempfile::tempdir().unwrap();
     let _ = elastos_identity::load_or_create_did(dir.path()).unwrap();
