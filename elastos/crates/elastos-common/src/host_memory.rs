@@ -14,8 +14,21 @@ const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 pub struct HostMemory {
     /// Effective physical/cgroup capacity, rather than currently free memory.
     pub total: u64,
+    /// Room a new model may take. Linux: `MemAvailable` capped by every cgroup
+    /// v2 ancestor's limit. macOS: a ceiling, see `macos_room`.
     pub available: u64,
-    pub pressure_normal: bool,
+    pub pressure: MemoryPressure,
+}
+
+/// The host's memory pressure as the platform reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryPressure {
+    /// The platform reports no level (Linux); room alone decides.
+    NotReported,
+    Normal,
+    Warning,
+    /// macOS reports critical pressure, or its level could not be read.
+    Critical,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -46,6 +59,18 @@ pub fn model_memory_fit(minimum_memory_mb: u32, memory: Option<HostMemory>) -> M
 
 pub fn observe_host_memory(platform: &str) -> io::Result<HostMemory> {
     observe_host_memory_with_reader(platform, read_observation)
+}
+
+/// Only the pressure level, cheap enough to check every second while a model
+/// runs. Linux reports none; another platform has no reading and counts as
+/// critical, as does an unreadable macOS level.
+pub fn observe_memory_pressure(platform: &str) -> MemoryPressure {
+    match platform {
+        "linux" => MemoryPressure::NotReported,
+        #[cfg(target_os = "macos")]
+        "macos" => macos_memory_pressure(),
+        _ => MemoryPressure::Critical,
+    }
 }
 
 fn read_observation(path: &Path) -> io::Result<String> {
@@ -102,7 +127,7 @@ fn parse_meminfo(text: &str) -> io::Result<HostMemory> {
     Ok(HostMemory {
         total,
         available,
-        pressure_normal: false,
+        pressure: MemoryPressure::NotReported,
     })
 }
 
@@ -426,51 +451,57 @@ fn macos_host_memory() -> io::Result<HostMemory> {
     }
     // SAFETY: host_statistics64 succeeded.
     let stats = unsafe { stats.assume_init() };
-    let available = macos_available(
-        u64::from(stats.free_count),
-        u64::from(stats.speculative_count),
-        u64::from(stats.purgeable_count),
-        u64::from(stats.external_page_count),
+    let available = macos_room(
+        total,
+        u64::from(stats.wire_count),
+        u64::from(stats.compressor_page_count),
         page as u64,
     )
     .ok_or_else(fail)?;
-    // kern.memorystatus_vm_pressure_level: 1 normal, 2 warning, 4 critical.
-    // Unreadable counts as not normal.
+    Ok(HostMemory {
+        total,
+        available,
+        pressure: macos_memory_pressure(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_memory_pressure() -> MemoryPressure {
     let mut level: libc::c_int = 0;
-    let mut level_len = std::mem::size_of_val(&level);
-    // SAFETY: the sysctl is an int and `level_len` is its size.
-    let pressure = unsafe {
+    let mut len = std::mem::size_of_val(&level);
+    // SAFETY: the sysctl is an int and `len` is its size.
+    let read = unsafe {
         libc::sysctlbyname(
             c"kern.memorystatus_vm_pressure_level".as_ptr(),
             (&mut level as *mut libc::c_int).cast(),
-            &mut level_len,
+            &mut len,
             std::ptr::null_mut(),
             0,
         )
     };
-    Ok(HostMemory {
-        total,
-        available: available.min(total),
-        pressure_normal: pressure == 0 && level == 1,
-    })
+    macos_pressure((read == 0 && len == std::mem::size_of_val(&level)).then_some(level))
 }
 
-/// Pages macOS can hand out without compressing or swapping: free pages
-/// (whose count includes speculative read-ahead), purgeable pages, and
-/// file-backed pages (speculative pages are file-backed, so counted once).
-/// Inactive anonymous memory is excluded: reclaiming it needs the compressor.
+/// `kern.memorystatus_vm_pressure_level` is 1 normal, 2 warning, 4 critical.
+/// Any other value, and an unreadable level, count as critical.
 #[cfg(any(target_os = "macos", test))]
-fn macos_available(
-    free: u64,
-    speculative: u64,
-    purgeable: u64,
-    file_backed: u64,
-    page: u64,
-) -> Option<u64> {
-    free.saturating_sub(speculative)
-        .checked_add(purgeable)?
-        .checked_add(file_backed)?
-        .checked_mul(page)
+fn macos_pressure(level: Option<i32>) -> MemoryPressure {
+    match level {
+        Some(1) => MemoryPressure::Normal,
+        Some(2) => MemoryPressure::Warning,
+        _ => MemoryPressure::Critical,
+    }
+}
+
+/// Room for a new model on macOS: memory that is neither wired (locked) nor
+/// occupied by the compressor. This is a ceiling, not free memory: macOS makes
+/// room in it by compressing other apps' memory or dropping file cache,
+/// possibly with some swapping. On Metal a model's weights become wired while
+/// it runs, so it can never lock more than this.
+#[cfg(any(target_os = "macos", test))]
+fn macos_room(total: u64, wired: u64, compressor: u64, page: u64) -> Option<u64> {
+    let held = wired.checked_add(compressor)?.checked_mul(page)?;
+    Some(total.saturating_sub(held))
 }
 
 #[cfg(test)]
@@ -538,7 +569,7 @@ mod tests {
             HostMemory {
                 total: 8_000_000 * 1024,
                 available: 3_000_000 * 1024,
-                pressure_normal: false
+                pressure: MemoryPressure::NotReported
             }
         );
         for text in [
@@ -659,9 +690,30 @@ mod tests {
         assert_eq!(observe(&files), 4285 * MIB);
     }
     #[test]
-    fn macos_estimate_excludes_inactive_anonymous_pages() {
-        assert_eq!(macos_available(100, 20, 5, 300, 16384), Some(385 * 16384));
-        assert_eq!(macos_available(10, 20, 0, 0, 16384), Some(0));
+    fn macos_room_is_total_less_wired_and_compressor_pages() {
+        // vm_stat on a busy 24 GiB M5 (19 Oct): 16 KiB pages, "Pages wired
+        // down" 419430 (6.4 GiB), "Pages occupied by compressor" 524288 (8 GiB).
+        let total = 25_769_803_776;
+        let room = macos_room(total, 419_430, 524_288, 16_384).unwrap();
+        assert_eq!(room, total - (419_430 + 524_288) * 16_384);
+        assert_eq!(room, 10_307_928_064);
+        // Free, purgeable and file-backed pages are not subtracted: macOS can
+        // compress or drop them to make room.
+        assert_eq!(macos_room(total, 0, 0, 16_384), Some(total));
+        // More held than installed leaves no room rather than wrapping.
+        assert_eq!(macos_room(GIB, GIB, 1, 1), Some(0));
+        // Counts too large to add up refuse the observation.
+        assert_eq!(macos_room(total, u64::MAX, 1, 16_384), None);
+        assert_eq!(macos_room(total, u64::MAX / 2, 0, 16_384), None);
+    }
+    #[test]
+    fn macos_pressure_level_unknown_or_unreadable_is_critical() {
+        assert_eq!(macos_pressure(Some(1)), MemoryPressure::Normal);
+        assert_eq!(macos_pressure(Some(2)), MemoryPressure::Warning);
+        assert_eq!(macos_pressure(Some(4)), MemoryPressure::Critical);
+        for level in [Some(0), Some(3), Some(8), Some(-1), None] {
+            assert_eq!(macos_pressure(level), MemoryPressure::Critical);
+        }
     }
     #[test]
     fn live_host_memory_is_readable() {
@@ -669,6 +721,15 @@ mod tests {
         let files = memory_files();
         let host = observe_host_memory_with_reader("linux", |p| read_fixture(&files, p)).unwrap();
         assert!(host.total > 0 && host.available <= host.total);
+        assert_eq!(host.pressure, MemoryPressure::NotReported);
+        assert_eq!(
+            observe_memory_pressure("linux"),
+            MemoryPressure::NotReported
+        );
+        assert_eq!(
+            observe_memory_pressure("unsupported"),
+            MemoryPressure::Critical
+        );
         assert!(observe_host_memory_with_reader("unsupported", |_| panic!(
             "unsupported platform reads no files"
         ))
@@ -685,13 +746,18 @@ mod tests {
     fn native_macos_memory_observation_is_readable() {
         let host = observe_host_memory("macos").unwrap();
         assert!(host.total > 0 && host.available <= host.total);
+        assert_ne!(host.pressure, MemoryPressure::NotReported);
+        assert_ne!(
+            observe_memory_pressure("macos"),
+            MemoryPressure::NotReported
+        );
     }
     #[test]
     fn signed_minimum_checks_capacity_without_promising_free_memory() {
         let host = HostMemory {
             total: 4 * GIB,
             available: 0,
-            pressure_normal: false,
+            pressure: MemoryPressure::NotReported,
         };
         assert_eq!(model_memory_fit(0, Some(host)), ModelMemoryFit::Unavailable);
         assert_eq!(model_memory_fit(4096, Some(host)), ModelMemoryFit::Fits);
@@ -706,7 +772,7 @@ mod tests {
                 Some(HostMemory {
                     total: 0,
                     available: 0,
-                    pressure_normal: false
+                    pressure: MemoryPressure::NotReported
                 })
             ),
             ModelMemoryFit::Insufficient

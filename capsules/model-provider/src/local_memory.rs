@@ -1,5 +1,5 @@
-//! Admission of a local GGUF engine against the host's free memory, checked
-//! right before the engine starts.
+//! Admission of a local GGUF engine against the host's room for it and its
+//! memory pressure, checked right before the engine starts.
 use crate::local_llama::LocalLlamaFault;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -13,14 +13,14 @@ pub(crate) const UBATCH_SIZE: u64 = 128;
 const BASE_SCRATCH: u64 = 512 * MIB;
 const MIN_HEADROOM: u64 = 1024 * MIB;
 
-pub(crate) use elastos_common::host_memory::HostMemory;
+pub(crate) use elastos_common::host_memory::{HostMemory, MemoryPressure};
 
 fn fits(host: HostMemory, required: u64) -> bool {
-    required <= host.available
-        || (host.pressure_normal && u128::from(required) * 10 <= u128::from(host.total) * 4)
+    required <= host.available && host.pressure != MemoryPressure::Critical
 }
 
 pub(crate) type HostMemoryReader = fn() -> Result<HostMemory, LocalLlamaFault>;
+pub(crate) type MemoryPressureReader = fn() -> MemoryPressure;
 
 #[derive(Debug, PartialEq, Eq)]
 struct MemoryPlan {
@@ -40,10 +40,11 @@ impl MemoryPlan {
 }
 
 /// Refuses with `MemoryObservationUnavailable` when Runtime cannot read the host
-/// limits, or with `MemoryUnavailable` unless the host fits the model weights,
-/// its KV cache at `context`, compute scratch, and a headroom of
-/// max(10% of RAM, 1 GiB) left for the rest of the device. The refusal carries
-/// the free memory it saw and the need, so the person sees both (#98).
+/// limits, with `MemoryPressureCritical` when macOS reports critical pressure
+/// (or none can be read), and with `MemoryUnavailable` unless the host's room
+/// fits the model weights, its KV cache at `context`, compute scratch, and a
+/// headroom of max(10% of RAM, 1 GiB) left for the rest of the device. That
+/// refusal carries the room it saw and the need, so the person sees both (#98).
 pub(crate) fn admit(
     model: &Path,
     context: u32,
@@ -58,6 +59,8 @@ pub(crate) fn admit(
     let required = plan.required().unwrap_or(u64::MAX);
     if fits(host, required) {
         Ok(())
+    } else if host.pressure == MemoryPressure::Critical {
+        Err(LocalLlamaFault::MemoryPressureCritical)
     } else {
         Err(LocalLlamaFault::MemoryUnavailable {
             available: host.available,
@@ -303,19 +306,33 @@ fn metadata(reader: impl Read) -> std::io::Result<Metadata> {
 #[cfg(not(test))]
 pub(crate) fn host_memory() -> Result<HostMemory, LocalLlamaFault> {
     #[cfg(debug_assertions)]
-    if let Some(bytes) = std::env::var("ELASTOS_MODEL_PROVIDER_TEST_FREE_MEMORY")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-    {
+    if let Some(bytes) = test_free_memory() {
         return Ok(HostMemory {
             total: bytes,
             available: bytes,
-            pressure_normal: false,
+            pressure: MemoryPressure::NotReported,
         });
     }
     observed_memory(elastos_common::host_memory::observe_host_memory(
         std::env::consts::OS,
     ))
+}
+
+/// The level a running local model watches; a fixed fixture reading reports none.
+#[cfg(not(test))]
+pub(crate) fn memory_pressure() -> MemoryPressure {
+    #[cfg(debug_assertions)]
+    if test_free_memory().is_some() {
+        return MemoryPressure::NotReported;
+    }
+    elastos_common::host_memory::observe_memory_pressure(std::env::consts::OS)
+}
+
+#[cfg(all(not(test), debug_assertions))]
+fn test_free_memory() -> Option<u64> {
+    std::env::var("ELASTOS_MODEL_PROVIDER_TEST_FREE_MEMORY")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
 }
 
 fn observed_memory(
@@ -330,8 +347,14 @@ pub(crate) fn test_host_memory() -> Result<HostMemory, LocalLlamaFault> {
     Ok(HostMemory {
         total: 8 * 1024 * MIB,
         available: 6 * 1024 * MIB,
-        pressure_normal: false,
+        pressure: MemoryPressure::NotReported,
     })
+}
+
+/// No level, so test runs never stop on the host's pressure.
+#[cfg(test)]
+pub(crate) fn test_memory_pressure() -> MemoryPressure {
+    MemoryPressure::NotReported
 }
 
 #[cfg(test)]
@@ -393,7 +416,7 @@ mod tests {
             Ok(HostMemory {
                 total: GIB,
                 available: GIB,
-                pressure_normal: false,
+                pressure: MemoryPressure::NotReported,
             })
         }
         let root = crate::test_support::temp_root_path("model-provider-memory", "minimum");
@@ -428,20 +451,69 @@ mod tests {
     }
 
     #[test]
-    fn normal_pressure_admits_up_to_40_percent_of_ram_when_estimate_is_low() {
-        let host = |available, total, pressure_normal| HostMemory {
+    fn admission_needs_room_and_no_critical_pressure() {
+        use MemoryPressure::{Critical, Normal, NotReported, Warning};
+        let host = |available, total, pressure| HostMemory {
             total,
             available,
-            pressure_normal,
+            pressure,
         };
-        // 24 GiB Mac, low estimate, normal pressure: Qwen-1.5B's 4.6 GB need fits.
-        assert!(fits(host(3 * GIB, 24 * GIB, true), 4_613_050_297));
-        // 8 GiB host: 40% is 3.2 GiB. A 3.04 GB need fits; a 4 GB need does not.
-        assert!(fits(host(GIB, 8 * GIB, true), 3_040_000_000));
-        assert!(!fits(host(GIB, 8 * GIB, true), 4_000_000_000));
-        // Warning, critical or unknown pressure with a low estimate: refused.
-        assert!(!fits(host(3 * GIB, 24 * GIB, false), 4_613_050_297));
-        // An estimate that covers the need admits regardless of pressure.
-        assert!(fits(host(5 * GIB, 8 * GIB, false), 4_000_000_000));
+        // A need equal to the room fits at every level but critical.
+        for pressure in [NotReported, Normal, Warning] {
+            assert!(fits(host(4 * GIB, 24 * GIB, pressure), 4 * GIB));
+            assert!(!fits(host(4 * GIB, 24 * GIB, pressure), 4 * GIB + 1));
+        }
+        // Busy 24 GiB Mac (19 Oct): ordinary warning pressure, 10,307,928,064 B
+        // beside wired and compressed memory; Qwen2.5 1.5B needs 4399 MiB.
+        assert!(fits(host(10_307_928_064, 24 * GIB, Warning), 4399 * MIB));
+        // Critical pressure refuses even with room, even a 0-byte need.
+        assert!(!fits(host(10_307_928_064, 24 * GIB, Critical), 4399 * MIB));
+        assert!(!fits(host(24 * GIB, 24 * GIB, Critical), 0));
+        // Normal pressure no longer admits past the room (the 40%-of-RAM rule).
+        assert!(!fits(host(3 * GIB, 24 * GIB, Normal), 4_613_050_297));
+        assert!(!fits(host(GIB, 8 * GIB, Normal), 3_040_000_000));
+        // Linux reports no level, so room alone decides, as before: a need
+        // under 40% of RAM but over the room was never admitted there.
+        assert!(fits(host(3 * GIB, 8 * GIB, NotReported), 3 * GIB));
+        assert!(!fits(host(GIB, 8 * GIB, NotReported), 3_040_000_000));
+    }
+
+    #[test]
+    fn critical_pressure_refusal_names_pressure_not_room() {
+        fn host(available: u64, pressure: MemoryPressure) -> Result<HostMemory, LocalLlamaFault> {
+            Ok(HostMemory {
+                total: 24 * GIB,
+                available,
+                pressure,
+            })
+        }
+        fn critical_with_room() -> Result<HostMemory, LocalLlamaFault> {
+            host(24 * GIB, MemoryPressure::Critical)
+        }
+        fn critical_without_room() -> Result<HostMemory, LocalLlamaFault> {
+            host(GIB, MemoryPressure::Critical)
+        }
+        fn warning_with_room() -> Result<HostMemory, LocalLlamaFault> {
+            host(10_307_928_064, MemoryPressure::Warning)
+        }
+        fn warning_without_room() -> Result<HostMemory, LocalLlamaFault> {
+            host(GIB, MemoryPressure::Warning)
+        }
+        let root = crate::test_support::temp_root_path("model-provider-memory", "pressure");
+        std::fs::create_dir_all(&root).unwrap();
+        let model = root.join("weights.gguf");
+        std::fs::write(&model, fake_gguf(28, 1536, 12, 2, 8960, 1000)).unwrap();
+        for read in [critical_with_room, critical_without_room] {
+            assert_eq!(
+                admit(&model, 4096, 1, read),
+                Err(LocalLlamaFault::MemoryPressureCritical)
+            );
+        }
+        assert_eq!(admit(&model, 4096, 1, warning_with_room), Ok(()));
+        assert!(matches!(
+            admit(&model, 4096, 1, warning_without_room),
+            Err(LocalLlamaFault::MemoryUnavailable { available, required })
+                if available == GIB && required > GIB
+        ));
     }
 }

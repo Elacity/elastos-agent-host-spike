@@ -523,9 +523,9 @@ try {
       assert.equal(terminal.status, "failed");
       assert.equal(terminal.error?.code, "model_memory_unavailable");
       assert.equal(terminal.error?.class, "context_rejected");
-      // The refusal names the free memory it saw and the model's need (#98).
+      // The refusal names the room it saw and the model's need (#98).
       const message = terminal.error?.message ?? "";
-      assert.match(message, /^Not enough free memory for this model: it needs \d+(?:\.\d)? GB and \d+(?:\.\d)? GB is free\. Close other apps, then try again\.$/);
+      assert.match(message, /^Not enough memory for this model: it needs \d+(?:\.\d)? GB and \d+(?:\.\d)? GB is available\. Close other apps, then try again\.$/);
       await visibleFailure(assistant, `Model run failed: ${message}`);
       await page.screenshot({ path: join(evidence, "finite-memory-refusal.png"), fullPage: true });
       resourceTurns.push({ stage: "memory_refusal", run_id: refused.run.run_id, status: terminal.status, code: terminal.error.code });

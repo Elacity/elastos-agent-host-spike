@@ -64,7 +64,7 @@ owning boundaries.
 
 Marketplace compares each signed model's declared minimum memory with the
 device's effective physical or cgroup memory capacity before Get. This check
-describes the minimum requirement. Runtime checks current free memory again
+describes the minimum requirement. Runtime checks the device's memory again
 before starting the engine for a reply.
 
 On Linux, Runtime verifies the visible cgroup v2 hierarchy and reads every
@@ -74,17 +74,25 @@ usage; an unreadable cache statistic gives zero credit. An unavailable memory
 observation returns `model_memory_observation_unavailable` and asks the Home
 owner to check the memory limits before trying again.
 
-A local engine is admitted right before it starts: free memory must cover the
-model weights, its KV cache at the configured context, batch scratch and
+A local engine is admitted right before it starts: the device's room must cover
+the model weights, its KV cache at the configured context, batch scratch and
 headroom of max(10% of effective memory capacity, 1 GiB); otherwise the run fails with
 `model_memory_unavailable` before anything is spawned, and its message names the
-free memory Runtime saw and the model's need in GB. Each model-provider
+room Runtime saw and the model's need in GB. On Linux the room is `MemAvailable`
+capped by the cgroup limits above. On macOS it is a ceiling, not free memory:
+total memory less wired and compressor-occupied pages, which macOS fills by
+compressing other apps' memory or dropping file cache. A macOS critical memory
+pressure level, or an unreadable one, also refuses with `model_memory_unavailable`;
+warning pressure does not. While a model loads or generates, the provider reads
+the macOS pressure level about once a second; at critical it stops the run and
+its engine, which releases the weights Metal keeps wired, and the run fails with
+`model_memory_critical`. Each model-provider
 process runs one local engine at a time, stops it after 60 s without requests
 and starts it again on the next request. Runtime's host lock protects its Home
 data root. Distinct data roots use separate locks and providers, including
 under the same OS account. For supported Local AI operation, run one active
-Home per device. Each provider checks the memory that is free when it starts
-its engine.
+Home per device. Each provider checks the device's memory when it starts its
+engine.
 
 The owning Runtime DID signs the service offer, which names the admitted
 provider capability and contains only bounded capability and policy facts. The

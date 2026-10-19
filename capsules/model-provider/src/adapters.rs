@@ -8,7 +8,9 @@ use crate::contract::{
     RUN_OUTPUT_CONTENT_SCHEMA, RUN_OUTPUT_OBJECT_SCHEMA, RUN_OUTPUT_TEXT_SCHEMA,
 };
 use crate::journal::{deterministic_run_id, now_ms};
-use crate::local_llama::{LocalLlamaEngines, LocalLlamaFault, LocalTiming, LocalTimingStage};
+use crate::local_llama::{
+    critical_pressure, LocalLlamaEngines, LocalLlamaFault, LocalRun, LocalTiming, LocalTimingStage,
+};
 use elastos_model_contract::decisions;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1769,9 +1771,9 @@ async fn run_local_text_worker_with_timing(
     )
     .then(HostedBackendReport::default);
     let mut local_socket = None;
-    // Holds the local execution slot until this run ends; dropping it arms
-    // the engine's idle release.
-    let mut _local_run = None;
+    // Holds the local execution slot and its memory pressure watch until this
+    // run ends; dropping it arms the engine's idle release.
+    let mut local_run = None;
     let (api_url, api_key, body, private_endpoint, context_window_tokens) = match &task.backend {
         LocalTextBackend::OpenRouterDecisions {
             api_url,
@@ -1847,7 +1849,7 @@ async fn run_local_text_worker_with_timing(
                     .map_err(|_| map_local_llama_fault(LocalLlamaFault::Timeout))?
                     .map_err(map_local_llama_fault)?,
             };
-            _local_run = Some(run);
+            let run: &mut LocalRun = local_run.insert(run);
             let endpoint = engines
                 .endpoint_with_timeout(
                     offer_id,
@@ -1856,11 +1858,15 @@ async fn run_local_text_worker_with_timing(
                     settings,
                     remaining_run_timeout(task.deadline_ms)?,
                     Some(&mut task.cancel_rx),
+                    Some(run.pressure()),
                 )
                 .await;
             let stop_requested = *task.cancel_rx.borrow();
             if stop_requested {
                 return Ok(cancel_text_worker(&task.backend).await);
+            }
+            if endpoint == Err(LocalLlamaFault::StoppedForMemoryPressure) {
+                return stop_text_worker_for_memory_pressure(&task.backend).await;
             }
             let endpoint = endpoint.map_err(map_local_llama_fault)?;
             let mut body = text_generation_request_body(
@@ -1905,6 +1911,9 @@ async fn run_local_text_worker_with_timing(
         let counted = tokio::select! {
             biased;
             _ = task.cancel_rx.changed() => return Ok(cancel_text_worker(&task.backend).await),
+            _ = critical_pressure(local_run.as_mut().map(LocalRun::pressure)) => {
+                return stop_text_worker_for_memory_pressure(&task.backend).await;
+            }
             response = count_request.send() => response.map_err(|err| map_text_reqwest_failure(err, true))?,
         };
         if !counted.status().is_success() {
@@ -1913,6 +1922,9 @@ async fn run_local_text_worker_with_timing(
         let count = tokio::select! {
             biased;
             _ = task.cancel_rx.changed() => return Ok(cancel_text_worker(&task.backend).await),
+            _ = critical_pressure(local_run.as_mut().map(LocalRun::pressure)) => {
+                return stop_text_worker_for_memory_pressure(&task.backend).await;
+            }
             response = read_bounded_json_response_async(counted) => response?,
         };
         let input_tokens = count["input_tokens"]
@@ -1980,6 +1992,9 @@ async fn run_local_text_worker_with_timing(
         _ = task.cancel_rx.changed() => {
             return Ok(cancel_text_worker(&task.backend).await);
         }
+        _ = critical_pressure(local_run.as_mut().map(LocalRun::pressure)) => {
+            return stop_text_worker_for_memory_pressure(&task.backend).await;
+        }
         response = request.send() => response.map_err(|err| map_text_reqwest_failure(err, private_endpoint))?
     };
     if !response.status().is_success() {
@@ -2004,6 +2019,9 @@ async fn run_local_text_worker_with_timing(
             biased;
             _ = task.cancel_rx.changed() => {
                 return Ok(cancel_text_worker(&task.backend).await);
+            }
+            _ = critical_pressure(local_run.as_mut().map(LocalRun::pressure)) => {
+                return stop_text_worker_for_memory_pressure(&task.backend).await;
             }
             _ = flush_timer.tick(), if timed_flushes < LOCAL_TEXT_TIMED_FLUSH_LIMIT
                 && !stream_state.delta_buffer.is_empty() => {
@@ -2262,11 +2280,31 @@ fn map_local_llama_fault(fault: LocalLlamaFault) -> AdapterFault {
                 class: ErrorClass::ContextRejected,
                 code: "model_memory_unavailable".into(),
                 message: format!(
-                    "Not enough free memory for this model: it needs {} GB and {} GB is free. \
+                    "Not enough memory for this model: it needs {} GB and {} GB is available. \
                      Close other apps, then try again.",
                     gb_tenths(required, true),
                     gb_tenths(available, false),
                 ),
+            },
+            detail: None,
+        },
+        LocalLlamaFault::MemoryPressureCritical => AdapterFault {
+            error: RunError {
+                class: ErrorClass::ContextRejected,
+                code: "model_memory_unavailable".into(),
+                message: "Not enough memory for this model: your Mac reports critically low \
+                          memory. Close other apps, then try again."
+                    .into(),
+            },
+            detail: None,
+        },
+        LocalLlamaFault::StoppedForMemoryPressure => AdapterFault {
+            error: RunError {
+                class: ErrorClass::BackendFailed,
+                code: "model_memory_critical".into(),
+                message: "Your Mac ran critically low on memory, so the model was stopped. \
+                          Close other apps, then try again."
+                    .into(),
             },
             detail: None,
         },
@@ -2310,6 +2348,25 @@ async fn cancel_text_worker(backend: &LocalTextBackend) -> ReconcileResult {
         return cancel_local_execution(engines, offer_id).await;
     }
     worker_settlement_unknown_result()
+}
+
+/// Stops the engine of a run that macOS put under critical memory pressure,
+/// which releases its wired weights, then fails the run with that reason. An
+/// unconfirmed stop leaves settlement unknown, as for a cancelled run.
+async fn stop_text_worker_for_memory_pressure(
+    backend: &LocalTextBackend,
+) -> std::result::Result<ReconcileResult, AdapterFault> {
+    if let LocalTextBackend::LocalLlama {
+        engines, offer_id, ..
+    } = backend
+    {
+        if engines.close_offer(offer_id).await.is_ok() {
+            return Err(map_local_llama_fault(
+                LocalLlamaFault::StoppedForMemoryPressure,
+            ));
+        }
+    }
+    Ok(worker_settlement_unknown_result())
 }
 
 pub(crate) async fn cancel_local_execution(
@@ -3598,10 +3655,10 @@ mod tests {
         });
         assert_eq!(insufficient.error.class, ErrorClass::ContextRejected);
         assert_eq!(insufficient.error.code, "model_memory_unavailable");
-        // The free memory it saw and the model's need, in plain numbers (#98).
+        // The room it saw and the model's need, in plain numbers (#98).
         assert_eq!(
             insufficient.error.message,
-            "Not enough free memory for this model: it needs 3.1 GB and 1.9 GB is free. \
+            "Not enough memory for this model: it needs 3.1 GB and 1.9 GB is available. \
              Close other apps, then try again."
         );
         assert!(
@@ -3615,8 +3672,30 @@ mod tests {
         assert!(even
             .error
             .message
-            .contains("it needs 2 GB and 1 GB is free."));
+            .contains("it needs 2 GB and 1 GB is available."));
         assert!(insufficient.detail.is_none());
+        // Critical pressure is named instead of numbers that may show room.
+        let critical = map_local_llama_fault(LocalLlamaFault::MemoryPressureCritical);
+        assert_eq!(critical.error.class, ErrorClass::ContextRejected);
+        assert_eq!(critical.error.code, "model_memory_unavailable");
+        assert_eq!(
+            critical.error.message,
+            "Not enough memory for this model: your Mac reports critically low memory. \
+             Close other apps, then try again."
+        );
+        let stopped = map_local_llama_fault(LocalLlamaFault::StoppedForMemoryPressure);
+        assert_eq!(stopped.error.class, ErrorClass::BackendFailed);
+        assert_eq!(stopped.error.code, "model_memory_critical");
+        assert_eq!(
+            stopped.error.message,
+            "Your Mac ran critically low on memory, so the model was stopped. \
+             Close other apps, then try again."
+        );
+        // Home shows the first 160 characters after "Model run failed: ".
+        for fault in [critical, stopped] {
+            assert!(fault.error.message.len() <= 160);
+            assert!(fault.detail.is_none());
+        }
     }
 
     #[cfg(unix)]
@@ -3685,6 +3764,234 @@ mod tests {
         assert!(update_rx.try_recv().is_err());
         engines.shutdown().await.unwrap();
         assert!(!engines.retains_artifacts().await);
+    }
+
+    #[cfg(unix)]
+    fn fake_engine(
+        label: &str,
+        mode: &str,
+    ) -> (LocalArtifactConfig, LocalArtifactConfig, std::path::PathBuf) {
+        use crate::test_support::{sha256_file, temp_root_path, write_fake_llama_server};
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root_path("model-provider-memory-pressure", label);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let (engine_path, model_path, events) = write_fake_llama_server(&root, mode);
+        let artifact = |path: &std::path::Path| LocalArtifactConfig {
+            sha256: sha256_file(path),
+            path: path.to_string_lossy().into_owned(),
+        };
+        (artifact(&engine_path), artifact(&model_path), events)
+    }
+
+    #[cfg(unix)]
+    fn fake_engine_task(
+        engines: &LocalLlamaEngines,
+        engine: &LocalArtifactConfig,
+        model: &LocalArtifactConfig,
+        prompt: &str,
+    ) -> (
+        LocalTextWorkerTask,
+        watch::Sender<bool>,
+        mpsc::Receiver<WorkerUpdate>,
+    ) {
+        let (update_tx, update_rx) = mpsc::channel(8);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let task = LocalTextWorkerTask {
+            request_id: "fixture-memory-pressure".into(),
+            hosted_socket: None,
+            run_id: format!("run-memory-pressure-{prompt}"),
+            generation: 1,
+            backend: LocalTextBackend::LocalLlama {
+                engines: engines.clone(),
+                offer_id: "local-text".into(),
+                engine: engine.clone(),
+                model: model.clone(),
+                settings: LocalLlamaSettings {
+                    context_size: 256,
+                    parallel: 1,
+                    threads: 1,
+                    batch_threads: 1,
+                    gpu_layers: 0,
+                    health_timeout_ms: 30_000,
+                    shutdown_timeout_ms: 5_000,
+                    enable_thinking: false,
+                },
+                requested_output_tokens: None,
+            },
+            offer: offer(),
+            deadline_ms: now_ms().saturating_add(30_000),
+            messages: vec![json!({"role": "user", "content": prompt})],
+            cancel_rx,
+            updates: update_tx,
+        };
+        (task, cancel_tx, update_rx)
+    }
+
+    /// Runs the worker and applies each update it sends, as Runtime does.
+    #[cfg(unix)]
+    async fn run_applied(
+        task: &mut LocalTextWorkerTask,
+        updates: &mut mpsc::Receiver<WorkerUpdate>,
+    ) -> std::result::Result<ReconcileResult, AdapterFault> {
+        let apply = async {
+            while let Some(update) = updates.recv().await {
+                if let WorkerUpdate::Apply { acknowledge, .. } = update {
+                    let _ = acknowledge.send(WorkerApplyAck::Applied);
+                }
+            }
+            std::future::pending().await
+        };
+        tokio::select! {
+            result = run_local_text_worker_inner(task) => result,
+            never = apply => never,
+        }
+    }
+
+    #[cfg(unix)]
+    async fn fake_engine_event(events: &std::path::Path, event: &str) {
+        let deadline = Instant::now() + crate::test_support::FIXTURE_EVENT_TIMEOUT;
+        while !std::fs::read_to_string(events)
+            .unwrap_or_default()
+            .lines()
+            .any(|line| line == event)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "missing fake engine event {event}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    fn fake_engine_pids(events: &std::path::Path) -> Vec<i32> {
+        std::fs::read_to_string(events)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.strip_prefix("start:")?.parse().ok())
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn process_exists(pid: i32) -> bool {
+        (unsafe { libc::kill(pid, 0) }) == 0
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn critical_pressure_while_generating_stops_the_run_and_its_engine() {
+        use crate::local_memory::MemoryPressure;
+        static CRITICAL: AtomicBool = AtomicBool::new(false);
+        fn pressure() -> MemoryPressure {
+            if CRITICAL.load(Ordering::SeqCst) {
+                MemoryPressure::Critical
+            } else {
+                MemoryPressure::Warning
+            }
+        }
+        let (engine, model, events) = fake_engine("generation", "healthy");
+        let engines =
+            LocalLlamaEngines::default().with_memory_pressure(pressure, Duration::from_millis(10));
+        // The engine keeps streaming for "stall" until its client goes away.
+        let (mut task, _cancel_tx, mut updates) =
+            fake_engine_task(&engines, &engine, &model, "stall");
+        let (result, ()) = tokio::join!(run_applied(&mut task, &mut updates), async {
+            // Warning pressure let it load and start generating.
+            fake_engine_event(&events, "request:stall").await;
+            CRITICAL.store(true, Ordering::SeqCst);
+        });
+        let error = result.unwrap_err().error;
+        assert_eq!(error.class, ErrorClass::BackendFailed);
+        assert_eq!(error.code, "model_memory_critical");
+        assert_eq!(
+            error.message,
+            "Your Mac ran critically low on memory, so the model was stopped. \
+             Close other apps, then try again."
+        );
+        // The engine is gone, so its memory is released.
+        let pids = fake_engine_pids(&events);
+        assert_eq!(pids.len(), 1);
+        assert!(!process_exists(pids[0]));
+        assert!(!engines.retains_artifacts().await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn memory_stop_keeps_cancel_and_restart_exact() {
+        use crate::local_memory::MemoryPressure;
+        static CRITICAL: AtomicBool = AtomicBool::new(false);
+        fn pressure() -> MemoryPressure {
+            if CRITICAL.load(Ordering::SeqCst) {
+                MemoryPressure::Critical
+            } else {
+                MemoryPressure::Warning
+            }
+        }
+        let completed = |result: std::result::Result<ReconcileResult, AdapterFault>| {
+            matches!(
+                result,
+                Ok(ReconcileResult::Terminal {
+                    status: RunStatus::Completed,
+                    ..
+                })
+            )
+        };
+        let (engine, model, events) = fake_engine("interplay", "healthy");
+        let engines =
+            LocalLlamaEngines::default().with_memory_pressure(pressure, Duration::from_millis(10));
+
+        // Warning pressure: the run completes and its engine stays warm.
+        let (mut task, _cancel_tx, mut updates) =
+            fake_engine_task(&engines, &engine, &model, "hello");
+        assert!(completed(run_applied(&mut task, &mut updates).await));
+        assert!(engines.retains_artifacts().await);
+        let warm = fake_engine_pids(&events)[0];
+
+        // Critical pressure as the next run checks its warm engine: the run
+        // fails with the reason and the engine stops.
+        CRITICAL.store(true, Ordering::SeqCst);
+        let (mut task, _cancel_tx, mut updates) =
+            fake_engine_task(&engines, &engine, &model, "hello");
+        let error = run_applied(&mut task, &mut updates)
+            .await
+            .unwrap_err()
+            .error;
+        assert_eq!(error.code, "model_memory_critical");
+        assert!(!process_exists(warm));
+        assert!(!engines.retains_artifacts().await);
+
+        // Once pressure eases, the next run starts a new engine and completes.
+        CRITICAL.store(false, Ordering::SeqCst);
+        let (mut task, _cancel_tx, mut updates) =
+            fake_engine_task(&engines, &engine, &model, "hello");
+        assert!(completed(run_applied(&mut task, &mut updates).await));
+        assert_eq!(fake_engine_pids(&events).len(), 2);
+
+        // Stop and critical pressure at once: the person's Stop wins and
+        // settles as an exact local cancellation.
+        let (mut task, cancel_tx, mut updates) =
+            fake_engine_task(&engines, &engine, &model, "stall");
+        let (result, ()) = tokio::join!(run_applied(&mut task, &mut updates), async {
+            fake_engine_event(&events, "request:stall").await;
+            CRITICAL.store(true, Ordering::SeqCst);
+            cancel_tx.send(true).unwrap();
+        });
+        let result = result.unwrap();
+        assert!(pure_local_stop_result(&result));
+        assert!(matches!(
+            result,
+            ReconcileResult::Terminal {
+                status: RunStatus::Cancelled,
+                ..
+            }
+        ));
+        assert!(!engines.retains_artifacts().await);
+        assert!(fake_engine_pids(&events)
+            .into_iter()
+            .all(|pid| !process_exists(pid)));
     }
 
     #[test]
