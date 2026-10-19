@@ -669,7 +669,7 @@ function renderHero(accounts) {
   if (accounts.length === 0) {
     totalBalanceNode.textContent = "—";
     totalBalanceNode.classList.remove("is-loading");
-    balanceStateNode.textContent = "No accounts yet.";
+    balanceStateNode.textContent = "This account has no wallet yet.";
     balanceStateNode.hidden = false;
     deltaNode.hidden = true;
     return;
