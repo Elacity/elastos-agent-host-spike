@@ -2,8 +2,9 @@
 
 ```text
 Slice:        S0b catch-up (reading only, no code change)
-Branch / PR:  claude/s0b-catch-up  PR_LINK
-Commit:       the commit that adds this file   parent c2e1a7aab583450ae7f7e653b2b5bd11f6aa6301
+Branch / PR:  claude/s0b-catch-up  https://github.com/SashaMIT/elastos-agent-host-spike/pull/2
+Commit:       b367f1dcc23b619f2fb3db3de3806059874b7ec4   parent c2e1a7aab583450ae7f7e653b2b5bd11f6aa6301
+              (this PR link and SHA were filled in by the next commit on the branch)
 Base:         origin/spike/agent-host 043e5a6577a6117c2edd5a288650e4648c657ec4. PR #1 (S0, review PASS) was
               still open and not merged when this session started, so this branch merges it first
               (c2e1a7a, a merge commit, no rebase). If PR #1 merges first, this PR still merges cleanly.
