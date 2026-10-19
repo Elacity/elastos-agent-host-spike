@@ -630,7 +630,7 @@ pub(crate) async fn run(status: bool, json: bool) -> anyhow::Result<()> {
     }
 
     if status {
-        if let Err(err) = print_home_state_probe(&snapshot) {
+        if let Err(err) = write_home_state_probe(&mut std::io::stdout().lock(), &snapshot) {
             if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
                 if is_broken_pipe(io_err) {
                     return Ok(());
@@ -2845,8 +2845,10 @@ async fn write_localhost_file(
     Ok(())
 }
 
-fn print_home_state_probe(snapshot: &HomeSnapshot) -> anyhow::Result<()> {
-    let mut out = std::io::stdout().lock();
+fn write_home_state_probe(
+    out: &mut impl std::io::Write,
+    snapshot: &HomeSnapshot,
+) -> anyhow::Result<()> {
     writeln!(out, "ElastOS Home State Probe")?;
     writeln!(out, "  Version:   {}", snapshot.version)?;
     writeln!(out, "  User:      {}", snapshot.user)?;
@@ -2941,20 +2943,9 @@ fn print_home_state_probe(snapshot: &HomeSnapshot) -> anyhow::Result<()> {
         "  Nick:      {}",
         snapshot.nickname.as_deref().unwrap_or("(not set)")
     )?;
-    writeln!(
-        out,
-        "  Carrier:   {} reachable",
-        snapshot.runtime.peer_count.unwrap_or_default()
-    )?;
-    writeln!(
-        out,
-        "  Delivery:  {}",
-        if snapshot.runtime.peer_count.unwrap_or_default() == 0 {
-            "local only until another Home joins Chat"
-        } else {
-            "open Chat and send a line to confirm delivery"
-        }
-    )?;
+    let (carrier, delivery) = people_carrier_status(snapshot.runtime.peer_count);
+    writeln!(out, "  Carrier:   {}", carrier)?;
+    writeln!(out, "  Delivery:  {}", delivery)?;
     writeln!(out, "  Roots:     localhost://Users, localhost://UsersAI")?;
     writeln!(out, "  Profile:   elastos identity nickname set")?;
     if let Some(ticket) = &snapshot.runtime.ticket {
@@ -3026,6 +3017,22 @@ fn print_home_state_probe(snapshot: &HomeSnapshot) -> anyhow::Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// The People section's Carrier and Delivery lines. A count Home has not
+/// learned yet says so instead of reading as an outage (#391).
+fn people_carrier_status(peer_count: Option<usize>) -> (String, &'static str) {
+    match peer_count {
+        Some(0) => (
+            "0 reachable".to_string(),
+            "local only until another Home joins Chat",
+        ),
+        Some(peers) => (
+            format!("{} reachable", peers),
+            "open Chat and send a line to confirm delivery",
+        ),
+        None => ("checking".to_string(), "checking"),
+    }
 }
 
 fn is_broken_pipe(err: &std::io::Error) -> bool {
@@ -3322,6 +3329,25 @@ mod tests {
             resolve_home_cli_renderer_program(temp.path()).unwrap(),
             renderer
         );
+    }
+
+    #[test]
+    fn home_status_says_checking_when_the_carrier_count_is_unknown() {
+        let render = |peer_count| {
+            let mut snapshot = sample_snapshot_with_components(&[]);
+            snapshot.runtime.peer_count = peer_count;
+            let mut out = Vec::new();
+            write_home_state_probe(&mut out, &snapshot).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let unknown = render(None);
+        assert!(unknown.contains("  Carrier:   checking\n"), "{unknown}");
+        assert!(unknown.contains("  Delivery:  checking\n"), "{unknown}");
+        assert!(!unknown.contains("0 reachable"), "{unknown}");
+        let none = render(Some(0));
+        assert!(none.contains("  Carrier:   0 reachable\n"), "{none}");
+        assert!(none.contains("  Delivery:  local only until another Home joins Chat\n"));
+        assert!(render(Some(2)).contains("  Carrier:   2 reachable\n"));
     }
 
     #[cfg(unix)]
