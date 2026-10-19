@@ -23,11 +23,16 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 - Library writes and archive extraction keep the start check's folder rule
   (#449): a write that would put a folder 16 or more folders below a protected
-  root is refused by name before anything is written (write, upload, new
-  folder, copy, move, rename, Trash, restore, whole and selected extraction;
-  a selected entry is listed as blocked). Extraction refuses an archive with
-  more than 10000 entries, and a whole extraction checks every entry before it
-  writes, so a refused archive leaves nothing behind.
+  root is refused by name (write, upload, new folder, copy, move, rename,
+  Trash, restore, whole and selected extraction; a selected entry is listed as
+  blocked). The rule counts the folder the write lands in, whatever its
+  spelling (repeated `/`, another letter case), and copy and move check every
+  path again as they write it. Extraction refuses an archive with more than
+  10000 entries, a file that expands past 100 MiB, or an archive that expands
+  past 1 GiB, by declared size before reading and again while reading; a
+  selected extraction writes each file as it reads it, and a Spaces
+  write-back holds at most 256 MiB. A whole extraction checks every entry
+  before it writes, and removes its new folder if writing fails.
 - zip 9.0.4 replaces zip 2.4.2 (RUSTSEC-2026-0367/0368/0369, #414); the
   cargo-audit exception file is removed. One entry-name rule refuses root,
   drive, UNC and `..` names in every Library archive reader (#417).

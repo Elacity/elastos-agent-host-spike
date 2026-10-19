@@ -4376,6 +4376,24 @@ async fn test_library_writes_refuse_folders_deeper_than_home_starts_with() {
     );
     assert!(!library_object_path(dir.path(), &uri(&format!("{deepest}/16"))).exists());
 
+    // Another spelling of the same folder gets the same answer: empty
+    // segments, which the writer skips, and another case, which a
+    // case-insensitive volume folds.
+    let (_, refused) = write(format!("/{}", deepest.replace('/', "//") + "//16/a.txt")).await;
+    assert_eq!(refused["status"], "error", "{refused}");
+    assert_eq!(
+        refused["message"],
+        too_deep_refusal(&format!("{deepest}/16/a.txt"))
+    );
+    let folded = deepest.replacen("Documents", "dOCUMENTS", 1);
+    let (_, refused) = mkdir(uri(&folded), "16").await;
+    assert_eq!(refused["status"], "error", "{refused}");
+    assert_eq!(
+        refused["message"],
+        too_deep_refusal(&format!("{folded}/16"))
+    );
+    assert!(!library_object_path(dir.path(), &uri(&format!("{deepest}/16"))).exists());
+
     // Copy and move check the whole folder before writing: Tree/x/y moved
     // under 14 folders would put x 16 deep.
     for (parent, name) in [
@@ -4563,8 +4581,8 @@ async fn test_library_archive_extract_refuses_folders_deeper_than_home_starts_wi
         assert_eq!(
             refused["message"],
             format!(
-                "Documents/{many}.{format} holds more than 10000 entries; Library extracts at \
-                 most 10000 from one archive, so nothing was extracted."
+                "Documents/{many}.{format} holds more than 10000 entries; Library extracts from \
+                 archives of up to 10000 entries."
             )
         );
         assert!(!library_object_path(dir.path(), &uri(&format!("Documents/{many}"))).exists());
@@ -4589,6 +4607,177 @@ async fn test_library_archive_extract_refuses_folders_deeper_than_home_starts_wi
         );
         assert!(!library_object_path(dir.path(), &uri("Documents/Imports/f0")).exists());
     }
+}
+
+/// #449: an archive is refused by what it expands to, by its declared sizes
+/// before anything is read; a whole extraction that fails while writing
+/// removes the folder it made.
+#[tokio::test]
+async fn test_library_archive_extract_bounds_expansion_and_removes_a_failed_extraction() {
+    use std::io::{Read as _, Write as _};
+
+    const MIB: u64 = 1024 * 1024;
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &authority);
+    let root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let uri = |relative: &str| format!("{root}/{relative}");
+    for (parent, name) in [(root.clone(), "Documents"), (uri("Documents"), "Imports")] {
+        let (_, made) = post_library(
+            app.clone(),
+            &token,
+            "mkdir",
+            json!({ "parent_uri": parent, "name": name }),
+        )
+        .await;
+        assert_eq!(made["status"], "ok", "{made}");
+    }
+    let upload = |relative: &str, bytes: Vec<u8>| {
+        let (app, token, target) = (app.clone(), token.clone(), uri(relative));
+        async move {
+            let (status, _, uploaded) =
+                put_library_upload(app, &token, &target, Vec::leak(bytes)).await;
+            assert_eq!(status, StatusCode::OK, "{uploaded}");
+        }
+    };
+    let extract = |relative: &str| {
+        post_library(
+            app.clone(),
+            &token,
+            "extract_archive",
+            json!({ "uri": uri(relative) }),
+        )
+    };
+    let deflated = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let zeros_zip = |name: &str, len: u64| {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer.start_file(name, deflated).unwrap();
+        std::io::copy(&mut std::io::repeat(0).take(len), &mut writer).unwrap();
+        writer.finish().unwrap().into_inner()
+    };
+
+    // One entry of 100 MiB + 1 byte, a few hundred KiB compressed: refused
+    // by name, whole and selected, and nothing is written.
+    upload("Documents/Big.zip", zeros_zip("big.bin", 100 * MIB + 1)).await;
+    let (_, refused) = extract("Documents/Big.zip").await;
+    assert_eq!(
+        refused["message"],
+        "big.bin in Documents/Big.zip would be more than 100 MiB once extracted; Library \
+         extracts files of up to 100 MiB from an archive.",
+        "{refused}"
+    );
+    assert!(!library_object_path(dir.path(), &uri("Documents/Big")).exists());
+    let (_, refused) = post_library(
+        app.clone(),
+        &token,
+        "archive_extract_entries",
+        json!({
+            "uri": uri("Documents/Big.zip"),
+            "destination_uri": uri("Documents/Imports"),
+            "entries": ["big.bin"],
+        }),
+    )
+    .await;
+    assert_eq!(
+        refused["message"],
+        "big.bin in Big.zip would be more than 100 MiB once extracted; Library extracts files \
+         of up to 100 MiB from an archive.",
+        "{refused}"
+    );
+    assert!(!library_object_path(dir.path(), &uri("Documents/Imports/big.bin")).exists());
+
+    // The same entry in a tar.gz: its header is refused before its body is
+    // expanded.
+    let tar_gz = {
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::default(),
+        ));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(100 * MIB + 1);
+        header.set_mode(0o644);
+        builder
+            .append_data(
+                &mut header,
+                "big.bin",
+                std::io::repeat(0).take(100 * MIB + 1),
+            )
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap()
+    };
+    upload("Documents/BigTar.tar.gz", tar_gz).await;
+    let (_, refused) = extract("Documents/BigTar.tar.gz").await;
+    assert_eq!(
+        refused["message"],
+        "big.bin in Documents/BigTar.tar.gz would be more than 100 MiB once extracted; Library \
+         extracts files of up to 100 MiB from an archive.",
+        "{refused}"
+    );
+    assert!(!library_object_path(dir.path(), &uri("Documents/BigTar")).exists());
+
+    // Eleven entries of 100 MiB each, 1100 MiB in all: refused as a whole.
+    let many = {
+        let base = zeros_zip("f0", 100 * MIB);
+        let mut source = zip::ZipArchive::new(std::io::Cursor::new(base)).unwrap();
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for index in 0..11 {
+            let file = source.by_name("f0").unwrap();
+            writer
+                .raw_copy_file_rename(file, format!("f{index}"))
+                .unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    };
+    upload("Documents/Many.zip", many).await;
+    let (_, refused) = extract("Documents/Many.zip").await;
+    assert_eq!(
+        refused["message"],
+        "Documents/Many.zip would be more than 1024 MiB once extracted; Library extracts up to \
+         1024 MiB from one archive.",
+        "{refused}"
+    );
+    assert!(!library_object_path(dir.path(), &uri("Documents/Many")).exists());
+
+    // Failures the first pass cannot see remove what the second pass wrote:
+    // a file where a folder is needed, and a damaged entry.
+    let stored =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let zip_of = |entries: &[(&str, &[u8])]| {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, body) in entries {
+            writer.start_file(*name, stored).unwrap();
+            writer.write_all(body).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    };
+    upload(
+        "Documents/Clash.zip",
+        zip_of(&[
+            ("ok.txt", b"ok".as_slice()),
+            ("a", b"file".as_slice()),
+            ("a/b", b"inside".as_slice()),
+        ]),
+    )
+    .await;
+    let (_, failed) = extract("Documents/Clash.zip").await;
+    assert_eq!(failed["status"], "error", "{failed}");
+    assert!(!library_object_path(dir.path(), &uri("Documents/Clash")).exists());
+
+    let mut damaged = zip_of(&[
+        ("ok.txt", b"ok".as_slice()),
+        ("x.txt", b"0123456789abcdef".as_slice()),
+    ]);
+    let body = damaged
+        .windows(16)
+        .position(|window| window == b"0123456789abcdef")
+        .unwrap();
+    damaged[body] = b'X';
+    upload("Documents/Damaged.zip", damaged).await;
+    let (_, failed) = extract("Documents/Damaged.zip").await;
+    assert_eq!(failed["status"], "error", "{failed}");
+    assert!(!library_object_path(dir.path(), &uri("Documents/Damaged")).exists());
 }
 
 /// #432 (display only): an entry name with a line break or a bidi override

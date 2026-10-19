@@ -37,6 +37,14 @@ const MAX_ARCHIVE_PREVIEW_BYTES: usize = 64 * 1024;
 /// Entries in one archive that Library extracts (#449). Home's start check
 /// reads every protected file, so one archive cannot add an unbounded number.
 const MAX_ARCHIVE_EXTRACT_ENTRIES: usize = 10_000;
+/// Bytes one archive entry may expand to when Library extracts it: the same
+/// 100 MiB as one Library upload (`MAX_GATEWAY_FILE_SIZE`) (#449).
+const MAX_ARCHIVE_ENTRY_BYTES: u64 = 100 * 1024 * 1024;
+/// Bytes one archive may expand to, counting every entry a reader passes
+/// over, in one extraction, listing or preview (#449).
+const MAX_ARCHIVE_EXPANDED_BYTES: u64 = 1024 * 1024 * 1024;
+/// Selected files a Spaces write-back holds in memory before it sends them.
+const MAX_ARCHIVE_SPACES_WRITE_BACK_BYTES: u64 = 256 * 1024 * 1024;
 const RUNTIME_CUSTODY_PUBLISH_INPUT_INVALID_MESSAGE: &str = "Runtime custody publish input invalid";
 const RUNTIME_CUSTODY_SHARE_UNAVAILABLE_MESSAGE: &str =
     "Runtime custody sharing is not available yet";
@@ -3345,39 +3353,21 @@ impl StartWalkRule {
     }
 
     /// `from` copied or moved to `to_uri`: every file and folder it holds is
-    /// checked before anything is written. Folders are followed as the copy
-    /// follows them; under a root the depth grows with each one, so the walk
-    /// ends.
+    /// checked before anything is written, so a refused copy or move changes
+    /// nothing. Links are not followed here. The copy and move writers check
+    /// each path again as they create it, which also covers a file added to
+    /// `from` after this check.
     fn tree(&self, from: &Path, to_uri: &str) -> anyhow::Result<()> {
-        if !from.is_dir() {
+        if !fs::symlink_metadata(from)?.is_dir() {
             return self.file(to_uri);
         }
         self.folder(to_uri)?;
-        if !self.reaches_a_root(to_uri) {
-            return Ok(());
-        }
         for entry in fs::read_dir(from)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().to_string();
             self.tree(&entry.path(), &format!("{to_uri}/{name}"))?;
         }
         Ok(())
-    }
-
-    /// Whether `uri` or anything inside it is under a declared root.
-    fn reaches_a_root(&self, uri: &str) -> bool {
-        let inside = |outer: &str, inner: &str| {
-            inner
-                .strip_prefix(outer)
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-        };
-        self.inventory.iter().any(|declaration| {
-            matches!(
-                declaration,
-                crate::auth::PrincipalRootProtectedObjectDeclarationV1::Root { root_uri }
-                    if inside(root_uri, uri) || inside(uri, root_uri)
-            )
-        })
     }
 }
 
@@ -4373,14 +4363,18 @@ fn preview_tar_archive_entry(
         Box::new(GzDecoder::new(Cursor::new(bytes)))
     };
     let mut archive = tar::Archive::new(reader);
+    let archive_name = crate::auth::printable_text(name);
+    let mut expansion = ArchiveExpansion::new(&archive_name);
     for entry in archive.entries()? {
         let mut entry = entry?;
         let Ok(normalized) =
             tar_entry_name(&entry).and_then(|name| normalized_archive_entry_path(&name))
         else {
+            expansion.pass_over(entry.size())?;
             continue;
         };
         if normalized != selected {
+            expansion.pass_over(entry.size())?;
             continue;
         }
         let entry_type = entry.header().entry_type();
@@ -4475,12 +4469,19 @@ fn list_tar_archive_entries(name: &str, bytes: Vec<u8>) -> anyhow::Result<(Vec<V
     let mut archive = tar::Archive::new(reader);
     let mut entries = Vec::new();
     let mut truncated = false;
+    // Listing expands every entry it passes over; past the limit the list
+    // stops, as it does past MAX_ARCHIVE_LIST_ENTRIES (#449).
+    let mut expansion = ArchiveExpansion::new("");
     for (index, entry) in archive.entries()?.enumerate() {
         if entries.len() >= MAX_ARCHIVE_LIST_ENTRIES {
             truncated = true;
             break;
         }
         let entry = entry?;
+        if expansion.pass_over(entry.size()).is_err() {
+            truncated = true;
+            break;
+        }
         let entry_type = entry.header().entry_type();
         let size = entry.header().size().ok();
         let modified_at = entry.header().mtime().ok();
@@ -4898,15 +4899,22 @@ fn extract_archive_entries_to_local_destination(
     let rule = StartWalkRule::new(data_dir, &destination.localhost_root);
     rule.folder(&destination.uri)?;
     fs::create_dir_all(&destination.path)?;
-    let writes = collect_selected_archive_writes(request.archive_name, bytes, &mut outcome)?;
-    apply_selected_archive_writes_to_local(
-        data_dir,
-        principal_id,
-        &destination,
-        &rule,
-        writes,
-        policy,
+    // Each selected entry is written as it is read: one file in memory.
+    read_selected_archive_entries(
+        request.archive_name,
+        bytes,
         &mut outcome,
+        &mut |write, outcome| {
+            apply_selected_archive_write_to_local(
+                data_dir,
+                principal_id,
+                &destination,
+                &rule,
+                write,
+                policy,
+                outcome,
+            )
+        },
     )?;
     outcome.finish_missing();
     let status = if outcome.blocked.is_empty() {
@@ -4954,35 +4962,47 @@ fn selected_archive_entries(entries: &[String]) -> anyhow::Result<BTreeSet<Strin
     Ok(selected)
 }
 
-fn collect_selected_archive_writes(
+/// Receives each selected entry of an archive as it is read.
+type SelectedArchiveSink<'a> =
+    dyn FnMut(ArchiveExtractWrite, &mut ArchiveExtractOutcome) -> anyhow::Result<()> + 'a;
+
+/// Reads the selected entries of an archive, each bounded by
+/// `ArchiveExpansion`, and hands each to `sink` as it is read (#449).
+fn read_selected_archive_entries(
     name: &str,
     bytes: Vec<u8>,
     outcome: &mut ArchiveExtractOutcome,
-) -> anyhow::Result<Vec<ArchiveExtractWrite>> {
+    sink: &mut SelectedArchiveSink<'_>,
+) -> anyhow::Result<()> {
+    let archive = crate::auth::printable_text(name);
+    let mut expansion = ArchiveExpansion::new(&archive);
     if name.to_ascii_lowercase().ends_with(".zip") {
-        collect_selected_zip_writes(name, bytes, outcome)
+        read_selected_zip_entries(&mut expansion, bytes, outcome, sink)
     } else {
-        collect_selected_tar_writes(name, bytes, outcome)
+        read_selected_tar_entries(name, &mut expansion, bytes, outcome, sink)
     }
 }
 
-fn collect_selected_tar_writes(
+fn read_selected_tar_entries(
     name: &str,
+    expansion: &mut ArchiveExpansion<'_>,
     bytes: Vec<u8>,
     outcome: &mut ArchiveExtractOutcome,
-) -> anyhow::Result<Vec<ArchiveExtractWrite>> {
+    sink: &mut SelectedArchiveSink<'_>,
+) -> anyhow::Result<()> {
     let reader: Box<dyn std::io::Read> = if name.to_ascii_lowercase().ends_with(".tar") {
         Box::new(Cursor::new(bytes))
     } else {
         Box::new(GzDecoder::new(Cursor::new(bytes)))
     };
     let mut archive = tar::Archive::new(reader);
-    let mut writes = Vec::new();
     for (index, entry) in archive.entries()?.enumerate() {
         if index >= MAX_ARCHIVE_EXTRACT_ENTRIES {
-            return Err(too_many_archive_entries(&crate::auth::printable_text(name)));
+            return Err(too_many_archive_entries(expansion.archive));
         }
         let mut entry = entry?;
+        // Passing over an entry expands it too, selected or not.
+        let size = entry.size();
         let normalized =
             match tar_entry_name(&entry).and_then(|name| normalized_archive_entry_path(&name)) {
                 Ok(path) => path,
@@ -4994,17 +5014,20 @@ fn collect_selected_tar_writes(
                         ),
                         "reason": err.to_string(),
                     }));
+                    expansion.pass_over(size)?;
                     continue;
                 }
             };
         if !outcome.is_selected(&normalized) {
+            expansion.pass_over(size)?;
             continue;
         }
         outcome.mark_matched(&normalized);
         outcome.processed_entries += 1;
         let entry_type = entry.header().entry_type();
         if entry_type.is_dir() {
-            writes.push(ArchiveExtractWrite::Directory { path: normalized });
+            expansion.pass_over(size)?;
+            sink(ArchiveExtractWrite::Directory { path: normalized }, outcome)?;
             continue;
         }
         if !entry_type.is_file() {
@@ -5012,29 +5035,34 @@ fn collect_selected_tar_writes(
                 "path": normalized,
                 "reason": "library archive selected extraction rejects non-file archive entries",
             }));
+            expansion.pass_over(size)?;
             continue;
         }
-        let mut entry_bytes = Vec::new();
-        entry.read_to_end(&mut entry_bytes)?;
-        writes.push(ArchiveExtractWrite::File {
-            path: normalized,
-            bytes: entry_bytes,
-        });
+        let entry_bytes =
+            expansion.read(&crate::auth::printable_text(&normalized), size, &mut entry)?;
+        sink(
+            ArchiveExtractWrite::File {
+                path: normalized,
+                bytes: entry_bytes,
+            },
+            outcome,
+        )?;
     }
-    Ok(writes)
+    Ok(())
 }
 
-fn collect_selected_zip_writes(
-    name: &str,
+/// ZIP entries are read by index, so only the selected files expand.
+fn read_selected_zip_entries(
+    expansion: &mut ArchiveExpansion<'_>,
     bytes: Vec<u8>,
     outcome: &mut ArchiveExtractOutcome,
-) -> anyhow::Result<Vec<ArchiveExtractWrite>> {
+    sink: &mut SelectedArchiveSink<'_>,
+) -> anyhow::Result<()> {
     let mut archive =
         ZipArchive::new(Cursor::new(bytes)).map_err(|err| anyhow!("invalid ZIP archive: {err}"))?;
     if archive.len() > MAX_ARCHIVE_EXTRACT_ENTRIES {
-        return Err(too_many_archive_entries(&crate::auth::printable_text(name)));
+        return Err(too_many_archive_entries(expansion.archive));
     }
-    let mut writes = Vec::new();
     for index in 0..archive.len() {
         let mut file = archive
             .by_index(index)
@@ -5059,7 +5087,8 @@ fn collect_selected_zip_writes(
         outcome.mark_matched(&normalized);
         outcome.processed_entries += 1;
         if file.is_dir() {
-            writes.push(ArchiveExtractWrite::Directory { path: normalized });
+            drop(file);
+            sink(ArchiveExtractWrite::Directory { path: normalized }, outcome)?;
             continue;
         }
         if !file.is_file() {
@@ -5069,65 +5098,68 @@ fn collect_selected_zip_writes(
             }));
             continue;
         }
-        let mut entry_bytes = Vec::new();
-        file.read_to_end(&mut entry_bytes)?;
-        writes.push(ArchiveExtractWrite::File {
-            path: normalized,
-            bytes: entry_bytes,
-        });
+        let size = file.size();
+        let entry_bytes =
+            expansion.read(&crate::auth::printable_text(&normalized), size, &mut file)?;
+        drop(file);
+        sink(
+            ArchiveExtractWrite::File {
+                path: normalized,
+                bytes: entry_bytes,
+            },
+            outcome,
+        )?;
     }
-    Ok(writes)
+    Ok(())
 }
 
-/// Each selected entry lands where the start walk allows; one that would
-/// not is listed as blocked, with its path, and nothing is written for it.
-fn apply_selected_archive_writes_to_local(
+/// One selected entry lands where the start walk allows; one that would not
+/// is listed as blocked, with its path, and nothing is written for it.
+fn apply_selected_archive_write_to_local(
     data_dir: &Path,
     principal_id: &str,
     destination: &LibraryTarget,
     rule: &StartWalkRule,
-    writes: Vec<ArchiveExtractWrite>,
+    write: ArchiveExtractWrite,
     policy: ArchiveConflictPolicy,
     outcome: &mut ArchiveExtractOutcome,
 ) -> anyhow::Result<()> {
-    for write in writes {
-        let (path, folder) = match &write {
-            ArchiveExtractWrite::Directory { path } => (path, true),
-            ArchiveExtractWrite::File { path, .. } => (path, false),
-        };
-        let uri = archive_entry_uri(&destination.uri, Path::new(path))?;
-        let allowed = if folder {
-            rule.folder(&uri)
-        } else {
-            rule.file(&uri)
-        };
-        if let Err(err) = allowed {
-            outcome.blocked.push(json!({
-                "path": crate::auth::printable_text(path),
-                "reason": err.to_string(),
+    let (path, folder) = match &write {
+        ArchiveExtractWrite::Directory { path } => (path, true),
+        ArchiveExtractWrite::File { path, .. } => (path, false),
+    };
+    let uri = archive_entry_uri(&destination.uri, Path::new(path))?;
+    let allowed = if folder {
+        rule.folder(&uri)
+    } else {
+        rule.file(&uri)
+    };
+    if let Err(err) = allowed {
+        outcome.blocked.push(json!({
+            "path": crate::auth::printable_text(path),
+            "reason": err.to_string(),
+        }));
+        return Ok(());
+    }
+    match write {
+        ArchiveExtractWrite::Directory { path } => {
+            create_selected_archive_directory(data_dir, principal_id, destination, &path)?;
+            outcome.written.push(json!({
+                "path": path,
+                "uri": uri,
+                "kind": "directory",
             }));
-            continue;
         }
-        match write {
-            ArchiveExtractWrite::Directory { path } => {
-                create_selected_archive_directory(data_dir, principal_id, destination, &path)?;
-                outcome.written.push(json!({
-                    "path": path,
-                    "uri": uri,
-                    "kind": "directory",
-                }));
-            }
-            ArchiveExtractWrite::File { path, bytes } => {
-                write_selected_archive_file(
-                    data_dir,
-                    principal_id,
-                    destination,
-                    &path,
-                    &bytes,
-                    policy,
-                    outcome,
-                )?;
-            }
+        ArchiveExtractWrite::File { path, bytes } => {
+            write_selected_archive_file(
+                data_dir,
+                principal_id,
+                destination,
+                &path,
+                &bytes,
+                policy,
+                outcome,
+            )?;
         }
     }
     Ok(())
@@ -5171,7 +5203,31 @@ async fn extract_archive_entries_to_webspace_destination(
             },
         ));
     }
-    let writes = collect_selected_archive_writes(request.archive_name, bytes, &mut outcome)?;
+    // Spaces write-back sends after reading, so it holds the selected files
+    // in memory, at most MAX_ARCHIVE_SPACES_WRITE_BACK_BYTES of them.
+    let mut writes = Vec::new();
+    let mut held = 0u64;
+    read_selected_archive_entries(
+        request.archive_name,
+        bytes,
+        &mut outcome,
+        &mut |write, _| {
+            if let ArchiveExtractWrite::File { bytes, .. } = &write {
+                held += bytes.len() as u64;
+                if held > MAX_ARCHIVE_SPACES_WRITE_BACK_BYTES {
+                    bail!(
+                        "The files selected in {} are more than {} MiB; Spaces takes up to {} \
+                         MiB from one archive at a time. Select fewer files.",
+                        crate::auth::printable_text(request.archive_name),
+                        MAX_ARCHIVE_SPACES_WRITE_BACK_BYTES / (1024 * 1024),
+                        MAX_ARCHIVE_SPACES_WRITE_BACK_BYTES / (1024 * 1024),
+                    );
+                }
+            }
+            writes.push(write);
+            Ok(())
+        },
+    )?;
     apply_selected_archive_writes_to_webspace(
         data_dir,
         registry,
@@ -5486,41 +5542,60 @@ fn extract_library_archive(
     rule.folder(&destination.uri)?;
 
     let bytes = read_library_file_bytes(data_dir, principal_id, target)?;
+    let archive_display =
+        crate::auth::principal_root_home_relative_path(&destination.localhost_root, &target.uri);
     let archive = WholeArchiveExtract {
         data_dir,
         principal_id,
-        archive_uri: &target.uri,
+        archive: &archive_display,
         destination: &destination,
         rule: &rule,
     };
-    // The first pass checks every entry and writes nothing; the second
-    // writes. A refused archive leaves no folder and no file behind.
-    for write in [false, true] {
-        if write {
-            fs::create_dir_all(&destination.path)?;
+    // The first pass checks every entry against every rule (name, kind,
+    // depth, count, expanded size) and writes nothing.
+    archive.run(name, &bytes, false)?;
+    // The folder is created here, so a read or write failure in the second
+    // pass (a damaged entry, a file where a folder is needed) removes it with
+    // everything written into it.
+    fs::create_dir(&destination.path)?;
+    if let Err(err) = archive.run(name, &bytes, true) {
+        if let Err(cleanup) = fs::remove_dir_all(&destination.path) {
+            bail!(
+                "{err} The partly extracted folder {} could not be removed: {cleanup}",
+                crate::auth::principal_root_home_relative_path(
+                    &destination.localhost_root,
+                    &destination.uri,
+                ),
+            );
         }
-        if name.to_ascii_lowercase().ends_with(".zip") {
-            archive.zip(&bytes, write)?;
-        } else {
-            archive.tar(name, &bytes, write)?;
-        }
+        return Err(err);
     }
     Ok(destination.uri)
 }
 
 /// One whole-archive extraction into a new Library folder. Each entry passes
 /// the entry-name rule, is a file or folder, lands where the start walk
-/// allows, and the archive holds at most `MAX_ARCHIVE_EXTRACT_ENTRIES`
-/// entries (#449). A refusal names the entry or the archive.
+/// allows, the archive holds at most `MAX_ARCHIVE_EXTRACT_ENTRIES` entries,
+/// and it expands within `ArchiveExpansion` (#449). A refusal names the entry
+/// or the archive.
 struct WholeArchiveExtract<'a> {
     data_dir: &'a Path,
     principal_id: &'a str,
-    archive_uri: &'a str,
+    /// Printable, for refusals.
+    archive: &'a str,
     destination: &'a LibraryTarget,
     rule: &'a StartWalkRule,
 }
 
 impl WholeArchiveExtract<'_> {
+    fn run(&self, name: &str, bytes: &[u8], write: bool) -> anyhow::Result<()> {
+        if name.to_ascii_lowercase().ends_with(".zip") {
+            self.zip(bytes, write)
+        } else {
+            self.tar(name, bytes, write)
+        }
+    }
+
     fn tar(&self, name: &str, bytes: &[u8], write: bool) -> anyhow::Result<()> {
         let reader: Box<dyn std::io::Read + '_> = if name.to_ascii_lowercase().ends_with(".tar") {
             Box::new(Cursor::new(bytes))
@@ -5528,9 +5603,10 @@ impl WholeArchiveExtract<'_> {
             Box::new(GzDecoder::new(Cursor::new(bytes)))
         };
         let mut archive = tar::Archive::new(reader);
+        let mut expansion = ArchiveExpansion::new(self.archive);
         for (index, entry) in archive.entries()?.enumerate() {
             if index >= MAX_ARCHIVE_EXTRACT_ENTRIES {
-                return Err(self.too_many_entries());
+                return Err(too_many_archive_entries(self.archive));
             }
             let mut entry = entry?;
             let raw_name = tar_entry_name(&entry)?;
@@ -5542,12 +5618,8 @@ impl WholeArchiveExtract<'_> {
             } else {
                 ArchiveEntryKind::Other
             };
-            let Some(entry_target) = self.entry_target(&raw_name, kind)? else {
-                continue;
-            };
-            if write {
-                self.write_entry(&entry_target, kind, &mut entry)?;
-            }
+            let size = entry.size();
+            self.entry(&mut expansion, &raw_name, kind, size, &mut entry, write)?;
         }
         Ok(())
     }
@@ -5556,8 +5628,9 @@ impl WholeArchiveExtract<'_> {
         let mut archive = ZipArchive::new(Cursor::new(bytes))
             .map_err(|err| anyhow!("invalid ZIP archive: {err}"))?;
         if archive.len() > MAX_ARCHIVE_EXTRACT_ENTRIES {
-            return Err(self.too_many_entries());
+            return Err(too_many_archive_entries(self.archive));
         }
+        let mut expansion = ArchiveExpansion::new(self.archive);
         for index in 0..archive.len() {
             let mut file = archive
                 .by_index(index)
@@ -5573,11 +5646,48 @@ impl WholeArchiveExtract<'_> {
             } else {
                 ArchiveEntryKind::Other
             };
-            let Some(entry_target) = self.entry_target(&raw_name, kind)? else {
-                continue;
-            };
-            if write {
-                self.write_entry(&entry_target, kind, &mut file)?;
+            let size = file.size();
+            self.entry(&mut expansion, &raw_name, kind, size, &mut file, write)?;
+        }
+        Ok(())
+    }
+
+    /// One entry: every rule, then, when `write`, its folder or file. A file
+    /// is admitted by its declared size before any byte is read.
+    fn entry(
+        &self,
+        expansion: &mut ArchiveExpansion<'_>,
+        raw_name: &str,
+        kind: ArchiveEntryKind,
+        size: u64,
+        reader: &mut impl std::io::Read,
+        write: bool,
+    ) -> anyhow::Result<()> {
+        let Some(entry_target) = self.entry_target(raw_name, kind)? else {
+            return expansion.pass_over(size);
+        };
+        let shown = crate::auth::printable_text(raw_name);
+        match kind {
+            ArchiveEntryKind::Folder => {
+                expansion.pass_over(size)?;
+                if write {
+                    fs::create_dir_all(&entry_target.path)?;
+                }
+            }
+            _ if !write => expansion.admit(&shown, size)?,
+            _ => {
+                let entry_bytes = expansion.read(&shown, size, reader)?;
+                if let Some(parent) = entry_target.path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                crate::auth::write_principal_root_object(
+                    self.data_dir,
+                    self.principal_id,
+                    &entry_target.localhost_root,
+                    &entry_target.uri,
+                    &entry_target.path,
+                    &entry_bytes,
+                )?;
             }
         }
         Ok(())
@@ -5604,38 +5714,6 @@ impl WholeArchiveExtract<'_> {
         }
         library_target(self.data_dir, self.principal_id, &entry_uri).map(Some)
     }
-
-    fn write_entry(
-        &self,
-        entry_target: &LibraryTarget,
-        kind: ArchiveEntryKind,
-        entry: &mut impl std::io::Read,
-    ) -> anyhow::Result<()> {
-        if kind == ArchiveEntryKind::Folder {
-            fs::create_dir_all(&entry_target.path)?;
-            return Ok(());
-        }
-        let mut entry_bytes = Vec::new();
-        entry.read_to_end(&mut entry_bytes)?;
-        if let Some(parent) = entry_target.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        crate::auth::write_principal_root_object(
-            self.data_dir,
-            self.principal_id,
-            &entry_target.localhost_root,
-            &entry_target.uri,
-            &entry_target.path,
-            &entry_bytes,
-        )
-    }
-
-    fn too_many_entries(&self) -> anyhow::Error {
-        too_many_archive_entries(&crate::auth::principal_root_home_relative_path(
-            &self.destination.localhost_root,
-            self.archive_uri,
-        ))
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5648,9 +5726,80 @@ enum ArchiveEntryKind {
 /// `archive` is already printable.
 fn too_many_archive_entries(archive: &str) -> anyhow::Error {
     anyhow!(
-        "{archive} holds more than {MAX_ARCHIVE_EXTRACT_ENTRIES} entries; Library extracts at \
-         most {MAX_ARCHIVE_EXTRACT_ENTRIES} from one archive, so nothing was extracted."
+        "{archive} holds more than {MAX_ARCHIVE_EXTRACT_ENTRIES} entries; Library extracts from \
+         archives of up to {MAX_ARCHIVE_EXTRACT_ENTRIES} entries."
     )
+}
+
+/// What one archive expands to while a reader passes over it (#449): each
+/// file kept is at most `MAX_ARCHIVE_ENTRY_BYTES`, and every entry passed
+/// over or kept adds up to at most `MAX_ARCHIVE_EXPANDED_BYTES`. Sizes are
+/// checked as the archive declares them, before any byte is read, and again
+/// as bytes arrive, so a size that lies cannot allocate more.
+struct ArchiveExpansion<'a> {
+    /// Printable, for refusals.
+    archive: &'a str,
+    bytes: u64,
+}
+
+impl<'a> ArchiveExpansion<'a> {
+    fn new(archive: &'a str) -> Self {
+        Self { archive, bytes: 0 }
+    }
+
+    /// Bytes the reader expands to pass over an entry it does not keep.
+    fn pass_over(&mut self, size: u64) -> anyhow::Result<()> {
+        self.bytes = self.bytes.saturating_add(size);
+        if self.bytes > MAX_ARCHIVE_EXPANDED_BYTES {
+            bail!(
+                "{} would be more than {} MiB once extracted; Library extracts up to {} MiB from \
+                 one archive.",
+                self.archive,
+                MAX_ARCHIVE_EXPANDED_BYTES / (1024 * 1024),
+                MAX_ARCHIVE_EXPANDED_BYTES / (1024 * 1024),
+            );
+        }
+        Ok(())
+    }
+
+    /// A file entry to be kept, by its declared size. `entry` is printable.
+    fn admit(&mut self, entry: &str, declared: u64) -> anyhow::Result<()> {
+        if declared > MAX_ARCHIVE_ENTRY_BYTES {
+            return Err(self.entry_too_large(entry));
+        }
+        self.pass_over(declared)
+    }
+
+    /// Reads a kept file entry: admitted by its declared size first, then
+    /// read at most one byte past the limit.
+    fn read(
+        &mut self,
+        entry: &str,
+        declared: u64,
+        reader: &mut impl std::io::Read,
+    ) -> anyhow::Result<Vec<u8>> {
+        self.admit(entry, declared)?;
+        let mut bytes = Vec::new();
+        reader
+            .take(MAX_ARCHIVE_ENTRY_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        let actual = bytes.len() as u64;
+        if actual > MAX_ARCHIVE_ENTRY_BYTES {
+            return Err(self.entry_too_large(entry));
+        }
+        self.pass_over(actual.saturating_sub(declared))?;
+        Ok(bytes)
+    }
+
+    fn entry_too_large(&self, entry: &str) -> anyhow::Error {
+        anyhow!(
+            "{entry} in {} would be more than {} MiB once extracted; Library extracts files of up \
+             to {} MiB from an archive.",
+            self.archive,
+            MAX_ARCHIVE_ENTRY_BYTES / (1024 * 1024),
+            MAX_ARCHIVE_ENTRY_BYTES / (1024 * 1024),
+        )
+    }
 }
 
 fn archive_entry_uri(destination_uri: &str, path: &Path) -> anyhow::Result<String> {
@@ -6702,11 +6851,12 @@ fn move_library_object(
     if to.path.exists() {
         bail!("library destination already exists");
     }
-    StartWalkRule::new(data_dir, &to.localhost_root).tree(&from.path, &to.uri)?;
+    let rule = StartWalkRule::new(data_dir, &to.localhost_root);
+    rule.tree(&from.path, &to.uri)?;
     if from.path.is_dir() {
-        move_library_directory(data_dir, principal_id, &from, &to)?;
+        move_library_directory(data_dir, principal_id, &rule, &from, &to)?;
     } else {
-        move_library_file(data_dir, principal_id, &from, &to)?;
+        move_library_file(data_dir, principal_id, &rule, &from, &to)?;
     }
     Ok(())
 }
@@ -6725,21 +6875,27 @@ fn copy_library_object(
     if to.path.exists() {
         bail!("library destination already exists");
     }
-    StartWalkRule::new(data_dir, &to.localhost_root).tree(&from.path, &to.uri)?;
+    let rule = StartWalkRule::new(data_dir, &to.localhost_root);
+    rule.tree(&from.path, &to.uri)?;
     if from.path.is_dir() {
-        copy_library_directory(data_dir, principal_id, &from, &to)?;
+        copy_library_directory(data_dir, principal_id, &rule, &from, &to)?;
     } else {
-        copy_library_file(data_dir, principal_id, &from, &to)?;
+        copy_library_file(data_dir, principal_id, &rule, &from, &to)?;
     }
     Ok(())
 }
 
+/// The copy and move writers check every path they create with `rule`, so a
+/// file or folder added to the source after `StartWalkRule::tree` cannot land
+/// deeper than Home starts with (#449).
 fn copy_library_directory(
     data_dir: &Path,
     principal_id: &str,
+    rule: &StartWalkRule,
     from: &LibraryTarget,
     to: &LibraryTarget,
 ) -> anyhow::Result<()> {
+    rule.folder(&to.uri)?;
     fs::create_dir_all(&to.path)?;
     for entry in fs::read_dir(&from.path)? {
         let entry = entry?;
@@ -6749,9 +6905,9 @@ fn copy_library_directory(
         let child_from = library_target(data_dir, principal_id, &child_from_uri)?;
         let child_to = library_target(data_dir, principal_id, &child_to_uri)?;
         if child_from.path.is_dir() {
-            copy_library_directory(data_dir, principal_id, &child_from, &child_to)?;
+            copy_library_directory(data_dir, principal_id, rule, &child_from, &child_to)?;
         } else {
-            copy_library_file(data_dir, principal_id, &child_from, &child_to)?;
+            copy_library_file(data_dir, principal_id, rule, &child_from, &child_to)?;
         }
     }
     Ok(())
@@ -6760,9 +6916,11 @@ fn copy_library_directory(
 fn copy_library_file(
     data_dir: &Path,
     principal_id: &str,
+    rule: &StartWalkRule,
     from: &LibraryTarget,
     to: &LibraryTarget,
 ) -> anyhow::Result<()> {
+    rule.file(&to.uri)?;
     let bytes = read_library_file_bytes(data_dir, principal_id, from)?;
     if let Some(parent) = to.path.parent() {
         fs::create_dir_all(parent)?;
@@ -6781,9 +6939,11 @@ fn copy_library_file(
 fn move_library_directory(
     data_dir: &Path,
     principal_id: &str,
+    rule: &StartWalkRule,
     from: &LibraryTarget,
     to: &LibraryTarget,
 ) -> anyhow::Result<()> {
+    rule.folder(&to.uri)?;
     fs::create_dir_all(&to.path)?;
     for entry in fs::read_dir(&from.path)? {
         let entry = entry?;
@@ -6793,9 +6953,9 @@ fn move_library_directory(
         let child_from = library_target(data_dir, principal_id, &child_from_uri)?;
         let child_to = library_target(data_dir, principal_id, &child_to_uri)?;
         if child_from.path.is_dir() {
-            move_library_directory(data_dir, principal_id, &child_from, &child_to)?;
+            move_library_directory(data_dir, principal_id, rule, &child_from, &child_to)?;
         } else {
-            move_library_file(data_dir, principal_id, &child_from, &child_to)?;
+            move_library_file(data_dir, principal_id, rule, &child_from, &child_to)?;
         }
     }
     fs::remove_dir(&from.path)?;
@@ -6805,9 +6965,11 @@ fn move_library_directory(
 fn move_library_file(
     data_dir: &Path,
     principal_id: &str,
+    rule: &StartWalkRule,
     from: &LibraryTarget,
     to: &LibraryTarget,
 ) -> anyhow::Result<()> {
+    rule.file(&to.uri)?;
     let bytes = read_library_file_bytes(data_dir, principal_id, from)?;
     if let Some(parent) = to.path.parent() {
         fs::create_dir_all(parent)?;
@@ -7372,6 +7534,70 @@ mod tests {
 
     use super::*;
 
+    /// #449: a folder added to a copy or move source after the tree check
+    /// is refused by the writer itself.
+    #[test]
+    fn copy_and_move_writers_refuse_a_folder_added_after_the_tree_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:library-late-child";
+        let root = crate::auth::principal_localhost_root(principal_id);
+        let rule = StartWalkRule::new(dir.path(), &root);
+        let mut parent = format!("{root}/Documents");
+        for level in 1..=14 {
+            parent.push_str(&format!("/{level}"));
+        }
+        for writer in ["copy", "move"] {
+            let from = library_target(
+                dir.path(),
+                principal_id,
+                &format!("{root}/Documents/Source-{writer}"),
+            )
+            .unwrap();
+            let to =
+                library_target(dir.path(), principal_id, &format!("{parent}/{writer}")).unwrap();
+            fs::create_dir_all(&from.path).unwrap();
+            // The empty source lands 15 folders deep: allowed.
+            rule.tree(&from.path, &to.uri).unwrap();
+            // A folder added now would land 16 deep.
+            fs::create_dir(from.path.join("late")).unwrap();
+            let result = if writer == "copy" {
+                copy_library_directory(dir.path(), principal_id, &rule, &from, &to)
+            } else {
+                move_library_directory(dir.path(), principal_id, &rule, &from, &to)
+            };
+            let message = result.unwrap_err().to_string();
+            assert!(
+                message.ends_with(&format!(
+                    "{writer}/late was not saved: it would be more than 16 folders deep in \
+                     Documents, and Home does not start with folders that deep. Save it fewer \
+                     folders down."
+                )),
+                "{writer}: {message}"
+            );
+            assert!(!to.path.join("late").exists(), "{writer}");
+            assert!(from.path.join("late").is_dir(), "{writer}");
+        }
+    }
+
+    /// #449: an entry larger than its declared size is read at most one byte
+    /// past the limit, then refused.
+    #[test]
+    fn archive_expansion_stops_reading_an_entry_larger_than_it_declares() {
+        let mut expansion = ArchiveExpansion::new("Lies.zip");
+        let mut body =
+            std::io::Read::take(std::io::repeat(0), MAX_ARCHIVE_ENTRY_BYTES + 10);
+        let message = expansion
+            .read("lie.bin", 1, &mut body)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            message,
+            "lie.bin in Lies.zip would be more than 100 MiB once extracted; Library extracts \
+             files of up to 100 MiB from an archive."
+        );
+        assert_eq!(body.limit(), 9);
+    }
+
     #[test]
     fn archive_entry_path_refuses_root_drive_and_climb_on_every_platform() {
         let refused = [
@@ -7491,8 +7717,17 @@ mod tests {
 
                 let requested = BTreeSet::from([entry_name.to_string(), leaf.to_string()]);
                 let mut outcome = ArchiveExtractOutcome::new(requested);
-                let writes =
-                    collect_selected_archive_writes(archive_name, bytes, &mut outcome).unwrap();
+                let mut writes = Vec::new();
+                read_selected_archive_entries(
+                    archive_name,
+                    bytes,
+                    &mut outcome,
+                    &mut |write, _| {
+                        writes.push(write);
+                        Ok(())
+                    },
+                )
+                .unwrap();
                 if !writes.is_empty()
                     || outcome.blocked.len() != 1
                     || outcome.blocked[0]["reason"] != reason

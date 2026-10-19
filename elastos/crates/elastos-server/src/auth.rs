@@ -7500,38 +7500,70 @@ impl PrincipalRootWalk<'_> {
 /// stop the next start. `folder` is false for a file, which sits in the
 /// folder above it. The walk's other rules need no writer check: writers name
 /// objects with UTF-8 text and create only regular files and folders.
+///
+/// The rule applies to the folder the write lands in, not to its spelling:
+/// empty segments are dropped as `rooted_localhost_fs_path` drops them, and
+/// segments are compared case-insensitively, so `Root//documents/…` on a
+/// case-insensitive volume counts as `Root/Documents/…`. On a case-sensitive
+/// volume that also limits a sibling folder that differs only in case.
 pub(crate) fn refuse_principal_root_depth_breach(
     localhost_root: &str,
     inventory: &[PrincipalRootProtectedObjectDeclarationV1],
     object_uri: &str,
     folder: bool,
 ) -> anyhow::Result<()> {
+    let object = canonical_localhost_segments(object_uri);
     for declaration in inventory {
         let PrincipalRootProtectedObjectDeclarationV1::Root { root_uri } = declaration else {
             continue;
         };
-        let Some(rest) = object_uri.strip_prefix(root_uri.as_str()) else {
-            continue;
-        };
-        if !rest.is_empty() && !rest.starts_with('/') {
+        let root = canonical_localhost_segments(root_uri);
+        if object.len() < root.len() || object[..root.len()] != root[..] {
             continue;
         }
-        let below = rest.split('/').filter(|part| !part.is_empty()).count();
+        let below = object.len() - root.len();
         let depth = if folder {
             below
         } else {
             below.saturating_sub(1)
         };
         if depth >= MAX_PRINCIPAL_ROOT_INVENTORY_DEPTH {
+            let shown = format!(
+                "localhost://{}",
+                object_uri
+                    .strip_prefix("localhost://")
+                    .unwrap_or(object_uri)
+                    .split('/')
+                    .filter(|segment| !segment.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            );
             return Err(anyhow!(
                 "{} was not saved: it would be more than 16 folders deep in {}, and Home does not \
                  start with folders that deep. Save it fewer folders down.",
-                principal_root_home_relative_path(localhost_root, object_uri),
+                principal_root_home_relative_path(localhost_root, &shown),
                 principal_root_home_relative_path(localhost_root, root_uri),
             ));
         }
     }
     Ok(())
+}
+
+/// A localhost URI's non-empty segments, case-folded (upper, then lower, so
+/// `ſ` and `K` fold as a case-insensitive volume folds them).
+fn canonical_localhost_segments(uri: &str) -> Vec<String> {
+    uri.strip_prefix("localhost://")
+        .unwrap_or(uri)
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            segment
+                .chars()
+                .flat_map(char::to_uppercase)
+                .flat_map(char::to_lowercase)
+                .collect()
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
