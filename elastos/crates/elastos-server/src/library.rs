@@ -5568,11 +5568,29 @@ fn extract_library_archive(
     // depth, count, expanded size) and writes nothing, so a refused archive
     // writes nothing.
     archive.run(name, &bytes, false)?;
-    // The second pass writes. A read or write failure in it (a damaged
-    // entry, a file where a folder is needed) stops the extraction; what was
-    // extracted before stays, as removing it could remove what another
-    // request saved in the folder meanwhile.
-    fs::create_dir_all(&destination.path)?;
+    #[cfg(test)]
+    if let Some(hook) = EXTRACT_BEFORE_WRITE_HOOK.with(|hook| hook.borrow_mut().take()) {
+        hook(&destination.path);
+    }
+    // The second pass writes, into a folder it creates now and only if it
+    // does not exist, so it never writes into a folder another request made
+    // meanwhile. A read or write failure in it (a damaged entry, a file where
+    // a folder is needed) stops the extraction; what was extracted before
+    // stays, as removing it could remove what another request saved in the
+    // folder meanwhile.
+    if let Err(err) = fs::create_dir(&destination.path) {
+        if err.kind() == std::io::ErrorKind::AlreadyExists {
+            bail!(
+                "{} appeared while the archive was being checked, so nothing was extracted. \
+                 Try again.",
+                crate::auth::principal_root_home_relative_path(
+                    &destination.localhost_root,
+                    &destination.uri,
+                ),
+            );
+        }
+        return Err(err.into());
+    }
     if let Err(err) = archive.run(name, &bytes, true) {
         bail!(
             "Extraction stopped: {}. Files extracted before this stay in {}.",
@@ -5584,6 +5602,17 @@ fn extract_library_archive(
         );
     }
     Ok(destination.uri)
+}
+
+#[cfg(test)]
+type ExtractBeforeWriteHook = Box<dyn FnOnce(&Path)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Runs once between the checking pass and the writing pass of a whole
+    /// extraction, with the destination folder's path.
+    static EXTRACT_BEFORE_WRITE_HOOK: std::cell::RefCell<Option<ExtractBeforeWriteHook>> =
+        std::cell::RefCell::new(None);
 }
 
 /// One whole-archive extraction into a new Library folder. Each entry passes
@@ -5899,9 +5928,10 @@ struct TarInputBudget {
 impl TarInputBudget {
     /// An entry from the archive's iterator. A yielded entry opens the
     /// budget for its body and the next header; an error at a limit is
-    /// replaced by the named refusal. A GNU sparse entry is refused: its
-    /// size is the logical file size, not the bytes the archive stores, so
-    /// it cannot size the budget. `archive` is printable.
+    /// replaced by the named refusal. A sparse entry, GNU (`S`) or PAX
+    /// (`GNU.sparse.*` attributes), is refused: its size is not the bytes the
+    /// archive stores, and this reader does not rebuild its contents.
+    /// `archive` is printable.
     fn entry<'e, T>(
         &self,
         archive: &str,
@@ -5911,10 +5941,13 @@ impl TarInputBudget {
         T: std::io::Read,
     {
         match entry {
-            Ok(entry) if entry.header().entry_type().is_gnu_sparse() => Err(anyhow!(
-                "{archive} holds a sparse file entry; Library does not open archives like that."
-            )),
-            Ok(entry) => {
+            Ok(mut entry) => {
+                if is_sparse_tar_entry(&mut entry)? {
+                    bail!(
+                        "{archive} holds a sparse file entry; Library does not open archives \
+                         like that."
+                    );
+                }
                 self.entry_left.set(
                     entry
                         .size()
@@ -5935,6 +5968,21 @@ impl TarInputBudget {
             }),
         }
     }
+}
+
+fn is_sparse_tar_entry<T: std::io::Read>(entry: &mut tar::Entry<'_, T>) -> anyhow::Result<bool> {
+    if entry.header().entry_type().is_gnu_sparse() {
+        return Ok(true);
+    }
+    let Some(extensions) = entry.pax_extensions()? else {
+        return Ok(false);
+    };
+    for extension in extensions {
+        if extension?.key_bytes().starts_with(b"GNU.sparse.") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 struct BoundedTarInput<'a> {
@@ -7889,6 +7937,138 @@ mod tests {
         );
         assert_eq!(selected.unwrap_err().to_string(), refusal);
         assert_eq!(written, 0);
+    }
+
+    /// #449: a PAX sparse entry (a regular file header with `GNU.sparse.*`
+    /// attributes) is refused by every tar reader, as a GNU sparse one is.
+    #[test]
+    fn tar_readers_refuse_a_pax_sparse_entry() {
+        let pax_record = |key: &str, value: &str| {
+            let body = format!(" {key}={value}\n");
+            let mut len = body.len() + 1;
+            while format!("{len}{body}").len() != len {
+                len += 1;
+            }
+            format!("{len}{body}")
+        };
+        let records = [
+            pax_record("GNU.sparse.major", "1"),
+            pax_record("GNU.sparse.minor", "0"),
+            pax_record("GNU.sparse.name", "hole.bin"),
+            pax_record("GNU.sparse.realsize", "1048576"),
+        ]
+        .concat();
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut pax = tar::Header::new_ustar();
+        pax.set_entry_type(tar::EntryType::XHeader);
+        pax.set_path("PaxHeaders/hole.bin").unwrap();
+        pax.set_size(records.len() as u64);
+        pax.set_mode(0o644);
+        pax.set_cksum();
+        builder.append(&pax, records.as_bytes()).unwrap();
+        let mut file = tar::Header::new_ustar();
+        file.set_path("GNUSparseFile.0/hole.bin").unwrap();
+        file.set_size(4);
+        file.set_mode(0o644);
+        file.set_cksum();
+        builder.append(&file, &b"0\n\n\n"[..]).unwrap();
+        let bytes = builder.into_inner().unwrap();
+        let refusal =
+            "Pax.tar holds a sparse file entry; Library does not open archives like that.";
+
+        let listed = list_tar_archive_entries("Pax.tar", bytes.clone());
+        assert_eq!(listed.unwrap_err().to_string(), refusal);
+        let previewed =
+            preview_tar_archive_entry("Pax.tar", bytes.clone(), "GNUSparseFile.0/hole.bin");
+        assert_eq!(previewed.err().unwrap().to_string(), refusal);
+        let mut outcome =
+            ArchiveExtractOutcome::new(BTreeSet::from(["GNUSparseFile.0/hole.bin".to_string()]));
+        let mut written = 0;
+        let selected = read_selected_archive_entries(
+            "Pax.tar",
+            bytes.clone(),
+            None,
+            &mut outcome,
+            &mut |_, _| {
+                written += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(selected.unwrap_err().to_string(), refusal);
+        assert_eq!(written, 0);
+
+        let dir = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:library-pax-sparse";
+        let root = crate::auth::principal_localhost_root(principal_id);
+        let archive_uri = format!("{root}/Documents/Pax.tar");
+        write_library_file_bytes(
+            dir.path(),
+            principal_id,
+            &archive_uri,
+            None,
+            None,
+            false,
+            &bytes,
+        )
+        .unwrap();
+        let target = library_target(dir.path(), principal_id, &archive_uri).unwrap();
+        let whole = extract_library_archive(dir.path(), principal_id, &target);
+        assert_eq!(
+            whole.unwrap_err().to_string(),
+            "Documents/Pax.tar holds a sparse file entry; Library does not open archives like \
+             that."
+        );
+    }
+
+    /// #449: a folder made at the extraction's destination by another
+    /// request after the check refuses the extraction; nothing is written
+    /// and the other request's file stays.
+    #[test]
+    fn whole_extraction_refuses_a_destination_made_after_the_check() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:library-destination-race";
+        let root = crate::auth::principal_localhost_root(principal_id);
+        let archive_uri = format!("{root}/Documents/Pack.zip");
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file("ok.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"extracted").unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        write_library_file_bytes(
+            dir.path(),
+            principal_id,
+            &archive_uri,
+            None,
+            None,
+            false,
+            &bytes,
+        )
+        .unwrap();
+        let target = library_target(dir.path(), principal_id, &archive_uri).unwrap();
+
+        EXTRACT_BEFORE_WRITE_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(|destination: &Path| {
+                fs::create_dir(destination).unwrap();
+                fs::write(destination.join("ok.txt"), b"theirs").unwrap();
+            }));
+        });
+        let message = extract_library_archive(dir.path(), principal_id, &target)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            message,
+            "Documents/Pack appeared while the archive was being checked, so nothing was \
+             extracted. Try again."
+        );
+        let theirs = library_target(
+            dir.path(),
+            principal_id,
+            &format!("{root}/Documents/Pack/ok.txt"),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&theirs.path).unwrap(), b"theirs");
     }
 
     #[test]
