@@ -194,7 +194,7 @@ async function run() {
     assert(reviewFilter.rowCount === 1, "review filter must use only current attention entries", reviewFilter);
     assert(reviewFilter.detailTitle === "Contact request", "review filter must keep the matching detail entry", reviewFilter);
 
-    await page.getByRole("button", { name: "Pending" }).click();
+    await page.getByRole("button", { name: "All, 2 pending requests", exact: true }).click();
     await page.getByRole("option").nth(1).click();
     const secondSelection = await page.evaluate(() => ({
       rowCount: document.querySelectorAll("#entry-rows .entry-row").length,
@@ -271,7 +271,7 @@ async function run() {
       rowCount: document.querySelectorAll("#entry-rows .entry-row").length,
     }));
     assert(phoneReview.listTitle === "Needs Review" && phoneReview.rowCount === 1, "phone review filter must narrow the list", phoneReview);
-    await page.getByRole("button", { name: "Pending" }).click();
+    await page.getByRole("button", { name: /^All, \d+ pending requests?$/ }).click();
     await noHorizontalOverflow(page, "phone");
     await page.screenshot({ path: "/tmp/inbox-phone-390x844.png" });
     await setPhoneFormFactor(page, false);

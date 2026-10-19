@@ -581,7 +581,7 @@
       }
     }
 
-    /* Phone stage: the app menu (All Pending / Needs Review) is not on the
+    /* Phone stage: the app menu (All / Needs Review) is not on the
        phone bar, so the filters return as a two-segment row above the list.
        The rail stays a bare list. */
     html[data-inbox-presentation="window"][data-el-form-factor="phone"] .shell {
@@ -636,9 +636,9 @@
     <aside class="sidebar">
       <div class="sidebar-title">Inbox</div>
       <div class="summary-stack" role="group" aria-label="Inbox filters">
-        <button class="summary-card active" type="button" data-filter="all" aria-pressed="true">
-          <strong id="pending-count">0</strong>
-          <span>Pending</span>
+        <button class="summary-card active" type="button" data-filter="all" aria-pressed="true" aria-label="All, 0 pending requests">
+          <strong id="pending-count" title="Pending requests">0</strong>
+          <span>All</span>
         </button>
         <button class="summary-card" type="button" data-filter="review" aria-pressed="false">
           <strong id="review-count">0</strong>
@@ -650,14 +650,14 @@
     <main class="main">
       <div class="toolbar">
         <div class="toolbar-title">
-          <h1 id="list-title">Requests</h1>
+          <h1 id="list-title">All</h1>
           <p id="status-text" class="status">Loading...</p>
         </div>
         <button id="refresh" class="action-secondary" type="button">Refresh</button>
       </div>
 
       <div id="entry-split" class="entry-split">
-        <section id="entry-rows" class="entry-rows" role="listbox" aria-label="Requests"></section>
+        <section id="entry-rows" class="entry-rows" role="listbox" aria-label="Inbox entries"></section>
         <section id="entry-detail" class="entry-detail" aria-live="polite"></section>
       </div>
       <section id="empty-state" class="empty-state hidden">
