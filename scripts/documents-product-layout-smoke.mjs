@@ -785,31 +785,49 @@ async function run() {
         await frame.locator('.document-list-item[data-doc-did="doc-beta"]').click();
         await frame.waitForFunction(() => document.getElementById("title-input")?.value === "Beta");
         const webLink = "https://example.invalid/documents-link?from=preview";
+        // Same origin included: a native href would replace the Documents
+        // frame, which then cannot answer Home's close request.
+        const sameOriginLink = `${new URL(frame.url()).origin}/favicon.ico`;
         // Spellings a browser would resolve to another host ("\" reads as
-        // "/", tabs are dropped) must not keep a native href.
+        // "/", tabs are dropped) are refused; relative, elastos:// and
+        // localhost:// links have no handler in the preview and are text.
         const offOriginLinks = ["//example.invalid/a", "/\\example.invalid/b", "\\\\example.invalid/c", "/\t/example.invalid/d"];
-        await frame.locator("#editor").fill(`[Example](${webLink}) and [Section](#notes) `
-          + offOriginLinks.map((href, index) => `[Escape ${index}](${href})`).join(" "));
+        const textLinks = ["/apps/documents/", "./other", "../other", "elastos://bafyexample", "localhost://ElastOS/Documents/x"];
+        await frame.locator("#editor").fill(`[Example](${webLink}) [Same](${sameOriginLink}) [Section](#notes-1) `
+          + offOriginLinks.map((href, index) => `[Escape ${index}](${href})`).join(" ") + " "
+          + textLinks.map((href, index) => `[Text ${index}](${href})`).join(" ")
+          + "\n\n" + Array.from({ length: 80 }, (_, index) => `Filler line ${index}`).join("\n\n") + "\n\n# Notes\n\nEnd.");
         await frame.locator("#mode-read").click();
         const frameUrl = frame.url();
+        const framePath = () => { const url = new URL(frame.url()); return url.origin + url.pathname + url.search; };
+        const pathBefore = framePath();
         const pagesBefore = browser.contexts().reduce((count, context) => count + context.pages().length, 0);
-        const link = frame.locator('#preview a[data-open-external]');
-        assert(await link.count() === 1 && await link.getAttribute("href") === null
-          && await link.getAttribute("data-open-external") === webLink,
-          "A preview web link inside Home must be one navigation-free control with no href.");
+        const controls = frame.locator("#preview a[data-open-external]");
+        assert(JSON.stringify(await controls.evaluateAll((nodes) => nodes.map((node) => [node.getAttribute("href"), node.dataset.openExternal])))
+          === JSON.stringify([[null, webLink], [null, sameOriginLink]]),
+          "Every preview web link inside Home, same origin included, must be a navigation-free control with no href.");
+        const hrefs = await frame.evaluate(() => [...document.querySelectorAll("#preview a[href]")].map((anchor) => anchor.getAttribute("href")));
+        assert(hrefs.length === 1 + offOriginLinks.length && hrefs.every((href) => href.startsWith("#")),
+          `Inside Home only in-document anchors may keep an href. Got ${JSON.stringify(hrefs)}`);
+        for (let index = 0; index < textLinks.length; index += 1) {
+          assert(await frame.getByText(`Text ${index}`, { exact: true }).evaluate((node) => !node.closest("a")),
+            `Inside Home ${textLinks[index]} must be plain text.`);
+        }
         const homeRequests = () => linkPage.evaluate(() => window.homeMessages
           .filter((message) => message?.type === "home:open-external"));
+        const link = controls.first();
         await link.click({ button: "middle" });
         await link.click();
         await link.focus();
         await linkPage.keyboard.press("Enter");
         await linkPage.keyboard.press("Space");
+        await controls.nth(1).click();
         await linkPage.waitForTimeout(200);
-        const expected = withoutOrigin ? [] : Array.from({ length: 3 }, () =>
-          ({ type: "home:open-external", url: webLink, homeToken: "documents-link-token" }));
+        const request = (url) => ({ type: "home:open-external", url, homeToken: "documents-link-token" });
+        const expected = withoutOrigin ? [] : [request(webLink), request(webLink), request(webLink), request(sameOriginLink)];
         const requests = await homeRequests();
         assert(JSON.stringify(requests) === JSON.stringify(expected),
-          `Documents preview link (click, Enter, Space; middle-click sends nothing) must send ${expected.length} exact Home requests. Got ${JSON.stringify(requests)}`);
+          `Documents preview links (click, Enter, Space; middle-click sends nothing) must send ${expected.length} exact Home requests. Got ${JSON.stringify(requests)}`);
         if (withoutOrigin) {
           assert(await frame.locator("#status-text").textContent() === "Open Documents from Home to open web links.",
             "Without the Home bridge a preview web link must say why it did not open.");
@@ -817,22 +835,25 @@ async function run() {
         const pagesAfter = browser.contexts().reduce((count, context) => count + context.pages().length, 0);
         assert(frame.url() === frameUrl && pagesAfter === pagesBefore,
           `Documents preview link navigated (${frame.url()}) or opened a page (${pagesBefore} -> ${pagesAfter}).`);
-        await frame.locator('#preview a[href="#notes"]').click();
-        assert((await homeRequests()).length === expected.length, "An in-document anchor must stay inside Documents.");
-        const hrefOrigins = await frame.evaluate(() => [...document.querySelectorAll("#preview a[href]")]
-          .map((anchor) => new URL(anchor.href).origin === location.origin));
-        assert(hrefOrigins.length === 1 + offOriginLinks.length && hrefOrigins.every(Boolean),
-          `Every preview href inside Home must stay on the document's origin. Got ${JSON.stringify(hrefOrigins)}`);
-        const framePath = () => { const url = new URL(frame.url()); return url.origin + url.pathname + url.search; };
-        const pathBefore = framePath();
         for (let index = 0; index < offOriginLinks.length; index += 1) {
           await frame.getByText(`Escape ${index}`, { exact: true }).click();
         }
+        for (let index = 0; index < textLinks.length; index += 1) {
+          await frame.getByText(`Text ${index}`, { exact: true }).click();
+        }
+        // The in-document anchor still scrolls to its heading.
+        const notesTop = () => frame.evaluate(() => document.getElementById("notes-1").getBoundingClientRect().top);
+        const topBefore = await notesTop();
+        await frame.locator('#preview a[href="#notes-1"]').click();
         await linkPage.waitForTimeout(200);
+        const topAfter = await notesTop();
+        const viewportHeight = await frame.evaluate(() => window.innerHeight);
+        assert(topBefore > viewportHeight && topAfter >= 0 && topAfter < viewportHeight,
+          `The in-document anchor did not scroll to its heading (${topBefore} -> ${topAfter}).`);
         const pagesAtEnd = browser.contexts().reduce((count, context) => count + context.pages().length, 0);
         assert(framePath() === pathBefore && pagesAtEnd === pagesBefore
           && (await homeRequests()).length === expected.length,
-          `An off-origin spelling navigated Documents (${frame.url()}), opened a page or asked Home.`);
+          `A refused or text link navigated Documents (${frame.url()}), opened a page or asked Home.`);
       } finally {
         await linkPage.close();
       }

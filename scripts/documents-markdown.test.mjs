@@ -9,7 +9,7 @@ const source = readFileSync(new URL("../capsules/documents/browser/documents.js"
 const start = source.indexOf("function escapeHtml(");
 const end = source.indexOf("function shortCid(", start);
 assert.ok(start >= 0 && end > start, "Documents Markdown renderer must exist");
-const renderer = vm.runInNewContext(source.slice(start, end) + "\n({ renderMarkdownDocument, renderInlineMarkdown, markdownHref })", { URL });
+const renderer = vm.runInNewContext(source.slice(start, end) + "\n({ renderMarkdownDocument, renderInlineMarkdown, markdownHref })");
 // Spellings browsers resolve to another host: a backslash reads as "/" and
 // tabs and newlines are dropped.
 const offOriginSpellings = [
@@ -123,8 +123,8 @@ test("safe Markdown retains formatting, tasks, links, tables, and fence language
   assertSafeHtml(html);
 });
 
-test("inside Home only same-origin paths and anchors keep an href; web links ask Home (#436)", () => {
-  const options = { homeBaseUrl: "https://documents.test/apps/documents/?home_origin=x" };
+test("inside Home only '#' anchors keep an href; every web link asks Home; other links are text (#436)", () => {
+  const options = { insideHome: true };
   const markdown = "# [Head](https://example.test/h)\n\n- **[item](http://example.test/?a=1&b=2)**\n\n| [cell](https://example.test/c) |\n| --- |\n| x |";
   const { html } = renderer.renderMarkdownDocument(markdown, options);
   assert.doesNotMatch(html, /href=/);
@@ -134,9 +134,14 @@ test("inside Home only same-origin paths and anchors keep an href; web links ask
   // A hostile address stays inside the quoted attribute value.
   assert.equal(renderer.renderInlineMarkdown('[x](https://example.test/" onmouseover="alert)', options),
     '<a data-open-external="https://example.test/&quot; onmouseover=&quot;alert" role="link" tabindex="0">x</a>');
-  for (const href of ["#notes", "elastos://document/example", "localhost://example", "/document/example", "./example", "../example", "https://documents.test/other"]) {
-    assert.equal(renderer.renderInlineMarkdown("[label](" + href + ")", options),
-      '<a href="' + href + '" rel="noopener noreferrer">label</a>');
+  // Same origin included: a native href would replace the Documents frame.
+  assert.equal(renderer.renderInlineMarkdown("[health](https://documents.test/api/health)", options),
+    '<a data-open-external="https://documents.test/api/health" role="link" tabindex="0">health</a>');
+  assert.equal(renderer.renderInlineMarkdown("[label](#notes)", options),
+    '<a href="#notes" rel="noopener noreferrer">label</a>');
+  for (const href of ["elastos://document/example", "localhost://example", "/document/example", "./example", "../example"]) {
+    assert.equal(renderer.renderInlineMarkdown("[**label**](" + href + ")", options),
+      "<span><strong>label</strong></span>");
   }
   for (const href of ["javascript:alert(1", ...offOriginSpellings]) {
     assert.equal(renderer.renderInlineMarkdown("[label](" + href + ")", options),

@@ -148,27 +148,18 @@ function renderInlineMarkdown(text, options) {
   return html + escapeHtml(text.slice(offset));
 }
 
-// Inside Home (options.homeBaseUrl, the document's own address) a link that
-// leaves the document's origin has no href, so the browser has no
-// navigation to perform (click, middle-click, keyboard or context menu); a
-// web link asks Home through the preview's own handlers (#436, as Chat) and
-// anything else is plain text. In-document anchors, elastos:// and
-// localhost:// links and same-origin paths keep their href.
+// Inside Home (options.insideHome) only an in-document "#" anchor keeps an
+// href: any other navigation would replace the Documents frame, which then
+// cannot answer Home's close request. A web link (same origin included) has
+// no href and asks Home through the preview's own handlers (#436, as Chat);
+// every other link (relative paths, elastos://, localhost://) is plain text,
+// since the preview has no handler for it.
 function renderMarkdownLink(value, labelHtml, options) {
   const href = markdownHref(value);
-  const baseUrl = options && options.homeBaseUrl;
-  if (baseUrl && !/^(#|elastos:\/\/|localhost:\/\/)/i.test(href)) {
-    let sameOrigin = false;
-    try {
-      sameOrigin = new URL(href, baseUrl).origin === new URL(baseUrl).origin;
-    } catch (_error) {
-      sameOrigin = false;
-    }
-    if (!sameOrigin) {
-      return /^https?:\/\//i.test(href)
-        ? '<a data-open-external="' + escapeHtml(href) + '" role="link" tabindex="0">' + labelHtml + "</a>"
-        : "<span>" + labelHtml + "</span>";
-    }
+  if (options && options.insideHome && !href.startsWith("#")) {
+    return /^https?:\/\//i.test(href)
+      ? '<a data-open-external="' + escapeHtml(href) + '" role="link" tabindex="0">' + labelHtml + "</a>"
+      : "<span>" + labelHtml + "</span>";
   }
   return '<a href="' + escapeHtml(href) + '" rel="noopener noreferrer">' + labelHtml + "</a>";
 }
@@ -902,7 +893,7 @@ function closeFindBar() {
 function refreshPreviewFromEditor() {
   const rendered = renderMarkdownDocument(elements.editor.value || "", {
     interactiveTasks: true,
-    homeBaseUrl: window.top !== window ? document.baseURI : "",
+    insideHome: window.top !== window,
   });
   elements.preview.innerHTML = rendered.html;
   renderOutline(rendered.outline);
