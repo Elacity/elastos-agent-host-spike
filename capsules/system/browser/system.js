@@ -138,6 +138,9 @@ let runtimeUpdateReconnects = 0;
 // to observe the restart itself: after this, the update finishing or Home refusing this page's old
 // session reloads the page once. A reloaded page starts with it false, so it reloads at most once.
 let runtimeUpdateInProgressSeen = false;
+// Why this page's last Update did not start (cancelled, refused). It stays in place of the offer
+// text until the person selects Update again, so a refresh cannot replace it before it is read.
+let runtimeUpdateFeedback = "";
 const RUNTIME_UPDATE_RESTART_TEXT = "Restarting to finish the update. Home is usually back within two minutes.";
 // Polls are 2 s apart while Home restarts: 150 polls outlast the controller's 120 s restart budget with margin.
 const RUNTIME_UPDATE_RESTART_POLLS = 150;
@@ -4030,7 +4033,11 @@ function renderRuntimeUpdate(update) {
     runtimeUpdatePending = null;
     runtimeUpdateReconnects = 0;
   }
-  if (["staging", "downloading", "verifying", "restarting"].includes(phase)) markRuntimeUpdateInProgress();
+  if (["staging", "downloading", "verifying", "restarting"].includes(phase)) {
+    // An update running now (from any page) replaces this page's older result.
+    runtimeUpdateFeedback = "";
+    markRuntimeUpdateInProgress();
+  }
   // A failed update keeps the current Home and its assets: never reload for it.
   if (phase === "failed") runtimeUpdateInProgressSeen = false;
   if (runtimeUpdateInProgressSeen && finishes) {
@@ -4072,6 +4079,8 @@ function renderRuntimeUpdate(update) {
   } else if (["staging", "downloading", "verifying", "restarting"].includes(phase)) {
     showRuntimeUpdateStatus(phase === "restarting"
       ? RUNTIME_UPDATE_RESTART_TEXT : readText(controller?.message) || "Checking the signed update. Keep Home open.");
+  } else if (runtimeUpdateFeedback) {
+    showRuntimeUpdateStatus(runtimeUpdateFeedback);
   } else if (["updated", "restored", "failed"].includes(phase)) {
     showRuntimeUpdateStatus(readText(controller.message) || "Check the update status again.");
   } else {
@@ -4195,6 +4204,7 @@ async function fetchRuntimeUpdateJson(init, url = "/api/apps/system/summary") {
 
 async function onRuntimeUpdateApply() {
   if (runtimeUpdateBusy || runtimeUpdatePending || !runtimeUpdateCanApply()) return;
+  runtimeUpdateFeedback = "";
   const intent = { action: "apply", request_id: window.crypto.randomUUID().replaceAll("-", "") };
   for (const field of ["source_name", "channel", "publisher_did", "current_version", "new_version", "head_cid", "release_cid"]) {
     intent[field] = runtimeUpdate[field];
@@ -4238,6 +4248,7 @@ async function onRuntimeUpdateApply() {
         : error.status === 401 || error.status === 403
           ? "Sign in as the Home owner to start the update."
           : "The update could not start: the release was refused or verification failed. Select Update again.";
+      runtimeUpdateFeedback = feedback;
     } else {
       feedback = runtimeUpdateProgressPhase() === "restarting"
         ? RUNTIME_UPDATE_RESTART_TEXT

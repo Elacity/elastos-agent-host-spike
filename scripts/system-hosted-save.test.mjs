@@ -247,7 +247,7 @@ function updateFixture(overrides = {}) {
     runtimeUpdateNode: panel, runtimeUpdateButton: button, runtimeUpdateStatusNode: status,
     runtimeUpdate: undefined, runtimeUpdatePending: null, runtimeUpdateBusy: false,
     runtimeUpdateActive: true, runtimeUpdateTimer: 0, runtimeUpdateReconnects: 0,
-    runtimeUpdateRequests: new Set(), runtimeUpdateInProgressSeen: false,
+    runtimeUpdateRequests: new Set(), runtimeUpdateInProgressSeen: false, runtimeUpdateFeedback: "",
     RUNTIME_UPDATE_RESTART_TEXT: source.match(/RUNTIME_UPDATE_RESTART_TEXT = "([^"]+)"/)?.[1],
     RUNTIME_UPDATE_RESTART_POLLS: Number(source.match(/RUNTIME_UPDATE_RESTART_POLLS = (\d+)/)?.[1]),
     systemSummaryInFlight: null, homeParentOrigin: "https://home.example",
@@ -769,6 +769,12 @@ test("System cancellation explains the unchanged Home and keeps private errors o
     assert.equal(f.status.textContent, "You cancelled the update. Home is unchanged.");
     assert.equal(f.posts.length, 0);
     assert.equal(f.button.disabled, false);
+    // The next refresh (#392) keeps it readable; only the next Update replaces it.
+    f.context.renderRuntimeUpdate(f.offer);
+    assert.equal(f.status.textContent, "You cancelled the update. Home is unchanged.");
+    f.context.requestPasskeyStepUp = () => new Promise(() => {});
+    f.context.onRuntimeUpdateApply();
+    assert.equal(f.status.textContent, "Verify your passkey to start the update.");
   }
   const f = updateFixture({ requestPasskeyStepUp: async () => { throw new Error("private signing path"); } });
   await f.context.onRuntimeUpdateApply();
