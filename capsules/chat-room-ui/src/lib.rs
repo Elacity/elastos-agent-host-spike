@@ -5619,6 +5619,8 @@ fn apply_active_poll_state(state: &mut AppState, mut poll: RoomPollView) -> bool
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct AttachmentRetry {
     failures: u32,
+    /// When the last attempt ended; orders retries fairly.
+    last_attempt_ms: f64,
     next_attempt_ms: f64,
 }
 
@@ -5631,14 +5633,22 @@ fn attachment_retry_delay_ms(failures: u32) -> f64 {
     (ATTACHMENT_RETRY_FIRST_MS * 2f64.powi(doublings)).min(ATTACHMENT_RETRY_MAX_MS)
 }
 
-/// The first shown attachment that is not cached and is due a download,
-/// wherever its message sits relative to the poll cursor.
+/// The shown attachment that is not cached, is due a download and was
+/// tried least recently (never-tried first, then in message order),
+/// wherever its message sits relative to the poll cursor. Taking turns
+/// keeps attachments that keep failing from starving the others.
 fn next_attachment_to_cache(state: &AppState, now_ms: f64) -> Option<AttachmentView> {
+    let last_attempt = |attachment: &AttachmentView| {
+        state
+            .attachment_retry
+            .get(&attachment.attachment_id)
+            .map_or(f64::NEG_INFINITY, |retry| retry.last_attempt_ms)
+    };
     state
         .objects
         .iter()
         .filter_map(|object| object.attachment.as_ref())
-        .find(|attachment| {
+        .filter(|attachment| {
             !state
                 .attachment_urls
                 .contains_key(&attachment.attachment_id)
@@ -5647,6 +5657,7 @@ fn next_attachment_to_cache(state: &AppState, now_ms: f64) -> Option<AttachmentV
                     .get(&attachment.attachment_id)
                     .is_none_or(|retry| retry.next_attempt_ms <= now_ms)
         })
+        .min_by(|left, right| last_attempt(left).total_cmp(&last_attempt(right)))
         .cloned()
 }
 
@@ -5666,6 +5677,7 @@ fn record_attachment_attempt(state: &mut AppState, attachment_id: &str, now_ms: 
         attachment_id.to_string(),
         AttachmentRetry {
             failures,
+            last_attempt_ms: now_ms,
             next_attempt_ms: now_ms + attachment_retry_delay_ms(failures),
         },
     );
@@ -6501,9 +6513,8 @@ mod tests {
         assert_nonterminal_poll_order(Unknown, Sending);
     }
 
-    #[test]
-    fn failed_attachment_is_retried_with_backoff_after_the_cursor_moves_past_it() {
-        let object = |seq: u64, attachment_id: Option<&str>| ConversationObjectView {
+    fn attachment_object(seq: u64, attachment_id: Option<&str>) -> ConversationObjectView {
+        ConversationObjectView {
             delivery_state: None,
             seq,
             created_at: 100 + seq,
@@ -6528,7 +6539,48 @@ mod tests {
                 is_audio: false,
                 is_video: false,
             }),
-        };
+        }
+    }
+
+    #[test]
+    fn attachments_that_keep_failing_cannot_starve_a_later_one() {
+        let mut state = AppState::default();
+        let mut poll = shared_poll(3);
+        poll.transport.configured = true;
+        poll.objects = vec![
+            attachment_object(1, Some("att-a")),
+            attachment_object(2, Some("att-b")),
+            attachment_object(3, Some("att-c")),
+        ];
+        apply_active_poll_state(&mut state, poll);
+        // Each attempt on A and B runs into the 60 s deadline, longer than
+        // the 30 s backoff cap, so one is always due again when the other
+        // ends. C downloads on its first attempt.
+        let mut now = 0.0;
+        let mut attempts = Vec::new();
+        while !state.attachment_urls.contains_key("att-c") && attempts.len() < 10 {
+            let attachment = super::next_attachment_to_cache(&state, now).expect("one is due");
+            now += 60_000.0;
+            if attachment.attachment_id == "att-c" {
+                state
+                    .attachment_urls
+                    .insert("att-c".into(), "data:image/png;base64,AAAA".into());
+            }
+            super::record_attachment_attempt(&mut state, &attachment.attachment_id, now);
+            attempts.push(attachment.attachment_id);
+        }
+        assert_eq!(attempts, ["att-a", "att-b", "att-c"]);
+        // Afterwards A and B take turns, least recently tried first.
+        let next = super::next_attachment_to_cache(&state, now).unwrap();
+        assert_eq!(next.attachment_id, "att-a");
+        super::record_attachment_attempt(&mut state, "att-a", now + 60_000.0);
+        let next = super::next_attachment_to_cache(&state, now + 60_000.0).unwrap();
+        assert_eq!(next.attachment_id, "att-b");
+    }
+
+    #[test]
+    fn failed_attachment_is_retried_with_backoff_after_the_cursor_moves_past_it() {
+        let object = attachment_object;
         let mut state = AppState::default();
         let mut first = shared_poll(1);
         first.transport.configured = true;
