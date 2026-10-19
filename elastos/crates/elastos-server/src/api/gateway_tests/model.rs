@@ -2267,9 +2267,113 @@ async fn owner_end_commits_before_cancellation_and_failed_write_preserves_send()
 
 #[cfg(unix)]
 #[tokio::test]
+async fn owner_end_cancels_system_validation_while_setup_is_held() {
+    for action in ["inbox", "system"] {
+        let dir = tempfile::tempdir().unwrap();
+        crate::api::seed_model_provider_operator_offers_for_test(dir.path(), vec![]).unwrap();
+        let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+        let app = gateway_router(test_state(dir.path()));
+        let connection_id = format!("model:hosted-{}", "a".repeat(32));
+        let scope = crate::api::model_provider_egress_decision::EgressScope {
+            offer_id: connection_id.clone(),
+            effect: "validate_models".into(),
+            method: "GET".into(),
+            url: "https://example.com/models".into(),
+            origin: "https://example.com".into(),
+            recipient: "example.com".into(),
+            payer: "this Home".into(),
+            provider: "OpenRouter".into(),
+            purpose: "Load hosted model choices".into(),
+            configuration_id: "a".repeat(64),
+        };
+        let id = crate::api::model_provider_egress_decision::request(
+            dir.path(),
+            &scope,
+            Some(&authority.proof_binding_id),
+        )
+        .unwrap();
+        crate::api::model_provider_egress_decision::approve(
+            dir.path(),
+            &id,
+            &authority.proof_binding_id,
+        )
+        .unwrap();
+        let gate = crate::api::hosted_egress_admission::admission_gate(dir.path(), &connection_id);
+        let mut ended = gate.changed.subscribe();
+        ended.borrow_and_update();
+        install_openrouter_models_double(OpenRouterModelsDouble::AwaitEnd);
+        let validate = test_browser_request("localhost:61180", "null")
+            .method("POST")
+            .uri("/api/apps/system/ai-provider/validate")
+            .header("x-elastos-home-token", authority.system_token.clone())
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({"id":connection_id,"provider":"openrouter","api_key":"fixture-key"})
+                    .to_string(),
+            ))
+            .unwrap();
+        let mut validation = Box::pin(app.clone().oneshot(validate));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut validation)
+                .await
+                .is_err()
+        );
+        assert!(
+            super::super::gateway_home_system_ai_provider::hosted_setup_gate(dir.path())
+                .try_lock_owned()
+                .is_err(),
+            "System Validate holds setup while its admitted transport waits"
+        );
+        assert!(gate.lock.try_write().is_err());
+        let end = if action == "inbox" {
+            inbox_action_request(
+                app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &authority),
+                &format!("model-egress-end:{id}"),
+            )
+        } else {
+            test_browser_request("localhost:61180", "null")
+                .method("POST")
+                .uri("/api/apps/system/approval-lens/revoke")
+                .header("x-elastos-home-token", authority.system_token.clone())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({"id":connection_id}).to_string()))
+                .unwrap()
+        };
+        let (end_response, validate_response) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                tokio::join!(app.oneshot(end), &mut validation)
+            })
+            .await
+            .expect("End saves and cancels Validate while setup remains held");
+        let (status, body) = status_json(end_response.unwrap()).await;
+        assert_eq!(status, StatusCode::OK, "{action}: {body}");
+        let (status, body) = status_json(validate_response.unwrap()).await;
+        assert!(!status.is_success(), "{body}");
+        assert!(
+            body.to_string().contains("Hosted HTTPS was ended"),
+            "{body}"
+        );
+        assert!(ended.has_changed().unwrap(), "End cancels admitted sends");
+        let history = serde_json::to_value(
+            crate::api::model_provider_egress_decision::inbox_history(dir.path()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(history[0]["id"], id);
+        assert_eq!(history[0]["status"], "ended");
+        assert!(crate::api::model_provider_egress_decision::active(
+            dir.path(),
+            &scope,
+            Some(&authority.proof_binding_id)
+        )
+        .is_err());
+        clear_hosted_ai_validate_doubles();
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn system_hosted_mutations_recheck_revoked_admin_after_waits() {
     for (action, wait) in [
-        ("revoke", "setup"),
         ("revoke", "transition"),
         ("delete", "setup"),
         ("delete", "transition"),

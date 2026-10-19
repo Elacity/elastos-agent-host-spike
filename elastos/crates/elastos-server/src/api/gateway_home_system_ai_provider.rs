@@ -181,6 +181,8 @@ thread_local! {
 pub(crate) enum OpenRouterModelsDouble {
     InvalidKey,
     Models(Vec<String>),
+    #[cfg(unix)]
+    AwaitEnd,
 }
 
 #[cfg(test)]
@@ -383,7 +385,8 @@ async fn fetch_openrouter_models(
     {
         let _ = (data_dir, connection_id);
         let _ = api_key;
-        OPENROUTER_MODELS_DOUBLE.with(|slot| match slot.borrow().as_ref() {
+        let double = OPENROUTER_MODELS_DOUBLE.with(|slot| slot.borrow().clone());
+        match double {
             Some(OpenRouterModelsDouble::InvalidKey) => {
                 Err(ai_provider_request_error("invalid OpenRouter key"))
             }
@@ -395,8 +398,20 @@ async fn fetch_openrouter_models(
                     privacy: None,
                 })
                 .collect()),
+            #[cfg(unix)]
+            Some(OpenRouterModelsDouble::AwaitEnd) => {
+                let gate =
+                    crate::api::hosted_egress_admission::admission_gate(data_dir, connection_id);
+                let _admission = gate.lock.read().await;
+                let mut ended = gate.changed.subscribe();
+                ended.borrow_and_update();
+                ended.changed().await?;
+                Err(hosted_transport_error(anyhow::anyhow!(
+                    "owner ended hosted HTTPS"
+                )))
+            }
             None => Err(anyhow::anyhow!("OpenRouter validation transport unset")),
-        })
+        }
     }
     #[cfg(all(not(test), target_os = "macos"))]
     {
@@ -562,7 +577,6 @@ pub(super) async fn system_approval_lens_revoke(
     if let Err(err) = require_system_admin(&state.data_dir, &headers) {
         return system_error_response(err);
     }
-    let _setup = hosted_setup_gate(&state.data_dir).lock_owned().await;
     #[cfg(unix)]
     let _transition = crate::api::model_provider_egress_decision::transition_gate(&state.data_dir)
         .lock_owned()

@@ -503,9 +503,6 @@ async fn dispatch_inbox_action(
             .proof_binding_id
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("admin passkey required"))?;
-        let _setup = super::gateway_home_system_ai_provider::hosted_setup_gate(data_dir)
-            .lock_owned()
-            .await;
         let _decision = crate::api::model_provider_egress_decision::transition_gate(data_dir)
             .lock_owned()
             .await;
