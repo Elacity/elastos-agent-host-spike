@@ -82,6 +82,17 @@ const MAX_MIGRATION_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 /// spent is named as not checked in this pass.
 const MAX_PRINCIPAL_ROOT_SCAN_PROBE_BYTES: u64 =
     MAX_MIGRATION_TOTAL_BYTES + MAX_MIGRATION_OBJECT_BYTES;
+/// The largest envelope an upload writes: base64url of a 100 MiB
+/// (`MAX_GATEWAY_FILE_SIZE`) AES-GCM ciphertext is about 133.4 MiB, plus a
+/// label that fits the 64 KiB head window. A Damaged-class file is never read
+/// past it at open (#450 L9). Canonical envelopes are not capped: Library
+/// archive extraction writes entries of any size.
+const MAX_UPLOAD_ENVELOPE_BYTES: u64 = 134 * 1024 * 1024;
+const _: () = assert!(
+    (crate::api::gateway::MAX_GATEWAY_FILE_SIZE as u64 + 16).div_ceil(3) * 4
+        + HEAD_WINDOW_MAX as u64
+        <= MAX_UPLOAD_ENVELOPE_BYTES
+);
 
 static AUTH_STATE_MUTATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static AUDIT_CHAIN_ACTIVATION_MUTATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -5395,7 +5406,7 @@ fn read_protected_principal_root_object_file(
     let probe =
         classify_principal_root_object_file(&mut file, len, &expected, &mut whole_read_budget)
             .with_context(|| format!("failed to read {path:?}"))?;
-    let damage = match probe.class {
+    let (damage, read_limit) = match probe.class {
         PrincipalRootObjectFileClass::Plaintext
         | PrincipalRootObjectFileClass::UnconfirmedPlaintext => {
             anyhow::bail!(
@@ -5403,20 +5414,30 @@ fn read_protected_principal_root_object_file(
                 printable_text(object_uri)
             );
         }
-        PrincipalRootObjectFileClass::Envelope => PrincipalRootObjectDamage::FailedCheck,
-        PrincipalRootObjectFileClass::Damaged(damage) => damage,
+        PrincipalRootObjectFileClass::Envelope => (PrincipalRootObjectDamage::FailedCheck, None),
+        // Damaged opens only as an authentic envelope laid out by other
+        // software; read no further than the largest upload envelope (#450 L9).
+        PrincipalRootObjectFileClass::Damaged(damage) => (damage, Some(MAX_UPLOAD_ENVELOPE_BYTES)),
     };
-    let data_key = principal_root_data_key_from_protection(data_dir, protection)?;
-    let bytes = read_principal_root_object_rest(&mut file, probe.prefix)
-        .with_context(|| format!("failed to read {path:?}"))?;
-    decrypt_principal_root_object_envelope_bytes(&data_key, &expected, &bytes).map_err(|_| {
+    let damaged = |damage| {
         principal_root_object_damaged_error(&PrincipalRootObjectNotice::new(
             data_dir,
             localhost_root,
             object_uri,
             damage,
         ))
-    })
+    };
+    if read_limit.is_some_and(|limit| len > limit) {
+        return Err(damaged(damage));
+    }
+    let data_key = principal_root_data_key_from_protection(data_dir, protection)?;
+    let Some(bytes) = read_principal_root_object_rest(&mut file, probe.prefix, read_limit)
+        .with_context(|| format!("failed to read {path:?}"))?
+    else {
+        return Err(damaged(damage));
+    };
+    decrypt_principal_root_object_envelope_bytes(&data_key, &expected, &bytes)
+        .map_err(|_| damaged(damage))
 }
 
 /// Full parse, binding and AES-GCM over an envelope's whole bytes.
@@ -5449,12 +5470,14 @@ fn decrypt_principal_root_object_envelope_bytes(
 }
 
 /// Opens a declared object without following a final symlink and requires a
-/// regular file. Returns the file and its length at open.
+/// regular file. Returns the file and its length at open. `O_NONBLOCK` keeps
+/// a FIFO swapped in after the walk from blocking the open while the caller
+/// holds its locks (#450 L8); it does not change reads of a regular file.
 fn open_principal_root_object_file(path: &Path) -> anyhow::Result<(File, u64)> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW);
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     let file = options
         .open(path)
         .with_context(|| format!("failed to read {path:?}"))?;
@@ -8088,13 +8111,29 @@ fn read_principal_root_object_tail(file: &mut File, len: u64) -> std::io::Result
     }
 }
 
-/// Reads the rest of the file after an already-read prefix.
-fn read_principal_root_object_rest(file: &mut File, prefix: Vec<u8>) -> std::io::Result<Vec<u8>> {
+/// Reads the rest of the file after an already-read prefix; None when the
+/// whole file, a file that grew included, is longer than `limit`.
+fn read_principal_root_object_rest(
+    file: &mut File,
+    prefix: Vec<u8>,
+    limit: Option<u64>,
+) -> std::io::Result<Option<Vec<u8>>> {
     use std::io::{Seek, SeekFrom};
     let mut bytes = prefix;
     file.seek(SeekFrom::Start(bytes.len() as u64))?;
-    file.read_to_end(&mut bytes)?;
-    Ok(bytes)
+    match limit {
+        Some(limit) => {
+            let rest = limit.saturating_add(1).saturating_sub(bytes.len() as u64);
+            Read::by_ref(file).take(rest).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > limit {
+                return Ok(None);
+            }
+        }
+        None => {
+            file.read_to_end(&mut bytes)?;
+        }
+    }
+    Ok(Some(bytes))
 }
 
 fn validate_principal_root_object_envelope(

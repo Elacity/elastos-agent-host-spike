@@ -557,6 +557,20 @@ fn read_path_blocks_damage_and_opens_authentic_noncanonical_envelopes() {
     std::fs::write(&path, &padded).unwrap();
     assert_eq!(read().unwrap(), b"padded body");
 
+    // #450 L9: a file without the canonical label is read no further than
+    // the largest upload envelope, so the same envelope padded past it is
+    // refused as damaged instead of being read whole.
+    let mut oversized = fixture.envelope(&uri, b"padded body");
+    oversized.resize(MAX_UPLOAD_ENVELOPE_BYTES as usize + 1, b'\n');
+    std::fs::write(&path, &oversized).unwrap();
+    drop(oversized);
+    let message = read().unwrap_err().to_string();
+    assert!(
+        message.contains(PROTECTED_PRINCIPAL_ROOT_OBJECT_DAMAGED),
+        "{message}"
+    );
+    assert!(message.contains("does not carry the label"), "{message}");
+
     std::fs::write(&path, b"legacy plaintext").unwrap();
     assert!(read()
         .unwrap_err()
@@ -574,6 +588,31 @@ fn read_path_blocks_damage_and_opens_authentic_noncanonical_envelopes() {
         b"legacy plaintext"
     );
     assert_eq!(read().unwrap(), b"legacy plaintext");
+}
+
+/// #450 L8: a FIFO swapped in for a protected object after the walk must not
+/// block the open, which runs while the caller holds its locks.
+#[cfg(unix)]
+#[test]
+fn open_refuses_a_fifo_without_blocking() {
+    use std::os::unix::ffi::OsStrExt;
+    let fixture = Fixture::new("person:local:classifier-fifo");
+    let uri = fixture.uri("Documents/swapped.txt");
+    let path = fixture.path(&uri);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(open_principal_root_object_file(&path).map(|_| ()));
+    });
+    let opened = receiver
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("opening a FIFO blocked");
+    assert!(opened
+        .unwrap_err()
+        .to_string()
+        .contains("must be a regular file"));
 }
 
 #[test]

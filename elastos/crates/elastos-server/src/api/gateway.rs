@@ -216,7 +216,7 @@ use gateway_wallet::*;
 pub(super) use gateway_wallet_adapter::RuntimeWalletAdapter;
 
 /// Maximum size for a single file fetched through the gateway (100 MB).
-const MAX_GATEWAY_FILE_SIZE: usize = 100 * 1024 * 1024;
+pub(crate) const MAX_GATEWAY_FILE_SIZE: usize = 100 * 1024 * 1024;
 const LIBRARY_UPLOAD_CHUNK_MAX_BYTES: usize = 768 * 1024;
 const BROWSER_FILE_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
 const BROWSER_INPUT_BODY_MAX_BYTES: usize = (BROWSER_FILE_UPLOAD_BYTES.div_ceil(3) * 4) + 64 * 1024;
