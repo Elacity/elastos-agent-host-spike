@@ -4278,11 +4278,8 @@ fn archive_preview_entry_for_object(
     } else {
         None
     };
-    let entry_name = normalized
-        .rsplit('/')
-        .next()
-        .unwrap_or(normalized.as_str())
-        .to_string();
+    let entry_name =
+        crate::auth::printable_text(normalized.rsplit('/').next().unwrap_or(normalized.as_str()));
     let viewers = viewer_options_for_name(data_dir, &normalized);
     Ok(json!({
         "schema": LIBRARY_ARCHIVE_PREVIEW_ENTRY_SCHEMA,
@@ -4290,6 +4287,7 @@ fn archive_preview_entry_for_object(
         "uri": uri,
         "family": archive_family_for_name(archive_name).unwrap_or("archive"),
         "entry": {
+            "display_path": crate::auth::printable_text(&normalized),
             "path": normalized,
             "name": entry_name,
             "kind": "file",
@@ -4636,12 +4634,14 @@ fn tar_entry_name<R: std::io::Read>(entry: &tar::Entry<'_, R>) -> anyhow::Result
         .map_err(|_| anyhow!("library archive entry path must be UTF-8"))
 }
 
+/// An archive entry name as shown: on one line and in order (#432), so a
+/// control, format or bidi character cannot forge a line or reverse a name.
 fn archive_entry_display_name(name: &str, index: usize) -> String {
     let display = name.trim();
     if display.is_empty() {
         format!("entry-{index}")
     } else {
-        display.to_string()
+        crate::auth::printable_text(display)
     }
 }
 
@@ -4696,17 +4696,15 @@ fn blocked_archive_entry_listing(
     })
 }
 
+/// `path` is the entry's key, sent back to preview or extract it; the person
+/// sees `display_path` and `name`, escaped by `printable_text` (#432).
 fn archive_entry_listing(entry: ArchiveEntryListing) -> Value {
-    let name = entry
-        .path
-        .rsplit('/')
-        .next()
-        .unwrap_or(&entry.path)
-        .to_string();
+    let name = entry.path.rsplit('/').next().unwrap_or(&entry.path);
     json!({
         "id": format!("entry:{}", entry.index),
+        "display_path": crate::auth::printable_text(&entry.path),
+        "name": crate::auth::printable_text(name),
         "path": entry.path,
-        "name": name,
         "kind": entry.kind,
         "size": entry.size,
         "compressed_size": entry.compressed_size,
@@ -5105,7 +5103,7 @@ fn apply_selected_archive_writes_to_local(
         };
         if let Err(err) = allowed {
             outcome.blocked.push(json!({
-                "path": path,
+                "path": crate::auth::printable_text(path),
                 "reason": err.to_string(),
             }));
             continue;

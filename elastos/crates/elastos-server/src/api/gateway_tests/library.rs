@@ -4591,6 +4591,108 @@ async fn test_library_archive_extract_refuses_folders_deeper_than_home_starts_wi
     }
 }
 
+/// #432 (display only): an entry name with a line break or a bidi override
+/// is shown escaped, on one line and in order; its raw `path` stays the key
+/// that preview and extract take.
+#[tokio::test]
+async fn test_library_archive_entry_names_with_control_or_bidi_characters_are_shown_escaped() {
+    use std::io::Write as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &authority);
+    let root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let documents_uri = format!("{root}/Documents");
+    let (_, made) = post_library(
+        app.clone(),
+        &token,
+        "mkdir",
+        json!({ "parent_uri": root, "name": "Documents" }),
+    )
+    .await;
+    assert_eq!(made["status"], "ok", "{made}");
+
+    let reversed = "Notes/evil\u{202e}txt.exe";
+    let broken = "a\nError: forged.txt";
+    let blocked = "../\u{202e}up.txt";
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for name in [reversed, broken, blocked] {
+        writer.start_file(name, options).unwrap();
+        writer.write_all(b"text").unwrap();
+    }
+    let zip_uri = format!("{documents_uri}/Names.zip");
+    let (_, written) = post_library(
+        app.clone(),
+        &token,
+        "write",
+        json!({
+            "uri": zip_uri,
+            "data": base64::engine::general_purpose::STANDARD
+                .encode(writer.finish().unwrap().into_inner()),
+        }),
+    )
+    .await;
+    assert_eq!(written["status"], "ok", "{written}");
+
+    let (_, listed) = post_library(
+        app.clone(),
+        &token,
+        "archive_entries",
+        json!({ "uri": zip_uri }),
+    )
+    .await;
+    let rows = listed["data"]["entries"].as_array().unwrap();
+    let row = |path: &str| {
+        rows.iter()
+            .find(|row| row["path"] == path || row["display_path"] == path)
+            .unwrap_or_else(|| panic!("no row for {path:?}: {listed}"))
+    };
+    assert_eq!(row(reversed)["display_path"], "Notes/evil\\u{202e}txt.exe");
+    assert_eq!(row(reversed)["name"], "evil\\u{202e}txt.exe");
+    assert_eq!(row(broken)["display_path"], "a\\u{a}Error: forged.txt");
+    assert_eq!(row(broken)["name"], "a\\u{a}Error: forged.txt");
+    let refused = row("../\\u{202e}up.txt");
+    assert_eq!(refused["kind"], "blocked");
+    assert_eq!(refused["path"], "../\\u{202e}up.txt");
+    for entry in rows {
+        for field in ["display_path", "name"] {
+            let shown = entry[field].as_str().unwrap();
+            assert!(!shown.contains(['\n', '\u{202e}']), "{field}: {shown:?}");
+        }
+    }
+
+    // The raw path still previews and extracts the entry.
+    let (_, preview) = post_library(
+        app.clone(),
+        &token,
+        "archive_preview_entry",
+        json!({ "uri": zip_uri, "entry": reversed }),
+    )
+    .await;
+    assert_eq!(preview["status"], "ok", "{preview}");
+    assert_eq!(
+        preview["data"]["entry"]["display_path"],
+        "Notes/evil\\u{202e}txt.exe"
+    );
+    assert_eq!(preview["data"]["entry"]["name"], "evil\\u{202e}txt.exe");
+    let (_, extracted) = post_library(
+        app.clone(),
+        &token,
+        "archive_extract_entries",
+        json!({
+            "uri": zip_uri,
+            "destination_uri": documents_uri,
+            "entries": [reversed],
+        }),
+    )
+    .await;
+    assert_eq!(extracted["status"], "ok", "{extracted}");
+    assert!(library_object_path(dir.path(), &format!("{documents_uri}/{reversed}")).is_file());
+}
+
 #[tokio::test]
 async fn test_library_gateway_reads_webspace_files_through_runtime_provider() {
     let dir = tempfile::tempdir().unwrap();

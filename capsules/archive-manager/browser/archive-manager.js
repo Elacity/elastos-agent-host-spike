@@ -482,11 +482,12 @@
         const checked = state.selectedEntries.has(entry.path || "");
         const selected = state.focusedEntry === (entry.path || "");
         const modified = entry.modified_at ? new Date(entry.modified_at * 1000).toLocaleString() : "-";
+        const shown = entry.display_path || entry.name || "entry";
         return `<div class="entry-row${blocked ? " blocked" : ""}${selected ? " selected" : ""}" role="button" tabindex="${selectable ? "0" : "-1"}" data-path="${escapeHtml(entry.path || "")}" aria-selected="${selected ? "true" : "false"}">
-          <div><input class="entry-check" type="checkbox" value="${escapeHtml(entry.path || "")}" ${checked ? "checked" : ""} ${selectable ? "" : "disabled"} aria-label="Select ${escapeHtml(entry.path || entry.name || "entry")}"></div>
+          <div><input class="entry-check" type="checkbox" value="${escapeHtml(entry.path || "")}" ${checked ? "checked" : ""} ${selectable ? "" : "disabled"} aria-label="Select ${escapeHtml(shown)}"></div>
           <div class="entry-name">
             <span class="entry-icon" aria-hidden="true">${escapeHtml(entryIcon(entry))}</span>
-            <span class="entry-title" title="${escapeHtml(entry.path || entry.name || "entry")}">${escapeHtml(entry.path || entry.name || "entry")}</span>
+            <span class="entry-title" title="${escapeHtml(shown)}">${escapeHtml(shown)}</span>
           </div>
           <span class="entry-cell">${escapeHtml(formatBytes(entry.size))}</span>
           <span class="entry-cell">${escapeHtml(modified)}</span>
@@ -521,7 +522,7 @@
         ? `<pre>${escapeHtml(text)}</pre>`
         : `<p>Binary preview is not shown. Extract the file to open it from Library.</p>`;
       preview.innerHTML = `
-        <div><strong>${escapeHtml(entry.path || "entry")}</strong></div>
+        <div><strong>${escapeHtml(entry.display_path || "entry")}</strong></div>
         <div>${escapeHtml(entry.mime || "application/octet-stream")} · ${formatBytes(entry.size)}${previewData.truncated ? " · truncated" : ""}</div>
         ${body}
       `;
