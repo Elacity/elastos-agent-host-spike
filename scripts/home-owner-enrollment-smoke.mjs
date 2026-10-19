@@ -467,8 +467,8 @@ for (const stage of ["before-begin", "after-create"]) {
 {
   const f = fixture({ purpose: "recover" }), home = f.reload();
   await home.show(); await home.choose();
-  f.afterCreate(() => { throw Error("Passkey cancelled"); });
-  await assert.rejects(home.api.runPasskeyCreate(), /cancelled/);
+  f.afterCreate(() => { const error = Error("Passkey cancelled"); error.name = "NotAllowedError"; throw error; });
+  await assert.rejects(home.api.runPasskeyCreate(), { name: "NotAllowedError", message: "Passkey cancelled" });
   assert.equal(home.element("#home-unlock-primary").textContent, "Choose Recovery Kit");
   assert.equal(f.requests.filter(r => r.path === "/api/auth/recovery/full-import").length, 0);
   assert.equal(home.opened(), null);

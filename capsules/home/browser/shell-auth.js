@@ -837,7 +837,9 @@ async function runPasskeyCreate() {
           pending.ceremony_id = null;
           savePendingRegistration(pending);
           const name = String(error && error.name || "");
-          if (name === "NotAllowedError" || name === "AbortError") throw new Error(PASSKEY_NOT_SAVED);
+          if (pending.intent.purpose === "create" && (name === "NotAllowedError" || name === "AbortError")) {
+            throw new Error(PASSKEY_NOT_SAVED);
+          }
           throw error;
         }
         pending.response = serializeCreatedCredential(credential);

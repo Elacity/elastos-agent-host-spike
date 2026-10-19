@@ -199,9 +199,9 @@ ssh -L 8090:localhost:8090 user@board
 ```
 
 Open `http://localhost:8090/home/` on that computer and create the passkey there
-(Touch ID or Windows Hello), or on a phone or security key. Signing in later
-needs the same passkey at the same address, `http://localhost:8090` through the
-tunnel.
+(Touch ID or Windows Hello), or on a phone or security key. The passkey belongs
+to this Home at `localhost`, so sign in later through a tunnel the same way;
+using the same tunnel and address, `http://localhost:8090/home/`, is simplest.
 
 ## How updates reach your Home
 
