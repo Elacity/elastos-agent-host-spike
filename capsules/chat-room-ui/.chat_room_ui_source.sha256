@@ -1,7 +1,7 @@
 {
   "schema": "elastos.chat-room-ui-artifacts/v1",
-  "source_fingerprint_sha256": "f0229c417c6e3444e1044f666f843ce0d959e5705b3bcceba4b997815fb3679d",
-  "compiler_wasm_sha256": "a1d81af57e2b4d911d540e168219e26c60c0d1471ffdc5f1772717280047bfae",
-  "browser_wasm_sha256": "8afb9d6c67ec395bcc52e0717a1badd1e760adee69061e54f96237816552757b",
-  "bindings_sha256": "d2402fd328e3ce3cdf402f551e0a73449bf639c25f91e29b632775360c2da8c1"
+  "source_fingerprint_sha256": "08129796aa481d32a74aafa1400f48c0db33f1b05ec31116fff7cb8524aa0ede",
+  "compiler_wasm_sha256": "bbf056f42930a24ef54ecf7ed45a283fc94e8cb916f16b478eb25b8df012574a",
+  "browser_wasm_sha256": "c15bdb313cc27c777a8c42655486589a3030de57de284ab7a0a961a66c67860a",
+  "bindings_sha256": "2141ab7bfd5d50b940cb3ec5f0f35159e5ef858d7e92adfb00b72509d294b68e"
 }

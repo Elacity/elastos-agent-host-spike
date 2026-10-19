@@ -1712,6 +1712,12 @@ impl App {
                 let Some(url) = anchor.get_attribute("data-open-external") else {
                     return;
                 };
+                // Releasing a drag-selection on the link fires click; selecting
+                // is how an address is copied, so that click opens nothing. The
+                // link has no href, so returning navigates nowhere.
+                if selection_intersects(&anchor) {
+                    return;
+                }
                 link_app.activate_external_link(&event, &url);
                 return;
             }
@@ -5157,17 +5163,17 @@ fn message_text_nodes(text: &str, shell_mode: bool) -> Vec<MessageTextNode<'_>> 
 }
 
 /// Splits message text into plain runs and `http://`/`https://` addresses.
-/// An address runs to the next whitespace, minus trailing sentence
-/// punctuation, quotes and unbalanced closing brackets. Nothing else (a bare
-/// `example.com`) is a link. The address is sent unchanged; the Runtime
-/// checks it.
+/// An address runs to the next whitespace or full-width (CJK) punctuation,
+/// minus trailing sentence punctuation, quotes and unbalanced closing
+/// brackets. Nothing else (a bare `example.com`) is a link. The address is
+/// sent unchanged; the Runtime checks it.
 fn split_text_links(text: &str) -> Vec<TextSegment<'_>> {
     let mut segments = Vec::new();
     let mut plain_start = 0;
     let mut cursor = 0;
     while let Some((start, scheme_len)) = next_web_scheme(text, cursor) {
         let rest = &text[start..];
-        let run_end = start + rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let run_end = start + rest.find(ends_link_run).unwrap_or(rest.len());
         let end = start + trim_link_end(&text[start..run_end]).len();
         if end > start + scheme_len {
             if plain_start < start {
@@ -5187,7 +5193,8 @@ fn split_text_links(text: &str) -> Vec<TextSegment<'_>> {
 }
 
 /// The next `http://` or `https://` (any ASCII case) at or after `from` that
-/// does not continue a word, with the scheme's length.
+/// does not continue an ASCII word, with the scheme's length. CJK text needs
+/// no space before an address.
 fn next_web_scheme(text: &str, from: usize) -> Option<(usize, usize)> {
     let bytes = text.as_bytes();
     (from..bytes.len()).find_map(|index| {
@@ -5195,7 +5202,7 @@ fn next_web_scheme(text: &str, from: usize) -> Option<(usize, usize)> {
             || text[..index]
                 .chars()
                 .next_back()
-                .is_some_and(char::is_alphanumeric)
+                .is_some_and(|before| before.is_ascii_alphanumeric())
         {
             return None;
         }
@@ -5206,6 +5213,28 @@ fn next_web_scheme(text: &str, from: usize) -> Option<(usize, usize)> {
                 .map(|_| (index, scheme.len()))
         })
     })
+}
+
+/// Whitespace (including the full-width space) and full-width punctuation end
+/// an address, so CJK prose around it stays text.
+fn ends_link_run(character: char) -> bool {
+    character.is_whitespace()
+        || matches!(
+            character,
+            '。' | '、'
+                | '，'
+                | '．'
+                | '：'
+                | '；'
+                | '！'
+                | '？'
+                | '）'
+                | '」'
+                | '』'
+                | '】'
+                | '〉'
+                | '》'
+        )
 }
 
 fn trim_link_end(candidate: &str) -> &str {
@@ -5260,6 +5289,18 @@ fn external_link_attributes(
         ]);
     }
     attributes
+}
+
+/// Whether the page has a non-empty text selection touching `element`.
+fn selection_intersects(element: &Element) -> bool {
+    window()
+        .and_then(|window| window.get_selection().ok().flatten())
+        .filter(|selection| !selection.is_collapsed())
+        .is_some_and(|selection| {
+            selection
+                .contains_node_with_allow_partial_containment(element, true)
+                .unwrap_or(false)
+        })
 }
 
 /// Keys that activate a focused link that has no href.
@@ -6799,8 +6840,69 @@ mod tests {
     }
 
     #[test]
-    fn direct_message_web_addresses_render_as_links() {
-        // Direct messages render their text with the same nodes as room Text.
+    fn cjk_text_around_web_addresses_stays_text() {
+        use TextSegment::{Link, Text};
+        let cases: &[(&str, &[TextSegment])] = &[
+            (
+                "詳細はhttps://example.com/ を見て",
+                &[
+                    Text("詳細は"),
+                    Link("https://example.com/"),
+                    Text(" を見て"),
+                ],
+            ),
+            (
+                "https://example.com/a。次は",
+                &[Link("https://example.com/a"), Text("。次は")],
+            ),
+            (
+                "見て：https://a.example/x、https://b.example！",
+                &[
+                    Text("見て："),
+                    Link("https://a.example/x"),
+                    Text("、"),
+                    Link("https://b.example"),
+                    Text("！"),
+                ],
+            ),
+            (
+                "「https://a.example/p」と『https://b.example』（https://c.example）",
+                &[
+                    Text("「"),
+                    Link("https://a.example/p"),
+                    Text("」と『"),
+                    Link("https://b.example"),
+                    Text("』（"),
+                    Link("https://c.example"),
+                    Text("）"),
+                ],
+            ),
+            (
+                "https://a.example/x\u{3000}次，https://b.example．【https://c.example】",
+                &[
+                    Link("https://a.example/x"),
+                    Text("\u{3000}次，"),
+                    Link("https://b.example"),
+                    Text("．【"),
+                    Link("https://c.example"),
+                    Text("】"),
+                ],
+            ),
+            // Only an ASCII letter or digit right before the scheme blocks it.
+            (
+                "abchttps://a.example 9https://b.example",
+                &[Text("abchttps://a.example 9https://b.example")],
+            ),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(&split_text_links(text), expected, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn message_text_nodes_give_one_no_href_link_inside_home() {
+        // A direct message's text, through the node list that both
+        // render_direct_messages and room Text use; the smoke covers the DOM.
         let url = "https://a.example/dm?x=1";
         let message: DirectMessageView = serde_json::from_value(serde_json::json!({
             "message_id": "message:a", "direction": "incoming",
@@ -6844,9 +6946,9 @@ mod tests {
     }
 
     #[test]
-    fn web_link_activation_asks_home_once_or_navigates_nowhere() {
+    fn link_activation_keys_and_requests() {
         let url = "https://a.example/x?y=1";
-        // Click and Enter/Space share one path that yields one request.
+        // The pure parts of activation; the smoke drives real click and keys.
         assert!(activates_link_key("Enter") && activates_link_key(" "));
         assert!(!activates_link_key("Tab") && !activates_link_key("a"));
         assert_eq!(

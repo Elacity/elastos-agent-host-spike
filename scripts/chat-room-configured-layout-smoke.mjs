@@ -817,6 +817,52 @@ async function runScenario(scenario) {
       const sharedAsks = [externalLinkUrl, textLinkUrl, textLinkUrl, textLinkUrl].map(request);
       assert(JSON.stringify(await askedHome()) === JSON.stringify(sharedAsks),
         "Chat did not send Home exactly one typed request per activation with the link's own address", await askedHome());
+      // Selecting is how an address is copied inside Home. Chromium starts no
+      // drag-selection inside a focusable element, so a person drags from the
+      // text before the link into it: that selects the address and asks
+      // nothing. Chromium keeps that selection through the next click inside
+      // it, so that click (released on the link) must not ask Home; it clears
+      // the selection. A double-click asks once: its second click carries the
+      // selected word. A plain click afterwards asks exactly once.
+      const pauseBetweenClicks = () => new Promise(resolve => setTimeout(resolve, 700));
+      const frameBox = await page.locator('iframe[title="Chat"]').boundingBox();
+      const boxes = await textLink.evaluate(node => {
+        const plain = document.createRange();
+        plain.selectNodeContents(node.previousSibling);
+        const box = rect => ({ x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+        return { link: box(node.getClientRects()[0]), before: box(plain.getClientRects()[0]) };
+      });
+      const lineY = frameBox.y + boxes.link.y + boxes.link.height / 2;
+      await page.mouse.move(frameBox.x + boxes.before.x + 2, lineY);
+      await page.mouse.down();
+      await page.mouse.move(frameBox.x + boxes.link.x + boxes.link.width * 0.6, lineY, { steps: 8 });
+      await page.mouse.up();
+      await new Promise(resolve => setTimeout(resolve, 300));
+      const dragged = await frame.evaluate(() => String(getSelection()));
+      assert(dragged.startsWith("Read (https://") && `Read (${textLinkUrl}`.startsWith(dragged),
+        "dragging from the text into the link did not select the address", dragged);
+      assert(JSON.stringify(await askedHome()) === JSON.stringify(sharedAsks),
+        "selecting an address asked Home", await askedHome());
+      await page.mouse.click(frameBox.x + boxes.link.x + boxes.link.width * 0.3, lineY);
+      await new Promise(resolve => setTimeout(resolve, 300));
+      assert(JSON.stringify(await askedHome()) === JSON.stringify(sharedAsks),
+        "a click released on the link with its address selected asked Home", await askedHome());
+      await pauseBetweenClicks();
+      await page.mouse.dblclick(frameBox.x + boxes.link.x + boxes.link.width * 0.3, lineY);
+      sharedAsks.push(request(textLinkUrl));
+      await waitFor(async () => (await askedHome()).length >= sharedAsks.length);
+      await new Promise(resolve => setTimeout(resolve, 300));
+      const word = await frame.evaluate(() => String(getSelection()));
+      assert(word.length > 0 && textLinkUrl.includes(word), "double-clicking the link did not select a word", word);
+      assert(JSON.stringify(await askedHome()) === JSON.stringify(sharedAsks),
+        "a double-click on the link did not ask Home exactly once", await askedHome());
+      await pauseBetweenClicks();
+      await page.mouse.click(frameBox.x + boxes.link.x + boxes.link.width * 0.5, lineY);
+      sharedAsks.push(request(textLinkUrl));
+      await waitFor(async () => (await askedHome()).length >= sharedAsks.length);
+      await new Promise(resolve => setTimeout(resolve, 300));
+      assert(JSON.stringify(await askedHome()) === JSON.stringify(sharedAsks),
+        "a plain click after selecting did not ask Home exactly once", await askedHome());
       // A direct message renders its address the same way.
       await frame.locator('[data-conversation-choice="direct:sha256:fixture-conversation"]').click();
       await frame.waitForFunction(() => document.body.dataset.chatMode === "direct"
@@ -831,7 +877,7 @@ async function runScenario(scenario) {
         text: `hello from direct ${directLinkUrl}` }), "a direct message link inside Home has no native navigation", directAttributes);
       await directLink.click();
       await directLink.press("Enter");
-      await waitFor(async () => (await askedHome()).length >= 6);
+      await waitFor(async () => (await askedHome()).length >= sharedAsks.length + 2);
       await new Promise(resolve => setTimeout(resolve, 300));
       assert(JSON.stringify(await askedHome()) === JSON.stringify([...sharedAsks, request(directLinkUrl), request(directLinkUrl)]),
         "a direct message link did not ask Home exactly once per activation", await askedHome());
