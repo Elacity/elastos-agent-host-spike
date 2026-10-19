@@ -20,11 +20,12 @@ mod direct;
 
 use direct::{
     apply_direct_messages, encode_path_segment, pending_delivery_note, pending_direct_request_id,
-    remove_unavailable_conversation, requested_conversation_decision, selected_conversation,
-    should_clear_polled_transient_error, terminal_retry_detail, valid_direct_send_response,
-    DirectConversationList, DirectDeliveryState, DirectMessageDirection, DirectMessageList,
-    DirectSendFailure, DirectSendInput, DirectSendResponse, DirectUiState, PendingDirectSend,
-    RequestedConversationDecision, DIRECT_API_BASE,
+    pending_note_wait_ms, remove_unavailable_conversation, requested_conversation_decision,
+    selected_conversation, should_clear_polled_transient_error, terminal_retry_detail,
+    track_pending_since, valid_direct_send_response, DirectConversationList, DirectDeliveryState,
+    DirectMessageDirection, DirectMessageList, DirectSendFailure, DirectSendInput,
+    DirectSendResponse, DirectUiState, PendingDirectSend, RequestedConversationDecision,
+    DIRECT_API_BASE,
 };
 
 const BROWSER_SESSION_API_BASE: &str = "/api/browser/session";
@@ -216,6 +217,13 @@ struct App {
     /// when it was a message sender. Lists re-render, so closing the card finds
     /// that exact name again and returns focus to it.
     participant_card_opener: RefCell<Option<(String, Option<u64>)>>,
+    /// When this session first saw each outgoing direct message pending, in
+    /// browser monotonic milliseconds (`track_pending_since`).
+    direct_pending_seen: RefCell<BTreeMap<String, f64>>,
+    /// Renders once the next pending message's note is due; unchanged polls
+    /// do not render, so the note needs its own wake-up.
+    pending_note_render: RefCell<Option<Closure<dyn FnMut()>>>,
+    pending_note_timer: Cell<Option<i32>>,
     state: RefCell<AppState>,
     document: Document,
     body: HtmlElement,
@@ -671,6 +679,9 @@ pub fn start() -> Result<(), JsValue> {
         participant_card_opening: Cell::new(0),
         participant_contact_requests: RefCell::new(BTreeSet::new()),
         participant_card_opener: RefCell::new(None),
+        direct_pending_seen: RefCell::new(BTreeMap::new()),
+        pending_note_render: RefCell::new(None),
+        pending_note_timer: Cell::new(None),
         state: RefCell::new(state),
         document: document.clone(),
         body: document
@@ -1765,6 +1776,13 @@ impl App {
         self.message_list
             .add_event_listener_with_callback("keydown", link_key.as_ref().unchecked_ref())?;
         link_key.forget();
+
+        let note_app = Rc::clone(self);
+        *self.pending_note_render.borrow_mut() =
+            Some(Closure::<dyn FnMut()>::wrap(Box::new(move || {
+                note_app.pending_note_timer.set(None);
+                let _ = note_app.render();
+            })));
 
         let library_attach_app = Rc::clone(self);
         let library_attach = Closure::<dyn FnMut(MessageEvent)>::wrap(Box::new(
@@ -4243,6 +4261,7 @@ impl App {
     fn render_direct_messages(&self, state: &AppState) -> Result<(), JsValue> {
         let direct = &state.direct;
         self.message_list.set_inner_html("");
+        self.schedule_pending_note_render(None);
         let Some(conversation_id) = direct.selected_conversation_id.as_deref() else {
             return Ok(());
         };
@@ -4257,6 +4276,10 @@ impl App {
             self.message_list.append_child(&empty)?;
             return Ok(());
         }
+        let now_ms = monotonic_now_ms();
+        let mut seen = self.direct_pending_seen.borrow_mut();
+        track_pending_since(&mut seen, &direct.messages, now_ms);
+        let mut next_note_ms: Option<f64> = None;
         let mut last_day = None;
         for message in &direct.messages {
             self.append_day_separator_if_new(&mut last_day, message.created_at)?;
@@ -4316,11 +4339,16 @@ impl App {
                             (message.delivery_state == DirectDeliveryState::Expired)
                                 .then(|| terminal_retry_detail(Some("retry_expired")).unwrap())
                         });
+                    let wait_ms = seen
+                        .get(&message.message_id)
+                        .map(|seen_at| pending_note_wait_ms(*seen_at, now_ms));
+                    if let Some(wait) = wait_ms.filter(|wait| *wait > 0.0) {
+                        next_note_ms = Some(next_note_ms.map_or(wait, |next| next.min(wait)));
+                    }
                     let pending_note = terminal.is_none().then(|| {
                         pending_delivery_note(
-                            message.delivery_state,
-                            message.created_at,
-                            (js_sys::Date::now() / 1000.0) as u64,
+                            wait_ms == Some(0.0),
+                            !conversation.removed,
                             state
                                 .direct_retried_at
                                 .get(request_id)
@@ -4369,7 +4397,29 @@ impl App {
             }
             self.message_list.append_child(&item)?;
         }
+        self.schedule_pending_note_render(next_note_ms);
         Ok(())
+    }
+
+    /// Keeps one timer: a render when the earliest pending note is due.
+    fn schedule_pending_note_render(&self, wait_ms: Option<f64>) {
+        let Some(window) = window() else {
+            return;
+        };
+        if let Some(timer) = self.pending_note_timer.take() {
+            window.clear_timeout_with_handle(timer);
+        }
+        let render = self.pending_note_render.borrow();
+        let (Some(wait_ms), Some(render)) = (wait_ms, render.as_ref()) else {
+            return;
+        };
+        // The slack lands the render just past the threshold.
+        if let Ok(timer) = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+            render.as_ref().unchecked_ref(),
+            wait_ms.ceil() as i32 + 50,
+        ) {
+            self.pending_note_timer.set(Some(timer));
+        }
     }
 
     fn render_participants(
@@ -8261,6 +8311,13 @@ fn room_access_policy_enabled_default() -> bool {
 
 fn local_date(timestamp_secs: u64) -> js_sys::Date {
     js_sys::Date::new(&(timestamp_secs as f64 * 1000.0).into())
+}
+
+/// Browser monotonic milliseconds, unaffected by wall-clock changes.
+fn monotonic_now_ms() -> f64 {
+    window()
+        .and_then(|window| window.performance())
+        .map_or(0.0, |performance| performance.now())
 }
 
 /// Hours and minutes in the viewer's own time zone.

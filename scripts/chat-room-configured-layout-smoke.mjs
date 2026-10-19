@@ -561,7 +561,7 @@ function startServer(scenario) {
         }
         if (retryScenario) {
           const outgoing = { message_id:"message:retry-original", request_id:"chat-message:original",
-            direction:"outgoing", text:"Original pending text", created_at:trace.retryCreatedAt ??= Math.floor(Date.now() / 1000),
+            direction:"outgoing", text:"Original pending text", created_at:1_725_000_000,
             delivery_state:trace.retryMode === "settled" ? "receipt_settled" : "pending" };
           return json(response, { conversation_id:directConversation().conversation_id,
             messages:[outgoing, ...(trace.sentAgain ? [trace.sentAgain] : [])] });
@@ -769,6 +769,11 @@ async function runScenario(scenario) {
   try {
     if (scenario === "history-status-order-calendar") {
       await page.clock.setFixedTime("2026-03-09T04:30:00Z");
+    }
+    if (scenario.startsWith("direct-retry")) {
+      // Chat's own clock decides when the pending note shows; fast-forwarding
+      // it is the only aging. The fixture never changes the message.
+      await page.clock.install();
     }
     await page.goto(url, { waitUntil: "domcontentloaded" });
     let frame = await chatFrame(page);
@@ -1247,12 +1252,17 @@ async function runScenario(scenario) {
       const original = frame.locator('[data-direct-message-id="message:retry-original"]');
       await original.locator('[data-direct-action="retry"]').waitFor({ state:"visible" });
       assert((await original.innerText()).includes("Sending"), "pending delivery copy is inaccurate");
-      // The note waits for the first automatic retries (60 s after sending);
-      // the fixture ages the message instead of waiting.
-      const pendingNote = "Not delivered yet. Your Home keeps trying while it is on, for up to 24 hours.";
+      // The note waits 60 s on Chat's own clock from when it first saw the
+      // message pending. created_at here is two years old and must not count.
+      // Polls keep returning the identical message, so only Chat's own
+      // threshold timer can show the note.
+      const pendingNote = "Delivery unconfirmed. Your Home keeps trying while it is on, for up to 24 hours.";
       await new Promise(resolveDelay => setTimeout(resolveDelay, 1500));
       assert(!(await original.innerText()).includes(pendingNote), "the pending note appeared before 60 seconds");
-      trace.retryCreatedAt -= 61;
+      await page.clock.fastForward(45_000);
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 500));
+      assert(!(await original.innerText()).includes(pendingNote), "the pending note appeared before 60 seconds");
+      await page.clock.fastForward(15_000);
       await frame.waitForFunction(note => document.querySelector('[data-direct-message-id="message:retry-original"]')?.textContent.includes(note), pendingNote);
       assert((await original.innerText()).includes("Sending"), "the pending note replaced the Sending label");
       const draft = "Keep my current draft while retrying a different message";

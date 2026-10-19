@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 pub(super) const DIRECT_API_BASE: &str = "/api/apps/chat-room/direct";
@@ -104,32 +106,59 @@ pub(super) fn terminal_retry_detail(code: Option<&str>) -> Option<&'static str> 
     }
 }
 
-/// How long a sent direct message stays "Sending" before Chat explains it.
-/// The Runtime retries pending envelopes every 15 seconds, up to four per pass
-/// (`DIRECT_SYNC_CADENCE_SECS`, `retry_pending`), so after a minute the first
-/// automatic retries have already failed.
-pub(super) const PENDING_NOTE_AFTER_SECS: u64 = 60;
+/// How long an outgoing direct message stays "Sending" before Chat explains
+/// it. The Runtime retries pending envelopes every 15 seconds, up to four per
+/// pass (`DIRECT_SYNC_CADENCE_SECS`, `retry_pending`), so after a minute the
+/// first automatic retries have already failed.
+pub(super) const PENDING_NOTE_AFTER_MS: f64 = 60_000.0;
 
-/// The note under an outgoing direct message that is still pending: shown once
-/// it has been pending for `PENDING_NOTE_AFTER_SECS`, or after a manual Retry
-/// (with when it ran). The Runtime keeps retrying until the envelope's 24-hour
-/// lifetime ends, while it runs; Chat cannot know why a peer is unreachable.
+/// Remembers when this Chat session first saw each outgoing message pending,
+/// on the browser's monotonic clock; the Runtime's `created_at` comes from
+/// another clock and is not compared with it. A message that is no longer
+/// pending is forgotten. Other conversations' entries are kept.
+pub(super) fn track_pending_since(
+    seen: &mut BTreeMap<String, f64>,
+    messages: &[DirectMessageView],
+    now_ms: f64,
+) {
+    for message in messages {
+        if message.direction == DirectMessageDirection::Outgoing
+            && message.delivery_state == DirectDeliveryState::Pending
+        {
+            seen.entry(message.message_id.clone()).or_insert(now_ms);
+        } else {
+            seen.remove(&message.message_id);
+        }
+    }
+}
+
+/// Milliseconds until a message first seen pending at `seen_at_ms` gets its
+/// note; zero once it is due.
+pub(super) fn pending_note_wait_ms(seen_at_ms: f64, now_ms: f64) -> f64 {
+    (seen_at_ms + PENDING_NOTE_AFTER_MS - now_ms).max(0.0)
+}
+
+/// The note under a pending outgoing direct message: once it is due, or after
+/// a manual Retry (with when it ran). The Runtime retries only messages to a
+/// current contact (`retry_pending`), so a removed conversation gets no retry
+/// claim. Chat cannot know whether the peer stored the message and only the
+/// receipt is missing, or why a peer is unreachable.
 pub(super) fn pending_delivery_note(
-    state: DirectDeliveryState,
-    created_at: u64,
-    now: u64,
+    due: bool,
+    contact_current: bool,
     retried_at: Option<&str>,
 ) -> Option<String> {
-    if state != DirectDeliveryState::Pending
-        || (retried_at.is_none() && now.saturating_sub(created_at) < PENDING_NOTE_AFTER_SECS)
-    {
+    if !due && retried_at.is_none() {
         return None;
     }
-    let note = "Not delivered yet. Your Home keeps trying while it is on, for up to 24 hours.";
-    Some(match retried_at {
-        Some(time) => format!("{note} Tried again at {time}."),
-        None => note.to_string(),
-    })
+    let mut note = String::from("Delivery unconfirmed.");
+    if contact_current {
+        note.push_str(" Your Home keeps trying while it is on, for up to 24 hours.");
+    }
+    if let Some(time) = retried_at {
+        note.push_str(&format!(" Tried again at {time}."));
+    }
+    Some(note)
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -409,37 +438,67 @@ mod tests {
     }
 
     #[test]
-    fn pending_note_appears_after_the_first_automatic_retries_or_a_manual_retry() {
-        let sent = 1_000;
-        let threshold = sent + PENDING_NOTE_AFTER_SECS;
-        let pending = DirectDeliveryState::Pending;
-        assert_eq!(pending_delivery_note(pending, sent, sent, None), None);
+    fn pending_note_waits_on_this_session_clock_not_created_at() {
+        let message = |id: &str, created_at: u64, state: &str| -> DirectMessageView {
+            serde_json::from_value(serde_json::json!({
+                "message_id": id, "request_id": format!("chat-message:{id}"),
+                "direction": "outgoing", "text": "hi", "created_at": created_at,
+                "delivery_state": state,
+            }))
+            .unwrap()
+        };
+        // One created_at far behind and one far ahead of the browser clock:
+        // both wait exactly the threshold from when this session saw them.
+        let mut seen = BTreeMap::new();
+        let first = 5_000.0;
+        let messages = [
+            message("old", 1, "pending"),
+            message("future", u64::MAX, "pending"),
+        ];
+        track_pending_since(&mut seen, &messages, first);
+        track_pending_since(&mut seen, &messages, first + 30_000.0);
+        for id in ["old", "future"] {
+            assert_eq!(seen[id], first, "first sight is kept");
+            assert_eq!(pending_note_wait_ms(seen[id], first), PENDING_NOTE_AFTER_MS);
+            assert_eq!(
+                pending_note_wait_ms(seen[id], first + PENDING_NOTE_AFTER_MS - 1.0),
+                1.0
+            );
+            assert_eq!(
+                pending_note_wait_ms(seen[id], first + PENDING_NOTE_AFTER_MS),
+                0.0
+            );
+        }
+        // Settled messages are forgotten; other conversations' are kept.
+        seen.insert("elsewhere".to_string(), 1.0);
+        track_pending_since(&mut seen, &[message("old", 1, "receipt_settled")], first);
+        assert!(!seen.contains_key("old") && seen.contains_key("elsewhere"));
+        let incoming: DirectMessageView = serde_json::from_value(serde_json::json!({
+            "message_id": "in", "direction": "incoming", "text": "hi", "created_at": 1,
+            "delivery_state": "received",
+        }))
+        .unwrap();
+        track_pending_since(&mut seen, &[incoming], first);
+        assert!(!seen.contains_key("in"));
+    }
+
+    #[test]
+    fn pending_note_claims_retries_only_for_a_current_contact() {
+        assert_eq!(pending_delivery_note(false, true, None), None);
         assert_eq!(
-            pending_delivery_note(pending, sent, threshold - 1, None),
-            None
+            pending_delivery_note(true, true, None).unwrap(),
+            "Delivery unconfirmed. Your Home keeps trying while it is on, for up to 24 hours."
         );
-        let note = pending_delivery_note(pending, sent, threshold, None).unwrap();
+        // The Runtime does not retry a removed contact's messages.
         assert_eq!(
-            note,
-            "Not delivered yet. Your Home keeps trying while it is on, for up to 24 hours."
+            pending_delivery_note(true, false, None).unwrap(),
+            "Delivery unconfirmed."
         );
         // A manual Retry shows when it ran, even before the threshold.
         assert_eq!(
-            pending_delivery_note(pending, sent, sent + 5, Some("14:03")).unwrap(),
-            format!("{note} Tried again at 14:03.")
+            pending_delivery_note(false, true, Some("14:03")).unwrap(),
+            "Delivery unconfirmed. Your Home keeps trying while it is on, for up to 24 hours. Tried again at 14:03."
         );
-        // A clock behind the send time never shows the note early.
-        assert_eq!(pending_delivery_note(pending, sent, sent - 500, None), None);
-        for settled in [
-            DirectDeliveryState::Received,
-            DirectDeliveryState::ReceiptSettled,
-            DirectDeliveryState::Expired,
-        ] {
-            assert_eq!(
-                pending_delivery_note(settled, sent, sent + 3_600, Some("14:03")),
-                None
-            );
-        }
     }
 
     #[test]
