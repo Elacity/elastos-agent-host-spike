@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Versions · Home</title>
+    <script src="./elastos-theme.js?v=home-20260813a"></script>
+    <link rel="stylesheet" href="./elastos-ui.css?v=home-20260813a" />
+    <link rel="stylesheet" href="./style.css?v=home-20260813a" />
+  </head>
+  <body class="version-list-page-body">
+    <main id="version-list" class="version-list-stage"></main>
+    <script type="module">
+      import { hostPath, mountVersionList } from "./shell-version-list.js";
+
+      const saved = await fetch("./file-versions.json").then((response) => response.json());
+      const requested = new URLSearchParams(window.location.search).get("resource");
+      const resource = requested == null ? saved.resource : requested;
+      const observations =
+        resource === saved.resource && !hostPath(resource) ? saved.observations : [];
+      mountVersionList(document.querySelector("#version-list"), {
+        resource,
+        observations,
+      });
+    </script>
+  </body>
+</html>

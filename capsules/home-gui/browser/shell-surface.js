@@ -714,6 +714,8 @@ function syncTaskbarGroupButton(entry, targetId, title, openCount) {
   };
 }
 
+import { appendDemoCard } from "./shell-demo-app.js?v=home-20260813a";
+
 export function renderLauncher(summary) {
   const query = launcherSearch.value;
   launcherGrid.replaceChildren();
@@ -727,6 +729,7 @@ export function renderLauncher(summary) {
     }
   }
   launcherGrid.appendChild(grid);
+  appendDemoCard(grid, hideLauncher);
   filterLauncherItems(query);
 }
 

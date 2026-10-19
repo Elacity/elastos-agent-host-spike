@@ -54,6 +54,14 @@
         <svg class="toolbar-identity-item-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3.5" width="11" height="7.5" rx="1.2"/><path d="M5.5 13.5h5M8 11v2.5"/></svg>
         Show Desktop
       </button>
+      <button id="identity-menu-versions" class="toolbar-identity-item" type="button" role="menuitem">
+        <svg class="toolbar-identity-item-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 4.5h9M3.5 8h9M3.5 11.5h6"/></svg>
+        Versions
+      </button>
+      <button id="identity-menu-approval" class="toolbar-identity-item" type="button" role="menuitem">
+        <svg class="toolbar-identity-item-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8.5 6.5 11 12 5"/></svg>
+        Approval
+      </button>
       <button id="identity-menu-shortcuts" class="toolbar-identity-item" type="button" role="menuitem">
         <svg class="toolbar-identity-item-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="11" height="8" rx="1.2"/><path d="M5 10h2.2M8.8 10H11M5.5 7h5"/></svg>
         Shortcuts
@@ -518,6 +526,28 @@
       </li>
     </ol>
     <button id="setup-sheet-later" class="el-button" type="button">Later</button>
+  </div>
+</section>
+
+<section id="approval-sheet" class="version-list-sheet" aria-label="Approval" hidden inert>
+  <div class="version-list-sheet-card">
+    <div class="version-list-panel">
+      <button id="approval-close" class="el-button version-list-close" type="button">Close</button>
+      <h2 class="version-list-title">Approval</h2>
+      <p class="version-list-kicker">A tool and a hosted model ask the same way. This does not allow it.</p>
+      <p class="version-list-resource">Tool</p>
+      <div class="approval-row" data-ask="tool"></div>
+      <p class="version-list-resource">Hosted model</p>
+      <div class="approval-row" data-ask="hosted"></div>
+      <p class="version-list-status" data-status="ready" data-grant="absent">Nothing is allowed.</p>
+    </div>
+  </div>
+</section>
+
+<section id="version-list-sheet" class="version-list-sheet" aria-label="Versions" hidden inert>
+  <div class="version-list-sheet-card">
+    <button id="version-list-close" class="el-button version-list-close" type="button">Close</button>
+    <div id="version-list-body"></div>
   </div>
 </section>
 

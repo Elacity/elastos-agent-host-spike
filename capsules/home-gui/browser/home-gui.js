@@ -150,6 +150,8 @@ import {
   retireConnectorSheet,
   showConnectorSheet,
 } from "./shell-connector-sheet.js?v=home-20260813a";
+import { bindVersionList, fileVersionsFromSummary } from "./shell-version-list.js?v=home-20260813a";
+import { bindApproval } from "./shell-approval.js?v=home-20260813a";
 
 const OPAQUE_CAPSULE_ORIGIN = "null";
 const OPAQUE_FRAME_TARGET = "*";
@@ -170,6 +172,10 @@ bindControlCentre();
 bindWalletRail();
 bindInboxRail();
 bindConnectorSheet();
+bindVersionList({
+  readModel: () => fileVersionsFromSummary(shellState.currentSummary),
+});
+bindApproval();
 
 const HOME_GUI_HOST_SELECTORS = Object.freeze([
   ".desktop-backdrop",

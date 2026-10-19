@@ -1892,13 +1892,21 @@ async fn run_local_text_worker_with_timing(
             _ = task.cancel_rx.changed() => return Ok(worker_settlement_unknown_result()),
             response = read_bounded_json_response_async(counted) => response?,
         };
-        let input_tokens = count["input_tokens"]
+        let live_tokens = count["input_tokens"]
             .as_u64()
             .filter(|count| *count > 0)
             .ok_or_else(|| {
                 AdapterFault::malformed(
                     "model backend returned invalid data",
                     "missing chat input token count",
+                )
+            })?;
+        let cached_prefix = count["cached_tokens"].as_u64().unwrap_or(0);
+        let input_tokens = crate::local_memory::counted_input_tokens(live_tokens, cached_prefix)
+            .ok_or_else(|| {
+                AdapterFault::malformed(
+                    "model backend returned invalid data",
+                    "input token count overflowed",
                 )
             })?;
         if let Some(timing) = timing {

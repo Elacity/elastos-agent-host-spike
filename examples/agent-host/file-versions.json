@@ -1,0 +1,8 @@
+{
+  "resource": "localhost://Users/self/Projects/demo/index.html",
+  "observations": [
+    {"resource": "localhost://Users/self/Projects/demo/index.html", "version": 1, "text": "<h1>demo</h1>"},
+    {"resource": "localhost://Users/self/Projects/demo/index.html", "version": 2, "text": "<h1>next</h1>"},
+    {"resource": "localhost://Users/self/Projects/demo/index.html", "version": 1, "text": "<h1>demo</h1>"}
+  ]
+}

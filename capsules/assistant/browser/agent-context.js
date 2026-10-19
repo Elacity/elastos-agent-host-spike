@@ -941,6 +941,29 @@ export function createTurnManifest({
   };
 }
 
+export function measurePrefixHit(previous, next) {
+  const first = previous?.[0];
+  const second = next?.[0];
+  if (!first || !second || first.role !== "system" || second.role !== "system") {
+    return 0;
+  }
+  if (first.content !== second.content || first.content.length === 0) {
+    return 0;
+  }
+  return Buffer.byteLength(first.content);
+}
+
+export function packStablePrefix({ head = "", notes = [], excerpts = [] } = {}) {
+  const messages = [{ role: "system", content: String(head) }];
+  for (const note of Array.isArray(notes) ? notes : []) {
+    messages.push({ role: "user", content: String(note) });
+  }
+  for (const excerpt of Array.isArray(excerpts) ? excerpts : []) {
+    messages.push({ role: "user", content: String(excerpt) });
+  }
+  return messages;
+}
+
 export function cheapTurnSnapshot(turn) {
   if (!turn || typeof turn !== "object") {
     return null;

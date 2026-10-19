@@ -516,6 +516,12 @@ fn macos_available(
         .checked_mul(page)
 }
 
+/// Live input plus a repeated prefix. A zero prefix leaves the live count.
+/// Overflow refuses instead of wrapping.
+pub(crate) fn counted_input_tokens(live: u64, cached_prefix: u64) -> Option<u64> {
+    live.checked_add(cached_prefix)
+}
+
 /// Ample fixed memory, so test engines never depend on the host's load.
 #[cfg(test)]
 pub(crate) fn test_host_memory() -> Result<HostMemory, LocalLlamaFault> {
@@ -532,6 +538,13 @@ mod tests {
     use crate::test_support::fake_gguf;
 
     const GIB: u64 = 1024 * MIB;
+
+    #[test]
+    fn admission_counts_a_repeated_prefix() {
+        assert_eq!(counted_input_tokens(100, 0), Some(100));
+        assert_eq!(counted_input_tokens(100, 24), Some(124));
+        assert_eq!(counted_input_tokens(u64::MAX, 1), None);
+    }
 
     #[test]
     fn plan_counts_weights_once_plus_kv_scratch_and_headroom() {
