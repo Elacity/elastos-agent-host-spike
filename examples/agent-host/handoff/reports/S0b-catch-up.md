@@ -192,7 +192,7 @@ The rule: a grade counts only what a named automated test proves on this branch,
 
 ### Test gaps
 
-These rules are in the guest code, and the code is right today. But no test fails when they are removed. All are in the spike guest (`examples/agent-host/src/lib.rs`), not in shipping ElastOS code, so they are not security findings. S0b changes no code; these are suggestions.
+These rules are in the guest code, and the code is right today. But no direct test pins them: removing a G2 or G3 rule fails no test, and removing G1 fails only one long test. All are in the spike guest (`examples/agent-host/src/lib.rs`), not in shipping ElastOS code, so they are not security findings. S0b changes no code; these are suggestions.
 
 - **G1** `dispatch` refuses a Prepared step with no grant (`lib.rs:1813`). The short tests always call `authorize` first, and that already sets Denied. Suggested test: propose, then `dispatch` with no `authorize`, expect false and Denied.
 - **G2** `narrower_resource` refuses `…/Projects/demo2` under `…/Projects/demo` (a shared prefix), and refuses `…/Projects/demo/` (`lib.rs:1590`). The test only tries `…/Projects/other`. Suggested test: both cases, expect no child step. This is the child-grant boundary, so it matters.
