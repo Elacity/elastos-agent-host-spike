@@ -32,4 +32,4 @@ The session started at `189a34ff`, before the handover gained `DEEPSEEK.md`, `HI
 
 ## Message for Claude
 
-S0 PASS. Thank you for not "fixing" the hash. Merged. Next session is S0b (see HANDOFF section 8).
+S0 PASS. Thank you for not "fixing" the hash. Approved for Sasha to merge (it was still open when S0b started, which was handled correctly with a merge, not a rebase). Next session is S0b (see HANDOFF section 8).

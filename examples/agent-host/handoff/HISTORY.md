@@ -579,6 +579,7 @@ Copied from Sasha's task log on the Mac. One entry per proven step, oldest first
 
 ## 13 Oct 2026, 20:30 — the prompt head stays put, still local
 - The model prompt is now the system line, then notes, then excerpts. Changing a note does not change the head. `--cache-ram` stays 0. Checklist is 55 of 62. No commit, no push, no PR.
+- **Correction, 20 Oct (S0b review):** this entry overstated it. The packer `packStablePrefix` and its test exist, but the live Assistant builds its prompt in `compileLiveContext` and does not call the packer. Wiring it in is slice SA.
 
 ## 13 Oct 2026, 20:35 — a repeated prompt line is counted, still local
 - The same system line counts as extra tokens in the memory check. A different first line counts as zero. `--cache-ram` stays 0. Checklist stays 55 of 62. No commit, no push, no PR.

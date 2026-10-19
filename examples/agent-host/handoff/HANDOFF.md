@@ -55,7 +55,8 @@ The task log called the spike "about 43 of 70" on 13 Oct. That was a rough total
 - Main line here: branch `spike/agent-host`. It already contains `origin/develop` of Elacity at `3beb81643` (= 0.8.0-alpha.24 plus one CI commit), merged as `d465df3bc`.
 - Spike code: `examples/agent-host/src/lib.rs` (about 10,000 lines, 72 host tests), `examples/vm-smoke/`, `elastos/crates/elastos-compute/src/exec_vm.rs`, the ignored Wasmtime test in `elastos/crates/elastos-compute/src/providers/component.rs`, Home screens `capsules/home-gui/browser/shell-version-list.js`, `shell-approval.js`, `shell-demo-app.js`, `version-list.html`, `file-versions.json`, prompt packing in `capsules/assistant/browser/agent-context.js`, admission counting in `capsules/model-provider/src/local_memory.rs` and `adapters.rs`.
 - Guest hash is per machine type (S0 review). Cargo's symbol hashes depend on the build machine, and they change both the `name` section and the code bytes. Reference hashes for the 19 Oct source: Mac aarch64 `fe9bcaa48669b10c9e7633f9ba7f34db1fcc65fa0dcc41ea1517c2dfc10f60c5`, Linux x86_64 `e34772d1a03a24327eea7626ba4928e19dfb13d214d14c2b70a42d698bc489a1`. In a report, give the Linux hash from two builds and the output of `python3 examples/agent-host/handoff/tools/wasm_sections.py examples/agent-host/agent-host.component.wasm`. Cursor rebuilds on the Mac. Do not change the build to make hashes match.
-- Checklist: 56 of 63 done (after S0).
+- Checklist: 55 of 63 done (after S0, and after the S0b review reopened `prefix-phase-a-pack`).
+- Spike grade: 37 of 70, proven row by row in `reports/S0b-catch-up.md`. That is the baseline. A row goes up only with a named test and a falsifier.
 
 ## 3. Hard rules
 
@@ -118,7 +119,7 @@ Questions:    <for Sasha, or "none">
 - "No commit, no push" everywhere: replaced by rules 2 and 3 above (commit, push to this private repo only, PR here).
 - "#116 and #277": both are finished. Ignore those lines.
 - "Desktop Home at `localhost:61180`": not running and not reachable from the cloud. Ignore.
-- "Prefix packing waits until after 0.8.0": alpha.24 is the 0.8.0 candidate. Phase A packing is already in the spike.
+- "Prefix packing waits until after 0.8.0": alpha.24 is the 0.8.0 candidate. The packer function exists, but the live Assistant does not use it yet (found in S0b). Slice SA wires it in.
 - Todo `run-tests-in-vm` still says "Home still has to show that list". Sasha saw the Versions list on a running Home on 13 Oct. The open part is that `cargo` is not in the VM image. S0 settles this.
 
 ## 7. What the cloud can and cannot run
@@ -149,6 +150,16 @@ S0 started before these were added, so they are their own slice. One report: `re
 - Section "Guest hash": run `handoff/tools/wasm_sections.py` on your build and paste the output. Then find the line in Cargo's source (rust-lang/cargo, the version that ships with Rust 1.91.0) that puts the compiler's verbose version, or the host, into the metadata hash. Cite file and line. If it is not there, say so.
 - Only `handoff/` files change. If the catch-up suggests a slice should change, write the suggestion; Sasha decides.
 
+### S0c - pin the three untested guest rules (cloud, tests only)
+
+S0b found three rules in `examples/agent-host/src/lib.rs` that are right today but not pinned. S3 builds on them, so they get direct tests first.
+
+- G1: `dispatch` refuses a step with no grant. Add a short direct test; today only one long test catches its removal.
+- G2: `narrower_resource`. A child must be strictly under the parent: refuse `.../demo2` under `.../demo`, refuse the parent itself, refuse `.../demo/` with nothing after it, accept `.../demo/x`. This is the child-grant boundary.
+- G3: `propose_hosted` refuses a resource that does not start with `localhost://` (for example `https://...` and a bare model name) and leaves the journal unchanged.
+- Falsifiers: remove each check in turn (both halves of the G2 check separately) and show the new test fails. Revert each.
+- Tests only. No production change, no import change. Report the Linux guest hash: it must not change, because tests are not in the wasm32 build.
+
 ### S1 - `sell-closed-admission` (cloud, small, test only)
 
 - Invariant: while issue #217 is open (it is, on 19 Oct), a capsule signed by a key that is not trusted on this Home is refused at install and at launch. Assistant tests show no store.
@@ -168,6 +179,13 @@ S0 started before these were added, so they are their own slice. One report: `re
 - This is the first time the guest calls `providers.invoke`. The import list changes. That is intended, and the report must say so.
 - Tests: no grant is denied before the provider; a stale version is refused; a crash between append and result is `settlement_unknown` and is not retried; resume reads back the same bytes; another principal's journal is refused.
 - Needs an adversarial review with `VERDICT: PASS` on the exact commit.
+
+### SA - `prefix-phase-a-pack`: the live Assistant uses the packer (cloud). Only after Sasha says yes.
+
+- `compileLiveContext` in `capsules/assistant/browser/agent-live.js` builds the prompt through `packStablePrefix`: system line first, then notes, then excerpts.
+- New Node tests on `compileLiveContext` itself: the head bytes are the same across two turns; a changed note does not change the head; the existing Assistant contract tests stay green; the live prompt still says there are no tools.
+- `--cache-ram` stays `0` in this slice. Do not change `DEFAULT_LIVE_SYSTEM_PROMPT`.
+- This edits the shipping Assistant's code inside the spike. It still goes nowhere outside this private repo.
 
 ### S4 - `prefix-aplus-hit` (Mac, not cloud)
 

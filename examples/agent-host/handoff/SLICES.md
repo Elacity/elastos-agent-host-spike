@@ -57,8 +57,8 @@ todos:
     content: "Done locally. A tool result enters derive. A step with no result stays in the marker log and out of the view. A second result is refused. 32 host tests. Guest hash b55f6460. No commit."
     status: completed
   - id: prefix-phase-a-pack
-    content: "Done locally. The prompt is the system line, then notes, then excerpts. A changed note does not rewrite the head. No commit."
-    status: completed
+    content: "Corrected in the S0b review. packStablePrefix (system line, then notes, then excerpts; a changed note does not rewrite the head) exists and its own test passes. The live Assistant builds its prompt in compileLiveContext and does not call it, and no test covers compileLiveContext. Wiring it in is slice SA."
+    status: pending
   - id: prefix-phase-a-cache-off
     content: "Done locally. --cache-ram stays 0 beside the admission comment. The cache was not turned on. No commit."
     status: completed
