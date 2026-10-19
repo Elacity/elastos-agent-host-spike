@@ -21,6 +21,8 @@ pub mod gateway;
 pub(crate) mod gateway_local_control;
 pub mod handlers;
 pub mod middleware;
+#[cfg(unix)]
+mod hosted_egress_admission;
 mod model_provider_config;
 #[cfg(target_os = "macos")]
 pub mod model_provider_egress;

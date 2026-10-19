@@ -101,10 +101,10 @@ A hosted web API is a Runtime-owned HTTPS interoperability edge on the Home
 that stores the credential. Runtime checks the exact owner route and sends the
 selected destination and credential through its broker. The installed Mac path
 confines the provider's direct external sockets; Linux product confinement
-still needs proof. The temporary Mac operator route
-bypasses normal Inbox decision and grant checks when enabled. Runtime still
-selects its permitted destination and credential, and the owner can End that
-route. Permanent SEC1 acceptance remains open.
+still needs proof. Runtime requires the owner's exact Inbox decision for each
+hosted connection, including saved operator connections. End saves the owner's
+decision before Runtime cancels admitted sends. Saved connections and their
+credentials remain available for owner management.
 
 Mac Runtime to Carrier to a Jetson or seed Runtime, then
 to that Runtime's model provider and backend, is service use. Ordinary capsules

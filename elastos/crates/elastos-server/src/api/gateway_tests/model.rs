@@ -1844,7 +1844,7 @@ async fn owner_inbox_retains_hosted_route_history_and_ends_exact_decision() {
     assert_eq!(summary["notifications"]["attention_count"], 261);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 #[tokio::test]
 async fn owner_inbox_end_keeps_competing_decision_from_cancelling_without_commit() {
     let dir = tempfile::tempdir().unwrap();
@@ -1871,7 +1871,7 @@ async fn owner_inbox_end_keeps_competing_decision_from_cancelling_without_commit
     )
     .unwrap();
     let held =
-        crate::api::model_provider_egress::hold_admission_for_test(dir.path(), &scope.offer_id)
+        crate::api::hosted_egress_admission::hold_admission_for_test(dir.path(), &scope.offer_id)
             .await;
     let end_action = format!("model-egress-end:{id}");
     let deny_action = format!("model-egress-deny:{id}");
@@ -1897,6 +1897,118 @@ async fn owner_inbox_end_keeps_competing_decision_from_cancelling_without_commit
     let history = crate::api::model_provider_egress_decision::inbox_history(dir.path()).unwrap();
     let history = serde_json::to_value(history).unwrap();
     assert_eq!(history[0]["status"], "ended");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn owner_end_failed_save_preserves_admission_and_saved_connection() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    struct RestorePermissions(std::path::PathBuf, std::fs::Permissions);
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            std::fs::set_permissions(&self.0, self.1.clone()).unwrap();
+        }
+    }
+
+    for fail_write in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let offer_id = format!("model:hosted-{}", "a".repeat(32));
+        crate::api::seed_model_provider_operator_offers_for_test(
+            dir.path(),
+            vec![hosted_test_offer(
+                &offer_id,
+                "Fixture",
+                "OpenRouter",
+                "https://openrouter.ai/api/v1/chat/completions",
+                "fixture-key",
+            )],
+        )
+        .unwrap();
+        let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+        let scope = crate::api::model_provider_egress_decision::EgressScope {
+            offer_id: offer_id.clone(),
+            effect: "text".into(),
+            method: "POST".into(),
+            url: "https://openrouter.ai/api/v1/chat/completions".into(),
+            origin: "https://openrouter.ai".into(),
+            recipient: "openrouter.ai".into(),
+            payer: "this Home".into(),
+            provider: "OpenRouter".into(),
+            purpose: "Generate fixture text".into(),
+            configuration_id: "b".repeat(64),
+        };
+        let id = crate::api::model_provider_egress_decision::request(
+            dir.path(),
+            &scope,
+            Some(&authority.proof_binding_id),
+        )
+        .unwrap();
+        crate::api::model_provider_egress_decision::approve(
+            dir.path(),
+            &id,
+            &authority.proof_binding_id,
+        )
+        .unwrap();
+        let offers = crate::api::load_model_provider_operator_offers(dir.path()).unwrap();
+        let gate = crate::api::hosted_egress_admission::admission_gate(dir.path(), &offer_id);
+        let ended = gate.changed.subscribe();
+        let held =
+            crate::api::hosted_egress_admission::hold_admission_for_test(dir.path(), &offer_id)
+                .await;
+        let app = gateway_router(test_state(dir.path()));
+        let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &authority);
+        let provider_dir = dir.path().join("providers/model-provider");
+        let restore = if fail_write {
+            let permissions = std::fs::metadata(&provider_dir).unwrap().permissions();
+            std::fs::set_permissions(&provider_dir, std::fs::Permissions::from_mode(0o500))
+                .unwrap();
+            Some(RestorePermissions(provider_dir, permissions))
+        } else {
+            None
+        };
+        let mut action = Box::pin(app.oneshot(inbox_action_request(
+            token,
+            &format!("model-egress-end:{id}"),
+        )));
+        if fail_write {
+            let response = tokio::time::timeout(std::time::Duration::from_secs(2), &mut action)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!response.status().is_success());
+            assert!(
+                !ended.has_changed().unwrap(),
+                "a failed save preserves the admitted send"
+            );
+        } else {
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(50), &mut action)
+                    .await
+                    .is_err(),
+                "End waits for admitted sends after its decision is saved"
+            );
+            assert!(
+                ended.has_changed().unwrap(),
+                "a saved End cancels admitted sends"
+            );
+            drop(action); // A disconnected caller leaves the durable End in place.
+        }
+        drop(restore);
+        let history = serde_json::to_value(
+            crate::api::model_provider_egress_decision::inbox_history(dir.path()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            history[0]["status"],
+            if fail_write { "approved" } else { "ended" }
+        );
+        assert_eq!(
+            crate::api::load_model_provider_operator_offers(dir.path()).unwrap(),
+            offers
+        );
+        drop(held);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -2010,7 +2122,7 @@ async fn owner_end_commits_before_cancellation_and_failed_write_preserves_send()
                 None
             } else {
                 Some(
-                    crate::api::model_provider_egress::hold_admission_for_test(
+                    crate::api::hosted_egress_admission::hold_admission_for_test(
                         dir.path(),
                         "validation:openrouter",
                     )
@@ -2283,7 +2395,7 @@ async fn staged_discard_without_staged_key_preserves_saved_approval() {
     );
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 #[tokio::test]
 async fn system_delete_and_discard_drain_committed_authority_before_cleanup() {
     for (discard, decision, revoke) in [
@@ -2342,7 +2454,7 @@ async fn system_delete_and_discard_drain_committed_authority_before_cleanup() {
             .unwrap();
         }
         let held =
-            crate::api::model_provider_egress::hold_admission_for_test(dir.path(), &id).await;
+            crate::api::hosted_egress_admission::hold_admission_for_test(dir.path(), &id).await;
         let app = gateway_router(test_state(dir.path()));
         let request = test_browser_request("localhost:61180", "null")
             .method("DELETE")
@@ -2388,7 +2500,7 @@ async fn system_delete_and_discard_drain_committed_authority_before_cleanup() {
         // The committed change is already draining admission, before key cleanup or refresh.
         assert!(tokio::time::timeout(
             std::time::Duration::from_millis(50),
-            crate::api::model_provider_egress::hold_admission_for_test(dir.path(), &id),
+            crate::api::hosted_egress_admission::hold_admission_for_test(dir.path(), &id),
         )
         .await
         .is_err());

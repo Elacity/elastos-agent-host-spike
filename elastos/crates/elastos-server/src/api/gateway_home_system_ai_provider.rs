@@ -31,17 +31,17 @@ async fn discard_staged_setup(
     crate::api::model_provider_config::require_staged_hosted_key(data_dir, id)?;
     #[cfg(unix)]
     let _ended = crate::api::model_provider_egress_decision::end_offer(data_dir, id)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     let _end = if _ended > 0 {
-        Some(crate::api::model_provider_egress::begin_hosted_end(data_dir, id).await)
+        Some(crate::api::hosted_egress_admission::begin_hosted_end(data_dir, id).await)
     } else {
         None
     };
     authorize()?;
     crate::api::model_provider_config::discard_staged_hosted_key(data_dir, id)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     let _cleanup_end = if _end.is_none() {
-        Some(crate::api::model_provider_egress::begin_hosted_end(data_dir, id).await)
+        Some(crate::api::hosted_egress_admission::begin_hosted_end(data_dir, id).await)
     } else {
         None
     };
@@ -570,14 +570,6 @@ pub(super) async fn system_approval_lens_revoke(
     if let Err(err) = require_system_admin(&state.data_dir, &headers) {
         return system_error_response(err);
     }
-    #[cfg(target_os = "macos")]
-    let operator_applies = match crate::api::model_provider_egress::operator_hosted_end_applicable(
-        &state.data_dir,
-        &req.id,
-    ) {
-        Ok(applies) => applies,
-        Err(err) => return system_error_response(err),
-    };
     #[cfg(unix)]
     let ended_https =
         match crate::api::model_provider_egress_decision::end_offer(&state.data_dir, &req.id) {
@@ -586,48 +578,23 @@ pub(super) async fn system_approval_lens_revoke(
         };
     #[cfg(not(unix))]
     let ended_https = 0;
-    #[cfg(target_os = "macos")]
-    let ended_operator = if operator_applies {
-        crate::api::model_provider_egress::end_operator_hosted_access(&state.data_dir, &req.id)
-    } else {
-        Ok(false)
-    };
     let jev_active = crate::jev_approval_lens::approved_connection(&state.data_dir, &req.id);
     let ended_jev = if jev_active {
         crate::jev_approval_lens::end_connection_approval(&state.data_dir, &req.id)
     } else {
         Ok(())
     };
-    // Durable authority changes precede cancellation. Drain in the same
-    // operator-before-offer order used by forward admission.
-    #[cfg(target_os = "macos")]
-    let _operator_end = if ended_operator.as_ref().is_ok_and(|ended| *ended) {
-        Some(crate::api::model_provider_egress::begin_operator_hosted_end(&state.data_dir).await)
-    } else {
-        None
-    };
-    #[cfg(target_os = "macos")]
+    // Commit the owner's authority change before cancelling admitted sends.
+    #[cfg(unix)]
     let _end = if ended_https > 0 {
-        Some(crate::api::model_provider_egress::begin_hosted_end(&state.data_dir, &req.id).await)
+        Some(crate::api::hosted_egress_admission::begin_hosted_end(&state.data_dir, &req.id).await)
     } else {
         None
     };
-    #[cfg(target_os = "macos")]
-    let ended_operator = match ended_operator {
-        Ok(ended) => ended,
-        Err(err) if ended_https > 0 => {
-            return system_error_response(err.context(
-                "Saved hosted approval ended; temporary operator access still needs End",
-            ));
-        }
-        Err(err) => return system_error_response(err),
-    };
-    #[cfg(not(target_os = "macos"))]
-    let ended_operator = false;
     if let Err(err) = ended_jev {
         return system_error_response(err);
     }
-    if ended_https == 0 && !ended_operator && !jev_active {
+    if ended_https == 0 && !jev_active {
         return system_error_response(anyhow::anyhow!("hosted connection has no active approval"));
     }
     Json(serde_json::json!({ "offer_id": req.id, "approval": "ended" })).into_response()
@@ -643,31 +610,27 @@ pub(super) async fn system_ai_provider_get(
     match crate::api::ai_provider_status(&state.data_dir) {
         Ok(status) => {
             let mut result = serde_json::to_value(status).expect("serializable provider status");
-            #[cfg(target_os = "macos")]
-            let operator_enabled =
-                crate::api::model_provider_egress::operator_hosted_access_enabled(&state.data_dir);
-            #[cfg(not(target_os = "macos"))]
-            let operator_enabled = false;
-            result["hosted_external_https"] = serde_json::json!(if operator_enabled {
-                "operator_ready"
-            } else if cfg!(target_os = "macos") {
+            result["hosted_external_https"] = serde_json::json!(if cfg!(target_os = "macos") {
                 "consent_required"
             } else {
                 "paused"
             });
-            result["hosted_external_https_reason"] = serde_json::json!(if operator_enabled {
-                "Owner-authorized hosted HTTPS is active for configured providers."
-            } else if cfg!(target_os = "macos") {
-                "Approve each hosted connection in Inbox before its key check or model request."
-            } else {
-                HOSTED_EXTERNAL_HTTPS_PAUSED
-            });
+            result["hosted_external_https_reason"] =
+                serde_json::json!(if cfg!(target_os = "macos") {
+                    "Approve each hosted connection in Inbox before its key check or model request."
+                } else {
+                    HOSTED_EXTERNAL_HTTPS_PAUSED
+                });
             if let Some(connections) = result
                 .get_mut("connections")
                 .and_then(serde_json::Value::as_array_mut)
             {
                 for connection in connections {
-                    connection["egress_state"] = serde_json::json!("paused");
+                    connection["egress_state"] = serde_json::json!(if cfg!(target_os = "macos") {
+                        "consent_required"
+                    } else {
+                        "paused"
+                    });
                     let Some(id) = connection
                         .get("id")
                         .and_then(serde_json::Value::as_str)
@@ -675,13 +638,6 @@ pub(super) async fn system_ai_provider_get(
                     else {
                         continue;
                     };
-                    #[cfg(target_os = "macos")]
-                    if crate::api::model_provider_egress::operator_hosted_offer_ready(
-                        &state.data_dir,
-                        &id,
-                    ) {
-                        connection["egress_state"] = serde_json::json!("operator_ready");
-                    }
                     #[cfg(target_os = "macos")]
                     match crate::api::model_provider_egress::saved_connection_state(
                         &state.data_dir,
@@ -956,9 +912,11 @@ pub(super) async fn system_ai_provider_delete(
             Ok(ended) => ended,
             Err(err) => return system_error_response(err),
         };
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     let _end = if _ended > 0 {
-        Some(crate::api::model_provider_egress::begin_hosted_end(&state.data_dir, &offer_id).await)
+        Some(
+            crate::api::hosted_egress_admission::begin_hosted_end(&state.data_dir, &offer_id).await,
+        )
     } else {
         None
     };
@@ -974,9 +932,11 @@ pub(super) async fn system_ai_provider_delete(
     ) {
         return system_error_response(err);
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     let _removal_end = if _end.is_none() {
-        Some(crate::api::model_provider_egress::begin_hosted_end(&state.data_dir, &offer_id).await)
+        Some(
+            crate::api::hosted_egress_admission::begin_hosted_end(&state.data_dir, &offer_id).await,
+        )
     } else {
         None
     };

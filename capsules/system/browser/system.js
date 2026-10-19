@@ -891,8 +891,7 @@ function configureAiProvider() {
   let latestStatus = null;
   const updateValidationEnd = () => {
     const state = latestStatus?.validation_egress_approval_state?.[selectedProvider()];
-    validationEndButton.hidden = latestStatus?.hosted_external_https !== "operator_ready" && state !== "pending" && state !== "approved";
-    validationEndButton.textContent = latestStatus?.hosted_external_https === "operator_ready" ? "End hosted HTTPS" : "End key-check access";
+    validationEndButton.hidden = state !== "pending" && state !== "approved";
   };
   const setBusy = (busy) => {
     addButton.disabled = busy || !hasShellAccess();
@@ -1044,10 +1043,10 @@ function configureAiProvider() {
       });
       const state = document.createElement("span");
       state.className = "ai-provider-state";
-      state.textContent = connection.egress_state === "operator_ready" ? "Hosted HTTPS active"
-        : connection.egress_state === "ready" ? "Hosted connection approved"
+      state.textContent = connection.egress_state === "ready" ? "Hosted connection approved"
         : connection.egress_state === "paused" && connection.egress_approval_state === "approved" ? "Route approval recorded · external HTTPS paused"
-        : connection.egress_approval_state === "pending" ? "Hosted connection needs Inbox review"
+        : connection.egress_approval_state === "ended" ? "Hosted approval ended"
+        : connection.egress_state === "consent_required" || connection.egress_approval_state === "pending" ? "Hosted connection needs Inbox review"
         : connection.egress_state === "paused" ? "External HTTPS paused"
         : connection.approval_state === "approved" ? "Assistant access approved"
         : connection.share_enabled ? "Shared" : "Private";
@@ -1062,11 +1061,11 @@ function configureAiProvider() {
       const secondary = document.createElement("div");
       secondary.className = "system-inline-row";
       secondary.append(shareButton);
-      if (connection.egress_state === "operator_ready" || connection.approval_state === "approved" || ["pending", "approved"].includes(connection.egress_approval_state)) {
+      if (connection.approval_state === "approved" || ["pending", "approved"].includes(connection.egress_approval_state)) {
         const endApproval = document.createElement("button");
         endApproval.className = "pc2-btn pc2-btn-secondary";
         endApproval.type = "button";
-        endApproval.textContent = connection.egress_state === "operator_ready" ? "End hosted HTTPS" : "End hosted approval";
+        endApproval.textContent = "End hosted approval";
         endApproval.addEventListener("click", async () => {
           if (!hasShellAccess()) return;
           endApproval.disabled = true;
@@ -1076,7 +1075,7 @@ function configureAiProvider() {
               body: JSON.stringify({ id: connection.id }),
             });
             await refreshStatus();
-            showState(connection.egress_state === "operator_ready" ? "Hosted HTTPS ended for this Home." : "Hosted approval ended. A later request needs Inbox review again.", "");
+            showState("Hosted approval ended. A later request needs Inbox review again.", "");
           } catch (error) {
             showState(publicSystemError(error, "Approval could not be ended."), "error");
             endApproval.disabled = false;
@@ -1145,8 +1144,7 @@ function configureAiProvider() {
   lensDisconnect.after(lensEnd);
   const updateLensEnd = () => {
     const connection = (latestStatus?.connections || []).find(c => c.id === lensModel.value && c.operation === "decision.evaluate");
-    lensEnd.hidden = !connection || (connection.egress_state !== "operator_ready" && connection.approval_state !== "approved" && !["pending", "approved"].includes(connection.egress_approval_state));
-    lensEnd.textContent = connection?.egress_state === "operator_ready" ? "End hosted HTTPS" : "End hosted approval";
+    lensEnd.hidden = !connection || (connection.approval_state !== "approved" && !["pending", "approved"].includes(connection.egress_approval_state));
     lensEnd.disabled = !hasShellAccess();
   };
   const renderLens = (status) => {
@@ -1178,7 +1176,7 @@ function configureAiProvider() {
         body: JSON.stringify({ id: connection.id }),
       });
       await refreshStatus();
-      showState(connection.egress_state === "operator_ready" ? "Hosted HTTPS ended for this Home." : "Hosted approval ended.", "");
+      showState("Hosted approval ended.", "");
     } catch (error) {
       showState(publicSystemError(error, "Approval could not be ended."), "error");
       lensEnd.disabled = false;
@@ -1217,9 +1215,7 @@ function configureAiProvider() {
   });
   const refreshStatus = async () => {
     latestStatus = await fetchJson("/api/apps/system/ai-provider", { headers: shellHeaders() });
-    document.querySelector("#ai-provider-egress-note").textContent = latestStatus.hosted_external_https === "operator_ready"
-      ? "Owner-authorized HTTPS is active for configured hosted models. This Home stores keys and pays for requests. End hosted HTTPS here at any time."
-      : latestStatus.hosted_external_https === "consent_required"
+    document.querySelector("#ai-provider-egress-note").textContent = latestStatus.hosted_external_https === "consent_required"
         ? "This Home keeps provider keys. Approve each hosted connection in Inbox before its key check or model request."
         : "External HTTPS is paused. Saved keys, models, and past results stay here.";
     renderInstances(latestStatus);

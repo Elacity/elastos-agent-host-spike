@@ -2,13 +2,13 @@
 //! The provider names an offer and effect; Runtime selects the destination,
 //! checks current owner authority, and adds the stored credential.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use elastos_runtime::provider::ProviderBridge;
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{watch, OwnedRwLockWriteGuard, RwLock, Semaphore};
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use url::Url;
 
@@ -76,97 +76,9 @@ enum DestinationClass {
 type JobCreateKey = (String, String, String);
 static JOB_CREATES: OnceLock<Mutex<HashSet<JobCreateKey>>> = OnceLock::new();
 static EGRESS_GRANTS: OnceLock<Mutex<()>> = OnceLock::new();
-const OPERATOR_ADMISSION_KEY: &str = "\0operator-hosted";
-type AdmissionKey = (PathBuf, String);
-static ADMISSION_GATES: OnceLock<Mutex<HashMap<AdmissionKey, Weak<AdmissionGate>>>> =
-    OnceLock::new();
-
-struct AdmissionGate {
-    lock: Arc<RwLock<()>>,
-    ending: AtomicUsize,
-    changed: watch::Sender<u64>,
-}
-
-pub(crate) struct HostedEndGuard {
-    gate: Arc<AdmissionGate>,
-    _lock: OwnedRwLockWriteGuard<()>,
-}
-
-struct PendingEnd {
-    gate: Arc<AdmissionGate>,
-    active: bool,
-}
-
-impl Drop for PendingEnd {
-    fn drop(&mut self) {
-        if self.active {
-            self.gate.ending.fetch_sub(1, Ordering::Release);
-        }
-    }
-}
-
-impl Drop for HostedEndGuard {
-    fn drop(&mut self) {
-        self.gate.ending.fetch_sub(1, Ordering::Release);
-    }
-}
-
-fn admission_gate(data_dir: &Path, offer_id: &str) -> Arc<AdmissionGate> {
-    let gates = ADMISSION_GATES.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut gates = gates.lock().unwrap_or_else(|error| error.into_inner());
-    let key = (data_dir.to_path_buf(), offer_id.to_string());
-    if let Some(gate) = gates.get(&key).and_then(Weak::upgrade) {
-        return gate;
-    }
-    gates.retain(|_, gate| gate.strong_count() > 0);
-    let (changed, _) = watch::channel(0);
-    let gate = Arc::new(AdmissionGate {
-        lock: Arc::new(RwLock::new(())),
-        ending: AtomicUsize::new(0),
-        changed,
-    });
-    gates.insert(key, Arc::downgrade(&gate));
-    gate
-}
-
+use super::hosted_egress_admission::admission_gate;
 #[cfg(test)]
-pub(super) struct HeldAdmissionForTest {
-    _gate: Arc<AdmissionGate>,
-    _read: tokio::sync::OwnedRwLockReadGuard<()>,
-}
-
-#[cfg(test)]
-pub(super) async fn hold_admission_for_test(
-    data_dir: &Path,
-    offer_id: &str,
-) -> HeldAdmissionForTest {
-    let gate = admission_gate(data_dir, offer_id);
-    let read = gate.lock.clone().read_owned().await;
-    HeldAdmissionForTest {
-        _gate: gate,
-        _read: read,
-    }
-}
-
-/// After durable End succeeds, stop admitted sends and drain their admission.
-pub(crate) async fn begin_hosted_end(data_dir: &Path, offer_id: &str) -> HostedEndGuard {
-    let gate = admission_gate(data_dir, offer_id);
-    gate.ending.fetch_add(1, Ordering::AcqRel);
-    let mut pending = PendingEnd {
-        gate: gate.clone(),
-        active: true,
-    };
-    gate.changed
-        .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
-    let lock = gate.lock.clone().write_owned().await;
-    pending.active = false;
-    HostedEndGuard { gate, _lock: lock }
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) async fn begin_operator_hosted_end(data_dir: &Path) -> HostedEndGuard {
-    begin_hosted_end(data_dir, OPERATOR_ADMISSION_KEY).await
-}
+use super::hosted_egress_admission::begin_hosted_end;
 
 struct JobCreateReservation(JobCreateKey);
 
@@ -347,66 +259,31 @@ async fn fetch_validation_inner(
             || public_validation_destination_allowed(endpoint, &destination),
         "hosted validation destination unavailable"
     );
-    anyhow::ensure!(
-        !(connection_id.is_none()
-            && operator_hosted_ended(data_dir)
-            && public_validation_destination_allowed(endpoint, &destination)),
-        "owner ended hosted HTTPS"
-    );
     let (validation_offer_id, effect) = endpoint.grant_binding();
-    let operator_route = operator_hosted_validation_route(
-        data_dir,
-        validation_offer_id,
-        effect,
-        "GET",
-        &destination,
-    );
-    let offer_id = if operator_route {
-        validation_offer_id
-    } else {
-        connection_id.unwrap_or(validation_offer_id)
-    };
+    let offer_id = connection_id.unwrap_or(validation_offer_id);
     let scope = egress_scope(offer_id, effect, "GET", &destination)?;
-    if !operator_route
-        && active_decision(data_dir, &scope, &destination, Some(owner_proof_binding_id)).is_err()
-    {
+    if active_decision(data_dir, &scope, &destination, Some(owner_proof_binding_id)).is_err() {
         let _decision = model_provider_egress_decision::transition_gate(data_dir)
             .lock_owned()
             .await;
         request_decision(data_dir, &scope, &destination, Some(owner_proof_binding_id))?;
         anyhow::bail!("hosted egress requires an Inbox decision");
     }
-    if !operator_route {
-        create_grant_after_decision(
-            data_dir,
-            offer_id,
-            effect,
-            "GET",
-            &destination,
-            Some(owner_proof_binding_id),
-            None,
-        )?;
-    }
-    let operator_gate = operator_end_affects(data_dir, offer_id, effect, "GET", &destination)
-        .unwrap_or(true)
-        .then(|| admission_gate(data_dir, OPERATOR_ADMISSION_KEY));
-    let operator_admission = match &operator_gate {
-        Some(gate) => Some(gate.lock.read().await),
-        None => None,
-    };
-    let mut operator_ended = operator_gate.as_ref().map(|gate| gate.changed.subscribe());
-    if let Some(ended) = &mut operator_ended {
-        ended.borrow_and_update();
-    }
+    create_grant_after_decision(
+        data_dir,
+        offer_id,
+        effect,
+        "GET",
+        &destination,
+        Some(owner_proof_binding_id),
+        None,
+    )?;
     let gate = admission_gate(data_dir, offer_id);
     let admission = gate.lock.read().await;
     let mut ended = gate.changed.subscribe();
     ended.borrow_and_update();
     anyhow::ensure!(
-        gate.ending.load(Ordering::Acquire) == 0
-            && operator_gate
-                .as_ref()
-                .is_none_or(|gate| gate.ending.load(Ordering::Acquire) == 0),
+        gate.ending.load(Ordering::Acquire) == 0,
         "hosted access is ending"
     );
     current_grant_for(
@@ -444,13 +321,6 @@ async fn fetch_validation_inner(
         tokio::select! {
             biased;
             _ = ended.changed() => anyhow::bail!("hosted access ended during send"),
-            _ = async {
-                if let Some(ended) = &mut operator_ended {
-                    let _ = ended.changed().await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            } => anyhow::bail!("operator hosted access ended during send"),
             result = &mut send => break result?,
             _ = monitor.tick() => current_grant_for(
                 data_dir, offer_id, effect, "GET", &destination,
@@ -459,7 +329,6 @@ async fn fetch_validation_inner(
         }
     };
     drop(admission);
-    drop(operator_admission);
     if response.status().is_redirection() {
         anyhow::bail!("hosted validation redirect denied");
     }
@@ -581,12 +450,6 @@ async fn handle(
     {
         return deny(&mut stream).await;
     }
-    if operator_hosted_ended(data_dir)
-        && public_effect_destination_allowed(&request, &destination)
-        && !uses_connection_authority(data_dir, &request.offer_id, &request.effect).unwrap_or(false)
-    {
-        return deny(&mut stream).await;
-    }
     let scope = match egress_scope(
         &request.offer_id,
         &request.effect,
@@ -596,14 +459,7 @@ async fn handle(
         Ok(scope) => scope,
         Err(_) => return deny(&mut stream).await,
     };
-    let operator_route = operator_hosted_effect_route(
-        data_dir,
-        &request.offer_id,
-        &request.effect,
-        request.method.as_str(),
-        &destination,
-    );
-    if !operator_route && active_decision(data_dir, &scope, &destination, None).is_err() {
+    if active_decision(data_dir, &scope, &destination, None).is_err() {
         let _decision = model_provider_egress_decision::transition_gate(data_dir)
             .lock_owned()
             .await;
@@ -620,17 +476,16 @@ async fn handle(
         };
         return deny_access(&mut stream, state).await;
     }
-    if !operator_route
-        && create_grant_after_decision(
-            data_dir,
-            &request.offer_id,
-            &request.effect,
-            request.method.as_str(),
-            &destination,
-            None,
-            Some((&request.run_id, &request.request_id)),
-        )
-        .is_err()
+    if create_grant_after_decision(
+        data_dir,
+        &request.offer_id,
+        &request.effect,
+        request.method.as_str(),
+        &destination,
+        None,
+        Some((&request.run_id, &request.request_id)),
+    )
+    .is_err()
         || current_grant(data_dir, &request, &destination).is_err()
     {
         return deny(&mut stream).await;
@@ -1095,192 +950,6 @@ fn refusal_state(
     model_provider_egress_decision::refusal_state(data_dir, scope, connection.as_ref())
 }
 
-// An explicit Mac owner installation can keep its configured public hosted
-// routes available while the permanent per-route consent flow is completed.
-// Runtime still selects every URL and credential; this never gives the
-// provider a raw socket or an arbitrary destination.
-fn operator_hosted_enabled(data_dir: &Path) -> bool {
-    cfg!(target_os = "macos") && operator_hosted_owner(data_dir) && !operator_hosted_ended(data_dir)
-}
-
-pub(crate) fn operator_hosted_access_enabled(data_dir: &Path) -> bool {
-    operator_hosted_enabled(data_dir)
-}
-
-fn operator_hosted_owner(data_dir: &Path) -> bool {
-    std::env::var_os("ELASTOS_HOSTED_HTTPS_OWNER_DATA_DIR")
-        .map(PathBuf::from)
-        .is_some_and(|root| root.is_absolute() && root == data_dir)
-}
-
-fn operator_hosted_end_path(data_dir: &Path) -> PathBuf {
-    data_dir.join(".audit/temporary-hosted-demo-revoked.json")
-}
-
-fn operator_hosted_ended(data_dir: &Path) -> bool {
-    match std::fs::symlink_metadata(operator_hosted_end_path(data_dir)) {
-        Ok(_) => true,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-        Err(_) => true,
-    }
-}
-
-pub(crate) fn operator_hosted_end_applicable(
-    data_dir: &Path,
-    offer_id: &str,
-) -> anyhow::Result<bool> {
-    if !cfg!(target_os = "macos") || !operator_hosted_owner(data_dir) {
-        return Ok(false);
-    }
-    if !matches!(offer_id, "validation:openrouter" | "validation:venice")
-        && !load_model_provider_operator_offers(data_dir)?
-            .iter()
-            .any(|offer| offer["id"] == offer_id)
-    {
-        return Ok(false);
-    }
-    Ok(true)
-}
-
-pub(crate) fn end_operator_hosted_access(data_dir: &Path, offer_id: &str) -> anyhow::Result<bool> {
-    if !operator_hosted_end_applicable(data_dir, offer_id)? {
-        return Ok(false);
-    }
-    if operator_hosted_ended(data_dir) {
-        return Ok(true);
-    }
-    let path = operator_hosted_end_path(data_dir);
-    std::fs::create_dir_all(path.parent().expect("hosted end parent"))?;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let mut marker = match std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)
-    {
-        Ok(marker) => marker,
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(true),
-        Err(error) => return Err(error.into()),
-    };
-    use std::io::Write as _;
-    marker.write_all(b"owner ended hosted HTTPS\n")?;
-    marker.sync_all()?;
-    Ok(true)
-}
-
-fn operator_hosted_effect_route(
-    data_dir: &Path,
-    offer_id: &str,
-    effect: &str,
-    method: &str,
-    destination: &Destination,
-) -> bool {
-    operator_hosted_enabled(data_dir)
-        && public_effect_route_allowed(effect, method, destination)
-        && load_model_provider_operator_offers(data_dir)
-            .ok()
-            .is_some_and(|offers| {
-                offers.iter().any(|offer| {
-                    let adapter = &offer["adapter"];
-                    let operation_matches = match effect {
-                        "text" => {
-                            offer["operation"] == "text.generate"
-                                && adapter["kind"] == "open_ai_compatible_text"
-                        }
-                        "decisions" => {
-                            offer["operation"] == "decision.evaluate"
-                                && adapter["kind"] == "open_router_decisions"
-                        }
-                        _ => false,
-                    };
-                    offer["id"] == offer_id
-                        && offer["enabled"] != false
-                        && operation_matches
-                        && adapter["api_url"] == destination.grant_url
-                        && adapter["hosted"]["backend_provider_label"] == destination.provider
-                })
-            })
-}
-
-fn operator_hosted_validation_route(
-    data_dir: &Path,
-    offer_id: &str,
-    effect: &str,
-    method: &str,
-    destination: &Destination,
-) -> bool {
-    let Some(endpoint) =
-        operator_validation_endpoint(offer_id, effect, method, destination.provider.as_str())
-    else {
-        return false;
-    };
-    operator_hosted_enabled(data_dir)
-        && public_validation_destination_allowed(endpoint, destination)
-}
-
-fn operator_validation_endpoint(
-    offer_id: &str,
-    effect: &str,
-    method: &str,
-    provider: &str,
-) -> Option<ValidationEndpoint> {
-    match (offer_id, effect, method, provider) {
-        ("validation:openrouter", "validate_models", "GET", "OpenRouter") => {
-            Some(ValidationEndpoint::OpenRouterModels)
-        }
-        ("validation:venice", "validate_access", "GET", "Venice") => {
-            Some(ValidationEndpoint::VeniceAccess)
-        }
-        ("validation:venice", "validate_models", "GET", "Venice") => {
-            Some(ValidationEndpoint::VeniceModels)
-        }
-        _ => None,
-    }
-}
-
-pub(crate) fn operator_hosted_offer_ready(data_dir: &Path, offer_id: &str) -> bool {
-    if !operator_hosted_enabled(data_dir) {
-        return false;
-    }
-    load_model_provider_operator_offers(data_dir)
-        .ok()
-        .and_then(|offers| {
-            offers.into_iter().find(|offer| {
-                let adapter = &offer["adapter"];
-                let configured = matches!(
-                    (
-                        offer["operation"].as_str(),
-                        adapter["kind"].as_str(),
-                        adapter["hosted"]["backend_provider_label"].as_str(),
-                        adapter["api_url"].as_str(),
-                    ),
-                    (
-                        Some("text.generate"),
-                        Some("open_ai_compatible_text"),
-                        Some("OpenRouter"),
-                        Some(OPENROUTER_CHAT_URL),
-                    ) | (
-                        Some("text.generate"),
-                        Some("open_ai_compatible_text"),
-                        Some("Venice"),
-                        Some(VENICE_CHAT_URL),
-                    ) | (
-                        Some("decision.evaluate"),
-                        Some("open_router_decisions"),
-                        Some("OpenRouter"),
-                        Some(OPENROUTER_DECISIONS_URL),
-                    )
-                );
-                offer["id"] == offer_id && offer["enabled"] != false && configured
-            })
-        })
-        .is_some()
-        && read_hosted_secret(data_dir, offer_id)
-            .ok()
-            .flatten()
-            .is_some()
-}
-
 fn grant_file(data_dir: &Path) -> anyhow::Result<GrantFile> {
     let Some(bytes) = read_hosted_egress_grants(data_dir)? else {
         return Ok(GrantFile {
@@ -1356,16 +1025,6 @@ fn current_grant_for(
     current_admin_proof: Option<&str>,
     run_binding: Option<(&str, &str)>,
 ) -> anyhow::Result<()> {
-    if operator_hosted_ended(data_dir)
-        && operator_end_affects(data_dir, offer_id, effect, method, destination)?
-    {
-        anyhow::bail!("owner ended hosted HTTPS");
-    }
-    if operator_hosted_effect_route(data_dir, offer_id, effect, method, destination)
-        || operator_hosted_validation_route(data_dir, offer_id, effect, method, destination)
-    {
-        return Ok(());
-    }
     let scope = egress_scope(offer_id, effect, method, destination)?;
     let decision = active_decision(data_dir, &scope, destination, current_admin_proof)?;
     let file = grant_file(data_dir)?;
@@ -1407,24 +1066,6 @@ fn current_grant_for(
         "hosted egress owner unavailable"
     );
     Ok(())
-}
-
-fn operator_end_affects(
-    data_dir: &Path,
-    offer_id: &str,
-    effect: &str,
-    method: &str,
-    destination: &Destination,
-) -> anyhow::Result<bool> {
-    Ok(!uses_connection_authority(data_dir, offer_id, effect)?
-        && (public_effect_route_allowed(effect, method, destination)
-            || operator_validation_endpoint(
-                offer_id,
-                effect,
-                method,
-                destination.provider.as_str(),
-            )
-            .is_some_and(|endpoint| public_validation_destination_allowed(endpoint, destination))))
 }
 
 fn job_creates() -> &'static Mutex<HashSet<JobCreateKey>> {
@@ -1705,38 +1346,17 @@ async fn forward(
         Ok(client) => client,
         Err(_) => return deny(stream).await,
     };
-    let operator_gate = operator_end_affects(
-        data_dir,
-        &request.offer_id,
-        &request.effect,
-        request.method.as_str(),
-        destination,
-    )
-    .unwrap_or(true)
-    .then(|| admission_gate(data_dir, OPERATOR_ADMISSION_KEY));
-    let operator_admission = match &operator_gate {
-        Some(gate) => Some(gate.lock.read().await),
-        None => None,
-    };
-    let mut operator_ended = operator_gate.as_ref().map(|gate| gate.changed.subscribe());
-    if let Some(ended) = &mut operator_ended {
-        ended.borrow_and_update();
-    }
     let gate = admission_gate(data_dir, &request.offer_id);
     let admission = gate.lock.read().await;
     let mut ended = gate.changed.subscribe();
     ended.borrow_and_update();
     if gate.ending.load(Ordering::Acquire) != 0
-        || operator_gate
-            .as_ref()
-            .is_some_and(|gate| gate.ending.load(Ordering::Acquire) != 0)
         || !run_authorized()
         || current_grant(data_dir, request, destination).is_err()
         || (matches!(request.effect.as_str(), "job_status" | "job_cancel")
             && current_job_binding(data_dir, request, backend_id).is_err())
     {
         drop(admission);
-        drop(operator_admission);
         return deny(stream).await;
     }
     let mut outbound = client.request(request.method.clone(), url.clone());
@@ -1750,7 +1370,6 @@ async fn forward(
             Ok(body) => body,
             Err(_) => {
                 drop(admission);
-                drop(operator_admission);
                 return deny(stream).await;
             }
         };
@@ -1762,23 +1381,14 @@ async fn forward(
         && mark_job_create_attempt(data_dir, request, backend_id).is_err()
     {
         drop(admission);
-        drop(operator_admission);
         return deny(stream).await;
     }
     let sent = tokio::select! {
         biased;
         _ = ended.changed() => None,
-        _ = async {
-            if let Some(ended) = &mut operator_ended {
-                let _ = ended.changed().await;
-            } else {
-                std::future::pending::<()>().await;
-            }
-        } => None,
         result = outbound.send() => Some(result),
     };
     drop(admission);
-    drop(operator_admission);
     let mut response = match sent {
         None => return unavailable(stream).await,
         Some(Ok(response)) if !response.status().is_redirection() => response,
@@ -2099,118 +1709,106 @@ mod tests {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
 
-    #[tokio::test]
-    async fn cancelled_end_releases_pending_admission() {
-        let dir = tempfile::tempdir().unwrap();
-        let gate = admission_gate(dir.path(), "model:fixture");
-        let read = gate.lock.read().await;
-        let mut end = Box::pin(begin_hosted_end(dir.path(), "model:fixture"));
-        assert!(tokio::time::timeout(Duration::from_millis(100), &mut end)
-            .await
-            .is_err());
-        assert_eq!(gate.ending.load(Ordering::Acquire), 1);
-        drop(end);
-        assert_eq!(gate.ending.load(Ordering::Acquire), 0);
-        drop(read);
-        drop(
-            tokio::time::timeout(
-                Duration::from_secs(1),
-                begin_hosted_end(dir.path(), "model:fixture"),
-            )
-            .await
-            .unwrap(),
-        );
-    }
-
     #[test]
-    fn operator_hosted_end_marker_stops_all_routes() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = operator_hosted_end_path(dir.path());
-        assert!(!operator_hosted_ended(dir.path()));
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, b"owner ended hosted HTTPS\n").unwrap();
-        assert!(operator_hosted_ended(dir.path()));
-        for (offer_id, effect, method, url, provider) in [
-            ("model:venice", "text", "POST", VENICE_CHAT_URL, "Venice"),
+    fn retired_operator_setting_requires_inbox_for_saved_routes() {
+        const CHILD: &str = "ELASTOS_TEST_RETIRED_HOSTED_OWNER";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "retired_operator_setting_requires_inbox_for_saved_routes",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("ELASTOS_HOSTED_HTTPS_OWNER_DATA_DIR", dir.path())
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "isolated retired-route control failed: {}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+            return;
+        }
+        let data_dir =
+            PathBuf::from(std::env::var_os("ELASTOS_HOSTED_HTTPS_OWNER_DATA_DIR").unwrap());
+        let saved = [
+            (
+                "model:openrouter",
+                "text",
+                OPENROUTER_CHAT_URL,
+                "OpenRouter",
+            ),
+            ("model:venice", "text", VENICE_CHAT_URL, "Venice"),
             (
                 "model:jev",
                 "decisions",
-                "POST",
                 OPENROUTER_DECISIONS_URL,
                 "OpenRouter",
             ),
-            (
-                "validation:venice",
-                "validate_models",
-                "GET",
-                VENICE_MODELS_URL,
-                "Venice",
-            ),
-        ] {
+        ];
+        super::super::model_provider_config::seed_model_provider_operator_offers_for_test(
+            &data_dir,
+            saved.iter().map(|(id, effect, url, provider)| json!({
+                "id":id, "operation":if *effect == "text" {"text.generate"} else {"decision.evaluate"},
+                "enabled":true, "adapter":{
+                    "kind":if *effect == "text" {"open_ai_compatible_text"} else {"open_router_decisions"},
+                    "api_url":url, "api_key":"fixture-key", "model":"fixture/model",
+                    "hosted":{"backend_provider_label":provider}
+                }
+            })).collect(),
+        ).unwrap();
+        let offers = load_model_provider_operator_offers(&data_dir).unwrap();
+        for (id, effect, method, url, provider) in saved
+            .into_iter()
+            .map(|(id, effect, url, provider)| (id, effect, "POST", url, provider))
+            .chain([
+                (
+                    "validation:openrouter",
+                    "validate_models",
+                    "GET",
+                    OPENROUTER_MODELS_URL,
+                    "OpenRouter",
+                ),
+                (
+                    "validation:venice",
+                    "validate_access",
+                    "GET",
+                    VENICE_ACCESS_URL,
+                    "Venice",
+                ),
+                (
+                    "validation:venice",
+                    "validate_models",
+                    "GET",
+                    VENICE_MODELS_URL,
+                    "Venice",
+                ),
+            ])
+        {
             let destination = Destination {
                 url: Url::parse(url).unwrap(),
                 grant_url: url.into(),
-                credential: Some("private-key".into()),
+                credential: Some("fixture-key".into()),
                 job_backend_id: None,
                 provider: provider.into(),
-                configuration_id: "configuration".into(),
+                configuration_id: "a".repeat(64),
                 fixture_ca_pem: None,
             };
             assert!(
-                operator_end_affects(dir.path(), offer_id, effect, method, &destination,).unwrap()
+                current_grant_for(&data_dir, id, effect, method, &destination, None, None).is_err(),
+                "the retired operator setting must require Inbox for {effect}"
             );
-            let error = current_grant_for(
-                dir.path(),
-                offer_id,
-                effect,
-                method,
-                &destination,
-                None,
-                None,
-            )
-            .err()
-            .unwrap();
-            assert!(error.to_string().contains("owner ended hosted HTTPS"));
         }
-    }
-
-    #[test]
-    fn operator_validation_matches_only_exact_provider_effect_and_get() {
-        assert!(matches!(
-            operator_validation_endpoint(
-                "validation:openrouter",
-                "validate_models",
-                "GET",
-                "OpenRouter"
-            ),
-            Some(ValidationEndpoint::OpenRouterModels)
-        ));
-        assert!(matches!(
-            operator_validation_endpoint("validation:venice", "validate_access", "GET", "Venice"),
-            Some(ValidationEndpoint::VeniceAccess)
-        ));
-        assert!(matches!(
-            operator_validation_endpoint("validation:venice", "validate_models", "GET", "Venice"),
-            Some(ValidationEndpoint::VeniceModels)
-        ));
-        for (offer, effect, method, provider) in [
-            (
-                "validation:openrouter",
-                "validate_models",
-                "POST",
-                "OpenRouter",
-            ),
-            (
-                "validation:openrouter",
-                "validate_access",
-                "GET",
-                "OpenRouter",
-            ),
-            ("validation:venice", "validate_models", "GET", "OpenRouter"),
-            ("model:hosted-venice", "validate_models", "GET", "Venice"),
-        ] {
-            assert!(operator_validation_endpoint(offer, effect, method, provider).is_none());
-        }
+        assert_eq!(
+            load_model_provider_operator_offers(&data_dir).unwrap(),
+            offers
+        );
+        assert_eq!(
+            offers.len(),
+            3,
+            "saved connections stay available for owner management"
+        );
     }
 
     fn write_private(path: &Path, bytes: &[u8]) {

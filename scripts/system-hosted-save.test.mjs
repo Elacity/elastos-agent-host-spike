@@ -7,7 +7,7 @@ import vm from "node:vm";
 const source = readFileSync(new URL("../capsules/system/browser/system.js", import.meta.url), "utf8");
 const controller = source.slice(source.indexOf("function configureAiProvider() {"), source.indexOf("function configurePasskeyAccess() {"));
 
-function fixture(connections = [], guest = false, staged = []) {
+function fixture(connections = [], guest = false, staged = [], status = {}) {
   const nodes = new Map();
   const element = () => ({
     value: "", hidden: false, disabled: false, dataset: {}, selectedOptions: [], children: [], handlers: {},
@@ -44,7 +44,7 @@ function fixture(connections = [], guest = false, staged = []) {
       }
       if (init.method !== "POST") {
         if (guest) throw new Error("request failed: 403 admin passkey required");
-        return { connections, staged_connections: stagedConnections };
+        return { ...status, connections, staged_connections: stagedConnections };
       }
       const body = JSON.parse(init.body);
       attempts.push(body);
@@ -63,6 +63,28 @@ function fixture(connections = [], guest = false, staged = []) {
   return { node, saved, messages, attempts, discarded,
     activate: () => { rejectActivation = false; }, pending: () => { consentPending = true; } };
 }
+
+test("saved hosted connections keep management controls while Inbox owns access", async () => {
+  const f = fixture([{
+    id: "model:hosted-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", name: "My hosted model",
+    provider: "openrouter", processor_label: "OpenRouter", selected_model: "fixture/model",
+    connected: true, operation: "text.generate", egress_state: "consent_required",
+  }], false, [], { hosted_external_https: "consent_required" });
+  await new Promise(setImmediate);
+  const card = f.node("#ai-provider-instances").children[0];
+  const controls = [];
+  const collect = element => {
+    controls.push(element.textContent);
+    for (const child of element.children) collect(child);
+  };
+  collect(card);
+  assert.ok(controls.includes("My hosted model"));
+  assert.ok(controls.includes("Hosted connection needs Inbox review"));
+  assert.ok(controls.includes("Disconnect"));
+  assert.ok(controls.includes("Edit"));
+  assert.match(f.node("#ai-provider-egress-note").textContent, /Approve each hosted connection in Inbox/);
+  assert.equal(f.attempts.length, 0);
+});
 
 test("guest setup does not keep an entered key or offer an unusable Add form", async () => {
   const f = fixture([], true);
