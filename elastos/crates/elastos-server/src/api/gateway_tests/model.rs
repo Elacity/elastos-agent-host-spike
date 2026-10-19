@@ -2354,7 +2354,7 @@ async fn owner_end_cancels_system_validation_while_setup_is_held() {
             .unwrap();
         assert_eq!(
             body.as_ref(),
-            b"This Home could not check the hosted connection. Try again."
+            b"Hosted HTTPS was ended on this Home. Start a new connection check in Inbox."
         );
         assert!(ended.has_changed().unwrap(), "End cancels admitted sends");
         let history = serde_json::to_value(

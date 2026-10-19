@@ -77,7 +77,7 @@ fn hosted_transport_error(err: anyhow::Error) -> anyhow::Error {
         "hosted egress requires an Inbox decision" => HOSTED_CONNECTION_PENDING,
         "hosted connection request was denied" => HOSTED_CONNECTION_DENIED,
         "hosted egress request was denied or ended" => HOSTED_ACCESS_CLOSED,
-        "owner ended hosted HTTPS" => HOSTED_CONNECTION_ENDED,
+        "hosted access ended during send" | "hosted access is ending" => HOSTED_CONNECTION_ENDED,
         "hosted validation destination unavailable"
         | "hosted validation redirect denied"
         | "hosted destination unavailable" => HOSTED_CONNECTION_ROUTE_BLOCKED,
@@ -1055,7 +1055,11 @@ mod parse_tests {
             super::HOSTED_ACCESS_CLOSED
         );
         assert_eq!(
-            mapped("owner ended hosted HTTPS"),
+            mapped("hosted access ended during send"),
+            super::HOSTED_CONNECTION_ENDED
+        );
+        assert_eq!(
+            mapped("hosted access is ending"),
             super::HOSTED_CONNECTION_ENDED
         );
         assert_eq!(
