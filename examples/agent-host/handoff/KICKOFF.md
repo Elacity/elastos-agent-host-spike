@@ -3,7 +3,7 @@
 Start a Claude Code session on the private repo, branch `spike/agent-host`, then paste:
 
 ```text
-This repo is a private copy of Elacity/elastos-runtime for one local spike, the Agent Host. Read CLAUDE.md, then examples/agent-host/handoff/HANDOFF.md in full, then ROADMAP.md and the checklist at the top of SLICES.md in the same folder. HANDOFF.md wins where they disagree.
+This repo is a private copy of Elacity/elastos-runtime for one local spike, the Agent Host. Read CLAUDE.md, then examples/agent-host/handoff/HANDOFF.md in full, then ROADMAP.md, DEEPSEEK.md, HISTORY.md, and the checklist at the top of SLICES.md in the same folder, and the repo's PRINCIPLES.md, docs/AGENT_ARCHITECTURE.md, AGENTS.md, and SECURITY.md. HANDOFF.md wins where they disagree.
 
 Do slice S0 only (baseline, no code change), as written in HANDOFF.md section 8. Do the setup in section 9 and run the commands in section 10.
 

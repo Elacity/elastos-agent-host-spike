@@ -2,7 +2,7 @@
 
 This is a private copy of `Elacity/elastos-runtime` for one spike: the Agent Host.
 
-Before any work, read `examples/agent-host/handoff/HANDOFF.md` in full. It has the rules, the roadmap, the checklist, the slice queue, the test commands, and the report format.
+Before any work, read `examples/agent-host/handoff/HANDOFF.md` in full. It has the rules, the roadmap, the checklist, the slice queue, the test commands, the report format, the list of principles and docs to read, and where the DeepSeek Harness reference is (`handoff/DEEPSEEK.md`).
 
 Hard rules, short form:
 
@@ -11,4 +11,5 @@ Hard rules, short form:
 - Author `SashaMIT <sash@ela.city>`, trailer `Co-authored-by: Claude <noreply@anthropic.com>`. Never rebase, amend, squash, or force-push.
 - No secrets and no large files in commits.
 - Every claim needs a falsifier: break it, show the test fail, revert.
+- DeepSeek Harness is a reference to learn from: clone it outside this repo, copy ideas, never code. `PRINCIPLES.md` wins over any DeepSeek pattern.
 - Simple English. Say what is next.

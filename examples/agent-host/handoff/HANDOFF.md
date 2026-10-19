@@ -8,10 +8,46 @@ ElastOS Runtime is a private computer. Its Assistant today is chat only: no tool
 
 The plan is to grow an **Agent Host**: Rust compiled to a WebAssembly component, running inside the Runtime's Wasmtime with no files, no network, no shell. It copies DeepSeek's ideas (append-only journal, stable prompt head, compaction, guarded tool pipeline, read-before-edit). Every effect is a request on the Bus that the Runtime grants or refuses. We copy patterns, never DeepSeek's code.
 
-- `ROADMAP.md` is the audit: grades, what to copy, what not to copy, phases A to F, where WASM sits.
-- `SLICES.md` is the working plan and the checklist (the `todos` at the top). One section per grade row, the DeepSeek source for each pattern, and the target Rust. It is now the live checklist. Update a todo's `status` in the same commit as the slice that finishes it.
-- Both files were written on Sasha's Mac. A path that starts with `/Users/sash/code/wt-agent-host/` means the repo root here. Other `/Users/sash/...` paths (Cursor plans, the task log, a canvas) do not exist in the cloud; this folder already holds what you need from them.
-- Principles that bind every line: `PRINCIPLES.md` 3, 5, 7, 10, 11, 16, 18, 19. Architecture contract: `docs/AGENT_ARCHITECTURE.md`. Team rules: `AGENTS.md`.
+Files in this folder:
+
+- `ROADMAP.md`: the audit. Grades, what to copy, what not to copy, phases A to F, where WASM sits.
+- `SLICES.md`: the working plan and the checklist (the `todos` at the top). One section per grade row, the DeepSeek source for each pattern, and the target Rust. It is now the live checklist. Update a todo's `status` in the same commit as the slice that finishes it.
+- `DEEPSEEK.md`: how to read DeepSeek Harness (pinned commits, which file goes with which slice, what changed since we read it, and the copy-ideas-not-code rule).
+- `HISTORY.md`: every proven step from 12 to 14 Oct, oldest first. Read it before changing a behaviour, so you do not undo a proof.
+- `LOG.md`, `reports/`, `reviews/`: the running record.
+
+`ROADMAP.md`, `SLICES.md`, and `HISTORY.md` were written on Sasha's Mac. A path that starts with `/Users/sash/code/wt-agent-host/` means the repo root here. Other `/Users/sash/...` paths (Cursor plans, the task log, a canvas) do not exist in the cloud; this folder already holds what you need from them.
+
+### Read before coding (in the repo, not in this folder)
+
+- `PRINCIPLES.md`, all 19 and the decision rule at the end. These bind every slice: 3 No ambient authority; 5 Small trusted core; 7 Humans and agents share one authority model; 10 One canonical path per operation; 11 Fail closed, then explain; 12 Docs, code, tests, and operations must agree; 15 Trust and access must travel with signed content (S1, S3); 16 UI surfaces must not be authority; 18 Executable capsules are isolated execution environments; 19 Consequences govern effects, not transports. A report names the principles its slice touches.
+- `docs/AGENT_ARCHITECTURE.md`: the Agent Host contract (Agent Host owns the loop, Runtime authorizes, model output is a proposal, UI is not a grant). S2 and S3 start from its `UsersAI` section.
+- `docs/ARCHITECTURE.md`: the component path and web projections.
+- `AGENTS.md`: the team's rules. Its review rules apply here too: one concern per change, its own tests, and an independent adversarial review from another model family for grants, gateway, provider launch, confinement, or signing.
+- `SECURITY.md`: how security findings are written. Even in this private repo, a report or PR text gives a safe summary. A real weakness in shipping ElastOS code goes in the report under `Questions:` as "security finding, details for Sasha", with no exploit steps.
+
+### Grades (from the 12 Oct canvas, which lives on Sasha's Mac)
+
+Scale: 0 absent, 1 sketched or prompt-only, 3 real but incomplete, 5 production for that job. A+ is 5 on every row (70 of 70).
+
+| Row | DeepSeek | ElastOS Assistant 12 Oct | Path target |
+| --- | --- | --- | --- |
+| 1 Agent loop | 5 | 1 | 5 |
+| 2 Session log | 5 | 2 | 5 |
+| 3 Prefix cache | 5 | 1 | 4 |
+| 4 Compaction | 4 | 2 | 4 |
+| 5 Tool system | 5 | 0 | 5 |
+| 6 Edit reliability | 4 | 0 | 5 |
+| 7 Shell and tests | 4 | 0 | 4 |
+| 8 Git and undo | 2 | 0 | 3 |
+| 9 Skills | 4 | 0 | 4 |
+| 10 Local model ops | 1 | 5 | 5 |
+| 11 Hosted and secrets | 2 | 4 | 5 |
+| 12 Capability model | 2 | 4 | 5 |
+| 13 Create an app | 3 | 1 | 4 |
+| 14 Package and sell | 0 | 2 | 4 |
+
+The task log called the spike "about 43 of 70" on 13 Oct. That was a rough total with no per-row breakdown. A path grade is a name, not a proof: a row only counts when a test proves it.
 
 ## 2. Where things are
 
@@ -70,6 +106,8 @@ Not run here: <tests that need Sasha's Mac, and why>
 Falsifiers:   <what I broke> -> <test that failed> -> reverted
 Guest hash:   <sha256 of agent-host.component.wasm>
 Import list:  unchanged | changed to <list> because <reason>
+Principles:   <numbers this slice touches, one line each on how it keeps them>
+DeepSeek:     <file and commit of any pattern used, or "none">
 Not proven:   <limits, honestly>
 Checklist:    <n> of 62   (<ids> moved to completed)
 Questions:    <for Sasha, or "none">
@@ -96,6 +134,9 @@ Do them in this order. Each is one session. Stop after each.
 
 - Set up (section 9). Merge Elacity `develop`. Run every command in section 10. Report the guest hash and whether it matches `fe9bcaa4...`.
 - Update `SLICES.md`: mark `run-tests-in-vm` done for the Home list, and add a pending todo `exec-cargo-in-image` (section 7 of SLICES.md) for "cargo is not in the VM image".
+- Do the one-time DeepSeek catch-up in `DEEPSEEK.md` and add the "DeepSeek since 12 Oct" section to the report.
+- Read `HISTORY.md` and say in the report if any proof there no longer matches the code.
+- Add a section "Spike grade today": for each of the 14 rows, the grade the spike has actually proven, with the test name that proves it. Unproven means it does not count. Cursor checks this.
 - This proves the cloud setup matches the Mac before anything changes.
 
 ### S1 - `sell-closed-admission` (cloud, small, test only)
@@ -140,7 +181,7 @@ python3 --version   # 3.10 or newer
 node --version      # 20 or newer
 ```
 
-If a download is blocked by the network setting, say exactly which host was blocked and stop. Do not work around it.
+Hosts the work needs: `static.rust-lang.org` (target), `crates.io` and `index.crates.io` (crates), `registry.npmjs.org` (optional Playwright), `github.com` (Elacity `develop` and DeepSeek Harness, read only). If a download is blocked by the network setting, say exactly which host was blocked and stop. Do not work around it.
 
 ## 10. Test commands (all green on 19 Oct on the Mac at `d465df3bc`)
 
