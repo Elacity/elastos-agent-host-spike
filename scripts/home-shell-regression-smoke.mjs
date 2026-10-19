@@ -1697,7 +1697,11 @@ assert(
       .disabled === true &&
     restoredBrowserEntry.node
       .querySelector("[data-action='close']")
-      .getAttribute("aria-label") === "Close",
+      .getAttribute("aria-label") === "Close" &&
+    restoredBrowserEntry.browserClosingStatus?.textContent === "Closing…" &&
+    restoredBrowserEntry.browserClosingStatus.getAttribute("role") === "status" &&
+    restoredBrowserEntry.browserClosingStatus.parentElement ===
+      restoredBrowserEntry.node.querySelector(".window-body"),
   "nonterminal Browser cleanup ended the close handshake before Runtime settled",
   {
     state: restoredBrowserEntry.node.dataset.browserCloseState,

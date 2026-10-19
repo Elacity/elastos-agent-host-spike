@@ -5708,6 +5708,19 @@ body.assistant-space-active #inbox-rail {
   pointer-events: auto;
 }
 
+/* Browser close waits for Runtime cleanup (a few seconds): say so on the
+   window instead of looking frozen. */
+.window-closing-status {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--frame-fill) 72%, transparent);
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
 .window-resize-handle {
   position: absolute;
   z-index: 3;

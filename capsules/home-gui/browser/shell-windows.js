@@ -1050,6 +1050,19 @@ function markBrowserWindowCloseState(entry, state) {
   const closeButton = entry.node.querySelector("[data-action='close']");
   entry.node.dataset.browserCloseState = state;
   closeButton.disabled = state === "pending";
+  if (state === "pending") {
+    if (!entry.browserClosingStatus) {
+      const status = document.createElement("div");
+      status.className = "window-closing-status";
+      status.setAttribute("role", "status");
+      status.textContent = "Closing…";
+      entry.browserClosingStatus = status;
+    }
+    entry.node.querySelector(".window-body").append(entry.browserClosingStatus);
+  } else if (entry.browserClosingStatus) {
+    entry.browserClosingStatus.remove();
+    delete entry.browserClosingStatus;
+  }
   if (state === "retry") {
     closeButton.setAttribute("aria-label", "Retry Browser close");
     closeButton.title = "Runtime cleanup is pending. Activate to retry close.";
