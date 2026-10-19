@@ -836,6 +836,8 @@ async function runPasskeyCreate() {
           // again with the same intent and original retention deadline.
           pending.ceremony_id = null;
           savePendingRegistration(pending);
+          const name = String(error && error.name || "");
+          if (name === "NotAllowedError" || name === "AbortError") throw new Error(PASSKEY_NOT_SAVED);
           throw error;
         }
         pending.response = serializeCreatedCredential(credential);
@@ -990,6 +992,10 @@ async function runPasskeySignIn() {
     setButtonsDisabled(false);
   }
 }
+
+const PASSKEY_NOT_SAVED = "No passkey was saved. Save it on this computer (Touch ID, or Windows Hello: set up a PIN in "
+  + "Settings → Accounts → Sign-in options), on a phone that can save passkeys, or on a security key. "
+  + "Then choose Resume setup.";
 
 // One plain reason and one next step per failed sign-in; never a status code
 // or server text. Stages: start (begin or status), passkey (the browser),

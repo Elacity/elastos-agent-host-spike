@@ -292,11 +292,15 @@ for (const raw of ["{", "x".repeat(65537), JSON.stringify({ schema: key, home_to
   assert.deepEqual(next.opened(), { response: grant, flow: { enrollmentPurpose: "create" } });
 }
 
-for (const guest of [false, true]) for (const reason of ["cancelled", "timed out"]) {
+for (const guest of [false, true]) for (const [name, reason] of [["NotAllowedError", "cancelled"], ["AbortError", "timed out"]]) {
   const f = fixture({ guest }), home = f.reload();
   await home.show(); await home.choose();
-  f.afterCreate(() => { const error = Error(reason); error.name = "NotAllowedError"; throw error; });
-  await assert.rejects(home.api.runPasskeyCreate(), new RegExp(reason));
+  f.afterCreate(() => { const error = Error(reason); error.name = name; throw error; });
+  await assert.rejects(home.api.runPasskeyCreate(), error => {
+    assert.match(error.message, /^No passkey was saved\. .*Windows Hello.*security key\. Then choose Resume setup\.$/);
+    assert.doesNotMatch(error.message, new RegExp(reason));
+    return true;
+  });
   const pending = JSON.parse(f.values.get(key));
   assert.equal(pending.ceremony_id, null);
   assert.equal(pending.response, null);
