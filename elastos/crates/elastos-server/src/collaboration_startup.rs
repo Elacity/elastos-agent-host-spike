@@ -3688,6 +3688,10 @@ mod tests {
         assert_eq!(state.pending_rebuilds, 0);
         assert_eq!(state.cancelled_rebuilds, 1);
         assert!(
+            state.health_reads > 31,
+            "health checks resume after the wait times out at 180 s"
+        );
+        assert!(
             !state.rebuilt,
             "a pending provider result cannot heal the fixture"
         );
