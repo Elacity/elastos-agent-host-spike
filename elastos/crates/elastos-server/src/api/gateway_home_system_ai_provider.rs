@@ -736,6 +736,9 @@ pub(super) async fn system_ai_provider_validate(
         .clone()
         .unwrap_or_else(|| format!("model:hosted-{:032x}", rand::random::<u128>()));
     let _setup = hosted_setup_gate(&state.data_dir).lock_owned().await;
+    if let Err(err) = require_system_admin(&state.data_dir, &headers) {
+        return system_error_response(err);
+    }
     let api_key = match crate::api::model_provider_config::hosted_key_for_save(
         &state.data_dir,
         provider,
@@ -796,6 +799,9 @@ pub(super) async fn system_ai_provider_save(
         .clone()
         .unwrap_or_else(|| format!("model:hosted-{:032x}", rand::random::<u128>()));
     let _setup = hosted_setup_gate(&state.data_dir).lock_owned().await;
+    if let Err(err) = require_system_admin(&state.data_dir, &headers) {
+        return system_error_response(err);
+    }
     let api_key = match if req.api_key.trim().is_empty() {
         crate::api::model_provider_config::hosted_key_for_save(
             &state.data_dir,
@@ -840,6 +846,9 @@ pub(super) async fn system_ai_provider_save(
     let _model_share_guard = super::gateway_model_service::model_share_gate()
         .write()
         .await;
+    if let Err(err) = require_system_admin(&state.data_dir, &headers) {
+        return system_error_response(err);
+    }
     match crate::api::save_hosted_offer(
         &state.data_dir,
         state.provider_registry.as_deref(),

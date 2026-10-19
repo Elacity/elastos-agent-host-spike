@@ -2224,6 +2224,9 @@ async fn system_hosted_mutations_recheck_revoked_admin_after_waits() {
         ("delete", "sharing"),
         ("discard", "setup"),
         ("discard", "transition"),
+        ("validate", "setup"),
+        ("save", "setup"),
+        ("save", "sharing"),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let id = format!("model:hosted-{}", "a".repeat(32));
@@ -2248,6 +2251,9 @@ async fn system_hosted_mutations_recheck_revoked_admin_after_waits() {
             )
             .unwrap();
         }
+        install_openrouter_models_double(OpenRouterModelsDouble::Models(vec![
+            "fixture/model".into()
+        ]));
         let authority = passkey_authority_with_name(dir.path(), Some("admin"));
         let app = gateway_router(test_state(dir.path()));
         let before =
@@ -2286,13 +2292,18 @@ async fn system_hosted_mutations_recheck_revoked_admin_after_waits() {
                 "POST"
             })
             .uri(match action {
-                "delete" => "/api/apps/system/ai-provider",
+                "delete" | "save" => "/api/apps/system/ai-provider",
+                "validate" => "/api/apps/system/ai-provider/validate",
                 "discard" => "/api/apps/system/ai-provider/staged",
                 _ => "/api/apps/system/approval-lens/revoke",
             })
             .header("x-elastos-home-token", authority.system_token.clone())
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(json!({"id":id}).to_string()))
+            .body(Body::from(if matches!(action, "validate" | "save") {
+                json!({"id":id,"provider":"openrouter","api_key":"replacement-fixture-key","model":"fixture/model","name":"Changed"})
+            } else {
+                json!({"id":id})
+            }.to_string()))
             .unwrap();
         let mut pending = Box::pin(app.oneshot(request));
         assert!(
@@ -2323,9 +2334,16 @@ async fn system_hosted_mutations_recheck_revoked_admin_after_waits() {
                 .unwrap()
                 .is_some()
         );
+        if matches!(action, "validate" | "save") && wait == "setup" {
+            assert!(
+                !crate::api::model_provider_config::staged_hosted_key_present(dir.path(), &id),
+                "a revoked owner cannot stage a replacement key after waiting for setup"
+            );
+        }
         if action == "discard" {
             assert!(crate::api::model_provider_config::staged_hosted_key_present(dir.path(), &id));
         }
+        clear_hosted_ai_validate_doubles();
     }
 }
 
