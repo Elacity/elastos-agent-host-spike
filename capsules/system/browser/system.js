@@ -3055,7 +3055,7 @@ function recoveryAttentionNote(status) {
   }
   if (status?.required_actions?.includes("migrate_declared_plaintext_objects")) {
     const notStarting = status.protection_configured === true ? "; until they are, Home will not start again" : "";
-    notes.push(`Some files in your protected Home folders are not encrypted yet${notStarting}. Saving your Recovery Kit encrypts files of up to 16 MiB after you approve with your passkey; a larger file is named so you can move it out and upload it again in Library.`);
+    notes.push(`Some files in your protected Home folders are not encrypted yet${notStarting}. Saving your Recovery Kit encrypts files of up to 16 MiB after you approve with your passkey; a larger file is named so you can move it out of your protected folders (Library takes uploads up to 100 MiB).`);
   }
   const count = Number(status?.objects_needing_attention_count) || 0;
   const first = Array.isArray(status?.objects_needing_attention) ? status.objects_needing_attention[0] : null;
