@@ -296,6 +296,15 @@ function createAppServer() {
       res.end();
       return;
     }
+    if (url.pathname === "/home-fixture") {
+      // Documents framed as Home frames it; the page records what it asks Home.
+      const homeOrigin = `http://${req.headers.host}`;
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(`<!doctype html><script>window.homeMessages = [];
+addEventListener("message", (event) => window.homeMessages.push(event.data));</script>
+<iframe title="Documents" style="width:1200px;height:850px" src="/apps/documents/?home_origin=${encodeURIComponent(homeOrigin)}#home_token=documents-link-token"></iframe>`);
+      return;
+    }
 
     let relative = url.pathname.replace(/^\/apps\/documents\/?/, "") || "index.html";
     relative = relative.replace(/^\/+/, "");
@@ -757,6 +766,37 @@ async function run() {
       );
     } finally {
       await parserPage.close();
+    }
+
+    // #436: a preview web link inside Home asks Home to confirm the exact
+    // address (home:open-external) and never navigates the Documents frame.
+    resetDocumentsFixture();
+    const linkPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    trackPage(linkPage, consoleErrors, pageErrors, failedRequests, errorResponses);
+    try {
+      await linkPage.goto(`http://127.0.0.1:${port}/home-fixture`);
+      const frame = await (await linkPage.locator('iframe[title="Documents"]').elementHandle()).contentFrame();
+      await frame.locator('.document-list-item[data-doc-did="doc-beta"]').click();
+      await frame.waitForFunction(() => document.getElementById("title-input")?.value === "Beta");
+      const webLink = "https://example.invalid/documents-link?from=preview";
+      await frame.locator("#editor").fill(`[Example](${webLink}) and [Section](#notes)`);
+      await frame.locator("#mode-read").click();
+      const frameUrl = frame.url();
+      await frame.locator('#preview a[href^="https://"]').click();
+      await linkPage.waitForFunction(() => window.homeMessages.some((message) => message?.type === "home:open-external"),
+        null, { timeout: 4000 });
+      const homeRequests = () => linkPage.evaluate(() => window.homeMessages
+        .filter((message) => message?.type === "home:open-external"));
+      const requests = await homeRequests();
+      assert(
+        JSON.stringify(requests) === JSON.stringify([{ type: "home:open-external", url: webLink, homeToken: "documents-link-token" }]),
+        `Documents preview link must send one exact Home request. Got ${JSON.stringify(requests)}`,
+      );
+      assert(frame.url() === frameUrl, `Documents preview link navigated its frame to ${frame.url()}`);
+      await frame.locator('#preview a[href="#notes"]').click();
+      assert((await homeRequests()).length === 1, "An in-document anchor must stay inside Documents.");
+    } finally {
+      await linkPage.close();
     }
 
     resetDocumentsFixture();

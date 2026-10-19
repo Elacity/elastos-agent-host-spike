@@ -577,6 +577,19 @@ function announceHomeChrome() {
   syncHomeMenuManifest();
 }
 
+// Home frames apps without popups or top navigation, so a web link in the
+// preview asks Home to show the exact address and open it only when the
+// person chooses Open (#436, the same request as Chat's links).
+function openPreviewWebLinkThroughHome(event) {
+  const link = event.target instanceof Element ? event.target.closest("a[href]") : null;
+  const url = link?.getAttribute("href") || "";
+  if (!/^https?:\/\//i.test(url) || !canAnnounceHomeChrome()) {
+    return;
+  }
+  event.preventDefault();
+  window.top.postMessage({ type: "home:open-external", url, homeToken: state.homeToken }, homeOrigin);
+}
+
 function chooseInCapsule(options) {
   if (state.pendingConfirmation) {
     closeConfirmModal("cancel");
@@ -2069,6 +2082,7 @@ function wireShellEvents() {
   elements.panePreview.addEventListener("click", () => setInspectorView("preview"));
   elements.paneOutline.addEventListener("click", () => setInspectorView("outline"));
   elements.paneHistory.addEventListener("click", () => setInspectorView("history"));
+  elements.preview.addEventListener("click", openPreviewWebLinkThroughHome);
   elements.preview.addEventListener("change", (event) => {
     const target = event.target;
     if (!(target instanceof HTMLInputElement) || !target.classList.contains("task-checkbox")) {
