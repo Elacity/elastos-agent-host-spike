@@ -8776,6 +8776,7 @@ async fn test_home_launch_starts_chat_room_capsule_and_reports_runtime_activity(
     assert_eq!(grant_context.principal_id, authority.principal_id);
 
     let summary = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/api/apps/system/summary")
@@ -8807,6 +8808,38 @@ async fn test_home_launch_starts_chat_room_capsule_and_reports_runtime_activity(
                 .as_str()
                 .unwrap_or_default()
                 .contains("chat-room")));
+
+    // The Runtime audit log covers the whole host; a guest gets none of it (#404).
+    let guest = passkey_authority_with_name_role(
+        dir.path(),
+        Some("guest"),
+        crate::auth::RuntimePrincipalRole::Guest,
+    );
+    let summary = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/apps/system/summary")
+                .header(HOST, "localhost:61180")
+                .header("origin", "null")
+                .header("x-elastos-home-token", guest.system_token.as_str())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(summary.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(summary.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["runtime"]["running"], true);
+    assert_eq!(payload["runtime_log"]["available"], false);
+    assert_eq!(payload["runtime_log"]["events"], json!([]));
+    assert!(payload["runtime_log"]["total_in_memory"].is_null());
+    assert_eq!(
+        payload["runtime_log"]["note"],
+        "Only the Home owner can see Runtime activity."
+    );
 }
 
 #[tokio::test]

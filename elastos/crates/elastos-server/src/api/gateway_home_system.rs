@@ -5124,7 +5124,14 @@ pub(super) fn require_admin_principal(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<()> {
-    let Some(proof_binding_id) = context.proof_binding_id.as_deref() else {
+    require_admin_proof_binding(data_dir, context.proof_binding_id.as_deref())
+}
+
+fn require_admin_proof_binding(
+    data_dir: &std::path::Path,
+    proof_binding_id: Option<&str>,
+) -> anyhow::Result<()> {
+    let Some(proof_binding_id) = proof_binding_id else {
         anyhow::bail!("admin passkey required");
     };
     let principal = crate::auth::load_principal_for_proof_binding(data_dir, proof_binding_id)?;
@@ -5133,6 +5140,12 @@ pub(super) fn require_admin_principal(
         anyhow::bail!("admin passkey required");
     }
     Ok(())
+}
+
+/// The host itself (its proofless local token) or an admin passkey. Guests
+/// never reach host-wide surfaces such as the Runtime audit log or terminal.
+pub(super) fn acts_for_host(data_dir: &std::path::Path, proof_binding_id: Option<&str>) -> bool {
+    proof_binding_id.is_none() || require_admin_proof_binding(data_dir, proof_binding_id).is_ok()
 }
 
 fn apply_hosted_share_selection(data_dir: &std::path::Path, selected: &mut BTreeSet<String>) {
@@ -7321,11 +7334,22 @@ pub(super) async fn system_summary(
         };
     let context = authority.home_launch_context();
 
+    let host_log_allowed = acts_for_host(&state.data_dir, context.proof_binding_id.as_deref());
     let (runtime, wallet_accounts, wallet_approvals, runtime_log, runtime_update) = tokio::join!(
         home_runtime_summary(&state.data_dir),
         system_wallet_accounts_summary(&state, &authority),
         system_wallet_approvals_summary(&state, &authority, false),
-        system_runtime_log(&state.data_dir),
+        async {
+            // The Runtime audit log covers the whole host (#404).
+            if host_log_allowed {
+                system_runtime_log(&state.data_dir).await
+            } else {
+                SystemRuntimeLogSummary {
+                    note: Some("Only the Home owner can see Runtime activity.".to_string()),
+                    ..SystemRuntimeLogSummary::default()
+                }
+            }
+        },
         system_runtime_update_summary(&state.data_dir, &context)
     );
     Json(SystemSummaryResponse {
