@@ -4979,23 +4979,61 @@ fn read_selected_archive_entries(
     if name.to_ascii_lowercase().ends_with(".zip") {
         read_selected_zip_entries(&mut expansion, bytes, outcome, sink)
     } else {
-        read_selected_tar_entries(name, &mut expansion, bytes, outcome, sink)
+        // A tar's entry count and sizes are known only by passing over it,
+        // so a first pass checks them before anything is written.
+        check_selected_tar_entries(name, &archive, &bytes, outcome)?;
+        read_selected_tar_entries(name, &mut expansion, &bytes, outcome, sink)
     }
+}
+
+fn tar_archive_reader<'a>(
+    name: &str,
+    bytes: &'a [u8],
+) -> tar::Archive<Box<dyn std::io::Read + 'a>> {
+    let reader: Box<dyn std::io::Read + 'a> = if name.to_ascii_lowercase().ends_with(".tar") {
+        Box::new(Cursor::new(bytes))
+    } else {
+        Box::new(GzDecoder::new(Cursor::new(bytes)))
+    };
+    tar::Archive::new(reader)
+}
+
+/// The entry count and expansion of a selected tar extraction, read without
+/// keeping any bytes.
+fn check_selected_tar_entries(
+    name: &str,
+    archive_display: &str,
+    bytes: &[u8],
+    outcome: &ArchiveExtractOutcome,
+) -> anyhow::Result<()> {
+    let mut expansion = ArchiveExpansion::new(archive_display);
+    let mut archive = tar_archive_reader(name, bytes);
+    for (index, entry) in archive.entries()?.enumerate() {
+        if index >= MAX_ARCHIVE_EXTRACT_ENTRIES {
+            return Err(too_many_archive_entries(archive_display));
+        }
+        let entry = entry?;
+        let size = entry.size();
+        let selected_file = tar_entry_name(&entry)
+            .and_then(|name| normalized_archive_entry_path(&name))
+            .ok()
+            .filter(|path| entry.header().entry_type().is_file() && outcome.is_selected(path));
+        match selected_file {
+            Some(path) => expansion.admit(&crate::auth::printable_text(&path), size)?,
+            None => expansion.pass_over(size)?,
+        }
+    }
+    Ok(())
 }
 
 fn read_selected_tar_entries(
     name: &str,
     expansion: &mut ArchiveExpansion<'_>,
-    bytes: Vec<u8>,
+    bytes: &[u8],
     outcome: &mut ArchiveExtractOutcome,
     sink: &mut SelectedArchiveSink<'_>,
 ) -> anyhow::Result<()> {
-    let reader: Box<dyn std::io::Read> = if name.to_ascii_lowercase().ends_with(".tar") {
-        Box::new(Cursor::new(bytes))
-    } else {
-        Box::new(GzDecoder::new(Cursor::new(bytes)))
-    };
-    let mut archive = tar::Archive::new(reader);
+    let mut archive = tar_archive_reader(name, bytes);
     for (index, entry) in archive.entries()?.enumerate() {
         if index >= MAX_ARCHIVE_EXTRACT_ENTRIES {
             return Err(too_many_archive_entries(expansion.archive));
@@ -5597,12 +5635,7 @@ impl WholeArchiveExtract<'_> {
     }
 
     fn tar(&self, name: &str, bytes: &[u8], write: bool) -> anyhow::Result<()> {
-        let reader: Box<dyn std::io::Read + '_> = if name.to_ascii_lowercase().ends_with(".tar") {
-            Box::new(Cursor::new(bytes))
-        } else {
-            Box::new(GzDecoder::new(Cursor::new(bytes)))
-        };
-        let mut archive = tar::Archive::new(reader);
+        let mut archive = tar_archive_reader(name, bytes);
         let mut expansion = ArchiveExpansion::new(self.archive);
         for (index, entry) in archive.entries()?.enumerate() {
             if index >= MAX_ARCHIVE_EXTRACT_ENTRIES {
@@ -7584,8 +7617,7 @@ mod tests {
     #[test]
     fn archive_expansion_stops_reading_an_entry_larger_than_it_declares() {
         let mut expansion = ArchiveExpansion::new("Lies.zip");
-        let mut body =
-            std::io::Read::take(std::io::repeat(0), MAX_ARCHIVE_ENTRY_BYTES + 10);
+        let mut body = std::io::Read::take(std::io::repeat(0), MAX_ARCHIVE_ENTRY_BYTES + 10);
         let message = expansion
             .read("lie.bin", 1, &mut body)
             .unwrap_err()
