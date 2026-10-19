@@ -12,8 +12,9 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
-    window, Blob, Document, Element, Event, HtmlButtonElement, HtmlElement, HtmlFormElement,
-    HtmlInputElement, HtmlTextAreaElement, MessageEvent, Node, RequestCredentials, Storage,
+    window, AbortSignal, Blob, Document, Element, Event, HtmlButtonElement, HtmlElement,
+    HtmlFormElement, HtmlInputElement, HtmlTextAreaElement, MessageEvent, Node,
+    RequestCredentials, Storage,
 };
 
 mod direct;
@@ -34,6 +35,11 @@ const CHAT_ROOM_API_BASE: &str = "/api/apps/chat-room";
 const ROOM_ACCESS_CAPABILITIES: [&str; 1] = ["room.access"];
 const SHELL_ROOM_POLL_INTERVAL_MS: u32 = 1_000;
 const GATEWAY_POLL_INTERVAL_MS: u32 = 3_000;
+/// How long Chat waits for Home to answer a read or a poll-loop request.
+const REQUEST_DEADLINE_MS: u32 = 10_000;
+/// Attachments are up to 8 MiB, so their reads get longer.
+const ATTACHMENT_DEADLINE_MS: u32 = 60_000;
+const REQUEST_DEADLINE_ERROR: &str = "Home is not answering. Chat keeps trying.";
 const AUTO_SCROLL_THRESHOLD_PX: i32 = 48;
 const HOME_TOKEN_HEADER: &str = "x-elastos-home-token";
 const DISPLAY_NAME_REQUIRED_ERROR: &str = "Enter your name.";
@@ -862,6 +868,7 @@ impl App {
             &self.room_api_url("/presence"),
             &serde_json::json!({}),
             &self.home_token_headers(),
+            Some(REQUEST_DEADLINE_MS),
         )
         .await;
     }
@@ -2080,6 +2087,7 @@ impl App {
                     mark_read: app.can_mark_read(None),
                 },
                 &headers,
+                Some(REQUEST_DEADLINE_MS),
             )
             .await;
             if request_token != app.home_token()
@@ -2636,6 +2644,7 @@ impl App {
             &self.room_api_url("/access-policy"),
             &payload,
             &self.home_token_headers(),
+            None,
         )
         .await?;
         let selection_guard = {
@@ -2656,6 +2665,7 @@ impl App {
             &self.room_api_url("/invites/create-link"),
             &ConversationJoinInviteCreateInput {},
             &self.home_token_headers(),
+            None,
         )
         .await?;
         {
@@ -2691,6 +2701,7 @@ impl App {
             &self.room_api_url("/invites/revoke"),
             &RoomInviteRevokeInput { invite_id },
             &self.home_token_headers(),
+            None,
         )
         .await?;
         let selection_guard = {
@@ -3038,6 +3049,7 @@ impl App {
                 size_bytes: bytes.len() as u64,
             },
             &headers,
+            None,
         )
         .await?;
         let chunk_size = usize::try_from(start.chunk_size_bytes)
@@ -3088,8 +3100,13 @@ impl App {
         let payload = SendMessageInput { request_id, body };
         let request_token = self.home_token();
         let headers = self.room_request_headers();
-        let result =
-            api_post_session_json(&self.room_api_url("/objects/send"), &payload, &headers).await;
+        let result = api_post_session_json(
+            &self.room_api_url("/objects/send"),
+            &payload,
+            &headers,
+            None,
+        )
+        .await;
         if self.home_token() != request_token || self.state.borrow().reconnect_needed {
             return Ok(false);
         }
@@ -3520,6 +3537,7 @@ impl App {
             &self.room_api_url("/contacts/request"),
             &serde_json::json!({ "participant_ref": participant_ref }),
             &self.home_token_headers(),
+            None,
         )
         .await?;
         Ok(())
@@ -3535,6 +3553,7 @@ impl App {
                 &app.room_api_url("/community-presence/request"),
                 &serde_json::json!({}),
                 &app.home_token_headers(),
+                None,
             )
             .await;
             match result {
@@ -3690,6 +3709,7 @@ impl App {
                     mark_read: self.can_mark_read(None),
                 },
                 &headers,
+                Some(REQUEST_DEADLINE_MS),
             )
             .await;
             if self.home_token() != request_token
@@ -8422,18 +8442,36 @@ async fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A request Home has not answered by its deadline is abandoned: the caller
+/// reports it and the next poll tick asks again, so one stalled connection
+/// can neither freeze Chat nor hold a browser connection slot.
+fn request_deadline(milliseconds: u32) -> AbortSignal {
+    AbortSignal::timeout_with_u32(milliseconds)
+}
+
+fn request_error(error: gloo_net::Error, deadline: Option<&AbortSignal>) -> String {
+    if deadline.is_some_and(AbortSignal::aborted) {
+        REQUEST_DEADLINE_ERROR.to_string()
+    } else {
+        error.to_string()
+    }
+}
+
 async fn api_post_json<TReq: Serialize, TResp: DeserializeOwned>(
     path: &str,
     body: &TReq,
 ) -> Result<TResp, String> {
-    api_post_json_with_headers(path, body, &[]).await
+    api_post_json_with_headers(path, body, &[], None).await
 }
 
 async fn direct_get_json<T: DeserializeOwned>(
     path: &str,
     extra_headers: &[(&str, String)],
 ) -> Result<T, u16> {
-    let mut request = Request::get(path).credentials(RequestCredentials::SameOrigin);
+    let deadline = request_deadline(REQUEST_DEADLINE_MS);
+    let mut request = Request::get(path)
+        .credentials(RequestCredentials::SameOrigin)
+        .abort_signal(Some(&deadline));
     for (name, value) in extra_headers {
         request = request.header(name, value);
     }
@@ -8476,12 +8514,18 @@ async fn direct_post_json<TReq: Serialize, TResp: DeserializeOwned>(
         .map_err(|_| failure(500))
 }
 
+/// `deadline_ms` bounds only requests a later tick repeats (the poll); a
+/// send is never abandoned, because Home may still deliver it.
 async fn api_post_session_json<TReq: Serialize, TResp: DeserializeOwned>(
     path: &str,
     body: &TReq,
     extra_headers: &[(&str, String)],
+    deadline_ms: Option<u32>,
 ) -> Result<TResp, String> {
-    let mut request = Request::post(path).credentials(RequestCredentials::SameOrigin);
+    let deadline = deadline_ms.map(request_deadline);
+    let mut request = Request::post(path)
+        .credentials(RequestCredentials::SameOrigin)
+        .abort_signal(deadline.as_ref());
     for (name, value) in extra_headers {
         request = request.header(name, value);
     }
@@ -8490,7 +8534,7 @@ async fn api_post_session_json<TReq: Serialize, TResp: DeserializeOwned>(
         .map_err(|err| err.to_string())?
         .send()
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| request_error(err, deadline.as_ref()))?;
     if !response.ok() {
         let body = response.text().await.unwrap_or_default();
         return Err(format!("request failed: {} {}", response.status(), body));
@@ -8498,23 +8542,32 @@ async fn api_post_session_json<TReq: Serialize, TResp: DeserializeOwned>(
     response
         .json::<TResp>()
         .await
-        .map_err(|err| err.to_string())
+        .map_err(|err| request_error(err, deadline.as_ref()))
 }
 
 async fn api_get_session_bytes(
     path: &str,
     extra_headers: &[(&str, String)],
 ) -> Result<Vec<u8>, String> {
-    let mut request = Request::get(path).credentials(RequestCredentials::SameOrigin);
+    let deadline = request_deadline(ATTACHMENT_DEADLINE_MS);
+    let mut request = Request::get(path)
+        .credentials(RequestCredentials::SameOrigin)
+        .abort_signal(Some(&deadline));
     for (name, value) in extra_headers {
         request = request.header(name, value);
     }
-    let response = request.send().await.map_err(|err| err.to_string())?;
+    let response = request
+        .send()
+        .await
+        .map_err(|err| request_error(err, Some(&deadline)))?;
     if !response.ok() {
         let body = response.text().await.unwrap_or_default();
         return Err(format!("request failed: {} {}", response.status(), body));
     }
-    response.binary().await.map_err(|err| err.to_string())
+    response
+        .binary()
+        .await
+        .map_err(|err| request_error(err, Some(&deadline)))
 }
 
 async fn api_post_session_bytes<TResp: DeserializeOwned>(
@@ -8549,24 +8602,38 @@ async fn api_get_json_with_headers<T: DeserializeOwned>(
     path: &str,
     extra_headers: &[(&str, String)],
 ) -> Result<T, String> {
-    let mut request = Request::get(path).credentials(RequestCredentials::SameOrigin);
+    let deadline = request_deadline(REQUEST_DEADLINE_MS);
+    let mut request = Request::get(path)
+        .credentials(RequestCredentials::SameOrigin)
+        .abort_signal(Some(&deadline));
     for (name, value) in extra_headers {
         request = request.header(name, value);
     }
-    let response = request.send().await.map_err(|err| err.to_string())?;
+    let response = request
+        .send()
+        .await
+        .map_err(|err| request_error(err, Some(&deadline)))?;
     if !response.ok() {
         let body = response.text().await.unwrap_or_default();
         return Err(format!("request failed: {} {}", response.status(), body));
     }
-    response.json::<T>().await.map_err(|err| err.to_string())
+    response
+        .json::<T>()
+        .await
+        .map_err(|err| request_error(err, Some(&deadline)))
 }
 
+/// `deadline_ms` as for [`api_post_session_json`].
 async fn api_post_json_with_headers<TReq: Serialize, TResp: DeserializeOwned>(
     path: &str,
     body: &TReq,
     extra_headers: &[(&str, String)],
+    deadline_ms: Option<u32>,
 ) -> Result<TResp, String> {
-    let mut request = Request::post(path).credentials(RequestCredentials::SameOrigin);
+    let deadline = deadline_ms.map(request_deadline);
+    let mut request = Request::post(path)
+        .credentials(RequestCredentials::SameOrigin)
+        .abort_signal(deadline.as_ref());
     for (name, value) in extra_headers {
         request = request.header(name, value);
     }
@@ -8575,7 +8642,7 @@ async fn api_post_json_with_headers<TReq: Serialize, TResp: DeserializeOwned>(
         .map_err(|err| err.to_string())?
         .send()
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| request_error(err, deadline.as_ref()))?;
     if !response.ok() {
         let body = response.text().await.unwrap_or_default();
         return Err(format!("request failed: {} {}", response.status(), body));
@@ -8583,7 +8650,7 @@ async fn api_post_json_with_headers<TReq: Serialize, TResp: DeserializeOwned>(
     response
         .json::<TResp>()
         .await
-        .map_err(|err| err.to_string())
+        .map_err(|err| request_error(err, deadline.as_ref()))
 }
 
 async fn api_post_empty_json_with_headers<TResp: DeserializeOwned>(
