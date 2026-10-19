@@ -1061,6 +1061,57 @@ async fn export_consumes_approval_before_scan_and_survives_long_scan() {
 }
 
 #[tokio::test]
+async fn export_with_protection_returns_kit_despite_damaged_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(wallet_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("alex"));
+    let principal =
+        crate::auth::load_principal_for_proof_binding(dir.path(), &authority.proof_binding_id)
+            .unwrap();
+    let first =
+        export_full_recovery_bundle_response(&app, dir.path(), &authority, &principal).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let protection = crate::auth::load_principal_root_protection(
+        dir.path(),
+        &authority.principal_id,
+        &principal.localhost_root,
+    )
+    .unwrap()
+    .expect("the first export creates protection");
+
+    // With protection in place, export only returns the archived kit: a
+    // damaged file does not stop it and is left as it is.
+    let damaged_uri = format!(
+        "{}/.AppData/LocalHost/GBA/ucity/damaged.sav",
+        principal.localhost_root
+    );
+    let damaged_path =
+        elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &damaged_uri).unwrap();
+    std::fs::create_dir_all(damaged_path.parent().unwrap()).unwrap();
+    let damaged = b"{\n  \"sche\xffma\": \"elastos.principal-root.object/v1\"".to_vec();
+    std::fs::write(&damaged_path, &damaged).unwrap();
+    let again =
+        export_full_recovery_bundle_response(&app, dir.path(), &authority, &principal).await;
+    let status = again.status();
+    let body = axum::body::to_bytes(again.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(std::fs::read(&damaged_path).unwrap(), damaged);
+    assert_eq!(
+        crate::auth::load_principal_root_protection(
+            dir.path(),
+            &authority.principal_id,
+            &principal.localhost_root,
+        )
+        .unwrap()
+        .unwrap()
+        .data_key_id,
+        protection.data_key_id
+    );
+}
+
+#[tokio::test]
 async fn test_full_recovery_bundle_recovers_existing_account_under_new_passkey() {
     let dir = tempfile::tempdir().unwrap();
     let (state, wallet_provider) = wallet_chain_test_state_with_observer(dir.path()).await;

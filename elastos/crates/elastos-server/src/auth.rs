@@ -5127,8 +5127,9 @@ pub(crate) struct PrincipalRootProtectionActivationWithPlaintext {
 /// reach Recovery, so the export flow captures the surviving plaintext here
 /// and migrates it under this same guard once the root's protection exists.
 /// The plan applies the migration limits before protection exists, naming
-/// a file over a limit, and refuses a damaged file by name, as the strict
-/// entry above does.
+/// a file over a limit. A damaged file is refused by name only while the
+/// root has no protection, when this commits the first key binding; with
+/// protection in place a damaged file is left as it is and never selected.
 pub(crate) fn begin_declarative_principal_root_protection_activation_migrating_plaintext(
     data_dir: &Path,
     principal_id: &str,
@@ -5150,7 +5151,9 @@ pub(crate) fn begin_declarative_principal_root_protection_activation_migrating_p
         protection.as_ref(),
         PrincipalRootScanMode::Plan,
     )?;
-    refuse_damaged_principal_root_objects(&scan)?;
+    if protection.is_none() {
+        refuse_damaged_principal_root_objects(&scan)?;
+    }
     if !scan.selections.is_empty() {
         // Admission precedes the caller's first protection or step-up write.
         require_principal_root_migration_capacity(data_dir, 1)?;
