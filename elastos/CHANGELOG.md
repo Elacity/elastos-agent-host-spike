@@ -109,60 +109,32 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Security
 
-- Isolation status: the first stage of the isolation plan (#173) is done, except that the seed does not yet run under its own account (#174, in 0.8.1). Web pages and shared files open in a separate sandbox; the web Terminal is off by default; Home checks allowed hosts and rejects requests whose Origin header names another website; sandboxed apps need valid tokens to reach private data; releases are signed with a new key kept off the public server.
-- Isolation status, not done yet: Home can still get every app's permissions, providers run as normal programs with your account's rights (only the model provider is partly limited), and approvals are not yet shown on a screen that only the Runtime controls (S1 and S2 of #173). Importing a Recovery Kit does not yet ask for your passkey again (#403), and on Linux with KVM the Browser network helper is installed with sudo without a hash check (#406). All of this is planned for 0.8.1.
-- Security updates for the TLS library (rustls 0.23.46, four reported weaknesses, RUSTSEC-2026-0346 to 0349, #380) and the WebAssembly runtime (wasmtime 36.0.18, RUSTSEC-2026-0363).
+- Isolation status: the first stage of the isolation plan (#173) is done, except that the seed does not yet run under its own account (#174, in 0.8.1). Web pages and shared files open in a separate sandbox, and sandboxed apps need valid tokens to reach private data. Home checks allowed hosts and rejects requests from other websites. Releases are signed with a new key kept off the public server.
+- Isolation status, not done yet (planned for 0.8.1): Home can still get every app's permissions, providers run as normal programs with your account's rights (only the model provider is partly limited), and approvals are not yet shown on a screen that only the Runtime controls (S1 and S2 of #173). Importing a Recovery Kit does not yet ask for your passkey again (#403), and on Linux with KVM the Browser network helper is installed with sudo without a hash check (#406).
+- Only the host and admins see the Runtime audit log in System (#404) and can use the web Terminal, which is off by default. A demoted admin's terminal closes (#405).
+- Security updates for the TLS library and the WebAssembly runtime (RUSTSEC-2026-0346 to 0349, 0363, #380).
 
 ### Added
 
-- An owner (admin) can add another passkey, such as a second device or a security key, in System → Accounts → Add passkey. You confirm with your current passkey first, and the new passkey opens the same account as an admin. Make admin and Make guest change every passkey of that account together (#338).
-
-- Home has a touch layout for phone-sized screens, 640 px wide or less: a Dock and pages of apps, one app at a time full screen, swipe down on its title bar for the app switcher, long-press menus, sheets with drag handles, and the screen kept above the keyboard. Desktop and tablet keep the desktop shell. Opening your Home from a phone needs an HTTPS address for your Home, which 0.8.0 does not set up yet (#116, #92).
+- An admin can add another passkey, such as a second device or a security key, in System → Accounts → Add passkey, after confirming with a current one. Make admin and Make guest change every passkey of that account. When sign-in fails, the lock screen says why and what to do next (#338).
+- Home has a touch layout for screens 640 px wide or less: a Dock and pages of apps, one app at a time full screen, swipe down on its title bar to switch apps, and long-press menus. Desktop and tablet keep the desktop shell. Opening your Home from a phone needs an HTTPS address, which 0.8.0 does not set up yet (#116, #92).
 
 ### Changed
 
-- When an update cannot be applied from this version (the release uses a
-  newer format or a kind of component this version does not know), System and
-  `elastos update` say that the install command is needed once and show it,
-  instead of saying the publisher's release is not valid. Your current version
-  stays unchanged.
-- Homes on the test channel also accept the final release, so they update to
-  0.8.0 in System. Running the install command again moves them to the stable
-  channel (#335).
-- Spam limits for Chat: 5 Community messages per Profile every 10 seconds (Chat
-  shows "Slow down"), 5 per sender on receiving Homes without holding up other
-  senders, and Discovery relay caps of 4 listings per Home, 8 contact requests
-  per sender and 16 per Home. The relay admits only the signing Home's own
-  submissions.
-- Known issues: Browser runs only on Apple Silicon Macs, takes about 5 seconds to close, and has no Chinese, Japanese or Korean fonts. On the Jetson, getting Qwen takes about 43 minutes; its first reply takes about 22 seconds and the next about 3.6 seconds. On a Mac under memory pressure, a model can refuse to start for lack of free memory; close other apps and try again. After a network change, Community can stay unreachable until you restart Home (#451).
-- Known issues when updating: from a test version older than 0.8.0-alpha.18 on a slow device such as a Jetson, System update can fail because the older version runs it; if Home is then stuck, follow "Recover an interrupted update" in `docs/INSTALL.md`. Earlier versions cannot start a Home with a Library file over 16 MB or over 64 MB in total: update it with the install command and do not use Undo.
-- Community posts reach members again without turning on Discovery, also across networks: they travel through the seed's Community node. Posts are signed, but that node can read them in transit until the relay arrives in 0.8.1. Direct messages across networks need that relay. Contact requests across networks still need Discovery on.
-- Upgrading from 0.7.1 or earlier: run the install command once. System update cannot move these Homes to 0.8.0, because releases are now signed with a new key (#186). Your Home keeps its data.
-- A Browser session now lasts until you close it, until Home stops answering for 5 minutes, until Runtime stops, or 12 hours (it used to close after 10 minutes).
-- Browser Settings no longer shows Agent access, which no agent can use yet (#290), and hides the engine choice when there is only one engine. The default engine is called Automatic.
-- If a model download is interrupted, Home now resumes it by itself a few times before asking you to Retry.
-- Community: a post whose delivery could not be confirmed says "Delivery unconfirmed". Inbox asks you once whether members see you online: Always, Only while Community is open, Later or Never; shown, earlier posts load without Discovery. Change it in System → Security. After Undo to an earlier test version, Community presence follows the Discovery switch in People again; turn Discovery off there to stay hidden.
+- Updates: test-channel Homes update to 0.8.0 in System; the install command moves them to the stable channel (#335). If an update needs the install command, System and `elastos update` show it and leave your version unchanged. From this version on, updates and `elastos home` wait up to 2 minutes for the new Runtime, so Home no longer fails to start after an update on a slow device such as a Jetson. If the previous version was put back but cannot start, `elastos home --browser` starts it.
+- Community posts reach members without Discovery, also across networks, through the seed's Community node. Posts are signed, but that node can read them until the relay arrives in 0.8.1. Direct messages across networks need that relay, and contact requests across networks still need Discovery on. Homes stay connected when others join or restart, a Home that shows Community unreachable reconnects by itself, and a busy node no longer holds up posts.
+- Community: Inbox asks once whether members see you online (Always, Only while Community is open, Later or Never); change it in System → Security. After Undo to an earlier test version, presence follows the Discovery switch in People again; turn Discovery off there to stay hidden. A post whose delivery could not be confirmed says "Delivery unconfirmed".
+- Known issues: Browser runs only on Apple Silicon Macs, takes about 5 seconds to close, and has no Chinese, Japanese or Korean fonts. On the Jetson, getting Qwen takes about 43 minutes; its first reply takes about 22 seconds and the next about 3.6 seconds. On a Mac under memory pressure, a model can refuse to start; close other apps and try again. After a network change, Community can stay unreachable until you restart Home (#451).
+- Known issues when updating: from 0.7.1 or earlier, run the install command once, because releases are now signed with a new key (#186); your Home keeps its data. From a test version older than 0.8.0-alpha.18 on a slow device such as a Jetson, System update can fail; if Home is then stuck, follow "Recover an interrupted update" in `docs/INSTALL.md`. Earlier versions cannot start a Home with a Library file over 16 MB or over 64 MB in total: update with the install command and do not use Undo.
 
 ### Fixed
 
-- Home now starts, updates and shows Recovery status with large Library files and any number of them. Start reads each encrypted file's label, not its contents, and names unencrypted files. A file with a damaged label or one for another key or place is named, shown as Blocked in Library and not changed by Home. Contents are checked when a file is opened (#444).
-- When sign-in fails, the lock screen now says why in one line and what to do next, instead of showing nothing (#338).
-- The publisher's Carrier ticket lists only its public addresses when it has
-  one (no container bridge, LAN or loopback addresses), and a Runtime on a
-  fixed Carrier port also listens on that port over IPv6, so its ticket stays
-  the same across restarts (#336).
-- Browser shows "Starting Browser…" while it starts, no longer shows white bars around the page, and has a standard title bar, so you can drag its window.
-- Browser opens on a new install: it no longer downloads its helpers again and fails with "another writer owns the installation lock", or fails when another program uses one of its local ports.
-- Browser shows images and fonts on busy news sites such as BBC and the Guardian. Before, Browser allowed only 16 connections at a time, so many pictures and fonts timed out.
-- Home no longer uses about a third of the CPU while Browser is open: it now checks Browser's status once a second and ignores changes to its timers.
-- Chat: the message box returns to one line after you send, People → Message reuses the open Chat window, and Open Inbox in People works. Web links in Chat messages and in Home CLI open in your browser after Home shows the exact address and you choose Open link.
-- In the Assistant, Edit on a message you just sent opens the editor, and Delete asks in the message itself, then removes it. A reply that just finished, or that you stopped, offers Delete and Regenerate right away. Before, Edit did nothing until the chat was reopened, and Delete did nothing.
-- In the Assistant, the end of each reply and its buttons stay above the message box, so you no longer scroll down to read the last lines.
+- Browser opens on a new install, shows "Starting Browser…", has a title bar you can drag and no white bars, and shows images and fonts on busy news sites such as BBC and the Guardian. A session lasts until you close it, Home stops answering for 5 minutes, Runtime stops, or 12 hours (it was 10 minutes). Home no longer uses about a third of the CPU with Browser open. Settings hides Agent access, which no agent can use yet (#290).
+- Assistant: Edit and Delete work on a message you just sent, a finished or stopped reply offers Delete and Regenerate right away, and the end of each reply stays above the message box. An interrupted model download resumes by itself a few times before asking you to Retry.
 - In the Assistant, Qwen2.5 1.5B now does ordinary requests, such as counting or writing a story, instead of answering that they need a tool or permission. Models in the Assistant still cannot read files, open websites or send messages, and a small model may not always say so clearly; SmolLM2 135M often pretends it did. A Home still using the old default instruction gets the new one; an instruction you changed is kept (#455).
-- First-run setup: the welcome sheet no longer disappears. Opening a step shrinks it to a small card that you click to continue, and it comes back after you save the Recovery Kit.
-- From this version on, a System update, `elastos home --browser` and `elastos home` give the new Runtime up to 2 minutes to become ready (`elastos home` gave up after 30 seconds), so Home no longer fails to start, or stays stopped after an update, on a slow device such as a Jetson. If the previous version was put back but could not start, `elastos home --browser` starts it. During an update, System says Home is restarting, then reloads.
-- Community posts are no longer held up by an overloaded Community node: Homes resend unanswered posts and presence less often, and the node only forwards them. Homes stay connected when other Homes join or restart, a Home that shows Community unreachable reconnects by itself, and presence from other Homes can no longer fill Community and stop new posts arriving.
-- Restoring the same Recovery Kit again on a Home now completes instead of showing an error, and the Kit's file name is shown in full. After `elastos update` or Undo in a terminal, it says Home is stopped and prints the command that starts it.
+- Chat: the message box returns to one line after you send, People → Message reuses the open Chat window, and Open Inbox in People works. Web links in Chat and Home CLI open in your browser after Home shows the exact address and you choose Open link. Chat shows "Slow down" after 5 Community messages per Profile in 10 seconds.
+- Home starts, updates and shows Recovery status with large Library files and any number of them. A file with a damaged label, or one for another key or place, is named, shown as Blocked in Library and left unchanged (#444). Restoring the same Recovery Kit again completes, and the Kit's file name is shown in full.
+- First-run setup: the welcome sheet no longer disappears; it shrinks to a card while you work on a step and comes back after you save the Recovery Kit. Appearance upload and reset no longer delete a damaged background image; they name it (#447).
 
 ## [0.8.0-alpha.24] - 2026-10-19
 
