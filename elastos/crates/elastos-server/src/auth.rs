@@ -7494,6 +7494,46 @@ impl PrincipalRootWalk<'_> {
     }
 }
 
+/// The walk's folder-depth rule for a writer (#449). The walk refuses a
+/// folder 16 or more folders below a declared root, so a writer refuses to
+/// create one, or a file inside one, before anything is written: no write can
+/// stop the next start. `folder` is false for a file, which sits in the
+/// folder above it. The walk's other rules need no writer check: writers name
+/// objects with UTF-8 text and create only regular files and folders.
+pub(crate) fn refuse_principal_root_depth_breach(
+    localhost_root: &str,
+    inventory: &[PrincipalRootProtectedObjectDeclarationV1],
+    object_uri: &str,
+    folder: bool,
+) -> anyhow::Result<()> {
+    for declaration in inventory {
+        let PrincipalRootProtectedObjectDeclarationV1::Root { root_uri } = declaration else {
+            continue;
+        };
+        let Some(rest) = object_uri.strip_prefix(root_uri.as_str()) else {
+            continue;
+        };
+        if !rest.is_empty() && !rest.starts_with('/') {
+            continue;
+        }
+        let below = rest.split('/').filter(|part| !part.is_empty()).count();
+        let depth = if folder {
+            below
+        } else {
+            below.saturating_sub(1)
+        };
+        if depth >= MAX_PRINCIPAL_ROOT_INVENTORY_DEPTH {
+            return Err(anyhow!(
+                "{} was not saved: it would be more than 16 folders deep in {}, and Home does not \
+                 start with folders that deep. Save it fewer folders down.",
+                principal_root_home_relative_path(localhost_root, object_uri),
+                principal_root_home_relative_path(localhost_root, root_uri),
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Principal-root object classifier (#444).
 //
@@ -7697,7 +7737,7 @@ fn principal_root_object_changed_error(localhost_root: &str, object_uri: &str) -
     )
 }
 
-fn principal_root_home_relative_path(localhost_root: &str, object_uri: &str) -> String {
+pub(crate) fn principal_root_home_relative_path(localhost_root: &str, object_uri: &str) -> String {
     printable_text(
         object_uri
             .strip_prefix(localhost_root)
@@ -7724,7 +7764,7 @@ fn printable_path(path: &Path) -> String {
 /// order. Control, format (bidi included) and line or paragraph separator
 /// characters are written as `\u{…}`, so no name can start a forged second
 /// line or reorder the text around it.
-fn printable_text(value: &str) -> String {
+pub(crate) fn printable_text(value: &str) -> String {
     let mut printable = String::with_capacity(value.len());
     for ch in value.chars() {
         if is_unprintable_char(ch) {

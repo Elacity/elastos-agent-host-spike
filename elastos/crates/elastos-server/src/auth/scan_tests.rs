@@ -627,3 +627,52 @@ fn names_with_line_breaks_or_bidi_render_on_one_line() {
         "{message}"
     );
 }
+
+/// #449: the writer's depth rule refuses exactly what the start walk refuses,
+/// and names the path on one line.
+#[test]
+fn writer_depth_rule_matches_the_start_walk() {
+    let home = Home::new("person:local:scan-writer-depth-home");
+    let inventory = home.declarations().remove(0).inventory;
+    let refusal = |relative: &str, folder: bool| {
+        refuse_principal_root_depth_breach(
+            &home.localhost_root,
+            &inventory,
+            &home.uri(relative),
+            folder,
+        )
+    };
+    let mut deepest = String::from("Documents");
+    for level in 1..=15 {
+        deepest.push_str(&format!("/{level}"));
+    }
+
+    // 15 folders below Documents and a file in the last: both pass.
+    refusal(&deepest, true).unwrap();
+    refusal(&format!("{deepest}/a.txt"), false).unwrap();
+    home.write_envelope(&format!("{deepest}/a.txt"), b"deep");
+    assert!(home.ready().unwrap().is_empty());
+
+    // A 16th folder, or a file that needs one: both refused, as the walk
+    // refuses the folder. The name is shown on one line.
+    let too_deep = format!("{deepest}/x\nError: y");
+    assert_eq!(
+        refusal(&too_deep, true).unwrap_err().to_string(),
+        format!(
+            "{deepest}/x\\u{{a}}Error: y was not saved: it would be more than 16 folders deep in \
+             Documents, and Home does not start with folders that deep. Save it fewer folders \
+             down."
+        )
+    );
+    assert!(refusal(&format!("{too_deep}/a.txt"), false).is_err());
+    std::fs::create_dir(home.path(&too_deep)).unwrap();
+    assert!(home
+        .ready()
+        .unwrap_err()
+        .to_string()
+        .contains("is more than 16 folders deep."));
+
+    // Outside every declared root nothing is refused.
+    let outside = deepest.replacen("Documents", "Elsewhere", 1);
+    refusal(&format!("{outside}/16/17"), true).unwrap();
+}

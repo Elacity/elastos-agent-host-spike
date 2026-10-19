@@ -4302,6 +4302,295 @@ async fn test_library_provider_every_archive_reader_refuses_root_drive_unc_and_c
     );
 }
 
+/// The sentence a Library write gets when it would put a folder deeper than
+/// Home starts with (#449).
+fn too_deep_refusal(relative: &str) -> String {
+    format!(
+        "{relative} was not saved: it would be more than 16 folders deep in Documents, and Home \
+         does not start with folders that deep. Save it fewer folders down."
+    )
+}
+
+/// `Documents/1/2/…/levels` relative to the Home root.
+fn numbered_folders(levels: usize) -> String {
+    let mut path = String::from("Documents");
+    for level in 1..=levels {
+        path.push_str(&format!("/{level}"));
+    }
+    path
+}
+
+#[tokio::test]
+async fn test_library_writes_refuse_folders_deeper_than_home_starts_with() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &authority);
+    let root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let uri = |relative: &str| format!("{root}/{relative}");
+    let mkdir = |parent: String, name: &str| {
+        post_library(
+            app.clone(),
+            &token,
+            "mkdir",
+            json!({ "parent_uri": parent, "name": name }),
+        )
+    };
+    let write = |relative: String| {
+        post_library(
+            app.clone(),
+            &token,
+            "write",
+            json!({
+                "uri": uri(&relative),
+                "data": base64::engine::general_purpose::STANDARD.encode(b"deep"),
+            }),
+        )
+    };
+
+    // The start walk allows 15 folders below Documents and refuses a 16th.
+    let (_, made) = mkdir(root.clone(), "Documents").await;
+    assert_eq!(made["status"], "ok", "{made}");
+    for level in 1..=15 {
+        let (_, made) = mkdir(uri(&numbered_folders(level - 1)), &level.to_string()).await;
+        assert_eq!(made["status"], "ok", "level {level}: {made}");
+    }
+    let deepest = numbered_folders(15);
+    let (_, refused) = mkdir(uri(&deepest), "16").await;
+    assert_eq!(refused["status"], "error", "{refused}");
+    assert_eq!(
+        refused["message"],
+        too_deep_refusal(&format!("{deepest}/16"))
+    );
+    assert!(!library_object_path(dir.path(), &uri(&format!("{deepest}/16"))).exists());
+
+    // A file in the deepest folder is saved; one that needs a 16th folder is
+    // refused, and no folder is made for it.
+    let (_, saved) = write(format!("{deepest}/a.txt")).await;
+    assert_eq!(saved["status"], "ok", "{saved}");
+    let (_, refused) = write(format!("{deepest}/16/a.txt")).await;
+    assert_eq!(refused["status"], "error", "{refused}");
+    assert_eq!(
+        refused["message"],
+        too_deep_refusal(&format!("{deepest}/16/a.txt"))
+    );
+    assert!(!library_object_path(dir.path(), &uri(&format!("{deepest}/16"))).exists());
+
+    // Copy and move check the whole folder before writing: Tree/x/y moved
+    // under 14 folders would put x 16 deep.
+    for (parent, name) in [
+        ("Documents", "Tree"),
+        ("Documents/Tree", "x"),
+        ("Documents/Tree/x", "y"),
+    ] {
+        let (_, made) = mkdir(uri(parent), name).await;
+        assert_eq!(made["status"], "ok", "{made}");
+    }
+    let (_, saved) = write("Documents/Tree/x/y/b.txt".to_string()).await;
+    assert_eq!(saved["status"], "ok", "{saved}");
+    let too_deep_parent = numbered_folders(14);
+    for op in ["copy", "move"] {
+        let (_, refused) = post_library(
+            app.clone(),
+            &token,
+            op,
+            json!({ "uri": uri("Documents/Tree"), "target_parent_uri": uri(&too_deep_parent) }),
+        )
+        .await;
+        assert_eq!(refused["status"], "error", "{op}: {refused}");
+        assert_eq!(
+            refused["message"],
+            too_deep_refusal(&format!("{too_deep_parent}/Tree/x")),
+            "{op}"
+        );
+        assert!(
+            !library_object_path(dir.path(), &uri(&format!("{too_deep_parent}/Tree"))).exists()
+        );
+        assert!(library_object_path(dir.path(), &uri("Documents/Tree/x/y/b.txt")).is_file());
+    }
+    // Two folders up, y is 15 deep: allowed.
+    let (_, copied) = post_library(
+        app.clone(),
+        &token,
+        "copy",
+        json!({ "uri": uri("Documents/Tree"), "target_parent_uri": uri(&numbered_folders(12)) }),
+    )
+    .await;
+    assert_eq!(copied["status"], "ok", "{copied}");
+}
+
+#[tokio::test]
+async fn test_library_archive_extract_refuses_folders_deeper_than_home_starts_with_and_too_many_entries(
+) {
+    use std::io::Write as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &authority);
+    let root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let uri = |relative: &str| format!("{root}/{relative}");
+    for (parent, name) in [(root.clone(), "Documents"), (uri("Documents"), "Imports")] {
+        let (_, made) = post_library(
+            app.clone(),
+            &token,
+            "mkdir",
+            json!({ "parent_uri": parent, "name": name }),
+        )
+        .await;
+        assert_eq!(made["status"], "ok", "{made}");
+    }
+    let entry = |folders: usize, file: &str| {
+        let mut name = String::new();
+        for level in 1..=folders {
+            name.push_str(&format!("{level}/"));
+        }
+        name + file
+    };
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let archive_of = |format: &str, names: &[String]| {
+        if format == "zip" {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            for name in names {
+                writer.start_file(name.as_str(), options).unwrap();
+                writer.write_all(b"x").unwrap();
+            }
+            return writer.finish().unwrap().into_inner();
+        }
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::default(),
+        ));
+        for name in names {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(1);
+            header.set_mode(0o644);
+            builder.append_data(&mut header, name, &b"x"[..]).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    };
+    let upload = |relative: String, bytes: Vec<u8>| {
+        let (app, token, target) = (app.clone(), token.clone(), uri(&relative));
+        async move { put_library_upload(app, &token, &target, Vec::leak(bytes)).await }
+    };
+    let extract = |relative: &str| {
+        post_library(
+            app.clone(),
+            &token,
+            "extract_archive",
+            json!({ "uri": uri(relative) }),
+        )
+    };
+
+    for format in ["zip", "tar.gz"] {
+        // Extracted into Documents/Deep, 15 archive folders put the last one
+        // 16 deep: refused by name, and no folder or file is left behind.
+        let deep = format!("Deep-{}", format.replace('.', "-"));
+        let (status, _, uploaded) = upload(
+            format!("Documents/{deep}.{format}"),
+            archive_of(format, &[entry(2, "shallow.txt"), entry(15, "deep.txt")]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{uploaded}");
+        let (_, refused) = extract(&format!("Documents/{deep}.{format}")).await;
+        assert_eq!(refused["status"], "error", "{format}: {refused}");
+        assert_eq!(
+            refused["message"],
+            too_deep_refusal(&format!("Documents/{deep}/{}", entry(15, "deep.txt"))),
+            "{format}"
+        );
+        assert!(!library_object_path(dir.path(), &uri(&format!("Documents/{deep}"))).exists());
+
+        // A selected extract lists that entry as blocked and writes the rest.
+        let (_, selected) = post_library(
+            app.clone(),
+            &token,
+            "archive_extract_entries",
+            json!({
+                "uri": uri(&format!("Documents/{deep}.{format}")),
+                "destination_uri": uri("Documents/Imports"),
+                "entries": [entry(2, "shallow.txt"), entry(15, "deep.txt")],
+            }),
+        )
+        .await;
+        assert_eq!(selected["status"], "ok", "{format}: {selected}");
+        assert_eq!(
+            selected["data"]["receipt"]["status"],
+            "completed_with_blocked_entries"
+        );
+        let blocked = selected["data"]["blocked"].as_array().unwrap();
+        assert_eq!(blocked.len(), 1, "{selected}");
+        assert_eq!(blocked[0]["path"], entry(15, "deep.txt"));
+        assert_eq!(
+            blocked[0]["reason"],
+            too_deep_refusal(&format!("Documents/Imports/{}", entry(15, "deep.txt")))
+        );
+        assert!(!library_object_path(
+            dir.path(),
+            &uri(&format!("Documents/Imports/{}", entry(14, "15")))
+        )
+        .exists());
+
+        // 14 archive folders are allowed.
+        let allowed = format!("Allowed-{}", format.replace('.', "-"));
+        let (status, _, uploaded) = upload(
+            format!("Documents/{allowed}.{format}"),
+            archive_of(format, &[entry(14, "ok.txt")]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{uploaded}");
+        let (_, extracted) = extract(&format!("Documents/{allowed}.{format}")).await;
+        assert_eq!(extracted["status"], "ok", "{format}: {extracted}");
+        assert!(library_object_path(
+            dir.path(),
+            &uri(&format!("Documents/{allowed}/{}", entry(14, "ok.txt")))
+        )
+        .is_file());
+
+        // More than 10000 entries: refused by the archive's name, whole and
+        // selected, before anything is written.
+        let many = format!("Many-{}", format.replace('.', "-"));
+        let names: Vec<String> = (0..=10_000).map(|index| format!("f{index}")).collect();
+        let (status, _, uploaded) = upload(
+            format!("Documents/{many}.{format}"),
+            archive_of(format, &names),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{uploaded}");
+        let (_, refused) = extract(&format!("Documents/{many}.{format}")).await;
+        assert_eq!(refused["status"], "error", "{format}: {refused}");
+        assert_eq!(
+            refused["message"],
+            format!(
+                "Documents/{many}.{format} holds more than 10000 entries; Library extracts at \
+                 most 10000 from one archive, so nothing was extracted."
+            )
+        );
+        assert!(!library_object_path(dir.path(), &uri(&format!("Documents/{many}"))).exists());
+        let (_, refused) = post_library(
+            app.clone(),
+            &token,
+            "archive_extract_entries",
+            json!({
+                "uri": uri(&format!("Documents/{many}.{format}")),
+                "destination_uri": uri("Documents/Imports"),
+                "entries": ["f0"],
+            }),
+        )
+        .await;
+        assert_eq!(refused["status"], "error", "{format}: {refused}");
+        assert!(
+            refused["message"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("{many}.{format} holds more than 10000 entries")),
+            "{refused}"
+        );
+        assert!(!library_object_path(dir.path(), &uri("Documents/Imports/f0")).exists());
+    }
+}
+
 #[tokio::test]
 async fn test_library_gateway_reads_webspace_files_through_runtime_provider() {
     let dir = tempfile::tempdir().unwrap();
