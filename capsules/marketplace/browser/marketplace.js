@@ -1121,7 +1121,7 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
             <div class="modal-section-title">Status</div>
             <span class="model-refresh" data-model-refresh></span>
           </div>
-          <div data-model-management aria-label="Model status"></div>
+          <div data-model-management role="group" aria-label="Model status"></div>
         </section>
         ${technicalDetails(app)}`,
         actions: '<span class="model-actions" data-model-actions></span>',

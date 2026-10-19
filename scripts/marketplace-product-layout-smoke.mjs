@@ -34,6 +34,7 @@ const mediaAvailability = {
   recheck_before_open: true,
 };
 const modelCid = `bafybei${"m".repeat(52)}`;
+const modelTitle = "Fixture model with a long title for clear phone detail controls";
 const sharedOfferId = "remote:grant-one:model:writer";
 const contactOfferId = "contact-ai";
 const marketplaceManifest = JSON.parse(await readFile(join(repoRoot, "capsules/marketplace/capsule.json"), "utf8"));
@@ -143,7 +144,7 @@ const catalogCapsules = [
   },
   {
     name: "fixture-model",
-    title: "Fixture model",
+    title: modelTitle,
     description: "Small model for quick answers.",
     role: "content",
     source: "signed-model-catalog",
@@ -668,7 +669,7 @@ async function assertModelsLayout(page, frame, { appPrimaryStyle, appRowStyle })
   })));
   assert(
     JSON.stringify(rows) === JSON.stringify([
-      { title: "Fixture model", sub: "1.32 GB · Fits this device", pill: "", icon: true },
+      { title: modelTitle, sub: "1.32 GB · Fits this device", pill: "", icon: true },
       { title: "Shared writing model", sub: "From Owner Home", pill: "Open", icon: true },
       { title: "Contact AI", sub: "Not shared yet", pill: "Ask", icon: true },
     ]),
@@ -685,6 +686,7 @@ async function assertModelsLayout(page, frame, { appPrimaryStyle, appRowStyle })
   await frame.locator("#detail-modal.active").waitFor();
   const get = frame.locator('.modal-footer-actions [data-model-control="use"]');
   await get.waitFor();
+  await frame.getByRole("group", { name: "Model status" }).waitFor();
   const detail = await frame.evaluate(() => ({
     developer: document.querySelector(".modal-developer")?.textContent.trim(),
     sections: [...document.querySelectorAll(".modal-body .modal-section-title")].map((node) => node.textContent.trim()),
@@ -784,6 +786,14 @@ async function assertModelsPhone(page, frame) {
     "phone model detail controls must be 44 px targets", detailTargets);
   const detailFits = await frame.locator("#detail-content").evaluate((node) => node.scrollWidth <= node.clientWidth + 1);
   assert(detailFits, "phone model detail must not overflow sideways");
+  const titleClearance = await frame.evaluate(() => ({
+    title: document.querySelector(".modal-title").getBoundingClientRect().toJSON(),
+    close: document.querySelector(".modal-close").getBoundingClientRect().toJSON(),
+  }));
+  assert(titleClearance.title.right <= titleClearance.close.left
+    || titleClearance.title.bottom <= titleClearance.close.top
+    || titleClearance.title.top >= titleClearance.close.bottom,
+  "phone detail Close must leave the long model title clear", titleClearance);
   await page.waitForTimeout(MODAL_FADE_MS);
   await page.screenshot({ path: MODEL_DETAIL_PHONE_SCREENSHOT });
   await page.keyboard.press("Escape");

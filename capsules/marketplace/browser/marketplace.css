@@ -1082,6 +1082,10 @@ button {
   outline-offset: -6px;
 }
 
+:root[data-el-form-factor="phone"] .modal-title-section {
+  padding-right: 42px;
+}
+
 :root[data-el-form-factor="phone"] .modal-btn,
 :root[data-el-form-factor="phone"] .modal-close,
 :root[data-el-form-factor="phone"] .store-see-all {
