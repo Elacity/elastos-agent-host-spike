@@ -4422,8 +4422,12 @@ async fn test_recovery_readiness_does_not_claim_profile_coverage() {
     }
 }
 
+/// U14: the projection the periodic Home stream polls walks no folder. It
+/// reads the protection record and, with a Profile, opens only the Profile
+/// authority. The summaries around it start no scan (they still read their
+/// own Home state files).
 #[tokio::test]
-async fn realtime_readiness_opens_no_object() {
+async fn realtime_readiness_walks_nothing_and_opens_only_the_profile_authority() {
     let dir = tempfile::tempdir().unwrap();
     let _ = elastos_identity::load_or_create_did(dir.path()).unwrap();
     let app = gateway_router(wallet_test_state(dir.path()).await);
@@ -4439,17 +4443,30 @@ async fn realtime_readiness_opens_no_object() {
     for index in 0..1_100 {
         std::fs::write(documents.join(format!("file-{index:04}.txt")), b"x").unwrap();
     }
-    let before = crate::auth::principal_root_scan_probes(dir.path());
-
-    // The periodic Home stream calls exactly this projection once per poll.
-    assert_eq!(
+    let readiness = || {
         crate::api::auth_gateway::principal_root_recovery_readiness_for_verified_principal(
             dir.path(),
             &authority.principal_id,
             &localhost_root,
         )
-        .unwrap(),
-        crate::api::auth_gateway::PrincipalRootRecoveryReadiness::Ready
+        .unwrap()
+    };
+    let opens_during =
+        |run: &dyn Fn() -> crate::api::auth_gateway::PrincipalRootRecoveryReadiness| {
+            let before = crate::auth::principal_root_object_opens(dir.path()).len();
+            let readiness = run();
+            let opens = crate::auth::principal_root_object_opens(dir.path())[before..].to_vec();
+            (readiness, opens)
+        };
+    let before = crate::auth::principal_root_scan_probes(dir.path());
+
+    // No Profile: the protection record only.
+    assert_eq!(
+        opens_during(&readiness),
+        (
+            crate::api::auth_gateway::PrincipalRootRecoveryReadiness::Ready,
+            Vec::new()
+        )
     );
     for (path, token, origin) in [
         (
@@ -4466,6 +4483,51 @@ async fn realtime_readiness_opens_no_object() {
         let (status, payload) = home_test_get_json(&app, path, token, origin).await;
         assert_eq!(status, StatusCode::OK, "{path}");
         assert_recovery_readiness_projection(&payload, "ready", path);
+    }
+    assert_eq!(crate::auth::principal_root_scan_probes(dir.path()), before);
+
+    // With a Profile: the protection record and the Profile authority. The
+    // 1,100 unencrypted files are moved aside while the Profile is set up,
+    // which would otherwise refuse them (more than 64 to encrypt).
+    let aside = dir.path().join("documents-aside");
+    std::fs::rename(&documents, &aside).unwrap();
+    let (status, _) = home_test_post_json(
+        &app,
+        "/api/apps/people/profile",
+        authority.people_token.as_str(),
+        "null",
+        json!({ "display_name": "Owner" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    std::fs::rename(&aside, &documents).unwrap();
+    let before = crate::auth::principal_root_scan_probes(dir.path());
+    assert_eq!(
+        opens_during(&readiness),
+        (
+            crate::api::auth_gateway::PrincipalRootRecoveryReadiness::KitOutdated,
+            vec![
+                crate::collaboration_profile_authority::profile_authority_object_uri(
+                    &localhost_root
+                )
+            ]
+        )
+    );
+    for (path, token, origin) in [
+        (
+            "/api/apps/home/summary",
+            authority.home_token.as_str(),
+            "http://localhost:61180",
+        ),
+        (
+            "/api/apps/people/summary",
+            authority.people_token.as_str(),
+            "null",
+        ),
+    ] {
+        let (status, payload) = home_test_get_json(&app, path, token, origin).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert_recovery_setup_required_projection(&payload, "recovery_kit_outdated", path);
     }
     assert_eq!(crate::auth::principal_root_scan_probes(dir.path()), before);
 }

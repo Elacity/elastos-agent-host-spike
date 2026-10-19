@@ -122,6 +122,22 @@ pub(crate) fn principal_root_scan_probes(data_dir: &Path) -> PrincipalRootScanPr
         .unwrap_or_default()
 }
 
+/// Per-`data_dir` object URIs opened through the protected read path, in
+/// order, so tests can prove which protected objects a path opens.
+#[cfg(test)]
+static PRINCIPAL_ROOT_OBJECT_OPENS: std::sync::LazyLock<Mutex<HashMap<PathBuf, Vec<String>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+pub(crate) fn principal_root_object_opens(data_dir: &Path) -> Vec<String> {
+    PRINCIPAL_ROOT_OBJECT_OPENS
+        .lock()
+        .expect("principal-root object open lock")
+        .get(data_dir)
+        .cloned()
+        .unwrap_or_default()
+}
+
 /// Test hook: replace one selected object's bytes after preflight, just
 /// before migration prepare reads it.
 #[cfg(test)]
@@ -5355,6 +5371,13 @@ fn read_protected_principal_root_object_file(
     path: &Path,
     protection: &PrincipalRootProtectionV1,
 ) -> anyhow::Result<Vec<u8>> {
+    #[cfg(test)]
+    PRINCIPAL_ROOT_OBJECT_OPENS
+        .lock()
+        .expect("principal-root object open lock")
+        .entry(data_dir.to_path_buf())
+        .or_default()
+        .push(object_uri.to_string());
     let (mut file, len) = open_principal_root_object_file(path)?;
     let expected = PrincipalRootObjectExpectation {
         principal_id,

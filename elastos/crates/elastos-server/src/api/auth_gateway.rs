@@ -1378,8 +1378,11 @@ pub(in crate::api) enum PrincipalRootRecoveryReadiness {
 }
 
 /// The periodic Home stream and the identity summary project Recovery
-/// readiness from the protection record and the Profile authority only. They
-/// open no protected object: the explicit Recovery status does that.
+/// readiness without a walk. They read the protection record and, once a
+/// kit is verified and a Profile exists, its authority file
+/// (`profile-authority.json`, a protected object decrypted under the root
+/// key); they open no other protected object. The explicit Recovery status
+/// scans the folders.
 pub(in crate::api) fn principal_root_recovery_readiness_for_verified_principal(
     data_dir: &std::path::Path,
     principal_id: &str,
