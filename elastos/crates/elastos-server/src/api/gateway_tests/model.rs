@@ -2227,17 +2227,19 @@ async fn system_hosted_mutations_recheck_revoked_admin_after_waits() {
         ("validate", "setup"),
         ("save", "setup"),
         ("save", "sharing"),
+        ("share", "sharing"),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let id = format!("model:hosted-{}", "a".repeat(32));
         crate::api::seed_model_provider_operator_offers_for_test(
             dir.path(),
-            vec![json!({
-                "id":id,"adapter":{"kind":"open_ai_compatible_text",
-                    "api_url":"https://openrouter.ai/api/v1/chat/completions",
-                    "api_key":"fixture-secret","model":"fixture/model",
-                    "hosted":{"backend_provider_label":"OpenRouter"}}
-            })],
+            vec![hosted_test_offer(
+                &id,
+                "Fixture",
+                "OpenRouter",
+                "https://openrouter.ai/api/v1/chat/completions",
+                "fixture-secret",
+            )],
         )
         .unwrap();
         // Materialize the fixture credential before taking byte snapshots.
@@ -2294,15 +2296,17 @@ async fn system_hosted_mutations_recheck_revoked_admin_after_waits() {
             .uri(match action {
                 "delete" | "save" => "/api/apps/system/ai-provider",
                 "validate" => "/api/apps/system/ai-provider/validate",
+                "share" => "/api/apps/system/ai-provider/share",
                 "discard" => "/api/apps/system/ai-provider/staged",
                 _ => "/api/apps/system/approval-lens/revoke",
             })
             .header("x-elastos-home-token", authority.system_token.clone())
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(if matches!(action, "validate" | "save") {
-                json!({"id":id,"provider":"openrouter","api_key":"replacement-fixture-key","model":"fixture/model","name":"Changed"})
-            } else {
-                json!({"id":id})
+            .body(Body::from(match action {
+                "validate" => json!({"id":id,"provider":"openrouter","api_key":"replacement-fixture-key"}),
+                "save" => json!({"id":id,"provider":"openrouter","api_key":"replacement-fixture-key","model":"fixture/model","name":"Changed"}),
+                "share" => json!({"id":id,"enabled":true,"terms_ack":"openrouter-5.1-5.2+model"}),
+                _ => json!({"id":id}),
             }.to_string()))
             .unwrap();
         let mut pending = Box::pin(app.oneshot(request));

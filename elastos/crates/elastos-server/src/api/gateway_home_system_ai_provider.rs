@@ -1004,6 +1004,9 @@ pub(super) async fn system_ai_provider_share(
     let _model_share_guard = super::gateway_model_service::model_share_gate()
         .write()
         .await;
+    if let Err(err) = require_system_admin(&state.data_dir, &headers) {
+        return system_error_response(err);
+    }
     match crate::api::set_hosted_offer_share(
         &state.data_dir,
         &offer_id,
