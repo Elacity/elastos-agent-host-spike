@@ -8107,12 +8107,32 @@ fn home_reset_background_image(
     home_appearance_summary(data_dir, context)
 }
 
+/// Upload and reset replace the background, but never delete a damaged
+/// image: the refusal is the damage notice that names the file, as for every
+/// other Home state save (#447). Every image is checked before any is removed.
 fn remove_home_background_images(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<()> {
+    let mut paths = Vec::with_capacity(HOME_BACKGROUND_IMAGE_FILES.len());
     for &(file_name, _content_type) in HOME_BACKGROUND_IMAGE_FILES {
         let path = home_appearance_path(data_dir, context, file_name)?;
+        if path.is_file() {
+            if let Err(err) = crate::auth::read_principal_root_object(
+                data_dir,
+                &home_browser_principal_id(context),
+                &home_browser_localhost_root(context),
+                &home_appearance_object_uri(context, file_name),
+                &path,
+            ) {
+                if is_damaged_home_state(&err) {
+                    return Err(err);
+                }
+            }
+        }
+        paths.push(path);
+    }
+    for path in paths {
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}

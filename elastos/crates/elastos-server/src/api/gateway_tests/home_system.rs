@@ -4723,6 +4723,67 @@ async fn damaged_home_state_file_leaves_shell_and_summaries_answering() {
     }
 }
 
+/// #447 N1: System → Appearance upload and reset never delete a damaged
+/// background image; both are refused with the notice that names it.
+#[tokio::test]
+async fn damaged_background_image_survives_upload_and_reset() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let localhost_root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let file = "Appearance/background-image.jpg";
+    let uri = format!("{localhost_root}/.AppData/ElastOS/Home/{file}");
+    let path = elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &uri).unwrap();
+    crate::auth::create_owner_only_dir_all(dir.path(), path.parent().unwrap()).unwrap();
+    crate::auth::write_principal_root_object(
+        dir.path(),
+        &authority.principal_id,
+        &localhost_root,
+        &uri,
+        &path,
+        b"jpeg",
+    )
+    .unwrap();
+    let mut damaged = std::fs::read(&path).unwrap();
+    damaged[9] = 0xff;
+    std::fs::write(&path, &damaged).unwrap();
+    let uploaded = path.with_file_name("background-image.png");
+
+    for (method, content_type, body) in [
+        ("POST", "image/png", "new-image"),
+        ("DELETE", "text/plain", ""),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                test_browser_request("localhost:61180", "null")
+                    .method(method)
+                    .uri("/api/apps/system/appearance/background-image")
+                    .header("x-elastos-home-token", authority.system_token.as_str())
+                    .header(CONTENT_TYPE, content_type)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let text = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&text);
+        assert!(!status.is_success(), "{method}: {text}");
+        assert!(
+            text.contains(&format!(
+                ".AppData/ElastOS/Home/{file} does not carry the label"
+            )),
+            "{method}: {text}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), damaged, "{method}");
+        assert!(!uploaded.exists(), "{method}");
+    }
+}
+
 #[tokio::test]
 async fn test_recovery_readiness_projects_unavailable_and_first_profile_fails_closed() {
     let dir = tempfile::tempdir().unwrap();
