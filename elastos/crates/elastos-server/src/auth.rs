@@ -76,6 +76,12 @@ const MAX_PRINCIPAL_ROOT_INVENTORY_DEPTH: usize = 16;
 const MAX_MIGRATION_OBJECTS: usize = 64;
 const MAX_MIGRATION_OBJECT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MIGRATION_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+/// Bytes a scan reads beyond each file's 64 KiB head to classify files that
+/// carry no label, in total. The plaintext limit plus one file, so selected
+/// plaintext alone reaches P3 before this; a candidate left over when it is
+/// spent is named as not checked in this pass.
+const MAX_PRINCIPAL_ROOT_SCAN_PROBE_BYTES: u64 =
+    MAX_MIGRATION_TOTAL_BYTES + MAX_MIGRATION_OBJECT_BYTES;
 
 static AUTH_STATE_MUTATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static AUDIT_CHAIN_ACTIVATION_MUTATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -7100,8 +7106,8 @@ fn validate_principal_root_object_path(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PrincipalRootScanMode {
-    /// Report: plaintext (including candidates left unconfirmed by the
-    /// whole-read budget) and damaged files. Selects nothing.
+    /// Report: plaintext (including files over 16 MiB with no label) and
+    /// damaged or unchecked files. Selects nothing.
     Readiness,
     /// Select whole-bytes plaintext for migration within the migration
     /// limits, refusing by name a file over a limit.
@@ -7138,10 +7144,7 @@ fn scan_declared_principal_root_objects(
         declared: declared.len(),
         ..PrincipalRootScan::default()
     };
-    let mut whole_read_budget = match mode {
-        PrincipalRootScanMode::Readiness => MAX_MIGRATION_TOTAL_BYTES,
-        PrincipalRootScanMode::Plan => MAX_MIGRATION_TOTAL_BYTES + MAX_MIGRATION_OBJECT_BYTES,
-    };
+    let mut probe_budget = MAX_PRINCIPAL_ROOT_SCAN_PROBE_BYTES;
     let mut plaintext_bytes = 0u64;
     for (object_uri, path) in declared {
         let (mut file, len) = open_principal_root_object_file(&path)?;
@@ -7152,7 +7155,7 @@ fn scan_declared_principal_root_objects(
             data_key_id,
         };
         let probe =
-            classify_principal_root_object_file(&mut file, len, &expected, &mut whole_read_budget)
+            classify_principal_root_object_file(&mut file, len, &expected, &mut probe_budget)
                 .with_context(|| format!("failed to read declared object {path:?}"))?;
         #[cfg(test)]
         record_principal_root_scan_probe(data_dir, |probes| {
@@ -7178,23 +7181,15 @@ fn scan_declared_principal_root_objects(
                 });
                 scan.plaintext.push(object_uri);
             }
+            // Over 16 MiB: never read whole and never encrypted in place.
             PrincipalRootObjectFileClass::UnconfirmedPlaintext
                 if mode == PrincipalRootScanMode::Plan =>
             {
-                if len > MAX_MIGRATION_OBJECT_BYTES {
-                    return Err(principal_root_plaintext_size_refusal(
-                        data_dir,
-                        localhost_root,
-                        &object_uri,
-                        len,
-                    ));
-                }
-                // Only plaintext spends the Plan budget, which is the plaintext
-                // limit plus one file: the total refuses before any file of up
-                // to 16 MiB is left unread.
-                return Err(anyhow!(
-                    "principal-root migration scan left {path:?} unclassified within its \
-                     plaintext budget"
+                return Err(principal_root_plaintext_size_refusal(
+                    data_dir,
+                    localhost_root,
+                    &object_uri,
+                    len,
                 ));
             }
             PrincipalRootObjectFileClass::Plaintext
@@ -7530,6 +7525,9 @@ pub(crate) enum PrincipalRootObjectDamage {
     NoKey,
     /// At open only: full parse, base64 or AES-GCM failed.
     FailedCheck,
+    /// A file with no label that the scan's probe cap left unread. Treated
+    /// as damaged until a later scan checks it.
+    Unchecked,
 }
 
 impl PrincipalRootObjectDamage {
@@ -7542,6 +7540,7 @@ impl PrincipalRootObjectDamage {
             Self::OtherKey { .. } => "other_key",
             Self::NoKey => "no_key",
             Self::FailedCheck => "failed_check",
+            Self::Unchecked => "unchecked",
         }
     }
 }
@@ -7642,6 +7641,13 @@ impl PrincipalRootObjectNotice {
             PrincipalRootObjectDamage::FailedCheck => format!(
                 "{path} is damaged: its contents failed the integrity check, so Home will not \
                  open it. Restore it from your own backup, or move it out of {disk_folder}."
+            ),
+            PrincipalRootObjectDamage::Unchecked => format!(
+                "{path} could not be checked in this pass: Home reads at most 80 MiB of files \
+                 without a label in one pass and stopped before it. Home will not encrypt, \
+                 change or delete it until it is checked. Move the damaged files listed with it \
+                 out of their folders, or move it out of {disk_folder}; Home checks it again the \
+                 next time it starts or shows Recovery status."
             ),
         }
     }
@@ -7951,8 +7957,8 @@ pub(crate) enum PrincipalRootObjectFileClass {
     Damaged(PrincipalRootObjectDamage),
     /// Whole bytes read: no sign, and the full parser refused them.
     Plaintext,
-    /// No sign in the first 64 KiB, not read whole: over 16 MiB, or the
-    /// scan's whole-read budget is spent. Never encrypted on this verdict.
+    /// No sign in the first 64 KiB and over 16 MiB, so not read whole.
+    /// Never encrypted on this verdict.
     UnconfirmedPlaintext,
 }
 
@@ -7969,15 +7975,15 @@ pub(crate) struct PrincipalRootObjectFileProbe {
 
 /// Classifies an open regular file of length `len` while reading as little
 /// as it can: the head grows from 4 KiB up to 64 KiB, continuing where it
-/// stopped; an envelope adds a 3-byte tail. A plaintext candidate is read
-/// whole only when it is at most 16 MiB and fits `whole_read_budget`. Only
-/// plaintext spends the budget: a candidate that turns out damaged gives its
-/// bytes back, so damaged files never crowd out the plaintext limits.
+/// stopped; an envelope adds a 3-byte tail. A candidate with no label is
+/// read whole only when it is at most 16 MiB and fits `probe_budget`, which
+/// every such read spends. One that no longer fits is Damaged(Unchecked):
+/// named, never encrypted, and checked again by the next scan.
 pub(crate) fn classify_principal_root_object_file(
     file: &mut File,
     len: u64,
     expected: &PrincipalRootObjectExpectation<'_>,
-    whole_read_budget: &mut u64,
+    probe_budget: &mut u64,
 ) -> std::io::Result<PrincipalRootObjectFileProbe> {
     let mut len = len;
     let mut prefix = Vec::new();
@@ -8026,17 +8032,18 @@ pub(crate) fn classify_principal_root_object_file(
         return Ok(probe(label_unreadable, prefix, bytes_read));
     }
     let remaining = len.saturating_sub(prefix.len() as u64);
-    let mut charged = 0;
-    if remaining > 0 && len <= MAX_MIGRATION_OBJECT_BYTES && remaining <= *whole_read_budget {
+    if remaining > 0 && len <= MAX_MIGRATION_OBJECT_BYTES && remaining <= *probe_budget {
         // Charged as read: a file that shrank costs only the bytes it held.
-        charged = read_principal_root_object_prefix(file, &mut prefix, len as usize)?;
-        *whole_read_budget -= charged;
-        bytes_read += charged;
+        let rest = read_principal_root_object_prefix(file, &mut prefix, len as usize)?;
+        *probe_budget -= rest;
+        bytes_read += rest;
         len = prefix.len() as u64;
     } else if remaining > 0 {
         bytes_read += read_principal_root_object_prefix(file, &mut prefix, window_max)?;
         let class = if principal_root_object_shows_envelope_sign(&prefix, len) {
             label_unreadable
+        } else if len <= MAX_MIGRATION_OBJECT_BYTES {
+            PrincipalRootObjectFileClass::Damaged(PrincipalRootObjectDamage::Unchecked)
         } else {
             PrincipalRootObjectFileClass::UnconfirmedPlaintext
         };
@@ -8045,7 +8052,6 @@ pub(crate) fn classify_principal_root_object_file(
     let class = if principal_root_object_shows_envelope_sign(&prefix, len)
         || principal_root_object_parses_as_envelope(&prefix)
     {
-        *whole_read_budget += charged;
         label_unreadable
     } else {
         PrincipalRootObjectFileClass::Plaintext

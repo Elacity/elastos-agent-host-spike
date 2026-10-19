@@ -257,8 +257,8 @@ fn start_refuses_plaintext_with_names() {
         70
     );
 
-    // Markerless candidates are read whole only within the 64 MiB budget;
-    // the rest count as not encrypted and start still refuses.
+    // Markerless candidates are read whole only within the 80 MiB probe
+    // cap; those read are not encrypted and start still refuses.
     let large = Home::new("person:local:scan-budget-home");
     for index in 0..6 {
         large.write_zeros(&format!("Documents/blank-{index}.bin"), 15 * MIB);
@@ -270,11 +270,11 @@ fn start_refuses_plaintext_with_names() {
             .downcast_ref::<PrincipalRootMigrationRequiredV1>()
             .unwrap()
             .plaintext_object_count,
-        6
+        5
     );
     let probes = probe_delta(before, large.probes());
     assert!(
-        probes.bytes_read <= MAX_MIGRATION_TOTAL_BYTES + 6 * HEAD_WINDOW_MAX as u64,
+        probes.bytes_read <= MAX_PRINCIPAL_ROOT_SCAN_PROBE_BYTES + 6 * HEAD_WINDOW_MAX as u64,
         "read {} bytes",
         probes.bytes_read
     );
@@ -457,7 +457,7 @@ fn plaintext_classified_fragment_is_wrapped_byte_exact() {
 fn damaged_candidates_do_not_spend_the_plaintext_budget() {
     let home = Home::new("person:local:scan-damaged-budget-home");
     for index in 0..5 {
-        home.write_late_sign(&format!("Documents/a-late-sign-{index}.bin"), 15 * MIB);
+        home.write_late_sign(&format!("Documents/a-late-sign-{index}.bin"), 13 * MIB);
     }
     let plaintext = vec![b'p'; 6 * MIB];
     home.write("Documents/z-plain.bin", &plaintext);
@@ -470,12 +470,76 @@ fn damaged_candidates_do_not_spend_the_plaintext_budget() {
     assert_eq!(outcome.plaintext_object_count, 1);
     assert_eq!(outcome.examples, vec!["Documents/z-plain.bin".to_string()]);
 
-    // 75 MiB of damaged candidates do not turn into a false P3.
+    // 65 MiB of damaged candidates, past the old 64 MiB readiness budget,
+    // neither hide the plaintext file nor turn into a false P3.
     let receipt = home.upgrade(&home.backup_dir()).unwrap();
     assert_eq!(receipt.object_count, 1);
     assert_eq!(receipt.notices.len(), 5);
     assert_eq!(home.open("Documents/z-plain.bin").unwrap(), plaintext);
     assert_eq!(home.ready().unwrap().len(), 5);
+}
+
+#[test]
+fn probe_cap_names_unread_candidates_and_start_continues() {
+    let home = Home::new("person:local:scan-probe-cap-home");
+    for index in 0..8 {
+        home.write_late_sign(&format!("Documents/a-late-sign-{index}.bin"), 15 * MIB);
+    }
+    // A genuine unencrypted file that the cap leaves unread.
+    let plaintext = vec![b'p'; 6 * MIB];
+    home.write("Documents/z-plain.bin", &plaintext);
+
+    let before = home.probes();
+    let notices = home.ready().expect("start continues past the probe cap");
+    let probes = probe_delta(before, home.probes());
+    assert!(
+        probes.bytes_read <= MAX_PRINCIPAL_ROOT_SCAN_PROBE_BYTES + 9 * HEAD_WINDOW_MAX as u64,
+        "read {} bytes",
+        probes.bytes_read
+    );
+    assert_eq!(notices.len(), 9, "{notices:?}");
+    for (index, notice) in notices.iter().take(5).enumerate() {
+        assert!(
+            notice.starts_with(&format!(
+                "Documents/a-late-sign-{index}.bin does not carry the label"
+            )),
+            "{notice}"
+        );
+    }
+    for (index, notice) in notices.iter().enumerate().skip(5).take(3) {
+        assert!(
+            notice.starts_with(&format!(
+                "Documents/a-late-sign-{index}.bin could not be checked in this pass"
+            )),
+            "{notice}"
+        );
+    }
+    assert!(
+        notices[8].starts_with("Documents/z-plain.bin could not be checked in this pass"),
+        "{}",
+        notices[8]
+    );
+
+    // Recovery does not count it as encrypted, and lists it.
+    let inspection = inspect_declarative_principal_root_protection(
+        home.data_dir(),
+        &home.principal_id,
+        &home.localhost_root,
+        &home.declarations()[0].inventory,
+    )
+    .unwrap();
+    assert_eq!(inspection.encrypted_object_count, 0);
+    assert_eq!(inspection.notices.len(), 9);
+    assert_eq!(
+        inspection.notices[8].damage,
+        PrincipalRootObjectDamage::Unchecked
+    );
+
+    // The upgrade selects nothing it could not check and changes nothing.
+    let receipt = home.upgrade(&home.backup_dir()).unwrap();
+    assert_eq!(receipt.object_count, 0);
+    assert_eq!(receipt.notices.len(), 9);
+    assert_eq!(home.read("Documents/z-plain.bin"), plaintext);
 }
 
 #[cfg(unix)]
