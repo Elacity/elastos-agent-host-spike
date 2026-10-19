@@ -54,8 +54,8 @@ The task log called the spike "about 43 of 70" on 13 Oct. That was a rough total
 - This repo is a **private** copy for the spike only. The real project is `Elacity/elastos-runtime`, which is **public**.
 - Main line here: branch `spike/agent-host`. It already contains `origin/develop` of Elacity at `3beb81643` (= 0.8.0-alpha.24 plus one CI commit), merged as `d465df3bc`.
 - Spike code: `examples/agent-host/src/lib.rs` (about 10,000 lines, 72 host tests), `examples/vm-smoke/`, `elastos/crates/elastos-compute/src/exec_vm.rs`, the ignored Wasmtime test in `elastos/crates/elastos-compute/src/providers/component.rs`, Home screens `capsules/home-gui/browser/shell-version-list.js`, `shell-approval.js`, `shell-demo-app.js`, `version-list.html`, `file-versions.json`, prompt packing in `capsules/assistant/browser/agent-context.js`, admission counting in `capsules/model-provider/src/local_memory.rs` and `adapters.rs`.
-- Guest hash on 19 Oct (Mac): `fe9bcaa48669b10c9e7633f9ba7f34db1fcc65fa0dcc41ea1517c2dfc10f60c5`. The build remaps paths so it should be the same on Linux with Rust 1.91.0. If it differs, report it. Do not "fix" it.
-- Checklist: 55 of 62 done.
+- Guest hash is per machine type (S0 review). Cargo's symbol hashes depend on the build machine, and they change both the `name` section and the code bytes. Reference hashes for the 19 Oct source: Mac aarch64 `fe9bcaa48669b10c9e7633f9ba7f34db1fcc65fa0dcc41ea1517c2dfc10f60c5`, Linux x86_64 `e34772d1a03a24327eea7626ba4928e19dfb13d214d14c2b70a42d698bc489a1`. In a report, give the Linux hash from two builds and the output of `python3 examples/agent-host/handoff/tools/wasm_sections.py examples/agent-host/agent-host.component.wasm`. Cursor rebuilds on the Mac. Do not change the build to make hashes match.
+- Checklist: 56 of 63 done (after S0).
 
 ## 3. Hard rules
 
@@ -104,7 +104,7 @@ Refusals:     <each input that must be refused, and what the code returns>
 Tests run:    <exact command> -> <result line>   (one line per command)
 Not run here: <tests that need Sasha's Mac, and why>
 Falsifiers:   <what I broke> -> <test that failed> -> reverted
-Guest hash:   <sha256 of agent-host.component.wasm>
+Guest hash:   <Linux sha256 of agent-host.component.wasm, same on two builds; plus wasm_sections.py output>
 Import list:  unchanged | changed to <list> because <reason>
 Principles:   <numbers this slice touches, one line each on how it keeps them>
 DeepSeek:     <file and commit of any pattern used, or "none">
@@ -138,6 +138,16 @@ Do them in this order. Each is one session. Stop after each.
 - Read `HISTORY.md` and say in the report if any proof there no longer matches the code.
 - Add a section "Spike grade today": for each of the 14 rows, the grade the spike has actually proven, with the test name that proves it. Unproven means it does not count. Cursor checks this.
 - This proves the cloud setup matches the Mac before anything changes.
+
+### S0b - catch-up reading, no code change (cloud)
+
+S0 started before these were added, so they are their own slice. One report: `reports/S0b-catch-up.md`.
+
+- The one-time DeepSeek catch-up in `DEEPSEEK.md`, as a section "DeepSeek since 12 Oct".
+- Read `HISTORY.md`. Section "History check": any proof there that no longer matches the code, or "none".
+- Section "Spike grade today": for each of the 14 rows in section 1, the grade the spike has proven, with the test name that proves it. Unproven does not count.
+- Section "Guest hash": run `handoff/tools/wasm_sections.py` on your build and paste the output. Then find the line in Cargo's source (rust-lang/cargo, the version that ships with Rust 1.91.0) that puts the compiler's verbose version, or the host, into the metadata hash. Cite file and line. If it is not there, say so.
+- Only `handoff/` files change. If the catch-up suggests a slice should change, write the suggestion; Sasha decides.
 
 ### S1 - `sell-closed-admission` (cloud, small, test only)
 
