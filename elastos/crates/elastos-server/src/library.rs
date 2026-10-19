@@ -3353,10 +3353,11 @@ impl StartWalkRule {
     }
 
     /// `from` copied or moved to `to_uri`: every file and folder it holds is
-    /// checked before anything is written, so a refused copy or move changes
-    /// nothing. Links are not followed here. The copy and move writers check
-    /// each path again as they create it, which also covers a file added to
-    /// `from` after this check.
+    /// checked before anything is written, so a refused copy or move of
+    /// ordinary folders changes nothing. This check does not follow a linked
+    /// folder; the writers do, and they check each path again as they create
+    /// it, which covers a linked folder's contents and a file added to `from`
+    /// after this check (those can stop a copy or move partway).
     fn tree(&self, from: &Path, to_uri: &str) -> anyhow::Result<()> {
         if !fs::symlink_metadata(from)?.is_dir() {
             return self.file(to_uri);
@@ -4357,16 +4358,11 @@ fn preview_tar_archive_entry(
     bytes: Vec<u8>,
     selected: &str,
 ) -> anyhow::Result<ArchiveEntryPreview> {
-    let reader: Box<dyn std::io::Read> = if name.to_ascii_lowercase().ends_with(".tar") {
-        Box::new(Cursor::new(bytes))
-    } else {
-        Box::new(GzDecoder::new(Cursor::new(bytes)))
-    };
-    let mut archive = tar::Archive::new(reader);
+    let (mut archive, input) = bounded_tar_archive(name, &bytes);
     let archive_name = crate::auth::printable_text(name);
     let mut expansion = ArchiveExpansion::new(&archive_name);
     for entry in archive.entries()? {
-        let mut entry = entry?;
+        let mut entry = input.entry(&archive_name, entry)?;
         let Ok(normalized) =
             tar_entry_name(&entry).and_then(|name| normalized_archive_entry_path(&name))
         else {
@@ -4461,23 +4457,19 @@ fn redacted_resolver_private_value(mut value: Value) -> Value {
 }
 
 fn list_tar_archive_entries(name: &str, bytes: Vec<u8>) -> anyhow::Result<(Vec<Value>, bool)> {
-    let reader: Box<dyn std::io::Read> = if name.to_ascii_lowercase().ends_with(".tar") {
-        Box::new(Cursor::new(bytes))
-    } else {
-        Box::new(GzDecoder::new(Cursor::new(bytes)))
-    };
-    let mut archive = tar::Archive::new(reader);
+    let (mut archive, input) = bounded_tar_archive(name, &bytes);
+    let archive_name = crate::auth::printable_text(name);
     let mut entries = Vec::new();
     let mut truncated = false;
     // Listing expands every entry it passes over; past the limit the list
     // stops, as it does past MAX_ARCHIVE_LIST_ENTRIES (#449).
-    let mut expansion = ArchiveExpansion::new("");
+    let mut expansion = ArchiveExpansion::new(&archive_name);
     for (index, entry) in archive.entries()?.enumerate() {
         if entries.len() >= MAX_ARCHIVE_LIST_ENTRIES {
             truncated = true;
             break;
         }
-        let entry = entry?;
+        let entry = input.entry(&archive_name, entry)?;
         if expansion.pass_over(entry.size()).is_err() {
             truncated = true;
             break;
@@ -4903,6 +4895,7 @@ fn extract_archive_entries_to_local_destination(
     read_selected_archive_entries(
         request.archive_name,
         bytes,
+        None,
         &mut outcome,
         &mut |write, outcome| {
             apply_selected_archive_write_to_local(
@@ -4967,15 +4960,20 @@ type SelectedArchiveSink<'a> =
     dyn FnMut(ArchiveExtractWrite, &mut ArchiveExtractOutcome) -> anyhow::Result<()> + 'a;
 
 /// Reads the selected entries of an archive, each bounded by
-/// `ArchiveExpansion`, and hands each to `sink` as it is read (#449).
+/// `ArchiveExpansion`, and hands each to `sink` as it is read (#449). A
+/// caller that keeps every file passes `keep_budget`, their total.
 fn read_selected_archive_entries(
     name: &str,
     bytes: Vec<u8>,
+    keep_budget: Option<u64>,
     outcome: &mut ArchiveExtractOutcome,
     sink: &mut SelectedArchiveSink<'_>,
 ) -> anyhow::Result<()> {
     let archive = crate::auth::printable_text(name);
-    let mut expansion = ArchiveExpansion::new(&archive);
+    let mut expansion = match keep_budget {
+        Some(budget) => ArchiveExpansion::with_keep_budget(&archive, budget),
+        None => ArchiveExpansion::new(&archive),
+    };
     if name.to_ascii_lowercase().ends_with(".zip") {
         read_selected_zip_entries(&mut expansion, bytes, outcome, sink)
     } else {
@@ -4984,18 +4982,6 @@ fn read_selected_archive_entries(
         check_selected_tar_entries(name, &archive, &bytes, outcome)?;
         read_selected_tar_entries(name, &mut expansion, &bytes, outcome, sink)
     }
-}
-
-fn tar_archive_reader<'a>(
-    name: &str,
-    bytes: &'a [u8],
-) -> tar::Archive<Box<dyn std::io::Read + 'a>> {
-    let reader: Box<dyn std::io::Read + 'a> = if name.to_ascii_lowercase().ends_with(".tar") {
-        Box::new(Cursor::new(bytes))
-    } else {
-        Box::new(GzDecoder::new(Cursor::new(bytes)))
-    };
-    tar::Archive::new(reader)
 }
 
 /// The entry count and expansion of a selected tar extraction, read without
@@ -5007,12 +4993,12 @@ fn check_selected_tar_entries(
     outcome: &ArchiveExtractOutcome,
 ) -> anyhow::Result<()> {
     let mut expansion = ArchiveExpansion::new(archive_display);
-    let mut archive = tar_archive_reader(name, bytes);
+    let (mut archive, input) = bounded_tar_archive(name, bytes);
     for (index, entry) in archive.entries()?.enumerate() {
         if index >= MAX_ARCHIVE_EXTRACT_ENTRIES {
             return Err(too_many_archive_entries(archive_display));
         }
-        let entry = entry?;
+        let entry = input.entry(archive_display, entry)?;
         let size = entry.size();
         let selected_file = tar_entry_name(&entry)
             .and_then(|name| normalized_archive_entry_path(&name))
@@ -5033,12 +5019,12 @@ fn read_selected_tar_entries(
     outcome: &mut ArchiveExtractOutcome,
     sink: &mut SelectedArchiveSink<'_>,
 ) -> anyhow::Result<()> {
-    let mut archive = tar_archive_reader(name, bytes);
+    let (mut archive, input) = bounded_tar_archive(name, bytes);
     for (index, entry) in archive.entries()?.enumerate() {
         if index >= MAX_ARCHIVE_EXTRACT_ENTRIES {
             return Err(too_many_archive_entries(expansion.archive));
         }
-        let mut entry = entry?;
+        let mut entry = input.entry(expansion.archive, entry)?;
         // Passing over an entry expands it too, selected or not.
         let size = entry.size();
         let normalized =
@@ -5242,26 +5228,15 @@ async fn extract_archive_entries_to_webspace_destination(
         ));
     }
     // Spaces write-back sends after reading, so it holds the selected files
-    // in memory, at most MAX_ARCHIVE_SPACES_WRITE_BACK_BYTES of them.
+    // in memory: at most MAX_ARCHIVE_SPACES_WRITE_BACK_BYTES of them, enforced
+    // while each file is read.
     let mut writes = Vec::new();
-    let mut held = 0u64;
     read_selected_archive_entries(
         request.archive_name,
         bytes,
+        Some(MAX_ARCHIVE_SPACES_WRITE_BACK_BYTES),
         &mut outcome,
         &mut |write, _| {
-            if let ArchiveExtractWrite::File { bytes, .. } = &write {
-                held += bytes.len() as u64;
-                if held > MAX_ARCHIVE_SPACES_WRITE_BACK_BYTES {
-                    bail!(
-                        "The files selected in {} are more than {} MiB; Spaces takes up to {} \
-                         MiB from one archive at a time. Select fewer files.",
-                        crate::auth::printable_text(request.archive_name),
-                        MAX_ARCHIVE_SPACES_WRITE_BACK_BYTES / (1024 * 1024),
-                        MAX_ARCHIVE_SPACES_WRITE_BACK_BYTES / (1024 * 1024),
-                    );
-                }
-            }
             writes.push(write);
             Ok(())
         },
@@ -5588,18 +5563,26 @@ fn extract_library_archive(
         archive: &archive_display,
         destination: &destination,
         rule: &rule,
+        trail: std::cell::RefCell::default(),
     };
     // The first pass checks every entry against every rule (name, kind,
     // depth, count, expanded size) and writes nothing.
     archive.run(name, &bytes, false)?;
-    // The folder is created here, so a read or write failure in the second
-    // pass (a damaged entry, a file where a folder is needed) removes it with
-    // everything written into it.
+    // The folder is created here, and the second pass records each folder
+    // and file it creates. If reading or writing fails (a damaged entry, a
+    // file where a folder is needed), exactly those are removed: a file only
+    // while it is still the one this extraction wrote, a folder only once it
+    // is empty. What another request saved in the folder meanwhile stays.
     fs::create_dir(&destination.path)?;
+    archive
+        .trail
+        .borrow_mut()
+        .folders
+        .push(destination.path.clone());
     if let Err(err) = archive.run(name, &bytes, true) {
-        if let Err(cleanup) = fs::remove_dir_all(&destination.path) {
+        if let Err(cleanup) = archive.trail.borrow().undo() {
             bail!(
-                "{err} The partly extracted folder {} could not be removed: {cleanup}",
+                "{err} What was extracted into {} could not all be removed: {cleanup}",
                 crate::auth::principal_root_home_relative_path(
                     &destination.localhost_root,
                     &destination.uri,
@@ -5623,6 +5606,88 @@ struct WholeArchiveExtract<'a> {
     archive: &'a str,
     destination: &'a LibraryTarget,
     rule: &'a StartWalkRule,
+    trail: std::cell::RefCell<ExtractTrail>,
+}
+
+/// The folders and files one whole extraction created, so a failed
+/// extraction removes exactly those (#449).
+#[derive(Default)]
+struct ExtractTrail {
+    /// In the order they were created.
+    folders: Vec<PathBuf>,
+    /// Each file with what it was on disk right after this extraction wrote
+    /// it.
+    files: std::collections::BTreeMap<PathBuf, FileStamp>,
+}
+
+/// Device, inode, size and modification time: a file replaced or changed
+/// by anyone else no longer matches.
+type FileStamp = (u64, u64, u64, i64, i64);
+
+fn file_stamp(path: &Path) -> std::io::Result<FileStamp> {
+    use std::os::unix::fs::MetadataExt as _;
+    let metadata = fs::symlink_metadata(path)?;
+    Ok((
+        metadata.dev(),
+        metadata.ino(),
+        metadata.size(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+    ))
+}
+
+impl ExtractTrail {
+    /// Creates `path` and its missing parents below `within`, recording each
+    /// folder it creates.
+    fn create_folders(&mut self, within: &Path, path: &Path) -> std::io::Result<()> {
+        let rest = path
+            .strip_prefix(within)
+            .map_err(|_| std::io::Error::other("archive entry is outside its folder"))?;
+        let mut current = within.to_path_buf();
+        for part in rest.components() {
+            current.push(part);
+            match fs::create_dir(&current) {
+                Ok(()) => self.folders.push(current.clone()),
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(())
+    }
+
+    fn wrote(&mut self, path: &Path) -> std::io::Result<()> {
+        self.files.insert(path.to_path_buf(), file_stamp(path)?);
+        Ok(())
+    }
+
+    /// Removes each file this extraction wrote that is unchanged since, then
+    /// each folder it created that is now empty, deepest first. Nothing else
+    /// is removed, and no folder is removed with what it holds.
+    fn undo(&self) -> std::io::Result<()> {
+        for (path, stamp) in &self.files {
+            match file_stamp(path) {
+                Ok(now) if now == *stamp => match fs::remove_file(path) {
+                    Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
+                    _ => {}
+                },
+                Ok(_) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+        }
+        for folder in self.folders.iter().rev() {
+            match fs::remove_dir(folder) {
+                Ok(()) => {}
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                    ) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(())
+    }
 }
 
 impl WholeArchiveExtract<'_> {
@@ -5635,13 +5700,13 @@ impl WholeArchiveExtract<'_> {
     }
 
     fn tar(&self, name: &str, bytes: &[u8], write: bool) -> anyhow::Result<()> {
-        let mut archive = tar_archive_reader(name, bytes);
+        let (mut archive, input) = bounded_tar_archive(name, bytes);
         let mut expansion = ArchiveExpansion::new(self.archive);
         for (index, entry) in archive.entries()?.enumerate() {
             if index >= MAX_ARCHIVE_EXTRACT_ENTRIES {
                 return Err(too_many_archive_entries(self.archive));
             }
-            let mut entry = entry?;
+            let mut entry = input.entry(self.archive, entry)?;
             let raw_name = tar_entry_name(&entry)?;
             let entry_type = entry.header().entry_type();
             let kind = if entry_type.is_dir() {
@@ -5704,14 +5769,18 @@ impl WholeArchiveExtract<'_> {
             ArchiveEntryKind::Folder => {
                 expansion.pass_over(size)?;
                 if write {
-                    fs::create_dir_all(&entry_target.path)?;
+                    self.trail
+                        .borrow_mut()
+                        .create_folders(&self.destination.path, &entry_target.path)?;
                 }
             }
             _ if !write => expansion.admit(&shown, size)?,
             _ => {
                 let entry_bytes = expansion.read(&shown, size, reader)?;
                 if let Some(parent) = entry_target.path.parent() {
-                    fs::create_dir_all(parent)?;
+                    self.trail
+                        .borrow_mut()
+                        .create_folders(&self.destination.path, parent)?;
                 }
                 crate::auth::write_principal_root_object(
                     self.data_dir,
@@ -5721,6 +5790,7 @@ impl WholeArchiveExtract<'_> {
                     &entry_target.path,
                     &entry_bytes,
                 )?;
+                self.trail.borrow_mut().wrote(&entry_target.path)?;
             }
         }
         Ok(())
@@ -5773,24 +5843,33 @@ struct ArchiveExpansion<'a> {
     /// Printable, for refusals.
     archive: &'a str,
     bytes: u64,
+    /// Bytes the kept files may still add up to, when the caller holds
+    /// every kept file in memory (Spaces write-back).
+    keep_left: Option<u64>,
 }
 
 impl<'a> ArchiveExpansion<'a> {
     fn new(archive: &'a str) -> Self {
-        Self { archive, bytes: 0 }
+        Self {
+            archive,
+            bytes: 0,
+            keep_left: None,
+        }
+    }
+
+    /// Kept files add up to at most `budget`; it is enforced while reading.
+    fn with_keep_budget(archive: &'a str, budget: u64) -> Self {
+        Self {
+            keep_left: Some(budget),
+            ..Self::new(archive)
+        }
     }
 
     /// Bytes the reader expands to pass over an entry it does not keep.
     fn pass_over(&mut self, size: u64) -> anyhow::Result<()> {
         self.bytes = self.bytes.saturating_add(size);
         if self.bytes > MAX_ARCHIVE_EXPANDED_BYTES {
-            bail!(
-                "{} would be more than {} MiB once extracted; Library extracts up to {} MiB from \
-                 one archive.",
-                self.archive,
-                MAX_ARCHIVE_EXPANDED_BYTES / (1024 * 1024),
-                MAX_ARCHIVE_EXPANDED_BYTES / (1024 * 1024),
-            );
+            return Err(archive_too_large(self.archive));
         }
         Ok(())
     }
@@ -5800,11 +5879,15 @@ impl<'a> ArchiveExpansion<'a> {
         if declared > MAX_ARCHIVE_ENTRY_BYTES {
             return Err(self.entry_too_large(entry));
         }
+        if self.keep_left.is_some_and(|left| declared > left) {
+            return Err(self.kept_too_large());
+        }
         self.pass_over(declared)
     }
 
     /// Reads a kept file entry: admitted by its declared size first, then
-    /// read at most one byte past the limit.
+    /// read at most one byte past the entry limit or the remaining keep
+    /// budget, whichever is smaller.
     fn read(
         &mut self,
         entry: &str,
@@ -5812,13 +5895,18 @@ impl<'a> ArchiveExpansion<'a> {
         reader: &mut impl std::io::Read,
     ) -> anyhow::Result<Vec<u8>> {
         self.admit(entry, declared)?;
+        let limit = MAX_ARCHIVE_ENTRY_BYTES.min(self.keep_left.unwrap_or(u64::MAX));
         let mut bytes = Vec::new();
-        reader
-            .take(MAX_ARCHIVE_ENTRY_BYTES + 1)
-            .read_to_end(&mut bytes)?;
+        reader.take(limit + 1).read_to_end(&mut bytes)?;
         let actual = bytes.len() as u64;
         if actual > MAX_ARCHIVE_ENTRY_BYTES {
             return Err(self.entry_too_large(entry));
+        }
+        if let Some(left) = self.keep_left {
+            if actual > left {
+                return Err(self.kept_too_large());
+            }
+            self.keep_left = Some(left - actual);
         }
         self.pass_over(actual.saturating_sub(declared))?;
         Ok(bytes)
@@ -5832,6 +5920,136 @@ impl<'a> ArchiveExpansion<'a> {
             MAX_ARCHIVE_ENTRY_BYTES / (1024 * 1024),
             MAX_ARCHIVE_ENTRY_BYTES / (1024 * 1024),
         )
+    }
+
+    fn kept_too_large(&self) -> anyhow::Error {
+        anyhow!(
+            "The files selected in {} are more than {} MiB; Spaces takes up to {} MiB from one \
+             archive at a time. Select fewer files.",
+            self.archive,
+            MAX_ARCHIVE_SPACES_WRITE_BACK_BYTES / (1024 * 1024),
+            MAX_ARCHIVE_SPACES_WRITE_BACK_BYTES / (1024 * 1024),
+        )
+    }
+}
+
+/// `archive` is printable.
+fn archive_too_large(archive: &str) -> anyhow::Error {
+    anyhow!(
+        "{archive} would be more than {} MiB once extracted; Library extracts up to {} MiB from \
+         one archive.",
+        MAX_ARCHIVE_EXPANDED_BYTES / (1024 * 1024),
+        MAX_ARCHIVE_EXPANDED_BYTES / (1024 * 1024),
+    )
+}
+
+/// Header bytes a tar reader may expand between two entries: the next
+/// entry's header block with its GNU long name, long link and PAX records.
+/// The tar crate reads those records whole into memory before it yields the
+/// entry, so the decompressed input itself is bounded (#449).
+const MAX_TAR_ENTRY_HEADER_BYTES: u64 = 1024 * 1024;
+/// Header bytes a tar reader may expand in one archive, on top of
+/// `MAX_ARCHIVE_EXPANDED_BYTES` of entry contents.
+const MAX_TAR_HEADER_BYTES: u64 = 64 * 1024 * 1024;
+
+/// A tar archive over input that stops at its limits.
+fn bounded_tar_archive<'a>(
+    name: &str,
+    bytes: &'a [u8],
+) -> (
+    tar::Archive<BoundedTarInput<'a>>,
+    std::rc::Rc<TarInputBudget>,
+) {
+    let inner: Box<dyn std::io::Read + 'a> = if name.to_ascii_lowercase().ends_with(".tar") {
+        Box::new(Cursor::new(bytes))
+    } else {
+        Box::new(GzDecoder::new(Cursor::new(bytes)))
+    };
+    let budget = std::rc::Rc::new(TarInputBudget {
+        entry_left: std::cell::Cell::new(MAX_TAR_ENTRY_HEADER_BYTES),
+        total_left: std::cell::Cell::new(MAX_ARCHIVE_EXPANDED_BYTES + MAX_TAR_HEADER_BYTES),
+        reached: std::cell::Cell::new(None),
+    });
+    let input = BoundedTarInput {
+        inner,
+        budget: budget.clone(),
+    };
+    (tar::Archive::new(input), budget)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TarInputLimit {
+    Header,
+    Archive,
+}
+
+/// What a tar reader may still expand: until the next entry (its body,
+/// padded to whole blocks, and the next header), and in all.
+struct TarInputBudget {
+    entry_left: std::cell::Cell<u64>,
+    total_left: std::cell::Cell<u64>,
+    reached: std::cell::Cell<Option<TarInputLimit>>,
+}
+
+impl TarInputBudget {
+    /// An entry from the archive's iterator. A yielded entry opens the
+    /// budget for its body and the next header; an error at a limit is
+    /// replaced by the named refusal. `archive` is printable.
+    fn entry<'e, T>(
+        &self,
+        archive: &str,
+        entry: std::io::Result<tar::Entry<'e, T>>,
+    ) -> anyhow::Result<tar::Entry<'e, T>>
+    where
+        T: std::io::Read,
+    {
+        match entry {
+            Ok(entry) => {
+                self.entry_left.set(
+                    entry
+                        .size()
+                        .div_ceil(512)
+                        .saturating_mul(512)
+                        .saturating_add(MAX_TAR_ENTRY_HEADER_BYTES),
+                );
+                Ok(entry)
+            }
+            Err(err) => Err(match self.reached.get() {
+                Some(TarInputLimit::Archive) => archive_too_large(archive),
+                Some(TarInputLimit::Header) => anyhow!(
+                    "{archive} holds an entry name or header of more than {} MiB; Library does \
+                     not open archives like that.",
+                    MAX_TAR_ENTRY_HEADER_BYTES / (1024 * 1024),
+                ),
+                None => err.into(),
+            }),
+        }
+    }
+}
+
+struct BoundedTarInput<'a> {
+    inner: Box<dyn std::io::Read + 'a>,
+    budget: std::rc::Rc<TarInputBudget>,
+}
+
+impl std::io::Read for BoundedTarInput<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let entry_left = self.budget.entry_left.get();
+        let total_left = self.budget.total_left.get();
+        let left = entry_left.min(total_left);
+        if left == 0 && !buf.is_empty() {
+            self.budget.reached.set(Some(if total_left == 0 {
+                TarInputLimit::Archive
+            } else {
+                TarInputLimit::Header
+            }));
+            return Err(std::io::Error::other("archive expansion limit reached"));
+        }
+        let max = buf.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+        let read = self.inner.read(&mut buf[..max])?;
+        self.budget.entry_left.set(entry_left - read as u64);
+        self.budget.total_left.set(total_left - read as u64);
+        Ok(read)
     }
 }
 
@@ -7630,6 +7848,118 @@ mod tests {
         assert_eq!(body.limit(), 9);
     }
 
+    /// #449: the Spaces keep budget is enforced while a file is read: the
+    /// read stops one byte past what is left.
+    #[test]
+    fn archive_keep_budget_stops_reading_at_what_is_left() {
+        let mut expansion = ArchiveExpansion::with_keep_budget("Pack.zip", 10);
+        let mut first = std::io::Read::take(std::io::repeat(1), 4);
+        assert_eq!(expansion.read("a", 4, &mut first).unwrap().len(), 4);
+        // Declares 4, holds 1 MiB: 6 bytes are left, so 7 are read.
+        let mut second = std::io::Read::take(std::io::repeat(1), 1024 * 1024);
+        let message = expansion.read("b", 4, &mut second).unwrap_err().to_string();
+        assert_eq!(
+            message,
+            "The files selected in Pack.zip are more than 256 MiB; Spaces takes up to 256 MiB \
+             from one archive at a time. Select fewer files."
+        );
+        assert_eq!(second.limit(), 1024 * 1024 - 7);
+        // A declared size over what is left is refused before any read.
+        let mut third = std::io::Read::take(std::io::repeat(1), 100);
+        assert!(expansion.read("c", 100, &mut third).is_err());
+        assert_eq!(third.limit(), 100);
+    }
+
+    /// #449: a tar whose long name or PAX record is over 1 MiB is refused by
+    /// every tar reader before the record is held in memory.
+    #[test]
+    fn tar_readers_refuse_an_oversized_name_or_header_record() {
+        const RECORD: u64 = 2 * 1024 * 1024;
+        let refusal = "Big.tar.gz holds an entry name or header of more than 1 MiB; Library \
+                       does not open archives like that.";
+        for kind in [tar::EntryType::GNULongName, tar::EntryType::XHeader] {
+            let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+                Vec::new(),
+                flate2::Compression::default(),
+            ));
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(kind);
+            header.set_size(RECORD);
+            header.set_mode(0o644);
+            header.as_gnu_mut().unwrap().name[..13].copy_from_slice(b"././@LongLink");
+            header.set_cksum();
+            builder
+                .append(&header, std::io::Read::take(std::io::repeat(b'a'), RECORD))
+                .unwrap();
+            let mut file = tar::Header::new_gnu();
+            file.set_size(1);
+            file.set_mode(0o644);
+            builder.append_data(&mut file, "x.txt", &b"x"[..]).unwrap();
+            let bytes = builder.into_inner().unwrap().finish().unwrap();
+
+            let listed = list_tar_archive_entries("Big.tar.gz", bytes.clone());
+            assert_eq!(listed.unwrap_err().to_string(), refusal, "{kind:?}");
+            let previewed = preview_tar_archive_entry("Big.tar.gz", bytes.clone(), "x.txt");
+            assert_eq!(previewed.err().unwrap().to_string(), refusal, "{kind:?}");
+            let mut outcome = ArchiveExtractOutcome::new(BTreeSet::from(["x.txt".to_string()]));
+            let mut written = 0;
+            let selected = read_selected_archive_entries(
+                "Big.tar.gz",
+                bytes,
+                None,
+                &mut outcome,
+                &mut |_, _| {
+                    written += 1;
+                    Ok(())
+                },
+            );
+            assert_eq!(selected.unwrap_err().to_string(), refusal, "{kind:?}");
+            assert_eq!(written, 0, "{kind:?}");
+        }
+    }
+
+    /// #449: a failed whole extraction removes only what it wrote: a file
+    /// another request saved or replaced in its folder meanwhile stays, and
+    /// a folder holding one stays.
+    #[test]
+    fn extract_trail_undo_keeps_what_another_request_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("Extracted");
+        fs::create_dir(&destination).unwrap();
+        let mut trail = ExtractTrail::default();
+        trail.folders.push(destination.clone());
+        trail
+            .create_folders(&destination, &destination.join("sub/inner"))
+            .unwrap();
+        trail
+            .create_folders(&destination, &destination.join("empty"))
+            .unwrap();
+        for name in ["sub/ours.txt", "sub/replaced.txt"] {
+            fs::write(destination.join(name), b"extracted").unwrap();
+            trail.wrote(&destination.join(name)).unwrap();
+        }
+        // Another request replaces one extracted file and saves a new one.
+        fs::write(destination.join("sub/next.tmp"), b"theirs").unwrap();
+        fs::rename(
+            destination.join("sub/next.tmp"),
+            destination.join("sub/replaced.txt"),
+        )
+        .unwrap();
+        fs::write(destination.join("sub/inner/theirs.txt"), b"theirs").unwrap();
+
+        trail.undo().unwrap();
+        assert!(!destination.join("sub/ours.txt").exists());
+        assert!(!destination.join("empty").exists());
+        assert_eq!(
+            fs::read(destination.join("sub/replaced.txt")).unwrap(),
+            b"theirs"
+        );
+        assert_eq!(
+            fs::read(destination.join("sub/inner/theirs.txt")).unwrap(),
+            b"theirs"
+        );
+    }
+
     #[test]
     fn archive_entry_path_refuses_root_drive_and_climb_on_every_platform() {
         let refused = [
@@ -7753,6 +8083,7 @@ mod tests {
                 read_selected_archive_entries(
                     archive_name,
                     bytes,
+                    None,
                     &mut outcome,
                     &mut |write, _| {
                         writes.push(write);

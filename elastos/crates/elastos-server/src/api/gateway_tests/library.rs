@@ -4717,6 +4717,38 @@ async fn test_library_archive_extract_bounds_expansion_and_removes_a_failed_extr
     );
     assert!(!library_object_path(dir.path(), &uri("Documents/BigTar")).exists());
 
+    // A 2 MiB GNU long name, held in memory by the tar reader before the
+    // entry it names: refused once 1 MiB of it is read.
+    let long_name = {
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::default(),
+        ));
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::GNULongName);
+        header.set_size(2 * MIB);
+        header.set_mode(0o644);
+        header.as_gnu_mut().unwrap().name[..13].copy_from_slice(b"././@LongLink");
+        header.set_cksum();
+        builder
+            .append(&header, std::io::repeat(b'a').take(2 * MIB))
+            .unwrap();
+        let mut file = tar::Header::new_gnu();
+        file.set_size(1);
+        file.set_mode(0o644);
+        builder.append_data(&mut file, "x.txt", &b"x"[..]).unwrap();
+        builder.into_inner().unwrap().finish().unwrap()
+    };
+    upload("Documents/LongName.tar.gz", long_name).await;
+    let (_, refused) = extract("Documents/LongName.tar.gz").await;
+    assert_eq!(
+        refused["message"],
+        "Documents/LongName.tar.gz holds an entry name or header of more than 1 MiB; Library \
+         does not open archives like that.",
+        "{refused}"
+    );
+    assert!(!library_object_path(dir.path(), &uri("Documents/LongName")).exists());
+
     // Eleven entries of 100 MiB each, 1100 MiB in all: refused as a whole.
     let many = {
         let base = zeros_zip("f0", 100 * MIB);
