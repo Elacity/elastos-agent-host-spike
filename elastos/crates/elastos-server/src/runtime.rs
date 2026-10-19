@@ -806,6 +806,85 @@ mod tests {
             .is_err());
     }
 
+    /// A Home with no signed release, dev_mode off and one trusted key refuses
+    /// an unsigned capsule, a capsule signed by another key, and a signed
+    /// capsule whose entrypoint changed. The refusal happens at launch, before
+    /// a compute provider loads it. The trusted key's capsule is loaded.
+    #[tokio::test]
+    async fn launch_refuses_untrusted_signers_before_the_provider_loads() {
+        async fn launch(
+            runtime: &Runtime,
+            dir: &Path,
+            manifest: &CapsuleManifest,
+            entrypoint: &[u8],
+        ) -> Result<CapsuleHandle> {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(
+                dir.join("capsule.json"),
+                serde_json::to_vec(manifest).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(dir.join(&manifest.entrypoint), entrypoint).unwrap();
+            runtime.run_local(dir, Vec::new()).await
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let loads = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::new(
+            storage,
+            Arc::new(CountingComputeProvider {
+                loads: loads.clone(),
+            }),
+        );
+        let trusted = elastos_runtime::signature::SigningKey::from_bytes(&[42; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp_dir.path(),
+                &[hex::encode(trusted.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+
+        let entrypoint = b"vm image bytes";
+        let mut manifest = unsigned_manifest();
+        manifest.name = "foreign-vm".to_string();
+        manifest.capsule_type = CapsuleType::MicroVM;
+        manifest.entrypoint = "rootfs.ext4".to_string();
+        let signed_by = |key: &elastos_runtime::signature::SigningKey| {
+            let mut signed = manifest.clone();
+            elastos_runtime::signature::sign_capsule(key, &mut signed, &hash_content(entrypoint))
+                .unwrap();
+            signed
+        };
+        let dir = temp_dir.path().join("foreign-vm");
+
+        let error = launch(&runtime, &dir, &manifest, entrypoint)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("is unsigned"), "{error}");
+        let foreign = elastos_runtime::signature::SigningKey::from_bytes(&[9; 32]);
+        let error = launch(&runtime, &dir, &signed_by(&foreign), entrypoint)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("verification failed"), "{error}");
+        let error = launch(&runtime, &dir, &signed_by(&trusted), b"changed image")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("verification failed"), "{error}");
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+
+        launch(&runtime, &dir, &signed_by(&trusted), entrypoint)
+            .await
+            .unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn descriptive_execution_types_refuse_generic_compute() {
         let temp_dir = tempfile::tempdir().unwrap();
