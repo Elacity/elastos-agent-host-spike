@@ -3782,7 +3782,7 @@ mod tests {
         let product = CollaborationChatProductPort::new(core).unwrap();
         let link = FakeCommunityLink::new(FakeLinkScript {
             peers: true,
-            outages: vec![0..105_000],
+            outages: std::iter::once(0..105_000).collect(),
             ..FakeLinkScript::default()
         });
         let statuses = Mutex::new(Vec::<String>::new());
