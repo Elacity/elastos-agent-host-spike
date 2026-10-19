@@ -739,8 +739,10 @@ async function refreshCommunityMembership() {
   }
 }
 
-// A failed read is shown, not hidden: only a Home without Community hides it.
+// A failed read is shown, not hidden: only a Home last confirmed without
+// Community keeps it hidden.
 function showCommunityUnavailable(error) {
+  if (communityMembership?.configured === false) return;
   if (communityButton) communityButton.disabled = true;
   if (communitySection) communitySection.hidden = false;
   setTextFields("community-status", publicSystemError(error, "Community setting is unavailable."));
@@ -828,6 +830,7 @@ function renderCommunityPresence(presence) {
 
 async function refreshCommunityPresence() {
   if (communityPresenceBusy || communityPresenceOptions.length === 0) return;
+  if (communityMembership?.configured === false) return;
   try {
     renderCommunityPresence(await fetchRuntimeUpdateJson({ headers: shellHeaders() }, "/api/apps/system/community/presence"));
     setHiddenFields("community-presence-status", true);

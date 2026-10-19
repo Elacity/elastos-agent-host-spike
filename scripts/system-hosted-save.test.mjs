@@ -850,10 +850,16 @@ test("Community guests cannot dispatch and refused owner changes retain the last
   assert.equal(owner.hidden.get("community-status"), false);
 });
 
-test("Community load failure is visible and leaves its control disabled", async () => {
+test("Community load failure is visible when configured and stays hidden on a Home without Community", async () => {
+  const none = communityFixture();
+  none.context.renderCommunityMembership({ schema: "elastos.community-membership/v1", configured: false, joined: false });
+  none.context.fetchJson = async () => { throw new Error("request failed: 500"); };
+  await none.context.refreshCommunityMembership();
+  none.context.showCommunityUnavailable(new Error("summary failed"));
+  assert.equal(none.section.hidden, true, "a confirmed unconfigured Home stays hidden after a later failure");
+  assert.equal(none.hidden.get("community-status"), undefined);
+
   const f = communityFixture();
-  f.context.renderCommunityMembership({ schema: "elastos.community-membership/v1", configured: false, joined: false });
-  assert.equal(f.section.hidden, true);
   f.context.fetchJson = async () => { throw new Error("request failed: 500"); };
   await f.context.refreshCommunityMembership();
   assert.equal(f.section.hidden, false);
@@ -898,7 +904,7 @@ test("Show me in Community offers three modes, sets only the caller's own and re
   const end = source.indexOf("function configureAiProvider(", start);
   const fetchStart = source.indexOf("async function fetchRuntimeUpdateJson(");
   const fetchEnd = source.indexOf("async function onRuntimeUpdateApply(", fetchStart);
-  vm.runInContext(`let communityPresenceBusy = false; ${source.slice(start, end)} ${source.slice(fetchStart, fetchEnd)}`, context);
+  vm.runInContext(`let communityPresenceBusy = false; var communityMembership = null; ${source.slice(start, end)} ${source.slice(fetchStart, fetchEnd)}`, context);
 
   await context.refreshCommunityPresence();
   assert.equal(row.hidden, false);
@@ -937,4 +943,12 @@ test("Show me in Community offers three modes, sets only the caller's own and re
   assert.equal(row.hidden, false);
   assert.equal(hidden.get("community-presence-status"), false);
   assert.ok(options.every(o => o.disabled));
+
+  section.hidden = true; row.hidden = true;
+  context.communityMembership = { configured: false };
+  let reads = 0;
+  context.fetchJson = async () => { reads++; throw new Error("request failed: 500"); };
+  await context.refreshCommunityPresence();
+  assert.equal(reads, 0, "a Home without Community never reads presence");
+  assert.equal(section.hidden, true, "and a presence failure cannot reveal it");
 });

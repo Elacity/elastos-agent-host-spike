@@ -457,7 +457,7 @@ fn presence_answer_text(
         PresenceDecision::Always => "Community shows you while your Home is online.",
         PresenceDecision::WhileOpen => "Community shows you while Community is open.",
         PresenceDecision::Later => {
-            "Not now. Tap Show me in Community in Chat when you want to decide."
+            "Not now. Choose Show me in Community in Chat when you want to decide."
         }
         _ => "Hidden. Change it in System → Security, under Community.",
     }
@@ -1029,6 +1029,7 @@ mod tests {
         ];
         for text in texts {
             assert!(!text.contains("System → Community"), "{text}");
+            assert!(!text.contains("Tap "), "device-neutral: {text}");
         }
         for text in &texts[1..] {
             assert!(
