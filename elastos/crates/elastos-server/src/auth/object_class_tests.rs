@@ -557,19 +557,12 @@ fn read_path_blocks_damage_and_opens_authentic_noncanonical_envelopes() {
     std::fs::write(&path, &padded).unwrap();
     assert_eq!(read().unwrap(), b"padded body");
 
-    // #450 L9: a file without the canonical label is read no further than
-    // the largest upload envelope, so the same envelope padded past it is
-    // refused as damaged instead of being read whole.
-    let mut oversized = fixture.envelope(&uri, b"padded body");
-    oversized.resize(MAX_UPLOAD_ENVELOPE_BYTES as usize + 1, b'\n');
-    std::fs::write(&path, &oversized).unwrap();
-    drop(oversized);
-    let message = read().unwrap_err().to_string();
-    assert!(
-        message.contains(PROTECTED_PRINCIPAL_ROOT_OBJECT_DAMAGED),
-        "{message}"
-    );
-    assert!(message.contains("does not carry the label"), "{message}");
+    // #450 L9: an authentic envelope in another layout opens at any size,
+    // here padded past the largest envelope an upload writes (about 134 MiB).
+    padded.resize(135 * 1024 * 1024, b'\n');
+    std::fs::write(&path, &padded).unwrap();
+    drop(padded);
+    assert_eq!(read().unwrap(), b"padded body");
 
     std::fs::write(&path, b"legacy plaintext").unwrap();
     assert!(read()
@@ -588,6 +581,62 @@ fn read_path_blocks_damage_and_opens_authentic_noncanonical_envelopes() {
         b"legacy plaintext"
     );
     assert_eq!(read().unwrap(), b"legacy plaintext");
+}
+
+/// #450 L9: a file whose canonical label names another key is refused with
+/// its notice without reading past the label, however large it is: here a
+/// 1 TiB sparse file that no full read could finish.
+#[test]
+fn open_refuses_a_foreign_label_without_reading_the_body() {
+    let fixture = Fixture::new("person:local:classifier-foreign-large");
+    let uri = fixture.uri("Documents/foreign.bin");
+    let path = fixture.path(&uri);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut foreign = fixture.envelope_struct(&uri, b"foreign body");
+    foreign.data_key_id = "pdek:another-home-key".to_string();
+    let canonical = serde_json::to_vec_pretty(&foreign).unwrap();
+    let head = &canonical[..canonical_head_len(&canonical)];
+    // A decodable ciphertext length keeps the canonical frame valid.
+    let len = (head.len() + CANONICAL_TAIL.len()) as u64 + 4 * (1u64 << 38);
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(head).unwrap();
+        file.set_len(len).unwrap();
+        file.seek(SeekFrom::Start(len - CANONICAL_TAIL.len() as u64))
+            .unwrap();
+        file.write_all(CANONICAL_TAIL).unwrap();
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let (data_dir, principal_id, localhost_root) = (
+        fixture.dir.path().to_path_buf(),
+        fixture.principal_id.clone(),
+        fixture.localhost_root.clone(),
+    );
+    let (read_uri, read_path) = (uri.clone(), path.clone());
+    std::thread::spawn(move || {
+        let read = read_principal_root_object(
+            &data_dir,
+            &principal_id,
+            &localhost_root,
+            &read_uri,
+            &read_path,
+        );
+        let _ = sender.send(read.map_err(|err| err.to_string()));
+    });
+    let message = receiver
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("a foreign label was read past its head")
+        .unwrap_err();
+    assert!(
+        message.contains(PROTECTED_PRINCIPAL_ROOT_OBJECT_DAMAGED),
+        "{message}"
+    );
+    assert!(
+        message.contains("is labelled for key pdek:another-home-key"),
+        "{message}"
+    );
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), len);
 }
 
 /// #450 L8: a FIFO swapped in for a protected object after the walk must not
