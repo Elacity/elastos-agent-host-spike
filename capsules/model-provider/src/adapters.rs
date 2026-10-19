@@ -2025,8 +2025,19 @@ async fn run_local_text_worker_with_timing(
             }
             _ = flush_timer.tick(), if timed_flushes < LOCAL_TEXT_TIMED_FLUSH_LIMIT
                 && !stream_state.delta_buffer.is_empty() => {
-                flush_local_text_delta(&task.offer, &task.run_id, task.generation,
-                    &task.updates, &mut stream_state.delta_buffer, timing).await?;
+                // The acknowledgement wait observes Stop and pressure like
+                // the stream itself; Stop wins a tie.
+                tokio::select! {
+                    biased;
+                    _ = task.cancel_rx.changed() => {
+                        return Ok(cancel_text_worker(&task.backend).await);
+                    }
+                    _ = critical_pressure(local_run.as_mut().map(LocalRun::pressure)) => {
+                        return stop_text_worker_for_memory_pressure(&task.backend).await;
+                    }
+                    flushed = flush_local_text_delta(&task.offer, &task.run_id, task.generation,
+                        &task.updates, &mut stream_state.delta_buffer, timing) => flushed?,
+                }
                 timed_flushes += 1;
                 continue;
             }
@@ -2089,15 +2100,23 @@ async fn run_local_text_worker_with_timing(
                             || local_text_event_bytes(&stream_state.delta_buffer)?
                                 >= task.offer.policy.event_bytes_limit
                         {
-                            flush_local_text_delta(
-                                &task.offer,
-                                &task.run_id,
-                                task.generation,
-                                &task.updates,
-                                &mut stream_state.delta_buffer,
-                                timing,
-                            )
-                            .await?;
+                            tokio::select! {
+                                biased;
+                                _ = task.cancel_rx.changed() => {
+                                    return Ok(cancel_text_worker(&task.backend).await);
+                                }
+                                _ = critical_pressure(local_run.as_mut().map(LocalRun::pressure)) => {
+                                    return stop_text_worker_for_memory_pressure(&task.backend).await;
+                                }
+                                flushed = flush_local_text_delta(
+                                    &task.offer,
+                                    &task.run_id,
+                                    task.generation,
+                                    &task.updates,
+                                    &mut stream_state.delta_buffer,
+                                    timing,
+                                ) => flushed?,
+                            }
                         }
                     }
                     ParsedTextStreamEvent::Completed => {
@@ -2131,15 +2150,23 @@ async fn run_local_text_worker_with_timing(
         }
     }
 
-    flush_local_text_delta(
-        &task.offer,
-        &task.run_id,
-        task.generation,
-        &task.updates,
-        &mut stream_state.delta_buffer,
-        timing,
-    )
-    .await?;
+    tokio::select! {
+        biased;
+        _ = task.cancel_rx.changed() => {
+            return Ok(cancel_text_worker(&task.backend).await);
+        }
+        _ = critical_pressure(local_run.as_mut().map(LocalRun::pressure)) => {
+            return stop_text_worker_for_memory_pressure(&task.backend).await;
+        }
+        flushed = flush_local_text_delta(
+            &task.offer,
+            &task.run_id,
+            task.generation,
+            &task.updates,
+            &mut stream_state.delta_buffer,
+            timing,
+        ) => flushed?,
+    }
     let output = json!({
         "schema": RUN_OUTPUT_TEXT_SCHEMA,
         "text": stream_state.output_text,
@@ -3992,6 +4019,113 @@ mod tests {
         assert!(fake_engine_pids(&events)
             .into_iter()
             .all(|pid| !process_exists(pid)));
+    }
+
+    /// Runs the worker but holds back the acknowledgement of its first text
+    /// delta, as a slow coordinator would, and calls `interrupt` once that
+    /// delta has been sent. A run still waiting when the hang guard expires
+    /// fails the test.
+    #[cfg(unix)]
+    async fn run_holding_delta_ack(
+        task: &mut LocalTextWorkerTask,
+        updates: &mut mpsc::Receiver<WorkerUpdate>,
+        interrupt: impl FnOnce(),
+    ) -> std::result::Result<ReconcileResult, AdapterFault> {
+        let mut held = Vec::new();
+        let mut interrupt = Some(interrupt);
+        let hold = async {
+            while let Some(update) = updates.recv().await {
+                if let WorkerUpdate::Apply {
+                    result: ReconcileResult::StillRunning { .. },
+                    acknowledge,
+                    ..
+                } = update
+                {
+                    held.push(acknowledge);
+                    if let Some(interrupt) = interrupt.take() {
+                        interrupt();
+                    }
+                }
+            }
+            std::future::pending().await
+        };
+        tokio::time::timeout(crate::test_support::FIXTURE_EVENT_TIMEOUT, async {
+            tokio::select! {
+                result = run_local_text_worker_inner(task) => result,
+                never = hold => never,
+            }
+        })
+        .await
+        .expect("the run must not wait on a held acknowledgement")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn critical_pressure_while_a_delta_awaits_its_acknowledgement_stops_the_engine() {
+        use crate::local_memory::MemoryPressure;
+        static CRITICAL: AtomicBool = AtomicBool::new(false);
+        fn pressure() -> MemoryPressure {
+            if CRITICAL.load(Ordering::SeqCst) {
+                MemoryPressure::Critical
+            } else {
+                MemoryPressure::Warning
+            }
+        }
+        // The engine sends one delta for "stall", then keeps the stream open.
+        let (engine, model, events) = fake_engine("held-ack-critical", "stream_then_stall");
+        let engines =
+            LocalLlamaEngines::default().with_memory_pressure(pressure, Duration::from_millis(10));
+        let (mut task, _cancel_tx, mut updates) =
+            fake_engine_task(&engines, &engine, &model, "stall");
+        let result = run_holding_delta_ack(&mut task, &mut updates, || {
+            CRITICAL.store(true, Ordering::SeqCst);
+        })
+        .await;
+        let error = result.unwrap_err().error;
+        assert_eq!(error.class, ErrorClass::BackendFailed);
+        assert_eq!(error.code, "model_memory_critical");
+        let pids = fake_engine_pids(&events);
+        assert_eq!(pids.len(), 1);
+        assert!(!process_exists(pids[0]));
+        assert!(!engines.retains_artifacts().await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn stop_while_a_delta_awaits_its_acknowledgement_wins_over_critical_pressure() {
+        use crate::local_memory::MemoryPressure;
+        static CRITICAL: AtomicBool = AtomicBool::new(false);
+        fn pressure() -> MemoryPressure {
+            if CRITICAL.load(Ordering::SeqCst) {
+                MemoryPressure::Critical
+            } else {
+                MemoryPressure::Warning
+            }
+        }
+        let (engine, model, events) = fake_engine("held-ack-stop", "stream_then_stall");
+        let engines =
+            LocalLlamaEngines::default().with_memory_pressure(pressure, Duration::from_millis(10));
+        let (mut task, cancel_tx, mut updates) =
+            fake_engine_task(&engines, &engine, &model, "stall");
+        // Stop and critical pressure arrive together; the person's Stop wins.
+        let result = run_holding_delta_ack(&mut task, &mut updates, || {
+            CRITICAL.store(true, Ordering::SeqCst);
+            cancel_tx.send(true).unwrap();
+        })
+        .await
+        .unwrap();
+        assert!(pure_local_stop_result(&result));
+        assert!(matches!(
+            result,
+            ReconcileResult::Terminal {
+                status: RunStatus::Cancelled,
+                ..
+            }
+        ));
+        let pids = fake_engine_pids(&events);
+        assert_eq!(pids.len(), 1);
+        assert!(!process_exists(pids[0]));
+        assert!(!engines.retains_artifacts().await);
     }
 
     #[test]

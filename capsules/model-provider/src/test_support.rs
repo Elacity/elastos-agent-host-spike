@@ -305,7 +305,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'text/event-stream')
         self.end_headers()
         if prompt == 'stall':
-            if mode in ('stream_then_stall_with_subtree', 'stream_then_stall_ignore_term'):
+            if mode in ('stream_then_stall', 'stream_then_stall_with_subtree', 'stream_then_stall_ignore_term'):
                 payload = json.dumps({'choices': [{'delta': {'content': 'first reply'}}]})
                 self.wfile.write(('data: ' + payload + '\n\n').encode('utf-8'))
                 self.wfile.flush()
