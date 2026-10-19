@@ -27,6 +27,7 @@ pub struct CollaborationChatProductPort {
     core: Arc<CollaborationCore>,
     history_status: Arc<Mutex<crate::room_service::RoomHistoryView>>,
     community_connected: Arc<AtomicBool>,
+    community_recovery_exhausted: Arc<AtomicBool>,
 }
 
 /// Read-only result of durably preparing one outgoing Chat message.
@@ -72,6 +73,7 @@ impl CollaborationChatProductPort {
         Ok(Self {
             core,
             community_connected: Arc::new(AtomicBool::new(false)),
+            community_recovery_exhausted: Arc::new(AtomicBool::new(false)),
             history_status: Arc::new(Mutex::new(crate::room_service::RoomHistoryView {
                 status: "searching".to_string(),
                 detail: "Checking recent Community history from online participants.".to_string(),
@@ -119,6 +121,8 @@ impl CollaborationChatProductPort {
                 crate::collaboration_release_network::COMMUNITY_LEFT_DETAIL.to_string()
             } else if connected {
                 "Community is connected.".to_string()
+            } else if self.community_recovery_exhausted.load(Ordering::Relaxed) {
+                "Community cannot connect. Restart Home to reconnect.".to_string()
             } else {
                 "Community is unreachable. Retained messages stay available.".to_string()
             }),
@@ -139,7 +143,15 @@ impl CollaborationChatProductPort {
     }
 
     pub(crate) fn set_community_connected(&self, connected: bool) {
+        if connected {
+            self.set_community_recovery_exhausted(false);
+        }
         self.community_connected.store(connected, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_community_recovery_exhausted(&self, exhausted: bool) {
+        self.community_recovery_exhausted
+            .store(exhausted, Ordering::Relaxed);
     }
 
     #[cfg(test)]
@@ -961,6 +973,63 @@ mod tests {
         assert!(!other_port.conversation_transport_view().available);
         fixture.port.set_community_connected(true);
         assert!(other_port.conversation_transport_view().available);
+    }
+
+    #[test]
+    fn community_recovery_exhaustion_status_is_shared_and_clears_after_recovery() {
+        let fixture = fixture();
+        let other_port = fixture.port.clone();
+        let unreachable = "Community is unreachable. Retained messages stay available.";
+        assert_eq!(
+            other_port.conversation_transport_view().status.as_deref(),
+            Some(unreachable)
+        );
+
+        fixture.port.set_community_recovery_exhausted(true);
+        let exhausted = serde_json::to_value(other_port.conversation_transport_view()).unwrap();
+        assert_eq!(
+            exhausted["status"],
+            "Community cannot connect. Restart Home to reconnect."
+        );
+        assert_eq!(exhausted["configured"], true);
+        assert_eq!(exhausted["available"], false);
+        assert_eq!(exhausted["community_joined"], true);
+
+        fixture.port.set_community_connected(true);
+        let connected = other_port.conversation_transport_view();
+        assert!(connected.available);
+        assert_eq!(connected.status.as_deref(), Some("Community is connected."));
+        fixture.port.set_community_connected(false);
+        assert_eq!(
+            other_port.conversation_transport_view().status.as_deref(),
+            Some(unreachable)
+        );
+
+        fixture.port.set_community_recovery_exhausted(true);
+        fixture.port.set_community_recovery_exhausted(false);
+        assert_eq!(
+            other_port.conversation_transport_view().status.as_deref(),
+            Some(unreachable)
+        );
+    }
+
+    #[test]
+    fn community_recovery_exhaustion_keeps_connected_and_left_status_priority() {
+        let fixture = fixture();
+        fixture.port.set_community_connected(true);
+        fixture.port.set_community_recovery_exhausted(true);
+        let connected = fixture.port.conversation_transport_view();
+        assert!(connected.available);
+        assert_eq!(connected.status.as_deref(), Some("Community is connected."));
+
+        fixture.port.set_community_joined(false).unwrap();
+        let left = fixture.port.conversation_transport_view();
+        assert!(!left.available);
+        assert_eq!(left.community_joined, Some(false));
+        assert_eq!(
+            left.status.as_deref(),
+            Some(crate::collaboration_release_network::COMMUNITY_LEFT_DETAIL)
+        );
     }
 
     #[test]

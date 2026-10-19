@@ -1,5 +1,7 @@
 //! Internal Carrier transport for one verified collaboration network.
 
+use std::collections::BTreeSet;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,12 +29,75 @@ const MAX_RECEIVE_RESPONSE_BYTES: usize =
 /// link. Gossip neighbours come back within seconds of a working dial, and
 /// the missing-peer rejoin retries every second, so a minute is a dead link.
 pub(crate) const COMMUNITY_LINK_SILENCE: Duration = Duration::from_secs(60);
-/// Longest wait between repairs while a Home stays without a Community peer.
+/// Longest early wait while a Home stays without a Community peer.
 const MAX_COMMUNITY_LINK_RETRY: Duration = Duration::from_secs(300);
-/// Most gossip rebuilds one process makes. Each rebuild leaves an address
-/// lookup and its eviction task on the endpoint (iroh 1.0.2 cannot remove
-/// them), so after this many the watchdog only rejoins until Home restarts.
-pub(crate) const MAX_COMMUNITY_GOSSIP_REBUILDS: u32 = 6;
+/// Most rebuild requests one watchdog admits for its Runtime lifetime. A
+/// request keeps its slot when its caller times out: Carrier can finish it
+/// later. Each rebuild retains one endpoint lookup and eviction task, so this
+/// policy bounds requests rather than promising a byte or wakeup budget.
+pub(crate) const MAX_COMMUNITY_GOSSIP_REBUILDS: u32 = 120;
+const COMMUNITY_OUTAGE_FAST_REBUILDS: u32 = 6;
+const COMMUNITY_LONG_OUTAGE_RETRY: Duration = Duration::from_secs(900);
+const COMMUNITY_ADDRESS_STABILITY: Duration = Duration::from_secs(10);
+
+pub(crate) type CommunityHostAddresses = BTreeSet<IpAddr>;
+
+/// Runtime samples host interfaces as a repair hint, not as connectivity proof.
+/// Unsupported hosts and enumeration failures keep the scheduled repair path.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn community_host_addresses() -> Option<CommunityHostAddresses> {
+    struct InterfaceList(*mut libc::ifaddrs);
+    impl Drop for InterfaceList {
+        fn drop(&mut self) {
+            // SAFETY: this is the list returned by a successful getifaddrs call,
+            // and this guard owns its one matching free.
+            if !self.0.is_null() {
+                unsafe { libc::freeifaddrs(self.0) };
+            }
+        }
+    }
+
+    let mut head = std::ptr::null_mut();
+    // SAFETY: head is a valid output pointer. On success the guard owns the
+    // allocated list until every address has been copied into Rust values.
+    if unsafe { libc::getifaddrs(&mut head) } != 0 {
+        return None;
+    }
+    let list = InterfaceList(head);
+    let mut current = list.0;
+    let mut addresses = CommunityHostAddresses::new();
+    while !current.is_null() {
+        // SAFETY: getifaddrs owns a linked list of valid ifaddrs records until
+        // the guard frees it. Family checks precede the sockaddr casts.
+        let interface = unsafe { &*current };
+        if !interface.ifa_addr.is_null() {
+            let family = unsafe { (*interface.ifa_addr).sa_family } as i32;
+            let ip = match family {
+                libc::AF_INET => {
+                    let addr = unsafe { &*interface.ifa_addr.cast::<libc::sockaddr_in>() };
+                    Some(IpAddr::V4(std::net::Ipv4Addr::from(
+                        addr.sin_addr.s_addr.to_ne_bytes(),
+                    )))
+                }
+                libc::AF_INET6 => {
+                    let addr = unsafe { &*interface.ifa_addr.cast::<libc::sockaddr_in6>() };
+                    Some(IpAddr::V6(std::net::Ipv6Addr::from(addr.sin6_addr.s6_addr)))
+                }
+                _ => None,
+            };
+            if let Some(ip) = ip.filter(|ip| !ip.is_loopback() && !ip.is_unspecified()) {
+                addresses.insert(ip);
+            }
+        }
+        current = interface.ifa_next;
+    }
+    Some(addresses)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn community_host_addresses() -> Option<CommunityHostAddresses> {
+    None
+}
 
 /// An exact collaboration-network Carrier subscription.
 ///
@@ -431,6 +496,7 @@ pub(crate) trait CommunityLink {
     /// Home at once.
     async fn recovers_its_link(&self) -> anyhow::Result<bool>;
     async fn link_health(&self) -> anyhow::Result<CommunityLinkHealth>;
+    fn host_addresses(&self) -> Option<CommunityHostAddresses>;
     /// Leaves the Community topic and joins it again with its bootstrap peers.
     async fn rejoin(&self) -> anyhow::Result<()>;
     /// Replaces Carrier's gossip actor; returns how many topics joined again.
@@ -464,6 +530,10 @@ impl CommunityLink for JoinedCollaborationNetwork {
             peer_count: health.peer_count,
             received_frames: health.received_frames,
         })
+    }
+
+    fn host_addresses(&self) -> Option<CommunityHostAddresses> {
+        community_host_addresses()
     }
 
     async fn rejoin(&self) -> anyhow::Result<()> {
@@ -506,9 +576,11 @@ pub(crate) enum CommunityLinkStep {
 /// the link: a Home the hub evicted from its active view lists no neighbour
 /// yet can still get a frame now and then, and it stays cut off until it
 /// rejoins. While no peer returns it keeps
-/// repairing with a doubling wait up to `MAX_COMMUNITY_LINK_RETRY`; two
-/// steps are never closer than one silence, counted from when the last one
-/// finished. After `MAX_COMMUNITY_GOSSIP_REBUILDS` rebuilds it only rejoins.
+/// repairing with a doubling wait up to `MAX_COMMUNITY_LINK_RETRY`, then a
+/// fifteen-minute wait after six rebuild requests in one outage. A changed
+/// nonempty host address set stable for ten seconds can bring a rebuild
+/// forward. Every repair shares the same rest, counted from the last finish,
+/// and lifetime request limit. A peer return resets only the outage counter.
 pub(crate) struct CommunityLinkWatchdog {
     silence: Duration,
     observed_at: Option<Instant>,
@@ -516,6 +588,10 @@ pub(crate) struct CommunityLinkWatchdog {
     last_step_at: Option<Instant>,
     steps: u32,
     rebuilds: u32,
+    outage_rebuilds: u32,
+    cap_reported: bool,
+    addresses: Option<CommunityHostAddresses>,
+    address_change: Option<(CommunityHostAddresses, Instant)>,
 }
 
 impl CommunityLinkWatchdog {
@@ -527,17 +603,26 @@ impl CommunityLinkWatchdog {
             last_step_at: None,
             steps: 0,
             rebuilds: 0,
+            outage_rebuilds: 0,
+            cap_reported: false,
+            addresses: None,
+            address_change: None,
         }
+    }
+
+    pub(crate) fn recovery_exhausted(&self) -> bool {
+        self.no_peers_since.is_some() && self.rebuilds >= MAX_COMMUNITY_GOSSIP_REBUILDS
     }
 
     /// `health` is `None` when Carrier did not answer, which counts as no peer.
     pub(crate) fn observe(
         &mut self,
         health: Option<CommunityLinkHealth>,
+        addresses: Option<CommunityHostAddresses>,
         now: Instant,
     ) -> Option<CommunityLinkStep> {
         // A gap (Community left, or a long cycle) starts the window again;
-        // the rest between steps and the process's rebuild count remain.
+        // repair rest and both request counters remain until a peer returns.
         if self
             .observed_at
             .is_some_and(|at| now.duration_since(at) > self.silence / 2)
@@ -545,25 +630,30 @@ impl CommunityLinkWatchdog {
             *self = Self {
                 last_step_at: self.last_step_at,
                 rebuilds: self.rebuilds,
+                outage_rebuilds: self.outage_rebuilds,
+                cap_reported: self.cap_reported,
                 ..Self::new(self.silence)
             };
         }
         self.observed_at = Some(now);
-        if health.is_some_and(|health| health.peer_count > 0) {
+        let healthy = health.is_some_and(|health| health.peer_count > 0);
+        let address_changed = self.observe_addresses(addresses, healthy, now);
+        if healthy {
             if self.steps > 0 {
                 tracing::info!(steps = self.steps, "Community link recovered");
             }
             self.steps = 0;
+            self.outage_rebuilds = 0;
             self.no_peers_since = None;
             return None;
         }
         let since = *self.no_peers_since.get_or_insert(now);
-        let wait = match self.steps {
-            0 | 1 => self.silence,
-            steps => self
-                .silence
-                .saturating_mul(1 << (steps - 1).min(8))
-                .min(MAX_COMMUNITY_LINK_RETRY),
+        let wait = if self.outage_rebuilds >= COMMUNITY_OUTAGE_FAST_REBUILDS {
+            COMMUNITY_LONG_OUTAGE_RETRY
+        } else {
+            self.silence
+                .saturating_mul(1 << self.outage_rebuilds.min(8))
+                .min(MAX_COMMUNITY_LINK_RETRY)
         };
         let anchor = match (self.steps, self.last_step_at) {
             (0, _) | (_, None) => since,
@@ -572,15 +662,23 @@ impl CommunityLinkWatchdog {
         let rested = self
             .last_step_at
             .is_none_or(|at| now.duration_since(at) >= self.silence);
-        if now.duration_since(anchor) < wait || !rested {
+        let network_rebuild = address_changed && self.rebuilds < MAX_COMMUNITY_GOSSIP_REBUILDS;
+        if (!network_rebuild && now.duration_since(anchor) < wait) || !rested {
             return None;
         }
-        let step = if self.steps > 0 && self.rebuilds < MAX_COMMUNITY_GOSSIP_REBUILDS {
+        let step = if (address_changed || self.steps > 0)
+            && self.rebuilds < MAX_COMMUNITY_GOSSIP_REBUILDS
+        {
+            // Reserve before dispatch. A detached Carrier job keeps its slot.
             self.rebuilds += 1;
+            self.outage_rebuilds = self.outage_rebuilds.saturating_add(1);
+            if let Some((addresses, _)) = self.address_change.take() {
+                self.addresses = Some(addresses);
+            }
             CommunityLinkStep::Rebuild
         } else {
-            if self.steps > 0 && self.rebuilds == MAX_COMMUNITY_GOSSIP_REBUILDS {
-                self.rebuilds += 1;
+            if self.rebuilds == MAX_COMMUNITY_GOSSIP_REBUILDS && !self.cap_reported {
+                self.cap_reported = true;
                 tracing::info!(
                     max_rebuilds = MAX_COMMUNITY_GOSSIP_REBUILDS,
                     "Carrier gossip rebuilds are capped until this Home restarts; \
@@ -594,10 +692,42 @@ impl CommunityLinkWatchdog {
         Some(step)
     }
 
+    fn observe_addresses(
+        &mut self,
+        addresses: Option<CommunityHostAddresses>,
+        healthy: bool,
+        now: Instant,
+    ) -> bool {
+        let Some(addresses) = addresses else {
+            self.address_change = None;
+            return false;
+        };
+        if healthy || addresses.is_empty() || self.addresses.is_none() {
+            self.addresses = Some(addresses);
+            self.address_change = None;
+            return false;
+        }
+        if self.addresses.as_ref() == Some(&addresses) {
+            self.address_change = None;
+            return false;
+        }
+        let (candidate, since) = self
+            .address_change
+            .get_or_insert_with(|| (addresses.clone(), now));
+        if *candidate != addresses {
+            *candidate = addresses;
+            *since = now;
+        }
+        now.duration_since(*since) >= COMMUNITY_ADDRESS_STABILITY
+    }
+
     /// Counts the rest before the next step from when this one finished.
     pub(crate) fn step_finished(&mut self, now: Instant) {
         if self.last_step_at.is_some() {
             self.last_step_at = Some(now);
+            // A slow repair belongs to this observation window. Its own wait
+            // does not mean the Home left Community.
+            self.observed_at = Some(now);
         }
     }
 }
@@ -679,6 +809,225 @@ fn decode_frame(frame: &serde_json::Value) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn host_addresses(addresses: &[&str]) -> Option<CommunityHostAddresses> {
+        Some(
+            addresses
+                .iter()
+                .map(|address| address.parse().unwrap())
+                .collect(),
+        )
+    }
+
+    fn healthy_link() -> Option<CommunityLinkHealth> {
+        Some(CommunityLinkHealth {
+            peer_count: 1,
+            received_frames: 0,
+        })
+    }
+
+    #[test]
+    fn community_link_watchdog_address_hint_needs_ten_stable_seconds_and_shared_rest() {
+        let mut watchdog = CommunityLinkWatchdog::new(COMMUNITY_LINK_SILENCE);
+        let start = Instant::now();
+        let observe = |watchdog: &mut CommunityLinkWatchdog, second, addresses| {
+            watchdog.observe(None, addresses, start + Duration::from_secs(second))
+        };
+        assert_eq!(
+            watchdog.observe(healthy_link(), host_addresses(&["192.0.2.1"]), start),
+            None
+        );
+        for (second, addresses) in [
+            (5, host_addresses(&["192.0.2.2", "2001:db8::1"])),
+            (10, host_addresses(&["2001:db8::1", "192.0.2.2"])),
+        ] {
+            assert_eq!(observe(&mut watchdog, second, addresses), None);
+        }
+        assert_eq!(
+            observe(
+                &mut watchdog,
+                15,
+                host_addresses(&["192.0.2.2", "2001:db8::1"])
+            ),
+            Some(CommunityLinkStep::Rebuild)
+        );
+        // A second stable change cannot bypass the rest after this repair.
+        watchdog.step_finished(start + Duration::from_secs(20));
+        for second in (20..80).step_by(5) {
+            assert_eq!(
+                observe(&mut watchdog, second, host_addresses(&["192.0.2.3"])),
+                None
+            );
+        }
+        assert_eq!(
+            observe(&mut watchdog, 80, host_addresses(&["192.0.2.3"])),
+            Some(CommunityLinkStep::Rebuild)
+        );
+        assert_eq!(watchdog.rebuilds, 2);
+        assert_eq!(watchdog.outage_rebuilds, 2);
+        assert!(watchdog.address_change.is_none());
+    }
+
+    #[test]
+    fn community_link_watchdog_healthy_churn_seeds_without_a_repair() {
+        let mut watchdog = CommunityLinkWatchdog::new(COMMUNITY_LINK_SILENCE);
+        let start = Instant::now();
+        for second in (0..120).step_by(5) {
+            let addresses = host_addresses(&[&format!("192.0.2.{}", second + 1)]);
+            assert_eq!(
+                watchdog.observe(
+                    healthy_link(),
+                    addresses,
+                    start + Duration::from_secs(second)
+                ),
+                None
+            );
+        }
+        assert_eq!(watchdog.rebuilds, 0);
+        assert!(watchdog.address_change.is_none());
+        assert!(!watchdog.recovery_exhausted());
+    }
+
+    #[test]
+    fn community_link_watchdog_empty_and_unknown_samples_disarm_stability() {
+        let mut watchdog = CommunityLinkWatchdog::new(COMMUNITY_LINK_SILENCE);
+        let start = Instant::now();
+        let samples = [
+            (0, host_addresses(&["192.0.2.1"])), // first sample seeds
+            (5, host_addresses(&["192.0.2.2"])),
+            (10, None), // unknown clears the pending stability window
+            (15, host_addresses(&["192.0.2.2"])),
+            (20, host_addresses(&[])), // known offline state becomes baseline
+            (25, host_addresses(&[])),
+            (30, None), // unknown is not an empty-to-nonempty change
+            (35, host_addresses(&["192.0.2.1"])),
+            (40, host_addresses(&["192.0.2.1"])),
+        ];
+        for (second, addresses) in samples {
+            assert_eq!(
+                watchdog.observe(None, addresses, start + Duration::from_secs(second)),
+                None
+            );
+        }
+        assert_eq!(
+            watchdog.observe(
+                None,
+                host_addresses(&["192.0.2.1"]),
+                start + Duration::from_secs(45)
+            ),
+            Some(CommunityLinkStep::Rebuild)
+        );
+        assert_eq!(
+            watchdog.rebuilds, 1,
+            "only stable restoration consumes a request"
+        );
+    }
+
+    #[test]
+    fn community_link_watchdog_same_ip_and_unknown_hosts_keep_the_timer_fallback() {
+        for addresses in [None, host_addresses(&["192.0.2.1"])] {
+            let mut watchdog = CommunityLinkWatchdog::new(COMMUNITY_LINK_SILENCE);
+            let start = Instant::now();
+            let mut steps = Vec::new();
+            for second in (0..=240).step_by(5) {
+                let now = start + Duration::from_secs(second);
+                if let Some(step) = watchdog.observe(None, addresses.clone(), now) {
+                    steps.push((step, second));
+                    watchdog.step_finished(now);
+                }
+            }
+            assert_eq!(
+                steps,
+                [
+                    (CommunityLinkStep::Rejoin, 60),
+                    (CommunityLinkStep::Rebuild, 120),
+                    (CommunityLinkStep::Rebuild, 240)
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn community_link_watchdog_unstable_address_churn_keeps_the_timer_fallback() {
+        let mut watchdog = CommunityLinkWatchdog::new(COMMUNITY_LINK_SILENCE);
+        let start = Instant::now();
+        let mut steps = Vec::new();
+        for second in (0..=240).step_by(5) {
+            let now = start + Duration::from_secs(second);
+            let addresses = host_addresses(&[&format!("2001:db8::{}", second + 1)]);
+            if let Some(step) = watchdog.observe(None, addresses, now) {
+                steps.push((step, second));
+                watchdog.step_finished(now);
+            }
+        }
+        assert_eq!(
+            steps,
+            [
+                (CommunityLinkStep::Rejoin, 60),
+                (CommunityLinkStep::Rebuild, 120),
+                (CommunityLinkStep::Rebuild, 240)
+            ]
+        );
+    }
+
+    #[test]
+    fn community_link_watchdog_caps_address_and_timer_requests_without_refunds() {
+        let mut watchdog = CommunityLinkWatchdog::new(COMMUNITY_LINK_SILENCE);
+        let start = Instant::now();
+        let mut count = 0;
+        for second in (0..=10_000).step_by(5) {
+            let now = start + Duration::from_secs(second);
+            // Churn has a stable sample for fifteen seconds each minute.
+            let addresses = host_addresses(&[&format!("2001:db8::{}", second / 60 + 1)]);
+            if watchdog.observe(None, addresses, now) == Some(CommunityLinkStep::Rebuild) {
+                count += 1;
+                watchdog.step_finished(now);
+            }
+        }
+        assert_eq!(count, MAX_COMMUNITY_GOSSIP_REBUILDS);
+        assert_eq!(watchdog.rebuilds, MAX_COMMUNITY_GOSSIP_REBUILDS);
+        assert!(watchdog.recovery_exhausted());
+        let healthy_at = start + Duration::from_secs(10_005);
+        assert_eq!(watchdog.observe(healthy_link(), None, healthy_at), None);
+        assert_eq!(watchdog.outage_rebuilds, 0);
+        assert!(!watchdog.recovery_exhausted());
+        // A leave gap preserves every reserved request, even after recovery.
+        for second in (10_600..11_600).step_by(5) {
+            assert_ne!(
+                watchdog.observe(
+                    None,
+                    host_addresses(&["192.0.2.9"]),
+                    start + Duration::from_secs(second)
+                ),
+                Some(CommunityLinkStep::Rebuild)
+            );
+        }
+        assert_eq!(watchdog.rebuilds, MAX_COMMUNITY_GOSSIP_REBUILDS);
+        assert!(watchdog.recovery_exhausted());
+    }
+
+    #[test]
+    fn community_link_watchdog_pacing_counts_address_attempts_and_saturates() {
+        let mut watchdog = CommunityLinkWatchdog::new(COMMUNITY_LINK_SILENCE);
+        let start = Instant::now();
+        watchdog.observe(None, host_addresses(&[]), start);
+        for second in (5..=70).step_by(5) {
+            let now = start + Duration::from_secs(second);
+            let addresses = host_addresses(&[&format!("192.0.2.{}", second / 15 + 1)]);
+            if let Some(step) = watchdog.observe(None, addresses, now) {
+                assert_eq!(step, CommunityLinkStep::Rebuild);
+                watchdog.step_finished(now);
+            }
+        }
+        assert_eq!(watchdog.outage_rebuilds, 1);
+        // Counter saturation keeps a bounded shift and the long-outage wait.
+        watchdog.steps = u32::MAX;
+        watchdog.outage_rebuilds = u32::MAX;
+        let now = start + Duration::from_secs(75);
+        assert_eq!(watchdog.observe(None, None, now), None);
+        assert_eq!(watchdog.steps, u32::MAX);
+    }
+
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
