@@ -477,3 +477,44 @@ fn damaged_candidates_do_not_spend_the_plaintext_budget() {
     assert_eq!(home.open("Documents/z-plain.bin").unwrap(), plaintext);
     assert_eq!(home.ready().unwrap().len(), 5);
 }
+
+#[cfg(unix)]
+#[test]
+fn linked_declared_folder_is_refused_by_name() {
+    let elsewhere = tempfile::tempdir().unwrap();
+
+    // A declared folder that is a link.
+    let home = Home::new("person:local:scan-linked-declaration-home");
+    let documents = home.path("Documents");
+    std::os::unix::fs::symlink(elsewhere.path(), &documents).unwrap();
+    assert_eq!(
+        home.ready().unwrap_err().to_string(),
+        format!(
+            "Documents is a link. Protected Home folders hold only regular files and folders. \
+             Move it out of {}, then try again.",
+            documents.parent().unwrap().display()
+        )
+    );
+
+    // A link above an exact declaration.
+    let home = Home::new("person:local:scan-linked-ancestor-home");
+    let notes = home.path("Documents/notes");
+    std::os::unix::fs::symlink(elsewhere.path(), &notes).unwrap();
+    let declarations = vec![PrincipalRootUpgradeDeclarationV1 {
+        principal_id: home.principal_id.clone(),
+        localhost_root: home.localhost_root.clone(),
+        inventory: vec![PrincipalRootProtectedObjectDeclarationV1::exact(
+            home.uri("Documents/notes/a.txt"),
+        )],
+    }];
+    assert_eq!(
+        verify_declared_principal_roots_ready(home.data_dir(), &declarations)
+            .unwrap_err()
+            .to_string(),
+        format!(
+            "Documents/notes is a link. Protected Home folders hold only regular files and \
+             folders. Move it out of {}, then try again.",
+            notes.parent().unwrap().display()
+        )
+    );
+}

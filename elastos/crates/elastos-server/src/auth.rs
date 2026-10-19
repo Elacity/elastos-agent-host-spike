@@ -7310,11 +7310,11 @@ fn walk_declared_principal_root_objects(
         validate_principal_root_object_binding(principal_id, localhost_root, uri)?;
         let path = rooted_localhost_fs_path(data_dir, uri)
             .ok_or_else(|| anyhow!("declared principal-root object path is invalid"))?;
-        ensure_no_symlink_components(data_dir, &path)?;
         let walk = PrincipalRootWalk {
             data_dir,
             localhost_root,
         };
+        walk.refuse_linked_ancestors(uri)?;
         match declaration {
             PrincipalRootProtectedObjectDeclarationV1::Exact { object_uri } => {
                 let metadata = match std::fs::symlink_metadata(&path) {
@@ -7355,6 +7355,37 @@ impl PrincipalRootWalk<'_> {
             Self::ACTION,
             principal_root_disk_folder(self.data_dir, uri),
         )
+    }
+
+    /// A link on the way to a declaration is refused by name, as one inside
+    /// it is. The declaration itself is checked where it is read.
+    fn refuse_linked_ancestors(&self, uri: &str) -> anyhow::Result<()> {
+        let rest = uri
+            .strip_prefix("localhost://")
+            .ok_or_else(|| anyhow!("declared principal-root object path is invalid"))?;
+        let segments: Vec<&str> = rest
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect();
+        let mut path = self.data_dir.to_path_buf();
+        let mut ancestor = String::from("localhost:/");
+        for segment in &segments[..segments.len().saturating_sub(1)] {
+            path.push(segment);
+            ancestor.push('/');
+            ancestor.push_str(segment);
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(self.refusal(&ancestor, "is a link."));
+                }
+                Ok(_) => {}
+                Err(err) if err.kind() == ErrorKind::NotFound => break,
+                Err(err) => {
+                    return Err(err)
+                        .context("failed to inspect declared principal-root object path")
+                }
+            }
+        }
+        Ok(())
     }
 
     fn collect(
