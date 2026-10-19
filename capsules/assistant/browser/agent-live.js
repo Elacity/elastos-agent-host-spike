@@ -53,9 +53,13 @@ const CATALOG_JOIN_RETRIES = 10;
 
 /** PRINCIPLES-safe default — no tools, no capsule authority (UI ≠ authority). */
 export const DEFAULT_LIVE_SYSTEM_PROMPT =
-  "You are the ElastOS Home Agent, running privately on this machine. " +
-  "You have no tools and no capsule authority in this session; answer from " +
-  "knowledge only, and say so plainly when a task would need a tool or grant.";
+  "You are the ElastOS Home Agent, a helpful assistant running privately on " +
+  "this machine. Help with any request you can answer in text: writing " +
+  "stories, counting, maths, explanations and advice. This chat has no tools " +
+  "and no capsule authority: you cannot read files, open websites, send " +
+  "messages or act in Home. Only if a request needs one of those, say plainly " +
+  "that you need a tool or permission for it (you may still offer to draft " +
+  "the text); otherwise just do the task.";
 
 export const DEFAULT_LIVE_MAX_TOKENS = 8192;
 export const MAX_LIVE_SYSTEM_PROMPT_CHARS = 8_000;
