@@ -77,7 +77,8 @@ owner to check the memory limits before trying again.
 A local engine is admitted right before it starts: free memory must cover the
 model weights, its KV cache at the configured context, batch scratch and
 headroom of max(10% of effective memory capacity, 1 GiB); otherwise the run fails with
-`model_memory_unavailable` before anything is spawned. Each model-provider
+`model_memory_unavailable` before anything is spawned, and its message names the
+free memory Runtime saw and the model's need in GB. Each model-provider
 process runs one local engine at a time, stops it after 60 s without requests
 and starts it again on the next request. Runtime's host lock protects its Home
 data root. Distinct data roots use separate locks and providers, including

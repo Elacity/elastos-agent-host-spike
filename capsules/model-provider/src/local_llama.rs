@@ -32,8 +32,12 @@ pub(crate) enum LocalLlamaFault {
     /// The engine could not be spawned or exited before it became ready.
     StartFailed,
     Timeout,
-    /// Free memory does not cover this model; nothing was started.
-    MemoryUnavailable,
+    /// Free memory does not cover this model; nothing was started. The bytes
+    /// the host had available and the bytes the model needs.
+    MemoryUnavailable {
+        available: u64,
+        required: u64,
+    },
     /// Runtime could not observe the host's memory limits; nothing was started.
     MemoryObservationUnavailable,
 }
@@ -1283,9 +1287,14 @@ mod tests {
     async fn insufficient_free_memory_refuses_before_spawn() {
         let (mut engines, engine, model, settings, events) = fixture("healthy");
         engines.read_host_memory = scarce_memory;
-        assert_eq!(
-            engines.endpoint("offer", &engine, &model, &settings).await,
-            Err(LocalLlamaFault::MemoryUnavailable)
+        let refused = engines.endpoint("offer", &engine, &model, &settings).await;
+        assert!(
+            matches!(
+                refused,
+                Err(LocalLlamaFault::MemoryUnavailable { available, required })
+                    if available == GIB && required > available
+            ),
+            "{refused:?}"
         );
         assert_eq!(event_count(&events, "start:"), 0);
         assert!(!engines.retains_artifacts().await);

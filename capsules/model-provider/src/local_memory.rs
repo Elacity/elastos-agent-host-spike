@@ -42,7 +42,8 @@ impl MemoryPlan {
 /// Refuses with `MemoryObservationUnavailable` when Runtime cannot read the host
 /// limits, or with `MemoryUnavailable` unless the host fits the model weights,
 /// its KV cache at `context`, compute scratch, and a headroom of
-/// max(10% of RAM, 1 GiB) left for the rest of the device.
+/// max(10% of RAM, 1 GiB) left for the rest of the device. The refusal carries
+/// the free memory it saw and the need, so the person sees both (#98).
 pub(crate) fn admit(
     model: &Path,
     context: u32,
@@ -53,9 +54,15 @@ pub(crate) fn admit(
     let file = std::fs::File::open(model).map_err(|_| LocalLlamaFault::Failed)?;
     let weights = file.metadata().map_err(|_| LocalLlamaFault::Failed)?.len();
     let plan = memory_plan(file, weights, context, parallel, host.total)?;
-    match plan.required() {
-        Some(required) if fits(host, required) => Ok(()),
-        _ => Err(LocalLlamaFault::MemoryUnavailable),
+    // A plan too large to add up never fits.
+    let required = plan.required().unwrap_or(u64::MAX);
+    if fits(host, required) {
+        Ok(())
+    } else {
+        Err(LocalLlamaFault::MemoryUnavailable {
+            available: host.available,
+            required,
+        })
     }
 }
 
@@ -397,10 +404,11 @@ mod tests {
             elastos_common::host_memory::model_memory_fit(512, Some(one_gib().unwrap())),
             elastos_common::host_memory::ModelMemoryFit::Fits
         );
-        assert_eq!(
+        assert!(matches!(
             admit(&model, 4096, 1, one_gib),
-            Err(LocalLlamaFault::MemoryUnavailable)
-        );
+            Err(LocalLlamaFault::MemoryUnavailable { available, required })
+                if available == GIB && required > GIB
+        ));
     }
 
     #[test]

@@ -2254,12 +2254,19 @@ fn map_local_llama_fault(fault: LocalLlamaFault) -> AdapterFault {
             },
             detail: None,
         },
-        LocalLlamaFault::MemoryUnavailable => AdapterFault {
+        LocalLlamaFault::MemoryUnavailable {
+            available,
+            required,
+        } => AdapterFault {
             error: RunError {
                 class: ErrorClass::ContextRejected,
                 code: "model_memory_unavailable".into(),
-                message: "Not enough free memory for this model. Close other apps, then try again."
-                    .into(),
+                message: format!(
+                    "Not enough free memory for this model: it needs {} GB and {} GB is free. \
+                     Close other apps, then try again.",
+                    gb_tenths(required, true),
+                    gb_tenths(available, false),
+                ),
             },
             detail: None,
         },
@@ -2274,6 +2281,24 @@ fn map_local_llama_fault(fault: LocalLlamaFault) -> AdapterFault {
         LocalLlamaFault::Failed => {
             AdapterFault::backend_failed("model backend failed", "local llama engine failed")
         }
+    }
+}
+
+/// Bytes as GB (GiB) to a tenth, as Home's other size messages show them. A
+/// need rounds up and a reading rounds down, so the two never read as equal.
+fn gb_tenths(bytes: u64, round_up: bool) -> String {
+    const GIB: u128 = 1 << 30;
+    let scaled = u128::from(bytes) * 10;
+    let tenths = if round_up {
+        scaled.div_ceil(GIB)
+    } else {
+        scaled / GIB
+    };
+    let (whole, tenth) = (tenths / 10, tenths % 10);
+    if tenth == 0 {
+        whole.to_string()
+    } else {
+        format!("{whole}.{tenth}")
     }
 }
 
@@ -3566,17 +3591,31 @@ mod tests {
             elastos_model_contract::MODEL_MEMORY_OBSERVATION_UNAVAILABLE_MESSAGE
         );
         assert!(unreadable.detail.is_none());
-        let insufficient = map_local_llama_fault(LocalLlamaFault::MemoryUnavailable);
+        const GIB: u64 = 1 << 30;
+        let insufficient = map_local_llama_fault(LocalLlamaFault::MemoryUnavailable {
+            available: GIB + GIB / 10 * 9 + GIB / 20,
+            required: 3 * GIB + 1,
+        });
         assert_eq!(insufficient.error.class, ErrorClass::ContextRejected);
         assert_eq!(insufficient.error.code, "model_memory_unavailable");
+        // The free memory it saw and the model's need, in plain numbers (#98).
         assert_eq!(
             insufficient.error.message,
-            "Not enough free memory for this model. Close other apps, then try again."
+            "Not enough free memory for this model: it needs 3.1 GB and 1.9 GB is free. \
+             Close other apps, then try again."
         );
         assert!(
             !insufficient.error.message.contains("smaller model"),
             "the refusal cannot know a smaller model that fits exists"
         );
+        let even = map_local_llama_fault(LocalLlamaFault::MemoryUnavailable {
+            available: GIB,
+            required: 2 * GIB,
+        });
+        assert!(even
+            .error
+            .message
+            .contains("it needs 2 GB and 1 GB is free."));
         assert!(insufficient.detail.is_none());
     }
 
