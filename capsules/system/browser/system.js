@@ -3039,6 +3039,9 @@ function recoveryAttentionNote(status) {
   if (status?.required_actions?.includes("finish_interrupted_principal_root_migration")) {
     notes.push("An earlier encryption step did not finish. Home will not start again until it is finished or undone; reinstalling ElastOS does that, and your files are kept.");
   }
+  if (status?.required_actions?.includes("migrate_declared_plaintext_objects")) {
+    notes.push("Some files in your protected Home folders are not encrypted yet. Saving your Recovery Kit encrypts them after you approve with your passkey; until then Home will not start again.");
+  }
   const count = Number(status?.objects_needing_attention_count) || 0;
   const first = Array.isArray(status?.objects_needing_attention) ? status.objects_needing_attention[0] : null;
   if (count > 0 && first) {
@@ -3062,13 +3065,13 @@ function setRecoveryStatus(status) {
     setRecoveryButton("Create Profile and save kit", false);
     return;
   }
+  const attention = recoveryAttentionNote(status);
   if (status?.required_actions?.includes("download_recovery_kit_with_profile")) {
     showRecoveryStatus("Profile needs backup", "muted");
-    showRecoveryNote("Save a new kit that includes your Profile.", "muted");
+    showRecoveryNote(attention ? `Save a new kit that includes your Profile. ${attention}` : "Save a new kit that includes your Profile.", "muted");
     setRecoveryButton("Save complete Recovery Kit", false);
     return;
   }
-  const attention = recoveryAttentionNote(status);
   if (attention) {
     showRecoveryStatus("Needs attention", "muted");
     showRecoveryNote(attention, "muted");

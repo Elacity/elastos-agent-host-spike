@@ -59,3 +59,24 @@ test("a pending encryption step is explained", () => {
   assert.equal(shown.status, "Needs attention");
   assert.equal(shown.note, "An earlier encryption step did not finish. Home will not start again until it is finished or undone; reinstalling ElastOS does that, and your files are kept.");
 });
+
+test("plaintext that arrived while Home runs is explained", () => {
+  const shown = render({ ...ready, root_encrypted: false, required_actions: ["migrate_declared_plaintext_objects"] });
+  assert.equal(shown.status, "Needs attention");
+  assert.equal(shown.note, "Some files in your protected Home folders are not encrypted yet. Saving your Recovery Kit encrypts them after you approve with your passkey; until then Home will not start again.");
+  assert.equal(shown.button, "Download Recovery Kit");
+});
+
+test("a Home whose Profile needs backup still sees files needing attention", () => {
+  const action = "Documents/a.bin does not carry the label this Home writes on encrypted files.";
+  const shown = render({
+    ...ready,
+    required_actions: ["download_recovery_kit_with_profile"],
+    objects_needing_attention: [{ path: "Documents/a.bin", problem: "label_unreadable", action }],
+    objects_needing_attention_count: 1,
+  });
+  assert.equal(shown.status, "Profile needs backup");
+  assert.equal(shown.note, `Save a new kit that includes your Profile. 1 file(s) in your protected Home folders need attention: ${action}`);
+  assert.equal(shown.button, "Save complete Recovery Kit");
+  assert.equal(render({ ...ready, required_actions: ["download_recovery_kit_with_profile"] }).note, "Save a new kit that includes your Profile.");
+});
