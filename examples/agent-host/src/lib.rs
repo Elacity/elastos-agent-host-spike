@@ -6394,6 +6394,10 @@ mod tests {
             demo,
             "localhost://Users/self/Projects/demo2"
         ));
+        assert!(!narrower_resource(
+            demo,
+            "localhost://Users/self/Projects/demo-old"
+        ));
         assert!(!narrower_resource(demo, demo));
         assert!(!narrower_resource(
             demo,
@@ -6407,6 +6411,7 @@ mod tests {
         let parent = propose_run(&mut journal, demo, &["true".to_string()]).unwrap();
         for refused in [
             "localhost://Users/self/Projects/demo2",
+            "localhost://Users/self/Projects/demo-old",
             demo,
             "localhost://Users/self/Projects/demo/",
         ] {
