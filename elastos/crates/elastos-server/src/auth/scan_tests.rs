@@ -71,6 +71,18 @@ impl Home {
             .unwrap();
     }
 
+    /// A sparse file of zeros whose only sign of an envelope sits at its
+    /// end, past the 64 KiB head: Damaged only once read whole.
+    fn write_late_sign(&self, relative: &str, len: usize) {
+        use std::io::{Seek, SeekFrom, Write};
+        let sign = b"\"ciphertext\"";
+        let mut file = std::fs::File::create(self.path(relative)).unwrap();
+        file.set_len(len as u64).unwrap();
+        file.seek(SeekFrom::Start((len - sign.len()) as u64))
+            .unwrap();
+        file.write_all(sign).unwrap();
+    }
+
     fn read(&self, relative: &str) -> Vec<u8> {
         std::fs::read(self.path(relative)).unwrap()
     }
@@ -439,4 +451,29 @@ fn plaintext_classified_fragment_is_wrapped_byte_exact() {
     .unwrap();
     assert!(removed >= 1, "removed {removed}");
     assert_eq!(home.open("Documents/fragment.bin").unwrap(), fragment);
+}
+
+#[test]
+fn damaged_candidates_do_not_spend_the_plaintext_budget() {
+    let home = Home::new("person:local:scan-damaged-budget-home");
+    for index in 0..5 {
+        home.write_late_sign(&format!("Documents/a-late-sign-{index}.bin"), 15 * MIB);
+    }
+    let plaintext = vec![b'p'; 6 * MIB];
+    home.write("Documents/z-plain.bin", &plaintext);
+
+    // Start names the one unencrypted file, not the damaged ones.
+    let error = home.ready().unwrap_err();
+    let outcome = error
+        .downcast_ref::<PrincipalRootMigrationRequiredV1>()
+        .expect("start refuses with the migration-required outcome");
+    assert_eq!(outcome.plaintext_object_count, 1);
+    assert_eq!(outcome.examples, vec!["Documents/z-plain.bin".to_string()]);
+
+    // 75 MiB of damaged candidates do not turn into a false P3.
+    let receipt = home.upgrade(&home.backup_dir()).unwrap();
+    assert_eq!(receipt.object_count, 1);
+    assert_eq!(receipt.notices.len(), 5);
+    assert_eq!(home.open("Documents/z-plain.bin").unwrap(), plaintext);
+    assert_eq!(home.ready().unwrap().len(), 5);
 }

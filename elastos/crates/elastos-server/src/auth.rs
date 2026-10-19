@@ -7160,11 +7160,12 @@ fn scan_declared_principal_root_objects(
                         len,
                     ));
                 }
-                // Only reachable once damaged candidates spent the budget the
-                // plaintext total would otherwise reach first.
-                return Err(principal_root_plaintext_total_refusal(
-                    localhost_root,
-                    &object_uri,
+                // Only plaintext spends the Plan budget, which is the plaintext
+                // limit plus one file: the total refuses before any file of up
+                // to 16 MiB is left unread.
+                return Err(anyhow!(
+                    "principal-root migration scan left {path:?} unclassified within its \
+                     plaintext budget"
                 ));
             }
             PrincipalRootObjectFileClass::Plaintext
@@ -7863,7 +7864,9 @@ pub(crate) struct PrincipalRootObjectFileProbe {
 /// Classifies an open regular file of length `len` while reading as little
 /// as it can: the head grows from 4 KiB up to 64 KiB, continuing where it
 /// stopped; an envelope adds a 3-byte tail. A plaintext candidate is read
-/// whole only when it is at most 16 MiB and fits `whole_read_budget`.
+/// whole only when it is at most 16 MiB and fits `whole_read_budget`. Only
+/// plaintext spends the budget: a candidate that turns out damaged gives its
+/// bytes back, so damaged files never crowd out the plaintext limits.
 pub(crate) fn classify_principal_root_object_file(
     file: &mut File,
     len: u64,
@@ -7917,9 +7920,12 @@ pub(crate) fn classify_principal_root_object_file(
         return Ok(probe(label_unreadable, prefix, bytes_read));
     }
     let remaining = len.saturating_sub(prefix.len() as u64);
+    let mut charged = 0;
     if remaining > 0 && len <= MAX_MIGRATION_OBJECT_BYTES && remaining <= *whole_read_budget {
-        *whole_read_budget -= remaining;
-        bytes_read += read_principal_root_object_prefix(file, &mut prefix, len as usize)?;
+        // Charged as read: a file that shrank costs only the bytes it held.
+        charged = read_principal_root_object_prefix(file, &mut prefix, len as usize)?;
+        *whole_read_budget -= charged;
+        bytes_read += charged;
         len = prefix.len() as u64;
     } else if remaining > 0 {
         bytes_read += read_principal_root_object_prefix(file, &mut prefix, window_max)?;
@@ -7933,6 +7939,7 @@ pub(crate) fn classify_principal_root_object_file(
     let class = if principal_root_object_shows_envelope_sign(&prefix, len)
         || principal_root_object_parses_as_envelope(&prefix)
     {
+        *whole_read_budget += charged;
         label_unreadable
     } else {
         PrincipalRootObjectFileClass::Plaintext
