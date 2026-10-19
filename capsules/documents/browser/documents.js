@@ -128,7 +128,7 @@ function hasExactKeys(value, expectedKeys) {
     actual.every((key, index) => key === expected[index]);
 }
 
-function renderInlineMarkdown(text, options) {
+function renderInlineMarkdown(text) {
   const tokens = /`([^`]+)`|\*\*([^*]+)\*\*|\*([^*]+)\*|\[([^\]]+)\]\(([^)]+)\)/g;
   let html = "";
   let offset = 0;
@@ -137,26 +137,35 @@ function renderInlineMarkdown(text, options) {
     if (match[1] !== undefined) {
       html += "<code>" + escapeHtml(match[1]) + "</code>";
     } else if (match[2] !== undefined) {
-      html += "<strong>" + renderInlineMarkdown(match[2], options) + "</strong>";
+      html += "<strong>" + renderInlineMarkdown(match[2]) + "</strong>";
     } else if (match[3] !== undefined) {
-      html += "<em>" + renderInlineMarkdown(match[3], options) + "</em>";
+      html += "<em>" + renderInlineMarkdown(match[3]) + "</em>";
     } else {
-      html += renderMarkdownLink(match[5], renderInlineMarkdown(match[4], options), options);
+      html += renderMarkdownLink(match[5], renderInlineMarkdown(match[4]));
     }
     offset = match.index + match[0].length;
   }
   return html + escapeHtml(text.slice(offset));
 }
 
-// Inside Home (options.insideHome) only an in-document "#" anchor keeps an
-// href: any other navigation would replace the Documents frame, which then
-// cannot answer Home's close request. A web link (same origin included) has
-// no href and asks Home through the preview's own handlers (#436, as Chat);
-// every other link (relative paths, elastos://, localhost://) is plain text,
-// since the preview has no handler for it.
-function renderMarkdownLink(value, labelHtml, options) {
+// The one place that decides whether Markdown is shown inside Home: this
+// frame was launched by Home (it holds a Home token) and is framed. Every
+// rendering asks it, so no view can show links without the policy below.
+function markdownShownInsideHome() {
+  return typeof window !== "undefined"
+    && window.top !== window
+    && !!new URLSearchParams(window.location.hash.replace(/^#/, "")).get("home_token");
+}
+
+// Inside Home only an in-document "#" anchor keeps an href: any other
+// navigation would replace the Documents frame, which then cannot answer
+// Home's close request. A web link (same origin included) has no href and
+// asks Home through `activatePreviewWebLink` (#436, as Chat); every other
+// link (relative paths, elastos://, localhost://) is plain text, since
+// nothing in Documents handles it. Outside Home links are normal anchors.
+function renderMarkdownLink(value, labelHtml) {
   const href = markdownHref(value);
-  if (options && options.insideHome && !href.startsWith("#")) {
+  if (markdownShownInsideHome() && !href.startsWith("#")) {
     return /^https?:\/\//i.test(href)
       ? '<a data-open-external="' + escapeHtml(href) + '" role="link" tabindex="0">' + labelHtml + "</a>"
       : "<span>" + labelHtml + "</span>";
@@ -185,7 +194,7 @@ function headingSlug(text, number) {
 
 function renderMarkdownDocument(source, options) {
   const interactiveTasks = !!(options && options.interactiveTasks);
-  const inline = (text) => renderInlineMarkdown(text, options);
+  const inline = (text) => renderInlineMarkdown(text);
   const lines = String(source || "").replace(/\r\n/g, "\n").split("\n");
   const blocks = [];
   const outline = [];
@@ -598,7 +607,7 @@ function announceHomeChrome() {
 }
 
 // Home frames apps without popups or top navigation, so inside Home a web
-// link in the preview has no href (renderInlineMarkdown) and asks Home to
+// link in a Markdown view has no href (renderMarkdownLink) and asks Home to
 // show the exact address and open it only when the person chooses Open
 // (#436, the same request as Chat's links). Without the Home session it
 // refuses and says so; nothing navigates either way.
@@ -616,11 +625,30 @@ function activatePreviewWebLink(event) {
     return;
   }
   if (!canAnnounceHomeChrome()) {
-    setStatus("Open Documents from Home to open web links.", "warning");
+    const message = "Open Documents from Home to open web links.";
+    if (state.mode === "share") {
+      elements.shareSubtitle.textContent = message;
+    } else {
+      setStatus(message, "warning");
+    }
     return;
   }
   const url = link.getAttribute("data-open-external") || "";
   window.top.postMessage({ type: "home:open-external", url, homeToken: state.homeToken }, homeOrigin);
+}
+
+// Every Markdown view renders through here, so each one gets the inside-Home
+// link policy (renderMarkdownLink) and the handlers that ask Home.
+const markdownLinkContainers = new WeakSet();
+function renderMarkdownInto(container, markdown, options) {
+  const rendered = renderMarkdownDocument(markdown, options);
+  container.innerHTML = rendered.html;
+  if (!markdownLinkContainers.has(container)) {
+    markdownLinkContainers.add(container);
+    container.addEventListener("click", activatePreviewWebLink);
+    container.addEventListener("keydown", activatePreviewWebLink);
+  }
+  return rendered;
 }
 
 function chooseInCapsule(options) {
@@ -891,11 +919,7 @@ function closeFindBar() {
 }
 
 function refreshPreviewFromEditor() {
-  const rendered = renderMarkdownDocument(elements.editor.value || "", {
-    interactiveTasks: true,
-    insideHome: window.top !== window,
-  });
-  elements.preview.innerHTML = rendered.html;
+  const rendered = renderMarkdownInto(elements.preview, elements.editor.value || "", { interactiveTasks: true });
   renderOutline(rendered.outline);
   if (!elements.findBar.classList.contains("hidden")) {
     updateFindMatches({ preserveIndex: true });
@@ -2118,8 +2142,6 @@ function wireShellEvents() {
   elements.panePreview.addEventListener("click", () => setInspectorView("preview"));
   elements.paneOutline.addEventListener("click", () => setInspectorView("outline"));
   elements.paneHistory.addEventListener("click", () => setInspectorView("history"));
-  elements.preview.addEventListener("click", activatePreviewWebLink);
-  elements.preview.addEventListener("keydown", activatePreviewWebLink);
   elements.preview.addEventListener("change", (event) => {
     const target = event.target;
     if (!(target instanceof HTMLInputElement) || !target.classList.contains("task-checkbox")) {
@@ -2328,7 +2350,10 @@ function setSharePreview(title, markdown, subtitle, pills) {
   document.title = title ? title + " · Documents" : "Documents";
   elements.shareTitle.textContent = title || "Documents";
   elements.shareSubtitle.textContent = subtitle || "Read-only markdown surface.";
-  elements.sharePreview.innerHTML = '<article class="markdown-body">' + renderMarkdownDocument(markdown || "").html + "</article>";
+  const article = document.createElement("article");
+  article.className = "markdown-body";
+  elements.sharePreview.replaceChildren(article);
+  renderMarkdownInto(article, markdown || "");
   elements.shareTopline.innerHTML = "";
   (pills || []).forEach((pill) => {
     const span = document.createElement("span");
@@ -2347,7 +2372,7 @@ async function loadShareBundle(options) {
   elements.shareShell.classList.remove("hidden");
 
   const params = new URLSearchParams(window.location.search);
-  const requestedFile = params.get("file");
+  const requestedFile = (options && options.file) || params.get("file");
 
   try {
     const files = await loadJson(basePath + "_files.json");
@@ -2366,9 +2391,25 @@ async function loadShareBundle(options) {
     files.forEach((file) => {
       const link = document.createElement("a");
       link.className = "share-doc-link" + (file === activeFile ? " active" : "");
-      const linkParams = new URLSearchParams(window.location.search);
-      linkParams.set("file", file);
-      link.href = window.location.pathname + "?" + linkParams.toString();
+      if (markdownShownInsideHome()) {
+        // Inside Home a navigation would replace the Documents frame (and
+        // drop its Home token), so the chosen file opens in place.
+        link.setAttribute("role", "link");
+        link.tabIndex = 0;
+        const open = (event) => {
+          if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") {
+            return;
+          }
+          event.preventDefault();
+          void loadShareBundle({ ...options, file });
+        };
+        link.addEventListener("click", open);
+        link.addEventListener("keydown", open);
+      } else {
+        const linkParams = new URLSearchParams(window.location.search);
+        linkParams.set("file", file);
+        link.href = window.location.pathname + "?" + linkParams.toString();
+      }
       link.innerHTML =
         '<span class="share-doc-title">' + escapeHtml(file.replace(/\.md$/i, "")) + "</span>" +
         '<span class="share-doc-meta">' + escapeHtml(file) + "</span>";

@@ -26,6 +26,8 @@ const homeClipboardProtocolPath = path.resolve("capsules/home/browser/home-clipb
 
 const documents = new Map();
 const saveCalls = [];
+const publishedFixtureCid = "bafypublishedfixture";
+const publishedWebLink = "https://example.invalid/published-link";
 let delayNextSave = false;
 let delayedSaveStart = null;
 let delayedSaveRelease = null;
@@ -298,13 +300,36 @@ function createAppServer() {
     }
     if (url.pathname === "/home-fixture") {
       // Documents framed as Home frames it; the page records what it asks Home.
-      // ?without_origin drops home_origin, so Documents has no Home bridge.
+      // ?without_origin drops home_origin, so Documents has no Home bridge;
+      // ?cid opens a published revision that is not in the local list.
       const homeOrigin = `http://${req.headers.host}`;
-      const query = url.searchParams.has("without_origin") ? "" : `?home_origin=${encodeURIComponent(homeOrigin)}`;
+      const params = new URLSearchParams();
+      if (!url.searchParams.has("without_origin")) params.set("home_origin", homeOrigin);
+      if (url.searchParams.has("cid")) params.set("cid", url.searchParams.get("cid"));
+      const query = params.size ? `?${params}` : "";
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(`<!doctype html><script>window.homeMessages = [];
 addEventListener("message", (event) => window.homeMessages.push(event.data));</script>
 <iframe title="Documents" style="width:1200px;height:850px" src="/apps/documents/${query}#home_token=documents-link-token"></iframe>`);
+      return;
+    }
+    if (url.pathname.startsWith(`/s/${publishedFixtureCid}/`)) {
+      // A published two-file revision with links of every kind.
+      const file = url.pathname.slice(`/s/${publishedFixtureCid}/`.length);
+      const bodies = {
+        "_files.json": JSON.stringify(["first.md", "second.md"]),
+        "_share.json": JSON.stringify({ share_id: "share-fixture", version: 1 }),
+        "first.md": `# Published\n\n[Out](${publishedWebLink}) [Same](http://${req.headers.host}/favicon.ico) [Jump](#notes-2) [Rel](/apps/documents/)\n\n`
+          + Array.from({ length: 80 }, (_, index) => `Filler line ${index}`).join("\n\n") + "\n\n# Notes\n\nEnd.",
+        "second.md": "# Second file\n\nSecond body.",
+      };
+      if (!Object.hasOwn(bodies, file)) {
+        res.writeHead(404);
+        res.end("Not found");
+        return;
+      }
+      res.writeHead(200, { "content-type": file.endsWith(".json") ? "application/json" : "text/markdown; charset=utf-8" });
+      res.end(bodies[file]);
       return;
     }
 
@@ -857,6 +882,61 @@ async function run() {
       } finally {
         await linkPage.close();
       }
+    }
+
+    // #436: a published revision Home opens (not in the local list) is the
+    // same: web links (same origin included) ask Home, other links are
+    // text, "#" scrolls, and the file list opens files in place.
+    resetDocumentsFixture();
+    const publishedPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    trackPage(publishedPage, consoleErrors, pageErrors, failedRequests, errorResponses);
+    try {
+      await publishedPage.goto(`http://127.0.0.1:${port}/home-fixture?cid=${publishedFixtureCid}`);
+      const frame = await (await publishedPage.locator('iframe[title="Documents"]').elementHandle()).contentFrame();
+      await frame.locator("#share-preview h1").first().waitFor({ state: "visible" });
+      const origin = new URL(frame.url()).origin;
+      const frameUrl = frame.url();
+      const pagesBefore = browser.contexts().reduce((count, context) => count + context.pages().length, 0);
+      const controls = frame.locator("#share-preview a[data-open-external]");
+      assert(JSON.stringify(await controls.evaluateAll((nodes) => nodes.map((node) => [node.getAttribute("href"), node.dataset.openExternal])))
+        === JSON.stringify([[null, publishedWebLink], [null, `${origin}/favicon.ico`]]),
+        "Published preview web links inside Home, same origin included, must be navigation-free controls.");
+      const hrefs = await frame.evaluate(() => [...document.querySelectorAll("#share-preview a[href]")].map((anchor) => anchor.getAttribute("href")));
+      assert(JSON.stringify(hrefs) === JSON.stringify(["#notes-2"]),
+        `Published preview inside Home may keep only in-document hrefs. Got ${JSON.stringify(hrefs)}`);
+      assert(await frame.getByText("Rel", { exact: true }).evaluate((node) => !node.closest("a")),
+        "A relative link in the published preview inside Home must be plain text.");
+      await controls.nth(0).click();
+      await controls.nth(1).focus();
+      await publishedPage.keyboard.press("Enter");
+      await frame.getByText("Rel", { exact: true }).click();
+      await publishedPage.waitForTimeout(200);
+      const requests = await publishedPage.evaluate(() => window.homeMessages
+        .filter((message) => message?.type === "home:open-external"));
+      assert(JSON.stringify(requests) === JSON.stringify([
+        { type: "home:open-external", url: publishedWebLink, homeToken: "documents-link-token" },
+        { type: "home:open-external", url: `${origin}/favicon.ico`, homeToken: "documents-link-token" },
+      ]), `Published preview links must send exact Home requests. Got ${JSON.stringify(requests)}`);
+      const notesTop = () => frame.evaluate(() => document.getElementById("notes-2").getBoundingClientRect().top);
+      const topBefore = await notesTop();
+      await frame.locator('#share-preview a[href="#notes-2"]').click();
+      await publishedPage.waitForTimeout(200);
+      const topAfter = await notesTop();
+      const viewportHeight = await frame.evaluate(() => window.innerHeight);
+      assert(topBefore > viewportHeight && topAfter >= 0 && topAfter < viewportHeight,
+        `The published preview anchor did not scroll to its heading (${topBefore} -> ${topAfter}).`);
+      const fileLinks = frame.locator(".share-doc-link");
+      assert(await fileLinks.count() === 2
+        && (await fileLinks.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("href")))).every((href) => href === null),
+        "The published file list inside Home must not navigate the frame.");
+      await fileLinks.nth(1).click();
+      await frame.waitForFunction(() => document.getElementById("share-title")?.textContent === "Second file");
+      const pagesAfter = browser.contexts().reduce((count, context) => count + context.pages().length, 0);
+      const pathOf = (value) => { const url = new URL(value); return url.origin + url.pathname + url.search; };
+      assert(pathOf(frame.url()) === pathOf(frameUrl) && pagesAfter === pagesBefore,
+        `The published preview navigated (${frame.url()}) or opened a page (${pagesBefore} -> ${pagesAfter}).`);
+    } finally {
+      await publishedPage.close();
     }
 
     resetDocumentsFixture();

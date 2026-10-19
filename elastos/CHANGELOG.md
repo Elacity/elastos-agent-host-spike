@@ -17,6 +17,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 - Apps keeps its title clear of Home window controls in narrow windows. Phone
   detail controls have full touch targets, and Tab skips closed detail content.
+- In Documents on the Desktop, a web link in a document or a published revision opens after Home shows the address and you choose Open; before, it did nothing, or replaced the Documents window so it could not be closed (#436). Links to a place in the same document still scroll there. Other links (relative paths, `elastos://` and `localhost://`) show as plain text in Documents on the Desktop.
 
 ### Developer detail
 
