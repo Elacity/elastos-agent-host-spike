@@ -407,7 +407,7 @@ async fn fetch_openrouter_models(
                 ended.borrow_and_update();
                 ended.changed().await?;
                 Err(hosted_transport_error(anyhow::anyhow!(
-                    "owner ended hosted HTTPS"
+                    "hosted access ended during send"
                 )))
             }
             None => Err(anyhow::anyhow!("OpenRouter validation transport unset")),

@@ -2350,7 +2350,8 @@ async fn owner_end_cancels_system_validation_while_setup_is_held() {
         let (status, body) = status_json(validate_response.unwrap()).await;
         assert!(!status.is_success(), "{body}");
         assert!(
-            body.to_string().contains("Hosted HTTPS was ended"),
+            body.to_string()
+                .contains("This Home could not check the hosted connection. Try again."),
             "{body}"
         );
         assert!(ended.has_changed().unwrap(), "End cancels admitted sends");
