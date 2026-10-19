@@ -1367,8 +1367,9 @@ if ! "$gateway_bin" principal-root-upgrade \
   --data-dir "$data_dir" \
   --backup-dir "$principal_root_backup_dir" \
   >"$principal_root_upgrade_log" 2>&1; then
-  # The refusal names the file and the action; show its last Error: line only.
-  python3 - "$principal_root_upgrade_log" >&2 2>/dev/null <<'PY' || true
+  # The refusal names the file and the action; show its last Error: line
+  # only, with the data directory as <data-dir>. The log keeps the full text.
+  python3 - "$principal_root_upgrade_log" "$data_dir" >&2 2>/dev/null <<'PY' || true
 import os
 import sys
 
@@ -1381,7 +1382,12 @@ except OSError:
     raise SystemExit(0)
 lines = [line for line in tail.splitlines() if line.startswith("Error:")]
 if lines:
-    text = "".join(ch if ch.isprintable() else "?" for ch in lines[-1])[:4096]
+    text = lines[-1]
+    data_dir = sys.argv[2].rstrip("/")
+    prefixes = {data_dir, os.path.realpath(data_dir)} if data_dir else set()
+    for prefix in sorted(prefixes, key=len, reverse=True):
+        text = text.replace(prefix, "<data-dir>")
+    text = "".join(ch if ch.isprintable() else "?" for ch in text)[:4096]
     print(f"mac-source-home-restart: {text}")
 PY
   redacted_error "principal-root upgrade failed; rollback retained for reconciliation"

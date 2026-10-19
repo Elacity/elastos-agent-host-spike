@@ -5369,7 +5369,10 @@ fn read_protected_principal_root_object_file(
     let damage = match probe.class {
         PrincipalRootObjectFileClass::Plaintext
         | PrincipalRootObjectFileClass::UnconfirmedPlaintext => {
-            anyhow::bail!("{PROTECTED_PRINCIPAL_ROOT_OBJECT_NOT_ENCRYPTED}: {object_uri}");
+            anyhow::bail!(
+                "{PROTECTED_PRINCIPAL_ROOT_OBJECT_NOT_ENCRYPTED}: {}",
+                printable_text(object_uri)
+            );
         }
         PrincipalRootObjectFileClass::Envelope => PrincipalRootObjectDamage::FailedCheck,
         PrincipalRootObjectFileClass::Damaged(damage) => damage,
@@ -7423,12 +7426,11 @@ impl PrincipalRootWalk<'_> {
         entries.sort_by_key(std::fs::DirEntry::file_name);
         for entry in entries {
             let Ok(name) = entry.file_name().into_string() else {
+                let folder = printable_path(path);
                 return Err(anyhow!(
-                    "A file in {} has a name that is not valid UTF-8. {} Move it out of {}, then \
-                     try again.",
-                    path.display(),
+                    "A file in {folder} has a name that is not valid UTF-8. {} Move it out of \
+                     {folder}, then try again.",
                     Self::ACTION,
-                    path.display(),
                 ));
             };
             let child_uri = format!("{uri}/{name}");
@@ -7642,32 +7644,79 @@ fn principal_root_object_changed_error(localhost_root: &str, object_uri: &str) -
 }
 
 fn principal_root_home_relative_path(localhost_root: &str, object_uri: &str) -> String {
-    object_uri
-        .strip_prefix(localhost_root)
-        .and_then(|rest| rest.strip_prefix('/'))
-        .filter(|rest| !rest.is_empty())
-        .unwrap_or(object_uri)
-        .to_string()
+    printable_text(
+        object_uri
+            .strip_prefix(localhost_root)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .filter(|rest| !rest.is_empty())
+            .unwrap_or(object_uri),
+    )
 }
 
 fn principal_root_disk_folder(data_dir: &Path, object_uri: &str) -> String {
-    rooted_localhost_fs_path(data_dir, object_uri)
-        .as_deref()
-        .and_then(Path::parent)
-        .unwrap_or(data_dir)
-        .display()
-        .to_string()
+    printable_path(
+        rooted_localhost_fs_path(data_dir, object_uri)
+            .as_deref()
+            .and_then(Path::parent)
+            .unwrap_or(data_dir),
+    )
+}
+
+fn printable_path(path: &Path) -> String {
+    printable_text(&path.display().to_string())
+}
+
+/// Names and label values come from disk: they are shown on one line, in
+/// order. Control, format (bidi included) and line or paragraph separator
+/// characters are written as `\u{…}`, so no name can start a forged second
+/// line or reorder the text around it.
+fn printable_text(value: &str) -> String {
+    let mut printable = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if is_unprintable_char(ch) {
+            printable.extend(ch.escape_unicode());
+        } else {
+            printable.push(ch);
+        }
+    }
+    printable
+}
+
+/// Cc, Cf (Unicode 15.1), Zl and Zp.
+fn is_unprintable_char(ch: char) -> bool {
+    ch.is_control()
+        || matches!(
+            ch as u32,
+            0x00AD
+                | 0x0600..=0x0605
+                | 0x061C
+                | 0x06DD
+                | 0x070F
+                | 0x0890..=0x0891
+                | 0x08E2
+                | 0x180E
+                | 0x200B..=0x200F
+                | 0x2028..=0x202E
+                | 0x2060..=0x2064
+                | 0x2066..=0x206F
+                | 0xFEFF
+                | 0xFFF9..=0xFFFB
+                | 0x110BD
+                | 0x110CD
+                | 0x13430..=0x1343F
+                | 0x1BCA0..=0x1BCA3
+                | 0x1D173..=0x1D17A
+                | 0xE0001
+                | 0xE0020..=0xE007F
+        )
 }
 
 /// Label values come from the file itself: show them on one line, bounded.
 fn printable_label(value: &str) -> String {
     const MAX_LABEL_CHARS: usize = 120;
-    let mut printable: String = value
-        .chars()
-        .take(MAX_LABEL_CHARS)
-        .map(|ch| if ch.is_control() { '\u{FFFD}' } else { ch })
-        .collect();
-    if value.chars().count() > MAX_LABEL_CHARS {
+    let escaped = printable_text(value);
+    let mut printable: String = escaped.chars().take(MAX_LABEL_CHARS).collect();
+    if escaped.chars().count() > MAX_LABEL_CHARS {
         printable.push('…');
     }
     printable

@@ -212,7 +212,11 @@ def value_after(flag):
 if len(sys.argv) >= 2 and sys.argv[1] == "principal-root-upgrade":
     if os.environ.get("ELASTOS_SMOKE_FAIL_UPGRADE") == "1":
         print("migrating Documents")
-        print("Error: Documents/large.bin is not encrypted and is 17 MiB.")
+        print(
+            "Error: Documents/large.bin is not encrypted and is 17 MiB. Move it out of "
+            + value_after("--data-dir")
+            + "/Users/x/Documents and try again."
+        )
         raise SystemExit(41)
     empty_upgrade = os.environ.get("ELASTOS_SMOKE_EMPTY_UPGRADE_RECEIPT")
     if empty_upgrade is not None:
@@ -762,10 +766,15 @@ def run_smoke(temp_root):
 
     refused = Fixture(temp_root, "refused-upgrade")
     refused_result = refused.run(env=refused.environment(ELASTOS_SMOKE_FAIL_UPGRADE="1"), ok=False)
-    if "mac-source-home-restart: Error: Documents/large.bin is not encrypted and is 17 MiB." not in refused_result.stderr:
-        raise AssertionError(f"refused upgrade did not print its Error: line: {refused_result.stderr!r}")
-    if "migrating Documents" in refused_result.stderr:
-        raise AssertionError("refused upgrade printed more than its Error: line")
+    expected_line = (
+        "mac-source-home-restart: Error: Documents/large.bin is not encrypted and is 17 MiB. "
+        "Move it out of <data-dir>/Users/x/Documents and try again."
+    )
+    if expected_line not in refused_result.stderr:
+        raise AssertionError(f"refused upgrade did not print its redacted Error: line: {refused_result.stderr!r}")
+    unredacted = refused_result.stderr.replace("<data-dir>/Users/x/Documents", "")
+    if "migrating Documents" in refused_result.stderr or "/Users/x/Documents" in unredacted:
+        raise AssertionError("refused upgrade printed more than its redacted Error: line")
 
     unsafe_fifo = Fixture(temp_root, "unsafe-rollback-fifo")
     fifo_result = unsafe_fifo.run(

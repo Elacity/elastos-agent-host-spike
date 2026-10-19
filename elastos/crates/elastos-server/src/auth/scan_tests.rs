@@ -518,3 +518,40 @@ fn linked_declared_folder_is_refused_by_name() {
         )
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn names_with_line_breaks_or_bidi_render_on_one_line() {
+    // A damaged file whose name would forge a second `Error:` line.
+    let home = Home::new("person:local:scan-escaped-notice-home");
+    let name = "Documents/evil\nError: forged\u{202e}txt.bin";
+    let mut damaged = home.envelope(name, b"damaged body");
+    damaged[9] = 0xff;
+    home.write(name, &damaged);
+    let notices = home.ready().unwrap();
+    assert_eq!(notices.len(), 1);
+    assert!(
+        notices[0].starts_with(
+            "Documents/evil\\u{a}Error: forged\\u{202e}txt.bin does not carry the label"
+        ),
+        "{}",
+        notices[0]
+    );
+    assert!(!notices[0].contains(['\n', '\u{202e}']), "{}", notices[0]);
+
+    // A link inside a folder whose name carries the same characters: the
+    // refusal names both on one line.
+    let home = Home::new("person:local:scan-escaped-refusal-home");
+    let folder = home.path("Documents/x\u{2066}\nError: y/link");
+    std::os::unix::fs::symlink("/", &folder).unwrap();
+    let message = home.ready().unwrap_err().to_string();
+    assert!(!message.contains(['\n', '\u{2066}']), "{message}");
+    assert!(
+        message.starts_with("Documents/x\\u{2066}\\u{a}Error: y/link is a link."),
+        "{message}"
+    );
+    assert!(
+        message.contains("/Documents/x\\u{2066}\\u{a}Error: y, then try again."),
+        "{message}"
+    );
+}
