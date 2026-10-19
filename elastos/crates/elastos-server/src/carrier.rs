@@ -128,6 +128,16 @@ const MAX_CARRIER_OBJECT_IMPORT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_REMOTE_RECEIPT_REPLICA_SUMMARY_ROWS: usize = 5;
 const GOSSIP_SEND_TIMEOUT: Duration = Duration::from_millis(1_500);
 const GOSSIP_JOIN_PEERS_TIMEOUT: Duration = Duration::from_millis(1_500);
+/// Bounds one topic subscription. Subscribing only queues a Join on the local
+/// actor, so it stalls only when that actor does; a stalled actor must not
+/// hold the gossip state lock that recovery and shutdown need.
+const GOSSIP_SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bounds one hand-off to the local gossip actor (a connection, a shutdown);
+/// a stalled actor never answers either.
+const GOSSIP_ACTOR_TIMEOUT: Duration = Duration::from_secs(2);
+/// A gossip recovery that cannot take the state within this gives up rather
+/// than running later, right after another one.
+const GOSSIP_RECOVERY_START_TIMEOUT: Duration = Duration::from_secs(2);
 /// A consumer that joins a CID topic after the holder announced still needs a
 /// window for DHT/mDNS to form a gossip neighbor and for the signed fetch
 /// ticket to arrive. One absolute deadline covers late holders. Operator peer
@@ -450,6 +460,62 @@ struct TopicBuffer {
     messages: VecDeque<GossipMessage>,
     base_index: u64,
     retained_bytes: usize,
+    /// Gossip frames received from peers on this topic, kept across a rejoin
+    /// or a gossip rebuild. Local sends never count.
+    remote_frames: u64,
+}
+
+/// How a topic was joined, so a gossip rebuild can join it again the same way.
+#[derive(Clone)]
+enum TopicJoin {
+    Direct(Vec<iroh::EndpointId>),
+    Discovered,
+}
+
+/// The Router's gossip entry. A gossip rebuild swaps the actor behind it, so
+/// new peer connections reach the new actor and the old one can be dropped.
+#[derive(Debug, Clone)]
+struct CarrierGossipHandler(Arc<std::sync::RwLock<Gossip>>);
+
+impl CarrierGossipHandler {
+    fn new(gossip: Gossip) -> Self {
+        Self(Arc::new(std::sync::RwLock::new(gossip)))
+    }
+
+    fn current(&self) -> Gossip {
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn replace(&self, gossip: Gossip) -> Gossip {
+        std::mem::replace(
+            &mut *self
+                .0
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            gossip,
+        )
+    }
+}
+
+impl ProtocolHandler for CarrierGossipHandler {
+    async fn accept(&self, connection: iroh::endpoint::Connection) -> Result<(), AcceptError> {
+        // Bounded, so a waiting accept never keeps a replaced actor alive.
+        let gossip = self.current();
+        match tokio::time::timeout(GOSSIP_ACTOR_TIMEOUT, gossip.handle_connection(connection)).await
+        {
+            Ok(handled) => handled.map_err(AcceptError::from_err),
+            Err(_) => Err(AcceptError::from_err(std::io::Error::other(
+                "gossip actor did not take the connection",
+            ))),
+        }
+    }
+
+    async fn shutdown(&self) {
+        ProtocolHandler::shutdown(&self.current()).await;
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -550,10 +616,36 @@ fn push_gossip_buffer_message(buffer: &mut TopicBuffer, message: GossipMessage) 
     true
 }
 
-fn spawn_carrier_gossip(endpoint: &Endpoint) -> Gossip {
+/// Active neighbours a Community bootstrap node keeps. Homes behind NAT reach
+/// each other only through it, so with iroh-gossip's default of 5 a sixth
+/// Home's join evicts a random Home, which then has no neighbour at all.
+/// Each active neighbour costs the hub one QUIC connection (already held for
+/// the topic) plus a bounded per-peer send queue, so 512 Homes stay cheap.
+const COMMUNITY_HUB_ACTIVE_VIEW_CAPACITY: usize = 512;
+/// Passive view of the hub: contact info only (no connection).
+const COMMUNITY_HUB_PASSIVE_VIEW_CAPACITY: usize = 1024;
+
+/// A Home keeps iroh-gossip's default membership; only a Community bootstrap
+/// node (its endpoint is one of the profile's bootstrap peers) is the hub.
+fn carrier_gossip_membership(community_hub: bool) -> iroh_gossip::proto::HyparviewConfig {
+    let mut membership = iroh_gossip::proto::HyparviewConfig::default();
+    if community_hub {
+        membership.active_view_capacity = COMMUNITY_HUB_ACTIVE_VIEW_CAPACITY;
+        membership.passive_view_capacity = COMMUNITY_HUB_PASSIVE_VIEW_CAPACITY;
+    }
+    membership
+}
+
+fn spawn_carrier_gossip_for(endpoint: &Endpoint, community_hub: bool) -> Gossip {
     Gossip::builder()
         .max_message_size(GOSSIP_WIRE_MESSAGE_MAX_BYTES)
+        .membership_config(carrier_gossip_membership(community_hub))
         .spawn(endpoint.clone())
+}
+
+#[cfg(test)]
+fn spawn_carrier_gossip(endpoint: &Endpoint) -> Gossip {
+    spawn_carrier_gossip_for(endpoint, false)
 }
 
 fn now_secs() -> u64 {
@@ -570,7 +662,6 @@ fn now_secs() -> u64 {
 /// works like a virtual LAN. Join a topic, discover peers automatically.
 pub struct CarrierNode {
     pub endpoint: Endpoint,
-    pub gossip: Gossip,
     _router: Router,
     pub gossip_state: Arc<Mutex<GossipState>>,
     pub memory_lookup: MemoryLookup,
@@ -578,23 +669,17 @@ pub struct CarrierNode {
 
 impl CarrierNode {
     pub(crate) async fn shutdown(self) {
-        let tasks = {
-            let mut state = self.gossip_state.lock().await;
-            let tasks = state
-                .receiver_tasks
-                .drain()
-                .map(|(_, task)| task)
-                .collect::<Vec<_>>();
-            state.senders.clear();
-            state.joined_topics.clear();
-            tasks
-        };
+        let (tasks, gossip) = self.gossip_state.lock().await.close();
         for task in tasks {
             task.abort();
             let _ = task.await;
         }
-        if let Err(err) = self.gossip.shutdown().await {
-            tracing::warn!(error = %err, "carrier gossip shutdown failed during runtime shutdown");
+        match tokio::time::timeout(GOSSIP_ACTOR_TIMEOUT, gossip.shutdown()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                tracing::warn!(error = %err, "carrier gossip shutdown failed during runtime shutdown");
+            }
+            Err(_) => tracing::warn!("carrier gossip did not shut down in time; dropping it"),
         }
         self.endpoint.close().await;
     }
@@ -651,6 +736,9 @@ impl CarrierRuntimeService {
 pub struct GossipState {
     endpoint: Endpoint,
     gossip: Gossip,
+    gossip_handler: CarrierGossipHandler,
+    topic_joins: HashMap<String, TopicJoin>,
+    closed: bool,
     memory_lookup: MemoryLookup,
     signing_key: Option<ed25519_dalek::SigningKey>,
     joined_topics: std::collections::HashSet<String>,
@@ -665,6 +753,8 @@ pub struct GossipState {
     topic_peers: Arc<Mutex<HashMap<String, HashSet<String>>>>,
     did: Option<String>,
     direct_only: bool,
+    /// Set on a Community bootstrap node; every gossip actor it spawns is a hub.
+    community_hub: bool,
     browser_exit_network: Option<crate::collaboration_network::VerifiedCollaborationNetworkProfile>,
     browser_exit_reservations: browser_exit::BrowserExitReservations,
     browser_engine_probe_slots: Arc<tokio::sync::Semaphore>,
@@ -683,7 +773,10 @@ impl GossipState {
             browser_exit_reservations: browser_exit::BrowserExitReservations::default(),
             browser_engine_probe_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             endpoint,
+            gossip_handler: CarrierGossipHandler::new(gossip.clone()),
             gossip,
+            topic_joins: HashMap::new(),
+            closed: false,
             memory_lookup,
             signing_key,
             joined_topics: std::collections::HashSet::new(),
@@ -698,7 +791,19 @@ impl GossipState {
             topic_peers: Arc::new(Mutex::new(HashMap::new())),
             did,
             direct_only: false,
+            community_hub: false,
         }
+    }
+
+    /// Stops every topic for shutdown. Recovery that was waiting for this
+    /// state finds it closed and starts no new gossip actor.
+    fn close(&mut self) -> (Vec<tokio::task::JoinHandle<()>>, Gossip) {
+        self.closed = true;
+        self.senders.clear();
+        self.joined_topics.clear();
+        self.topic_joins.clear();
+        let tasks = self.receiver_tasks.drain().map(|(_, task)| task).collect();
+        (tasks, self.gossip.clone())
     }
 }
 
@@ -911,7 +1016,8 @@ async fn connect_ticket_endpoints(
     for addr in endpoints {
         match endpoint.connect(addr.clone(), iroh_gossip::ALPN).await {
             Ok(conn) => {
-                gossip.handle_connection(conn).await.ok();
+                let _ = tokio::time::timeout(GOSSIP_ACTOR_TIMEOUT, gossip.handle_connection(conn))
+                    .await;
                 let peer_id = addr.id.to_string();
                 connected.push(peer_id.clone());
                 let mut known = peers.lock().await;
@@ -1129,10 +1235,12 @@ fn is_trusted_source_runtime(data_dir: &std::path::Path) -> bool {
 async fn register_topic_state(
     state: &mut GossipState,
     topic_name: &str,
+    join: TopicJoin,
     sender: distributed_topic_tracker::GossipSender,
     receiver_task: tokio::task::JoinHandle<()>,
 ) {
     state.joined_topics.insert(topic_name.to_string());
+    state.topic_joins.insert(topic_name.to_string(), join);
     state.senders.insert(topic_name.to_string(), sender);
     if let Some(existing) = state
         .receiver_tasks
@@ -1141,6 +1249,67 @@ async fn register_topic_state(
         existing.abort();
         let _ = existing.await;
     }
+}
+
+/// Joins one recorded topic again on the current gossip actor. Its buffer and
+/// consumer cursors stay; its neighbours are relearned from the new join.
+async fn rejoin_topic(state: &mut GossipState, topic_name: &str, join: TopicJoin) -> Result<()> {
+    state.topic_peers.lock().await.remove(topic_name);
+    match join {
+        TopicJoin::Direct(peers) => join_gossip_topic_direct(state, topic_name, peers).await,
+        TopicJoin::Discovered => join_gossip_topic(state, topic_name, false).await,
+    }
+}
+
+/// Leaves one topic and joins it again with the peers it was joined with.
+/// Dropping the topic's only sender and receiver makes the actor quit it and
+/// send a fresh Join; a stalled actor needs `rebuild_carrier_gossip` instead.
+async fn leave_and_rejoin_topic(state: &mut GossipState, topic_name: &str) -> Result<()> {
+    anyhow::ensure!(!state.closed, "Carrier gossip is shut down");
+    let join = state
+        .topic_joins
+        .get(topic_name)
+        .cloned()
+        .context("gossip topic is not joined")?;
+    state.senders.remove(topic_name);
+    if let Some(task) = state.receiver_tasks.remove(topic_name) {
+        task.abort();
+        let _ = task.await;
+    }
+    rejoin_topic(state, topic_name, join).await
+}
+
+/// Replaces the gossip actor and joins every recorded topic on the new one.
+/// iroh-gossip 0.101 can hold a peer forever (a full per-peer send queue, or
+/// a peer left pending after a failed dial); only a new actor drops that.
+/// Returns how many topics joined again.
+async fn rebuild_carrier_gossip(state: &mut GossipState) -> Result<usize> {
+    anyhow::ensure!(!state.closed, "Carrier gossip is shut down");
+    // Leave first, so the old actor's Disconnects precede the new Joins.
+    let previous = state.gossip.clone();
+    if tokio::time::timeout(GOSSIP_ACTOR_TIMEOUT, previous.shutdown())
+        .await
+        .is_err()
+    {
+        warn!("carrier: gossip actor did not shut down for the rebuild; dropping it");
+    }
+    let replacement = spawn_carrier_gossip_for(&state.endpoint, state.community_hub);
+    state.gossip = replacement.clone();
+    drop(state.gossip_handler.replace(replacement));
+    drop(previous);
+    let topics = state
+        .topic_joins
+        .iter()
+        .map(|(topic, join)| (topic.clone(), join.clone()))
+        .collect::<Vec<_>>();
+    let mut rejoined = 0;
+    for (topic, join) in topics {
+        match rejoin_topic(state, &topic, join).await {
+            Ok(()) => rejoined += 1,
+            Err(err) => warn!("carrier: gossip rebuild could not rejoin '{topic}': {err:#}"),
+        }
+    }
+    Ok(rejoined)
 }
 
 async fn join_gossip_topic_direct(
@@ -1165,13 +1334,15 @@ async fn join_gossip_topic_direct(
             bootstrap_peers.len()
         );
     }
-    let joined = state
-        .gossip
-        .subscribe_with_opts(
+    let joined = tokio::time::timeout(
+        GOSSIP_SUBSCRIBE_TIMEOUT,
+        state.gossip.subscribe_with_opts(
             topic,
-            iroh_gossip::api::JoinOptions::with_bootstrap(bootstrap_peers),
-        )
-        .await?;
+            iroh_gossip::api::JoinOptions::with_bootstrap(bootstrap_peers.clone()),
+        ),
+    )
+    .await
+    .context("gossip subscription timed out")??;
     let (iroh_sender, iroh_receiver) = joined.split();
     let dtt_sender =
         distributed_topic_tracker::GossipSender::new(iroh_sender, TimeoutConfig::default());
@@ -1199,7 +1370,14 @@ async fn join_gossip_topic_direct(
         )
         .await;
     });
-    register_topic_state(state, topic_name, dtt_sender, receiver_task).await;
+    register_topic_state(
+        state,
+        topic_name,
+        TopicJoin::Direct(bootstrap_peers),
+        dtt_sender,
+        receiver_task,
+    )
+    .await;
     Ok(())
 }
 
@@ -1231,11 +1409,15 @@ async fn join_gossip_topic(
         topic_name,
         bootstrap_peers.len()
     );
-    let topic = state
-        .gossip
-        .subscribe_and_join_with_auto_discovery_no_wait(record_publisher)
-        .await?;
-    let (sender, receiver) = topic.split().await?;
+    let (sender, receiver) = tokio::time::timeout(GOSSIP_SUBSCRIBE_TIMEOUT, async {
+        let topic = state
+            .gossip
+            .subscribe_and_join_with_auto_discovery_no_wait(record_publisher)
+            .await?;
+        topic.split().await
+    })
+    .await
+    .context("gossip subscription timed out")??;
     state
         .buffers
         .lock()
@@ -1260,7 +1442,14 @@ async fn join_gossip_topic(
         )
         .await;
     });
-    register_topic_state(state, topic_name, sender, receiver_task).await;
+    register_topic_state(
+        state,
+        topic_name,
+        TopicJoin::Discovered,
+        sender,
+        receiver_task,
+    )
+    .await;
     Ok(())
 }
 
@@ -1330,9 +1519,9 @@ enum CarrierNodeNetwork {
     /// Operator configuration cannot select this value.
     Public,
     /// Direct connections only. The Minimal preset has no public Iroh relay
-    /// and no public address discovery. Peers use explicit tickets and
-    /// MemoryLookup. An approved ElastOS relay stays CR3. This constructor
-    /// rejects `ELASTOS_RELAY_URL`.
+    /// and no public address discovery. Peers resolve LAN addresses through
+    /// mDNS and explicit tickets through MemoryLookup. An approved ElastOS relay
+    /// stays CR3. This constructor rejects `ELASTOS_RELAY_URL`.
     Isolated,
 }
 
@@ -1409,6 +1598,98 @@ fn published_direct_endpoint_addr(addr: iroh::EndpointAddr) -> iroh::EndpointAdd
     let mut next = addr;
     next.addrs.retain(|transport| transport.is_ip());
     next
+}
+
+/// The address a ticket shared beyond this host carries (#336). When the
+/// endpoint has a public address, loopback, link-local, container bridge, LAN
+/// and CGNAT addresses are dropped: they reach nobody else, and LAN peers find
+/// each other through mDNS. A host with no public address (a LAN or a test)
+/// keeps its addresses. The shell-scope `get_ticket` keeps every address.
+fn exported_endpoint_addr(addr: iroh::EndpointAddr) -> iroh::EndpointAddr {
+    let public = |transport: &iroh::TransportAddr| match transport {
+        iroh::TransportAddr::Ip(addr) => is_public_ip(addr.ip()),
+        _ => false,
+    };
+    let mut next = addr;
+    if next.addrs.iter().any(public) {
+        next.addrs
+            .retain(|transport| !transport.is_ip() || public(transport));
+    }
+    next
+}
+
+/// Global unicast, excluding the IANA special-use ranges.
+fn is_public_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => is_public_ipv4(v4),
+        std::net::IpAddr::V6(v6) => {
+            let s = v6.segments();
+            // IPv4-mapped (::ffff:0:0/96) and NAT64 (64:ff9b::/96) carry an
+            // IPv4 address. IPv4-compatible (::/96) is deprecated: never public.
+            let embedded = std::net::Ipv4Addr::from((u32::from(s[6]) << 16) | u32::from(s[7]));
+            if s[..5] == [0; 5] && s[5] == 0xffff {
+                return is_public_ipv4(embedded);
+            }
+            if s[..6] == [0; 6] {
+                return false;
+            }
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                return is_public_ipv4(embedded);
+            }
+            // 6to4 (2002::/16) carries an IPv4 address in bits 16..48.
+            if s[0] == 0x2002 {
+                return is_public_ipv4(std::net::Ipv4Addr::from(
+                    (u32::from(s[1]) << 16) | u32::from(s[2]),
+                ));
+            }
+            let bits = u128::from(v6);
+            let within =
+                |net: &(u128, u32)| bits & !u128::MAX.checked_shr(net.1).unwrap_or(0) == net.0;
+            // Globally reachable blocks inside the IETF 2001::/23 assignment.
+            if GLOBAL_IPV6_IN_IETF.iter().any(within) {
+                return true;
+            }
+            (bits >> 125) == 1 && !SPECIAL_USE_IPV6.iter().any(within)
+        }
+    }
+}
+
+/// IANA IPv6 Special-Purpose Address Registry entries inside 2000::/3 that
+/// are not globally reachable, as (prefix, length). Everything outside
+/// 2000::/3 (::, ::1, 100::/64, fc00::/7, fe80::/10, multicast) is excluded
+/// by the 2000::/3 check; mapped, compatible, NAT64 and 6to4 are judged by
+/// their IPv4 address above.
+const SPECIAL_USE_IPV6: [(u128, u32); 3] = [
+    (0x2001_0000 << 96, 23), // IETF assignments: Teredo, benchmarking, ORCHID
+    (0x2001_0db8 << 96, 32), // documentation
+    (0x3fff_0000 << 96, 20), // documentation
+];
+
+/// Globally reachable sub-blocks of 2001::/23 (PCP, TURN and DNS-SD anycast,
+/// AMT, AS112-v6).
+const GLOBAL_IPV6_IN_IETF: [(u128, u32); 5] = [
+    ((0x2001_0001 << 96) | 1, 128),
+    ((0x2001_0001 << 96) | 2, 128),
+    ((0x2001_0001 << 96) | 3, 128),
+    (0x2001_0003 << 96, 32),
+    (0x2001_0004_0112 << 80, 48),
+];
+
+fn is_public_ipv4(v4: std::net::Ipv4Addr) -> bool {
+    let [a, b, c, _] = v4.octets();
+    !(a == 0
+        || a == 10
+        || (a == 100 && (b & 0xc0) == 64)
+        || a == 127
+        || (a == 169 && b == 254)
+        || (a == 172 && (b & 0xf0) == 16)
+        || (a == 192 && b == 0 && (c == 0 || c == 2))
+        || (a == 192 && b == 88 && c == 99)
+        || (a == 192 && b == 168)
+        || (a == 198 && (b & 0xfe) == 18)
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
+        || a >= 224)
 }
 
 fn direct_only_relay_only_error(endpoints: &[iroh::EndpointAddr]) -> Option<serde_json::Value> {
@@ -1508,21 +1789,48 @@ async fn bind_carrier_endpoint(
     allow_ephemeral_fallback: bool,
 ) -> anyhow::Result<Endpoint> {
     let builder = || short_lived_endpoint_builder(secret_key.clone(), network, approved_relay);
-    let requested = builder()?;
-    // Iroh retains the other address family's default wildcard listener.
-    // A configured loopback endpoint uses only its requested IP transport.
-    // Its local-only address has no external router port to map.
-    let requested = if requested_bind_addr.ip().is_loopback() {
-        requested
-            .clear_ip_transports()
-            .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
-    } else {
-        requested
+    let requested = || -> anyhow::Result<iroh::endpoint::Builder> {
+        let requested = builder()?;
+        // Iroh retains the other address family's default wildcard listener.
+        // A configured loopback endpoint uses only its requested IP transport.
+        // Its local-only address has no external router port to map.
+        let requested = if requested_bind_addr.ip().is_loopback() {
+            requested
+                .clear_ip_transports()
+                .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
+        } else {
+            requested
+        };
+        requested.bind_addr(requested_bind_addr).map_err(|error| {
+            anyhow::anyhow!("Invalid Carrier address {requested_bind_addr}: {error}")
+        })
     };
-    let bound = requested.bind_addr(requested_bind_addr).map_err(|error| {
-        anyhow::anyhow!("Invalid Carrier address {requested_bind_addr}: {error}")
-    })?;
-    match bound.bind().await {
+    // An IPv4 wildcard on a fixed port also listens on the same IPv6 port, so
+    // a published ticket keeps one address per family across restarts (#336).
+    // If that IPv6 port is taken or the host has no IPv6, the Runtime keeps
+    // iroh's default ephemeral IPv6 listener instead.
+    let fixed_v6 = match requested_bind_addr {
+        std::net::SocketAddr::V4(v4) if v4.ip().is_unspecified() && v4.port() != 0 => Some(
+            std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, v4.port())),
+        ),
+        _ => None,
+    };
+    let first = match fixed_v6 {
+        Some(v6) => {
+            let bound = requested()?
+                .bind_addr(v6)
+                .map_err(|error| anyhow::anyhow!("Invalid Carrier IPv6 address {v6}: {error}"))?;
+            match bound.bind().await {
+                Ok(endpoint) => return Ok(endpoint),
+                Err(error) => {
+                    warn!("carrier: cannot listen on {v6} ({error}); IPv6 uses a random port");
+                    requested()?.bind().await
+                }
+            }
+        }
+        None => requested()?.bind().await,
+    };
+    match first {
         Ok(endpoint) => Ok(endpoint),
         Err(error) if !allow_ephemeral_fallback => Err(error).with_context(|| {
             format!("Failed to bind requested Carrier address {requested_bind_addr}")
@@ -1623,7 +1931,7 @@ pub async fn start_carrier_node_with_registry(
     data_dir: PathBuf,
     provider_registry: Option<Weak<ProviderRegistry>>,
 ) -> Result<CarrierNode> {
-    start_carrier_node_with_registry_bound(signing_key, did, data_dir, provider_registry, None)
+    start_carrier_node_with_registry_bound(signing_key, did, data_dir, provider_registry, None, &[])
         .await
 }
 
@@ -1631,6 +1939,8 @@ pub async fn start_carrier_node_with_registry(
 ///
 /// `bind_addr` of `None` keeps the well-known [`DEFAULT_CARRIER_BIND_ADDR`]
 /// attempt. When supplied, the explicit address must bind successfully.
+/// `community_bootstrap_node_ids` are the verified Community profile's
+/// bootstrap peers; a node whose endpoint is one of them is the Community hub.
 /// Every caller shares this path, so the operator peer-store address
 /// book seeding and provider-invoke dispatch are identical for a runtime host
 /// and a standalone provider host.
@@ -1640,6 +1950,7 @@ pub async fn start_carrier_node_with_registry_bound(
     data_dir: PathBuf,
     provider_registry: Option<Weak<ProviderRegistry>>,
     bind_addr: Option<std::net::SocketAddr>,
+    community_bootstrap_node_ids: &[String],
 ) -> Result<CarrierNode> {
     let network =
         parse_elastos_carrier_network(std::env::var("ELASTOS_CARRIER_NETWORK").ok().as_deref())?;
@@ -1654,6 +1965,7 @@ pub async fn start_carrier_node_with_registry_bound(
         provider_registry,
         network,
         bind_addr,
+        community_bootstrap_node_ids,
     )
     .await
 }
@@ -1672,6 +1984,7 @@ pub(crate) async fn start_isolated_carrier_node_with_registry(
         provider_registry,
         CarrierNodeNetwork::Isolated,
         Some("0.0.0.0:0".parse()?),
+        &[],
     )
     .await
 }
@@ -1683,6 +1996,7 @@ async fn start_carrier_node_with_network(
     provider_registry: Option<Weak<ProviderRegistry>>,
     network: CarrierNodeNetwork,
     bind_addr: Option<std::net::SocketAddr>,
+    community_bootstrap_node_ids: &[String],
 ) -> Result<CarrierNode> {
     let expected_did = crate::crypto::encode_signing_key_did(signing_key);
     let decoded_did =
@@ -1707,20 +2021,17 @@ async fn start_carrier_node_with_network(
     )
     .await?;
 
-    // Add mDNS for LAN discovery alongside the N0 preset lookup services.
-    match network {
-        CarrierNodeNetwork::Public if carrier_mdns_enabled() => {
-            if let Ok(mdns) = MdnsAddressLookup::builder().build(endpoint.id()) {
-                endpoint
-                    .address_lookup()
-                    .context("Carrier endpoint closed before mDNS setup")?
-                    .add(mdns);
-            }
+    // LAN discovery exchanges IP addresses for direct connections.
+    // The endpoint's IP-only policy also filters the published addresses.
+    if carrier_mdns_enabled() {
+        if let Ok(mdns) = MdnsAddressLookup::builder().build(endpoint.id()) {
+            endpoint
+                .address_lookup()
+                .context("Carrier endpoint closed before mDNS setup")?
+                .add(mdns);
         }
-        CarrierNodeNetwork::Public => {
-            info!("carrier: mDNS discovery disabled by ELASTOS_CARRIER_MDNS");
-        }
-        CarrierNodeNetwork::Isolated => {}
+    } else {
+        info!("carrier: mDNS discovery disabled by ELASTOS_CARRIER_MDNS");
     }
 
     // Add MemoryLookup for explicit peer addresses (--connect tickets)
@@ -1737,20 +2048,29 @@ async fn start_carrier_node_with_network(
     let bootstrap_peers =
         seed_address_book_from_operator_peer_store(&memory_lookup, &data_dir, network);
 
-    let gossip = spawn_carrier_gossip(&endpoint);
-
+    // The Community watchdog uses the same rule to tell the seed from a Home.
+    let local_node_id = endpoint.id().to_string();
+    let community_hub = community_bootstrap_node_ids.contains(&local_node_id);
+    if community_hub {
+        info!(
+            active_view = COMMUNITY_HUB_ACTIVE_VIEW_CAPACITY,
+            "carrier: this node is a Community bootstrap node; gossip runs as the hub"
+        );
+    }
     let gossip_state = Arc::new(Mutex::new(GossipState::new(
         endpoint.clone(),
-        gossip.clone(),
+        spawn_carrier_gossip_for(&endpoint, community_hub),
         memory_lookup.clone(),
         Some(signing_key.clone()),
         Some(did.to_string()),
     )));
-    {
+    let gossip_handler = {
         let mut state = gossip_state.lock().await;
         state.bootstrap_peers = bootstrap_peers;
         state.direct_only = network == CarrierNodeNetwork::Isolated;
-    }
+        state.community_hub = community_hub;
+        state.gossip_handler.clone()
+    };
 
     let file_handler = FileHandler {
         data_dir: data_dir.clone(),
@@ -1767,7 +2087,7 @@ async fn start_carrier_node_with_network(
     let router = Router::builder(endpoint.clone())
         .accept(CARRIER_ALPN, file_handler)
         .accept(OPERATOR_ALPN, operator_handler)
-        .accept(iroh_gossip::ALPN, gossip.clone())
+        .accept(iroh_gossip::ALPN, gossip_handler)
         .spawn();
 
     let bound_port = endpoint
@@ -1828,7 +2148,6 @@ async fn start_carrier_node_with_network(
 
     Ok(CarrierNode {
         endpoint,
-        gossip,
         _router: router,
         gossip_state,
         memory_lookup,
@@ -2662,7 +2981,10 @@ async fn carrier_provider_invoke_registry(
         }),
     );
 
-    let result = if target == "custody" {
+    let result = if target == "custody"
+        || target == crate::collaboration_history::HISTORY_PROVIDER
+        || target == crate::collaboration_transport::SHARED_PROVIDER
+    {
         registry
             .send_runtime_provider_target_raw(target, &request)
             .await
@@ -2696,6 +3018,8 @@ fn carrier_provider_target_allowed(target: &str) -> bool {
             | "collaboration"
             | "collaboration-direct"
             | "collaboration-profile"
+            | "collaboration.history"
+            | "collaboration.shared"
     )
 }
 
@@ -7040,6 +7364,38 @@ impl CarrierGossipProvider {
     pub fn new(state: Arc<Mutex<GossipState>>) -> Self {
         Self { state }
     }
+
+    /// Runtime-only Community recovery (`gossip_rejoin`, `gossip_rebuild`);
+    /// capsule resources never name these operations. Each runs on its own
+    /// task, so a caller that stops waiting (shutdown, Community leave)
+    /// cannot leave a topic half joined, and starts within
+    /// `GOSSIP_RECOVERY_START_TIMEOUT` or not at all.
+    async fn recover_gossip(&self, rebuild: bool, topic: String) -> serde_json::Value {
+        let state = self.state.clone();
+        let recovery = tokio::spawn(async move {
+            let mut state = tokio::time::timeout(GOSSIP_RECOVERY_START_TIMEOUT, state.lock())
+                .await
+                .context("Carrier gossip is busy")?;
+            if rebuild {
+                rebuild_carrier_gossip(&mut state)
+                    .await
+                    .map(|topics| serde_json::json!({"status":"ok","data":{"topics": topics}}))
+            } else {
+                leave_and_rejoin_topic(&mut state, &topic)
+                    .await
+                    .map(|()| serde_json::json!({"status":"ok","data":{"topic": topic}}))
+            }
+        });
+        match recovery.await {
+            Ok(Ok(response)) => response,
+            Ok(Err(err)) => serde_json::json!({
+                "status":"error","code":"recovery_failed","message": format!("{err:#}")
+            }),
+            Err(_) => serde_json::json!({
+                "status":"error","code":"recovery_failed","message":"gossip recovery stopped"
+            }),
+        }
+    }
 }
 
 impl std::fmt::Debug for CarrierGossipProvider {
@@ -7068,6 +7424,10 @@ impl Provider for CarrierGossipProvider {
         request: &serde_json::Value,
     ) -> Result<serde_json::Value, ProviderError> {
         let op = request.get("op").and_then(|v| v.as_str()).unwrap_or("");
+        if matches!(op, "gossip_rejoin" | "gossip_rebuild") {
+            let topic = request["topic"].as_str().unwrap_or_default().to_string();
+            return Ok(self.recover_gossip(op == "gossip_rebuild", topic).await);
+        }
         let mut state = self.state.lock().await;
 
         match op {
@@ -7145,6 +7505,7 @@ impl Provider for CarrierGossipProvider {
                 let removed_sender = state.senders.remove(topic_name);
                 let removed_task = state.receiver_tasks.remove(topic_name);
                 let was_joined = state.joined_topics.remove(topic_name);
+                state.topic_joins.remove(topic_name);
                 if removed_sender.is_none() && removed_task.is_none() && !was_joined {
                     return Ok(
                         serde_json::json!({"status":"error","code":"not_joined","message":"not joined"}),
@@ -7548,6 +7909,13 @@ impl Provider for CarrierGossipProvider {
                 } else {
                     watcher.get()
                 };
+                // The publisher bootstrap asks for the ticket it shares beyond
+                // this host; local callers keep every address (#336).
+                let addr = if request["exported"].as_bool() == Some(true) {
+                    exported_endpoint_addr(addr)
+                } else {
+                    addr
+                };
                 let ticket_json = serde_json::json!({
                     "topic": null,
                     "endpoints": [addr],
@@ -7666,6 +8034,34 @@ impl Provider for CarrierGossipProvider {
                     .collect();
                 peers.sort();
                 Ok(serde_json::json!({"status":"ok","data":{"topic": topic_name, "peers": peers}}))
+            }
+
+            // Runtime-only, like `gossip_peek`: capsule resources never name it.
+            "gossip_topic_health" => {
+                let topic_name = request["topic"].as_str().unwrap_or_default();
+                if !state.joined_topics.contains(topic_name) {
+                    return Ok(gossip_cursor_error(
+                        "not_joined",
+                        "gossip topic is not joined",
+                    ));
+                }
+                let peer_count = state
+                    .topic_peers
+                    .lock()
+                    .await
+                    .get(topic_name)
+                    .map_or(0, HashSet::len);
+                let received_frames = state
+                    .buffers
+                    .lock()
+                    .await
+                    .get(topic_name)
+                    .map_or(0, |buffer| buffer.remote_frames);
+                Ok(serde_json::json!({"status":"ok","data":{
+                    "topic": topic_name,
+                    "peer_count": peer_count,
+                    "received_frames": received_frames,
+                }}))
             }
 
             "gossip_join_peers" => {
@@ -7804,18 +8200,17 @@ async fn handle_gossip_event(
 ) {
     match event {
         iroh_gossip::api::Event::Received(msg) => {
-            if msg.content.len() > GOSSIP_WIRE_MESSAGE_MAX_BYTES {
-                return;
-            }
-            let Ok(gossip_msg) = serde_json::from_slice::<GossipMessage>(&msg.content) else {
-                return;
-            };
-            if serialize_gossip_wire_message(&gossip_msg).is_err() {
-                return;
-            }
+            // Any frame from a peer proves the link; only well-formed ones are kept.
+            let gossip_msg = (msg.content.len() <= GOSSIP_WIRE_MESSAGE_MAX_BYTES)
+                .then(|| serde_json::from_slice::<GossipMessage>(&msg.content).ok())
+                .flatten()
+                .filter(|message| serialize_gossip_wire_message(message).is_ok());
             let mut bufs = buffers.lock().await;
             if let Some(buf) = bufs.get_mut(topic) {
-                push_gossip_buffer_message(buf, gossip_msg);
+                buf.remote_frames = buf.remote_frames.wrapping_add(1);
+                if let Some(gossip_msg) = gossip_msg {
+                    push_gossip_buffer_message(buf, gossip_msg);
+                }
             }
         }
         iroh_gossip::api::Event::NeighborUp(peer) => {
@@ -8312,6 +8707,8 @@ fn carrier_endpoint_matches_peer(endpoint: &iroh::EndpointAddr, peer_did: &str) 
     did_to_public_key(peer_did).is_some_and(|public_key| endpoint.id == public_key)
 }
 
+// Its raw fetch methods are still crate-visible; component bytes go through
+// AdmittedRow functions. Restricting these methods is #369.
 pub struct CarrierClient {
     conn: iroh::endpoint::Connection,
     _endpoint: Endpoint,
@@ -8724,13 +9121,27 @@ impl CarrierClient {
             "{operation} exceeds its {max_bytes}-byte bound ({len} bytes declared)"
         );
         let mut content = vec![0u8; len as usize];
+        // Only a scoped caller (setup's progress line) is told how far the
+        // body has come, at most once per `REPLY_PROGRESS_CHUNK` bytes. The
+        // read itself is unchanged, so the idle rule above still decides.
+        let progress = REPLY_PROGRESS.try_with(std::sync::Arc::clone).ok();
+        if let Some(progress) = &progress {
+            progress(0, len);
+        }
         let mut filled = 0;
+        let mut reported = 0;
         while filled < content.len() {
             let read = tokio::time::timeout(idle, recv.read(&mut content[filled..]))
                 .await
                 .map_err(stalled)??;
             filled += read
                 .ok_or_else(|| anyhow::anyhow!("{operation} ended early ({filled}/{len} bytes)"))?;
+            if let Some(progress) = &progress {
+                if filled == content.len() || filled - reported >= REPLY_PROGRESS_CHUNK {
+                    reported = filled;
+                    progress(filled as u64, len);
+                }
+            }
         }
         Ok(content)
     }
@@ -8759,15 +9170,23 @@ impl CarrierClient {
         send.finish().context(CarrierTransportFailure)?;
 
         let mut reader = BufReader::new(recv);
-        // A bounded read holds at most 64 KiB of base64 plus its envelope;
-        // a holder that sends more is refused before it is buffered.
-        let (line, _budget) = if bounded {
-            let line = read_peer_line(
-                &mut reader,
-                CARRIER_BOUNDED_INVOKE_MAX_RESPONSE_BYTES,
-                CARRIER_PROVIDER_REPLY_WAIT,
-            )
-            .await;
+        let reply_bound = if invocation.target == crate::collaboration_history::HISTORY_PROVIDER
+            && invocation.op == "read"
+            && invocation.transfer == ProviderTransfer::Json
+        {
+            Some(crate::collaboration_history::MAX_HISTORY_CARRIER_REPLY_BYTES as u64)
+        } else if invocation.target == crate::collaboration_transport::SHARED_PROVIDER
+            && invocation.op == "deliver"
+            && invocation.transfer == ProviderTransfer::Json
+        {
+            Some(crate::collaboration_transport::MAX_SHARED_CARRIER_REPLY_BYTES as u64)
+        } else if bounded {
+            Some(CARRIER_BOUNDED_INVOKE_MAX_RESPONSE_BYTES)
+        } else {
+            None
+        };
+        let (line, _budget) = if let Some(limit) = reply_bound {
+            let line = read_peer_line(&mut reader, limit, CARRIER_PROVIDER_REPLY_WAIT).await;
             (line, None)
         } else if whole_content {
             (
@@ -8788,6 +9207,12 @@ impl CarrierClient {
             }
         };
         let line = line.map_err(carrier_answer_read_error)?;
+        if let Some(limit) = reply_bound {
+            anyhow::ensure!(
+                line.ends_with('\n'),
+                "bounded Carrier provider response exceeds {limit} bytes"
+            );
+        }
         let response: serde_json::Value = serde_json::from_str(line.trim())?;
         carrier_provider_invoke_result(response)
     }
@@ -8890,6 +9315,23 @@ impl CarrierClient {
             .transpose()?
             .ok_or_else(|| anyhow::anyhow!("Carrier gossip pull response missing messages"))
     }
+}
+
+/// Receives `(bytes_read, bytes_declared)` for each byte reply read inside
+/// [`with_reply_progress`]. Replies read outside a scope report nothing.
+pub(crate) type ReplyProgress = std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>;
+
+tokio::task_local! {
+    static REPLY_PROGRESS: ReplyProgress;
+}
+
+const REPLY_PROGRESS_CHUNK: usize = 64 * 1024;
+
+pub(crate) async fn with_reply_progress<F: std::future::Future>(
+    progress: ReplyProgress,
+    future: F,
+) -> F::Output {
+    REPLY_PROGRESS.scope(progress, future).await
 }
 
 /// A download fails only when no bytes arrive for this long, never on total
@@ -9169,6 +9611,7 @@ pub(crate) mod tests {
             messages,
             base_index,
             retained_bytes,
+            remote_frames: 0,
         }
     }
 
@@ -9182,6 +9625,7 @@ pub(crate) mod tests {
             messages,
             base_index,
             retained_bytes,
+            remote_frames: 0,
         }
     }
 
@@ -9196,22 +9640,12 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn shutdown_test_carrier_node(node: CarrierNode) {
-        let tasks = {
-            let mut state = node.gossip_state.lock().await;
-            let tasks = state
-                .receiver_tasks
-                .drain()
-                .map(|(_, task)| task)
-                .collect::<Vec<_>>();
-            state.senders.clear();
-            state.joined_topics.clear();
-            tasks
-        };
+        let (tasks, gossip) = node.gossip_state.lock().await.close();
         for task in tasks {
             task.abort();
             let _ = task.await;
         }
-        tokio::time::timeout(Duration::from_secs(5), node.gossip.shutdown())
+        tokio::time::timeout(Duration::from_secs(5), gossip.shutdown())
             .await
             .expect("test gossip shutdown timed out")
             .expect("test gossip shutdown failed");
@@ -10869,9 +11303,50 @@ pub(crate) mod tests {
         assert!(!response.to_string().contains("\"connect_ticket\":"));
     }
 
+    #[tokio::test]
+    async fn test_carrier_shared_dispatch_uses_private_runtime_target_and_authenticated_source() {
+        let registry = ProviderRegistry::new();
+        let target = crate::collaboration_transport::SHARED_PROVIDER;
+        registry
+            .register_runtime_provider_target(target, Arc::new(MockCarrierContentProvider))
+            .await
+            .unwrap();
+        let request = serde_json::json!({
+            "source": target, "target": target, "operation": "deliver", "transfer": "json",
+            "request": {"op":"deliver", "_runtime_invocation": {
+                "schema":"elastos.provider.invocation/v1", "source":target, "target":target,
+                "op":"deliver", "capability":format!("provider:{target}->{target}:deliver"),
+                "transport":"carrier-provider-plane", "carrier":null, "transfer":"json",
+                "range":null, "progress":null
+            }}
+        });
+        assert!(registry
+            .send_raw(target, &request["request"])
+            .await
+            .is_err());
+        let source = authenticated_test_source_endpoint();
+        let response = carrier_provider_invoke_registry(&registry, &request, &source)
+            .await
+            .unwrap();
+        assert_eq!(response["ok"], true);
+        assert_eq!(
+            response["result"]["data"]["runtime_invocation"]["carrier"]["source_endpoint_did"],
+            public_key_to_did(&source).unwrap()
+        );
+        let mut forged = request;
+        forged["request"]["_runtime_invocation"]["carrier"] =
+            serde_json::json!({"source_endpoint_did":"forged"});
+        let refused = carrier_provider_invoke_registry(&registry, &forged, &source)
+            .await
+            .unwrap();
+        assert_eq!(refused["ok"], false);
+        assert_eq!(refused["code"], "invalid_provider_invocation");
+    }
+
     #[test]
     fn test_carrier_provider_target_admission_keeps_protected_runtime_targets_narrow() {
         assert!(carrier_provider_target_allowed("custody"));
+        assert!(carrier_provider_target_allowed("collaboration.shared"));
         assert!(!carrier_provider_target_allowed("protect"));
         assert!(!carrier_provider_target_allowed("media"));
         assert!(!carrier_provider_target_allowed(
@@ -10896,6 +11371,82 @@ pub(crate) mod tests {
         assert_eq!(endpoint.bound_sockets(), vec![bind_addr]);
         releasing.await.unwrap();
         endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn reply_progress_reports_chunks_inside_its_scope_only() {
+        let server = Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .clear_ip_transports()
+            .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
+            .alpns(vec![CARRIER_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let address = wait_for_direct_endpoint_addr(&server).await;
+        let payload: Vec<u8> = (0..200_000u32).map(|index| index as u8).collect();
+        let served = payload.clone();
+        let server_endpoint = server.clone();
+        let serving = tokio::spawn(async move {
+            // Two complete replies, then one that declares more than the bound.
+            for declared in [served.len() as u64, served.len() as u64, 1u64 << 20] {
+                let conn = server_endpoint.accept().await.unwrap().await.unwrap();
+                let (mut send, recv) = conn.accept_bi().await.unwrap();
+                let mut request = String::new();
+                BufReader::new(recv).read_line(&mut request).await.unwrap();
+                send.write_all(&declared.to_be_bytes()).await.unwrap();
+                if declared == served.len() as u64 {
+                    send.write_all(&served).await.unwrap();
+                }
+                send.finish().unwrap();
+                conn.closed().await;
+            }
+        });
+        let reports = Arc::new(StdMutex::new(Vec::new()));
+        let recorded = Arc::clone(&reports);
+        let sink: ReplyProgress =
+            Arc::new(move |read, declared| recorded.lock().unwrap().push((read, declared)));
+        let fetch = |max_bytes| {
+            let address = address.clone();
+            async move {
+                let client = CarrierClient::connect_endpoint_addr(address, 5)
+                    .await
+                    .unwrap();
+                let result = client.fetch_file_bounded("artifact", max_bytes).await;
+                client.close().await;
+                result
+            }
+        };
+
+        let bytes = with_reply_progress(Arc::clone(&sink), fetch(1 << 21))
+            .await
+            .unwrap();
+        assert_eq!(bytes, payload);
+        let len = payload.len() as u64;
+        let seen = reports.lock().unwrap().clone();
+        assert_eq!(seen.first(), Some(&(0, len)));
+        assert_eq!(seen.last(), Some(&(len, len)));
+        assert!(seen.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        // Reports are spaced at least one chunk apart, so they stay few.
+        assert!(seen.len() >= 2, "{seen:?}");
+        assert!(seen.len() <= 1 + payload.len().div_ceil(REPLY_PROGRESS_CHUNK));
+        assert!(seen[1..seen.len() - 1]
+            .windows(2)
+            .all(|pair| pair[1].0 - pair[0].0 >= REPLY_PROGRESS_CHUNK as u64));
+
+        reports.lock().unwrap().clear();
+        assert_eq!(fetch(1 << 21).await.unwrap(), payload);
+        assert!(reports.lock().unwrap().is_empty());
+
+        let error = with_reply_progress(sink, fetch(1 << 19)).await.unwrap_err();
+        assert!(error.to_string().contains("byte bound"), "{error}");
+        assert!(reports.lock().unwrap().is_empty());
+        tokio::time::timeout(Duration::from_secs(5), serving)
+            .await
+            .unwrap()
+            .unwrap();
+        server.close().await;
     }
 
     #[tokio::test]
@@ -10935,12 +11486,20 @@ pub(crate) mod tests {
         sources.default_source = source.name.clone();
         sources.sources.push(source);
         crate::sources::save_trusted_sources(dir.path(), &sources).unwrap();
+        // The fixture row names the bytes the source serves.
+        let row = crate::capsule_record::AdmittedRow::for_test(
+            "artifact",
+            &serde_json::from_value(serde_json::json!({
+                "release_path": "artifact", "size": 7,
+                "checksum": format!("sha256:{:x}", Sha256::digest(b"fixture")),
+            }))
+            .unwrap(),
+        );
         let refused = tokio::time::timeout(
             Duration::from_secs(5),
             crate::setup::fetch_first_party_component_via_carrier(
                 dir.path(),
-                None,
-                "artifact",
+                &row,
                 crate::setup::FirstPartyCarrierContext::Setup,
             ),
         )
@@ -10972,8 +11531,7 @@ pub(crate) mod tests {
         for _ in 0..2 {
             let bytes = crate::setup::fetch_first_party_component_via_carrier(
                 dir.path(),
-                None,
-                "artifact",
+                &row,
                 crate::setup::FirstPartyCarrierContext::Setup,
             )
             .await
@@ -11072,8 +11630,7 @@ pub(crate) mod tests {
                 Duration::from_secs(10),
                 crate::setup::install_first_party_component_via_carrier(
                     dir.path(),
-                    "fixture-tool",
-                    &info,
+                    &crate::capsule_record::AdmittedRow::for_test("fixture-tool", &info),
                     &dest,
                     crate::setup::FirstPartyCarrierContext::Setup,
                 ),
@@ -11297,6 +11854,7 @@ pub(crate) mod tests {
                 Some(&old_components),
                 &new_components,
                 "*",
+                &crate::capsule_record::UpdateRecords::default(),
             ),
         )
         .await
@@ -11314,6 +11872,7 @@ pub(crate) mod tests {
                 Some(&old_components),
                 &new_components,
                 "*",
+                &crate::capsule_record::UpdateRecords::default(),
                 crate::setup::FirstPartyCarrierContext::Runtime,
             ),
         )
@@ -11819,9 +12378,6 @@ pub(crate) mod tests {
         pub(crate) stall_once: std::collections::BTreeSet<u64>,
         /// Range starts whose every read stalls past the answer budget.
         pub(crate) stall_always: std::collections::BTreeSet<u64>,
-        /// While it holds a value below `u64::MAX`, every read of a range
-        /// starting at or after that offset stalls past the answer budget.
-        pub(crate) stall_from: Option<Arc<std::sync::atomic::AtomicU64>>,
         /// Range starts whose first read the holder refuses.
         pub(crate) refuse_once: std::collections::BTreeSet<u64>,
         /// Range starts whose every read the holder refuses.
@@ -11839,7 +12395,6 @@ pub(crate) mod tests {
         pub(crate) serial: Option<tokio::sync::Mutex<()>>,
         pub(crate) stall_once: StdMutex<std::collections::BTreeSet<u64>>,
         pub(crate) stall_always: std::collections::BTreeSet<u64>,
-        pub(crate) stall_from: Option<Arc<std::sync::atomic::AtomicU64>>,
         pub(crate) refuse_once: StdMutex<std::collections::BTreeSet<u64>>,
         pub(crate) refuse_always: std::collections::BTreeSet<u64>,
         pub(crate) oversize: std::collections::BTreeSet<u64>,
@@ -11877,11 +12432,7 @@ pub(crate) mod tests {
             tokio::time::sleep(self.delay).await;
             let start = request["_runtime_invocation"]["range"]["start"].as_u64();
             let stalls = start.is_some_and(|start| {
-                self.stall_always.contains(&start)
-                    || self.stall_from.as_ref().is_some_and(|from| {
-                        start >= from.load(std::sync::atomic::Ordering::Acquire)
-                    })
-                    || self.stall_once.lock().unwrap().remove(&start)
+                self.stall_always.contains(&start) || self.stall_once.lock().unwrap().remove(&start)
             });
             if stalls {
                 tokio::time::sleep(Duration::from_secs(7)).await;
@@ -12083,7 +12634,6 @@ pub(crate) mod tests {
                     serial: behavior.serialized.then(|| tokio::sync::Mutex::new(())),
                     stall_once: StdMutex::new(behavior.stall_once),
                     stall_always: behavior.stall_always,
-                    stall_from: behavior.stall_from,
                     refuse_once: StdMutex::new(behavior.refuse_once),
                     refuse_always: behavior.refuse_always,
                     oversize: behavior.oversize,
@@ -12803,6 +13353,127 @@ pub(crate) mod tests {
             _local_dir: local_dir,
             _remote_dir: remote_dir,
         }
+    }
+
+    struct HistoryWireProbe {
+        bytes: Arc<std::sync::atomic::AtomicUsize>,
+        requests: Arc<StdMutex<Vec<serde_json::Value>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for HistoryWireProbe {
+        async fn handle(
+            &self,
+            _request: ResourceRequest,
+        ) -> Result<ResourceResponse, ProviderError> {
+            Err(ProviderError::Provider("history is Runtime-owned".into()))
+        }
+        fn schemes(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+        fn name(&self) -> &'static str {
+            "history-wire-probe"
+        }
+        async fn send_raw(
+            &self,
+            request: &serde_json::Value,
+        ) -> Result<serde_json::Value, ProviderError> {
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(
+                serde_json::json!({"body":"x".repeat(self.bytes.load(std::sync::atomic::Ordering::SeqCst))}),
+            )
+        }
+    }
+
+    async fn assert_private_carrier_reply_bound(target: &str, operation: &str, limit: usize) {
+        let fixture = peer_did_route_fixture(181, 182).await;
+        let payload_size = 32 * 1024;
+        assert!(payload_size < limit);
+        let size = Arc::new(std::sync::atomic::AtomicUsize::new(payload_size));
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        fixture
+            ._remote_registry
+            .register_runtime_provider_target(
+                target,
+                Arc::new(HistoryWireProbe {
+                    bytes: size.clone(),
+                    requests: requests.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(fixture
+            ._remote_registry
+            .send_raw(target, &serde_json::json!({"op":operation}))
+            .await
+            .is_err());
+        let invocation = ProviderInvocation {
+            source: target.into(),
+            target: target.into(),
+            op: operation.into(),
+            request: serde_json::json!({"op":operation}),
+            transfer: ProviderTransfer::Json,
+            range: None,
+            progress: None,
+            transport: ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
+                peer_did: fixture.remote_did.clone(),
+                timeout_ms: Some(5_000),
+            }),
+        };
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            fixture.local_registry.invoke_provider(invocation.clone()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response["body"], "x".repeat(payload_size));
+        let mut request = requests.lock().unwrap()[0].clone();
+        assert_eq!(
+            request["_runtime_invocation"]["carrier"]["source_endpoint_did"],
+            public_key_to_did(&fixture.local_node.endpoint.id()).unwrap()
+        );
+        // The receiving Runtime owns this metadata; wire callers supply null.
+        request["_runtime_invocation"]["carrier"] = serde_json::Value::Null;
+        size.store(limit + 1, std::sync::atomic::Ordering::SeqCst);
+        let client = CarrierClient::connect_known_endpoint(
+            &fixture.local_node.endpoint,
+            fixture.remote_addr.clone(),
+            5,
+        )
+        .await
+        .unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.invoke_provider(&invocation, request),
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(&format!("exceeds {limit} bytes")), "{error}");
+        shutdown_test_carrier_node(fixture.remote_node).await;
+        shutdown_test_carrier_node(fixture.local_node).await;
+    }
+
+    #[tokio::test]
+    async fn private_history_carrier_read_authenticates_source_and_bounds_the_wire_reply() {
+        assert_private_carrier_reply_bound(
+            crate::collaboration_history::HISTORY_PROVIDER,
+            "read",
+            crate::collaboration_history::MAX_HISTORY_CARRIER_REPLY_BYTES,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn private_shared_carrier_delivery_authenticates_source_and_bounds_the_wire_reply() {
+        assert_private_carrier_reply_bound(
+            crate::collaboration_transport::SHARED_PROVIDER,
+            "deliver",
+            crate::collaboration_transport::MAX_SHARED_CARRIER_REPLY_BYTES,
+        )
+        .await;
     }
 
     fn peer_did_invocation(peer_did: &str) -> ProviderInvocation {
@@ -16297,6 +16968,185 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn exported_ticket_lists_only_public_addresses() {
+        let peer = SecretKey::from_bytes(&[70u8; 32]).public();
+        let ips = |addrs: &[&str]| {
+            let addr = iroh::EndpointAddr::from(peer).with_addrs(
+                addrs
+                    .iter()
+                    .map(|addr| iroh::TransportAddr::Ip(addr.parse().unwrap())),
+            );
+            exported_endpoint_addr(addr)
+                .addrs
+                .into_iter()
+                .map(|transport| match transport {
+                    iroh::TransportAddr::Ip(addr) => addr.to_string(),
+                    other => panic!("unexpected transport: {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        // The seed: public IPv4 beside Docker bridges, benchmarking and loopback.
+        let seed = ips(&[
+            "127.0.0.1:4433",
+            "172.17.0.1:4433",
+            "172.19.0.1:4433",
+            "198.18.0.1:4433",
+            "77.42.19.31:4433",
+        ]);
+        assert_eq!(seed, ["77.42.19.31:4433"]);
+        let mixed = ips(&[
+            "[::1]:4433",
+            "[fe80::1]:4433",
+            "[fd00::1]:4433",
+            "[2001:db8::1]:4433",
+            "[2001:2::1]:4433",
+            "[2001:10::1]:4433",
+            "[2001:20::1]:4433",
+            "[2001::1]:4433",
+            "[3fff::1]:4433",
+            "[100::1]:4433",
+            "[5f00::1]:4433",
+            "[2002:c0a8:101::1]:4433",
+            "[64:ff9b:1::1]:4433",
+            "[ff02::1]:4433",
+            "[::ffff:10.0.0.1]:4433",
+            "[64:ff9b::c000:201]:4433",
+            "169.254.1.1:4433",
+            "100.64.0.1:4433",
+            "192.0.2.1:4433",
+            "203.0.113.9:4433",
+            "224.0.0.1:4433",
+            "[::ffff:77.42.19.31]:4433",
+            "[::77.42.19.31]:4433",
+            "[2a01:4f9:c013:e725::1]:4433",
+        ]);
+        assert_eq!(
+            mixed,
+            ["[::ffff:77.42.19.31]:4433", "[2a01:4f9:c013:e725::1]:4433"]
+        );
+        // A host with only private and special-use addresses keeps them (a LAN).
+        assert_eq!(
+            ips(&["192.168.1.20:4433", "198.18.0.1:4433", "127.0.0.1:4433"]).len(),
+            3
+        );
+        // Each IPv6 special-use range counts as private, so a LAN keeps its route.
+        assert_eq!(
+            ips(&["192.168.1.20:4433", "[2001:2::1]:4433", "[3fff::1]:4433"]).len(),
+            3
+        );
+        // IPv4-compatible is never public, so a LAN beside it keeps its route.
+        assert_eq!(ips(&["192.168.1.20:4433", "[::77.42.19.31]:4433"]).len(), 2);
+        // Globally reachable: 6to4 of a public IPv4, AMT, and 2001:4860 (outside 2001::/23).
+        assert_eq!(
+            ips(&[
+                "[2002:4d2a:131f::1]:4433",
+                "[2001:3::1]:4433",
+                "[2001:4860::8888]:4433",
+                "10.0.0.2:4433",
+            ]),
+            [
+                "[2001:3::1]:4433",
+                "[2001:4860::8888]:4433",
+                "[2002:4d2a:131f::1]:4433"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_taken_ipv6_carrier_port_keeps_a_random_ipv6_listener() {
+        // Another service holds the Carrier port on IPv6. On a busy host the
+        // same IPv4 port can belong to someone else, so pick a pair whose
+        // IPv4 side is free; the test is about the IPv6 side only.
+        let mut attempt = 0;
+        let (occupied, port, endpoint) = loop {
+            attempt += 1;
+            assert!(
+                attempt <= 20,
+                "no free IPv4 port beside a taken IPv6 port in 20 attempts"
+            );
+            let occupied = match std::net::UdpSocket::bind("[::1]:0") {
+                Ok(occupied) => occupied,
+                Err(_) if attempt == 1 => return, // This host has no IPv6.
+                Err(error) => panic!("IPv6 loopback stopped binding: {error}"),
+            };
+            let port = occupied.local_addr().unwrap().port();
+            let ipv4_free = std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok();
+            if !ipv4_free {
+                continue;
+            }
+            match bind_carrier_endpoint(
+                SecretKey::from_bytes(&[72u8; 32]),
+                CarrierNodeNetwork::Isolated,
+                None,
+                format!("0.0.0.0:{port}").parse().unwrap(),
+                false,
+            )
+            .await
+            {
+                Ok(endpoint) => break (occupied, port, endpoint),
+                // Someone took the IPv4 port between the check and the bind.
+                Err(error)
+                    if error.to_string()
+                        == format!("Failed to bind requested Carrier address 0.0.0.0:{port}") =>
+                {
+                    continue
+                }
+                Err(error) => panic!("IPv4 binds the fixed port while IPv6 is taken: {error:#}"),
+            }
+        };
+        let sockets = endpoint.bound_sockets();
+        let addr = super::tests::wait_for_direct_endpoint_addr(&endpoint).await;
+        let snapshot: Vec<std::net::SocketAddr> = addr
+            .addrs
+            .iter()
+            .filter_map(|transport| match transport {
+                iroh::TransportAddr::Ip(addr) => Some(*addr),
+                _ => None,
+            })
+            .collect();
+        let ticket = {
+            let json =
+                serde_json::json!({ "topic": null, "endpoints": [exported_endpoint_addr(addr)] });
+            data_encoding::BASE32_NOPAD.encode(&serde_json::to_vec(&json).unwrap())
+        };
+        endpoint.close().await;
+        drop(occupied);
+        assert!(
+            sockets.iter().any(|s| s.is_ipv4() && s.port() == port),
+            "IPv4 keeps the fixed port: {sockets:?}"
+        );
+        assert!(
+            sockets.iter().any(|s| s.is_ipv6() && s.port() != port),
+            "IPv6 falls back to a random port: {sockets:?}"
+        );
+        let decoded = decode_ticket_endpoints(&ticket);
+        let ips: Vec<std::net::SocketAddr> = decoded[0]
+            .addrs
+            .iter()
+            .filter_map(|transport| match transport {
+                iroh::TransportAddr::Ip(addr) => Some(*addr),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            ips.iter().all(|ip| ip.is_ipv4() == (ip.port() == port)),
+            "the ticket lists IPv4 on the fixed port and IPv6 on its own: {ips:?}"
+        );
+        // The ticket lists exactly the snapshot's public addresses, or all of
+        // them on a host with none, so any IPv6 the host advertises stays.
+        let expected: Vec<_> = if snapshot.iter().any(|ip| is_public_ip(ip.ip())) {
+            snapshot
+                .iter()
+                .copied()
+                .filter(|ip| is_public_ip(ip.ip()))
+                .collect()
+        } else {
+            snapshot.clone()
+        };
+        assert_eq!(ips, expected, "snapshot {snapshot:?}");
+    }
+
+    #[test]
     fn test_ticket_encode_decode_roundtrip() {
         // Simulate the ticket format used by get_ticket / connect
         let ticket_json = serde_json::json!({
@@ -17384,6 +18234,7 @@ pub(crate) mod tests {
             dir.path().to_path_buf(),
             None,
             Some(address),
+            &[],
         )
         .await;
         match result {
@@ -17476,10 +18327,11 @@ pub(crate) mod tests {
         node2.memory_lookup.add_endpoint_info(addr1.clone());
 
         let topic = topic_hash("#test");
+        let gossip1 = node1.gossip_state.lock().await.gossip.clone();
+        let gossip2 = node2.gossip_state.lock().await.gossip.clone();
 
         // node1 subscribes (no peers yet)
-        let topic1 = node1
-            .gossip
+        let topic1 = gossip1
             .subscribe_with_opts(topic, iroh_gossip::api::JoinOptions::with_bootstrap(vec![]))
             .await
             .unwrap();
@@ -17489,7 +18341,7 @@ pub(crate) mod tests {
         let peer1_id: iroh::EndpointId = addr1.id;
         let topic2 = tokio::time::timeout(
             std::time::Duration::from_secs(15),
-            node2.gossip.subscribe_and_join(topic, vec![peer1_id]),
+            gossip2.subscribe_and_join(topic, vec![peer1_id]),
         )
         .await
         .unwrap()
@@ -17545,14 +18397,8 @@ pub(crate) mod tests {
             "near-maximum collaboration transport frame must exceed iroh's old 4 KiB default"
         );
         assert!(near_max_bytes.len() <= GOSSIP_WIRE_MESSAGE_MAX_BYTES);
-        assert_eq!(
-            node1.gossip.max_message_size(),
-            GOSSIP_WIRE_MESSAGE_MAX_BYTES
-        );
-        assert_eq!(
-            node2.gossip.max_message_size(),
-            GOSSIP_WIRE_MESSAGE_MAX_BYTES
-        );
+        assert_eq!(gossip1.max_message_size(), GOSSIP_WIRE_MESSAGE_MAX_BYTES);
+        assert_eq!(gossip2.max_message_size(), GOSSIP_WIRE_MESSAGE_MAX_BYTES);
         sender2
             .broadcast(near_max_bytes.clone().into())
             .await
@@ -17657,6 +18503,136 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(node1).await;
         shutdown_test_carrier_node(node2).await;
         panic!("provider gossip bootstrap sequence did not deliver marker");
+    }
+
+    async fn remote_frames(provider: &CarrierGossipProvider, topic: &str) -> u64 {
+        let health = provider
+            .send_raw(&serde_json::json!({"op": "gossip_topic_health", "topic": topic}))
+            .await
+            .unwrap();
+        assert_eq!(health["status"], "ok", "{health}");
+        health["data"]["received_frames"].as_u64().unwrap()
+    }
+
+    /// Sends until the receiver counts a frame beyond `after`.
+    async fn frames_flow(
+        sender: &CarrierGossipProvider,
+        receiver: &CarrierGossipProvider,
+        topic: &str,
+        after: u64,
+    ) -> bool {
+        for attempt in 0..40 {
+            sender
+                .send_raw(&serde_json::json!({
+                    "op": "gossip_send",
+                    "topic": topic,
+                    "message": format!("community link frame {attempt}"),
+                }))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            if remote_frames(receiver, topic).await > after {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn test_community_gossip_rejoin_and_rebuild_keep_frames_flowing() {
+        let dir1 = tempfile::tempdir().unwrap();
+        let dir2 = tempfile::tempdir().unwrap();
+        let (sk1, did1) = elastos_identity::derive_did(&[41u8; 32]);
+        let (sk2, did2) = elastos_identity::derive_did(&[42u8; 32]);
+        let node1 = start_carrier_node(&sk1, &did1, dir1.path().to_path_buf())
+            .await
+            .unwrap();
+        let node2 = start_carrier_node(&sk2, &did2, dir2.path().to_path_buf())
+            .await
+            .unwrap();
+        let provider1 = CarrierGossipProvider::new(node1.gossip_state.clone());
+        let provider2 = CarrierGossipProvider::new(node2.gossip_state.clone());
+        let topic = "__test/community-link-recovery";
+        let joined = provider1
+            .send_raw(&serde_json::json!({"op": "gossip_join_exact", "topic": topic, "peers": []}))
+            .await
+            .unwrap();
+        assert_eq!(joined["status"], "ok");
+        let ticket = provider1
+            .send_raw(&serde_json::json!({"op": "get_ticket"}))
+            .await
+            .unwrap()["data"]["ticket"]
+            .clone();
+        let remembered = provider2
+            .send_raw(&serde_json::json!({"op": "remember_peer", "ticket": ticket}))
+            .await
+            .unwrap();
+        let joined = provider2
+            .send_raw(&serde_json::json!({
+                "op": "gossip_join_exact",
+                "topic": topic,
+                "peers": remembered["data"]["added"],
+            }))
+            .await
+            .unwrap();
+        assert_eq!(joined["status"], "ok");
+        assert!(frames_flow(&provider1, &provider2, topic, 0).await);
+
+        let before = remote_frames(&provider2, topic).await;
+        let rejoined = provider2
+            .send_raw(&serde_json::json!({"op": "gossip_rejoin", "topic": topic}))
+            .await
+            .unwrap();
+        assert_eq!(
+            rejoined,
+            serde_json::json!({"status": "ok", "data": {"topic": topic}})
+        );
+        assert!(
+            frames_flow(&provider1, &provider2, topic, before).await,
+            "frames flow after the topic rejoin"
+        );
+
+        let before = remote_frames(&provider2, topic).await;
+        let rebuilt = provider2
+            .send_raw(&serde_json::json!({"op": "gossip_rebuild"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            rebuilt,
+            serde_json::json!({"status": "ok", "data": {"topics": 1}})
+        );
+        assert!(
+            frames_flow(&provider1, &provider2, topic, before).await,
+            "frames reach the rebuilt actor"
+        );
+        let before = remote_frames(&provider1, topic).await;
+        assert!(
+            frames_flow(&provider2, &provider1, topic, before).await,
+            "frames leave the rebuilt actor"
+        );
+
+        // A recovery that cannot take the gossip state gives up instead of
+        // running later, right after another one.
+        let held = node2.gossip_state.lock().await;
+        let busy = provider2
+            .send_raw(&serde_json::json!({"op": "gossip_rebuild"}))
+            .await
+            .unwrap();
+        drop(held);
+        assert_eq!(busy["code"], "recovery_failed", "{busy}");
+        let before = remote_frames(&provider2, topic).await;
+        assert!(
+            frames_flow(&provider1, &provider2, topic, before).await,
+            "a refused recovery leaves the link alone"
+        );
+
+        shutdown_test_carrier_node(node2).await;
+        let after_shutdown = provider2
+            .send_raw(&serde_json::json!({"op": "gossip_rebuild"}))
+            .await
+            .unwrap();
+        assert_eq!(after_shutdown["status"], "error");
+        shutdown_test_carrier_node(node1).await;
     }
 
     #[tokio::test]
@@ -18833,9 +19809,13 @@ pub(crate) mod tests {
     async fn test_default_carrier_node_is_isolated() {
         let dir = tempfile::tempdir().unwrap();
         let (sk, did) = elastos_identity::derive_did(&[45u8; 32]);
-        let node = start_carrier_node(&sk, &did, dir.path().to_path_buf())
-            .await
-            .unwrap();
+        let node = tokio::time::timeout(
+            Duration::from_secs(10),
+            start_carrier_node(&sk, &did, dir.path().to_path_buf()),
+        )
+        .await
+        .expect("direct Carrier startup deadline")
+        .unwrap();
         {
             let state = node.gossip_state.lock().await;
             assert!(
@@ -18843,6 +19823,252 @@ pub(crate) mod tests {
                 "unset ELASTOS_CARRIER_NETWORK starts Isolated"
             );
         }
-        shutdown_test_carrier_node(node).await;
+        assert_eq!(
+            node.endpoint.address_lookup().unwrap().len(),
+            if carrier_mdns_enabled() { 3 } else { 2 },
+            "direct startup registers LAN mDNS alongside memory and gossip lookups unless opted out"
+        );
+        assert!(node.endpoint.addr().relay_urls().next().is_none());
+        tokio::time::timeout(Duration::from_secs(5), shutdown_test_carrier_node(node))
+            .await
+            .expect("direct Carrier shutdown deadline");
+    }
+
+    /// iroh-gossip's own membership state machine on a deterministic
+    /// in-memory network: Homes sit behind NAT and reach only the hub (the
+    /// seed's Community node), except Homes on one LAN, which also reach
+    /// each other. A send to an unreachable node fails like a failed dial.
+    mod community_hub_membership {
+        use super::super::carrier_gossip_membership;
+        use gossip_rand::{rngs::StdRng, SeedableRng};
+        use iroh_gossip::proto::{
+            self, topic, Command, InEvent, OutEvent, PeerData, Scope, State, TopicId,
+        };
+        use std::collections::{BTreeMap, BTreeSet, VecDeque};
+        use tokio::time::{Duration, Instant};
+
+        const HUB: u64 = 0;
+        const HOMES: u64 = 8;
+        const MAX_EVENTS: usize = 2_000_000;
+
+        struct Network {
+            hub_membership: bool,
+            lan: Vec<(u64, u64)>,
+            topic: TopicId,
+            nodes: BTreeMap<u64, (u64, State<u64, StdRng>)>,
+            queue: VecDeque<(u64, InEvent<u64>)>,
+            timers: Vec<(Instant, u64, u64, proto::Timer<u64>)>,
+            now: Instant,
+            events: usize,
+            neighbours: BTreeMap<u64, BTreeSet<u64>>,
+            leaving: Option<u64>,
+            /// `(when, home)`: a Home's last neighbour went down.
+            isolated: Vec<(&'static str, u64)>,
+            phase: &'static str,
+            received: BTreeSet<u64>,
+        }
+
+        impl Network {
+            fn new(hub_membership: bool, lan: &[(u64, u64)]) -> Self {
+                Self {
+                    hub_membership,
+                    lan: lan.to_vec(),
+                    topic: TopicId::from_bytes([7; 32]),
+                    nodes: BTreeMap::new(),
+                    queue: VecDeque::new(),
+                    timers: Vec::new(),
+                    now: Instant::now(),
+                    events: 0,
+                    neighbours: BTreeMap::new(),
+                    leaving: None,
+                    isolated: Vec::new(),
+                    phase: "join",
+                    received: BTreeSet::new(),
+                }
+            }
+
+            fn reachable(&self, a: u64, b: u64) -> bool {
+                a == HUB || b == HUB || self.lan.contains(&(a.min(b), a.max(b)))
+            }
+
+            /// Starts (or restarts) `id` and joins the topic through the hub.
+            fn start(&mut self, id: u64) {
+                let generation = self.nodes.get(&id).map_or(0, |(g, _)| g + 1);
+                if self.nodes.contains_key(&id) {
+                    // The old process is gone: its connections close.
+                    for peer in self.neighbours.remove(&id).unwrap_or_default() {
+                        self.queue.push_back((peer, InEvent::PeerDisconnected(id)));
+                    }
+                }
+                let config = proto::Config {
+                    membership: carrier_gossip_membership(id == HUB && self.hub_membership),
+                    ..Default::default()
+                };
+                let rng = StdRng::seed_from_u64(id * 1_000 + generation);
+                let state = State::new(id, PeerData::default(), config, rng);
+                self.nodes.insert(id, (generation, state));
+                let bootstrap = if id == HUB { Vec::new() } else { vec![HUB] };
+                self.queue
+                    .push_back((id, InEvent::Command(self.topic, Command::Join(bootstrap))));
+            }
+
+            /// Carrier's topic rejoin: leave, then join through the hub again.
+            fn rejoin(&mut self, id: u64) {
+                self.leaving = Some(id);
+                self.queue
+                    .push_back((id, InEvent::Command(self.topic, Command::Quit)));
+                self.run_for(Duration::from_secs(1));
+                self.leaving = None;
+                self.neighbours.remove(&id);
+                self.queue
+                    .push_back((id, InEvent::Command(self.topic, Command::Join(vec![HUB]))));
+            }
+
+            fn broadcast_from(&mut self, id: u64) {
+                self.received.clear();
+                self.queue.push_back((
+                    id,
+                    InEvent::Command(
+                        self.topic,
+                        Command::Broadcast(b"community".to_vec().into(), Scope::Swarm),
+                    ),
+                ));
+            }
+
+            fn handle(&mut self, node: u64, event: InEvent<u64>) {
+                self.events += 1;
+                assert!(self.events < MAX_EVENTS, "the membership never settled");
+                let now = self.now;
+                let Some((generation, state)) = self.nodes.get_mut(&node) else {
+                    return;
+                };
+                let generation = *generation;
+                let out: Vec<_> = state.handle(event, now, None).collect();
+                for event in out {
+                    match event {
+                        OutEvent::SendMessage(to, message) => {
+                            if self.reachable(node, to) && self.nodes.contains_key(&to) {
+                                self.queue
+                                    .push_back((to, InEvent::RecvMessage(node, message)));
+                            } else {
+                                self.queue.push_back((node, InEvent::PeerDisconnected(to)));
+                            }
+                        }
+                        OutEvent::EmitEvent(_, topic::Event::NeighborUp(peer)) => {
+                            self.neighbours.entry(node).or_default().insert(peer);
+                        }
+                        OutEvent::EmitEvent(_, topic::Event::NeighborDown(peer)) => {
+                            let left = self.neighbours.entry(node).or_default();
+                            left.remove(&peer);
+                            if left.is_empty() && node != HUB && self.leaving != Some(node) {
+                                self.isolated.push((self.phase, node));
+                            }
+                        }
+                        OutEvent::EmitEvent(_, topic::Event::Received(_)) => {
+                            self.received.insert(node);
+                        }
+                        OutEvent::ScheduleTimer(after, timer) => {
+                            self.timers.push((now + after, node, generation, timer));
+                        }
+                        OutEvent::DisconnectPeer(peer) => {
+                            self.queue
+                                .push_back((peer, InEvent::PeerDisconnected(node)));
+                        }
+                        OutEvent::PeerData(..) => {}
+                    }
+                }
+            }
+
+            fn run_for(&mut self, duration: Duration) {
+                let until = self.now + duration;
+                loop {
+                    while let Some((node, event)) = self.queue.pop_front() {
+                        self.handle(node, event);
+                    }
+                    let next = self
+                        .timers
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (at, ..))| *at <= until)
+                        .min_by_key(|(_, (at, ..))| *at)
+                        .map(|(index, _)| index);
+                    let Some(index) = next else { break };
+                    let (at, node, generation, timer) = self.timers.swap_remove(index);
+                    self.now = self.now.max(at);
+                    if self.nodes.get(&node).is_some_and(|(g, _)| *g == generation) {
+                        self.handle(node, InEvent::TimerExpired(timer));
+                    }
+                }
+                self.now = until;
+            }
+        }
+
+        /// A hub and 8 Homes join one after another; then one Home restarts,
+        /// one rejoins, and the hub broadcasts. Returns the network after it.
+        fn community(hub_membership: bool, lan: &[(u64, u64)]) -> Network {
+            let mut network = Network::new(hub_membership, lan);
+            network.start(HUB);
+            network.run_for(Duration::from_secs(1));
+            for home in 1..=HOMES {
+                network.start(home);
+                network.run_for(Duration::from_secs(5));
+            }
+            network.run_for(Duration::from_secs(180));
+            network.phase = "restart";
+            network.start(3);
+            network.run_for(Duration::from_secs(180));
+            network.phase = "rejoin";
+            network.rejoin(5);
+            network.run_for(Duration::from_secs(180));
+            network.broadcast_from(HUB);
+            network.run_for(Duration::from_secs(30));
+            network
+        }
+
+        fn assert_every_home_keeps_the_hub(network: &Network) {
+            assert_eq!(network.isolated, [], "no Home may lose its only neighbour");
+            for home in 1..=HOMES {
+                assert!(
+                    network
+                        .neighbours
+                        .get(&home)
+                        .is_some_and(|n| n.contains(&HUB)),
+                    "Home {home} keeps the hub as a neighbour: {:?}",
+                    network.neighbours.get(&home)
+                );
+            }
+            let homes: BTreeSet<u64> = (1..=HOMES).collect();
+            assert_eq!(
+                network.received, homes,
+                "a hub broadcast reaches all 8 Homes"
+            );
+        }
+
+        #[test]
+        fn default_membership_cuts_homes_off_a_hub_with_more_than_five() {
+            let network = community(false, &[]);
+            // Homes 6..8 already evict earlier ones while joining, and the
+            // restart of Home 3 evicts another.
+            let phases: BTreeSet<&str> = network.isolated.iter().map(|(p, _)| *p).collect();
+            assert!(
+                phases.contains("join") && phases.contains("restart"),
+                "iroh-gossip's default 5 active neighbours evict Homes from the hub: {:?}",
+                network.isolated
+            );
+            assert!(network.neighbours[&HUB].len() <= 5);
+        }
+
+        #[test]
+        fn hub_membership_keeps_every_home_through_joins_restarts_and_rejoins() {
+            let network = community(true, &[]);
+            assert_every_home_keeps_the_hub(&network);
+            assert_eq!(network.neighbours[&HUB].len(), HOMES as usize);
+        }
+
+        #[test]
+        fn homes_on_one_lan_keep_default_membership_and_still_reach_everyone() {
+            let network = community(true, &[(1, 2), (3, 4), (6, 7)]);
+            assert_every_home_keeps_the_hub(&network);
+        }
     }
 }

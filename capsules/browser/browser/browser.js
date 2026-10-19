@@ -28,8 +28,7 @@ import {
   requestedDisplayMode,
 } from "./browser-status.js?v=browser-20260907c";
 import { createBrowserRemoteDisplay } from "./browser-remote-display.js?v=browser-20260915d";
-import { renderServiceSelection } from "./browser-service-selection.js?v=browser-20260907c";
-import { createOperatorApprovalController, mountOperatorApproval } from "./browser-operator-approval.js";
+import { engineChoiceHidden, renderServiceSelection } from "./browser-service-selection.js?v=browser-20261015a";
 
 const STATUS_TTL_MS = 4200;
 const PAGE_STATUS_INTERVAL_MS = 2_500;
@@ -40,6 +39,7 @@ const PAGE_STATUS_AFTER_INPUT_FOLLOWUP_DELAYS_MS = [650, 1800, 3500, 6500];
 const PAGE_HEARTBEAT_INTERVAL_MS = 60_000;
 const BROWSER_OPEN_POLL_INTERVAL_MS = 1_200;
 const BROWSER_OPEN_POLL_TIMEOUT_MS = 5 * 60_000;
+const BROWSER_OPEN_ELAPSED_VISIBLE_SECONDS = 5;
 const LIBRARY_FILE_PICKER_MAX_BYTES = 16 * 1024 * 1024;
 const PRODUCT_DISPLAY_MODE = "webrtc_remote_display";
 const GUARANTEE_MECHANISM_MICROVM = "mechanism_microvm";
@@ -47,7 +47,7 @@ const GUARANTEE_OPERATOR_RBI = "operator_rbi";
 const GUARANTEE_POLICY_WEBVIEW = "policy_webview";
 const LOCAL_EXIT_LABEL = "This device";
 const LOCAL_EXIT_SUMMARY = "Use this device's Exit Node for Browser traffic.";
-const DEFAULT_ENGINE_LABEL = "Local VM";
+const DEFAULT_ENGINE_LABEL = "Automatic";
 const DEFAULT_ENGINE_SUMMARY = "Runtime chooses a compatible Browser Engine.";
 const BROWSER_WINDOW_CLOSE_REQUEST_TYPE =
   "elastos.browser.window-close.request/v1";
@@ -93,6 +93,7 @@ const settingsPanel = document.querySelector("#browser-settings-panel");
 const settingsCloseButton = document.querySelector("#browser-settings-close");
 const engineSelect = document.querySelector("#browser-engine");
 const engineSummaryNode = document.querySelector("#browser-engine-summary");
+const engineLabelNode = document.querySelector('label[for="browser-engine"]');
 const exitSelect = document.querySelector("#browser-exit");
 const exitSummaryNode = document.querySelector("#browser-exit-summary");
 const statusNode = document.querySelector("#browser-status");
@@ -1952,6 +1953,12 @@ function syncEngineSelect(summary) {
       ? "Your selected Browser Engine is unavailable. Choose another Engine to change where the page runs."
       : browserEngineSummary(selectedEngine);
   }
+  const hidden = engineChoiceHidden(engines, selectedBrowserEngineId);
+  for (const node of [engineLabelNode, engineSelect, engineSummaryNode]) {
+    if (node) {
+      node.hidden = hidden;
+    }
+  }
   updateSettingsTitle();
 }
 
@@ -2077,7 +2084,7 @@ function browserOpenJobError(status) {
   return next;
 }
 
-async function waitForRuntimeOpen(response, { engineLabel, exitLabel }) {
+async function waitForRuntimeOpen(response) {
   if (response?.schema === "elastos.browser.open-result/v1") {
     return response;
   }
@@ -2089,9 +2096,11 @@ async function waitForRuntimeOpen(response, { engineLabel, exitLabel }) {
   }
   const startedAt = Date.now();
   while (Date.now() - startedAt < BROWSER_OPEN_POLL_TIMEOUT_MS) {
-    const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+    const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
     showStatus(
-      `Browser is preparing ${engineLabel} with ${exitLabel} (${elapsedSeconds}s). Wait for preparation to finish, then close Browser if needed.`,
+      elapsedSeconds >= BROWSER_OPEN_ELAPSED_VISIBLE_SECONDS
+        ? `Starting Browser… ${elapsedSeconds}s`
+        : "Starting Browser…",
       { sticky: true },
     );
     await wait(BROWSER_OPEN_POLL_INTERVAL_MS);
@@ -2237,7 +2246,7 @@ async function requestRuntimeOpen(value, { history = "push" } = {}) {
     ) {
       openSettlement.statusUrl = accepted.status_url;
     }
-    const response = await waitForRuntimeOpen(accepted, { engineLabel, exitLabel });
+    const response = await waitForRuntimeOpen(accepted);
     const openedPage = runtimeOpenResultPage(response);
     if (!openedPage) {
       throw new Error("Browser did not open the page.");
@@ -2730,17 +2739,6 @@ window.addEventListener("pagehide", (event) => {
     startRecoverableDisplayAttach();
   }
   releaseRuntimePageForUnload();
-});
-
-mountOperatorApproval({
-  container: settingsPanel,
-  controller: createOperatorApprovalController({
-    fetchJson,
-    runtimeOrigin: new URL(window.location.href).origin,
-    getOwner: () => unloadCleanupStarted || homeWindowCloseInFlight
-      ? null : runtimePageOwner(currentPage, currentPageGeneration),
-    sameOwner: sameRuntimePageOwner,
-  }),
 });
 
 const requestedStartupUrl = params.get("url");

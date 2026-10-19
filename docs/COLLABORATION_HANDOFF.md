@@ -30,7 +30,8 @@ from this document after a local history reconstruction.
 8. A direct conversation is authorized between accepted Profile identities.
    Its stable conversation ID is an opaque selector, not authority.
 9. Shared-room attribution comes from verified signed Profiles. Presence is
-   liveness only.
+   liveness only; a member who is online but has not posted is listed under
+   the name in that presence's verified signed Profile, until it expires.
 10. A delivery receipt proves that the named Runtime endpoint accepted the
     exact envelope. It does not claim that a person read the message.
 11. The signed network profile and seed signer provide bootstrap and
@@ -75,6 +76,18 @@ from this document after a local history reconstruction.
 - Runtime stores the signed envelope before its first delivery attempt and
   retries within the declared lifetime.
 - Shared-room messages and participant rows use verified Profile names.
+- Runtime retains canonical signed Community message originals for up to 24 hours,
+  with at most 200 messages and a 1 MiB limit on the complete serialized history
+  sidecar. The sidecar uses the existing conversation namespace and owner-only
+  state lock. The live state format remains readable after Undo.
+- Community catch-up reads those originals from online participants through the
+  private `collaboration.history` Runtime service. A request carries live signed
+  presence; Runtime verifies its Profile, conversation grant, and authenticated
+  Carrier endpoint. Every returned original passes signature, Profile, exact
+  conversation, Chat payload, and historical age checks before projection.
+- Catch-up runs in its own bounded Runtime task. Live delivery keeps its five-minute
+  lifetime. An unavailable peer history produces an explicit catch-up status while
+  the local conversation remains available.
 - Stale asynchronous Chat results cannot replace the selected conversation.
 - Direct messages are text-only in this source boundary. The UI states that
   attachments are unavailable instead of hiding or inventing a path.
@@ -121,8 +134,11 @@ two-Runtime acceptance below.
 1. Complete final candidate review and CI, preserving the reviewed history.
 2. Complete one-Runtime Profile, People, Chat, Inbox, Clipboard, restart, and layout
    behavior with the existing local data preserved.
-3. If localhost passes, install the same exact commit on the public seed.
-4. Run the real two-Runtime journey between localhost and the public seed.
+3. Install the same exact candidate on the approved isolated acceptance Homes.
+   Keep the install/release seed in its assigned role.
+4. Run the complete journey with three separate web accounts and two self-hosted
+   Homes, including a Home behind a router. Use the approved Community bootstrap
+   and relay placement recorded in the owning issue.
 5. Record each target's source/artifact identity and product verdict before
    making release or installed-acceptance claims.
 

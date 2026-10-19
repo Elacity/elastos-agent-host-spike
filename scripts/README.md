@@ -19,6 +19,9 @@ automatically a stable end-user command.
   Runtime imports frozen signed output through `--signed-publication`.
 - `release-signer.py` is the separately installed custodian tool. The operator
   pins its interpreter, OpenSSL and source, and owns all release-key access.
+  Its explicit `community-profile` operation prepares a signed initial Community
+  startup file and pin before release preparation; see
+  [operator provisioning](../docs/COLLABORATION_NETWORK_PROFILE.md#initial-production-profile).
   The existing release-input CI suite runs its refused-case tests.
 - `python3 scripts/publish-platform-artifacts-test.py` checks its local platform
   manifest exports, native/guest target selection and the staged artifact gate
@@ -199,9 +202,11 @@ platform matrix. Generic provider VM archives remain a separate build path.
 Linux preparation needs tracked lockfiles for the standalone Browser helper
 projects; a missing lockfile stops preparation before a native build.
 
-The Browser guest is one ARM64 Chromium/Selkies image shared by Mac and Linux
-ARM64. Its release artifact is `browser-vm-image-arm64.tar.gz`; both platform
-rows bind the same bytes. Linux x86-64 is a remote Engine consumer.
+The Browser guest is one ARM64 Chromium/Selkies image. Its release artifact is
+`browser-vm-image-arm64.tar.gz`, published for Mac only; Linux ARM64 offers no
+Browser image until #90. A capsule record names one platform, so
+`check-product-data.mjs` refuses two platform rows sharing one `release_path`.
+Linux x86-64 is a remote Engine consumer.
 The guest builder defaults to a 4 GiB root disk (`--rootfs-size 4096M`). Linux
 preparation keeps one spare root image. Capacity proof includes the compressed
 archive, extraction, profile, launch copies and update staging plus the Runtime
@@ -214,7 +219,7 @@ Image admission checks that identity against the candidate. Source options and
 payload hashes stay in its build receipt. Legacy receipts keep their historical
 proof and need explicit qualification before entering a new signed candidate.
 
-For Mac and Linux ARM64, add `--browser-vm-image-set /path/to/verified-image-set`.
+For Mac, add `--browser-vm-image-set /path/to/verified-image-set`.
 Browser preparation packages the verified four-member rootfs/kernel/initrd set
 and matching host helpers in this same input. Reuse the qualified image when its
 guest inputs match. An existing package can instead be supplied with

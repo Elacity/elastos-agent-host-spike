@@ -1403,12 +1403,6 @@
           "release_path": "browser-vm-image-arm64.tar.gz",
           "install_path": "browser-vm/image-set",
           "extract_path": "browser-vm-image"
-        },
-        "linux-arm64": {
-          "strategy": "browser-vm-image",
-          "release_path": "browser-vm-image-arm64.tar.gz",
-          "install_path": "browser-vm/image-set",
-          "extract_path": "browser-vm-image"
         }
       }
     },
@@ -1713,5 +1707,12 @@
       "max_cache_bytes": 8589934592,
       "max_model_memory_bytes": 4294967296
     }
+  },
+  "collaboration_network": {
+    "expected_network_id": "elastos.community",
+    "head_cid": "bafkreic3sd6pqbfkpfrw2aqkkdidfzr6yeta6icplmxmhsg57qav577xay",
+    "trusted_profile_signer_dids": [
+      "did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe"
+    ]
   }
 }

@@ -371,7 +371,7 @@ export async function runQualification(planPath, output, { signal = new AbortCon
       "scripts/lib/browser-open-failure.mjs", "scripts/lib/browser-journey-target.mjs",
       "scripts/lib/browser-journey-viewer-reload.mjs", "scripts/lib/browser-journey-turn-interruption.mjs",
       "scripts/lib/browser-qualification-observer.mjs", "scripts/browser-qualification-runner.mjs",
-      "scripts/browser-qualification-audit.mjs"]) {
+      "scripts/browser-qualification-audit.mjs", "capsules/browser/browser/browser-service-selection.js"]) {
       const absolute = join(ROOT, path);
       frozen.push(...await freezeArtifacts([{ role: path, path: absolute, sha256: sha256(readFileSync(absolute)) }], signal));
     }

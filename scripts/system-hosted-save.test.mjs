@@ -225,7 +225,9 @@ function updateFixture(overrides = {}) {
     runtimeUpdateNode: panel, runtimeUpdateButton: button, runtimeUpdateStatusNode: status,
     runtimeUpdate: undefined, runtimeUpdatePending: null, runtimeUpdateBusy: false,
     runtimeUpdateActive: true, runtimeUpdateTimer: 0, runtimeUpdateReconnects: 0,
-    runtimeUpdateRequests: new Set(),
+    runtimeUpdateRequests: new Set(), runtimeUpdateInProgressSeen: false,
+    RUNTIME_UPDATE_RESTART_TEXT: source.match(/RUNTIME_UPDATE_RESTART_TEXT = "([^"]+)"/)?.[1],
+    RUNTIME_UPDATE_RESTART_POLLS: Number(source.match(/RUNTIME_UPDATE_RESTART_POLLS = (\d+)/)?.[1]),
     systemSummaryInFlight: null, homeParentOrigin: "https://home.example",
     document: { hidden: false, addEventListener: (type, handler) => listeners.set(`document:${type}`, handler) },
     window: {
@@ -233,6 +235,7 @@ function updateFixture(overrides = {}) {
       addEventListener: (type, handler) => listeners.set(type, handler),
       setTimeout: (handler, delay) => { timers.set(++timerId, { handler, delay, due: now + delay }); return timerId; },
       clearTimeout: id => timers.delete(id),
+      location: { reloads: 0, reload() { this.reloads += 1; } },
     },
     readText: value => typeof value === "string" ? value.trim() : "",
     setTextFields: (field, value) => fields.set(field, value),
@@ -354,6 +357,7 @@ test("Home update freezes one exact passkey intent and retries a lost response w
   f.context.renderRuntimeUpdate({ ...f.offer, available: false, controller: { phase: "updated", id: intent.request_id, message: "Home is up to date." } });
   assert.equal(f.context.runtimeUpdatePending, null);
   assert.equal(f.status.textContent, "Home is up to date.");
+  assert.equal(f.context.window.location.reloads, 1, "the finished update loads the new System");
 });
 
 test("Home update keeps an ambiguous submission pending and stops bounded progress recovery", async () => {
@@ -447,12 +451,11 @@ test("matching queue confirmation and controller state prove progress after slow
   assert.match(f.status.textContent, /Checking the signed update/);
   f.context.refreshSystemSummary = async () => { throw new TypeError("response lost"); };
   await f.context.pollRuntimeUpdate();
-  assert.match(f.status.textContent, /report update progress/);
-  assert(!f.status.textContent.includes("restarting"));
+  assert.equal(f.status.textContent, "Restarting to finish the update. Home is usually back within two minutes.");
   f.context.renderRuntimeUpdate({ ...f.offer, controller: { id, phase: "restarting" } });
-  assert.match(f.status.textContent, /Home is restarting/);
+  assert.equal(f.status.textContent, "Restarting to finish the update. Home is usually back within two minutes.");
   await f.context.pollRuntimeUpdate();
-  assert.match(f.status.textContent, /Home is restarting/);
+  assert.equal(f.status.textContent, "Restarting to finish the update. Home is usually back within two minutes.");
 });
 
 test("only a matching queue reply confirms dispatch and an ambiguous deadline preserves the exact retry", async () => {
@@ -529,8 +532,8 @@ test("Home update polling binds host messages, stops at auth refusal, and closes
   assert.equal(f.context.runtimeUpdateTimer, timer);
   f.listeners.get("message")({ source: f.top, origin: "https://home.example", data: message });
   assert.equal(f.timers.get(f.context.runtimeUpdateTimer).delay, 0);
-  f.context.renderRuntimeUpdate({ ...f.offer, can_apply: false, controller: { phase: "restarting" } });
-  assert.equal(f.timers.get(f.context.runtimeUpdateTimer).delay, 2000);
+  f.context.renderRuntimeUpdate({ ...f.offer, can_apply: false, controller: { phase: "ready" } });
+  assert.equal(f.timers.get(f.context.runtimeUpdateTimer).delay, 5000);
   f.context.refreshSystemSummary = async () => { const error = new Error("expired"); error.status = 403; throw error; };
   f.timers.clear();
   await f.context.pollRuntimeUpdate();
@@ -542,10 +545,120 @@ test("Home update polling binds host messages, stops at auth refusal, and closes
   assert.equal(f.timers.size, 0);
 });
 
+test("System explains the restart wait, outlasts the controller restart budget, and reloads once when Home is back", async () => {
+  for (const back of ["updated", "restored"]) {
+    const f = updateFixture();
+    await f.context.onRuntimeUpdateApply();
+    const id = f.context.runtimeUpdatePending.intent.request_id;
+    f.context.renderRuntimeUpdate({ ...f.offer, controller: { id, phase: "restarting" } });
+    assert.equal(f.status.textContent, "Restarting to finish the update. Home is usually back within two minutes.");
+    assert.equal(f.timers.get(f.context.runtimeUpdateTimer).delay, 2000);
+    f.context.refreshSystemSummary = async () => { throw new TypeError("connection refused"); };
+    await f.advance(130_000);
+    assert.equal(f.status.textContent, "Restarting to finish the update. Home is usually back within two minutes.");
+    assert(f.timers.size > 0, "System still polls after the 120 s controller restart budget");
+    assert.equal(f.context.window.location.reloads, 0);
+    f.context.refreshSystemSummary = async () => f.context.renderRuntimeUpdate(
+      { ...f.offer, available: false, controller: { id, phase: back, message: "Home is up to date." } });
+    await f.advance(2_000);
+    assert.equal(f.context.window.location.reloads, 1);
+    assert.equal(f.timers.size, 0, "the reloading page stops polling");
+    const fresh = updateFixture();
+    fresh.context.renderRuntimeUpdate({ ...fresh.offer, controller: { id, phase: back, message: "Home is up to date." } });
+    assert.equal(fresh.context.window.location.reloads, 0, "the reloaded page does not reload again");
+  }
+  const failed = updateFixture();
+  await failed.context.onRuntimeUpdateApply();
+  const id = failed.context.runtimeUpdatePending.intent.request_id;
+  failed.context.renderRuntimeUpdate({ ...failed.offer, controller: { id, phase: "restarting" } });
+  failed.context.renderRuntimeUpdate({ ...failed.offer, controller: { id, phase: "failed", message: "The update failed." } });
+  assert.equal(failed.context.window.location.reloads, 0, "a failed update keeps the current page");
+  assert.equal(failed.status.textContent, "The update failed.");
+});
+
+test("the restart gets the full polling budget however long the download took", async () => {
+  const f = updateFixture();
+  await f.context.onRuntimeUpdateApply();
+  const id = f.context.runtimeUpdatePending.intent.request_id;
+  f.context.refreshSystemSummary = async () => f.context.renderRuntimeUpdate(
+    { ...f.offer, controller: { id, phase: "downloading", message: "Downloading the update (88 MB)." } });
+  await f.advance(600_000);
+  f.context.refreshSystemSummary = async () => { throw new TypeError("connection refused"); };
+  await f.advance(130_000);
+  assert(f.timers.size > 0, "a long download does not shorten the restart wait");
+  assert.equal(f.status.textContent, "Restarting to finish the update. Home is usually back within two minutes.");
+});
+
+test("once an update is in progress, the update finishing or a session refusal reloads once; failed never does", async () => {
+  const refused = () => { throw new TypeError("connection refused"); };
+  const status = code => () => { const error = new Error("session"); error.status = code; throw error; };
+  const back = (f, id, phase) => () => f.context.renderRuntimeUpdate(
+    { ...f.offer, available: false, controller: { id, phase, message: "Home is up to date." } });
+  for (const own of [true, false]) {
+    for (const [seen, steps, reloads] of [
+      ["downloading", f => [status(401)], 1],
+      ["downloading", f => [status(403)], 1],
+      ["verifying", (f, id) => [back(f, id, "updated")], 1],
+      ["downloading", f => [refused, refused, status(401)], 1],
+      ["restarting", (f, id) => [refused, back(f, id, "restored")], 1],
+      ["staging", (f, id) => [back(f, id, "failed"), status(401)], 0],
+    ]) {
+      const f = updateFixture();
+      let id = "another-tab-request";
+      if (own) {
+        await f.context.onRuntimeUpdateApply();
+        id = f.context.runtimeUpdatePending.intent.request_id;
+      }
+      f.context.renderRuntimeUpdate({ ...f.offer, controller: { id, phase: seen } });
+      const label = `${own ? "own" : "seen"} ${seen} -> ${steps(f, id).length} steps -> ${reloads}`;
+      for (const step of steps(f, id)) {
+        f.context.refreshSystemSummary = async () => step();
+        f.timers.clear();
+        await f.context.pollRuntimeUpdate();
+        if (step === refused) assert.equal(f.status.textContent, "Restarting to finish the update. Home is usually back within two minutes.", label);
+        if (step === refused) assert.equal(f.timers.get(f.context.runtimeUpdateTimer).delay, 2000, label);
+      }
+      assert.equal(f.context.window.location.reloads, reloads, label);
+      if (reloads) assert.equal(f.timers.size, 0, label);
+      f.context.renderRuntimeUpdate({ ...f.offer, controller: { id, phase: "updated" } });
+      await f.context.pollRuntimeUpdate();
+      assert.equal(f.context.window.location.reloads, reloads, `at most one reload: ${label}`);
+      assert.equal(f.posts.filter(post => post.method === "POST").length, own ? 1 : 0, `no resend: ${label}`);
+    }
+  }
+  const fresh = updateFixture();
+  fresh.context.refreshSystemSummary = async () => status(401)();
+  await fresh.context.pollRuntimeUpdate();
+  assert.match(fresh.status.textContent, /access has changed/, "a page that saw no update in progress keeps the dead-end message");
+  fresh.context.renderRuntimeUpdate({ ...fresh.offer, controller: { id: "earlier", phase: "updated" } });
+  assert.equal(fresh.context.window.location.reloads, 0, "nor does an earlier update's result reload it");
+  const queued = updateFixture();
+  await queued.context.onRuntimeUpdateApply();
+  queued.context.renderRuntimeUpdate({ ...queued.offer, controller: { id: "earlier-update", phase: "updated" } });
+  assert.equal(queued.context.window.location.reloads, 0, "an earlier update's result does not reload a queued request");
+});
+
+test("an auth refusal right after a restart reloads once instead of a dead end", async () => {
+  const f = updateFixture();
+  await f.context.onRuntimeUpdateApply();
+  const id = f.context.runtimeUpdatePending.intent.request_id;
+  f.context.renderRuntimeUpdate({ ...f.offer, controller: { id, phase: "restarting" } });
+  f.context.refreshSystemSummary = async () => { const error = new Error("session"); error.status = 401; throw error; };
+  f.timers.clear();
+  await f.context.pollRuntimeUpdate();
+  assert.equal(f.context.window.location.reloads, 1);
+  assert.equal(f.timers.size, 0);
+  assert.equal(f.posts.filter(post => post.method === "POST").length, 1, "the reload replays no update request");
+});
+
 test("Home update summary refreshes share one bounded request", async () => {
   const f = updateFixture();
-  let finish, reads = 0;
+  let finish, reads = 0, communityReads = 0, presenceReads = 0;
   f.context.fetchJson = () => { reads++; return new Promise(resolve => { finish = resolve; }); };
+  f.context.refreshCommunityMembership = async () => { communityReads++; };
+  f.context.refreshCommunityPresence = async () => { presenceReads++; };
+  const unavailable = [];
+  f.context.showCommunityUnavailable = error => unavailable.push(error.message);
   f.context.renderSystemSummary = value => { f.context.renderRuntimeUpdate(value.runtime_update); };
   const refresh = source.slice(source.indexOf("async function refreshSystemSummary() {"), source.indexOf("async function fetchJson("));
   vm.runInContext(refresh, f.context);
@@ -555,6 +668,8 @@ test("Home update summary refreshes share one bounded request", async () => {
   assert([...f.timers.values()].some(timer => timer.delay === 10_000));
   finish({ runtime_update: f.offer });
   await Promise.all([first, second]);
+  assert.equal(communityReads, 1, "one shared summary refresh also reads current Community membership once");
+  assert.equal(presenceReads, 1, "and the person's own Community choice once");
   assert.equal(f.context.systemSummaryInFlight, null);
   assert(![...f.timers.values()].some(timer => timer.delay === 10_000));
   f.context.fetchJson = (_url, init) => new Promise((_resolve, reject) => {
@@ -564,6 +679,7 @@ test("Home update summary refreshes share one bounded request", async () => {
   const deadline = [...f.timers.values()].find(timer => timer.delay === 10_000);
   deadline.handler();
   await assert.rejects(hung, /request deadline/);
+  assert.deepEqual(unavailable, ["request deadline"], "a failed summary shows Community as unavailable instead of hiding it");
   assert.equal(f.context.systemSummaryInFlight, null, "timed-out request releases the next refresh");
   assert(![...f.timers.values()].some(timer => timer.delay === 10_000));
 });
@@ -587,7 +703,7 @@ test("System startup and recovery stay ready while the background Carrier check 
       refreshCapsuleCatalog: async () => calls.push("catalogue"),
     });
     for (const name of ["configureSettingsTabs", "configureSettingsSearch", "activateSettingsTab",
-      "configureAppearanceEditor", "configureAppearancePreferences", "configureGuestAccess",
+      "configureAppearanceEditor", "configureAppearancePreferences", "configureGuestAccess", "configureCommunityMembership", "configureCommunityPresence",
       "configureAiProvider", "configurePasskeyAccess", "configureRecoveryAccess", "configureChainAccess",
       "configureActiveShell", "configureCapsuleCatalog", "configureTechnicalDetails", "configureDeviceDidCopy",
       "configureRuntimeUpdate", "configureHomeRecoverySave"]) context[name] = () => {};
@@ -668,4 +784,171 @@ test("a slow update keeps polling while Home reports the approved download", asy
   assert.equal(f.status.textContent, message);
   assert.equal(f.context.runtimeUpdatePending.polls, 0);
   assert.equal(f.button.disabled, true);
+});
+
+function communityFixture(role = "admin") {
+  const section = { hidden: true }, button = { disabled: true, textContent: "" };
+  const fields = new Map(), hidden = new Map(), requests = [], timers = new Map();
+  let nextTimer = 0;
+  const context = vm.createContext({
+    communitySection: section, communityButton: button,
+    currentAccess: { role }, hasShellAccess: () => true,
+    readText: value => typeof value === "string" ? value.trim() : "",
+    setTextFields: (key, value) => fields.set(key, value),
+    setHiddenFields: (key, value) => hidden.set(key, value),
+    shellHeaders: value => value || {}, publicSystemError: (_, fallback) => fallback,
+    AbortController, runtimeUpdateRequests: new Set(),
+    window: { setTimeout: (handler, delay) => { const id = ++nextTimer; timers.set(id, { handler, delay }); return id; }, clearTimeout: id => timers.delete(id) },
+    fetchJson: async (path, init) => {
+      requests.push({ path, ...init });
+      return { schema: "elastos.community-membership/v1", configured: true, joined: false, detail: "Left" };
+    },
+  });
+  const start = source.indexOf("function renderCommunityMembership(");
+  const end = source.indexOf("async function onGuestRegistrationChange", start);
+  const fetchStart = source.indexOf("async function fetchRuntimeUpdateJson(");
+  const fetchEnd = source.indexOf("async function onRuntimeUpdateApply(", fetchStart);
+  vm.runInContext(`let communityMembership = null; let communityBusy = false; ${source.slice(start, end)} ${source.slice(fetchStart, fetchEnd)}`, context);
+  context.renderCommunityMembership({ schema: "elastos.community-membership/v1", configured: true, joined: true, detail: "Joined" });
+  return { context, section, button, fields, hidden, requests, timers };
+}
+
+test("Community uses one owner request and a visible Rejoin control", async () => {
+  const f = communityFixture();
+  let finish;
+  f.context.fetchJson = async (path, init) => {
+    f.requests.push({ path, ...init });
+    return new Promise(resolve => { finish = resolve; });
+  };
+  const pending = f.context.updateCommunityMembership();
+  assert.equal(f.button.disabled, true);
+  await f.context.updateCommunityMembership();
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.requests[0].path, "/api/apps/system/community");
+  assert.equal(JSON.parse(f.requests[0].body).joined, false);
+  assert.equal([...f.timers.values()][0].delay, 10_000, "the local owner choice has a bounded response wait");
+  finish({ schema: "elastos.community-membership/v1", configured: true, joined: false, detail: "Left" });
+  await pending;
+  assert.equal(f.button.textContent, "Rejoin Community");
+  assert.equal(f.button.disabled, false);
+  assert.equal(f.fields.get("community-detail"), "Left");
+  assert.equal(f.section.hidden, false);
+  assert.equal(f.timers.size, 0);
+});
+
+test("Community guests cannot dispatch and refused owner changes retain the last accepted state", async () => {
+  const guest = communityFixture("guest");
+  await guest.context.updateCommunityMembership();
+  assert.equal(guest.requests.length, 0);
+  assert.equal(guest.button.disabled, true);
+  const owner = communityFixture();
+  owner.context.fetchJson = async () => { throw new Error("request failed: 401"); };
+  await owner.context.updateCommunityMembership();
+  assert.equal(owner.button.textContent, "Leave Community");
+  assert.equal(owner.button.disabled, false);
+  assert.equal(owner.fields.get("community-detail"), "Joined");
+  assert.equal(owner.hidden.get("community-status"), false);
+});
+
+test("Community load failure is visible when configured and stays hidden on a Home without Community", async () => {
+  const none = communityFixture();
+  none.context.renderCommunityMembership({ schema: "elastos.community-membership/v1", configured: false, joined: false });
+  none.context.fetchJson = async () => { throw new Error("request failed: 500"); };
+  await none.context.refreshCommunityMembership();
+  none.context.showCommunityUnavailable(new Error("summary failed"));
+  assert.equal(none.section.hidden, true, "a confirmed unconfigured Home stays hidden after a later failure");
+  assert.equal(none.hidden.get("community-status"), undefined);
+
+  const f = communityFixture();
+  f.context.fetchJson = async () => { throw new Error("request failed: 500"); };
+  await f.context.refreshCommunityMembership();
+  assert.equal(f.section.hidden, false);
+  assert.equal(f.hidden.get("community-status"), false);
+  assert.equal(f.fields.get("community-status"), "Community setting is unavailable.");
+  assert.equal(f.button.disabled, true);
+});
+
+test("Community missing configuration stays hidden and malformed state cannot enable its control", () => {
+  const f = communityFixture();
+  f.context.renderCommunityMembership({ schema: "elastos.community-membership/v1", configured: false, joined: false });
+  assert.equal(f.section.hidden, true);
+  assert.equal(f.button.disabled, true);
+  assert.throws(() => f.context.renderCommunityMembership({ schema: "foreign", configured: true, joined: true }));
+  assert.equal(f.button.disabled, true);
+});
+
+test("Show me in Community offers three modes, sets only the caller's own and reverts on refusal", async () => {
+  const row = { hidden: true }, section = { hidden: true };
+  const option = mode => {
+    const attrs = new Map([["aria-checked", "false"]]), classes = new Set();
+    return {
+      dataset: { presenceMode: mode }, disabled: true, classes,
+      classList: { toggle: (name, on) => (on ? classes.add(name) : classes.delete(name)) },
+      setAttribute: (key, value) => attrs.set(key, value), getAttribute: key => attrs.get(key),
+    };
+  };
+  const options = ["always", "while_open", "hidden"].map(option);
+  const checked = () => options.filter(o => o.getAttribute("aria-checked") === "true").map(o => o.dataset.presenceMode);
+  const fields = new Map(), hidden = new Map(), requests = [];
+  let reply = { schema: "elastos.community-presence/v1", configured: true, joined: true, community_presence: "requested" };
+  const context = vm.createContext({
+    communitySection: section, communityPresenceRow: row, communityPresenceOptions: options, hasShellAccess: () => true,
+    setTextFields: (key, value) => fields.set(key, value),
+    setHiddenFields: (key, value) => hidden.set(key, value),
+    shellHeaders: value => value || {}, publicSystemError: (_, fallback) => fallback,
+    AbortController, runtimeUpdateRequests: new Set(),
+    window: { setTimeout: () => 1, clearTimeout: () => {} },
+    fetchJson: async (path, init) => { requests.push({ path, ...init }); return reply; },
+  });
+  const start = source.indexOf("function configureCommunityPresence(");
+  const end = source.indexOf("function configureAiProvider(", start);
+  const fetchStart = source.indexOf("async function fetchRuntimeUpdateJson(");
+  const fetchEnd = source.indexOf("async function onRuntimeUpdateApply(", fetchStart);
+  vm.runInContext(`let communityPresenceBusy = false; var communityMembership = null; ${source.slice(start, end)} ${source.slice(fetchStart, fetchEnd)}`, context);
+
+  await context.refreshCommunityPresence();
+  assert.equal(row.hidden, false);
+  assert.deepEqual(checked(), [], "an open request shows no choice until the person makes one");
+  assert.ok(options.every(o => !o.disabled));
+
+  reply = { ...reply, community_presence: "while_open" };
+  await context.updateCommunityPresence("while_open");
+  const post = requests.at(-1);
+  assert.equal(post.path, "/api/apps/system/community/presence");
+  assert.deepEqual(JSON.parse(post.body), { mode: "while_open" });
+  assert.deepEqual(checked(), ["while_open"]);
+  assert.ok(options.find(o => o.dataset.presenceMode === "while_open").classes.has("active"));
+
+  context.fetchJson = async () => { throw new Error("request failed: 409"); };
+  await context.updateCommunityPresence("always");
+  assert.deepEqual(checked(), ["while_open"], "a refused change keeps the last accepted choice");
+  assert.equal(hidden.get("community-presence-status"), false);
+
+  context.fetchJson = async () => ({ ...reply, community_presence: "refused" });
+  await context.refreshCommunityPresence();
+  assert.deepEqual(checked(), ["hidden"], "Never in Inbox shows as Hidden");
+
+  context.fetchJson = async () => ({ ...reply, joined: false, community_presence: "always" });
+  await context.refreshCommunityPresence();
+  assert.ok(options.every(o => o.disabled), "a Home that left Community cannot change it until it rejoins");
+
+  row.hidden = true;
+  context.fetchJson = async () => ({ ...reply, configured: false });
+  await context.refreshCommunityPresence();
+  assert.equal(row.hidden, true, "a Home without Community keeps the row hidden");
+  assert.equal(section.hidden, true);
+  context.fetchJson = async () => { throw new Error("request failed: 500"); };
+  await context.refreshCommunityPresence();
+  assert.equal(section.hidden, false, "a presence load failure is visible");
+  assert.equal(row.hidden, false);
+  assert.equal(hidden.get("community-presence-status"), false);
+  assert.ok(options.every(o => o.disabled));
+
+  section.hidden = true; row.hidden = true;
+  context.communityMembership = { configured: false };
+  let reads = 0;
+  context.fetchJson = async () => { reads++; throw new Error("request failed: 500"); };
+  await context.refreshCommunityPresence();
+  assert.equal(reads, 0, "a Home without Community never reads presence");
+  assert.equal(section.hidden, true, "and a presence failure cannot reveal it");
 });

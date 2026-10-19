@@ -29,6 +29,10 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 use tracing_subscriber::{fmt, EnvFilter};
 
+// Chromium allows up to 128 sockets per proxy, and pre-opened idle streams
+// count against the slot pool, so the web bridge must not starve page loads.
+const WEB_EGRESS_MAX_SESSIONS: usize = 128;
+const MEDIA_EGRESS_MAX_SESSIONS: usize = 16;
 const OPEN_REQUEST_ENV: &str = "ELASTOS_BROWSER_VM_OPEN_REQUEST";
 const VZ_TRANSPORT_AUTHORITY_SCHEMA: &str = "elastos.browser.vz-transport-authority/v1";
 const VZ_TRANSPORT_SECRET_SCHEMA: &str = "elastos.browser.vz-transport-secret/v1";
@@ -50,10 +54,6 @@ const MAX_GUEST_CONTROL_ERROR_CHARS: usize = 512;
 const MAX_SETTLEMENT_MESSAGE_CHARS: usize = 2 * 1024;
 const DEFAULT_CONTROL_PROXY_REQUEST_TIMEOUT_MS: u32 = 120_000;
 const DEFAULT_PROFILE_FLUSH_TIMEOUT_MS: u32 = 30_000;
-const BROWSER_VM_TARGET_VERSION: &str = match option_env!("ELASTOS_RELEASE_VERSION") {
-    Some(version) => version,
-    None => concat!(env!("CARGO_PKG_VERSION"), "-dev"),
-};
 const DISPLAY_MODE_BOOT_ARG: &str = "elastos.browser_display_mode";
 const DISPLAY_WIDTH_BOOT_ARG: &str = "elastos.browser_width";
 const DISPLAY_HEIGHT_BOOT_ARG: &str = "elastos.browser_height";
@@ -920,16 +920,6 @@ async fn run() -> Result<(), String> {
     let shutdown = Arc::new(AtomicBool::new(false));
     owner.shutdown = Some(Arc::clone(&shutdown));
     trace_stage("spawn_egress_bridge", "");
-    let egress_max_sessions =
-        post_effect_try!(env_u32("ELASTOS_BROWSER_VM_EGRESS_MAX_SESSIONS", 16,));
-    if egress_max_sessions == 0 || egress_max_sessions > 256 {
-        return Err(owner
-            .finish_cleanup(
-                "ELASTOS_BROWSER_VM_EGRESS_MAX_SESSIONS must be from 1 to 256",
-                None,
-            )
-            .await);
-    }
     let egress_port = owner
         .transport
         .authority
@@ -944,7 +934,7 @@ async fn run() -> Result<(), String> {
         egress_port,
         owner.paths.runtime_stream_path.clone(),
         Arc::clone(&shutdown),
-        egress_max_sessions as usize,
+        WEB_EGRESS_MAX_SESSIONS,
         None,
     ));
     owner.ordinary_stream_bridge = true;
@@ -969,7 +959,7 @@ async fn run() -> Result<(), String> {
                 .expect("validated Browser VZ media Runtime socket"),
         ),
         Arc::clone(&shutdown),
-        egress_max_sessions as usize,
+        MEDIA_EGRESS_MAX_SESSIONS,
         Some(media_peers),
     ));
     owner.media_stream_bridge = true;
@@ -3395,7 +3385,7 @@ fn ensure_sparse_profile_disk(path: &Path, profile_key: &str) -> Result<bool, St
 fn browser_vm_manifest(memory_mib: u32, vcpu_count: u8) -> CapsuleManifest {
     CapsuleManifest {
         schema: SCHEMA_V1.to_string(),
-        version: BROWSER_VM_TARGET_VERSION.to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
         name: "browser-vm-target".to_string(),
         description: Some("ElastOS Browser VM target".to_string()),
 	        author: Some("elastos".to_string()),
@@ -4944,6 +4934,18 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    #[test]
+    fn egress_bridges_use_fixed_independent_caps() {
+        assert_eq!(WEB_EGRESS_MAX_SESSIONS, 128);
+        assert_eq!(MEDIA_EGRESS_MAX_SESSIONS, 16);
+        let source = include_str!("browser-vz-engine-supervisor.rs");
+        let removed = ["ELASTOS_BROWSER_VM_", "EGRESS_MAX_SESSIONS"].concat();
+        assert!(
+            !source.contains(&removed),
+            "egress caps must not be configurable"
+        );
+    }
+
     fn transport_fixture(suffix: char) -> VzTransportLaunch {
         let expires_at = (current_unix_millis().unwrap() / 1_000 + 300) * 1_000;
         let generation = format!("sha256:{}", suffix.to_string().repeat(64));
@@ -5916,6 +5918,34 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn home_lifetime_transport_keeps_browser_vm_past_ten_minutes() {
+        // Simulated clock. The Runtime issues the transport for ttl_secs; the
+        // shipped value is the Home launch token lifetime (12 h), not 600 s.
+        let signals = install_shutdown_signal_reporter().unwrap();
+        let ten_minutes_and_a_second = Duration::from_secs(10 * 60 + 1);
+        for (ttl_secs, outlives_ten_minutes) in [(600_u64, false), (12 * 60 * 60, true)] {
+            let mut transport = transport_fixture('l');
+            transport.authority["expires_at_unix_ms"] =
+                json!(current_unix_millis().unwrap() + ttl_secs * 1_000);
+            let wait =
+                wait_for_shutdown_or_transport_expiry(&signals, Some(&transport), None, None);
+            tokio::pin!(wait);
+            let early = tokio::time::timeout(ten_minutes_and_a_second, &mut wait).await;
+            assert_eq!(early.is_err(), outlives_ten_minutes, "ttl_secs={ttl_secs}");
+            let outcome = match early {
+                Ok(outcome) => outcome,
+                Err(_) => tokio::time::timeout(Duration::from_secs(ttl_secs), &mut wait)
+                    .await
+                    .expect("transport still ends at its expiry"),
+            };
+            assert!(matches!(
+                outcome,
+                ShutdownWaitReason::TransportExpired { .. }
+            ));
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

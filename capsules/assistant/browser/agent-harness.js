@@ -66,6 +66,8 @@ import {
   startTurnForPrompt,
   canSubmitNewTurn,
   deleteMessageAt,
+  beginDeleteMessage,
+  cancelDeleteMessage,
   beginEditUserMessage,
   cancelEditUserMessage,
   submitEditUserMessage,
@@ -1253,7 +1255,7 @@ export function sendToAgentHarness(prompt, opts = {}) {
     renderSessions();
     setTitle(session.title);
     clearEmptyState();
-    appendMessage("user", displayText, { parts, modelText });
+    appendMessage("user", displayText, { msgIndex: session.messages.length - 1, parts, modelText });
     startTurnForPrompt(modelText);
     return true;
   }
@@ -1352,6 +1354,11 @@ export function bindAgentHarness() {
     priority: 89,
     isActive: () => sessionActionsOpen(),
     dismiss: () => closeSessionActions(),
+  });
+  registerEscapeHandler("agent-delete-confirm", {
+    priority: 88,
+    isActive: () => Boolean(streamEl()?.querySelector("[data-delete-confirm-bar]")),
+    dismiss: () => cancelDeleteMessage(),
   });
 
   window.addEventListener("resize", () => {
@@ -1614,13 +1621,27 @@ export function bindAgentHarness() {
       beginEditUserMessage(editBtn.closest(".agent-msg")?.dataset.msgIndex);
       return;
     }
+    if (event.target.closest?.("[data-delete-cancel]")) {
+      event.preventDefault();
+      cancelDeleteMessage();
+      return;
+    }
+    const deleteConfirm = event.target.closest?.("[data-delete-confirm]");
+    if (deleteConfirm) {
+      event.preventDefault();
+      const idx = deleteConfirm.closest(".agent-msg")?.dataset.msgIndex;
+      cancelDeleteMessage();
+      if (!turnBusy) deleteMessageAt(idx);
+      return;
+    }
     const deleteBtn = event.target.closest?.("[data-delete-message]");
     if (deleteBtn) {
       event.preventDefault();
       if (turnBusy) {
         return;
       }
-      deleteMessageAt(deleteBtn.closest(".agent-msg")?.dataset.msgIndex);
+      cancelDeleteMessage();
+      beginDeleteMessage(deleteBtn.closest(".agent-msg")?.dataset.msgIndex);
       return;
     }
     if (event.target.closest?.("[data-retry]") || event.target.closest?.("[data-regenerate]")) {

@@ -39,8 +39,16 @@ const MAX_REFUSED: usize = 8;
 const LEASE_ENV: &str = "ELASTOS_UPDATE_CONTROLLER_LEASE";
 const HOST_ENV: &str = "ELASTOS_UPDATE_CONTROLLER_HOST";
 const MAX_PRIVATE_JSON: u64 = 256 * 1024;
-const INITIAL_READY_TIMEOUT: Duration = Duration::from_secs(120);
-const READY_TIMEOUT: Duration = Duration::from_secs(30);
+// Every Home start shares runtime_control::RUNTIME_READY_TIMEOUT. One update is
+// bounded by a candidate start plus one rollback start.
+use crate::runtime_control::RUNTIME_READY_TIMEOUT as READY_TIMEOUT;
+// A recovery run starts the restored previous release at most this often, so it
+// stays within the same bound as one update's candidate and rollback starts.
+const PREVIOUS_START_ATTEMPTS: usize = 2;
+const RUNTIME_LOG: &str = "runtime.log";
+const PREVIOUS_RUNTIME_LOG: &str = "runtime.previous.log";
+// Each start appends to runtime.log; past this size the next start moves it aside once.
+const MAX_RUNTIME_LOG: u64 = 16 * 1024 * 1024;
 
 // Home reads provider and Browser settings from its installed private config files.
 // Persist the paths, desktop session, locale, and Runtime bindings needed to restart this Home.
@@ -94,12 +102,80 @@ fn allowed_launch_key(key: &std::ffi::OsStr) -> bool {
         .any(|allowed| key == std::ffi::OsStr::new(allowed))
 }
 
-fn readiness_budget(restarting: bool) -> Duration {
-    if restarting {
-        READY_TIMEOUT
-    } else {
-        INITIAL_READY_TIMEOUT
+/// `elastos home --browser` hands a pending Home restart recovery to the retained
+/// update controller, which proves the old generation gone before starting Home.
+pub fn resume_restart_recovery() -> Result<()> {
+    if std::env::var(HOST_ENV).as_deref() == Ok("1") {
+        return Ok(());
     }
+    let data = crate::sources::default_data_dir();
+    let Some(source) = load_trusted_sources(&data)?.default_source().cloned() else {
+        return Ok(());
+    };
+    let current = std::env::current_exe()?;
+    if source.install_path.is_empty() || Path::new(&source.install_path) != current {
+        return Ok(());
+    }
+    let data = fs::canonicalize(data)?;
+    let binary = fs::canonicalize(current)?;
+    let Some(handoff) = restart_recovery_handoff(&data, &binary)? else {
+        return Ok(());
+    };
+    eprintln!("Finishing the interrupted Home restart.");
+    Err(exec_controller(
+        &handoff.controller,
+        &handoff.receipt,
+        &handoff.lease,
+    ))
+}
+
+struct RecoveryHandoff {
+    controller: PathBuf,
+    receipt: PathBuf,
+    lease: FileLock,
+}
+
+fn restart_recovery_handoff(data: &Path, binary: &Path) -> Result<Option<RecoveryHandoff>> {
+    if !crate::install_transaction::pending_restart_recovery(data, binary)? {
+        return Ok(None);
+    }
+    let kept = "Home restart recovery needs its retained update controller. Recovery files are kept for operator repair.";
+    let directory = data.join(DIRECTORY);
+    check_controller_directory(&directory).context(kept)?;
+    let lease = acquire_lease(&directory)?;
+    let receipt_path = directory.join(RECEIPT);
+    let receipt: Receipt = read_private_json(&receipt_path).context(kept)?;
+    validate_retained_receipt(&receipt).context(kept)?;
+    anyhow::ensure!(
+        receipt.data_dir == data && receipt.binary == binary,
+        "{kept}"
+    );
+    Ok(Some(RecoveryHandoff {
+        controller: receipt.controller,
+        receipt: receipt_path,
+        lease,
+    }))
+}
+
+/// Exec keeps the terminal's foreground process and the same lease description.
+/// Returns only on failure.
+fn exec_controller(controller: &Path, receipt: &Path, lease: &FileLock) -> anyhow::Error {
+    let inherited = unsafe { libc::fcntl(lease.as_raw_fd(), libc::F_DUPFD, 3) };
+    if inherited < 0 {
+        return std::io::Error::last_os_error().into();
+    }
+    let mut command = std::process::Command::new(controller);
+    command
+        .args(["__update-controller", "--receipt"])
+        .arg(receipt)
+        .env(LEASE_ENV, inherited.to_string());
+    // exec returns only on failure; retry a controller copy that was just written.
+    let error = crate::install_transaction::retry_text_file_busy(|| Err::<(), _>(command.exec()))
+        .unwrap_err();
+    unsafe {
+        libc::close(inherited);
+    }
+    error.into()
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -191,6 +267,7 @@ struct Receipt {
 pub struct UpdateRequest {
     pub id: String,
     pub source_name: String,
+    /// The signed head's channel the owner approved; the source policy admits it.
     pub channel: String,
     pub publisher_did: String,
     pub current_version: String,
@@ -665,23 +742,7 @@ pub async fn enter_browser_home() -> Result<()> {
         return Err(error);
     }
     drop(writer);
-    // Exec keeps the terminal's foreground process and the same lease description.
-    let inherited = unsafe { libc::fcntl(lease.as_raw_fd(), libc::F_DUPFD, 3) };
-    if inherited < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let mut command = std::process::Command::new(controller);
-    command
-        .args(["__update-controller", "--receipt"])
-        .arg(path)
-        .env(LEASE_ENV, inherited.to_string());
-    // exec returns only on failure; retry the controller copy we just wrote.
-    let error = crate::install_transaction::retry_text_file_busy(|| Err::<(), _>(command.exec()))
-        .unwrap_err();
-    unsafe {
-        libc::close(inherited);
-    }
-    Err(error.into())
+    Err(exec_controller(&controller, &path, &lease))
 }
 
 /// An older updater or an interrupted Undo can leave this release's support
@@ -848,7 +909,7 @@ pub fn queue_update(data_dir: &Path, request: UpdateRequest) -> Result<()> {
     anyhow::ensure!(
         !path_present(&data_dir.join(DIRECTORY).join(ACTIVE_REQUEST))?
             && !InstallTransaction::has_pending_recovery(Path::new(&source.install_path)),
-        "An earlier update requires recovery. Start the retained update controller."
+        "An earlier update requires recovery. Run `elastos home --browser` to finish it."
     );
     let path = data_dir.join(DIRECTORY).join(REQUEST);
     let bytes = serde_json::to_vec(&request)?;
@@ -888,8 +949,8 @@ struct Controller {
     host_ready: bool,
     carrier: Option<Arc<crate::carrier::CarrierClient>>,
     carrier_close: Option<tokio::task::JoinHandle<()>>,
-    /// Test fixture: the claimed candidate's readiness budget. The fixture Home binds an
-    /// ephemeral port and reports it in `readiness-port`.
+    /// Test fixture: shortens the claimed candidate's readiness budget. A fixture Home
+    /// binds an ephemeral port and reports it in `readiness-port`.
     #[cfg(test)]
     test_readiness: Option<Duration>,
 }
@@ -964,12 +1025,16 @@ impl Controller {
         drop(writer);
         let generation = hex::encode(rand::random::<[u8; 16]>());
         async {
-            self.spawn(&generation, false)?;
+            self.spawn(
+                &generation,
+                false,
+                &format!("Home {} start", source.installed_version),
+            )?;
             self.wait_ready(
                 &generation,
                 &source.installed_version,
                 &expected,
-                readiness_budget(false),
+                READY_TIMEOUT,
             )
             .await
         }
@@ -977,7 +1042,7 @@ impl Controller {
         .with_context(|| {
             format!(
                 "Home could not start. Check the startup log at {} before starting Home again.",
-                self.directory.join("runtime.log").display()
+                self.directory.join(RUNTIME_LOG).display()
             )
         })?;
         self.publish_ready_result()?;
@@ -986,12 +1051,14 @@ impl Controller {
         Ok(())
     }
 
-    fn spawn(&mut self, generation: &str, restarting: bool) -> Result<()> {
+    /// Every start appends to one private log under a header, so a failed update
+    /// start keeps its evidence through the rollback start that follows it.
+    fn spawn(&mut self, generation: &str, restarting: bool, purpose: &str) -> Result<()> {
         anyhow::ensure!(
             self.child.is_none(),
             "controller already owns a Home process"
         );
-        let log = open_private_log(&self.directory.join("runtime.log"))?;
+        let log = open_start_log(&self.directory, purpose, generation)?;
         let mut command =
             self.receipt
                 .launch
@@ -1024,19 +1091,29 @@ impl Controller {
             if child.observed_exit()?.is_some() {
                 bail!("Home exited before it became ready.");
             }
-            if process_start(pid).as_deref() != Some(start.as_str()) {
-                bail!("Home process generation changed.");
+            match process_start(pid) {
+                Some(current) if current != start => bail!("Home process generation changed."),
+                Some(_) => {}
+                // macOS hides an exiting Home's start time before its exit is observable, so
+                // check again until the exit shows or the deadline passes.
+                None => {
+                    if tokio::time::Instant::now() >= deadline {
+                        bail!(
+                            "Home did not become ready within {} seconds.",
+                            budget.as_secs()
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
             }
             let home_port = BROWSER_HOME_PORT;
-            // The fixture Home reports its port once it has bound the listener.
+            // A fixture Home reports its ephemeral port once it has bound the listener.
             #[cfg(test)]
-            let home_port = match self.test_readiness {
-                Some(_) => std::fs::read_to_string(self.receipt.data_dir.join("readiness-port"))
-                    .ok()
-                    .and_then(|port| port.trim().parse().ok())
-                    .unwrap_or(0),
-                None => home_port,
-            };
+            let home_port = std::fs::read_to_string(self.receipt.data_dir.join("readiness-port"))
+                .ok()
+                .and_then(|port| port.trim().parse().ok())
+                .unwrap_or(home_port);
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if tokio::time::timeout(
                 remaining,
@@ -1150,7 +1227,7 @@ impl Controller {
         } else {
             self.publish(
                 "failed",
-                "Home could not restart. Run the retained update controller to recover.",
+                "Home could not restart. Run `elastos home --browser` to recover.",
             )
         }
     }
@@ -1200,10 +1277,7 @@ impl Controller {
             .clone();
         let source = installed_source(&self.receipt.data_dir)?;
         anyhow::ensure!(
-            request.source_name == source.name
-                && request.channel == normalized_channel(&source)
-                && source.publisher_dids.first() == Some(&request.publisher_did)
-                && request.current_version == source.installed_version,
+            owner_choice_matches_source(&request, &source),
             "Update choice changed. Check the update again."
         );
         let client = Arc::new(
@@ -1293,7 +1367,11 @@ impl Controller {
                     .is_some_and(|request| request.id == record.plan.request_id),
             "Pending recovery belongs to a different controller."
         );
-        if matches!(record.phase, RestartPhase::CandidateStartClaimed) {
+        // A claim without a process receipt may still have a running child.
+        if matches!(
+            record.phase,
+            RestartPhase::CandidateStartClaimed | RestartPhase::PreviousStartClaimed
+        ) {
             bail!("Home start was claimed without a process receipt. Retain recovery files for operator repair.");
         }
         // The pipe closes on controller death. A new owner proves exact generation absence.
@@ -1331,31 +1409,53 @@ impl Controller {
             self.finish_request()?;
             return Ok(());
         }
-        if matches!(
-            record.phase,
-            RestartPhase::PreviousStartClaimed | RestartPhase::PreviousRunning
-        ) {
-            bail!("The previous Home start was already attempted. Retain recovery files for operator repair.");
-        }
         let offline = crate::host_lock::acquire_host_process_lock(
             &self.receipt.data_dir,
             "update-recovery",
             "offline",
         )?;
-        transaction.restore_for_restart()?;
+        if record.phase == RestartPhase::PreviousRunning {
+            // The failed previous generation is gone (proved above); the restored
+            // release is started again.
+            transaction.retire_previous_start()?;
+        } else {
+            transaction.restore_for_restart()?;
+        }
         crate::update::verify_restart_support(&transaction)?;
         drop(offline);
-        let record = transaction.claim_start(true)?;
-        if let Err(error) = crate::update::RestartOwner::start(self, &transaction, record).await {
-            self.stop_child().await?;
-            return Err(
-                error.context("Previous Home start failed; retain its consumed recovery claim.")
-            );
-        }
+        self.start_restored_previous(&transaction).await?;
         crate::update::finish_ready_restart(&transaction)?;
         transaction.finish_restart()?;
         self.finish_request()?;
         Ok(())
+    }
+
+    /// The restored previous release gets the full budget, at most
+    /// PREVIOUS_START_ATTEMPTS times. Each retry follows a stop that proved the failed
+    /// generation gone. The failed new release is never started again.
+    async fn start_restored_previous(&mut self, transaction: &InstallTransaction) -> Result<()> {
+        let mut attempt = 1;
+        loop {
+            let record = transaction.claim_start(true)?;
+            let Err(error) = crate::update::RestartOwner::start(self, transaction, record).await
+            else {
+                return Ok(());
+            };
+            self.stop_child().await?;
+            let last = attempt == PREVIOUS_START_ATTEMPTS;
+            // No later owner can prove a claim without a process receipt gone.
+            if !last || transaction.restart_record()?.phase == RestartPhase::PreviousStartClaimed {
+                crate::update::retire_stopped_previous_start(transaction)?;
+            }
+            if last {
+                return Err(error.context(format!(
+                    "The previous Home did not start after {PREVIOUS_START_ATTEMPTS} attempts. Recovery files are kept. Check {}, then run `elastos home --browser` to try again.",
+                    self.directory.join(RUNTIME_LOG).display()
+                )));
+            }
+            eprintln!("The previous Home did not start ({error:#}). Trying again.");
+            attempt += 1;
+        }
     }
 }
 
@@ -1416,17 +1516,28 @@ impl crate::update::RestartOwner for Controller {
                     "Previous Runtime differs from verified rollback"
                 );
             }
-            self.spawn(&record.generation, true)?;
+            self.spawn(
+                &record.generation,
+                true,
+                &format!(
+                    "Home {version} {} start",
+                    if previous { "rollback" } else { "update" }
+                ),
+            )?;
             let pid = self.child.as_ref().unwrap().pid();
             transaction.record_started(
                 &record.generation,
                 pid,
                 process_start(pid).context("Home exited during start")?,
             )?;
-            let budget = readiness_budget(true);
             // Tests shorten only the candidate start; the previous Home keeps its budget.
             #[cfg(test)]
-            let budget = self.test_readiness.filter(|_| !previous).unwrap_or(budget);
+            let budget = self
+                .test_readiness
+                .filter(|_| !previous)
+                .unwrap_or(READY_TIMEOUT);
+            #[cfg(not(test))]
+            let budget = READY_TIMEOUT;
             self.wait_ready(&record.generation, version, &expected, budget)
                 .await?;
             Ok(())
@@ -1440,7 +1551,16 @@ impl crate::update::RestartOwner for Controller {
     }
 }
 
-fn verify_update_choice(
+/// The owner's choice still names this Home's source, signer and version, and
+/// the source's channel policy admits the offered channel.
+pub(crate) fn owner_choice_matches_source(request: &UpdateRequest, source: &TrustedSource) -> bool {
+    request.source_name == source.name
+        && crate::update::verify_source_channel(source, &request.channel).is_ok()
+        && source.publisher_dids.first() == Some(&request.publisher_did)
+        && request.current_version == source.installed_version
+}
+
+pub(crate) fn verify_update_choice(
     bytes: &[u8],
     choice: &UpdateRequest,
     source: &TrustedSource,
@@ -1454,10 +1574,11 @@ fn verify_update_choice(
     anyhow::ensure!(
         signer == choice.publisher_did
             && head["payload"]["latest_release_cid"].as_str() == Some(choice.release_cid.as_str())
-            && head["payload"]["version"].as_str() == Some(choice.new_version.as_str()),
+            && head["payload"]["version"].as_str() == Some(choice.new_version.as_str())
+            && head["payload"]["channel"].as_str() == Some(choice.channel.as_str()),
         "Signed release differs from the owner update choice."
     );
-    crate::update::verify_source_channel(source, head["payload"]["channel"].as_str().unwrap_or(""))
+    crate::update::verify_source_channel(source, &choice.channel)
 }
 
 fn path_present(path: &Path) -> Result<bool> {
@@ -1473,14 +1594,6 @@ fn installed_source(data_dir: &Path) -> Result<TrustedSource> {
         .default_source()
         .cloned()
         .context("Installed trusted source is unavailable.")
-}
-
-fn normalized_channel(source: &TrustedSource) -> &str {
-    if source.channel.trim().is_empty() {
-        "stable"
-    } else {
-        source.channel.trim()
-    }
 }
 
 #[cfg(test)]
@@ -1583,22 +1696,25 @@ fn controller_file_digest(path: &Path) -> Result<Option<String>> {
 
 pub(crate) const REFUSED_MESSAGE: &str = "This update was refused because the publisher's signed release is not valid for this Home. Your current version is unchanged.";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ApplyFailure {
     SourceUnavailable,
     NotEnoughSpace,
     DownloadMismatch,
     Refused,
+    /// The updater's own plain words, with the install command to run once.
+    InstallerRequired(String),
     Unknown,
 }
 
 impl ApplyFailure {
-    fn message(self) -> &'static str {
+    fn message(&self) -> &str {
         match self {
             Self::SourceUnavailable => "Home could not reach the update source. Your current version is unchanged. Connect to the internet and select Update again.",
             Self::NotEnoughSpace => "There is not enough free disk space for this update. Your current version is unchanged. Free some space and select Update again.",
             Self::DownloadMismatch => "The downloaded update did not match what the publisher signed. Your current version is unchanged. Select Update again.",
             Self::Refused => REFUSED_MESSAGE,
+            Self::InstallerRequired(message) => message,
             Self::Unknown => "The update could not be completed. Your current version is unchanged. Select Update again.",
         }
     }
@@ -1615,6 +1731,11 @@ fn classify_apply_failure(error: &anyhow::Error) -> ApplyFailure {
         .any(|cause| cause.is::<crate::update::DownloadMismatch>())
     {
         ApplyFailure::DownloadMismatch
+    } else if let Some(installer) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<crate::update::InstallerRequired>())
+    {
+        ApplyFailure::InstallerRequired(installer.to_string())
     } else if error
         .chain()
         .any(|cause| cause.is::<crate::update::ReleaseRefused>())
@@ -1960,14 +2081,31 @@ fn write_private(path: &Path, value: &impl Serialize) -> Result<()> {
 
 fn open_private_log(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
-        .write(true)
-        .truncate(false)
+        .append(true)
         .create(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
     check_private_file(&file)?;
-    file.set_len(0)?;
+    Ok(file)
+}
+
+/// Opens runtime.log for one Home start and writes that start's header. A log past
+/// MAX_RUNTIME_LOG moves to runtime.previous.log first, replacing the older one.
+fn open_start_log(directory: &Path, purpose: &str, generation: &str) -> Result<File> {
+    let path = directory.join(RUNTIME_LOG);
+    let mut file = open_private_log(&path)?;
+    if file.metadata()?.len() > MAX_RUNTIME_LOG {
+        fs::rename(&path, directory.join(PREVIOUS_RUNTIME_LOG))?;
+        file = open_private_log(&path)?;
+    }
+    let unix_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    writeln!(
+        file,
+        "\n=== {purpose}; generation {generation}; unix time {unix_time} ==="
+    )?;
     Ok(file)
 }
 

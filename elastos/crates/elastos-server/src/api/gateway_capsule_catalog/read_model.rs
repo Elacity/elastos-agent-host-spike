@@ -174,10 +174,17 @@ pub(in crate::api::gateway) fn capsule_interface_registry_summary_for(
     data_dir: &std::path::Path,
     platform: &str,
 ) -> CapsuleInterfaceRegistryResponse {
-    let catalog = capsule_catalog_summary_for(data_dir, platform);
+    capsule_interface_registry_summary_from_catalog(&capsule_catalog_summary_for(
+        data_dir, platform,
+    ))
+}
+
+pub(in crate::api::gateway) fn capsule_interface_registry_summary_from_catalog(
+    catalog: &CapsuleCatalogResponse,
+) -> CapsuleInterfaceRegistryResponse {
     let mut interfaces = Vec::new();
-    for capsule in catalog.capsules {
-        for interface in capsule.interfaces {
+    for capsule in &catalog.capsules {
+        for interface in &capsule.interfaces {
             let bindings = interface
                 .methods
                 .iter()
@@ -196,7 +203,7 @@ pub(in crate::api::gateway) fn capsule_interface_registry_summary_for(
                 projections: capsule.projections.clone(),
                 cid: capsule.cid.clone(),
                 trust_state: capsule.trust_state.clone(),
-                interface,
+                interface: interface.clone(),
                 bindings,
             });
         }
@@ -312,6 +319,7 @@ fn catalog_capsule_summary(
         name: name.clone(),
         model_content: manifest.model_content,
         model_runtime: None,
+        model_memory_fit: None,
         publisher_did: None,
         content_size_bytes: None,
         version: manifest.version,
@@ -734,6 +742,10 @@ mod tests {
             );
             assert_eq!(summary.capsule_type, expected_type);
             assert_eq!(summary.execution, Some(expected_execution));
+            assert!(
+                summary.model_memory_fit.is_none(),
+                "ordinary app rows have no model memory fact"
+            );
         }
     }
 
@@ -923,6 +935,9 @@ pub(in crate::api::gateway) struct CapsuleSummary {
     pub(in crate::api::gateway) model_content: Option<elastos_common::ModelContentMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(in crate::api::gateway) model_runtime: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(in crate::api::gateway) model_memory_fit:
+        Option<elastos_common::host_memory::ModelMemoryFit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(in crate::api::gateway) publisher_did: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

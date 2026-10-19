@@ -36,6 +36,27 @@ test("release configuration binds every host to the image set and Runtime profil
   }
 });
 
+test("Mac Browser transport lasts as long as the Home launch token, not ten minutes", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "browser-release-ttl-"));
+  const config = (ttl) => {
+    const data = path.join(temp, String(ttl ?? "default"));
+    const env = { ELASTOS_BROWSER_VM_PYTHON: path.join(data, "bin/python3") };
+    if (ttl !== undefined) env.ELASTOS_BROWSER_VZ_TRANSPORT_TTL_SECS = String(ttl);
+    execFileSync(process.execPath, [path.join(root, "scripts/browser-source-home-config.mjs"),
+      "--data-dir", data, "--platform", "darwin-arm64", "--release-image"],
+    { env, stdio: "pipe" });
+    return JSON.parse(fs.readFileSync(path.join(data, "config/browser-vz-vsock-transport.json"))).ttl_secs;
+  };
+  try {
+    // The installed setup runs this script with an empty environment.
+    assert.equal(config(), 12 * 60 * 60);
+    assert.equal(config(12 * 60 * 60), 12 * 60 * 60);
+    assert.throws(() => config(12 * 60 * 60 + 1), /ELASTOS_BROWSER_VZ_TRANSPORT_TTL_SECS must be 120\.\.43200/);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test("Linux launcher selects the image kernel while the capsule kernel retains ownership", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "browser-release-kernel-"));
   try {

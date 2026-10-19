@@ -56,6 +56,11 @@ impl PrivateFixture {
     }
 
     fn publish_installed_release_with_components(&self, components: &[u8]) -> TrustedSource {
+        self.publish_installed_release_listing(components, json!({}))
+    }
+
+    /// `extra` adds top-level release payload fields, such as `capsule_records`.
+    fn publish_installed_release_listing(&self, components: &[u8], extra: Value) -> TrustedSource {
         self.file(&self.data.join("components.json"), components, 0o600);
         let binary = fs::read(&self.binary).unwrap();
         let descriptor = |bytes: &[u8]| {
@@ -63,15 +68,17 @@ impl PrivateFixture {
                 "cid": raw_cid(bytes), "sha256": digest(bytes), "size": bytes.len()
             })
         };
-        let release = signed(
-            json!({
-                "schema":"elastos.release/v1", "version":"0.7.0", "channel":"stable",
-                "platforms": {(crate::update::detect_release_platform()): {
-                    "binary": descriptor(&binary), "components": descriptor(components)
-                }}
-            }),
-            "elastos.release.v1",
-        );
+        let mut payload = json!({
+            "schema":"elastos.release/v1", "version":"0.7.0", "channel":"stable",
+            "platforms": {(crate::update::detect_release_platform()): {
+                "binary": descriptor(&binary), "components": descriptor(components)
+            }}
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let release = signed(payload, "elastos.release.v1");
         let head = signed(
             json!({
                 "schema":"elastos.release.head/v1", "version":"0.7.0", "channel":"stable",
@@ -313,7 +320,7 @@ fn alternate_binary_refuses_installed_recovery_before_start_or_offline_migration
             let (target, plan, backup) = host_fence_migration_target(&fixture);
             let before = fixture.snapshot();
             let expected = if restarting {
-                "retained update controller"
+                "`elastos home --browser`"
             } else {
                 "Run `elastos update` again"
             };
@@ -696,6 +703,14 @@ fn installed_controller_admission_binds_signature_channel_version_platform_and_b
         admit_installed_release(&envelope, &source, &fixture.binary).unwrap(),
         expected
     );
+    let canary = TrustedSource {
+        channel: "canary".into(),
+        ..source.clone()
+    };
+    assert_eq!(
+        admit_installed_release(&envelope, &canary, &fixture.binary).unwrap(),
+        expected
+    );
     for refusal in [
         "binary",
         "version",
@@ -717,7 +732,7 @@ fn installed_controller_admission_binds_signature_channel_version_platform_and_b
                 envelope.clone()
             }
             "channel" => {
-                source.channel = "canary".into();
+                source.channel = "jetson-test".into();
                 envelope.clone()
             }
             "publisher" => {
@@ -815,6 +830,61 @@ fn signed_update_choice_requires_the_exact_head_release_publisher_version_and_ch
 }
 
 #[test]
+fn canary_update_choice_accepts_only_the_trusted_signers_stable_head() {
+    let (mut source, choice, head) = choice_fixture();
+    source.channel = "canary".into();
+    // The owner approves the offered stable channel; the canary source admits it.
+    assert_eq!(choice.channel, "stable");
+    assert!(owner_choice_matches_source(&choice, &source));
+    verify_update_choice(&head, &choice, &source).unwrap();
+    let mut subscription = choice.clone();
+    subscription.channel = "canary".into();
+    assert!(owner_choice_matches_source(&subscription, &source));
+    assert!(verify_update_choice(&head, &subscription, &source).is_err());
+    let mut stable = source.clone();
+    stable.channel = "stable".into();
+    assert!(!owner_choice_matches_source(&subscription, &stable));
+    for (field, value) in [
+        ("source_name", "another source"),
+        ("channel", "jetson-test"),
+        ("publisher_did", "did:key:another"),
+        ("current_version", "0.6.9"),
+    ] {
+        let mut changed = serde_json::to_value(&choice).unwrap();
+        changed[field] = json!(value);
+        let changed: UpdateRequest = serde_json::from_value(changed).unwrap();
+        assert!(!owner_choice_matches_source(&changed, &source), "{field}");
+    }
+    let value: Value = serde_json::from_slice(&head).unwrap();
+    let mut unsigned = value.clone();
+    unsigned.as_object_mut().unwrap().remove("signature");
+    let other_key = ed25519_dalek::SigningKey::from_bytes(&[44; 32]);
+    let (signature, other_did) = crate::crypto::domain_separated_sign(
+        &other_key,
+        "elastos.release.head.v1",
+        &serde_json::to_vec(&value["payload"]).unwrap(),
+    );
+    let wrong_signer =
+        json!({"payload": value["payload"], "signature": signature, "signer_did": other_did});
+    let forged = json!({"payload": value["payload"], "signature": signature, "signer_did": value["signer_did"]});
+    for (case, envelope, expected) in [
+        ("unsigned", unsigned, "Missing signature in envelope"),
+        ("wrong signer", wrong_signer, "Signer DID mismatch"),
+        (
+            "forged",
+            forged,
+            "Signed envelope signature verification failed",
+        ),
+    ] {
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let mut choice = choice.clone();
+        choice.head_cid = raw_cid(&bytes);
+        let error = verify_update_choice(&bytes, &choice, &source).unwrap_err();
+        assert!(error.to_string().contains(expected), "{case}: {error:#}");
+    }
+}
+
+#[test]
 fn receipt_round_trip_keeps_non_utf8_launch_args_environment_and_working_directory() {
     let fixture = PrivateFixture::new();
     let cwd = fixture
@@ -899,6 +969,34 @@ fn receipt_round_trip_keeps_non_utf8_launch_args_environment_and_working_directo
     bad.args[0] = "invalid base64!".into();
     assert!(bad.command(&fixture.binary, &generation, true).is_err());
     assert_ne!(bad.sha256().unwrap(), receipt.launch_sha256);
+}
+
+#[test]
+fn launch_capture_and_restart_preserve_carrier_mdns_choice() {
+    for choice in [None, Some("0"), Some("1")] {
+        let environment = choice.into_iter().map(|value| {
+            (
+                OsString::from("ELASTOS_CARRIER_MDNS"),
+                OsString::from(value),
+            )
+        });
+        let launch = LaunchPlan::capture_environment(environment, PathBuf::from("/Home fixture"));
+        for restarting in [false, true] {
+            let command = launch
+                .command(
+                    Path::new("/Home fixture/bin/elastos"),
+                    &"c".repeat(32),
+                    restarting,
+                )
+                .unwrap();
+            let retained = command
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| *key == OsStr::new("ELASTOS_CARRIER_MDNS"))
+                .and_then(|(_, value)| value);
+            assert_eq!(retained, choice.map(OsStr::new));
+        }
+    }
 }
 
 #[test]
@@ -2329,10 +2427,10 @@ fn controller_copy_refusals_preserve_the_previous_controller_and_foreign_target(
 }
 
 #[test]
-fn log_rotation_checks_private_ownership_before_truncation() {
+fn start_log_checks_private_ownership_and_keeps_earlier_starts() {
     for tamper in ["unsafe mode", "hard link", "symlink"] {
         let fixture = PrivateFixture::new();
-        let log = fixture.directory.join("runtime.log");
+        let log = fixture.directory.join(RUNTIME_LOG);
         let other = fixture.directory.join("foreign-log");
         fixture.file(&other, b"foreign retained log", 0o600);
         match tamper {
@@ -2341,7 +2439,10 @@ fn log_rotation_checks_private_ownership_before_truncation() {
             "symlink" => symlink(&other, &log).unwrap(),
             _ => unreachable!(),
         }
-        assert!(open_private_log(&log).is_err(), "{tamper}");
+        assert!(
+            open_start_log(&fixture.directory, "Home 0.7.0 start", "a").is_err(),
+            "{tamper}"
+        );
         assert_eq!(fs::read(&log).unwrap(), b"foreign retained log", "{tamper}");
         assert_eq!(
             fs::read(&other).unwrap(),
@@ -2350,10 +2451,41 @@ fn log_rotation_checks_private_ownership_before_truncation() {
         );
     }
     let fixture = PrivateFixture::new();
-    let log = fixture.directory.join("runtime.log");
-    fixture.file(&log, b"previous bounded log", 0o600);
-    drop(open_private_log(&log).unwrap());
-    assert!(fs::read(&log).unwrap().is_empty());
+    let log = fixture.directory.join(RUNTIME_LOG);
+    fixture.file(&log, b"failed update start evidence\n", 0o600);
+    let mut file = open_start_log(
+        &fixture.directory,
+        "Home 0.7.0 rollback start",
+        &"b".repeat(32),
+    )
+    .unwrap();
+    file.write_all(b"rollback output\n").unwrap();
+    drop(file);
+    let text = fs::read_to_string(&log).unwrap();
+    assert!(
+        text.starts_with(&format!(
+            "failed update start evidence\n\n=== Home 0.7.0 rollback start; generation {}; unix time ",
+            "b".repeat(32)
+        )),
+        "{text}"
+    );
+    assert!(text.ends_with(" ===\nrollback output\n"), "{text}");
+    // Past its bound the log moves aside once, keeping the latest earlier starts.
+    File::options()
+        .write(true)
+        .open(&log)
+        .unwrap()
+        .set_len(MAX_RUNTIME_LOG + 1)
+        .unwrap();
+    drop(open_start_log(&fixture.directory, "Home 0.7.0 start", &"c".repeat(32)).unwrap());
+    let previous = fixture.directory.join(PREVIOUS_RUNTIME_LOG);
+    assert_eq!(fs::metadata(&previous).unwrap().len(), MAX_RUNTIME_LOG + 1);
+    assert!(fs::read(&previous)
+        .unwrap()
+        .starts_with(b"failed update start evidence\n"));
+    assert!(fs::read_to_string(&log)
+        .unwrap()
+        .starts_with("\n=== Home 0.7.0 start; generation "));
 }
 
 #[tokio::test]
@@ -2858,7 +2990,7 @@ async fn recovery_with_an_owned_ready_child_publishes_its_terminal_result() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn initial_home_readiness_has_a_finite_budget_beyond_the_restart_limit() {
+async fn every_home_start_has_one_finite_readiness_budget() {
     let fixture = PrivateFixture::new();
     publish_retained_receipt(&fixture);
     let capsule = fixture.data.join("capsules/home");
@@ -2913,42 +3045,30 @@ async fn initial_home_readiness_has_a_finite_budget_beyond_the_restart_limit() {
     };
 
     let binary_hash = digest(b"signed fixture Runtime");
-    for restarting in [false, true] {
-        let started = tokio::time::Instant::now();
-        let message = {
-            let proof = controller.wait_ready(
-                &generation,
-                "0.7.0",
-                &binary_hash,
-                readiness_budget(restarting),
-            );
-            tokio::pin!(proof);
-            if !restarting {
-                tokio::select! {
-                    result = &mut proof => panic!("initial readiness ended before 31 seconds: {result:?}"),
-                    _ = tokio::time::sleep(Duration::from_secs(31)) => {},
-                }
-            }
-            proof.await.unwrap_err().to_string()
-        };
-        let expected = Duration::from_secs(if restarting { 30 } else { 120 });
-        assert!(started.elapsed() >= expected);
-        assert!(started.elapsed() <= expected + Duration::from_millis(50));
-        assert!(
-            message.contains(&format!("within {} seconds", expected.as_secs())),
-            "{message}"
-        );
-        assert!(!controller.host_ready);
-        assert_eq!(controller.child.as_ref().unwrap().pid(), pid);
-        assert!(controller
-            .child
-            .as_ref()
-            .unwrap()
-            .observed_exit()
-            .unwrap()
-            .is_none());
-        assert!(!fixture.directory.join(STATUS).exists());
-    }
+    let started = tokio::time::Instant::now();
+    let message = {
+        let proof = controller.wait_ready(&generation, "0.7.0", &binary_hash, READY_TIMEOUT);
+        tokio::pin!(proof);
+        // A slow device's Home (45 s) is still inside the budget.
+        tokio::select! {
+            result = &mut proof => panic!("readiness ended before 45 seconds: {result:?}"),
+            _ = tokio::time::sleep(Duration::from_secs(45)) => {},
+        }
+        proof.await.unwrap_err().to_string()
+    };
+    assert!(started.elapsed() >= Duration::from_secs(120));
+    assert!(started.elapsed() <= Duration::from_secs(120) + Duration::from_millis(50));
+    assert!(message.contains("within 120 seconds"), "{message}");
+    assert!(!controller.host_ready);
+    assert_eq!(controller.child.as_ref().unwrap().pid(), pid);
+    assert!(controller
+        .child
+        .as_ref()
+        .unwrap()
+        .observed_exit()
+        .unwrap()
+        .is_none());
+    assert!(!fixture.directory.join(STATUS).exists());
     // Restore wall time for the operating system's signal delivery and reap.
     tokio::time::resume();
     controller.stop_child().await.unwrap();
@@ -3073,29 +3193,65 @@ impl crate::update::RestartOwner for RealRestartOwner {
 
 #[tokio::test]
 async fn real_controller_loader_failure_restores_previous_home_once() {
-    real_controller_restart_failure("loader").await;
+    real_controller_restart_failure("loader", 0).await;
 }
 
 #[tokio::test]
 async fn real_controller_crash_before_readiness_restores_previous_home_once() {
-    real_controller_restart_failure("crash").await;
+    real_controller_restart_failure("crash", 0).await;
 }
 
 #[tokio::test]
 async fn real_controller_hung_start_restores_previous_home_once() {
-    real_controller_restart_failure("hung").await;
+    real_controller_restart_failure("hung", 0).await;
 }
 
-async fn real_controller_restart_failure(failure: &str) {
-    let fixture = PrivateFixture::new();
-    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
-    let previous = format!(
-        "#!/bin/sh\nexec {} --exact {} --ignored --nocapture\n",
-        quote(std::env::current_exe().unwrap().to_str().unwrap()),
-        quote(&format!(
+/// A rollback start as slow as Home on a busy Jetson still restores the previous Home.
+#[tokio::test]
+async fn real_controller_rollback_start_taking_45_seconds_restores_previous_home() {
+    real_controller_restart_failure("crash", 45).await;
+}
+
+struct RestartScenario {
+    fixture: PrivateFixture,
+    owner: RealRestartOwner,
+    request: UpdateRequest,
+    fetch: crate::update::FetchFn,
+    old: Vec<(PathBuf, Vec<u8>)>,
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Shell lines that export `settings` and exec the real fixture Home below.
+fn fixture_home_exec(settings: &str) -> String {
+    format!(
+        "export {settings}\nexec {} --exact {} --ignored --nocapture\n",
+        shell_quote(std::env::current_exe().unwrap().to_str().unwrap()),
+        shell_quote(&format!(
             "{}::restart_home_fixture",
             module_path!().split_once("::").unwrap().1
         )),
+    )
+}
+
+/// Home runs the installed previous release (0.7.0) and the owner approved a signed
+/// 0.7.1 whose Runtime is `candidate`. After a restart the previous fixture Home
+/// answers only after `previous_delay` seconds. The previous wrapper runs under the
+/// `previous-interpreter` link, so a test can make its spawn fail.
+async fn restart_scenario(
+    candidate: impl FnOnce(&PrivateFixture) -> String,
+    previous_delay: u64,
+    candidate_budget: Option<Duration>,
+) -> RestartScenario {
+    let fixture = PrivateFixture::new();
+    let interpreter = fixture.data.join("previous-interpreter");
+    symlink("/bin/sh", &interpreter).unwrap();
+    let previous = format!(
+        "#!{}\n{}",
+        interpreter.display(),
+        fixture_home_exec(&format!("RESTART_FIXTURE_READY_DELAY={previous_delay}"))
     );
     crate::test_support::write_from_child(&fixture.binary, &previous, 0o755);
     let home = fixture.data.join("capsules/home");
@@ -3137,20 +3293,7 @@ async fn real_controller_restart_failure(failure: &str) {
     fixture.publish_installed_release_with_components(&components(b"old support"));
     publish_retained_receipt(&fixture);
 
-    let interpreter = fixture.data.join("candidate-interpreter");
-    let candidate = if failure == "loader" {
-        // A real interpreter admits --version, then disappears before the Home exec.
-        // Signed candidate bytes remain unchanged throughout activation and rollback.
-        symlink("/bin/sh", &interpreter).unwrap();
-        format!(
-            "#!{}\n/bin/rm {}\nprintf 'elastos 0.7.1\\n'\n",
-            interpreter.display(),
-            quote(interpreter.to_str().unwrap())
-        )
-    } else {
-        format!("#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'elastos 0.7.1\\n'; exit 0; fi\nprintf 'candidate\\n' >> candidate-starts\n{}\n",
-            if failure == "crash" { "exit 7" } else { "exec /bin/sleep 60" })
-    };
+    let candidate = candidate(&fixture);
     let candidate_components = components(b"new support");
     let descriptor =
         |bytes: &[u8]| json!({"cid":raw_cid(bytes),"sha256":digest(bytes),"size":bytes.len()});
@@ -3199,7 +3342,7 @@ async fn real_controller_restart_failure(failure: &str) {
             host_ready: false,
             carrier: None,
             carrier_close: None,
-            test_readiness: Some(Duration::from_secs(3)),
+            test_readiness: candidate_budget,
         },
         starts: Vec::new(),
         stops: 0,
@@ -3210,7 +3353,7 @@ async fn real_controller_restart_failure(failure: &str) {
     owner.controller.start_initial().await.unwrap();
     owner.controller.request = Some(request.clone());
     write_private(&fixture.directory.join(ACTIVE_REQUEST), &request).unwrap();
-    let old_paths = [
+    let old = [
         fixture.binary.clone(),
         fixture.data.join("components.json"),
         fixture.data.join("sources.json"),
@@ -3219,14 +3362,58 @@ async fn real_controller_restart_failure(failure: &str) {
         fixture.data.join("bin/fixture-provider"),
         home.join("capsule.json"),
         home.join("browser/index.html"),
-    ];
-    let old = old_paths.map(|path| {
+    ]
+    .map(|path| {
         let bytes = fs::read(&path).unwrap();
         (path, bytes)
-    });
+    })
+    .to_vec();
+    RestartScenario {
+        fixture,
+        owner,
+        request,
+        fetch,
+        old,
+    }
+}
+
+fn crash_candidate(_: &PrivateFixture) -> String {
+    "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'elastos 0.7.1\\n'; exit 0; fi\nprintf 'candidate\\n' >> candidate-starts\nprintf 'candidate start evidence\\n' >&2\nexit 7\n".into()
+}
+
+async fn real_controller_restart_failure(failure: &str, previous_delay: u64) {
+    let RestartScenario {
+        fixture,
+        mut owner,
+        request,
+        fetch,
+        old,
+    } = restart_scenario(
+        |fixture| match failure {
+            // A real interpreter admits --version, then disappears before the Home exec.
+            // Signed candidate bytes remain unchanged throughout activation and rollback.
+            "loader" => {
+                let interpreter = fixture.data.join("candidate-interpreter");
+                symlink("/bin/sh", &interpreter).unwrap();
+                format!(
+                    "#!{}\n/bin/rm {}\nprintf 'elastos 0.7.1\\n'\n",
+                    interpreter.display(),
+                    shell_quote(interpreter.to_str().unwrap())
+                )
+            }
+            "crash" => crash_candidate(fixture),
+            _ => "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'elastos 0.7.1\\n'; exit 0; fi\nprintf 'candidate\\n' >> candidate-starts\nprintf 'candidate start evidence\\n' >&2\nexec /bin/sleep 60\n".into(),
+        },
+        previous_delay,
+        Some(Duration::from_secs(3)),
+    )
+    .await;
+    let interpreter = fixture.data.join("candidate-interpreter");
+    let started = std::time::Instant::now();
     let result =
         crate::update::run_restarting_update(&fixture.data, &fetch, request.head_cid, &mut owner)
             .await;
+    assert!(started.elapsed() >= Duration::from_secs(previous_delay));
     owner.controller.publish_apply_result(&result).unwrap();
     let error = format!("{:#}", result.unwrap_err());
     assert!(
@@ -3302,6 +3489,20 @@ async fn real_controller_restart_failure(failure: &str) {
             b"candidate\n"
         );
     }
+    // The failed update start's log survives the rollback start that followed it.
+    let log = fs::read_to_string(fixture.directory.join(RUNTIME_LOG)).unwrap();
+    let first = log.find("=== Home 0.7.0 start; generation ").unwrap();
+    let update = log
+        .find("=== Home 0.7.1 update start; generation ")
+        .unwrap();
+    let rollback = log
+        .find("=== Home 0.7.0 rollback start; generation ")
+        .unwrap();
+    assert!(first < update && update < rollback, "{log}");
+    if failure != "loader" {
+        let evidence = log.find("candidate start evidence").unwrap();
+        assert!(update < evidence && evidence < rollback, "{log}");
+    }
     if let Some((pid, birth)) = &owner.candidate_process {
         if let Some(birth) = birth {
             assert!(child::generation_gone(*pid, birth).unwrap());
@@ -3319,22 +3520,7 @@ async fn real_controller_restart_failure(failure: &str) {
         fs::read(fixture.data.join("owner-data")).unwrap(),
         b"new owner data"
     );
-    for parent in [&fixture.data, &fixture.data.join("installation")] {
-        for name in [
-            ".elastos.update-journal.json",
-            ".elastos.update-journal.tmp",
-            ".elastos.update-stage",
-            ".elastos.update-rollback",
-            ".elastos.update-support",
-        ] {
-            assert!(
-                !parent.join(name).exists(),
-                "{}",
-                parent.join(name).display()
-            );
-        }
-    }
-    assert!(!InstallTransaction::has_pending_recovery(&fixture.binary));
+    assert_no_recovery_files(&fixture);
     // Repeated controller reconciliation retains the ready Home and consumes no new start.
     for _ in 0..2 {
         owner.controller.reconcile_pending().await.unwrap();
@@ -3354,6 +3540,283 @@ async fn real_controller_restart_failure(failure: &str) {
         .is_none());
 }
 
+fn assert_no_recovery_files(fixture: &PrivateFixture) {
+    for parent in [&fixture.data, &fixture.data.join("installation")] {
+        for name in [
+            ".elastos.update-journal.json",
+            ".elastos.update-journal.tmp",
+            ".elastos.update-stage",
+            ".elastos.update-rollback",
+            ".elastos.update-support",
+        ] {
+            assert!(
+                !parent.join(name).exists(),
+                "{}",
+                parent.join(name).display()
+            );
+        }
+    }
+    assert!(!InstallTransaction::has_pending_recovery(&fixture.binary));
+}
+
+/// A new release whose Home needs 45 s, like Home on a busy Jetson, is accepted.
+#[tokio::test]
+async fn real_controller_accepts_a_new_home_ready_after_45_seconds() {
+    let RestartScenario {
+        fixture,
+        mut owner,
+        request,
+        fetch,
+        ..
+    } = restart_scenario(
+        |_| {
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'elastos 0.7.1\\n'; exit 0; fi\n{}",
+                fixture_home_exec(
+                    "RESTART_FIXTURE_ROLE=candidate RESTART_FIXTURE_VERSION=0.7.1 RESTART_FIXTURE_READY_DELAY=45"
+                )
+            )
+        },
+        0,
+        None,
+    )
+    .await;
+    let started = std::time::Instant::now();
+    let result =
+        crate::update::run_restarting_update(&fixture.data, &fetch, request.head_cid, &mut owner)
+            .await;
+    owner.controller.publish_apply_result(&result).unwrap();
+    result.unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(45));
+    assert_eq!(owner.starts, [RestartPhase::CandidateStartClaimed]);
+    assert!(owner.controller.host_ready);
+    let projected = status(&fixture.data).unwrap().unwrap();
+    assert_eq!(projected.phase, "updated");
+    assert_eq!(projected.current_version, "0.7.1");
+    assert_eq!(
+        projected.host_pid,
+        Some(owner.controller.child.as_ref().unwrap().pid())
+    );
+    assert_eq!(
+        fs::read(fixture.data.join("candidate-starts")).unwrap(),
+        b"start\n"
+    );
+    assert!(fixture.data.join("candidate-ready").exists());
+    assert!(!fixture.data.join("previous-starts").exists());
+    assert_eq!(
+        fs::read(fixture.data.join("bin/fixture-provider")).unwrap(),
+        b"new support"
+    );
+    assert_no_recovery_files(&fixture);
+    owner.controller.stop_child().await.unwrap();
+}
+
+/// The candidate crashes and the in-process rollback start exits while `previous-fail`
+/// exists: the journal is left at previous_running with a dead pid, as on the Jetson.
+async fn dead_previous_start() -> (PrivateFixture, Vec<(PathBuf, Vec<u8>)>) {
+    let RestartScenario {
+        fixture,
+        mut owner,
+        request,
+        fetch,
+        old,
+    } = restart_scenario(crash_candidate, 0, Some(Duration::from_secs(3))).await;
+    fixture.file(&fixture.data.join("previous-fail"), b"", 0o600);
+    let result =
+        crate::update::run_restarting_update(&fixture.data, &fetch, request.head_cid, &mut owner)
+            .await;
+    owner.controller.publish_apply_result(&result).unwrap();
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(
+        error.contains("previous Home did not become ready; retain recovery journal"),
+        "{error}"
+    );
+    let projected = status(&fixture.data).unwrap().unwrap();
+    assert_eq!(projected.phase, "failed");
+    assert!(
+        projected.message.contains("`elastos home --browser`"),
+        "{}",
+        projected.message
+    );
+    let record = InstallTransaction::acquire(&fixture.data, &fixture.binary)
+        .unwrap()
+        .restart_record()
+        .unwrap();
+    assert_eq!(record.phase, RestartPhase::PreviousRunning);
+    assert!(child::generation_gone(
+        record.pid.unwrap(),
+        record.process_start.as_deref().unwrap()
+    )
+    .unwrap());
+    assert!(owner.controller.child.is_none());
+    (fixture, old)
+}
+
+/// What `elastos home --browser` execs for a pending restart: the retained controller
+/// with its receipt and the held lease.
+fn retained_controller(fixture: &PrivateFixture) -> Controller {
+    let handoff = restart_recovery_handoff(&fixture.data, &fixture.binary)
+        .unwrap()
+        .unwrap();
+    assert_eq!(handoff.receipt, fixture.directory.join(RECEIPT));
+    assert_eq!(handoff.controller, fixture.controller());
+    assert!(acquire_lease(&fixture.directory).is_err());
+    drop(handoff);
+    Controller {
+        receipt: read_private_json(&fixture.directory.join(RECEIPT)).unwrap(),
+        directory: fixture.directory.clone(),
+        child: None,
+        request: None,
+        previous_binary_sha256: String::new(),
+        previous_version: String::new(),
+        generation: String::new(),
+        host_ready: false,
+        carrier: None,
+        carrier_close: None,
+        test_readiness: None,
+    }
+}
+
+async fn assert_recovered(
+    fixture: &PrivateFixture,
+    mut controller: Controller,
+    old: &[(PathBuf, Vec<u8>)],
+    previous_starts: usize,
+) {
+    controller.reconcile_pending().await.unwrap();
+    controller.complete_reconciliation().await.unwrap();
+    assert!(controller.host_ready);
+    let projected = status(&fixture.data).unwrap().unwrap();
+    assert_eq!(projected.phase, "restored");
+    assert_eq!(projected.current_version, "0.7.0");
+    assert_no_recovery_files(fixture);
+    assert!(restart_recovery_handoff(&fixture.data, &fixture.binary)
+        .unwrap()
+        .is_none());
+    assert!(!fixture.directory.join(ACTIVE_REQUEST).exists());
+    assert_eq!(
+        fs::read_to_string(fixture.data.join("previous-starts"))
+            .unwrap()
+            .lines()
+            .count(),
+        previous_starts
+    );
+    assert!(fixture.data.join("previous-ready").exists());
+    for (path, bytes) in old {
+        assert_eq!(&fs::read(path).unwrap(), bytes, "{}", path.display());
+    }
+    // The failed new release was never started again.
+    assert_eq!(
+        fs::read(fixture.data.join("candidate-starts")).unwrap(),
+        b"candidate\n"
+    );
+    controller.stop_child().await.unwrap();
+}
+
+/// The rollback start cannot even spawn: the stopped claim has no process receipt,
+/// so it returns to `restored` and the next run starts the previous release.
+#[tokio::test]
+async fn unspawnable_rollback_start_is_started_by_the_next_run() {
+    let RestartScenario {
+        fixture,
+        mut owner,
+        request,
+        fetch,
+        old,
+    } = restart_scenario(
+        |_| "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'elastos 0.7.1\\n'; exit 0; fi\nprintf 'candidate\\n' >> candidate-starts\n/bin/rm previous-interpreter\nexit 7\n".into(),
+        0,
+        Some(Duration::from_secs(3)),
+    )
+    .await;
+    let result =
+        crate::update::run_restarting_update(&fixture.data, &fetch, request.head_cid, &mut owner)
+            .await;
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(
+        error.contains("previous Home did not become ready; retain recovery journal")
+            && error.contains("spawn owned update child"),
+        "{error}"
+    );
+    assert_eq!(
+        InstallTransaction::acquire(&fixture.data, &fixture.binary)
+            .unwrap()
+            .restart_record()
+            .unwrap()
+            .phase,
+        RestartPhase::Restored
+    );
+    assert!(!fixture.data.join("previous-starts").exists());
+    symlink("/bin/sh", fixture.data.join("previous-interpreter")).unwrap();
+    let controller = retained_controller(&fixture);
+    assert_recovered(&fixture, controller, &old, 1).await;
+}
+
+/// A previous start claimed without a process receipt may still have a child, so
+/// recovery keeps every file for operator repair.
+#[tokio::test]
+async fn unreceipted_previous_claim_keeps_recovery_files() {
+    let (fixture, _) = dead_previous_start().await;
+    {
+        let transaction = InstallTransaction::acquire(&fixture.data, &fixture.binary).unwrap();
+        transaction.retire_previous_start().unwrap();
+        assert_eq!(
+            transaction.claim_start(true).unwrap().phase,
+            RestartPhase::PreviousStartClaimed
+        );
+    }
+    let mut controller = retained_controller(&fixture);
+    let before = fixture.snapshot();
+    let error = format!("{:#}", controller.reconcile_pending().await.unwrap_err());
+    assert!(
+        error.contains("claimed without a process receipt"),
+        "{error}"
+    );
+    assert_eq!(fixture.snapshot(), before);
+    assert!(controller.child.is_none());
+}
+
+#[tokio::test]
+async fn home_recovers_the_previous_release_after_its_start_died() {
+    let (fixture, old) = dead_previous_start().await;
+    fs::remove_file(fixture.data.join("previous-fail")).unwrap();
+    let controller = retained_controller(&fixture);
+    assert_recovered(&fixture, controller, &old, 2).await;
+}
+
+#[tokio::test]
+async fn repeated_previous_start_failure_keeps_recovery_files_and_says_so() {
+    let (fixture, old) = dead_previous_start().await;
+    let mut controller = retained_controller(&fixture);
+    let error = format!("{:#}", controller.reconcile_pending().await.unwrap_err());
+    assert!(
+        error
+            .contains("The previous Home did not start after 2 attempts. Recovery files are kept.")
+            && error.contains("`elastos home --browser`"),
+        "{error}"
+    );
+    assert!(controller.child.is_none());
+    assert!(InstallTransaction::has_pending_recovery(&fixture.binary));
+    assert!(fixture.directory.join(ACTIVE_REQUEST).exists());
+    assert_eq!(
+        fs::read_to_string(fixture.data.join("previous-starts"))
+            .unwrap()
+            .lines()
+            .count(),
+        3
+    );
+    let log = fs::read_to_string(fixture.directory.join(RUNTIME_LOG)).unwrap();
+    assert_eq!(log.matches("=== Home 0.7.0 rollback start;").count(), 3);
+    assert_eq!(log.matches("fixture previous start refused").count(), 3);
+    for (path, bytes) in &old {
+        assert_eq!(&fs::read(path).unwrap(), bytes, "{}", path.display());
+    }
+    // Not a dead end: once the cause is gone, the next run recovers.
+    fs::remove_file(fixture.data.join("previous-fail")).unwrap();
+    let controller = retained_controller(&fixture);
+    assert_recovered(&fixture, controller, &old, 4).await;
+}
+
 #[tokio::test]
 #[ignore = "real child Home for controller restart failure tests"]
 async fn restart_home_fixture() {
@@ -3364,6 +3827,11 @@ async fn restart_home_fixture() {
     let data = std::env::current_dir().unwrap();
     let generation = std::env::var("ELASTOS_UPDATE_GENERATION").unwrap();
     let restarting = std::env::var("ELASTOS_UPDATE_RESTART").unwrap() == "1";
+    let setting =
+        |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.into());
+    let role = setting("RESTART_FIXTURE_ROLE", "previous");
+    let version = setting("RESTART_FIXTURE_VERSION", "0.7.0");
+    let delay: u64 = setting("RESTART_FIXTURE_READY_DELAY", "0").parse().unwrap();
     let mut term =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
     child::watch_parent().unwrap();
@@ -3395,10 +3863,19 @@ async fn restart_home_fixture() {
         OpenOptions::new()
             .append(true)
             .create(true)
-            .open(data.join("previous-starts"))
+            .open(data.join(format!("{role}-starts")))
             .unwrap()
             .write_all(b"start\n")
             .unwrap();
+        if role == "previous" && data.join("previous-fail").exists() {
+            eprintln!("fixture previous start refused");
+            std::process::exit(9);
+        }
+        // A slow device's Home: nothing answers until the delay has passed.
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(delay)) => {},
+            _ = term.recv() => return,
+        }
     }
     // A private ephemeral port, away from the operator's Home, reported to the controller.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3413,10 +3890,14 @@ async fn restart_home_fixture() {
         "binary_sha256":digest(&fs::read(data.join("installed-runtime")).unwrap())
     })).unwrap();
     let document = fs::read(data.join("capsules/home/browser/index.html")).unwrap();
+    let ready = restarting.then(|| data.join(format!("{role}-ready")));
     let router = Router::new()
         .route(
             "/api/health",
-            get(|| async { Json(json!({"version":"0.7.0"})) }),
+            get(move || {
+                let version = version.clone();
+                async move { Json(json!({ "version": version })) }
+            }),
         )
         .route(
             "/api/auth/attach",
@@ -3429,13 +3910,13 @@ async fn restart_home_fixture() {
             "/home/",
             get(move || {
                 let document = document.clone();
-                let data = data.clone();
+                let ready = ready.clone();
                 async move {
-                    if restarting {
+                    if let Some(ready) = ready {
                         OpenOptions::new()
                             .append(true)
                             .create(true)
-                            .open(data.join("previous-ready"))
+                            .open(ready)
                             .unwrap()
                             .write_all(b"ready\n")
                             .unwrap();
@@ -3708,6 +4189,70 @@ impl crate::update::RestartOwner for StagingRestartOwner {
 }
 
 #[tokio::test]
+async fn home_launch_and_browser_paths_refuse_a_release_whose_record_differs_before_writing() {
+    let app = b"fixture app archive";
+    let row = json!({"install_path":"capsules/fixture-app", "extract_path":"fixture-app",
+        "release_path":"fixture-app.tar.gz", "cid":raw_cid(app),
+        "checksum":format!("sha256:{}", digest(app)), "size":app.len()});
+    let components = serde_json::to_vec(&json!({
+        "schema":"elastos.components/v1", "capsules":{}, "profiles":{},
+        "external":{"fixture-app":{"install_path":"capsules/fixture-app","platforms":{"*":row}}}
+    }))
+    .unwrap();
+    let did = crate::crypto::encode_signing_key_did(&test_key());
+    let record = |size: usize| {
+        crate::capsule_record::signed_record(
+            &test_key(),
+            json!({"schema":"elastos.capsule.record/v1", "name":"fixture-app", "platform":"*",
+                "capsule_version":null, "sha256":digest(app), "size":size, "cid":raw_cid(app),
+                "release_path":"fixture-app.tar.gz", "signer_did":did}),
+        )
+    };
+    let fixture = PrivateFixture::new();
+    fixture.publish_installed_release_listing(
+        &components,
+        json!({"capsule_records":[record(app.len() + 1)]}),
+    );
+    // The refusal names the record, so it comes before any Carrier fetch.
+    let error =
+        crate::setup::ensure_capsule_component_for_home_launch(&fixture.data, "fixture-app")
+            .await
+            .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("differs from the release components"),
+        "{error:#}"
+    );
+    // The shared check the Browser helper and image downloads run first.
+    let error = crate::setup::admit_installed_components(
+        &fixture.data,
+        crate::setup::FirstPartyCarrierContext::Runtime,
+    )
+    .err()
+    .expect("a differing record is refused");
+    assert!(error
+        .to_string()
+        .contains("differs from the release components"));
+    assert!(!fixture.data.join("capsules/fixture-app").exists());
+
+    let fixture = PrivateFixture::new();
+    fixture.publish_installed_release_listing(
+        &components,
+        json!({"capsule_records":[record(app.len())]}),
+    );
+    let admitted = crate::setup::admit_installed_components(
+        &fixture.data,
+        crate::setup::FirstPartyCarrierContext::Runtime,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(admitted.bytes, components);
+    // A Runtime admission holds the installation writer until it is dropped.
+    assert!(crate::install_transaction::acquire_installed_writer(&fixture.data).is_err());
+    drop(admitted);
+    assert!(crate::install_transaction::acquire_installed_writer(&fixture.data).is_ok());
+}
+
+#[tokio::test]
 async fn staged_support_skips_linux_only_home_component_on_darwin() {
     let fixture = PrivateFixture::new();
     fixture.publish_installed_release();
@@ -3730,7 +4275,10 @@ async fn staged_support_skips_linux_only_home_component_on_darwin() {
         "profiles":{"home":{"components":["browser-stream-bridge"]}},
         "external":{"browser-stream-bridge":{
             "install_path":"bin/browser-stream-bridge",
-            "platforms":{"linux-arm64":{"cid":raw_cid(b"linux support")}}
+            "platforms":{"linux-arm64":{
+                "release_path":"browser-stream-bridge-linux-arm64", "cid":raw_cid(b"linux support"),
+                "checksum":format!("sha256:{}", digest(b"linux support")), "size":b"linux support".len()
+            }}
         }}
     }))
     .unwrap();
@@ -3740,6 +4288,7 @@ async fn staged_support_skips_linux_only_home_component_on_darwin() {
         &fs::read(fixture.data.join("components.json")).unwrap(),
         &components,
         "darwin-arm64",
+        &crate::capsule_record::UpdateRecords::default(),
         &fetch,
         &mut owner,
     )
@@ -3778,7 +4327,7 @@ async fn staged_support_replaces_a_component_left_by_an_interrupted_undo() {
     let components = serde_json::to_vec(&json!({
         "schema":"elastos.components/v1", "capsules":{}, "profiles":{},
         "external":{"fixture-provider":{"install_path":"bin/fixture-provider", "platforms":{
-            (crate::setup::detect_platform()): {"cid":cid, "checksum":format!("sha256:{}", digest(signed)), "size":signed.len()}
+            (crate::setup::detect_platform()): {"release_path":"fixture-provider", "cid":cid, "checksum":format!("sha256:{}", digest(signed)), "size":signed.len()}
         }}}
     }))
     .unwrap();
@@ -3791,6 +4340,7 @@ async fn staged_support_replaces_a_component_left_by_an_interrupted_undo() {
         &components,
         &components,
         &crate::setup::detect_platform(),
+        &crate::capsule_record::UpdateRecords::default(),
         &fetch,
         &mut owner,
     )
@@ -3975,6 +4525,7 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
         "catalogue",
         "catalogue restored",
         "catalogue fetch",
+        "canary updated",
     ] {
         let fixture = PrivateFixture::new();
         fs::create_dir(fixture.data.join("bin")).unwrap();
@@ -4132,6 +4683,17 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
         let (_, mut request, _) = choice_fixture();
         request.head_cid = raw_cid(&head);
         request.release_cid = raw_cid(&release);
+        if outcome == "canary updated" {
+            // A canary Home: the owner approved the offered stable head, and the
+            // controller admits that choice as `apply` does before staging it.
+            let mut sources = crate::sources::load_trusted_sources(&fixture.data).unwrap();
+            sources.sources[0].channel = "canary".into();
+            crate::sources::save_trusted_sources(&fixture.data, &sources).unwrap();
+            let source = installed_source(&fixture.data).unwrap();
+            assert_eq!(request.channel, "stable");
+            assert!(owner_choice_matches_source(&request, &source));
+            verify_update_choice(&head, &request, &source).unwrap();
+        }
         let mut command = tokio::process::Command::new("/bin/sh");
         command.args(["-c", "exec sleep 60"]);
         let child = child::OwnedChild::spawn(&mut command).unwrap();
@@ -4259,7 +4821,14 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
         .await;
         owner.controller.publish_apply_result(&result).unwrap();
         let status = status(&fixture.data).unwrap().unwrap();
-        let updated = ["updated", "support path", "moved", "bundle", "catalogue"];
+        let updated = [
+            "updated",
+            "support path",
+            "moved",
+            "bundle",
+            "catalogue",
+            "canary updated",
+        ];
         if updated.contains(&outcome) {
             result.unwrap();
             assert_eq!(
@@ -4273,6 +4842,20 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
                 fs::read(fixture.data.join(&candidate_support)).unwrap(),
                 b"new support"
             );
+            if outcome == "canary updated" {
+                // The Home runs the stable release and keeps its canary subscription.
+                let source = installed_source(&fixture.data).unwrap();
+                assert_eq!(
+                    (source.channel.as_str(), source.installed_version.as_str()),
+                    ("canary", "0.7.1")
+                );
+                crate::installed_release::read_without_migration(
+                    &fixture.data,
+                    &fixture.binary,
+                    &source,
+                )
+                .unwrap();
+            }
         } else if outcome.ends_with("restored") {
             assert!(result.is_err());
             assert_eq!((owner.stops, owner.starts), (2, 2));
@@ -4397,6 +4980,222 @@ async fn stage_before_stop_preserves_home_on_fetch_or_verify_failure_and_restart
     }
 }
 
+#[tokio::test]
+async fn system_update_fetches_the_pinned_network_before_stop_and_joins_after_activation() {
+    let config_file = crate::collaboration_startup::COLLABORATION_STARTUP_CONFIG_FILE;
+    for outcome in [
+        "joined",
+        "tampered",
+        "isolated",
+        "join fails",
+        "candidate fails",
+    ] {
+        let fixture = PrivateFixture::new();
+        fs::create_dir(fixture.data.join("bin")).unwrap();
+        fixture.file(
+            &fixture.data.join("bin/fixture-provider"),
+            b"old support",
+            0o755,
+        );
+        let manifest = |bytes: &[u8]| {
+            json!({
+                "schema":"elastos.components/v1", "profiles":{}, "capsules":{},
+                "external":{"fixture-provider":{"install_path":"bin/fixture-provider", "platforms":{
+                    (crate::setup::detect_platform()): {"release_path":"fixture-provider", "cid":raw_cid(bytes), "checksum":format!("sha256:{}", digest(bytes)), "size":bytes.len()}
+                }}}
+            })
+        };
+        let (_signer, chain) =
+            crate::collaboration_release_network::tests::signed_profile_chain_config(1);
+        let network = chain[0].clone();
+        let parsed: Value = serde_json::from_slice(&network).unwrap();
+        let network_cid = crate::setup::catalog_head_cid(&network).unwrap();
+        let mut value = manifest(b"new support");
+        value["collaboration_network"] = json!({
+            "head_cid": network_cid,
+            "expected_network_id": parsed["expected_network_id"],
+            "trusted_profile_signer_dids": parsed["trusted_profile_signer_dids"],
+        });
+        let old_components = serde_json::to_vec(&manifest(b"old support")).unwrap();
+        let components = serde_json::to_vec(&value).unwrap();
+        fixture.publish_installed_release_with_components(&old_components);
+        publish_retained_receipt(&fixture);
+        if outcome == "isolated" {
+            crate::collaboration_release_network::choose_isolated(&fixture.data).unwrap();
+        }
+        if outcome == "join fails" {
+            // Nothing can be joined where a directory holds the config path.
+            fs::create_dir(fixture.data.join(config_file)).unwrap();
+        }
+        let binary = b"#!/bin/sh\nprintf 'elastos 0.7.1\\n'\n".as_slice();
+        let descriptor =
+            |bytes: &[u8]| json!({"cid":raw_cid(bytes),"sha256":digest(bytes),"size":bytes.len()});
+        let release = signed(
+            json!({
+                "schema":"elastos.release/v1","version":"0.7.1","channel":"stable",
+                "platforms":{(crate::update::detect_release_platform()):{"binary":descriptor(binary),"components":descriptor(&components)}}
+            }),
+            "elastos.release.v1",
+        );
+        let head = signed(
+            json!({
+                "schema":"elastos.release.head/v1","version":"0.7.1","channel":"stable",
+                "latest_release_cid":raw_cid(&release),"release_sha256":digest(&release)
+            }),
+            "elastos.release.head.v1",
+        );
+        let (_, mut request, _) = choice_fixture();
+        request.head_cid = raw_cid(&head);
+        request.release_cid = raw_cid(&release);
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 60"]);
+        let child = child::OwnedChild::spawn(&mut command).unwrap();
+        let pid = child.pid();
+        let birth = process_start(pid).unwrap();
+        let mut owner = StagingRestartOwner {
+            controller: Controller {
+                receipt: read_private_json(&fixture.directory.join(RECEIPT)).unwrap(),
+                directory: fixture.directory.clone(),
+                child: Some(child),
+                request: Some(request.clone()),
+                previous_binary_sha256: digest(b"signed fixture Runtime"),
+                previous_version: "0.7.0".into(),
+                generation: "a".repeat(32),
+                host_ready: true,
+                carrier: None,
+                carrier_close: None,
+                test_readiness: None,
+            },
+            host: Some(
+                crate::host_lock::acquire_host_process_lock(&fixture.data, "home", "fixture")
+                    .unwrap(),
+            ),
+            stops: 0,
+            starts: 0,
+            fail_candidate: outcome == "candidate fails",
+            candidate_support: PathBuf::from("bin/fixture-provider"),
+        };
+        owner
+            .controller
+            .publish("staging", "Checking the signed update.")
+            .unwrap();
+        let served_network = if outcome == "tampered" {
+            crate::collaboration_release_network::tests::signed_profile_chain_config(1).1[0].clone()
+        } else {
+            network.clone()
+        };
+        let items = std::collections::BTreeMap::from([
+            (request.head_cid.clone(), head),
+            (request.release_cid.clone(), release),
+            (raw_cid(binary), binary.to_vec()),
+            (raw_cid(&components), components),
+            (raw_cid(b"new support"), b"new support".to_vec()),
+            (network_cid.clone(), served_network),
+        ]);
+        let network_fetches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = network_fetches.clone();
+        let data = fixture.data.clone();
+        let fetch: crate::update::FetchFn = Box::new(move |cid| {
+            let bytes = items.get(&cid).cloned();
+            let network_fetch = cid == network_cid;
+            let observed = observed.clone();
+            let birth = birth.clone();
+            let data = data.clone();
+            Box::pin(async move {
+                if network_fetch {
+                    observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    // The network comes with the other downloads, while the
+                    // current Home still runs on the current release.
+                    assert!(!child::generation_gone(pid, &birth).unwrap());
+                    assert_eq!(
+                        fs::read(data.join("bin/fixture-provider")).unwrap(),
+                        b"old support"
+                    );
+                }
+                bytes.ok_or_else(|| anyhow::anyhow!("content {cid} is not published"))
+            })
+        });
+        let result = crate::update::run_restarting_update(
+            &fixture.data,
+            &fetch,
+            request.head_cid,
+            &mut owner,
+        )
+        .await;
+        owner.controller.publish_apply_result(&result).unwrap();
+        let status = status(&fixture.data).unwrap().unwrap();
+        let joined_network = || fs::read(fixture.data.join(config_file)).ok();
+        match outcome {
+            "joined" => {
+                result.unwrap();
+                assert_eq!((owner.stops, owner.starts), (1, 1));
+                assert_eq!(status.phase, "updated");
+                assert_eq!(joined_network(), Some(network.clone()));
+                assert_eq!(
+                    fs::metadata(fixture.data.join(config_file))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+            "isolated" => {
+                result.unwrap();
+                assert_eq!(network_fetches.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert_eq!(joined_network(), None);
+            }
+            "tampered" => {
+                let error = format!("{:#}", result.unwrap_err());
+                assert!(error.contains("does not match the pinned"), "{error}");
+                assert_eq!((owner.stops, owner.starts), (0, 0));
+                assert_eq!(status.phase, "failed");
+                assert!(status.message.contains("unchanged"));
+                assert_eq!(joined_network(), None);
+                assert_eq!(
+                    fs::read(&fixture.binary).unwrap(),
+                    b"signed fixture Runtime"
+                );
+            }
+            "join fails" => {
+                assert!(result.is_err());
+                assert_eq!((owner.stops, owner.starts), (2, 1));
+                assert_eq!(status.phase, "restored");
+                assert!(fixture.data.join(config_file).is_dir());
+            }
+            "candidate fails" => {
+                assert!(result.is_err());
+                assert_eq!((owner.stops, owner.starts), (2, 2));
+                assert_eq!(status.phase, "restored");
+                // The previous release comes back; the joined network stays.
+                assert_eq!(joined_network(), Some(network.clone()));
+            }
+            _ => unreachable!(),
+        }
+        if outcome != "tampered" && outcome != "isolated" {
+            assert_eq!(network_fetches.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+        if ["join fails", "candidate fails"].contains(&outcome) {
+            assert!(owner.controller.child.is_some(), "previous Home is running");
+            assert_eq!(
+                fs::read(&fixture.binary).unwrap(),
+                b"signed fixture Runtime"
+            );
+            assert_eq!(
+                fs::read(fixture.data.join("components.json")).unwrap(),
+                old_components
+            );
+        }
+        assert!(
+            !InstallTransaction::has_pending_recovery(&fixture.binary),
+            "{outcome}"
+        );
+        assert!(!fixture.data.join(".elastos.update-support").exists());
+        owner.host.take();
+        owner.controller.stop_child().await.unwrap();
+    }
+}
+
 #[test]
 fn apply_failures_are_classified_only_from_typed_evidence() {
     for (error, expected) in [
@@ -4425,6 +5224,19 @@ fn apply_failures_are_classified_only_from_typed_evidence() {
             .unwrap_err()
             .context("staging"),
             ApplyFailure::Refused,
+        ),
+        (
+            // A newer signed format or kind: plain words and the command, never "not valid".
+            crate::update::installer_required::<()>(
+                &serde_json::from_value(json!({"name":"fixture", "publisher_dids":["did:key:fixture"],
+                    "gateways":["https://publisher.example"]}))
+                .unwrap(),
+                "0.9.0",
+                crate::update::refused(Err(anyhow::anyhow!("release components use schema v2"))),
+            )
+            .unwrap_err()
+            .context("staging"),
+            ApplyFailure::InstallerRequired("ElastOS 0.9.0 needs the install command once; this Home cannot apply it itself. Your current version is unchanged. Run this once: curl -fsSL 'https://publisher.example/install.sh' | bash".into()),
         ),
         (
             anyhow::anyhow!("Binary SHA-256 mismatch!"),

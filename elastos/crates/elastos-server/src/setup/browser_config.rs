@@ -24,9 +24,81 @@ pub(super) async fn ensure_host_components(
     if !local_vm_selected(data, platform)? {
         return configure(data, platform, false);
     }
-    let Some(profile) = manifest.profiles.get("browser-host") else {
+    let Some(rows) = host_rows(manifest, platform)? else {
         return Ok(()); // Source Homes and older releases own their existing helpers.
     };
+    if rows.iter().any(|row| row.missing(data)) {
+        // Downloads take their rows from the release admitted against its capsule
+        // records; a Runtime caller holds the writer until they are written.
+        let admitted = super::admit_installed_components(data, context)?;
+        let admitted_rows = match &admitted {
+            Some(admitted) => host_rows(&admitted.manifest, platform)?.unwrap_or_default(),
+            None => rows,
+        };
+        for row in &admitted_rows {
+            if row.missing(data) {
+                let admitted_row =
+                    super::admitted_row(data, admitted.as_ref(), manifest, row.name, row.info)?;
+                let dest = data.join(row.relative);
+                super::download_component(data, &admitted_row, &dest, context).await?;
+                // The receipts let the next open use these bytes without the writer.
+                super::write_platform_cache_metadata(admitted_row.info(), &dest)?;
+            }
+            super::ensure_bundle_executable_link(data, row.name, row.info)?;
+        }
+    } else {
+        for row in &rows {
+            super::ensure_bundle_executable_link(data, row.name, row.info)?;
+        }
+    }
+    // Engine and Exit bridges load the owner's selection when Home starts.
+    // Setup publishes a first selection before that startup. A running Home
+    // can repair helper bytes, but needs setup/restart for its first selection.
+    if matches!(context, super::FirstPartyCarrierContext::Runtime) {
+        anyhow::ensure!(
+            data.join("config/browser-engine-adapter.json").exists()
+                || std::env::var_os("ELASTOS_BROWSER_ENGINE_ADAPTER_CONFIG").is_some(),
+            "Browser helpers are ready. Close Home, run elastos setup, then start Home again."
+        );
+        return Ok(());
+    }
+    configure(
+        data,
+        platform,
+        manifest
+            .external
+            .contains_key(super::browser_vm_image::NAME),
+    )
+}
+
+/// One Browser host helper row of a release.
+#[derive(Clone, Copy)]
+struct HostRow<'a> {
+    name: &'a str,
+    component: &'a super::Component,
+    info: &'a super::PlatformInfo,
+    relative: &'a str,
+}
+
+impl HostRow<'_> {
+    fn missing(&self, data: &Path) -> bool {
+        !matches!(
+            super::component_install_state(data, self.component, Some(self.info)),
+            super::InstallState::Installed
+        ) || (self.info.extract_path.is_none() && !executable(&data.join(self.relative)))
+    }
+}
+
+/// The release's Browser host helpers for `platform`, each a prepared signed
+/// release artifact. `None` when the release has no `browser-host` profile.
+fn host_rows<'a>(
+    manifest: &'a super::ComponentsManifest,
+    platform: &str,
+) -> anyhow::Result<Option<Vec<HostRow<'a>>>> {
+    let Some(profile) = manifest.profiles.get("browser-host") else {
+        return Ok(None);
+    };
+    let mut rows = Vec::new();
     for name in &profile.components {
         let component = manifest
             .external
@@ -50,33 +122,14 @@ pub(super) async fn ensure_host_components(
                 .is_some_and(|p| !p.trim().is_empty()),
             "Browser host component '{name}' must come from the signed release"
         );
-        if !matches!(
-            super::component_install_state(data, component, Some(info)),
-            super::InstallState::Installed
-        ) || (info.extract_path.is_none() && !executable(&data.join(relative)))
-        {
-            super::download_component(data, name, info, &data.join(relative), context).await?;
-        }
-        super::ensure_bundle_executable_link(data, name, info)?;
+        rows.push(HostRow {
+            name,
+            component,
+            info,
+            relative,
+        });
     }
-    // Engine and Exit bridges load the owner's selection when Home starts.
-    // Setup publishes a first selection before that startup. A running Home
-    // can repair helper bytes, but needs setup/restart for its first selection.
-    if matches!(context, super::FirstPartyCarrierContext::Runtime) {
-        anyhow::ensure!(
-            data.join("config/browser-engine-adapter.json").exists()
-                || std::env::var_os("ELASTOS_BROWSER_ENGINE_ADAPTER_CONFIG").is_some(),
-            "Browser helpers are ready. Close Home, run elastos setup, then start Home again."
-        );
-        return Ok(());
-    }
-    configure(
-        data,
-        platform,
-        manifest
-            .external
-            .contains_key(super::browser_vm_image::NAME),
-    )
+    Ok(Some(rows))
 }
 
 pub(super) fn local_vm_selected(data: &Path, platform: &str) -> anyhow::Result<bool> {
@@ -580,114 +633,136 @@ mod tests {
             }
         }
         let platform = "darwin-arm64";
-        {
-            let temp = tempfile::tempdir().unwrap();
-            let data = temp.path();
-            fs::create_dir_all(data.join("capsules/browser")).unwrap();
-            configure(data, platform, true).unwrap();
-            assert!(!data.join("config/browser-engine-adapter.json").exists());
-            for name in &names {
-                let component = manifest.external.get_mut(name).unwrap();
-                let Some(info) = component.platforms.get_mut(platform) else {
-                    continue;
-                };
-                let relative = info
-                    .install_path
-                    .as_ref()
-                    .or(component.install_path.as_ref())
-                    .unwrap();
-                let path = if let Some(binary) = &info.binary_path {
-                    data.join(relative).join(binary)
-                } else {
-                    data.join(relative)
-                };
-                fs::create_dir_all(path.parent().unwrap()).unwrap();
-                if name == "node" {
-                    // The fixture delegates execution to the test runner's Node;
-                    // the managed bundle and link still follow installed setup.
-                    let node = fixture_node();
-                    fs::write(
-                        &path,
-                        format!(
-                            "#!/bin/sh\nexec '{}' \"$@\"\n",
-                            node.to_str().unwrap().replace('\'', "'\\''")
-                        ),
-                    )
-                    .unwrap();
-                } else {
-                    fs::write(&path, b"admitted host fixture").unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path();
+        fs::create_dir_all(data.join("capsules/browser")).unwrap();
+        configure(data, platform, true).unwrap();
+        assert!(!data.join("config/browser-engine-adapter.json").exists());
+        // Each helper is a signed release artifact served over Carrier: a bundle
+        // archive, or the program itself.
+        let node = fixture_node();
+        let mut artifacts = std::collections::HashMap::new();
+        let mut turnserver_cid = String::new();
+        for name in &names {
+            let component = manifest.external.get_mut(name).unwrap();
+            let Some(info) = component.platforms.get_mut(platform) else {
+                continue;
+            };
+            let program = if name == "node" {
+                // The fixture delegates execution to the test runner's Node;
+                // the managed bundle and link still follow installed setup.
+                format!(
+                    "#!/bin/sh\nexec '{}' \"$@\"\n",
+                    node.to_str().unwrap().replace('\'', "'\\''")
+                )
+                .into_bytes()
+            } else {
+                format!("{name} release fixture").into_bytes()
+            };
+            let bytes = match (&info.extract_path, &info.binary_path) {
+                (Some(root), Some(binary)) => {
+                    let encoder =
+                        flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                    let mut archive = tar::Builder::new(encoder);
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(program.len() as u64);
+                    header.set_mode(0o755);
+                    header.set_cksum();
+                    archive
+                        .append_data(&mut header, format!("{root}/{binary}"), program.as_slice())
+                        .unwrap();
+                    archive.into_inner().unwrap().finish().unwrap()
                 }
-                fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-                info.strategy = None;
-                info.checksum = Some(format!(
-                    "sha256:{}",
-                    hex::encode(sha2::Sha256::digest(b"admitted host fixture"))
-                ));
-                info.size = Some(21);
-                if info.binary_path.is_some() {
-                    fs::write(
-                        data.join(relative)
-                            .join(super::super::CACHED_ARTIFACT_SHA_FILE),
-                        info.checksum.as_deref().unwrap(),
-                    )
-                    .unwrap();
-                }
-            }
-            for name in [
-                "browser-engine-adapter",
-                "exit-provider",
-                "browser-local-exit",
-                "crosvm",
-            ] {
-                if name == "crosvm" && manifest.external["crosvm"].platforms.contains_key(platform)
-                {
-                    continue; // The admitted bundle owns this executable link.
-                }
-                let path = data.join("bin").join(name);
-                fs::write(&path, b"fixture").unwrap();
-                fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-            }
-            let error = ensure_host_components(
-                data,
-                &manifest,
-                platform,
-                super::super::FirstPartyCarrierContext::Runtime,
+                _ => program,
+            };
+            let digest = sha2::Sha256::digest(&bytes);
+            let cid = cid::Cid::new_v1(
+                0x55,
+                cid::multihash::Multihash::<64>::wrap(0x12, &digest).unwrap(),
             )
+            .to_string();
+            info.strategy = None;
+            info.checksum = Some(format!("sha256:{digest:x}"));
+            info.size = Some(bytes.len() as u64);
+            info.cid = Some(cid.clone());
+            if name == "turnserver" {
+                turnserver_cid = cid.clone();
+            }
+            artifacts.insert(cid, bytes);
+        }
+        fs::create_dir_all(data.join("bin")).unwrap();
+        for name in [
+            "browser-engine-adapter",
+            "exit-provider",
+            "browser-local-exit",
+            "crosvm",
+        ] {
+            if name == "crosvm" && manifest.external["crosvm"].platforms.contains_key(platform) {
+                continue; // The admitted bundle owns this executable link.
+            }
+            let path = data.join("bin").join(name);
+            fs::write(&path, b"fixture").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let source: crate::sources::TrustedSource = serde_json::from_value(serde_json::json!({
+            "name": "fixture",
+            "publisher_dids": [elastos_identity::derive_did(&[217; 32]).1],
+            "connect_ticket": "",
+            "publisher_node_id": ""
+        }))
+        .unwrap();
+        let (_, server, serving) =
+            crate::setup::tests::carrier_cid_source(data, &source, artifacts.clone()).await;
+        let runtime = super::super::FirstPartyCarrierContext::Runtime;
+        let setup = super::super::FirstPartyCarrierContext::Setup;
+        // An open before setup installs the helpers; the first Engine selection
+        // stays with setup.
+        let error = ensure_host_components(data, &manifest, platform, runtime)
             .await
             .unwrap_err();
-            assert!(
-                error.to_string().contains("Close Home, run elastos setup"),
-                "{platform}: {error:#}"
-            );
-            assert!(!data.join("config/browser-engine-adapter.json").exists());
-            ensure_host_components(
-                data,
-                &manifest,
-                platform,
-                super::super::FirstPartyCarrierContext::Setup,
-            )
+        assert!(
+            error.to_string().contains("Close Home, run elastos setup"),
+            "{platform}: {error:#}"
+        );
+        assert!(!data.join("config/browser-engine-adapter.json").exists());
+        // Setup uses the helpers that open installed.
+        ensure_host_components(data, &manifest, platform, setup)
             .await
             .unwrap();
-            assert!(data.join("config/browser-engine-adapter.json").is_file());
-            assert!(data.join("config/exit-provider.json").is_file());
-            assert!(data.join("bin/node").is_symlink());
-            assert!(data.join("bin/turnserver").is_symlink());
-            assert_eq!(
-                fs::read(data.join("bin/turnserver")).unwrap(),
-                b"admitted host fixture"
-            );
-            // A repeated open repairs a missing managed executable link.
-            fs::remove_file(data.join("bin/turnserver")).unwrap();
-            ensure_host_components(
-                data,
-                &manifest,
-                platform,
-                super::super::FirstPartyCarrierContext::Runtime,
-            )
+        assert!(data.join("config/browser-engine-adapter.json").is_file());
+        assert!(data.join("config/exit-provider.json").is_file());
+        assert!(data.join("bin/node").is_symlink());
+        assert!(data.join("bin/turnserver").is_symlink());
+        assert_eq!(
+            fs::read(data.join("bin/turnserver")).unwrap(),
+            b"turnserver release fixture"
+        );
+        // Setup reinstalls a missing helper, and the next open uses it as is.
+        let turnserver = manifest.external["turnserver"].platforms[platform]
+            .install_path
+            .as_deref()
+            .unwrap();
+        fs::remove_dir_all(data.join(turnserver)).unwrap();
+        ensure_host_components(data, &manifest, platform, setup)
             .await
             .unwrap();
-            assert!(data.join("bin/turnserver").is_symlink());
-        }
+        // A repeated open repairs a missing managed executable link.
+        fs::remove_file(data.join("bin/turnserver")).unwrap();
+        ensure_host_components(data, &manifest, platform, runtime)
+            .await
+            .unwrap();
+        assert!(data.join("bin/turnserver").is_symlink());
+        server.close().await;
+        // Each install fetched its helpers once; no later open or setup fetched
+        // an installed helper again.
+        let mut requested = serving.await.unwrap();
+        let mut expected = artifacts
+            .into_keys()
+            .chain([turnserver_cid])
+            .collect::<Vec<_>>();
+        requested.sort();
+        expected.sort();
+        assert_eq!(requested, expected);
     }
 
     #[tokio::test]

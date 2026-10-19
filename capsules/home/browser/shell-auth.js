@@ -17,7 +17,9 @@ const unlockPersonName = document.querySelector("#home-unlock-person-name");
 const unlockMonogram = document.querySelector("#home-unlock-monogram");
 const unlockPrimary = document.querySelector("#home-unlock-primary");
 const unlockSecondary = document.querySelector("#home-unlock-secondary");
+const unlockCreate = document.querySelector("#home-unlock-create");
 const unlockStatus = document.querySelector("#home-unlock-status");
+const unlockFaceStatus = document.querySelector("#home-unlock-face-status");
 const unlockName = document.querySelector("#home-unlock-name");
 const ownerToken = document.querySelector("#home-owner-token");
 const ownerTokenLabel = document.querySelector("#home-owner-token-label");
@@ -114,7 +116,7 @@ export async function showHomeUnlock(onUnlocked, options = {}) {
   } catch (error) {
     unlockMode = "signin";
     renderUnlockMode({ registered: true, guestRegistrationEnabled: false });
-    setUnlockStatus(String(error.message || error), "error");
+    setUnlockStatus(signInFailure("start", error).message, "error");
   }
 }
 
@@ -198,6 +200,16 @@ export function bindHomeUnlock() {
   };
   unlockPrimary?.addEventListener("click", startUnlock);
   unlockPerson?.addEventListener("click", startUnlock);
+  // First-visit entry on the lock face: the same guest enrollment the card's
+  // secondary action opens, reachable without first failing a passkey prompt.
+  unlockCreate?.addEventListener("click", () => {
+    if (busy || !guestRegistrationAvailable) return;
+    clearRecoverySelection();
+    recoverySession = null;
+    recoveryTerminalToken = "";
+    unlockMode = "create_guest";
+    renderUnlockMode({ registered: true, guestRegistrationEnabled: true });
+  });
   unlockSecondary?.addEventListener("click", () => {
     clearRecoverySelection();
     recoverySession = null;
@@ -326,6 +338,84 @@ export async function requestPasskeyStepUp(appToken, operation, request) {
   }
 }
 
+// Adds another passkey to the signed-in account: a fresh approval with the
+// current passkey (the step-up System updates use), then the new passkey.
+// Home bound both to the System launch that asked; the server accepts only an
+// owner (admin) and gives the new passkey that account. Errors are one plain
+// sentence.
+export async function addAccountPasskey(appToken) {
+  if (!window.PublicKeyCredential) {
+    throw new Error("Passkeys are not available in this browser.");
+  }
+  let stage = "approve";
+  try {
+    const stepUpToken = await requestPasskeyStepUp(appToken, "auth.passkey.add", {
+      schema: "elastos.auth.passkey.add.intent/v1",
+    });
+    stage = "begin";
+    const begin = await fetchJson("/api/auth/passkey/add/begin", {
+      method: "POST",
+      body: JSON.stringify({
+        schema: "elastos.auth.passkey.add.begin.request/v1",
+        app_token: appToken,
+        step_up_token: stepUpToken,
+      }),
+    });
+    if (
+      begin?.schema !== "elastos.auth.passkey.add.begin/v1"
+      || !boundedString(begin.ceremony_id, 128)
+      || !begin.options?.publicKey?.user
+    ) {
+      throw new Error("invalid passkey add challenge");
+    }
+    begin.options.publicKey.user.name = "ElastOS Home";
+    begin.options.publicKey.user.displayName = "ElastOS Home";
+    stage = "create";
+    const credential = await navigator.credentials.create(toCreationOptions(begin.options));
+    if (!credential) {
+      throw Object.assign(new Error("Passkey creation was cancelled."), { name: "NotAllowedError" });
+    }
+    stage = "complete";
+    const response = await fetchJson("/api/auth/passkey/add/complete", {
+      method: "POST",
+      body: JSON.stringify({
+        schema: "elastos.auth.passkey.add.complete.request/v1",
+        app_token: appToken,
+        ceremony_id: begin.ceremony_id,
+        response: serializeCreatedCredential(credential),
+      }),
+    });
+    if (response?.schema !== "elastos.auth.passkey.add.result/v1" || !readText(response.role)) {
+      throw new Error("invalid passkey add result");
+    }
+    return { role: readText(response.role) };
+  } catch (error) {
+    throw new Error(passkeyAddFailure(stage, error));
+  }
+}
+
+function passkeyAddFailure(stage, error) {
+  const status = Number(error && error.status) || 0;
+  const name = String(error && error.name || "");
+  const cancelled = name === "NotAllowedError" || name === "AbortError";
+  if (stage === "approve") {
+    return cancelled
+      ? "Your current passkey was not confirmed. Select Add passkey to try again."
+      : "Home could not confirm your current passkey. Select Add passkey to try again.";
+  }
+  if (stage === "create") {
+    if (cancelled) return "No new passkey was created. Select Add passkey to try again.";
+    if (name === "InvalidStateError") {
+      return "This device already has this passkey. Use another device or security key.";
+    }
+    return "This browser could not create a passkey. Try another browser or security key.";
+  }
+  if (!status && error instanceof TypeError) {
+    return "Home is not responding. Check that ElastOS is running, then try again.";
+  }
+  return "Home did not add the passkey. Select Add passkey to try again.";
+}
+
 function renderUnlockChecking() {
   if (unlockTitle) {
     unlockTitle.textContent = "Sign in";
@@ -401,6 +491,10 @@ function renderUnlockMode({ registered, guestRegistrationEnabled }) {
   }
   if (unlockFace) {
     unlockFace.hidden = !showFace;
+  }
+  if (unlockCreate) {
+    unlockCreate.hidden = !(showFace && guestRegistrationEnabled);
+    unlockCreate.disabled = unlockMode === "unsupported";
   }
   if (unlockCard) {
     unlockCard.hidden = showFace;
@@ -577,8 +671,10 @@ async function selectRecoveryKit() {
       renderEnrollmentChoice();
       setUnlockStatus("Recovery Kit selection expired. Choose the kit again.", "muted");
     }, RECOVERY_SELECTION_MS);
-    setUnlockStatus(encrypted ? "Kit selected. Enter its password, then continue with your passkey."
-      : "Kit selected. Continue with your passkey to recover this account.", "muted");
+    // The picker is cleared above, so the status names the accepted file.
+    const selected = file.name ? `Kit selected: ${file.name}.` : "Kit selected.";
+    setUnlockStatus(encrypted ? `${selected} Enter its password, then continue with your passkey.`
+      : `${selected} Continue with your passkey to recover this account.`, "muted");
     if (encrypted) recoveryPassword?.focus();
   } catch (_) {
     if (version !== recoverySelectionVersion) return;
@@ -586,6 +682,23 @@ async function selectRecoveryKit() {
     setUnlockStatus("Choose a valid full Recovery Kit JSON file, up to 1 MB.", "error");
   }
   renderEnrollmentChoice();
+}
+
+// What a full-import response still lacks, as one plain next step, or "" when
+// it completed. Only the Home's own recovery record missing is not a failed
+// recovery: the account, Profile and Wallet are back, and the same kit finishes
+// the record.
+export function recoveryImportIncompleteMessage(response) {
+  const people = response?.people_identity_restore?.status;
+  if (response?.schema === "elastos.full-recovery-bundle.import.response/v2"
+    && response.wallet_restore?.status === "complete"
+    && people === "restored") {
+    return response.runtime_audit?.status === "complete" ? ""
+      : "Your account, Profile and Wallet were recovered. Only this Home's recovery record did not save. Choose the same kit again to finish it.";
+  }
+  return people === "absent"
+    ? "The root was recovered. This kit has no signed Profile or name. Choose a newer kit that includes your Profile."
+    : "The root was recovered. Profile or Wallet recovery still needs completion. Choose the same kit again to retry safely.";
 }
 
 async function completeEnrollmentRecovery() {
@@ -623,14 +736,8 @@ async function completeEnrollmentRecovery() {
     setHomeAuthorityToken(response.home_token);
   }
   recoveryTerminalToken = readText(response.runtime_audit?.retry_token);
-  if (response.schema !== "elastos.full-recovery-bundle.import.response/v2"
-    || response.wallet_restore?.status !== "complete"
-    || response.runtime_audit?.status !== "complete"
-    || response.people_identity_restore?.status !== "restored") {
-    throw new Error(response.people_identity_restore?.status === "absent"
-      ? "The root was recovered. This kit has no signed Profile or name. Choose a newer kit that includes your Profile."
-      : "The root was recovered. Profile, Wallet, or audit recovery still needs completion. Choose the same kit again to retry safely.");
-  }
+  const incomplete = recoveryImportIncompleteMessage(response);
+  if (incomplete) throw new Error(incomplete);
   const refreshed = await refreshHomeSession();
   recoverySession = refreshed;
   const summary = await fetchJson("/api/apps/home/summary", {
@@ -729,6 +836,10 @@ async function runPasskeyCreate() {
           // again with the same intent and original retention deadline.
           pending.ceremony_id = null;
           savePendingRegistration(pending);
+          const name = String(error && error.name || "");
+          if (pending.intent.purpose === "create" && (name === "NotAllowedError" || name === "AbortError")) {
+            throw new Error(PASSKEY_NOT_SAVED);
+          }
           throw error;
         }
         pending.response = serializeCreatedCredential(credential);
@@ -856,13 +967,16 @@ async function runPasskeySignIn() {
   busy = true;
   setButtonsDisabled(true);
   setUnlockStatus("Choose your passkey.", "muted");
+  let stage = "start";
   try {
     const begin = await fetchJson("/api/auth/passkey/authenticate/begin", { method: "POST" });
     const request = toRequestOptions(begin.options);
+    stage = "passkey";
     const credential = await navigator.credentials.get(request);
     if (!credential) {
-      throw new Error("Passkey sign-in was cancelled.");
+      throw Object.assign(new Error("Passkey sign-in was cancelled."), { name: "NotAllowedError" });
     }
+    stage = "verify";
     const response = await fetchJson("/api/auth/passkey/authenticate/complete", {
       method: "POST",
       body: JSON.stringify({
@@ -871,11 +985,49 @@ async function runPasskeySignIn() {
       }),
     });
     setHomeAuthorityToken(response?.home_token);
+    stage = "open";
     await unlockComplete(response);
+  } catch (error) {
+    throw signInFailure(stage, error);
   } finally {
     busy = false;
     setButtonsDisabled(false);
   }
+}
+
+const PASSKEY_NOT_SAVED = "No passkey was saved. Save it on this computer (Touch ID, or Windows Hello: set up a PIN in "
+  + "Settings → Accounts → Sign-in options), on a phone that can save passkeys, or on a security key. "
+  + "Then choose Resume setup.";
+
+// One plain reason and one next step per failed sign-in; never a status code
+// or server text. Stages: start (begin or status), passkey (the browser),
+// verify (Home checks the passkey), open (Home opens after sign-in).
+function signInFailure(stage, error) {
+  const status = Number(error && error.status) || 0;
+  const name = String(error && error.name || "");
+  let message;
+  let tone = "error";
+  if (stage === "open") {
+    message = "Home could not open after sign-in. Reload this page.";
+  } else if (status === 429) {
+    message = "Sign-in is busy right now. Wait a minute, then try again.";
+  } else if (stage === "passkey") {
+    if (name === "NotAllowedError" || name === "AbortError") {
+      message = "No passkey was used. Select your account to try again.";
+      tone = "muted";
+    } else if (name === "SecurityError") {
+      message = "Passkeys do not work at this address. Open Home at the address where you created your passkey.";
+    } else {
+      message = "This browser could not use your passkey. Try again in the browser where you created it.";
+    }
+  } else if (!status) {
+    message = "Home is not responding. Check that ElastOS is running, then try again.";
+  } else if (stage === "verify") {
+    message = "Home did not accept this passkey. Use the passkey you created for this Home.";
+  } else {
+    message = "Home could not start sign-in. Try again in a moment.";
+  }
+  return Object.assign(new Error(message), { signInFailure: true, tone });
 }
 
 async function unlockComplete(response, flow = null) {
@@ -898,9 +1050,8 @@ export function profileReadinessActionTarget(response) {
 }
 
 function reportUnlockError(error) {
-  if (isPasskeyNotSelected(error) && unlockMode === "signin_guest_enabled") {
-    renderUnlockMode({ registered: true, guestRegistrationEnabled: true });
-    setUnlockStatus("No passkey selected.", "muted");
+  if (error?.signInFailure) {
+    setUnlockStatus(error.message, error.tone);
     return;
   }
   setUnlockStatus(String(error.message || error), "error");
@@ -917,14 +1068,6 @@ function setButtonsDisabled(disabled) {
     unlockSecondary.disabled = disabled;
   }
   if (enrollmentDismiss) enrollmentDismiss.disabled = disabled;
-}
-
-function isPasskeyNotSelected(error) {
-  const name = String(error && error.name || "");
-  const message = String(error && error.message || error || "");
-  return name === "NotAllowedError"
-    || message.includes("timed out or was not allowed")
-    || message.includes("Passkey sign-in was cancelled");
 }
 
 function setUnlockNameVisible(visible) {
@@ -950,12 +1093,13 @@ function readUnlockName() {
 }
 
 function setUnlockStatus(message, tone) {
-  if (!unlockStatus) {
-    return;
+  // The card and the lock face each show the same one line.
+  for (const node of [unlockStatus, unlockFaceStatus]) {
+    if (!node) continue;
+    node.textContent = message;
+    node.hidden = !message;
+    node.dataset.tone = tone || "muted";
   }
-  unlockStatus.textContent = message;
-  unlockStatus.hidden = !message;
-  unlockStatus.dataset.tone = tone || "muted";
 }
 
 function readUnlockPersonLabel(value) {

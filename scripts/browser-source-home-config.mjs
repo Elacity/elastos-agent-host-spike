@@ -39,7 +39,6 @@ const VM_CONTROL_TIMEOUT_MS = "210000";
 const VM_CONTROL_PROXY_REQUEST_TIMEOUT_MS = "120000";
 const VM_ENGINE_TIMEOUT_MS = "225000";
 const VM_SUPERVISOR_TIMEOUT_MS = 240000;
-const VM_EGRESS_MAX_SESSIONS = "16";
 const VM_ADAPTER_MAX_ACTIVE_SESSIONS = "4";
 const VM_CONTROL_MAX_ACTIVE_PAGES = "1";
 const VM_IDLE_KEEPALIVE_MS = "300000";
@@ -496,12 +495,14 @@ function browserVzTransportConfig(
       1,
       0xffffffff,
     ),
+    // Same as the Home launch token (12 h): a Browser session ends when the user
+    // closes it or Home stops its heartbeat, not when this credential expires.
     ttl_secs: boundedIntegerEnv(
       env,
       "ELASTOS_BROWSER_VZ_TRANSPORT_TTL_SECS",
-      600,
+      43200,
       120,
-      3600,
+      43200,
     ),
   };
 }
@@ -612,7 +613,6 @@ function vmBrowserEngineAdapter(args, sourceEnv = process.env, vzTransport = nul
     ELASTOS_BROWSER_VM_ENGINE_TIMEOUT_MS: VM_ENGINE_TIMEOUT_MS,
     ELASTOS_BROWSER_VM_CONTROL_LAUNCH_TIMEOUT_MS: VM_CONTROL_TIMEOUT_MS,
     ELASTOS_BROWSER_VM_CONTROL_PROXY_REQUEST_TIMEOUT_MS: VM_CONTROL_PROXY_REQUEST_TIMEOUT_MS,
-    ELASTOS_BROWSER_VM_EGRESS_MAX_SESSIONS: VM_EGRESS_MAX_SESSIONS,
     ELASTOS_BROWSER_VM_CONTROL_MAX_ACTIVE_PAGES: VM_CONTROL_MAX_ACTIVE_PAGES,
     ELASTOS_BROWSER_VM_IDLE_KEEPALIVE_MS: args.platform.startsWith("linux-")
       ? VM_LINUX_IDLE_KEEPALIVE_MS

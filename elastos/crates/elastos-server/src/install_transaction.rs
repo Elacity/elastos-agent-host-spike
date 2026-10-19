@@ -584,7 +584,7 @@ impl InstallTransaction {
             return Ok(());
         };
         if journal.restart.is_some() && !rollback_committed {
-            bail!("Home restart is pending; use the installed restart controller to recover");
+            bail!("Home restart recovery is pending. Run `elastos home --browser` to finish it.");
         }
         // Every finalized scratch file is hash/mode bound before any release
         // restoration. Partial writes have distinct names and only staging owns them.
@@ -1007,6 +1007,34 @@ impl InstallTransaction {
             );
         }
         self.recover_inner(true)
+    }
+
+    /// Caller proved the claimed previous generation gone and holds the host lock.
+    /// The restored previous release stays installed; a new claim starts it again.
+    pub(crate) fn retire_previous_start(&self) -> anyhow::Result<()> {
+        let mut journal = self.read_journal()?.context("restart journal missing")?;
+        let restart = journal.restart.as_mut().context("restart record missing")?;
+        if journal.phase != Phase::Recovering
+            || !matches!(
+                restart.phase,
+                RestartPhase::PreviousStartClaimed | RestartPhase::PreviousRunning
+            )
+        {
+            bail!("only a failed start of the restored previous Home can be retried");
+        }
+        for entry in &journal.entries {
+            self.require_state(
+                entry.id,
+                entry.original_sha256.as_deref(),
+                entry.original_mode,
+            )?;
+        }
+        support::require_installed(self, &journal.support, true)?;
+        restart.phase = RestartPhase::Restored;
+        restart.generation.clear();
+        restart.pid = None;
+        restart.process_start = None;
+        self.write_journal(&journal)
     }
 
     pub(crate) fn finish_restart(&self) -> anyhow::Result<()> {
@@ -1649,16 +1677,16 @@ pub(crate) fn authorize_host_start_with_generation(
     if journal.restart.is_none() {
         bail!("{}", pending_home_recovery_hint(&journal));
     }
-    let restart = journal.restart.context(
-        "Home restart recovery is pending. Start the retained update controller with its receipt.",
-    )?;
+    let restart = journal
+        .restart
+        .context("Home restart recovery is pending. Run `elastos home --browser` to finish it.")?;
     validate_restart_plan(&restart.plan)?;
     let generation = generation.unwrap_or_default();
     if generation.len() != 32
         || generation != restart.generation
         || restart.pid.is_some_and(|pid| pid != process_id)
     {
-        bail!("Home start differs from the controller's claimed generation. Start the retained update controller with its receipt.");
+        bail!("Home start differs from the controller's claimed generation. Run `elastos home --browser` to finish Home restart recovery.");
     }
     let previous = match restart.phase {
         RestartPhase::CandidateStartClaimed | RestartPhase::CandidateRunning => false,
@@ -1697,9 +1725,15 @@ pub(crate) fn refuse_pending_home_start(data_dir: &Path, binary: &Path) -> anyho
     Ok(())
 }
 
+/// A pending Home restart belongs to the retained update controller.
+pub(crate) fn pending_restart_recovery(data_dir: &Path, binary: &Path) -> anyhow::Result<bool> {
+    Ok(read_host_start_journal_at(data_dir, binary)?
+        .is_some_and(|journal| journal.restart.is_some()))
+}
+
 fn pending_home_recovery_hint(journal: &Journal) -> &'static str {
     if journal.restart.is_some() {
-        "Home restart recovery is pending. Start the retained update controller with its receipt."
+        "Home restart recovery is pending. Run `elastos home --browser` to finish it."
     } else if journal
         .entries
         .iter()

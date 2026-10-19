@@ -338,7 +338,7 @@ fi
 echo "[pinned-model-proof] installing the local model engine through elastos setup"
 mkdir -p "${HOME_ROOT}"
 env -i HOME="$HOME_ROOT" XDG_DATA_HOME="${HOME_ROOT}/xdg" PATH="/usr/bin:/bin" \
-    ELASTOS_QUIET_RUNTIME_NOTICES=1 \
+    ELASTOS_QUIET_RUNTIME_NOTICES=1 ELASTOS_COLLABORATION_STARTUP_MODE=isolated \
     "$ELASTOS_BIN" setup --with llama-server >"${PROOF_ROOT}/proof/setup.log" 2>&1 \
     || die "elastos setup failed; see ${PROOF_ROOT}/proof/setup.log"
 BUNDLE="$(python3 - "${DATA_DIR}/components.json" "$PLATFORM" <<'PY'

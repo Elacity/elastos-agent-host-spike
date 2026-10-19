@@ -156,12 +156,12 @@ pub(super) fn configured_discovery_network_profile_for_test(
     }
 }
 
-struct TestCollaborationMessageScope<'a> {
-    network_id: &'a str,
-    conversation_id: &'a str,
+pub(super) struct TestCollaborationMessageScope<'a> {
+    pub(super) network_id: &'a str,
+    pub(super) conversation_id: &'a str,
 }
 
-fn signed_discovery_message_for_test(
+pub(super) fn signed_discovery_message_for_test(
     signing_key: &SigningKey,
     sender_profile_did: &str,
     scope: TestCollaborationMessageScope<'_>,
@@ -4127,6 +4127,18 @@ fn assert_recovery_readiness_projection(payload: &Value, status: &str, path: &st
     );
 }
 
+fn assert_recovery_setup_required_projection(payload: &Value, reason: &str, path: &str) {
+    assert_eq!(
+        payload["identity"]["recovery_readiness"],
+        json!({
+            "schema": "elastos.recovery.readiness/v1",
+            "status": "setup_required",
+            "reason": reason,
+        }),
+        "{path}"
+    );
+}
+
 #[tokio::test]
 async fn existing_profile_setup_protects_root_without_claiming_recovery() {
     let dir = tempfile::tempdir().unwrap();
@@ -4261,11 +4273,75 @@ async fn existing_profile_setup_protects_root_without_claiming_recovery() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(payload["identity"]["profile_readiness"]["status"], "ready");
-    assert_recovery_readiness_projection(&payload, "setup_required", "profile without backup");
+    assert_recovery_setup_required_projection(
+        &payload,
+        "recovery_kit_missing",
+        "profile without backup",
+    );
     assert_eq!(
         payload["discovery"]["status"], "unconfigured",
         "Profile creation does not opt into discovery"
     );
+}
+
+#[tokio::test]
+async fn online_activation_refuses_over_limit_before_protection() {
+    let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let _ = elastos_identity::load_or_create_did(dir.path()).unwrap();
+    let authority = passkey_authority_with_name(dir.path(), Some("Private account label"));
+    let principal =
+        crate::auth::load_principal_for_proof_binding(dir.path(), &authority.proof_binding_id)
+            .unwrap();
+    let uri = format!("{}/Documents/large.bin", principal.localhost_root);
+    let path = elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &uri).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let file = std::fs::File::create(&path).unwrap();
+    file.set_len(17 * 1024 * 1024).unwrap();
+    drop(file);
+    let app = gateway_router(wallet_test_state(dir.path()).await);
+    let response = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("POST")
+                .uri("/api/apps/people/profile")
+                .header("x-elastos-home-token", authority.people_token.as_str())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"display_name": "Confirmed public name"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        body.contains(
+            "Documents/large.bin is not encrypted and is 17 MiB. Home encrypts existing files \
+             of up to 16 MiB in place."
+        ),
+        "{body}"
+    );
+    assert!(crate::auth::load_principal_root_protection(
+        dir.path(),
+        &principal.principal_id,
+        &principal.localhost_root,
+    )
+    .unwrap()
+    .is_none());
+    let large = std::fs::read(&path).unwrap();
+    assert_eq!(large.len(), 17 * 1024 * 1024);
+    assert!(large.iter().all(|byte| *byte == 0), "file left unchanged");
+    assert!(!dir.path().join("backups").exists(), "no migration backup");
 }
 
 #[tokio::test]
@@ -4290,7 +4366,7 @@ async fn test_recovery_readiness_does_not_claim_profile_coverage() {
     ] {
         let (status, payload) = home_test_get_json(&app, path, token, origin).await;
         assert_eq!(status, StatusCode::OK, "{path}");
-        assert_recovery_readiness_projection(&payload, "setup_required", path);
+        assert_recovery_setup_required_projection(&payload, "recovery_kit_missing", path);
     }
     assert_eq!(file_snapshot(dir.path()), before_summary);
 
@@ -4326,6 +4402,274 @@ async fn test_recovery_readiness_does_not_claim_profile_coverage() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(payload["profile"]["display_name"], "Owner");
     assert_eq!(payload["profile_readiness"]["status"], "ready");
+
+    // A verified kit that predates the Profile is outdated, not missing.
+    for (path, token, origin) in [
+        (
+            "/api/apps/home/summary",
+            authority.home_token.as_str(),
+            "http://localhost:61180",
+        ),
+        (
+            "/api/apps/people/summary",
+            authority.people_token.as_str(),
+            "null",
+        ),
+    ] {
+        let (status, payload) = home_test_get_json(&app, path, token, origin).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert_recovery_setup_required_projection(&payload, "recovery_kit_outdated", path);
+    }
+}
+
+/// U14: the projection the periodic Home stream polls walks no folder. It
+/// reads the protection record and, with a Profile, opens only the Profile
+/// authority. The summaries around it start no scan (they still read their
+/// own Home state files).
+#[tokio::test]
+async fn realtime_readiness_walks_nothing_and_opens_only_the_profile_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let _ = elastos_identity::load_or_create_did(dir.path()).unwrap();
+    let app = gateway_router(wallet_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("owner"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let localhost_root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let documents = elastos_common::localhost::rooted_localhost_fs_path(
+        dir.path(),
+        &format!("{localhost_root}/Documents"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(&documents).unwrap();
+    for index in 0..1_100 {
+        std::fs::write(documents.join(format!("file-{index:04}.txt")), b"x").unwrap();
+    }
+    let readiness = || {
+        crate::api::auth_gateway::principal_root_recovery_readiness_for_verified_principal(
+            dir.path(),
+            &authority.principal_id,
+            &localhost_root,
+        )
+        .unwrap()
+    };
+    let opens_during =
+        |run: &dyn Fn() -> crate::api::auth_gateway::PrincipalRootRecoveryReadiness| {
+            let before = crate::auth::principal_root_object_opens(dir.path()).len();
+            let readiness = run();
+            let opens = crate::auth::principal_root_object_opens(dir.path())[before..].to_vec();
+            (readiness, opens)
+        };
+    let before = crate::auth::principal_root_scan_probes(dir.path());
+
+    // No Profile: the protection record only.
+    assert_eq!(
+        opens_during(&readiness),
+        (
+            crate::api::auth_gateway::PrincipalRootRecoveryReadiness::Ready,
+            Vec::new()
+        )
+    );
+    for (path, token, origin) in [
+        (
+            "/api/apps/home/summary",
+            authority.home_token.as_str(),
+            "http://localhost:61180",
+        ),
+        (
+            "/api/apps/people/summary",
+            authority.people_token.as_str(),
+            "null",
+        ),
+    ] {
+        let (status, payload) = home_test_get_json(&app, path, token, origin).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert_recovery_readiness_projection(&payload, "ready", path);
+    }
+    assert_eq!(crate::auth::principal_root_scan_probes(dir.path()), before);
+
+    // With a Profile: the protection record and the Profile authority. The
+    // 1,100 unencrypted files are moved aside while the Profile is set up,
+    // which would otherwise refuse them (more than 64 to encrypt).
+    let aside = dir.path().join("documents-aside");
+    std::fs::rename(&documents, &aside).unwrap();
+    let (status, _) = home_test_post_json(
+        &app,
+        "/api/apps/people/profile",
+        authority.people_token.as_str(),
+        "null",
+        json!({ "display_name": "Owner" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    std::fs::rename(&aside, &documents).unwrap();
+    let before = crate::auth::principal_root_scan_probes(dir.path());
+    assert_eq!(
+        opens_during(&readiness),
+        (
+            crate::api::auth_gateway::PrincipalRootRecoveryReadiness::KitOutdated,
+            vec![
+                crate::collaboration_profile_authority::profile_authority_object_uri(
+                    &localhost_root
+                )
+            ]
+        )
+    );
+    for (path, token, origin) in [
+        (
+            "/api/apps/home/summary",
+            authority.home_token.as_str(),
+            "http://localhost:61180",
+        ),
+        (
+            "/api/apps/people/summary",
+            authority.people_token.as_str(),
+            "null",
+        ),
+    ] {
+        let (status, payload) = home_test_get_json(&app, path, token, origin).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert_recovery_setup_required_projection(&payload, "recovery_kit_outdated", path);
+    }
+    assert_eq!(crate::auth::principal_root_scan_probes(dir.path()), before);
+}
+
+async fn home_test_get_text(
+    app: &axum::Router,
+    uri: &str,
+    token: &str,
+    origin: &'static str,
+) -> (StatusCode, String) {
+    let response = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", origin)
+                .uri(uri)
+                .header("x-elastos-home-token", token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
+
+/// #444 FU2 interim: Home now starts with a Home state file whose label is
+/// damaged. The shell, the Home summary and the System summary still answer
+/// with the defaults, Recovery names the file, and a save over it is
+/// refused with the notice that names it.
+#[tokio::test]
+async fn damaged_home_state_file_leaves_shell_and_summaries_answering() {
+    for (file, save) in [
+        (
+            "active-shell.json",
+            Some((
+                "/api/apps/home/active-shell",
+                json!({ "active": HOME_GUI_SHELL_ID }),
+            )),
+        ),
+        ("browser-state.json", None),
+        ("services-state.json", None),
+        ("services-requests.json", None),
+        (
+            "Appearance/preferences.json",
+            Some((
+                "/api/apps/home/appearance/preferences",
+                json!({ "theme": "light" }),
+            )),
+        ),
+        ("Appearance/background-overlay.json", None),
+        // Read only where its absence is tolerated; its writers fail closed.
+        ("community-presence.json", None),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let app = gateway_router(test_state(dir.path()));
+        let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+        crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+        let localhost_root = crate::auth::principal_localhost_root(&authority.principal_id);
+        let uri = format!("{localhost_root}/.AppData/ElastOS/Home/{file}");
+        let path = elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &uri).unwrap();
+        crate::auth::create_owner_only_dir_all(dir.path(), path.parent().unwrap()).unwrap();
+        crate::auth::write_principal_root_object(
+            dir.path(),
+            &authority.principal_id,
+            &localhost_root,
+            &uri,
+            &path,
+            b"{}",
+        )
+        .unwrap();
+        let mut damaged = std::fs::read(&path).unwrap();
+        damaged[9] = 0xff;
+        std::fs::write(&path, &damaged).unwrap();
+
+        for (endpoint, token, origin) in [
+            (
+                "/api/apps/home/active-shell",
+                authority.home_token.as_str(),
+                "http://localhost:61180",
+            ),
+            (
+                "/api/apps/home/summary",
+                authority.home_token.as_str(),
+                "http://localhost:61180",
+            ),
+            (
+                "/api/apps/system/summary",
+                authority.system_token.as_str(),
+                "null",
+            ),
+        ] {
+            let (status, body) = home_test_get_text(&app, endpoint, token, origin).await;
+            assert_eq!(status, StatusCode::OK, "{file} {endpoint}: {body}");
+        }
+
+        // Recovery names the file.
+        let status =
+            crate::api::auth_gateway::principal_root_recovery_status_for_verified_principal(
+                dir.path(),
+                &authority.principal_id,
+                &localhost_root,
+            )
+            .unwrap();
+        assert!(
+            status
+                .objects_needing_attention
+                .iter()
+                .any(|attention| attention.path == format!(".AppData/ElastOS/Home/{file}")),
+            "{file}: {status:?}"
+        );
+        if let Some((endpoint, body)) = save {
+            let response = app
+                .clone()
+                .oneshot(
+                    test_browser_request("localhost:61180", "http://localhost:61180")
+                        .method("POST")
+                        .uri(endpoint)
+                        .header("x-elastos-home-token", authority.home_token.as_str())
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let text = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let text = String::from_utf8_lossy(&text);
+            assert!(!status.is_success(), "{file} {endpoint}: {text}");
+            assert!(
+                text.contains(&format!(
+                    ".AppData/ElastOS/Home/{file} does not carry the label"
+                )),
+                "{file} {endpoint}: {text}"
+            );
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), damaged, "{file}");
+    }
 }
 
 #[tokio::test]
@@ -5497,6 +5841,109 @@ async fn test_system_guest_registration_requires_admin_passkey() {
         .as_str()
         .unwrap()
         .starts_with("localhost://Users/"));
+}
+
+#[tokio::test]
+async fn system_community_membership_is_home_wide_and_requires_current_owner_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let authority = passkey_authority_with_profile(dir.path(), "owner");
+    let port = crate::collaboration_product::test_chat_product_port(
+        dir.path(),
+        "membership-network",
+        "community",
+    );
+    let mut state = test_state(dir.path());
+    state.collaboration_chat_product_port = Some(port.clone());
+    let app = gateway_router(state);
+    let marker = dir
+        .path()
+        .join("collaboration-community-membership-v1.json");
+    let mut denied_tokens = vec![
+        system_app_token(dir.path()),
+        projection_launch_token_for_authority_context(dir.path(), PEOPLE_CAPSULE_ID, &authority),
+    ];
+    for index in 0..3 {
+        let guest = passkey_authority_with_profile_role_credential(
+            dir.path(),
+            &format!("Guest {index}"),
+            crate::auth::RuntimePrincipalRole::Guest,
+            &format!("membership-guest-{index}"),
+        );
+        denied_tokens.push(guest.system_token);
+    }
+    for token in denied_tokens {
+        let response = app
+            .clone()
+            .oneshot(
+                test_browser_request("localhost:61180", "null")
+                    .method("POST")
+                    .uri("/api/apps/system/community")
+                    .header("x-elastos-home-token", token)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"joined":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(port.community_membership().joined());
+        assert!(!marker.exists());
+    }
+    for joined in [false, true] {
+        let response = app
+            .clone()
+            .oneshot(
+                test_browser_request("localhost:61180", "null")
+                    .method("POST")
+                    .uri("/api/apps/system/community")
+                    .header("x-elastos-home-token", &authority.system_token)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"joined": joined}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["joined"], joined);
+        assert_eq!(port.community_membership().joined(), joined);
+    }
+    let before = std::fs::read(&marker).unwrap();
+    let mut principal =
+        crate::auth::load_principal_for_proof_binding(dir.path(), &authority.proof_binding_id)
+            .unwrap();
+    principal.role = crate::auth::RuntimePrincipalRole::Guest;
+    let mut auth = crate::auth::load_auth_state(dir.path()).unwrap();
+    let current = auth
+        .principals
+        .iter_mut()
+        .find(|entry| entry.principal_id == principal.principal_id)
+        .unwrap();
+    *current = principal;
+    crate::auth::save_auth_state(dir.path(), &auth).unwrap();
+    let response = app
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("POST")
+                .uri("/api/apps/system/community")
+                .header("x-elastos-home-token", authority.system_token)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"joined":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "an earlier owner token cannot retain a removed admin role"
+    );
+    assert_eq!(std::fs::read(marker).unwrap(), before);
 }
 
 #[test]
@@ -7960,6 +8407,8 @@ async fn test_home_browser_state_drops_unknown_targets() {
             "obsolete-wallet": "Old Wallet"
         },
         "taskbar": ["system", "people", "obsolete-wallet"],
+        "homeDock": ["obsolete-wallet", "people", "people"],
+        "homePages": [["system", "obsolete-wallet"], ["obsolete-wallet"], ["people", "system"], "system"],
         "desktopIconsVisible": true
     });
     {
@@ -8019,6 +8468,8 @@ async fn test_home_browser_state_drops_unknown_targets() {
     assert!(json["layout"]["desktopLabels"].get("people").is_some());
     assert_eq!(json["layout"]["desktopHidden"], json!(["system", "people"]));
     assert_eq!(json["layout"]["taskbar"], json!(["system", "people"]));
+    assert_eq!(json["layout"]["homeDock"], json!(["people"]));
+    assert_eq!(json["layout"]["homePages"], json!([["system"], ["people"]]));
     assert_eq!(json["session"]["windows"].as_array().unwrap().len(), 2);
     assert_eq!(json["session"]["windows"][0]["target"], "people");
     assert_eq!(json["session"]["windows"][1]["target"], "system");
@@ -11757,4 +12208,216 @@ async fn test_system_ai_provider_migrates_legacy_openrouter_secret() {
     assert_eq!(connection(&payload, "openrouter")["id"], "model:openrouter");
     assert_eq!(connection(&payload, "openrouter")["connected"], true);
     assert_ai_provider_http_omits_secrets(&body);
+}
+
+async fn home_external_link_raw(
+    app: &axum::Router,
+    origin: &'static str,
+    home_token: &str,
+    body: serde_json::Value,
+) -> (StatusCode, String) {
+    let response = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", origin)
+                .method("POST")
+                .uri("/api/apps/home/external-link")
+                .header("x-elastos-home-token", home_token)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8(body.to_vec()).unwrap())
+}
+
+#[tokio::test]
+async fn home_external_link_names_the_launched_app_and_the_exact_address() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let home_token =
+        issue_home_launch_token_with_context(dir.path(), HOME_CAPSULE_ID, &context).unwrap();
+    let launched = |target: &str| {
+        issue_home_projection_launch_token_with_context(dir.path(), target, target, &context)
+            .unwrap()
+    };
+    let request = |app_token: &str, url: &str| {
+        json!({
+            "schema": "elastos.home.external-link.request/v1",
+            "app_token": app_token,
+            "url": url,
+        })
+    };
+
+    let library_token = launched(LIBRARY_CAPSULE_ID);
+    for (app_token, app_id, app_title) in [
+        (library_token.clone(), LIBRARY_CAPSULE_ID, "Library"),
+        (
+            launched(HOME_CLI_CAPSULE_ID_FOR_TEST),
+            "home-cli",
+            "Home CLI",
+        ),
+    ] {
+        let (status, body) = home_external_link_raw(
+            &app,
+            "http://localhost:61180",
+            &home_token,
+            request(&app_token, "https://Example.com/a b?q=1#part"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+            json!({
+                "schema": "elastos.home.external-link.result/v1",
+                "app_id": app_id,
+                "app_title": app_title,
+                "url": "https://example.com/a%20b?q=1#part",
+            })
+        );
+    }
+
+    let other_session = local_home_launch_token_context(dir.path()).unwrap();
+    let refused_authority = [
+        (
+            "foreign origin",
+            "https://evil.example",
+            home_token.clone(),
+            library_token.clone(),
+        ),
+        (
+            "an app frame calling directly",
+            "null",
+            home_token.clone(),
+            library_token.clone(),
+        ),
+        (
+            "app token from another Home session",
+            "http://localhost:61180",
+            home_token.clone(),
+            issue_home_projection_launch_token_with_context(
+                dir.path(),
+                LIBRARY_CAPSULE_ID,
+                LIBRARY_CAPSULE_ID,
+                &other_session,
+            )
+            .unwrap(),
+        ),
+        (
+            "Home token from another session",
+            "http://localhost:61180",
+            issue_home_launch_token_with_context(dir.path(), HOME_CAPSULE_ID, &other_session)
+                .unwrap(),
+            library_token.clone(),
+        ),
+        (
+            "app token Home did not mint",
+            "http://localhost:61180",
+            home_token.clone(),
+            issue_home_launch_token_with_context(dir.path(), LIBRARY_CAPSULE_ID, &context).unwrap(),
+        ),
+        (
+            "Home GUI is not a link sender",
+            "http://localhost:61180",
+            home_token.clone(),
+            launched(HOME_GUI_SHELL_ID),
+        ),
+        (
+            "Home's own token",
+            "http://localhost:61180",
+            home_token.clone(),
+            home_token.clone(),
+        ),
+        (
+            "an app that is not installed",
+            "http://localhost:61180",
+            home_token.clone(),
+            launched("not-installed"),
+        ),
+        (
+            "a projection onto another app",
+            "http://localhost:61180",
+            home_token.clone(),
+            issue_home_projection_launch_token_with_context(
+                dir.path(),
+                "assistant",
+                LIBRARY_CAPSULE_ID,
+                &context,
+            )
+            .unwrap(),
+        ),
+        (
+            "a forged token",
+            "http://localhost:61180",
+            home_token.clone(),
+            "not-a-launch-token".to_string(),
+        ),
+    ];
+    for (label, origin, home, app_token) in refused_authority {
+        let (status, body) = home_external_link_raw(
+            &app,
+            origin,
+            &home,
+            request(&app_token, "https://example.com/"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{label}: {body}");
+    }
+
+    let expired =
+        issue_expired_home_launch_token_with_context(dir.path(), LIBRARY_CAPSULE_ID, &context)
+            .unwrap();
+    let (status, body) = home_external_link_raw(
+        &app,
+        "http://localhost:61180",
+        &home_token,
+        request(&expired, "https://example.com/"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body.contains("expired"), "{body}");
+
+    for url in [
+        "javascript:alert(1)",
+        "data:text/html,x",
+        "file:///etc/passwd",
+        "elastos://doc",
+        "https://user:pass@example.com/",
+        "https://example.com/\u{7}",
+        // Home's own pages (the request's Host) open inside Home.
+        "http://localhost:61180/apps/home/",
+        "http://localhost:61180/api/apps/home/summary",
+    ] {
+        let (status, body) = home_external_link_raw(
+            &app,
+            "http://localhost:61180",
+            &home_token,
+            request(&library_token, url),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{url:?}: {body}");
+    }
+    let (status, _) = home_external_link_raw(
+        &app,
+        "http://localhost:61180",
+        &home_token,
+        json!({
+            "schema": "elastos.home.external-link.request/v2",
+            "app_token": library_token,
+            "url": "https://example.com/",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let mut extra = request(&library_token, "https://example.com/");
+    extra["app_id"] = json!("wallet");
+    let (status, _) =
+        home_external_link_raw(&app, "http://localhost:61180", &home_token, extra).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }

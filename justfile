@@ -173,9 +173,18 @@ verify:
     just product-ui-source
     node scripts/home-clipboard-source-gate.mjs
     node --test scripts/browser-window-close-handshake.test.mjs
+    node --test scripts/home-assistant-mark.test.mjs
     node --test scripts/home-two-runtime-acceptance.test.mjs
     node --test scripts/system-hosted-save.test.mjs
+    node --test scripts/home-form-factor.test.mjs
+    node --test scripts/home-keyboard-inset.test.mjs
+    node --test scripts/home-capsule-layout.test.mjs
+    node --test scripts/home-phone-dock.test.mjs
+    node --test scripts/home-phone-stage.test.mjs
+    node --test scripts/home-sheet-handle.test.mjs
     node --test scripts/home-link-status.test.mjs
+    node --test scripts/home-touch-long-press.test.mjs
+    node --test scripts/home-phone-home.test.mjs
     node --test scripts/chat-room-enter.test.mjs
     python3 scripts/source-home-capsule-inventory-smoke.py
     ./scripts/command-smoke.sh
@@ -196,6 +205,7 @@ verify-ci: ci-test-capsules ci-test-elastos
 
 product-ui-source:
     node scripts/home-shell-regression-smoke.mjs
+    node scripts/home-shell-bridge-smoke.mjs
     node scripts/people-discovery-smoke.mjs
     node scripts/inbox-product-behavior-smoke.mjs
     node scripts/archive-product-behavior-smoke.mjs
@@ -204,6 +214,7 @@ product-ui-source:
     node --test scripts/documents-markdown.test.mjs
     node scripts/library-product-behavior-smoke.mjs
     node scripts/chat-room-product-behavior-smoke.mjs
+    node --test scripts/chat-room-reconnect.test.mjs
 
 product-ui-browser:
     node scripts/people-product-layout-smoke.mjs
@@ -213,7 +224,10 @@ product-ui-browser:
     node scripts/isolation-ui-truth-browser-smoke.mjs
     node scripts/documents-product-layout-smoke.mjs
     node scripts/library-product-layout-smoke.mjs
+    node scripts/browser-product-layout-smoke.mjs
+    node scripts/system-uiux-layout-smoke.mjs
     node scripts/chat-room-configured-layout-smoke.mjs
+    node scripts/home-phone-layout-smoke.mjs
 
 product-ui-virtual-auth:
     HOME_VIRTUAL_AUTH_APP_MATRIX=1 node scripts/home-passkey-virtual-auth-smoke.mjs

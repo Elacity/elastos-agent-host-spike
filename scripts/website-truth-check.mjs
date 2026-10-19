@@ -40,10 +40,14 @@ check("facts state current isolation and issue-owned evidence", () => {
 
 check("visitor content stays useful without release services", () => {
   assert.ok(html.includes('href="#install"'), "visitors need a device installation path");
-  assert.ok(html.includes('src="./site.js"'), "platform selection and copy use a local script");
-  assert.ok(html.includes('id="copy-install" disabled'), "keep copying unavailable until release installation is verified");
-  assert.ok(html.includes("Installation awaits accepted release proof."));
-  assert.ok(html.includes('aria-label="Installation command" hidden'), "reveal command only with the verified installer");
+  assert.ok(html.includes('src="./site.js"'), "copy uses a local script");
+  const installCommand = readFileSync(resolve(repo, "docs/INSTALL.md"), "utf8").match(/^curl -fsSL \S+\/install\.sh \| bash$/m)?.[0];
+  assert.ok(installCommand, "docs/INSTALL.md states the install command");
+  assert.ok(html.includes(`<code id="install-command">${installCommand}</code>`), "the site shows the install command from docs/INSTALL.md");
+  assert.ok(!/aria-label="Installation command" hidden|id="copy-install" disabled/.test(html), "the install command and Copy are visible");
+  assert.ok(html.includes('href="https://github.com/Elacity/elastos-runtime/blob/develop/docs/INSTALL.md"'), "the install section links docs/INSTALL.md");
+  assert.ok(!/docs\/MAC\.md/.test(html), "the developer runbook is not an install path");
+  assert.ok(!/protected video|copy-proof|sybil-proof|man-in-the-middle/i.test(html), "no unshipped protected video or absolute security claims");
   assert.ok(!/0\.1\.2|Mac download in preparation|guest access is open/.test(html));
   assert.ok(!/xcode-select|ELASTOS_SOURCE_HOME|git clone/.test(html), "source build steps belong in the developer guide");
   assert.ok(html.includes("Development preview."));
@@ -121,7 +125,6 @@ check("assets have source parity", () => {
     ["elastos-logo.svg", "capsules/home/browser/elastos-logo.svg"],
     ["elastos-mark.svg", "capsules/home/browser/elastos-home-icon.svg"],
     ["Inter-latin-var.woff2", "capsules/home/browser/assets/fonts/Inter-latin-var.woff2"],
-    ...["documents", "library", "people", "system"].map((app) => [`${app}.png`, `capsules/${app}/browser/icons/icon-128.png`]),
   ];
   for (const [asset, source] of pairs) assert.ok(readFileSync(resolve(site, "assets", asset)).equals(readFileSync(resolve(repo, source))), `asset differs from source: ${asset}`);
   assert.deepEqual(readdirSync(resolve(site, "assets")).sort(), pairs.map(([asset]) => asset).sort());

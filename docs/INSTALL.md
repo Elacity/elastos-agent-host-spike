@@ -41,6 +41,19 @@ The installer needs `curl` and a working `python3`; on a Mac without the
 Command Line Tools it stops first and asks you to run `xcode-select --install`.
 Setup and updates need outgoing UDP to port 4433 for Carrier.
 
+Carrier uses mDNS by default to find other Homes on the same local network.
+It announces the Carrier node ID and local addresses. People Discovery controls
+signed Profile advertisements separately. Runtime checks Profile and message
+authority before it accepts Chat messages. Chat uses an encrypted Carrier
+connection.
+
+To turn mDNS off, set `ELASTOS_CARRIER_MDNS=0` in Runtime's environment before
+starting it. Restart Runtime after changing this setting. Keep mDNS on for
+automatic direct reconnection after a restart or local address change. Carrier
+owns peer address resolution. See
+[Community availability](COLLABORATION_NETWORK_PROFILE.md#availability) for
+the bootstrap and connection contract.
+
 The installer detects the platform (Linux `x86_64`/`aarch64` or
 macOS Apple silicon), verifies the signed release, installs Runtime, and
 fetches the Home profile from the trusted publisher. It
@@ -176,6 +189,20 @@ Refresh-only is not sufficient for package/dependency changes: rebuild the targe
 `scripts/browser-vm-artifact-preflight.sh`, including the complete
 PipeWire/WirePlumber/GStreamer dependency set, before installation.
 
+## Set up Home on a board without a screen or passkey
+
+Home is created with a passkey, and the board needs none of its own. From a Mac
+or Windows computer, open an SSH tunnel to the board and keep it open:
+
+```sh
+ssh -L 8090:localhost:8090 user@board
+```
+
+Open `http://localhost:8090/home/` on that computer and create the passkey there
+(Touch ID or Windows Hello), or on a phone or security key. The passkey belongs
+to this Home at `localhost`, so sign in later through a tunnel the same way;
+using the same tunnel and address, `http://localhost:8090/home/`, is simplest.
+
 ## How updates reach your Home
 
 Updates are pull only. Nothing is pushed to your Home. The publisher's seed
@@ -200,10 +227,15 @@ connection fails, the check fails.
 **What System shows.** System shows the new version and its release notes.
 
 **Approve and restart.** You approve the update with your passkey for that
-exact release. The Runtime downloads the binary and components by CID over
-Carrier (a component listed without a CID comes by its release name), stages
-everything beside the running Home and restarts Home. A download fails only
-after 30 seconds without data.
+exact release. The Runtime always downloads the new Runtime binary and
+`components.json` by CID over Carrier. A capsule is downloaded only when its
+signed record changed: the release lists one record per capsule archive
+(name, capsule version, SHA-256, size, CID, signer), each signed on its own by
+the publisher. Before any download the Runtime checks each record's signature
+against the publisher DIDs in `sources.json` and that it matches the
+capsule's entry in `components.json`; downloaded bytes must match the same
+SHA-256 and size. The Runtime stages everything beside the running Home and
+restarts Home. A download fails only after 30 seconds without data.
 
 **If it fails.** If the new release does not start, the previous release is
 restored.
@@ -255,7 +287,12 @@ Replace `<previous head CID>` with the saved CID. A plain update to an older
 release is refused. Undo needs the network: it fetches the changed parts of the
 previous release again by CID from the trusted source, so the source must be
 reachable. Undo keeps your identity, accounts, and user data, including data
-written after the update.
+written after the update. A Home that joined the release Community
+network stays joined, with its accepted revision, contacts, and messages. An
+older release with no network pin, or with an older pin for the same network,
+keeps the joined configuration in place. Leaving Community is a separate
+action. To keep a Home out of Community, choose that before its first start
+with `elastos setup --isolated`.
 
 For a legacy Home, the first update to a new publisher key uses the installer's
 re-trust step. After that step, Undo accepts only heads signed by the current
@@ -270,20 +307,60 @@ again before starting Home. Runtime owns the saved transaction and verifies its
 files before recovery. Keep the installation files and data in place.
 
 A Home with an installed update controller keeps its controller Runtime and
-private receipt in the data directory. If restart recovery requires that
-controller, set `ELASTOS_RECOVERY_DATA` to the data directory shown in the local
-message and run:
+private receipt in the data directory. The controller of the version that runs
+the update owns its restart and recovery, so the steps below depend on that
+version.
+
+From 0.8.0 (and its test release 0.8.0-alpha.18), if a Home restart was
+interrupted, run `elastos home --browser`. It
+hands recovery to that retained controller, which verifies its signed Runtime,
+retained launch settings and saved release before it starts Home. When the
+start of the restored previous release failed, the controller starts that
+release again, at most twice per run, and clears the recovery files once Home
+is ready. It never starts the failed new release again. Keep this terminal
+open. Every Home start, with or without `--browser`, first or after an update,
+gives its newly started Runtime up to 120 seconds to become ready. Each start
+through the update controller appends its output under a header to the private
+`update-controller/runtime.log` file, so a failed update start stays readable
+after the rollback; a startup failure names that file.
+
+On 0.8.0-alpha.16 and 0.8.0-alpha.17 (including an update from one of them to
+0.8.0), an update or rollback start has a 30-second limit, each start replaces
+`update-controller/runtime.log`, and `elastos home --browser` refuses a pending
+restart. Set `ELASTOS_RECOVERY_DATA` to the data directory shown in the local
+message and run the retained controller:
 
 ```bash
 "${ELASTOS_RECOVERY_DATA}/update-controller/runtime" __update-controller \
   --receipt "${ELASTOS_RECOVERY_DATA}/update-controller/receipt.json"
 ```
 
-The controller verifies its signed Runtime, retained launch settings and saved
-release before it starts Home. Keep this terminal open. Initial startup has a
-120-second limit; update and rollback startup have a 30-second limit. A startup
-failure names the private `update-controller/runtime.log` file to inspect
-before trying again. The receipt keeps Home paths, locale, desktop opener settings and Runtime launch
+If it reports that the previous Home start was already attempted, the previous
+release is already back in place. Stop every `elastos` process of this Home and
+move these files out of the way. Several have the same name, so make a folder
+of your own with the subfolders `bin`, `data` and `installation`, and move each
+file into the subfolder named below (keep them; do not delete them):
+
+- `bin`: from next to the installed `elastos` binary,
+  `.elastos.update-journal.json`, `.elastos.update-stage` and
+  `.elastos.update-rollback`
+- `data`: from the data directory, `.elastos.update-stage`,
+  `.elastos.update-rollback`, `.elastos.update-support` and
+  `update-controller/active-request.json`
+- `installation`: from the data directory's `installation` folder,
+  `.elastos.update-stage` and `.elastos.update-rollback`
+
+Then run the install command as the same user, with the same `HOME` (and on
+Linux the same `XDG_DATA_HOME`) as this Home, and add
+`-s -- --install-dir <folder>` when the `elastos` binary is not in
+`~/.local/bin`:
+`curl -fsSL https://elastos.elacitylabs.com/install.sh | bash`. The installer
+finds the data directory from `HOME` and `XDG_DATA_HOME` (it ignores
+`ELASTOS_RECOVERY_DATA`). It installs the current release and runs
+`elastos setup`, and keeps that data directory and its identity. Start Home
+with `elastos home --browser`.
+
+The receipt keeps Home paths, locale, desktop opener settings and Runtime launch
 bindings. It also retains the configured Wallet price API key, which Wallet reads
 from the environment. Other provider and Browser settings stay in their installed
 private configuration files. Keep the receipt's owner-only permissions and

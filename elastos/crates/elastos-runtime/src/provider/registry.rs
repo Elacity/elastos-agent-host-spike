@@ -295,6 +295,8 @@ pub enum ProviderError {
     Unavailable(String),
     /// IO error
     Io(std::io::Error),
+    /// A verified local volume cannot fit the requested bytes and shared reserve.
+    NotEnoughFreeSpace(elastos_common::NotEnoughFreeSpace),
 }
 
 /// Provider-to-provider invocation transfer contract.
@@ -604,6 +606,7 @@ impl std::fmt::Display for ProviderError {
             ProviderError::NoProvider(scheme) => write!(f, "no provider for scheme: {}", scheme),
             ProviderError::Unavailable(msg) => write!(f, "peer unavailable: {}", msg),
             ProviderError::Io(e) => write!(f, "IO error: {}", e),
+            ProviderError::NotEnoughFreeSpace(e) => std::fmt::Display::fmt(e, f),
         }
     }
 }
@@ -676,8 +679,14 @@ const RESERVED_SUB_NAMES: &[&str] = &[
 ];
 
 /// Reserved names for provider targets that only Runtime invocation can reach.
-const RESERVED_RUNTIME_PROVIDER_TARGETS: &[&str] =
-    &["protect", "media", "custody", "protected-content-decrypt"];
+const RESERVED_RUNTIME_PROVIDER_TARGETS: &[&str] = &[
+    "protect",
+    "media",
+    "custody",
+    "protected-content-decrypt",
+    "collaboration.history",
+    "collaboration.shared",
+];
 
 /// Registry of providers
 pub struct ProviderRegistry {
@@ -1349,6 +1358,7 @@ impl ProviderRegistry {
                 .await
                 .map_err(|_| unavailable())?
                 .map_err(|error| {
+                    tracing::info!("local model activation request failed");
                     tracing::debug!(?error, "private model activation failed");
                     unavailable()
                 })?;
@@ -1356,6 +1366,12 @@ impl ProviderRegistry {
         if response["status"] != "ok" {
             let code = response["code"].as_str().unwrap_or("");
             let message = response["message"].as_str().unwrap_or("");
+            let reason = match message {
+                "model activation pending" => "model activation pending",
+                "model activation closure unconfirmed" => "model activation closure unconfirmed",
+                _ => "model activation refused",
+            };
+            tracing::info!(reason, "local model activation refused");
             let detail = [code, message]
                 .into_iter()
                 .filter(|part| !part.is_empty())
@@ -1550,7 +1566,7 @@ impl ProviderRegistry {
             u128::from(observation.available_bytes),
             u128::from(required_bytes),
         )
-        .map_err(|error| ProviderError::Provider(error.to_string()))?;
+        .map_err(ProviderError::NotEnoughFreeSpace)?;
         Ok(observation)
     }
 
@@ -3437,10 +3453,13 @@ mod tests {
         // Exactly the work plus the shared reserve fits; one byte less does not.
         assert!(registry.check_local_ipfs_capacity(110).await.is_ok());
         let refused = registry.check_local_ipfs_capacity(111).await.unwrap_err();
-        assert_eq!(
-            refused.to_string(),
-            ProviderError::Provider(elastos_common::NotEnoughFreeSpace { needed: 111 }.to_string())
-                .to_string()
+        assert!(matches!(refused, ProviderError::NotEnoughFreeSpace(space) if space.needed == 111));
+        *provider.response.lock().await = Some(serde_json::json!({"status":"ok","data":{
+            "volume_id":7,"capacity_bytes":1000,"available_bytes":5,"required_bytes":10
+        }}));
+        assert!(
+            matches!(registry.check_local_ipfs_capacity(10).await.unwrap_err(),
+            ProviderError::NotEnoughFreeSpace(space) if space.needed == 10)
         );
         let valid = serde_json::json!({"status":"ok","data":{
             "volume_id":7,"capacity_bytes":1_u64 << 40,
@@ -4611,7 +4630,14 @@ mod tests {
             .register_sub_provider("decrypt", Arc::new(RawMockProvider))
             .await
             .unwrap();
-        for target in ["protect", "media", "custody", "protected-content-decrypt"] {
+        for target in [
+            "protect",
+            "media",
+            "custody",
+            "protected-content-decrypt",
+            "collaboration.history",
+            "collaboration.shared",
+        ] {
             registry
                 .register_runtime_provider_target(target, Arc::new(RawMockProvider))
                 .await
@@ -4638,7 +4664,14 @@ mod tests {
         assert_eq!(registry.sub_provider_schemes().await, vec!["decrypt"]);
         assert!(!registry.has_ready_runtime_provider_target("decrypt").await);
         let registrations = registry.registrations().await;
-        for target in ["protect", "media", "custody", "protected-content-decrypt"] {
+        for target in [
+            "protect",
+            "media",
+            "custody",
+            "protected-content-decrypt",
+            "collaboration.history",
+            "collaboration.shared",
+        ] {
             let protected = registry
                 .invoke_provider(ProviderInvocation {
                     source: "runtime".to_string(),
@@ -4692,7 +4725,14 @@ mod tests {
             .register_sub_provider("decrypt", Arc::new(MockProvider::new()))
             .await
             .unwrap();
-        for target in ["protect", "media", "custody", "protected-content-decrypt"] {
+        for target in [
+            "protect",
+            "media",
+            "custody",
+            "protected-content-decrypt",
+            "collaboration.history",
+            "collaboration.shared",
+        ] {
             registry
                 .register_runtime_provider_target(target, Arc::new(RawMockProvider))
                 .await

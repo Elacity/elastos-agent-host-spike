@@ -3217,13 +3217,13 @@ async function runControlledBrowserJourney(page, appFrame, windowIdentity, token
     await appFrame.locator("#browser-url").waitFor({ state: "visible", timeout: 15_000 });
     await appFrame.waitForFunction(() => document.querySelector("#browser-url")?.disabled === false,
       null, { timeout: BROWSER_UI_PAGE_ID_TIMEOUT_MS });
-    if (fixture.engineId) {
+    if (engineChoice?.engineId) {
       await appFrame.locator("#browser-settings").click();
       const selectedEngine = await appFrame.locator("#browser-engine").inputValue();
-      if (selectedEngine !== fixture.engineId) {
-        await appFrame.locator("#browser-engine").selectOption(fixture.engineId);
+      if (selectedEngine !== engineChoice.engineId) {
+        await appFrame.locator("#browser-engine").selectOption(engineChoice.engineId);
       }
-      assert(await appFrame.locator("#browser-engine").inputValue() === fixture.engineId,
+      assert(await appFrame.locator("#browser-engine").inputValue() === engineChoice.engineId,
         "Requested Browser Engine UI selection failed");
       await appFrame.locator("#browser-settings-close").click();
     }
@@ -4025,9 +4025,11 @@ async function ensureSignedWithVirtualPasskey(page, onCreated) {
     throw skip;
   }
 
-  const secondary = page.locator("#home-unlock-secondary");
-  await secondary.waitFor({ state: "visible", timeout: 15_000 });
-  await secondary.click();
+  // The lock face offers "Create account" directly; the card's secondary
+  // action covers the neutral surface.
+  const createEntry = page.locator("#home-unlock-create:visible, #home-unlock-secondary:visible").first();
+  await createEntry.waitFor({ state: "visible", timeout: 15_000 });
+  await createEntry.click();
   state = await homeState(page);
   assert(
     state.unlockTitle === "Create guest account" && state.unlockNameVisible,
