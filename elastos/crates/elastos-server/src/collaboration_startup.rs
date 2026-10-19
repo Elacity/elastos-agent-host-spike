@@ -3874,6 +3874,19 @@ mod tests {
         membership.send(false).unwrap();
         tokio::select! {
             _ = &mut watchdog => panic!("leaving Community keeps the worker alive"),
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+        }
+        let (pending, cancelled) = {
+            let state = link.state.lock().unwrap();
+            (state.pending_rebuilds, state.cancelled_rebuilds)
+        };
+        assert_eq!(
+            (pending, cancelled),
+            (0, 1),
+            "leaving drops the wait before its 30 s step timeout at 150 s"
+        );
+        tokio::select! {
+            _ = &mut watchdog => panic!("leaving Community keeps the worker alive"),
             _ = tokio::time::sleep(Duration::from_secs(600)) => {}
         }
         {
