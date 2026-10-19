@@ -5942,31 +5942,43 @@ impl TarInputBudget {
     {
         match entry {
             Ok(mut entry) => {
-                if is_sparse_tar_entry(&mut entry)? {
+                // Inspecting a global PAX entry reads its body here, so
+                // those bytes are charged to the allowance set below.
+                let before = self.total_left.get();
+                let sparse = is_sparse_tar_entry(&mut entry)
+                    .map_err(|err| self.limit_error(archive).unwrap_or(err))?;
+                if sparse {
                     bail!(
                         "{archive} holds a sparse file entry; Library does not open archives \
                          like that."
                     );
                 }
+                let inspected = before - self.total_left.get();
                 self.entry_left.set(
                     entry
                         .size()
                         .div_ceil(512)
                         .saturating_mul(512)
-                        .saturating_add(MAX_TAR_ENTRY_HEADER_BYTES),
+                        .saturating_add(MAX_TAR_ENTRY_HEADER_BYTES)
+                        .saturating_sub(inspected),
                 );
                 Ok(entry)
             }
-            Err(err) => Err(match self.reached.get() {
-                Some(TarInputLimit::Archive) => archive_too_large(archive),
-                Some(TarInputLimit::Header) => anyhow!(
-                    "{archive} holds an entry name or header of more than {} MiB; Library does \
-                     not open archives like that.",
-                    MAX_TAR_ENTRY_HEADER_BYTES / (1024 * 1024),
-                ),
-                None => err.into(),
-            }),
+            Err(err) => Err(self.limit_error(archive).unwrap_or_else(|| err.into())),
         }
+    }
+
+    /// The named refusal when a read stopped at a limit. `archive` is
+    /// printable.
+    fn limit_error(&self, archive: &str) -> Option<anyhow::Error> {
+        Some(match self.reached.get()? {
+            TarInputLimit::Archive => archive_too_large(archive),
+            TarInputLimit::Header => anyhow!(
+                "{archive} holds an entry name or header of more than {} MiB; Library does not \
+                 open archives like that.",
+                MAX_TAR_ENTRY_HEADER_BYTES / (1024 * 1024),
+            ),
+        })
     }
 }
 
@@ -8018,6 +8030,79 @@ mod tests {
             "Documents/Pax.tar holds a sparse file entry; Library does not open archives like \
              that."
         );
+    }
+
+    /// A tar of a PAX global header with `global` bytes of records, an
+    /// optional local PAX header with `local` bytes, and one file `x.txt`.
+    fn tar_with_pax_headers(global: usize, local: Option<usize>) -> Vec<u8> {
+        let record = |len: usize| {
+            // "<len> comment=<value>\n", exactly `len` bytes.
+            let digits = len.to_string().len();
+            format!("{len} comment={}\n", "a".repeat(len - digits - 10))
+        };
+        let mut builder = tar::Builder::new(Vec::new());
+        for (kind, len) in [
+            (tar::EntryType::XGlobalHeader, Some(global)),
+            (tar::EntryType::XHeader, local),
+        ] {
+            let Some(len) = len else { continue };
+            let body = record(len);
+            assert_eq!(body.len(), len);
+            let mut header = tar::Header::new_ustar();
+            header.set_entry_type(kind);
+            header.set_path("pax_global_header").unwrap();
+            header.set_size(len as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append(&header, body.as_bytes()).unwrap();
+        }
+        let mut file = tar::Header::new_ustar();
+        file.set_path("x.txt").unwrap();
+        file.set_size(1);
+        file.set_mode(0o644);
+        file.set_cksum();
+        builder.append(&file, &b"x"[..]).unwrap();
+        builder.into_inner().unwrap()
+    }
+
+    /// #449: bytes a reader reads while inspecting a global PAX header are
+    /// charged to the header allowance, so a 512 KiB global header cannot
+    /// let a 1.25 MiB local one through.
+    #[test]
+    fn tar_readers_charge_a_global_pax_header_to_the_header_allowance() {
+        const KIB: usize = 1024;
+        let bytes = tar_with_pax_headers(512 * KIB, Some(1280 * KIB));
+        let refusal = "Global.tar holds an entry name or header of more than 1 MiB; Library \
+                       does not open archives like that.";
+        let listed = list_tar_archive_entries("Global.tar", bytes.clone());
+        assert_eq!(listed.unwrap_err().to_string(), refusal);
+        let previewed = preview_tar_archive_entry("Global.tar", bytes.clone(), "x.txt");
+        assert_eq!(previewed.err().unwrap().to_string(), refusal);
+        let mut outcome = ArchiveExtractOutcome::new(BTreeSet::from(["x.txt".to_string()]));
+        let mut written = 0;
+        let selected =
+            read_selected_archive_entries("Global.tar", bytes, None, &mut outcome, &mut |_, _| {
+                written += 1;
+                Ok(())
+            });
+        assert_eq!(selected.unwrap_err().to_string(), refusal);
+        assert_eq!(written, 0);
+    }
+
+    /// #449: a small global PAX header, as `git archive` writes, still
+    /// lists and previews.
+    #[test]
+    fn tar_readers_accept_a_git_archive_global_pax_header() {
+        let bytes = tar_with_pax_headers(52, None);
+        let (rows, truncated) = list_tar_archive_entries("Git.tar", bytes.clone()).unwrap();
+        assert!(!truncated);
+        assert!(
+            rows.iter()
+                .any(|row| row["path"] == "x.txt" && row["safety"]["status"] == "safe"),
+            "{rows:?}"
+        );
+        let preview = preview_tar_archive_entry("Git.tar", bytes, "x.txt").unwrap();
+        assert_eq!(preview.bytes, b"x");
     }
 
     /// #449: a folder made at the extraction's destination by another
