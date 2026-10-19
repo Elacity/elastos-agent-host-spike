@@ -13,8 +13,8 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
     window, AbortSignal, Blob, Document, Element, Event, HtmlButtonElement, HtmlElement,
-    HtmlFormElement, HtmlInputElement, HtmlTextAreaElement, MessageEvent, Node,
-    RequestCredentials, Storage,
+    HtmlFormElement, HtmlInputElement, HtmlTextAreaElement, MessageEvent, Node, RequestCredentials,
+    Storage,
 };
 
 mod direct;
