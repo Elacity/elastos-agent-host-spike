@@ -118,6 +118,7 @@ function visibleDiscoveryPeer() {
     advertisement_id: "ad-visible-1",
     display_name: "Jordan Visible",
     handle: "jordan",
+    status: "visible",
     peer_id: "must-not-render-peer-id",
     connect_ticket: "must-not-render-ticket",
     route: "must-not-render-route",

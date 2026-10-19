@@ -203,7 +203,8 @@ struct HomePeopleDiscoveryPeerSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     handle: Option<String>,
     last_seen_at: u64,
-    status: String,
+    /// `visible` (no relationship yet), `contact`, `requested` or `pending`.
+    status: &'static str,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -566,8 +567,10 @@ pub(super) async fn people_summary(
         let discovery = if let (Some(service), Some(authority)) =
             (discovery_service.as_ref(), contact_authority.as_ref())
         {
+            let snapshot = authority.store.read_only_snapshot()?;
             configured_people_discovery_summary(
-                &service.read_only_status(authority.store.as_ref(), &authority.profile, now)?,
+                &service.read_only_status_from_snapshot(&snapshot, &authority.profile, now)?,
+                &contact_relationships(&snapshot, now),
                 now,
             )
         } else {
@@ -883,6 +886,41 @@ pub(super) struct ConfiguredContactAuthority {
     pub(super) store: std::sync::Arc<crate::collaboration_contact_store::CollaborationContactStore>,
 }
 
+/// Profile DID to (`contact` | `requested` | `pending`, direct conversation)
+/// from this principal's signed contact store. People absent from the map
+/// have no relationship yet; a store that cannot be read yields none.
+pub(super) type ContactRelationships =
+    std::collections::HashMap<String, (&'static str, Option<String>)>;
+
+pub(super) fn contact_relationships(
+    store: &crate::collaboration_contact_store::CollaborationContactReadSnapshot<'_>,
+    now: u64,
+) -> ContactRelationships {
+    let mut relationships = ContactRelationships::new();
+    if let Ok(requests) = store.pending_incoming_requests() {
+        for request in requests {
+            relationships.insert(
+                request.requester_profile_did().to_string(),
+                ("pending", None),
+            );
+        }
+    }
+    if let Ok(requests) = store.outgoing_pending_requests(now) {
+        for request in requests {
+            relationships.insert(request.remote_profile_did, ("requested", None));
+        }
+    }
+    if let Ok(snapshot) = store.snapshot() {
+        for contact in snapshot.contacts() {
+            relationships.insert(
+                contact.remote_profile_did().to_string(),
+                ("contact", Some(contact.conversation_id().to_string())),
+            );
+        }
+    }
+    relationships
+}
+
 /// Adds this principal's durable pending contact requests to one Home/Inbox
 /// read response. The contact store remains the only persistent truth.
 pub(super) fn apply_contact_request_notification_projection(
@@ -1099,14 +1137,23 @@ where
     {
         return Err(home_error_response(err));
     }
+    let store = Arc::clone(&authority.store);
     let status = action(service, authority, now)
         .await
         .map_err(home_error_response)?;
-    Ok(configured_people_discovery_summary(&status, now))
+    let snapshot = store.read_only_snapshot().map_err(home_error_response)?;
+    Ok(configured_people_discovery_summary(
+        &status,
+        &contact_relationships(&snapshot, now),
+        now,
+    ))
 }
 
+/// Each visible person carries their relationship (`visible` when there is
+/// none yet), so People offers Add contact only to people it can add.
 fn configured_people_discovery_summary(
     status: &crate::collaboration_discovery_runtime::CollaborationDiscoveryStatus,
+    relationships: &ContactRelationships,
     now: u64,
 ) -> HomePeopleDiscoverySummary {
     let discovered_peers = status
@@ -1117,7 +1164,9 @@ fn configured_people_discovery_summary(
             display_name: person.display_name().to_string(),
             handle: person.handle().map(str::to_string),
             last_seen_at: person.last_seen_at(),
-            status: "visible".to_string(),
+            status: relationships
+                .get(person.profile_did())
+                .map_or("visible", |(relationship, _)| *relationship),
         })
         .collect::<Vec<_>>();
     let request_count = status.incoming_requests().len();
@@ -1271,6 +1320,7 @@ mod discovery_summary_tests {
                     ),
                 ],
             ),
+            &ContactRelationships::new(),
             100,
         );
 
@@ -1286,6 +1336,61 @@ mod discovery_summary_tests {
     }
 
     #[test]
+    fn configured_discovery_summary_marks_people_who_already_have_a_relationship() {
+        let visible = ["ad-new", "ad-contact", "ad-requested", "ad-pending"]
+            .into_iter()
+            .map(|id| {
+                crate::collaboration_discovery_runtime::DiscoveryVisiblePerson::test_new(
+                    id, id, None, 100, 700,
+                )
+            })
+            .collect();
+        let relationships = ContactRelationships::from([
+            (
+                "did:key:test-ad-contact".to_string(),
+                ("contact", Some("direct:abc".to_string())),
+            ),
+            ("did:key:test-ad-requested".to_string(), ("requested", None)),
+            ("did:key:test-ad-pending".to_string(), ("pending", None)),
+        ]);
+        let summary = configured_people_discovery_summary(
+            &crate::collaboration_discovery_runtime::CollaborationDiscoveryStatus::test_new(
+                true,
+                true,
+                Some(700),
+                None,
+                visible,
+                Vec::new(),
+            ),
+            &relationships,
+            100,
+        );
+
+        let json = serde_json::to_value(&summary).unwrap();
+        let statuses = json["discovered_peers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|peer| {
+                (
+                    peer["advertisement_id"].as_str().unwrap(),
+                    peer["status"].as_str().unwrap(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            statuses,
+            std::collections::BTreeMap::from([
+                ("ad-contact", "contact"),
+                ("ad-new", "visible"),
+                ("ad-pending", "pending"),
+                ("ad-requested", "requested"),
+            ])
+        );
+        assert!(!json.to_string().contains("did:key:"));
+    }
+
+    #[test]
     fn configured_discovery_summary_honestly_reports_off_pending_expiry() {
         let summary = configured_people_discovery_summary(
             &crate::collaboration_discovery_runtime::CollaborationDiscoveryStatus::test_new(
@@ -1296,6 +1401,7 @@ mod discovery_summary_tests {
                 Vec::new(),
                 Vec::new(),
             ),
+            &ContactRelationships::new(),
             100,
         );
 
@@ -1322,6 +1428,7 @@ mod discovery_summary_tests {
                 Vec::new(),
                 Vec::new(),
             ),
+            &ContactRelationships::new(),
             100,
         );
 
@@ -1343,6 +1450,7 @@ mod discovery_summary_tests {
                 Vec::new(),
             )
             .with_connecting_for_test(),
+            &ContactRelationships::new(),
             100,
         );
 
@@ -1374,6 +1482,7 @@ mod discovery_summary_tests {
                     ),
                 ],
             ),
+            &ContactRelationships::new(),
             100,
         );
 

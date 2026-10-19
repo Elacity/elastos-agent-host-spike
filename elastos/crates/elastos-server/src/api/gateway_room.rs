@@ -1593,29 +1593,7 @@ fn participant_card_directory(
     let Some(store) = read_snapshot else {
         return directory;
     };
-    if let Ok(requests) = store.pending_incoming_requests() {
-        for request in requests {
-            directory.relationships.insert(
-                request.requester_profile_did().to_string(),
-                ("pending", None),
-            );
-        }
-    }
-    if let Ok(requests) = store.outgoing_pending_requests(now) {
-        for request in requests {
-            directory
-                .relationships
-                .insert(request.remote_profile_did.clone(), ("requested", None));
-        }
-    }
-    if let Ok(snapshot) = store.snapshot() {
-        for contact in snapshot.contacts() {
-            directory.relationships.insert(
-                contact.remote_profile_did().to_string(),
-                ("contact", Some(contact.conversation_id().to_string())),
-            );
-        }
-    }
+    directory.relationships = gateway_home_system::contact_relationships(store, now);
     if let Some(service) = discovery_service {
         if let Ok(status) = service.read_only_status_from_snapshot(store, &authority.profile, now) {
             directory.discoverable = status
