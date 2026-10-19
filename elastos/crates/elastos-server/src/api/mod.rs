@@ -20,9 +20,9 @@ pub use capsule_inventory::preparation::{
 pub mod gateway;
 pub(crate) mod gateway_local_control;
 pub mod handlers;
-pub mod middleware;
 #[cfg(unix)]
 mod hosted_egress_admission;
+pub mod middleware;
 mod model_provider_config;
 #[cfg(target_os = "macos")]
 pub mod model_provider_egress;
