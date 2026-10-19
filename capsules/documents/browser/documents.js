@@ -25,6 +25,9 @@ const state = {
   pendingConfirmation: null,
   pendingChatAttachmentId: "",
 };
+// Launched by Home: framed, with the Home token Home put in the launch
+// address. Decided once here; the current address may change later.
+const DOCUMENTS_INSIDE_HOME = window.top !== window && !!state.homeToken;
 const homeOrigin = new URLSearchParams(window.location.search).get("home_origin") || "";
 const homeNavigation = createHomeNavigationClient({ homeToken: state.homeToken, homeOrigin });
 const DOCUMENTS_WINDOW_CLOSE_REQUEST_TYPE =
@@ -148,29 +151,26 @@ function renderInlineMarkdown(text) {
   return html + escapeHtml(text.slice(offset));
 }
 
-// The one place that decides whether Markdown is shown inside Home: this
-// frame was launched by Home (it holds a Home token) and is framed. Every
-// rendering asks it, so no view can show links without the policy below.
-function markdownShownInsideHome() {
-  return typeof window !== "undefined"
-    && window.top !== window
-    && !!new URLSearchParams(window.location.hash.replace(/^#/, "")).get("home_token");
-}
-
-// Inside Home only an in-document "#" anchor keeps an href: any other
-// navigation would replace the Documents frame, which then cannot answer
-// Home's close request. A web link (same origin included) has no href and
-// asks Home through `activatePreviewWebLink` (#436, as Chat); every other
-// link (relative paths, elastos://, localhost://) is plain text, since
-// nothing in Documents handles it. Outside Home links are normal anchors.
+// Inside Home rendered Markdown has no href at all: any navigation would
+// replace the Documents frame (or its address), and a replaced frame cannot
+// answer Home's close request. A web link (same origin included) asks Home
+// through `activateMarkdownLink` (#436, as Chat); a link to a place in the
+// document scrolls there without touching the address; every other link
+// (relative paths, elastos://, localhost://, refused addresses) is plain
+// text. Outside Home links are normal anchors. `DOCUMENTS_INSIDE_HOME` is
+// decided once at launch, never from the current address.
 function renderMarkdownLink(value, labelHtml) {
   const href = markdownHref(value);
-  if (markdownShownInsideHome() && !href.startsWith("#")) {
-    return /^https?:\/\//i.test(href)
-      ? '<a data-open-external="' + escapeHtml(href) + '" role="link" tabindex="0">' + labelHtml + "</a>"
-      : "<span>" + labelHtml + "</span>";
+  if (!DOCUMENTS_INSIDE_HOME) {
+    return '<a href="' + escapeHtml(href) + '" rel="noopener noreferrer">' + labelHtml + "</a>";
   }
-  return '<a href="' + escapeHtml(href) + '" rel="noopener noreferrer">' + labelHtml + "</a>";
+  if (/^https?:\/\//i.test(href)) {
+    return '<a data-open-external="' + escapeHtml(href) + '" role="link" tabindex="0">' + labelHtml + "</a>";
+  }
+  if (href.length > 1 && href.startsWith("#")) {
+    return '<a data-scroll-to="' + escapeHtml(href.slice(1)) + '" role="link" tabindex="0">' + labelHtml + "</a>";
+  }
+  return "<span>" + labelHtml + "</span>";
 }
 
 // Browsers drop tabs and newlines from an address and read "\" as "/", so
@@ -610,18 +610,26 @@ function announceHomeChrome() {
 // link in a Markdown view has no href (renderMarkdownLink) and asks Home to
 // show the exact address and open it only when the person chooses Open
 // (#436, the same request as Chat's links). Without the Home session it
-// refuses and says so; nothing navigates either way.
-function activatePreviewWebLink(event) {
+// refuses and says so. A link to a place in the document scrolls there.
+// Nothing navigates either way.
+function activateMarkdownLink(event) {
   if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") {
     return;
   }
-  const link = event.target instanceof Element ? event.target.closest("[data-open-external]") : null;
+  const link = event.target instanceof Element ? event.target.closest("[data-open-external], [data-scroll-to]") : null;
   if (!link) {
     return;
   }
   event.preventDefault();
   const selection = window.getSelection();
   if (event.type === "click" && selection && !selection.isCollapsed && selection.containsNode(link, true)) {
+    return;
+  }
+  if (link.hasAttribute("data-scroll-to")) {
+    const target = document.getElementById(link.getAttribute("data-scroll-to") || "");
+    if (target) {
+      target.scrollIntoView({ block: "start" });
+    }
     return;
   }
   if (!canAnnounceHomeChrome()) {
@@ -638,15 +646,15 @@ function activatePreviewWebLink(event) {
 }
 
 // Every Markdown view renders through here, so each one gets the inside-Home
-// link policy (renderMarkdownLink) and the handlers that ask Home.
+// link policy (renderMarkdownLink) and the handlers for its controls.
 const markdownLinkContainers = new WeakSet();
 function renderMarkdownInto(container, markdown, options) {
   const rendered = renderMarkdownDocument(markdown, options);
   container.innerHTML = rendered.html;
   if (!markdownLinkContainers.has(container)) {
     markdownLinkContainers.add(container);
-    container.addEventListener("click", activatePreviewWebLink);
-    container.addEventListener("keydown", activatePreviewWebLink);
+    container.addEventListener("click", activateMarkdownLink);
+    container.addEventListener("keydown", activateMarkdownLink);
   }
   return rendered;
 }
@@ -2391,7 +2399,7 @@ async function loadShareBundle(options) {
     files.forEach((file) => {
       const link = document.createElement("a");
       link.className = "share-doc-link" + (file === activeFile ? " active" : "");
-      if (markdownShownInsideHome()) {
+      if (DOCUMENTS_INSIDE_HOME) {
         // Inside Home a navigation would replace the Documents frame (and
         // drop its Home token), so the chosen file opens in place.
         link.setAttribute("role", "link");

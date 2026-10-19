@@ -10,18 +10,10 @@ const start = source.indexOf("function escapeHtml(");
 const end = source.indexOf("function shortCid(", start);
 assert.ok(start >= 0 && end > start, "Documents Markdown renderer must exist");
 const exports = "\n({ renderMarkdownDocument, renderInlineMarkdown, markdownHref })";
-// Outside Home (no window, standalone or framed without a Home token) and
-// inside Home (framed, with the Home token Home puts in the address).
-const renderer = vm.runInNewContext(source.slice(start, end) + exports);
-const framedWindow = (hash) => {
-  const window = { location: { hash } };
-  window.top = {};
-  return window;
-};
-const homeRenderer = vm.runInNewContext(source.slice(start, end) + exports,
-  { window: framedWindow("#home_token=t"), URLSearchParams });
-const framedWithoutHomeRenderer = vm.runInNewContext(source.slice(start, end) + exports,
-  { window: framedWindow(""), URLSearchParams });
+// DOCUMENTS_INSIDE_HOME is a module constant decided at launch; the
+// renderer reads it, so each context supplies it.
+const renderer = vm.runInNewContext(source.slice(start, end) + exports, { DOCUMENTS_INSIDE_HOME: false });
+const homeRenderer = vm.runInNewContext(source.slice(start, end) + exports, { DOCUMENTS_INSIDE_HOME: true });
 // Spellings browsers resolve to another host: a backslash reads as "/" and
 // tabs and newlines are dropped.
 const offOriginSpellings = [
@@ -135,8 +127,8 @@ test("safe Markdown retains formatting, tasks, links, tables, and fence language
   assertSafeHtml(html);
 });
 
-test("inside Home only '#' anchors keep an href; every web link asks Home; other links are text (#436)", () => {
-  const markdown = "# [Head](https://example.test/h)\n\n- **[item](http://example.test/?a=1&b=2)**\n\n| [cell](https://example.test/c) |\n| --- |\n| x |";
+test("inside Home Markdown has no href: web links ask Home, '#' links scroll, other links are text (#436)", () => {
+  const markdown = "# [Head](https://example.test/h)\n\n- **[item](http://example.test/?a=1&b=2)**\n\n| [cell](https://example.test/c) |\n| --- |\n| [jump](#notes) |";
   // No option: every caller gets the policy.
   const { html } = homeRenderer.renderMarkdownDocument(markdown);
   assert.doesNotMatch(html, /href=/);
@@ -149,22 +141,24 @@ test("inside Home only '#' anchors keep an href; every web link asks Home; other
   // Same origin included: a native href would replace the Documents frame.
   assert.equal(homeRenderer.renderInlineMarkdown("[health](https://documents.test/api/health)"),
     '<a data-open-external="https://documents.test/api/health" role="link" tabindex="0">health</a>');
+  // A place in the document: a control that scrolls, the address untouched.
   assert.equal(homeRenderer.renderInlineMarkdown("[label](#notes)"),
-    '<a href="#notes" rel="noopener noreferrer">label</a>');
+    '<a data-scroll-to="notes" role="link" tabindex="0">label</a>');
+  assert.equal(homeRenderer.renderInlineMarkdown('[x](#a" onclick="b)'),
+    '<a data-scroll-to="a&quot; onclick=&quot;b" role="link" tabindex="0">x</a>');
   for (const href of ["elastos://document/example", "localhost://example", "/document/example", "./example", "../example"]) {
     assert.equal(homeRenderer.renderInlineMarkdown("[**label**](" + href + ")"),
       "<span><strong>label</strong></span>");
   }
-  for (const href of ["javascript:alert(1", ...offOriginSpellings]) {
-    assert.equal(homeRenderer.renderInlineMarkdown("[label](" + href + ")"),
-      '<a href="#" rel="noopener noreferrer">label</a>');
+  for (const href of ["#", "javascript:alert(1", ...offOriginSpellings]) {
+    assert.equal(homeRenderer.renderInlineMarkdown("[label](" + href + ")"), "<span>label</span>");
   }
-  for (const outside of [renderer, framedWithoutHomeRenderer]) {
-    assert.equal(outside.renderInlineMarkdown("[label](https://example.test/)"),
-      '<a href="https://example.test/" rel="noopener noreferrer">label</a>');
-    assert.equal(outside.renderInlineMarkdown("[label](/document/example)"),
-      '<a href="/document/example" rel="noopener noreferrer">label</a>');
-  }
+  assert.equal(renderer.renderInlineMarkdown("[label](https://example.test/)"),
+    '<a href="https://example.test/" rel="noopener noreferrer">label</a>');
+  assert.equal(renderer.renderInlineMarkdown("[label](/document/example)"),
+    '<a href="/document/example" rel="noopener noreferrer">label</a>');
+  assert.equal(renderer.renderInlineMarkdown("[label](#notes)"),
+    '<a href="#notes" rel="noopener noreferrer">label</a>');
 });
 
 test("every Markdown view renders through renderMarkdownInto, which binds the Home link handlers", () => {
@@ -177,9 +171,14 @@ test("every Markdown view renders through renderMarkdownInto, which binds the Ho
   });
   assert.deepEqual(callers, ["renderMarkdownInto"]);
   const helper = source.slice(source.indexOf("function renderMarkdownInto("), source.indexOf("\n}\n", source.indexOf("function renderMarkdownInto(")));
-  assert.match(helper, /addEventListener\("click", activatePreviewWebLink\)/);
-  assert.match(helper, /addEventListener\("keydown", activatePreviewWebLink\)/);
-  assert.equal([...source.matchAll(/function markdownShownInsideHome\(/g)].length, 1);
+  assert.match(helper, /addEventListener\("click", activateMarkdownLink\)/);
+  assert.match(helper, /addEventListener\("keydown", activateMarkdownLink\)/);
+  // Inside Home is decided once from the launch token, never per call and
+  // never from the current address (a followed fragment replaces it).
+  assert.equal([...source.matchAll(/const DOCUMENTS_INSIDE_HOME = window\.top !== window && !!state\.homeToken;/g)].length, 1);
+  assert.equal([...source.matchAll(/DOCUMENTS_INSIDE_HOME\s*=/g)].length, 1);
+  assert.equal([...source.matchAll(/location\.hash/g)].length, 1, "only the launch token reads the address hash");
+  assert.match(source, /^const state = \{\n  homeToken: new URLSearchParams\(window\.location\.hash/m);
   assert.doesNotMatch(source, /insideHome:/, "inside-Home is decided in one place, never per call");
   for (const view of ["elements.preview", "article"]) {
     assert.match(source, new RegExp("renderMarkdownInto\\(" + view.replace(".", "\\.") + ","));

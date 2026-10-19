@@ -319,9 +319,9 @@ addEventListener("message", (event) => window.homeMessages.push(event.data));</s
       const bodies = {
         "_files.json": JSON.stringify(["first.md", "second.md"]),
         "_share.json": JSON.stringify({ share_id: "share-fixture", version: 1 }),
-        "first.md": `# Published\n\n[Out](${publishedWebLink}) [Same](http://${req.headers.host}/favicon.ico) [Jump](#notes-2) [Rel](/apps/documents/)\n\n`
+        "first.md": `# Published\n\n[Out](${publishedWebLink}) [Same](http://${req.headers.host}/s/${publishedFixtureCid}/_share.json) [Jump](#notes-2) [Rel](/apps/documents/)\n\n`
           + Array.from({ length: 80 }, (_, index) => `Filler line ${index}`).join("\n\n") + "\n\n# Notes\n\nEnd.",
-        "second.md": "# Second file\n\nSecond body.",
+        "second.md": `# Second file\n\n[Same second](http://${req.headers.host}/s/${publishedFixtureCid}/_share.json) [Top](#second-file-1)\n\nSecond body.`,
       };
       if (!Object.hasOwn(bodies, file)) {
         res.writeHead(404);
@@ -795,11 +795,35 @@ async function run() {
       await parserPage.close();
     }
 
-    // #436: inside Home a preview web link has no href, so click, middle-click
-    // and the keyboard cannot navigate the Documents frame; click, Enter and
-    // Space ask Home to confirm the exact address (home:open-external).
-    // Without the Home bridge it refuses with a message and still navigates
-    // nowhere.
+    // #436 invariant inside Home: after every step the Markdown views and
+    // the published file list hold no a[href], the frame address (hash
+    // included) is still the launch address, and no page opened.
+    const pageCount = () => browser.contexts().reduce((count, context) => count + context.pages().length, 0);
+    const assertHomeFrameInvariant = async (frame, launch, step) => {
+      const url = frame.url();
+      const pages = pageCount();
+      const hrefs = await frame.evaluate(() => [...document.querySelectorAll(
+        "#preview a[href], #share-preview a[href], #share-doc-list a[href]")].map((anchor) => anchor.getAttribute("href")));
+      assert(url === launch.url && pages === launch.pages && hrefs.length === 0,
+        `Inside Home after "${step}": frame ${url} (launch ${launch.url}), pages ${pages} (launch ${launch.pages}), hrefs ${JSON.stringify(hrefs)}`);
+    };
+    const scrollsTo = async (frame, id, activate) => {
+      const top = () => frame.evaluate((target) => document.getElementById(target).getBoundingClientRect().top, id);
+      const before = await top();
+      await activate();
+      await frame.page().waitForTimeout(200);
+      const after = await top();
+      const viewportHeight = await frame.evaluate(() => window.innerHeight);
+      assert(before > viewportHeight && after >= 0 && after < viewportHeight,
+        `The link to #${id} did not scroll to its heading (${before} -> ${after}).`);
+    };
+    const filler = "\n\n" + Array.from({ length: 80 }, (_, index) => `Filler line ${index}`).join("\n\n");
+
+    // Editor preview: web links (same origin included) ask Home with click,
+    // Enter and Space (middle-click does nothing); "#" links scroll; other
+    // links are text. Without the Home bridge a web link refuses with a
+    // message. Sequence: render, follow a fragment, edit, switch document,
+    // re-render, then a same-origin link.
     for (const withoutOrigin of [false, true]) {
       resetDocumentsFixture();
       const linkPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
@@ -809,34 +833,28 @@ async function run() {
         const frame = await (await linkPage.locator('iframe[title="Documents"]').elementHandle()).contentFrame();
         await frame.locator('.document-list-item[data-doc-did="doc-beta"]').click();
         await frame.waitForFunction(() => document.getElementById("title-input")?.value === "Beta");
+        const launch = { url: frame.url(), pages: pageCount() };
         const webLink = "https://example.invalid/documents-link?from=preview";
-        // Same origin included: a native href would replace the Documents
-        // frame, which then cannot answer Home's close request.
-        const sameOriginLink = `${new URL(frame.url()).origin}/favicon.ico`;
-        // Spellings a browser would resolve to another host ("\" reads as
-        // "/", tabs are dropped) are refused; relative, elastos:// and
-        // localhost:// links have no handler in the preview and are text.
-        const offOriginLinks = ["//example.invalid/a", "/\\example.invalid/b", "\\\\example.invalid/c", "/\t/example.invalid/d"];
-        const textLinks = ["/apps/documents/", "./other", "../other", "elastos://bafyexample", "localhost://ElastOS/Documents/x"];
-        await frame.locator("#editor").fill(`[Example](${webLink}) [Same](${sameOriginLink}) [Section](#notes-1) `
-          + offOriginLinks.map((href, index) => `[Escape ${index}](${href})`).join(" ") + " "
-          + textLinks.map((href, index) => `[Text ${index}](${href})`).join(" ")
-          + "\n\n" + Array.from({ length: 80 }, (_, index) => `Filler line ${index}`).join("\n\n") + "\n\n# Notes\n\nEnd.");
-        await frame.locator("#mode-read").click();
-        const frameUrl = frame.url();
-        const framePath = () => { const url = new URL(frame.url()); return url.origin + url.pathname + url.search; };
-        const pathBefore = framePath();
-        const pagesBefore = browser.contexts().reduce((count, context) => count + context.pages().length, 0);
+        // A same-origin page that loads: a native href would replace the
+        // Documents frame, which then cannot answer Home's close request.
+        const sameOriginLink = `${new URL(frame.url()).origin}/s/${publishedFixtureCid}/_share.json`;
+        // Refused spellings ("\" reads as "/", tabs are dropped), relative,
+        // elastos:// and localhost:// links are text inside Home.
+        const textLinks = ["//example.invalid/a", "/\\example.invalid/b", "\\\\example.invalid/c", "/\t/example.invalid/d",
+          "/apps/documents/", "./other", "../other", "elastos://bafyexample", "localhost://ElastOS/Documents/x"];
+        const markdown = `[Example](${webLink}) [Same](${sameOriginLink}) [Section](#notes-1) `
+          + textLinks.map((href, index) => `[Text ${index}](${href})`).join(" ") + filler + "\n\n# Notes\n\nEnd.";
+        await frame.locator("#mode-split").click();
+        await frame.locator("#editor").fill(markdown);
+        await assertHomeFrameInvariant(frame, launch, "render");
         const controls = frame.locator("#preview a[data-open-external]");
-        assert(JSON.stringify(await controls.evaluateAll((nodes) => nodes.map((node) => [node.getAttribute("href"), node.dataset.openExternal])))
-          === JSON.stringify([[null, webLink], [null, sameOriginLink]]),
-          "Every preview web link inside Home, same origin included, must be a navigation-free control with no href.");
-        const hrefs = await frame.evaluate(() => [...document.querySelectorAll("#preview a[href]")].map((anchor) => anchor.getAttribute("href")));
-        assert(hrefs.length === 1 + offOriginLinks.length && hrefs.every((href) => href.startsWith("#")),
-          `Inside Home only in-document anchors may keep an href. Got ${JSON.stringify(hrefs)}`);
+        assert(JSON.stringify(await controls.evaluateAll((nodes) => nodes.map((node) => node.dataset.openExternal)))
+          === JSON.stringify([webLink, sameOriginLink]),
+          "Every preview web link inside Home, same origin included, must be a Home control.");
         for (let index = 0; index < textLinks.length; index += 1) {
           assert(await frame.getByText(`Text ${index}`, { exact: true }).evaluate((node) => !node.closest("a")),
-            `Inside Home ${textLinks[index]} must be plain text.`);
+            `Inside Home ${JSON.stringify(textLinks[index])} must be plain text.`);
+          await frame.getByText(`Text ${index}`, { exact: true }).click();
         }
         const homeRequests = () => linkPage.evaluate(() => window.homeMessages
           .filter((message) => message?.type === "home:open-external"));
@@ -846,47 +864,38 @@ async function run() {
         await link.focus();
         await linkPage.keyboard.press("Enter");
         await linkPage.keyboard.press("Space");
-        await controls.nth(1).click();
         await linkPage.waitForTimeout(200);
-        const request = (url) => ({ type: "home:open-external", url, homeToken: "documents-link-token" });
-        const expected = withoutOrigin ? [] : [request(webLink), request(webLink), request(webLink), request(sameOriginLink)];
-        const requests = await homeRequests();
-        assert(JSON.stringify(requests) === JSON.stringify(expected),
-          `Documents preview links (click, Enter, Space; middle-click sends nothing) must send ${expected.length} exact Home requests. Got ${JSON.stringify(requests)}`);
+        await assertHomeFrameInvariant(frame, launch, "web link");
         if (withoutOrigin) {
           assert(await frame.locator("#status-text").textContent() === "Open Documents from Home to open web links.",
             "Without the Home bridge a preview web link must say why it did not open.");
         }
-        const pagesAfter = browser.contexts().reduce((count, context) => count + context.pages().length, 0);
-        assert(frame.url() === frameUrl && pagesAfter === pagesBefore,
-          `Documents preview link navigated (${frame.url()}) or opened a page (${pagesBefore} -> ${pagesAfter}).`);
-        for (let index = 0; index < offOriginLinks.length; index += 1) {
-          await frame.getByText(`Escape ${index}`, { exact: true }).click();
-        }
-        for (let index = 0; index < textLinks.length; index += 1) {
-          await frame.getByText(`Text ${index}`, { exact: true }).click();
-        }
-        // The in-document anchor still scrolls to its heading.
-        const notesTop = () => frame.evaluate(() => document.getElementById("notes-1").getBoundingClientRect().top);
-        const topBefore = await notesTop();
-        await frame.locator('#preview a[href="#notes-1"]').click();
-        await linkPage.waitForTimeout(200);
-        const topAfter = await notesTop();
-        const viewportHeight = await frame.evaluate(() => window.innerHeight);
-        assert(topBefore > viewportHeight && topAfter >= 0 && topAfter < viewportHeight,
-          `The in-document anchor did not scroll to its heading (${topBefore} -> ${topAfter}).`);
-        const pagesAtEnd = browser.contexts().reduce((count, context) => count + context.pages().length, 0);
-        assert(framePath() === pathBefore && pagesAtEnd === pagesBefore
-          && (await homeRequests()).length === expected.length,
-          `A refused or text link navigated Documents (${frame.url()}), opened a page or asked Home.`);
+        await scrollsTo(frame, "notes-1", () => frame.locator('#preview [data-scroll-to="notes-1"]').click());
+        await assertHomeFrameInvariant(frame, launch, "follow fragment");
+        await frame.locator("#editor").fill(markdown + "\n\nEdited.");
+        await assertHomeFrameInvariant(frame, launch, "edit");
+        await frame.locator('.document-list-item[data-doc-did="doc-alpha"]').click();
+        await frame.locator("#confirm-action").click();
+        await frame.waitForFunction(() => document.getElementById("title-input")?.value === "Alpha");
+        await assertHomeFrameInvariant(frame, launch, "switch document");
+        await frame.locator("#editor").fill(markdown);
+        await assertHomeFrameInvariant(frame, launch, "re-render");
+        await frame.getByText("Same", { exact: true }).click();
+        await linkPage.waitForTimeout(300);
+        await assertHomeFrameInvariant(frame, launch, "same-origin link");
+        const request = (url) => ({ type: "home:open-external", url, homeToken: "documents-link-token" });
+        const expected = withoutOrigin ? [] : [request(webLink), request(webLink), request(webLink), request(sameOriginLink)];
+        const requests = await homeRequests();
+        assert(JSON.stringify(requests) === JSON.stringify(expected),
+          `Documents preview links (click, Enter, Space, same-origin; middle-click and text send nothing) must send ${expected.length} exact Home requests. Got ${JSON.stringify(requests)}`);
       } finally {
         await linkPage.close();
       }
     }
 
-    // #436: a published revision Home opens (not in the local list) is the
-    // same: web links (same origin included) ask Home, other links are
-    // text, "#" scrolls, and the file list opens files in place.
+    // Published revision Home opens (not in the local list), with the
+    // sequence found in review: follow a fragment, switch file, then a
+    // same-origin link.
     resetDocumentsFixture();
     const publishedPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     trackPage(publishedPage, consoleErrors, pageErrors, failedRequests, errorResponses);
@@ -895,15 +904,12 @@ async function run() {
       const frame = await (await publishedPage.locator('iframe[title="Documents"]').elementHandle()).contentFrame();
       await frame.locator("#share-preview h1").first().waitFor({ state: "visible" });
       const origin = new URL(frame.url()).origin;
-      const frameUrl = frame.url();
-      const pagesBefore = browser.contexts().reduce((count, context) => count + context.pages().length, 0);
+      const launch = { url: frame.url(), pages: pageCount() };
+      await assertHomeFrameInvariant(frame, launch, "published render");
       const controls = frame.locator("#share-preview a[data-open-external]");
-      assert(JSON.stringify(await controls.evaluateAll((nodes) => nodes.map((node) => [node.getAttribute("href"), node.dataset.openExternal])))
-        === JSON.stringify([[null, publishedWebLink], [null, `${origin}/favicon.ico`]]),
-        "Published preview web links inside Home, same origin included, must be navigation-free controls.");
-      const hrefs = await frame.evaluate(() => [...document.querySelectorAll("#share-preview a[href]")].map((anchor) => anchor.getAttribute("href")));
-      assert(JSON.stringify(hrefs) === JSON.stringify(["#notes-2"]),
-        `Published preview inside Home may keep only in-document hrefs. Got ${JSON.stringify(hrefs)}`);
+      assert(JSON.stringify(await controls.evaluateAll((nodes) => nodes.map((node) => node.dataset.openExternal)))
+        === JSON.stringify([publishedWebLink, `${origin}/s/${publishedFixtureCid}/_share.json`]),
+        "Published preview web links inside Home, same origin included, must be Home controls.");
       assert(await frame.getByText("Rel", { exact: true }).evaluate((node) => !node.closest("a")),
         "A relative link in the published preview inside Home must be plain text.");
       await controls.nth(0).click();
@@ -911,30 +917,21 @@ async function run() {
       await publishedPage.keyboard.press("Enter");
       await frame.getByText("Rel", { exact: true }).click();
       await publishedPage.waitForTimeout(200);
+      await assertHomeFrameInvariant(frame, launch, "published web links");
+      await scrollsTo(frame, "notes-2", () => frame.getByText("Jump", { exact: true }).click());
+      await assertHomeFrameInvariant(frame, launch, "published follow fragment");
+      await frame.locator(".share-doc-link").nth(1).click();
+      await frame.waitForFunction(() => document.getElementById("share-title")?.textContent === "Second file");
+      await assertHomeFrameInvariant(frame, launch, "switch published file");
+      await frame.getByText("Same second", { exact: true }).click();
+      await publishedPage.waitForTimeout(300);
+      await assertHomeFrameInvariant(frame, launch, "published same-origin link");
       const requests = await publishedPage.evaluate(() => window.homeMessages
         .filter((message) => message?.type === "home:open-external"));
-      assert(JSON.stringify(requests) === JSON.stringify([
-        { type: "home:open-external", url: publishedWebLink, homeToken: "documents-link-token" },
-        { type: "home:open-external", url: `${origin}/favicon.ico`, homeToken: "documents-link-token" },
-      ]), `Published preview links must send exact Home requests. Got ${JSON.stringify(requests)}`);
-      const notesTop = () => frame.evaluate(() => document.getElementById("notes-2").getBoundingClientRect().top);
-      const topBefore = await notesTop();
-      await frame.locator('#share-preview a[href="#notes-2"]').click();
-      await publishedPage.waitForTimeout(200);
-      const topAfter = await notesTop();
-      const viewportHeight = await frame.evaluate(() => window.innerHeight);
-      assert(topBefore > viewportHeight && topAfter >= 0 && topAfter < viewportHeight,
-        `The published preview anchor did not scroll to its heading (${topBefore} -> ${topAfter}).`);
-      const fileLinks = frame.locator(".share-doc-link");
-      assert(await fileLinks.count() === 2
-        && (await fileLinks.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("href")))).every((href) => href === null),
-        "The published file list inside Home must not navigate the frame.");
-      await fileLinks.nth(1).click();
-      await frame.waitForFunction(() => document.getElementById("share-title")?.textContent === "Second file");
-      const pagesAfter = browser.contexts().reduce((count, context) => count + context.pages().length, 0);
-      const pathOf = (value) => { const url = new URL(value); return url.origin + url.pathname + url.search; };
-      assert(pathOf(frame.url()) === pathOf(frameUrl) && pagesAfter === pagesBefore,
-        `The published preview navigated (${frame.url()}) or opened a page (${pagesBefore} -> ${pagesAfter}).`);
+      const request = (url) => ({ type: "home:open-external", url, homeToken: "documents-link-token" });
+      assert(JSON.stringify(requests) === JSON.stringify([request(publishedWebLink),
+        request(`${origin}/s/${publishedFixtureCid}/_share.json`), request(`${origin}/s/${publishedFixtureCid}/_share.json`)]),
+      `Published preview links must send exact Home requests. Got ${JSON.stringify(requests)}`);
     } finally {
       await publishedPage.close();
     }
