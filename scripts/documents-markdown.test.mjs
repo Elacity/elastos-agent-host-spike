@@ -9,7 +9,13 @@ const source = readFileSync(new URL("../capsules/documents/browser/documents.js"
 const start = source.indexOf("function escapeHtml(");
 const end = source.indexOf("function shortCid(", start);
 assert.ok(start >= 0 && end > start, "Documents Markdown renderer must exist");
-const renderer = vm.runInNewContext(source.slice(start, end) + "\n({ renderMarkdownDocument, renderInlineMarkdown, safeMarkdownHref })");
+const renderer = vm.runInNewContext(source.slice(start, end) + "\n({ renderMarkdownDocument, renderInlineMarkdown, markdownHref })", { URL });
+// Spellings browsers resolve to another host: a backslash reads as "/" and
+// tabs and newlines are dropped.
+const offOriginSpellings = [
+  "//example.invalid/x", "/\\example.invalid/x", "\\\\example.invalid/x", "\\/example.invalid/x",
+  "/\t/example.invalid/x", "/\n/example.invalid/x", "/\r/example.invalid/x", "./\\..\\x",
+];
 
 test("Documents loads its module through an external script", () => {
   const html = readFileSync(new URL("../capsules/documents/browser/index.html", import.meta.url), "utf8");
@@ -71,14 +77,14 @@ test("link and image destinations refuse executable or hidden schemes", () => {
   for (const href of [
     "javascript:alert", "JaVaScRiPt:alert", "java\tscript:alert", "java\nscript:alert",
     "&#106;avascript:alert", "javascript&#58;alert", "data:text/html,<script>alert</script>",
-    "vbscript:alert", "file:///etc/passwd", "blob:https://example.test/id", "//example.test/",
+    "vbscript:alert", "file:///etc/passwd", "blob:https://example.test/id", ...offOriginSpellings,
   ]) {
     for (const prefix of ["", "!"]) {
       const { html } = renderer.renderMarkdownDocument(prefix + "[label](" + href + ")");
       assert.doesNotMatch(html, /href="(?!#")/);
       assertSafeHtml(html);
     }
-    assert.equal(renderer.safeMarkdownHref(href), "#");
+    assert.equal(renderer.markdownHref(href), "#");
   }
 });
 
@@ -117,8 +123,8 @@ test("safe Markdown retains formatting, tasks, links, tables, and fence language
   assertSafeHtml(html);
 });
 
-test("inside Home a web link has no href; other links and outside Home are unchanged (#436)", () => {
-  const options = { webLinksAskHome: true };
+test("inside Home only same-origin paths and anchors keep an href; web links ask Home (#436)", () => {
+  const options = { homeBaseUrl: "https://documents.test/apps/documents/?home_origin=x" };
   const markdown = "# [Head](https://example.test/h)\n\n- **[item](http://example.test/?a=1&b=2)**\n\n| [cell](https://example.test/c) |\n| --- |\n| x |";
   const { html } = renderer.renderMarkdownDocument(markdown, options);
   assert.doesNotMatch(html, /href=/);
@@ -128,9 +134,13 @@ test("inside Home a web link has no href; other links and outside Home are uncha
   // A hostile address stays inside the quoted attribute value.
   assert.equal(renderer.renderInlineMarkdown('[x](https://example.test/" onmouseover="alert)', options),
     '<a data-open-external="https://example.test/&quot; onmouseover=&quot;alert" role="link" tabindex="0">x</a>');
-  for (const href of ["#notes", "elastos://document/example", "/document/example", "javascript:alert(1"]) {
+  for (const href of ["#notes", "elastos://document/example", "localhost://example", "/document/example", "./example", "../example", "https://documents.test/other"]) {
     assert.equal(renderer.renderInlineMarkdown("[label](" + href + ")", options),
-      '<a href="' + renderer.safeMarkdownHref(href) + '" rel="noopener noreferrer">label</a>');
+      '<a href="' + href + '" rel="noopener noreferrer">label</a>');
+  }
+  for (const href of ["javascript:alert(1", ...offOriginSpellings]) {
+    assert.equal(renderer.renderInlineMarkdown("[label](" + href + ")", options),
+      '<a href="#" rel="noopener noreferrer">label</a>');
   }
   assert.equal(renderer.renderInlineMarkdown("[label](https://example.test/)"),
     '<a href="https://example.test/" rel="noopener noreferrer">label</a>');

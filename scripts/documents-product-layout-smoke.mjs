@@ -785,7 +785,11 @@ async function run() {
         await frame.locator('.document-list-item[data-doc-did="doc-beta"]').click();
         await frame.waitForFunction(() => document.getElementById("title-input")?.value === "Beta");
         const webLink = "https://example.invalid/documents-link?from=preview";
-        await frame.locator("#editor").fill(`[Example](${webLink}) and [Section](#notes)`);
+        // Spellings a browser would resolve to another host ("\" reads as
+        // "/", tabs are dropped) must not keep a native href.
+        const offOriginLinks = ["//example.invalid/a", "/\\example.invalid/b", "\\\\example.invalid/c", "/\t/example.invalid/d"];
+        await frame.locator("#editor").fill(`[Example](${webLink}) and [Section](#notes) `
+          + offOriginLinks.map((href, index) => `[Escape ${index}](${href})`).join(" "));
         await frame.locator("#mode-read").click();
         const frameUrl = frame.url();
         const pagesBefore = browser.contexts().reduce((count, context) => count + context.pages().length, 0);
@@ -815,6 +819,20 @@ async function run() {
           `Documents preview link navigated (${frame.url()}) or opened a page (${pagesBefore} -> ${pagesAfter}).`);
         await frame.locator('#preview a[href="#notes"]').click();
         assert((await homeRequests()).length === expected.length, "An in-document anchor must stay inside Documents.");
+        const hrefOrigins = await frame.evaluate(() => [...document.querySelectorAll("#preview a[href]")]
+          .map((anchor) => new URL(anchor.href).origin === location.origin));
+        assert(hrefOrigins.length === 1 + offOriginLinks.length && hrefOrigins.every(Boolean),
+          `Every preview href inside Home must stay on the document's origin. Got ${JSON.stringify(hrefOrigins)}`);
+        const framePath = () => { const url = new URL(frame.url()); return url.origin + url.pathname + url.search; };
+        const pathBefore = framePath();
+        for (let index = 0; index < offOriginLinks.length; index += 1) {
+          await frame.getByText(`Escape ${index}`, { exact: true }).click();
+        }
+        await linkPage.waitForTimeout(200);
+        const pagesAtEnd = browser.contexts().reduce((count, context) => count + context.pages().length, 0);
+        assert(framePath() === pathBefore && pagesAtEnd === pagesBefore
+          && (await homeRequests()).length === expected.length,
+          `An off-origin spelling navigated Documents (${frame.url()}), opened a page or asked Home.`);
       } finally {
         await linkPage.close();
       }

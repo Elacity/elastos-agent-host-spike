@@ -128,9 +128,6 @@ function hasExactKeys(value, expectedKeys) {
     actual.every((key, index) => key === expected[index]);
 }
 
-// Inside Home (options.webLinksAskHome) a web link has no href, so the
-// browser has no navigation to perform (click, middle-click, keyboard or
-// context menu); the preview's own handlers ask Home instead (#436, as Chat).
 function renderInlineMarkdown(text, options) {
   const tokens = /`([^`]+)`|\*\*([^*]+)\*\*|\*([^*]+)\*|\[([^\]]+)\]\(([^)]+)\)/g;
   let html = "";
@@ -143,22 +140,48 @@ function renderInlineMarkdown(text, options) {
       html += "<strong>" + renderInlineMarkdown(match[2], options) + "</strong>";
     } else if (match[3] !== undefined) {
       html += "<em>" + renderInlineMarkdown(match[3], options) + "</em>";
-    } else if (options && options.webLinksAskHome && /^https?:\/\//i.test(match[5].trim())) {
-      html += '<a data-open-external="' + escapeHtml(match[5].trim()) + '" role="link" tabindex="0">' + renderInlineMarkdown(match[4], options) + "</a>";
     } else {
-      html += '<a href="' + safeMarkdownHref(match[5]) + '" rel="noopener noreferrer">' + renderInlineMarkdown(match[4], options) + "</a>";
+      html += renderMarkdownLink(match[5], renderInlineMarkdown(match[4], options), options);
     }
     offset = match.index + match[0].length;
   }
   return html + escapeHtml(text.slice(offset));
 }
 
-function safeMarkdownHref(value) {
-  const href = String(value || "").trim();
-  if (/^(https?:\/\/|elastos:\/\/|localhost:\/\/|#|\/(?!\/)|\.{1,2}\/)/i.test(href)) {
-    return escapeHtml(href);
+// Inside Home (options.homeBaseUrl, the document's own address) a link that
+// leaves the document's origin has no href, so the browser has no
+// navigation to perform (click, middle-click, keyboard or context menu); a
+// web link asks Home through the preview's own handlers (#436, as Chat) and
+// anything else is plain text. In-document anchors, elastos:// and
+// localhost:// links and same-origin paths keep their href.
+function renderMarkdownLink(value, labelHtml, options) {
+  const href = markdownHref(value);
+  const baseUrl = options && options.homeBaseUrl;
+  if (baseUrl && !/^(#|elastos:\/\/|localhost:\/\/)/i.test(href)) {
+    let sameOrigin = false;
+    try {
+      sameOrigin = new URL(href, baseUrl).origin === new URL(baseUrl).origin;
+    } catch (_error) {
+      sameOrigin = false;
+    }
+    if (!sameOrigin) {
+      return /^https?:\/\//i.test(href)
+        ? '<a data-open-external="' + escapeHtml(href) + '" role="link" tabindex="0">' + labelHtml + "</a>"
+        : "<span>" + labelHtml + "</span>";
+    }
   }
-  return "#";
+  return '<a href="' + escapeHtml(href) + '" rel="noopener noreferrer">' + labelHtml + "</a>";
+}
+
+// Browsers drop tabs and newlines from an address and read "\" as "/", so
+// spellings such as "/\host", "/<tab>/host" or "\\host" would reach another
+// host; any address with a control character or backslash is refused.
+function markdownHref(value) {
+  const href = String(value || "").trim();
+  if (/[\u0000-\u001f\u007f\\]/.test(href)) {
+    return "#";
+  }
+  return /^(https?:\/\/|elastos:\/\/|localhost:\/\/|#|\/(?!\/)|\.{1,2}\/)/i.test(href) ? href : "#";
 }
 
 function headingSlug(text, number) {
@@ -879,7 +902,7 @@ function closeFindBar() {
 function refreshPreviewFromEditor() {
   const rendered = renderMarkdownDocument(elements.editor.value || "", {
     interactiveTasks: true,
-    webLinksAskHome: window.top !== window,
+    homeBaseUrl: window.top !== window ? document.baseURI : "",
   });
   elements.preview.innerHTML = rendered.html;
   renderOutline(rendered.outline);
