@@ -6009,6 +6009,19 @@ mod tests {
     }
 
     #[test]
+    fn a_hosted_proposal_must_name_a_localhost_resource() {
+        let mut journal = two_turns();
+        let before = journal.clone();
+        for refused in ["https://api.example.com/v1/model", "qwen2.5-1.5b"] {
+            assert_eq!(propose_hosted(&mut journal, refused), Err("host path"));
+            assert_eq!(journal, before);
+        }
+        let id = propose_hosted(&mut journal, "localhost://Models/hosted").unwrap();
+        assert_eq!(step_state(&journal, id), Some(StepState::Prepared));
+        assert_eq!(journal.events, before.events);
+    }
+
+    #[test]
     fn a_hosted_proposal_has_no_secret_and_a_missing_grant_is_denied() {
         let model = "localhost://Models/hosted";
         let mut journal = empty_journal();
@@ -6372,6 +6385,48 @@ mod tests {
         assert!(!saved
             .windows(b"child-grant".len())
             .any(|window| window == b"child-grant"));
+    }
+
+    #[test]
+    fn a_child_must_sit_strictly_under_its_parent() {
+        let demo = "localhost://Users/self/Projects/demo";
+        assert!(!narrower_resource(
+            demo,
+            "localhost://Users/self/Projects/demo2"
+        ));
+        assert!(!narrower_resource(demo, demo));
+        assert!(!narrower_resource(
+            demo,
+            "localhost://Users/self/Projects/demo/"
+        ));
+        assert!(narrower_resource(
+            demo,
+            "localhost://Users/self/Projects/demo/x"
+        ));
+        let mut journal = empty_journal();
+        let parent = propose_run(&mut journal, demo, &["true".to_string()]).unwrap();
+        for refused in [
+            "localhost://Users/self/Projects/demo2",
+            demo,
+            "localhost://Users/self/Projects/demo/",
+        ] {
+            assert_eq!(
+                propose_child(&mut journal, parent, refused),
+                Err("not a subset")
+            );
+            assert!(open_child_host(&journal, parent, refused).is_err());
+        }
+        assert_eq!(journal.steps.len(), 1);
+        let child = propose_child(
+            &mut journal,
+            parent,
+            "localhost://Users/self/Projects/demo/x",
+        )
+        .unwrap();
+        let child_step = journal.steps.iter().find(|step| step.id == child).unwrap();
+        assert_eq!(child_step.kind, ProposalKind::Child);
+        assert_eq!(child_step.parent_id, Some(parent));
+        assert_eq!(journal.steps.len(), 2);
     }
 
     #[test]
@@ -7815,6 +7870,23 @@ mod tests {
         assert_eq!(step_state(&journal, id), Some(StepState::Denied));
         assert!(!dispatch(&mut journal, id));
         assert_eq!(step_state(&journal, id), Some(StepState::Denied));
+    }
+
+    #[test]
+    fn dispatch_without_a_grant_is_denied_even_without_authorize() {
+        let mut journal = two_turns();
+        let before = model_bytes(&journal.events).unwrap();
+        let id = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
+        assert!(!dispatch(&mut journal, id));
+        assert_eq!(step_state(&journal, id), Some(StepState::Denied));
+        let step = journal.steps.iter().find(|step| step.id == id).unwrap();
+        assert_eq!(step.grant, None);
+        assert!(!dispatch(&mut journal, id));
+        assert_eq!(model_bytes(&journal.events).unwrap(), before);
+        let granted = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
+        assert!(authorize(&mut journal, granted, Some("fixture-grant")));
+        assert!(dispatch(&mut journal, granted));
+        assert_eq!(step_state(&journal, granted), Some(StepState::Dispatched));
     }
 
     #[test]
