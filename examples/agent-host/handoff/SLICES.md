@@ -183,8 +183,8 @@ todos:
     content: "Done locally. Sasha opened Demo on the running Home and saw the word demo. It is not Assistant and not the store. No commit."
     status: completed
   - id: sell-closed-admission
-    content: "Section 14. While #217 is closed, another person's capsule is refused. Assistant contract tests still show no store."
-    status: pending
+    content: "Done in S1 (overnight 1). Launch: launch_refuses_untrusted_signers_before_the_provider_loads (unsigned, untrusted key, changed entrypoint refused before the provider loads; trusted key loads) beside the team test installed_release_refuses_unsigned_and_foreign_signed_local_capsules. Install: only components named by the signed release (component_without_signed_release_path_is_refused_before_fetch, installed_setup_refuses_wrong_signers_without_writes). Assistant: scripts/home-agent-no-store.test.mjs. Tests only."
+    status: completed
   - id: sell-second-home
     content: "Section 14 A+. A second Home installs the signed app and runs it. Revocation stops a later launch. Anders owns this scope."
     status: pending
