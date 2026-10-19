@@ -7645,7 +7645,7 @@ impl PrincipalRootObjectNotice {
             PrincipalRootObjectDamage::Unchecked => format!(
                 "{path} could not be checked in this pass: Home reads at most 80 MiB of files \
                  without a label in one pass and stopped before it. Home will not encrypt, \
-                 change or delete it until it is checked. Move the damaged files listed with it \
+                 change or delete it until it is checked. Move the other files listed with it \
                  out of their folders, or move it out of {disk_folder}; Home checks it again the \
                  next time it starts or shows Recovery status."
             ),

@@ -519,6 +519,14 @@ fn probe_cap_names_unread_candidates_and_start_continues() {
         "{}",
         notices[8]
     );
+    assert!(
+        notices[8].contains(
+            "Home will not encrypt, change or delete it until it is checked. Move the other \
+             files listed with it out of their folders, or move it out of "
+        ),
+        "{}",
+        notices[8]
+    );
 
     // Recovery does not count it as encrypted, and lists it.
     let inspection = inspect_declarative_principal_root_protection(

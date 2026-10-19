@@ -3040,7 +3040,8 @@ function recoveryAttentionNote(status) {
     notes.push("An earlier encryption step did not finish. Home will not start again until it is finished or undone; reinstalling ElastOS does that, and your files are kept.");
   }
   if (status?.required_actions?.includes("migrate_declared_plaintext_objects")) {
-    notes.push("Some files in your protected Home folders are not encrypted yet. Saving your Recovery Kit encrypts them after you approve with your passkey; until then Home will not start again.");
+    const notStarting = status.protection_configured === true ? "; until they are, Home will not start again" : "";
+    notes.push(`Some files in your protected Home folders are not encrypted yet${notStarting}. Saving your Recovery Kit encrypts files of up to 16 MiB after you approve with your passkey; a larger file is named so you can move it out and upload it again in Library.`);
   }
   const count = Number(status?.objects_needing_attention_count) || 0;
   const first = Array.isArray(status?.objects_needing_attention) ? status.objects_needing_attention[0] : null;
