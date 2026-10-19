@@ -20,6 +20,9 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Developer detail
 
+- zip 9.0.4 replaces zip 2.4.2 (RUSTSEC-2026-0367/0368/0369, #414); the
+  cargo-audit exception file is removed. One entry-name rule refuses root,
+  drive, UNC and `..` names in every Library archive reader (#417).
 - `elastos serve --capsule` starts its initial MicroVM capsule with a VM-bound
   Capsule session instead of a Shell session, because the guest can read its
   boot token; capability approval stays with the shell (#387).
