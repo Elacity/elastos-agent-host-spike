@@ -30,11 +30,12 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   path again as they write it. Extraction refuses an archive with more than
   10000 entries, a file that expands past 100 MiB, or an archive that expands
   past 1 GiB, by declared size before reading and again while reading; tar
-  input stops at 1 MiB of names and headers per entry. A selected extraction
-  writes each file as it reads it; a Spaces write-back holds at most 256 MiB,
-  enforced while reading. A whole extraction checks every entry before it
-  writes; if writing fails, it removes the files it wrote that are unchanged
-  and the folders it created that are then empty.
+  input stops at 1 MiB of names and headers per entry, and a tar with a
+  sparse entry is refused. A selected extraction writes each file as it reads
+  it; a Spaces write-back holds at most 256 MiB, enforced while reading. A
+  whole extraction checks every entry before it writes, so a refused archive
+  writes nothing; if reading or writing fails after that, the files
+  extracted before stay and the message says where.
 - zip 9.0.4 replaces zip 2.4.2 (RUSTSEC-2026-0367/0368/0369, #414); the
   cargo-audit exception file is removed. One entry-name rule refuses root,
   drive, UNC and `..` names in every Library archive reader (#417).

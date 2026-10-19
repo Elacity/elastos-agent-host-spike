@@ -4611,9 +4611,9 @@ async fn test_library_archive_extract_refuses_folders_deeper_than_home_starts_wi
 
 /// #449: an archive is refused by what it expands to, by its declared sizes
 /// before anything is read; a whole extraction that fails while writing
-/// removes the folder it made.
+/// says so and that what it extracted before stays.
 #[tokio::test]
-async fn test_library_archive_extract_bounds_expansion_and_removes_a_failed_extraction() {
+async fn test_library_archive_extract_bounds_expansion_and_reports_a_stopped_extraction() {
     use std::io::{Read as _, Write as _};
 
     const MIB: u64 = 1024 * 1024;
@@ -4772,8 +4772,8 @@ async fn test_library_archive_extract_bounds_expansion_and_removes_a_failed_extr
     );
     assert!(!library_object_path(dir.path(), &uri("Documents/Many")).exists());
 
-    // Failures the first pass cannot see remove what the second pass wrote:
-    // a file where a folder is needed, and a damaged entry.
+    // Failures the first pass cannot see stop the extraction; the message
+    // says the files extracted before stay, and they do.
     let stored =
         zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     let zip_of = |entries: &[(&str, &[u8])]| {
@@ -4795,7 +4795,13 @@ async fn test_library_archive_extract_bounds_expansion_and_removes_a_failed_extr
     .await;
     let (_, failed) = extract("Documents/Clash.zip").await;
     assert_eq!(failed["status"], "error", "{failed}");
-    assert!(!library_object_path(dir.path(), &uri("Documents/Clash")).exists());
+    let message = failed["message"].as_str().unwrap();
+    assert!(message.starts_with("Extraction stopped: "), "{message}");
+    assert!(
+        message.ends_with(". Files extracted before this stay in Documents/Clash."),
+        "{message}"
+    );
+    assert!(library_object_path(dir.path(), &uri("Documents/Clash/ok.txt")).is_file());
 
     let mut damaged = zip_of(&[
         ("ok.txt", b"ok".as_slice()),
@@ -4808,8 +4814,14 @@ async fn test_library_archive_extract_bounds_expansion_and_removes_a_failed_extr
     damaged[body] = b'X';
     upload("Documents/Damaged.zip", damaged).await;
     let (_, failed) = extract("Documents/Damaged.zip").await;
-    assert_eq!(failed["status"], "error", "{failed}");
-    assert!(!library_object_path(dir.path(), &uri("Documents/Damaged")).exists());
+    let message = failed["message"].as_str().unwrap();
+    assert!(message.starts_with("Extraction stopped: "), "{failed}");
+    assert!(
+        message.ends_with(". Files extracted before this stay in Documents/Damaged."),
+        "{message}"
+    );
+    assert!(library_object_path(dir.path(), &uri("Documents/Damaged/ok.txt")).is_file());
+    assert!(!library_object_path(dir.path(), &uri("Documents/Damaged/x.txt")).exists());
 }
 
 /// #432 (display only): an entry name with a line break or a bidi override

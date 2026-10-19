@@ -5563,33 +5563,25 @@ fn extract_library_archive(
         archive: &archive_display,
         destination: &destination,
         rule: &rule,
-        trail: std::cell::RefCell::default(),
     };
     // The first pass checks every entry against every rule (name, kind,
-    // depth, count, expanded size) and writes nothing.
+    // depth, count, expanded size) and writes nothing, so a refused archive
+    // writes nothing.
     archive.run(name, &bytes, false)?;
-    // The folder is created here, and the second pass records each folder
-    // and file it creates. If reading or writing fails (a damaged entry, a
-    // file where a folder is needed), exactly those are removed: a file only
-    // while it is still the one this extraction wrote, a folder only once it
-    // is empty. What another request saved in the folder meanwhile stays.
-    fs::create_dir(&destination.path)?;
-    archive
-        .trail
-        .borrow_mut()
-        .folders
-        .push(destination.path.clone());
+    // The second pass writes. A read or write failure in it (a damaged
+    // entry, a file where a folder is needed) stops the extraction; what was
+    // extracted before stays, as removing it could remove what another
+    // request saved in the folder meanwhile.
+    fs::create_dir_all(&destination.path)?;
     if let Err(err) = archive.run(name, &bytes, true) {
-        if let Err(cleanup) = archive.trail.borrow().undo() {
-            bail!(
-                "{err} What was extracted into {} could not all be removed: {cleanup}",
-                crate::auth::principal_root_home_relative_path(
-                    &destination.localhost_root,
-                    &destination.uri,
-                ),
-            );
-        }
-        return Err(err);
+        bail!(
+            "Extraction stopped: {}. Files extracted before this stay in {}.",
+            err.to_string().trim_end_matches('.'),
+            crate::auth::principal_root_home_relative_path(
+                &destination.localhost_root,
+                &destination.uri,
+            ),
+        );
     }
     Ok(destination.uri)
 }
@@ -5606,88 +5598,6 @@ struct WholeArchiveExtract<'a> {
     archive: &'a str,
     destination: &'a LibraryTarget,
     rule: &'a StartWalkRule,
-    trail: std::cell::RefCell<ExtractTrail>,
-}
-
-/// The folders and files one whole extraction created, so a failed
-/// extraction removes exactly those (#449).
-#[derive(Default)]
-struct ExtractTrail {
-    /// In the order they were created.
-    folders: Vec<PathBuf>,
-    /// Each file with what it was on disk right after this extraction wrote
-    /// it.
-    files: std::collections::BTreeMap<PathBuf, FileStamp>,
-}
-
-/// Device, inode, size and modification time: a file replaced or changed
-/// by anyone else no longer matches.
-type FileStamp = (u64, u64, u64, i64, i64);
-
-fn file_stamp(path: &Path) -> std::io::Result<FileStamp> {
-    use std::os::unix::fs::MetadataExt as _;
-    let metadata = fs::symlink_metadata(path)?;
-    Ok((
-        metadata.dev(),
-        metadata.ino(),
-        metadata.size(),
-        metadata.mtime(),
-        metadata.mtime_nsec(),
-    ))
-}
-
-impl ExtractTrail {
-    /// Creates `path` and its missing parents below `within`, recording each
-    /// folder it creates.
-    fn create_folders(&mut self, within: &Path, path: &Path) -> std::io::Result<()> {
-        let rest = path
-            .strip_prefix(within)
-            .map_err(|_| std::io::Error::other("archive entry is outside its folder"))?;
-        let mut current = within.to_path_buf();
-        for part in rest.components() {
-            current.push(part);
-            match fs::create_dir(&current) {
-                Ok(()) => self.folders.push(current.clone()),
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(err) => return Err(err),
-            }
-        }
-        Ok(())
-    }
-
-    fn wrote(&mut self, path: &Path) -> std::io::Result<()> {
-        self.files.insert(path.to_path_buf(), file_stamp(path)?);
-        Ok(())
-    }
-
-    /// Removes each file this extraction wrote that is unchanged since, then
-    /// each folder it created that is now empty, deepest first. Nothing else
-    /// is removed, and no folder is removed with what it holds.
-    fn undo(&self) -> std::io::Result<()> {
-        for (path, stamp) in &self.files {
-            match file_stamp(path) {
-                Ok(now) if now == *stamp => match fs::remove_file(path) {
-                    Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
-                    _ => {}
-                },
-                Ok(_) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => return Err(err),
-            }
-        }
-        for folder in self.folders.iter().rev() {
-            match fs::remove_dir(folder) {
-                Ok(()) => {}
-                Err(err)
-                    if matches!(
-                        err.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-                    ) => {}
-                Err(err) => return Err(err),
-            }
-        }
-        Ok(())
-    }
 }
 
 impl WholeArchiveExtract<'_> {
@@ -5769,18 +5679,14 @@ impl WholeArchiveExtract<'_> {
             ArchiveEntryKind::Folder => {
                 expansion.pass_over(size)?;
                 if write {
-                    self.trail
-                        .borrow_mut()
-                        .create_folders(&self.destination.path, &entry_target.path)?;
+                    fs::create_dir_all(&entry_target.path)?;
                 }
             }
             _ if !write => expansion.admit(&shown, size)?,
             _ => {
                 let entry_bytes = expansion.read(&shown, size, reader)?;
                 if let Some(parent) = entry_target.path.parent() {
-                    self.trail
-                        .borrow_mut()
-                        .create_folders(&self.destination.path, parent)?;
+                    fs::create_dir_all(parent)?;
                 }
                 crate::auth::write_principal_root_object(
                     self.data_dir,
@@ -5790,7 +5696,6 @@ impl WholeArchiveExtract<'_> {
                     &entry_target.path,
                     &entry_bytes,
                 )?;
-                self.trail.borrow_mut().wrote(&entry_target.path)?;
             }
         }
         Ok(())
@@ -5994,7 +5899,9 @@ struct TarInputBudget {
 impl TarInputBudget {
     /// An entry from the archive's iterator. A yielded entry opens the
     /// budget for its body and the next header; an error at a limit is
-    /// replaced by the named refusal. `archive` is printable.
+    /// replaced by the named refusal. A GNU sparse entry is refused: its
+    /// size is the logical file size, not the bytes the archive stores, so
+    /// it cannot size the budget. `archive` is printable.
     fn entry<'e, T>(
         &self,
         archive: &str,
@@ -6004,6 +5911,9 @@ impl TarInputBudget {
         T: std::io::Read,
     {
         match entry {
+            Ok(entry) if entry.header().entry_type().is_gnu_sparse() => Err(anyhow!(
+                "{archive} holds a sparse file entry; Library does not open archives like that."
+            )),
             Ok(entry) => {
                 self.entry_left.set(
                     entry
@@ -7918,46 +7828,67 @@ mod tests {
         }
     }
 
-    /// #449: a failed whole extraction removes only what it wrote: a file
-    /// another request saved or replaced in its folder meanwhile stays, and
-    /// a folder holding one stays.
+    /// #449: a GNU sparse entry is refused by every tar reader before the
+    /// reader goes on, so its logical size cannot open room for a large
+    /// long name after it.
     #[test]
-    fn extract_trail_undo_keeps_what_another_request_saved() {
-        let dir = tempfile::tempdir().unwrap();
-        let destination = dir.path().join("Extracted");
-        fs::create_dir(&destination).unwrap();
-        let mut trail = ExtractTrail::default();
-        trail.folders.push(destination.clone());
-        trail
-            .create_folders(&destination, &destination.join("sub/inner"))
+    fn tar_readers_refuse_a_sparse_entry_before_a_large_long_name() {
+        const LOGICAL: u64 = 512 * 1024 * 1024;
+        const RECORD: u64 = 2 * 1024 * 1024;
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::default(),
+        ));
+        // A sparse file of 512 MiB that stores no bytes.
+        let mut sparse = tar::Header::new_gnu();
+        sparse.set_entry_type(tar::EntryType::GNUSparse);
+        sparse.set_path("hole.bin").unwrap();
+        sparse.set_size(0);
+        sparse.set_mode(0o644);
+        let gnu = sparse.as_gnu_mut().unwrap();
+        gnu.set_real_size(LOGICAL);
+        gnu.sparse[0].set_offset(LOGICAL);
+        gnu.sparse[0].set_length(0);
+        sparse.set_cksum();
+        builder.append(&sparse, std::io::empty()).unwrap();
+        let mut long_name = tar::Header::new_gnu();
+        long_name.set_entry_type(tar::EntryType::GNULongName);
+        long_name.set_size(RECORD);
+        long_name.set_mode(0o644);
+        long_name.as_gnu_mut().unwrap().name[..13].copy_from_slice(b"././@LongLink");
+        long_name.set_cksum();
+        builder
+            .append(
+                &long_name,
+                std::io::Read::take(std::io::repeat(b'a'), RECORD),
+            )
             .unwrap();
-        trail
-            .create_folders(&destination, &destination.join("empty"))
-            .unwrap();
-        for name in ["sub/ours.txt", "sub/replaced.txt"] {
-            fs::write(destination.join(name), b"extracted").unwrap();
-            trail.wrote(&destination.join(name)).unwrap();
-        }
-        // Another request replaces one extracted file and saves a new one.
-        fs::write(destination.join("sub/next.tmp"), b"theirs").unwrap();
-        fs::rename(
-            destination.join("sub/next.tmp"),
-            destination.join("sub/replaced.txt"),
-        )
-        .unwrap();
-        fs::write(destination.join("sub/inner/theirs.txt"), b"theirs").unwrap();
+        let mut file = tar::Header::new_gnu();
+        file.set_size(1);
+        file.set_mode(0o644);
+        builder.append_data(&mut file, "x.txt", &b"x"[..]).unwrap();
+        let bytes = builder.into_inner().unwrap().finish().unwrap();
+        let refusal =
+            "Sparse.tar.gz holds a sparse file entry; Library does not open archives like that.";
 
-        trail.undo().unwrap();
-        assert!(!destination.join("sub/ours.txt").exists());
-        assert!(!destination.join("empty").exists());
-        assert_eq!(
-            fs::read(destination.join("sub/replaced.txt")).unwrap(),
-            b"theirs"
+        let listed = list_tar_archive_entries("Sparse.tar.gz", bytes.clone());
+        assert_eq!(listed.unwrap_err().to_string(), refusal);
+        let previewed = preview_tar_archive_entry("Sparse.tar.gz", bytes.clone(), "x.txt");
+        assert_eq!(previewed.err().unwrap().to_string(), refusal);
+        let mut outcome = ArchiveExtractOutcome::new(BTreeSet::from(["x.txt".to_string()]));
+        let mut written = 0;
+        let selected = read_selected_archive_entries(
+            "Sparse.tar.gz",
+            bytes,
+            None,
+            &mut outcome,
+            &mut |_, _| {
+                written += 1;
+                Ok(())
+            },
         );
-        assert_eq!(
-            fs::read(destination.join("sub/inner/theirs.txt")).unwrap(),
-            b"theirs"
-        );
+        assert_eq!(selected.unwrap_err().to_string(), refusal);
+        assert_eq!(written, 0);
     }
 
     #[test]
