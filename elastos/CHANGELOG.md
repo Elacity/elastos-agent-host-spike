@@ -13,6 +13,11 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   Each row shows the download size and device memory fit. Shared model details
   show where prompts go, and keyboard users can open Technical details.
 
+### Fixed
+
+- Apps keeps its title clear of Home window controls in narrow windows. Phone
+  detail controls have full touch targets, and Tab skips closed detail content.
+
 ### Developer detail
 
 - `elastos serve --capsule` starts its initial MicroVM capsule with a VM-bound

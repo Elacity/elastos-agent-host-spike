@@ -1203,7 +1203,7 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
   function trapDetailFocus(event) {
     const focusables = [...els.detailContent.querySelectorAll(
       'button:not([disabled]), summary, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-    )].filter((node) => !node.closest("[hidden]") && node.offsetParent !== null);
+    )].filter((node) => !node.closest("[hidden]") && node.offsetParent !== null && node.checkVisibility());
     if (focusables.length < 2) {
       event.preventDefault();
       focusables[0]?.focus();

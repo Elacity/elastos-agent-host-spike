@@ -648,13 +648,14 @@ async function assertModelsLayout(page, frame, { appPrimaryStyle, appRowStyle })
   await frame.locator('#category-list [data-destination="models"]').click();
   const modelRow = frame.locator(`.store-row[data-app="model:${modelCid}"]`);
   await modelRow.waitFor();
-  await frame.locator('.store-row[data-action="shared-detail"]').waitFor();
+  await frame.getByText("Contact AI", { exact: true }).waitFor();
   const titles = await frame.locator("#store-sections .store-section-title").allInnerTexts();
   assert(
     JSON.stringify(titles) === JSON.stringify(["Run on this Home", "Shared with you", "From contacts"]),
     "Models must group rows under plain section titles",
     titles,
   );
+  await frame.locator('.store-row[data-action="shared-detail"]').waitFor();
   const ownComponents = await frame.locator(
     ".shared-model-card, .store-models-settings, .shared-model-facts, #store-sections .store-section > p:not(.store-inline-note)",
   ).count();
@@ -715,6 +716,10 @@ async function assertModelsLayout(page, frame, { appPrimaryStyle, appRowStyle })
     summaryFocused = await frame.evaluate(() => document.activeElement?.matches(".technical-details > summary") === true);
   }
   assert(summaryFocused, "Tab must reach Technical details in the model detail");
+  await page.keyboard.press("Tab");
+  const closedDetailsNext = await frame.evaluate(() => document.activeElement?.textContent.trim());
+  assert(closedDetailsNext === "Close", "Tab must skip the contents of closed Technical details", { closedDetailsNext });
+  await page.keyboard.press("Shift+Tab");
   await page.keyboard.press("Enter");
   await page.keyboard.press("Tab");
   const storageFocus = await frame.evaluate(() => document.activeElement?.textContent.trim());
@@ -771,6 +776,12 @@ async function assertModelsPhone(page, frame) {
   await page.screenshot({ path: MODELS_PHONE_SCREENSHOT });
   await modelRow.click();
   await frame.locator('.modal-footer-actions [data-model-control="use"]').waitFor();
+  const detailTargets = await frame.locator("#detail-content button, #detail-content .technical-details > summary").evaluateAll((nodes) => nodes.filter((node) => node.checkVisibility()).map((node) => {
+    const box = node.getBoundingClientRect();
+    return { label: node.textContent.trim() || node.getAttribute("aria-label"), width: box.width, height: box.height };
+  }));
+  assert(detailTargets.every((target) => target.width >= PHONE_TOUCH_TARGET_PX && target.height >= PHONE_TOUCH_TARGET_PX),
+    "phone model detail controls must be 44 px targets", detailTargets);
   const detailFits = await frame.locator("#detail-content").evaluate((node) => node.scrollWidth <= node.clientWidth + 1);
   assert(detailFits, "phone model detail must not overflow sideways");
   await page.waitForTimeout(MODAL_FADE_MS);
@@ -1098,6 +1109,8 @@ async function run() {
     await page.setViewportSize({ width: 640, height: 900 });
     await waitForFrameWidth(frame, 640);
     await assertNoHorizontalOverflow(frame, "narrow Marketplace layout");
+    const narrowTitleTop = await frame.locator(".store-product-name").evaluate((node) => node.getBoundingClientRect().top);
+    assert(narrowTitleTop >= 52, "The narrow Marketplace title must clear the Home window controls", { narrowTitleTop });
 
     await frame.locator('[data-destination="discover"]').click();
     await frame.locator('.store-row[data-app="people"]').first().waitFor();

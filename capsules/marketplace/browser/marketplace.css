@@ -936,7 +936,7 @@ button {
   .store-sidebar {
     flex: none;
     width: 100%;
-    padding: 20px 20px 12px;
+    padding: var(--window-chrome-safe-top, 52px) 20px 12px;
     border-right: 0;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
     backdrop-filter: none;
@@ -1080,4 +1080,16 @@ button {
 
 :root[data-el-form-factor="phone"] .store-pill:focus-visible {
   outline-offset: -6px;
+}
+
+:root[data-el-form-factor="phone"] .modal-btn,
+:root[data-el-form-factor="phone"] .modal-close,
+:root[data-el-form-factor="phone"] .store-see-all {
+  min-width: var(--el-touch-target);
+  min-height: var(--el-touch-target);
+}
+
+:root[data-el-form-factor="phone"] .technical-details > summary {
+  min-height: var(--el-touch-target);
+  padding: 12px 0;
 }
