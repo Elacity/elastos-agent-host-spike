@@ -35,7 +35,7 @@ Guest hash:   e34772d1a03a24327eea7626ba4928e19dfb13d214d14c2b70a42d698bc489a1 o
               Same as the S0 Linux reference. wasm_sections.py output is below.
 Import list:  unchanged (elastos:bus/identity@1.0.0, runtime@1.0.0, types@1.0.0)
 Principles:   12 Docs, code, tests agree: the history check and the grade table compare the record with the
-                 code. Four rules in the code are not pinned by a test (Test gaps).
+                 code. Three rules in the code are not pinned by a test (G1-G3).
               15 Trust travels with signed content: the guest bytes depend on the build machine type
                  (Cargo, cited below). A rebuild matches a signed capsule only on the same machine type.
               3, 11, 18: unchanged, because no code changed; the import list was checked again.
@@ -45,7 +45,7 @@ Not proven:   That the `host:` line is the only input that differs between the M
               Rows 7, 8, 13: the Mac boots and the screens Sasha saw are not re-run here, so they do not count.
 Checklist:    56 of 63 (no todo moved; S0b is reading only)
 Questions:    1. Spike grade today is 37 of 70, not "about 43". OK to use 37 as the baseline?
-              2. Four test gaps (below). Add the missing tests as a small slice before S1, or fold them into S2?
+              2. Three test gaps, G1-G3 (below). Add the missing tests as a small slice before S1, or fold them into S2?
               3. PR #1 is still open. Merge it first, or merge this PR (it already contains S0)?
               4. One history mismatch: the prompt packer is tested but not on the live Assistant path.
                  Reword the 13 Oct 20:30 entry, the todo prefix-phase-a-pack and HANDOFF section 6,
@@ -85,11 +85,11 @@ Suggestions for `SLICES.md` (Sasha decides; nothing changed here):
 
 ## History check
 
-I read all 144 entries in `HISTORY.md`. A helper agent in this session also went through every entry against the code. I re-checked each finding below myself before writing it here. Guest hashes and test counts in the history are point-in-time and were not re-proven.
+I read all 144 entries in `HISTORY.md`. A helper agent in this session also went through every entry against the code. I re-checked each finding below myself (file and line) before writing it here, and ran a falsifier for the mismatch. Guest hashes and test counts in the history are point-in-time and were not re-proven.
 
 ### Mismatch: one
 
-**13 Oct 20:30, "The model prompt is now the system line, then notes, then excerpts."** That is true of `packStablePrefix` (`capsules/assistant/browser/agent-context.js:956`), but nothing on the live path calls it. The only caller is `scripts/home-agent-prefix.test.mjs`. The live prompt is built by `compileLiveContext` (`capsules/assistant/browser/agent-live.js:381-423`). It puts the system line first, then the notes as a second **system** message (`role: "system"`, line 412), then history. It has no retrieved excerpts in that function. The head still comes first in the live path, but no test covers that order.
+**13 Oct 20:30, "The model prompt is now the system line, then notes, then excerpts."** That is true of `packStablePrefix` (`capsules/assistant/browser/agent-context.js:956`), but nothing on the live path calls it. The only caller is `scripts/home-agent-prefix.test.mjs`. The live prompt is built by `compileLiveContext` (`capsules/assistant/browser/agent-live.js:381-423`). It puts the system line first, then the notes as a second **system** message (`role: "system"`, line 412), then history. It has no retrieved excerpts in that function. The head still comes first in the live path, but no test calls `compileLiveContext` (it is referenced only by `agent-live.js` and `agent-stream.js`).
 
 Falsifier: I removed the head from `packStablePrefix`. `home-agent-prefix.test.mjs` failed (1 pass, 1 fail). `home-agent-shell-smoke.mjs` ("ok") and `home-agent-cancellation.test.mjs` (50 pass) still passed. So the packer is not on the path those tests cover. Reverted, 2 of 2 pass.
 
@@ -115,7 +115,7 @@ Other constants named in the history still hold: the 4000-byte budgets (`lib.rs:
 Weaker than the history says (true in code, but the test does not prove the words):
 
 - 13 Oct 20:35 "a different first line counts as zero": `admission_counts_a_repeated_prefix` tests the addition only. Nothing feeds it a real `cached_tokens` count.
-- 13 Oct 20:15 "the log is not uploaded": the guest test only checks that no event text contains "upload" (`lib.rs:6125`).
+- 13 Oct 20:15 "the log is not uploaded": the guest test only checks that no event text contains "upload" (`lib.rs:6128`).
 - The 60 s idle release and "admission hashes the entrypoint" are locked by checking source text, not by behaviour.
 
 Superseded or renamed, not a mismatch:
@@ -295,4 +295,4 @@ Not proven: that the `host:` line is the only input that differs between the Mac
 
 ## What is next
 
-S1 `sell-closed-admission` (cloud, test only), after Sasha merges this PR, unless Sasha wants the three gap tests first (Question 2).
+S1 `sell-closed-admission` (cloud, test only), after Sasha merges this PR, unless Sasha wants the G1-G3 tests first (Question 2) or the packer question settled (Question 4).
