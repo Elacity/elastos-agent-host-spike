@@ -105,7 +105,8 @@ The release availability contract while this node is unreachable is:
 - Homes keep all messages they already received.
 
 Chat states **Community unreachable** when its Community connection is
-unavailable.
+unavailable, or **Community can't connect. Restart Home to reconnect.** after
+Home has used up its repairs (#451).
 
 An address change requires the next signed network revision in a release.
 More bootstrap peers and participant Homes acting as bootstrap are tracked in
