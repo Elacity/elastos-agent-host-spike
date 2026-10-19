@@ -66,7 +66,7 @@ The task log called the spike "about 43 of 70" on 13 Oct. That was a rough total
 4. **Before a slice:** `export RUST_TEST_THREADS=2`, then bring in the team's latest code:
    `git fetch https://github.com/Elacity/elastos-runtime.git develop && git merge FETCH_HEAD`.
    If the merge is not clean, stop and report. Do not rewrite history.
-5. **One slice, then stop and write the report.** Do not start the next slice.
+5. **One slice, then stop and write the report.** Do not start the next slice. The only exception is a written run plan such as `OVERNIGHT-1.md`, which lists the items allowed in a row and when to stop.
 6. **No secrets** in any file, commit, PR text, or output. If you meet a token, key, ticket, or password, report the path and type only.
 7. **No large files:** no model weights, VM images, `*.component.wasm`, or build output in commits.
 8. **Do not delete branches** you did not create in this session.
