@@ -254,6 +254,12 @@ button {
   filter: brightness(1.08);
 }
 
+.store-see-all:disabled {
+  cursor: default;
+  filter: none;
+  opacity: 0.55;
+}
+
 .store-row-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -276,6 +282,7 @@ button {
 }
 
 .model-content-identity,
+.shared-model-identity,
 .modal-developer {
   overflow-wrap: anywhere;
 }
@@ -467,6 +474,7 @@ button {
 .badge.ddrm { --badge-hue: #d946ef; }
 .badge.wallet { --badge-hue: #f97316; }
 .badge.installed { --badge-hue: #22c55e; }
+.badge.model { --badge-hue: #22c55e; }
 
 .badge.app,
 .badge.viewer,
@@ -476,7 +484,8 @@ button {
 .badge.shell,
 .badge.ddrm,
 .badge.wallet,
-.badge.installed {
+.badge.installed,
+.badge.model {
   color: color-mix(in srgb, var(--badge-hue) 62%, var(--el-text));
   background: color-mix(in srgb, var(--badge-hue) 18%, transparent);
 }
@@ -661,6 +670,7 @@ button {
   flex-wrap: wrap;
   gap: 10px;
   justify-content: flex-end;
+  margin-left: auto;
 }
 
 .trust-chip {
@@ -695,27 +705,84 @@ button {
   background: var(--bg-hover);
 }
 
-/* The model detail's one forward action reads as the primary button. */
-[data-model-management] .modal-btn[data-model-control="use"],
-[data-model-management] .modal-btn[data-model-control="open-assistant"] {
-  border-color: transparent;
+/* A model detail keeps the app layout: its forward action (Get, Retry or
+   Open in Assistant) is the footer's primary button, Refresh sits where a
+   section's See All link would, and Status reads like the About text. */
+.modal-btn[data-model-control="use"],
+.modal-btn[data-model-control="open-assistant"] {
+  border: 0;
   color: #fff;
   background: var(--accent);
 }
 
-[data-model-management] .modal-btn[data-model-control="use"]:hover,
-[data-model-management] .modal-btn[data-model-control="open-assistant"]:hover {
+.modal-btn[data-model-control="use"]:hover,
+.modal-btn[data-model-control="open-assistant"]:hover {
   background: var(--accent-hover);
 }
 
-[data-model-management] .modal-btn[data-model-control="use"]:disabled,
-[data-model-management] .modal-btn[data-model-control="open-assistant"]:disabled {
+.modal-btn[data-model-control="use"]:disabled,
+.modal-btn[data-model-control="open-assistant"]:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.model-actions {
+  display: contents;
+}
+
+.modal-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.model-refresh .modal-btn {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  color: var(--accent);
+  background: transparent;
+  font-weight: 500;
+}
+
+.model-refresh .modal-btn:hover {
+  background: transparent;
+  filter: brightness(1.08);
+}
+
+.model-refresh .modal-btn:disabled {
+  cursor: default;
   opacity: 0.55;
 }
 
 [data-model-management] .model-row {
+  padding: 0;
   border-top: 0;
-  padding-top: 4px;
+}
+
+[data-model-management] p,
+[data-model-management] .model-row p {
+  margin: 0 0 6px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+[data-model-management] .model-row > p:first-child {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+[data-model-management] .model-row progress {
+  display: block;
+  width: 100%;
+  max-width: none;
+  margin: 8px 0 4px;
+}
+
+.technical-details .model-storage {
+  margin-top: 12px;
 }
 
 .store-loading {
@@ -945,19 +1012,6 @@ button {
     grid-template-columns: minmax(0, 1fr);
   }
 }
-.store-models-settings { display: flex; flex-wrap: wrap; gap: 8px; }
-.store-section > p { margin: 4px 0 8px; color: var(--text-muted); font-size: 12px; line-height: 1.45; }
-.shared-model-card { max-width: 640px; padding: 12px 0; border-bottom: 1px solid var(--el-hairline); }
-.shared-model-card .store-section-head { align-items: center; margin-bottom: 4px; }
-.shared-model-card h3 { margin: 0; color: var(--text-primary); font-size: 13px; font-weight: 600; }
-.shared-model-card p { margin: 0 0 8px; color: var(--text-muted); font-size: 12px; }
-.shared-model-card .store-section-head p { margin: 2px 0 0; }
-.shared-model-card details { margin-top: 8px; color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
-.shared-model-card details summary { cursor: pointer; }
-.shared-model-card details p { margin: 6px 0 0; }
-.shared-model-facts { display: grid; grid-template-columns: minmax(90px, 1fr) minmax(0, 3fr); gap: 4px 12px; margin: 0; font-size: 12px; }
-.shared-model-facts dt { color: var(--text-muted); }
-.shared-model-facts dd { margin: 0; color: var(--text-primary); overflow-wrap: anywhere; }
 
 /* Phone stage: the sidebar is the shared push drawer (elastos-drawer.js), so
    the store opens on content. The head stays pinned with the sidebar toggle

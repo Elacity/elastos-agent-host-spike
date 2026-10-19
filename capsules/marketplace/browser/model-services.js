@@ -34,7 +34,7 @@ export function modelAccessOpportunities(summary) {
     return true;
   }).map(offer => ({
     id: offer.offer_id, title: offer.display_name || "A contact's AI service",
-    status: ({ requestable: "Ask this person", requested: "Waiting for approval", pending: "Waiting for approval",
+    status: ({ requestable: "Not shared yet", requested: "Waiting for approval", pending: "Waiting for approval",
       approved: "Approved", active: "Approved", denied: "Request denied", expired: "Access expired" })[offer.status] || "Check access in Services",
     requestable: offer.status === "requestable" || offer.status === "expired",
   }));

@@ -42,7 +42,7 @@ test("contact opportunities remain requests, separate from exact usable model of
     available_remote_offers: [{ service_kind: "remote_model", offer_id: "contact-model", display_name: "Contact", status: "requestable" },
       { service_kind: "remote_browser", offer_id: "browser" }] });
   assert.deepEqual(access.map(item => [item.id, item.status, item.requestable]),
-    [["selected", "Approved", false], ["contact-model", "Ask this person", true]]);
+    [["selected", "Approved", false], ["contact-model", "Not shared yet", true]]);
   assert.equal(access[1].facts, undefined);
   assert.throws(() => modelAccessOpportunities({ remote_offers: [], available_remote_offers: [{ service_kind: "remote_model", offer_id: "bad/id" }] }));
 });
@@ -97,7 +97,7 @@ function publisherFixture() {
   for (const [start, end] of [
     ["  async function loadCatalogData()", "  async function loadMediaData()"],
     ["  function capsuleToApp(", "  function appCategory("],
-    ["  function shortDid(", "  function modelSizeLabel("],
+    ["  function modelSizeLabel(", "  function renderAppRow("],
     ["  function packageLabel(", "  function openApp("],
   ]) vm.runInContext(source.slice(source.indexOf(start), source.indexOf(end)), context);
   return context;
@@ -131,7 +131,7 @@ test("invalid or unavailable model catalog verification clears publisher cards",
       ? { model_catalog_state: status, capsules: [{ ...model, ...changes }] } : { interfaces: [] } });
     await context.loadCatalogData();
     assert.equal(context.state.apps.length, accepted ? 1 : 0);
-    if (accepted) assert.match(context.detailPublisher(context.state.apps[0]), /^Runtime-verified publisher/);
+    if (accepted) assert.equal(context.detailPublisher(context.state.apps[0]), "Verified publisher · 1.02 KB");
     else assert.match(context.state.appLoadError, /verification is unavailable/);
   }
 });

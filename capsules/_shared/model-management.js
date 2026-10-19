@@ -8,6 +8,12 @@
     insufficient: "This device has less memory than this model requires. Choose a smaller model.",
     unavailable: "This Home could not check the device memory. Ask the Home owner to check the memory limits, then try again.",
   });
+  // The Marketplace detail shows one short memory line under the model's status.
+  const COMPACT_MEMORY_FIT_TEXT = Object.freeze({
+    fits: "Fits this device's memory. It needs some free memory to reply.",
+    insufficient: "Needs more memory than this device has. Choose a smaller model.",
+    unavailable: "Couldn't check this device's memory. Ask the Home owner to check the memory limits.",
+  });
   const FAILURE_TEXT = Object.freeze({
     authorization_unavailable: "Preparation stopped. Open Models again to check access.",
     policy_unavailable: "Preparation stopped. Model policy is unavailable.",
@@ -134,7 +140,10 @@
       offer_id: output.offer_id, preparation }, cid);
   }
   window.ElastosModelManagement = {
-    create({ root, capsule, token, buttonClass = "pc2-btn pc2-btn-secondary", cid: requiredCid = null, compact = false, onReadyOpen = null }) {
+    // actionsRoot and refreshRoot let a host place the action buttons and Refresh in its own
+    // layout (the Marketplace detail footer and Status heading); without them both stay in root.
+    create({ root, capsule, token, buttonClass = "pc2-btn pc2-btn-secondary", cid: requiredCid = null, compact = false, onReadyOpen = null,
+      actionsRoot = null, refreshRoot = null }) {
       let visible = false, closed = false, generation = 0, busy = false, timer, reader;
       let selectedCid = requiredCid, choices = [], model = null, methods = new Map(), message = "", loading = false;
       let unresolvedUse = null, reconcileRequired = false, refusal = "";
@@ -334,18 +343,21 @@
         node.type = "button"; node.disabled = disabled || busy || loading; node.addEventListener("click", run); return node;
       }
       function render() {
-        const focused = root.contains(document.activeElement) ? document.activeElement?.dataset.modelControl || pendingFocus : null;
+        const hosts = [root, actionsRoot, refreshRoot].filter(Boolean);
+        const focused = hosts.some(host => host.contains(document.activeElement)) ? document.activeElement?.dataset.modelControl || pendingFocus : null;
         pendingFocus = focused;
         const restoreFocus = () => {
           if (!focused) return;
-          const target = root.querySelector(`[data-model-control="${focused}"]`);
+          const target = hosts.map(host => host.querySelector(`[data-model-control="${focused}"]`)).find(Boolean);
           if (target && !target.disabled) { target.focus(); pendingFocus = null; }
           else root.focus();
         };
-        root.replaceChildren();
-        const refresh = button("Refresh models", () => void load(), loading);
+        for (const host of hosts) host.replaceChildren();
+        const refresh = button(compact ? "Refresh" : "Refresh models", () => void load(), loading);
         refresh.dataset.modelControl = "refresh";
-        if (!compact) root.append(refresh);
+        if (refreshRoot) refreshRoot.append(refresh);
+        else if (!compact) root.append(refresh);
+        const trailingRefresh = () => { if (compact && !refreshRoot) root.append(refresh); };
         const status = element("p", loading ? "Loading models…" : message || refusal || (statusFailures ? "Checking status…" : ""));
         status.setAttribute("role", "status"); status.hidden = compact && !status.textContent; root.append(status);
         if (!model) {
@@ -360,12 +372,12 @@
               list.append(row);
             }
             root.append(list);
-            if (compact) root.append(refresh);
+            trailingRefresh();
             restoreFocus();
             return;
           }
           if (!loading && !message) root.append(element("p", "No verified model is available. Ask your administrator to configure a trusted catalog."));
-          if (compact) root.append(refresh);
+          trailingRefresh();
           restoreFocus();
           return;
         }
@@ -387,12 +399,12 @@
           ? DISPATCH_UNAVAILABLE_TEXT[r.dispatch_unavailable_reason] : phase === "service_unavailable" && p?.failure_class
             ? failureText(p) : (compact ? COMPACT_PHASE_TEXT : PHASE_TEXT)[phase];
         row.append(element("p", label));
-        row.append(element("p", MEMORY_FIT_TEXT[model.model_memory_fit], "model-memory-fit"));
+        row.append(element("p", (compact ? COMPACT_MEMORY_FIT_TEXT : MEMORY_FIT_TEXT)[model.model_memory_fit], "model-memory-fit"));
         if (active(p)) {
           const progress = element("progress"); progress.max = p.total_bytes || 1; progress.value = p.completed_bytes;
-          progress.setAttribute("aria-label", "Preparation progress"); row.append(progress, element("p", `${formatBytes(p.completed_bytes)} of ${formatBytes(p.total_bytes)} prepared`));
+          progress.setAttribute("aria-label", "Preparation progress"); row.append(progress, element("p", `${formatBytes(p.completed_bytes)} of ${formatBytes(p.total_bytes)}`));
         }
-        const controls = element("div", "", "model-controls");
+        const controls = actionsRoot || element("div", "", "model-controls");
         const useLabel = r.dispatch_unavailable_reason === "catalog_updated" ? "Use"
           : (p && p.state !== "reclaimed") || unresolvedUse ? "Retry" : compact ? "Get" : "Download";
         const use = button(useLabel, () => void act("use"), active(p) || reconcileRequired
@@ -419,14 +431,14 @@
           reclaim.dataset.modelControl = "reclaim";
           controls.append(reclaim);
         }
-        if (active(p)) { const cancel = button("Cancel preparation", () => void act("cancel"), p.cancel_requested || reconcileRequired); cancel.dataset.modelControl = "cancel"; controls.append(cancel); }
+        if (active(p)) { const cancel = button(compact ? "Stop" : "Cancel preparation", () => void act("cancel"), p.cancel_requested || reconcileRequired); cancel.dataset.modelControl = "cancel"; controls.append(cancel); }
         if (!compact && reclaimStep !== "confirm") {
           const labelNode = element("label", "", "model-keep"), toggle = element("input");
           toggle.type = "checkbox"; toggle.checked = r.kept; toggle.disabled = !(r.admitted || active(p)) || p?.cancel_requested || busy || loading || reconcileRequired; toggle.dataset.modelControl = "keep";
           toggle.addEventListener("change", () => void act("retention", toggle.checked));
           labelNode.append(toggle, document.createTextNode("Keep on this device")); controls.append(labelNode);
         }
-        row.append(controls);
+        if (!actionsRoot) row.append(controls);
         if (!compact) {
           row.append(element("p", r.kept
             ? (r.admitted ? "Kept on this device. Release this choice to allow cache cleanup." : "Keep choice saved for this preparation.")
@@ -434,7 +446,7 @@
           row.append(element("p", "The model loads into memory when you use it in Assistant.", "model-hint"));
         }
         root.append(row);
-        if (compact) root.append(refresh);
+        trailingRefresh();
         if (!requiredCid && choices.length > 1) {
           const back = button("Choose another model", () => { selectedCid = null; model = null; void load(); });
           back.dataset.modelControl = "choose-another";
