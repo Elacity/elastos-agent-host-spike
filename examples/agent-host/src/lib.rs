@@ -262,6 +262,422 @@ fn replay(bytes: &[u8]) -> Option<Vec<SurfaceNode>> {
     Some(events)
 }
 
+/// Format 1 of the UsersAI journal object (`handoff/USERSAI-JOURNAL.md`).
+/// The bytes are a header, hash-linked records, and the head hash. A grant
+/// string is never encoded, so a decoded step has no grant until Runtime
+/// grants it again.
+#[cfg(any(test, target_arch = "wasm32"))]
+const JOURNAL_MAGIC: &[u8; 4] = b"EAHJ";
+#[cfg(any(test, target_arch = "wasm32"))]
+const JOURNAL_FORMAT: u16 = 1;
+#[cfg(any(test, target_arch = "wasm32"))]
+const JOURNAL_CAP: usize = 256 * 1024;
+#[cfg(any(test, target_arch = "wasm32"))]
+const JOURNAL_HEADER: usize = 4 + 2 + 8 + 1 + 1 + 8 + 1 + 32 + 4;
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn put_str(out: &mut Vec<u8>, text: &str) -> Option<()> {
+    out.extend_from_slice(&u32::try_from(text.len()).ok()?.to_le_bytes());
+    out.extend_from_slice(text.as_bytes());
+    Some(())
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn put_opt(out: &mut Vec<u8>, value: Option<u64>) {
+    out.push(u8::from(value.is_some()));
+    out.extend_from_slice(&value.unwrap_or(0).to_le_bytes());
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn node_payload(node: &SurfaceNode) -> Option<Vec<u8>> {
+    let mut out = vec![role_tag(node.role), source_tag(node.source)];
+    put_str(&mut out, &node.text)?;
+    Some(out)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn state_tag(state: StepState) -> u8 {
+    match state {
+        StepState::Prepared => 1,
+        StepState::NotStarted => 2,
+        StepState::Denied => 3,
+        StepState::Cancelled => 4,
+        StepState::Dispatched => 5,
+        StepState::SettlementUnknown => 6,
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn kind_tag(kind: ProposalKind) -> u8 {
+    match kind {
+        ProposalKind::Unspecified => 1,
+        ProposalKind::Read => 2,
+        ProposalKind::Edit => 3,
+        ProposalKind::Run => 4,
+        ProposalKind::Restore => 5,
+        ProposalKind::Hosted => 6,
+        ProposalKind::Child => 7,
+        ProposalKind::Init => 8,
+    }
+}
+
+/// The step without its grant. `grant` has no field in the bytes.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn step_payload(step: &Step) -> Option<Vec<u8>> {
+    let mut out = step.id.to_le_bytes().to_vec();
+    out.push(state_tag(step.state));
+    out.push(kind_tag(step.kind));
+    put_str(&mut out, &step.resource)?;
+    out.extend_from_slice(&step.effect_id.to_le_bytes());
+    out.push(u8::from(step.has_result));
+    put_str(&mut out, &step.old)?;
+    put_str(&mut out, &step.new)?;
+    out.extend_from_slice(&u32::try_from(step.argv.len()).ok()?.to_le_bytes());
+    for arg in &step.argv {
+        put_str(&mut out, arg)?;
+    }
+    put_opt(&mut out, step.parent_id);
+    put_str(&mut out, &step.seat)?;
+    put_opt(&mut out, step.seen_version);
+    put_str(&mut out, &step.inbox)?;
+    Some(out)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn turn_payload(turn: &Turn) -> Option<Vec<u8>> {
+    let mut out = turn.id.to_le_bytes().to_vec();
+    out.extend_from_slice(&u32::try_from(turn.steps.len()).ok()?.to_le_bytes());
+    for step in &turn.steps {
+        out.extend_from_slice(&step.to_le_bytes());
+    }
+    Some(out)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn journal_link(previous: &[u8; 32], tag: u8, payload: &[u8]) -> Option<[u8; 32]> {
+    let mut message = previous.to_vec();
+    message.push(tag);
+    message.extend_from_slice(&u32::try_from(payload.len()).ok()?.to_le_bytes());
+    message.extend_from_slice(payload);
+    Some(sha256(&message))
+}
+
+/// Encode a journal as format 1. `prev_head` is the head of the version this
+/// one replaces, or zeros for the first. More than the cap returns nothing.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn encode_journal(journal: &Journal, prev_head: &[u8; 32]) -> Option<Vec<u8>> {
+    let mut records: Vec<(u8, Vec<u8>)> = Vec::new();
+    for node in &journal.events {
+        records.push((1, node_payload(node)?));
+    }
+    for node in &journal.markers {
+        records.push((2, node_payload(node)?));
+    }
+    for step in &journal.steps {
+        records.push((3, step_payload(step)?));
+    }
+    for turn in &journal.turns {
+        records.push((4, turn_payload(turn)?));
+    }
+    for node in journal.compact_backup.iter().flat_map(|(nodes, _)| nodes) {
+        records.push((5, node_payload(node)?));
+    }
+    for node in journal.compact_pending.iter().flatten() {
+        records.push((6, node_payload(node)?));
+    }
+    let mut out = JOURNAL_MAGIC.to_vec();
+    out.extend_from_slice(&JOURNAL_FORMAT.to_le_bytes());
+    out.extend_from_slice(&journal.epoch.to_le_bytes());
+    out.push(u8::from(journal.compaction_open));
+    put_opt(
+        &mut out,
+        journal.compact_backup.as_ref().map(|(_, epoch)| *epoch),
+    );
+    out.push(u8::from(journal.compact_pending.is_some()));
+    out.extend_from_slice(prev_head);
+    out.extend_from_slice(&u32::try_from(records.len()).ok()?.to_le_bytes());
+    let mut link = sha256(&out);
+    for (tag, payload) in &records {
+        link = journal_link(&link, *tag, payload)?;
+        out.push(*tag);
+        out.extend_from_slice(&u32::try_from(payload.len()).ok()?.to_le_bytes());
+        out.extend_from_slice(payload);
+        out.extend_from_slice(&link);
+        if out.len() > JOURNAL_CAP {
+            return None;
+        }
+    }
+    out.extend_from_slice(&link);
+    (out.len() <= JOURNAL_CAP).then_some(out)
+}
+
+/// A cursor over bytes. Every read past the end is `truncated`.
+#[cfg(any(test, target_arch = "wasm32"))]
+struct JournalReader<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+impl<'a> JournalReader<'a> {
+    fn take(&mut self, len: usize) -> Result<&'a [u8], &'static str> {
+        let end = self.at.checked_add(len).ok_or("truncated")?;
+        let slice = self.bytes.get(self.at..end).ok_or("truncated")?;
+        self.at = end;
+        Ok(slice)
+    }
+
+    fn byte(&mut self) -> Result<u8, &'static str> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn flag(&mut self) -> Result<bool, &'static str> {
+        match self.byte()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err("record"),
+        }
+    }
+
+    fn u32(&mut self) -> Result<u32, &'static str> {
+        Ok(u32::from_le_bytes(
+            self.take(4)?.try_into().map_err(|_| "truncated")?,
+        ))
+    }
+
+    fn u64(&mut self) -> Result<u64, &'static str> {
+        Ok(u64::from_le_bytes(
+            self.take(8)?.try_into().map_err(|_| "truncated")?,
+        ))
+    }
+
+    fn hash(&mut self) -> Result<[u8; 32], &'static str> {
+        self.take(32)?.try_into().map_err(|_| "truncated")
+    }
+
+    fn text(&mut self) -> Result<String, &'static str> {
+        let len = usize::try_from(self.u32()?).map_err(|_| "record")?;
+        let bytes = self.take(len).map_err(|_| "record")?;
+        Ok(std::str::from_utf8(bytes)
+            .map_err(|_| "record")?
+            .to_string())
+    }
+
+    /// A flag and a value. With the flag off, the value must be zero.
+    fn opt(&mut self) -> Result<Option<u64>, &'static str> {
+        let present = self.flag()?;
+        let value = self.u64()?;
+        match (present, value) {
+            (true, value) => Ok(Some(value)),
+            (false, 0) => Ok(None),
+            (false, _) => Err("record"),
+        }
+    }
+
+    fn done(&self) -> Result<(), &'static str> {
+        (self.at == self.bytes.len()).then_some(()).ok_or("record")
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn decode_node(payload: &[u8]) -> Result<SurfaceNode, &'static str> {
+    let mut reader = JournalReader {
+        bytes: payload,
+        at: 0,
+    };
+    let role = match reader.byte().map_err(|_| "record")? {
+        1 => Role::System,
+        2 => Role::User,
+        3 => Role::Assistant,
+        4 => Role::ToolResult,
+        _ => return Err("record"),
+    };
+    let source = match reader.byte().map_err(|_| "record")? {
+        1 => NodeSource::Head,
+        2 => NodeSource::InHistory,
+        3 => NodeSource::Person,
+        4 => NodeSource::Snapshot,
+        5 => NodeSource::Skill,
+        6 => NodeSource::TurnMarker,
+        7 => NodeSource::StepMarker,
+        8 => NodeSource::CompactionCheckpoint,
+        9 => NodeSource::Observation,
+        _ => return Err("record"),
+    };
+    let text = reader.text()?;
+    reader.done()?;
+    Ok(SurfaceNode { role, text, source })
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn decode_step(payload: &[u8]) -> Result<Step, &'static str> {
+    let mut reader = JournalReader {
+        bytes: payload,
+        at: 0,
+    };
+    let fail = |_| "record";
+    let id = reader.u64().map_err(fail)?;
+    let state = match reader.byte().map_err(fail)? {
+        1 => StepState::Prepared,
+        2 => StepState::NotStarted,
+        3 => StepState::Denied,
+        4 => StepState::Cancelled,
+        5 => StepState::Dispatched,
+        6 => StepState::SettlementUnknown,
+        _ => return Err("record"),
+    };
+    let kind = match reader.byte().map_err(fail)? {
+        1 => ProposalKind::Unspecified,
+        2 => ProposalKind::Read,
+        3 => ProposalKind::Edit,
+        4 => ProposalKind::Run,
+        5 => ProposalKind::Restore,
+        6 => ProposalKind::Hosted,
+        7 => ProposalKind::Child,
+        8 => ProposalKind::Init,
+        _ => return Err("record"),
+    };
+    let resource = reader.text()?;
+    let effect_id = reader.u64().map_err(fail)?;
+    let has_result = reader.flag().map_err(fail)?;
+    let old = reader.text()?;
+    let new = reader.text()?;
+    let count = reader.u32().map_err(fail)?;
+    let mut argv = Vec::new();
+    for _ in 0..count {
+        argv.push(reader.text()?);
+    }
+    let parent_id = reader.opt().map_err(fail)?;
+    let seat = reader.text()?;
+    let seen_version = reader.opt().map_err(fail)?;
+    let inbox = reader.text()?;
+    reader.done()?;
+    Ok(Step {
+        id,
+        state,
+        kind,
+        resource,
+        grant: None,
+        effect_id,
+        has_result,
+        old,
+        new,
+        argv,
+        parent_id,
+        seat,
+        seen_version,
+        inbox,
+    })
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn decode_turn(payload: &[u8]) -> Result<Turn, &'static str> {
+    let mut reader = JournalReader {
+        bytes: payload,
+        at: 0,
+    };
+    let id = reader.u64().map_err(|_| "record")?;
+    let count = reader.u32().map_err(|_| "record")?;
+    let mut steps = Vec::new();
+    for _ in 0..count {
+        steps.push(reader.u64().map_err(|_| "record")?);
+    }
+    reader.done()?;
+    Ok(Turn { id, steps })
+}
+
+/// Decode format 1. The size, the format, and the whole hash chain are
+/// checked before any record is read. Returns the journal, `prev_head`, and
+/// this version's head.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn decode_journal(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static str> {
+    if bytes.len() > JOURNAL_CAP {
+        return Err("too large");
+    }
+    let mut reader = JournalReader { bytes, at: 0 };
+    let header = reader.take(JOURNAL_HEADER)?;
+    if &header[..4] != JOURNAL_MAGIC {
+        return Err("not a journal");
+    }
+    if header[4..6] != JOURNAL_FORMAT.to_le_bytes() {
+        return Err("format version");
+    }
+    let mut fields = JournalReader {
+        bytes: &header[6..],
+        at: 0,
+    };
+    let epoch = fields.u64()?;
+    let compaction_open = fields.byte()?;
+    let backup_flag = fields.byte()?;
+    let backup_epoch = fields.u64()?;
+    let pending_flag = fields.byte()?;
+    let prev_head = fields.hash()?;
+    let count = fields.u32()?;
+    let mut link = sha256(header);
+    let mut records = Vec::new();
+    for _ in 0..count {
+        let tag = reader.byte()?;
+        let len = usize::try_from(reader.u32()?).map_err(|_| "truncated")?;
+        let payload = reader.take(len)?;
+        let stored = reader.hash()?;
+        link = journal_link(&link, tag, payload).ok_or("record")?;
+        if stored != link {
+            return Err("hash");
+        }
+        records.push((tag, payload));
+    }
+    if reader.hash()? != link {
+        return Err("hash");
+    }
+    if reader.at != bytes.len() {
+        return Err("trailing bytes");
+    }
+    let flag = |value: u8| match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err("record"),
+    };
+    let backup = flag(backup_flag)?;
+    let pending = flag(pending_flag)?;
+    if !backup && backup_epoch != 0 {
+        return Err("record");
+    }
+    let mut journal = empty_journal();
+    journal.epoch = epoch;
+    journal.compaction_open = flag(compaction_open)?;
+    let mut backup_nodes = Vec::new();
+    let mut pending_nodes = Vec::new();
+    let mut last_tag = 0;
+    for (tag, payload) in records {
+        if tag < last_tag {
+            return Err("record");
+        }
+        last_tag = tag;
+        match tag {
+            1 => journal.events.push(decode_node(payload)?),
+            2 => journal.markers.push(decode_node(payload)?),
+            3 => journal.steps.push(decode_step(payload)?),
+            4 => journal.turns.push(decode_turn(payload)?),
+            5 if backup => backup_nodes.push(decode_node(payload)?),
+            6 if pending => pending_nodes.push(decode_node(payload)?),
+            _ => return Err("record"),
+        }
+    }
+    journal.compact_backup = backup.then_some((backup_nodes, backup_epoch));
+    journal.compact_pending = pending.then_some(pending_nodes);
+    Ok((journal, prev_head, link))
+}
+
+/// The journal as it reads back from storage: every grant is cleared.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn without_grants(journal: &Journal) -> Journal {
+    let mut copy = journal.clone();
+    for step in &mut copy.steps {
+        step.grant = None;
+    }
+    copy
+}
+
 #[cfg(any(test, target_arch = "wasm32"))]
 fn system_head(events: &[SurfaceNode]) -> Option<&str> {
     events
@@ -5423,6 +5839,16 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 "the version list granted a restore".to_string(),
             ));
         }
+        let stored = encode_journal(&journal, &[0; 32]);
+        let resumed = stored.as_deref().map(decode_journal);
+        if !matches!(
+            &resumed,
+            Some(Ok((back, prev, _))) if *back == without_grants(&journal) && *prev == [0; 32]
+        ) {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "the journal did not round-trip through format 1".to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -7824,6 +8250,201 @@ mod tests {
         assert_eq!(restored, visible);
         assert!(replay(&recorded[..recorded.len().saturating_sub(1)]).is_none());
         assert!(replay(&[9, 0, 0, 0, 0]).is_none());
+    }
+
+    /// Every journal field is set: turns, markers, steps of several kinds and
+    /// states, an observation, a snapshot, a skill, an empty assistant line,
+    /// and an open compaction with its backup and pending copies.
+    fn a_rich_journal() -> Journal {
+        let mut journal = two_turns();
+        admit_user(&mut journal, &"a long person line ".repeat(20));
+        assert!(admit_snapshot(
+            &mut journal,
+            "localhost://Users/self/Projects/demo",
+            "2026-10-20T01:00:00Z",
+            "localhost://Users/self/Projects/demo/index.html",
+        ));
+        assert!(admit_skill(&mut journal, "Prefer the Runtime grant."));
+        admit_assistant(&mut journal, "");
+        let note = "localhost://Users/self/Projects/demo/notes.txt";
+        assert!(observe(&mut journal, note, 1, "hello from the project"));
+        let turn = open_turn(&mut journal);
+        open_step(&mut journal, turn).unwrap();
+        let read = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
+        assert!(cancel(&mut journal, read));
+        let edit = propose_edit(&mut journal, note, "hello", "hi", Some(1)).unwrap();
+        assert!(note_crash(&mut journal, edit));
+        let run = propose_run(
+            &mut journal,
+            "localhost://Users/self/Projects/demo",
+            &[
+                "vm-smoke".to_string(),
+                "tests::project_is_ready".to_string(),
+            ],
+        )
+        .unwrap();
+        apply_inbox(&mut journal, run, InboxAnswer::Deny, None);
+        propose_child(
+            &mut journal,
+            run,
+            "localhost://Users/self/Projects/demo/src",
+        )
+        .unwrap();
+        assert!(begin_compact(&mut journal, COMPACTION_SUMMARY));
+        journal
+    }
+
+    #[test]
+    fn a_journal_round_trips_through_format_one() {
+        let journal = a_rich_journal();
+        assert!(journal.compaction_open);
+        assert!(journal.compact_backup.is_some() && journal.compact_pending.is_some());
+        assert!(!journal.markers.is_empty() && !journal.turns.is_empty());
+        assert!(journal.steps.len() >= 4);
+        assert!(journal.steps.iter().all(|step| step.grant.is_none()));
+        let bytes = encode_journal(&journal, &[0; 32]).unwrap();
+        let (back, prev, head) = decode_journal(&bytes).unwrap();
+        assert_eq!(back, journal);
+        assert_eq!(prev, [0; 32]);
+        assert_eq!(head[..], bytes[bytes.len() - 32..]);
+        assert_eq!(encode_journal(&back, &[0; 32]).unwrap(), bytes);
+        let mut committed = journal.clone();
+        assert!(commit_compact(&mut committed));
+        assert!(committed.compact_backup.is_none() && committed.compact_pending.is_none());
+        let bytes = encode_journal(&committed, &[0; 32]).unwrap();
+        assert_eq!(decode_journal(&bytes).unwrap().0, committed);
+    }
+
+    #[test]
+    fn decoding_keeps_the_replay_bytes() {
+        let journal = a_rich_journal();
+        let bytes = encode_journal(&journal, &[0; 32]).unwrap();
+        let back = decode_journal(&bytes).unwrap().0;
+        let before = model_bytes(&journal.events).unwrap();
+        assert_eq!(model_bytes(&back.events).unwrap(), before);
+        assert_eq!(replay(&before).unwrap(), back.events);
+        assert_eq!(derive(&back.events), derive(&journal.events));
+        assert!(back
+            .events
+            .iter()
+            .any(|node| node.role == Role::Assistant && node.text.is_empty()));
+    }
+
+    #[test]
+    fn every_flipped_byte_is_refused() {
+        let bytes = encode_journal(&a_rich_journal(), &[0; 32]).unwrap();
+        for index in 0..bytes.len() {
+            for bit in [0x01, 0x80] {
+                let mut flipped = bytes.clone();
+                flipped[index] ^= bit;
+                assert!(decode_journal(&flipped).is_err(), "byte {index} bit {bit}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_wrong_format_version_is_refused() {
+        let bytes = encode_journal(&two_turns(), &[0; 32]).unwrap();
+        for version in [0u16, 2, u16::MAX] {
+            let mut other = bytes.clone();
+            other[4..6].copy_from_slice(&version.to_le_bytes());
+            assert_eq!(decode_journal(&other).unwrap_err(), "format version");
+        }
+        let mut magic = bytes.clone();
+        magic[0] = b'X';
+        assert_eq!(decode_journal(&magic).unwrap_err(), "not a journal");
+    }
+
+    #[test]
+    fn every_truncation_is_refused() {
+        let bytes = encode_journal(&a_rich_journal(), &[0; 32]).unwrap();
+        for len in 0..bytes.len() {
+            assert_eq!(
+                decode_journal(&bytes[..len]).unwrap_err(),
+                "truncated",
+                "length {len}"
+            );
+        }
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert_eq!(decode_journal(&longer).unwrap_err(), "trailing bytes");
+    }
+
+    #[test]
+    fn node_zero_and_the_epoch_survive_a_round_trip() {
+        let journal = two_turns();
+        let back = decode_journal(&encode_journal(&journal, &[0; 32]).unwrap())
+            .unwrap()
+            .0;
+        assert_eq!(back.epoch, 1);
+        assert_eq!(back.events[0], journal.events[0]);
+        assert_eq!(back.events[0].text, SYSTEM_HEAD);
+        let mut compacted = a_rich_journal();
+        assert!(commit_compact(&mut compacted));
+        assert_eq!(compacted.epoch, 2);
+        let back = decode_journal(&encode_journal(&compacted, &[0; 32]).unwrap())
+            .unwrap()
+            .0;
+        assert_eq!(back.epoch, 2);
+        assert_eq!(back.events[0].text, SYSTEM_HEAD);
+        assert_eq!(back.events[0].source, NodeSource::Head);
+    }
+
+    #[test]
+    fn a_grant_is_never_stored() {
+        let mut journal = a_rich_journal();
+        let read = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
+        assert!(authorize(&mut journal, read, Some("fixture-grant")));
+        let standing = propose_read(&mut journal, "localhost://Users/self/Documents/other.txt");
+        assert!(apply_inbox(
+            &mut journal,
+            standing,
+            InboxAnswer::Standing,
+            Some("fixture-grant")
+        ));
+        let bytes = encode_journal(&journal, &[0; 32]).unwrap();
+        assert!(!bytes
+            .windows(b"fixture-grant".len())
+            .any(|window| window == b"fixture-grant"));
+        assert!(bytes
+            .windows(b"standing".len())
+            .any(|window| window == b"standing"));
+        let mut back = decode_journal(&bytes).unwrap().0;
+        assert_eq!(back, without_grants(&journal));
+        assert_ne!(back, journal);
+        assert!(back.steps.iter().all(|step| step.grant.is_none()));
+        assert_eq!(step_state(&back, read), Some(StepState::Prepared));
+        assert!(!dispatch(&mut back, read));
+        assert_eq!(step_state(&back, read), Some(StepState::Denied));
+    }
+
+    #[test]
+    fn a_journal_over_the_cap_is_refused() {
+        let mut journal = two_turns();
+        admit_user(&mut journal, &"x".repeat(JOURNAL_CAP));
+        assert_eq!(encode_journal(&journal, &[0; 32]), None);
+        assert_eq!(
+            decode_journal(&vec![0; JOURNAL_CAP + 1]).unwrap_err(),
+            "too large"
+        );
+        let mut near = two_turns();
+        admit_user(&mut near, &"x".repeat(JOURNAL_CAP - 4096));
+        let bytes = encode_journal(&near, &[0; 32]).unwrap();
+        assert!(bytes.len() <= JOURNAL_CAP);
+        assert_eq!(decode_journal(&bytes).unwrap().0, near);
+    }
+
+    #[test]
+    fn the_previous_head_links_two_versions() {
+        let mut journal = two_turns();
+        let first = encode_journal(&journal, &[0; 32]).unwrap();
+        let (_, _, first_head) = decode_journal(&first).unwrap();
+        admit_user(&mut journal, "third turn");
+        let second = encode_journal(&journal, &first_head).unwrap();
+        let (back, prev, second_head) = decode_journal(&second).unwrap();
+        assert_eq!(prev, first_head);
+        assert_ne!(second_head, first_head);
+        assert_eq!(back, journal);
     }
 
     #[test]
