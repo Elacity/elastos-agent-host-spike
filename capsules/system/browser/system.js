@@ -390,7 +390,13 @@ function hasShellAccess() {
 async function refreshSystemSummary() {
   if (systemSummaryInFlight) return systemSummaryInFlight;
   systemSummaryInFlight = (async () => {
-    const systemSummary = await fetchRuntimeUpdateJson({ headers: shellHeaders() });
+    let systemSummary;
+    try {
+      systemSummary = await fetchRuntimeUpdateJson({ headers: shellHeaders() });
+    } catch (error) {
+      if (runtimeUpdateActive) showCommunityUnavailable(error);
+      throw error;
+    }
     if (runtimeUpdateActive) {
       renderSystemSummary(systemSummary);
       await refreshCommunityMembership();
@@ -729,10 +735,16 @@ async function refreshCommunityMembership() {
     renderCommunityMembership(await fetchRuntimeUpdateJson({ headers: shellHeaders() }, "/api/apps/system/community"));
     setHiddenFields("community-status", true);
   } catch (error) {
-    if (communityButton) communityButton.disabled = true;
-    setTextFields("community-status", publicSystemError(error, "Community setting is unavailable."));
-    setHiddenFields("community-status", false);
+    showCommunityUnavailable(error);
   }
+}
+
+// A failed read is shown, not hidden: only a Home without Community hides it.
+function showCommunityUnavailable(error) {
+  if (communityButton) communityButton.disabled = true;
+  if (communitySection) communitySection.hidden = false;
+  setTextFields("community-status", publicSystemError(error, "Community setting is unavailable."));
+  setHiddenFields("community-status", false);
 }
 
 async function updateCommunityMembership() {
@@ -821,6 +833,8 @@ async function refreshCommunityPresence() {
     setHiddenFields("community-presence-status", true);
   } catch (error) {
     setCommunityPresenceOptions(null, true);
+    if (communitySection) communitySection.hidden = false;
+    if (communityPresenceRow) communityPresenceRow.hidden = false;
     setTextFields("community-presence-status", publicSystemError(error, "Community setting is unavailable."));
     setHiddenFields("community-presence-status", false);
   }
