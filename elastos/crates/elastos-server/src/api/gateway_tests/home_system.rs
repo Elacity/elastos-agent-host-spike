@@ -770,7 +770,11 @@ async fn test_home_cli_terminal_developer_mode_policy_matrix() {
             for authority in [&owner, &guest] {
                 let token =
                     app_token_for_authority(dir.path(), HOME_CLI_CAPSULE_ID_FOR_TEST, authority);
-                if developer_mode && !registration_enabled {
+                // `elastos home` runs as the host user: guests never get it (#405).
+                if developer_mode
+                    && !registration_enabled
+                    && authority.principal_id == owner.principal_id
+                {
                     let contract = app
                         .clone()
                         .oneshot(
@@ -786,6 +790,27 @@ async fn test_home_cli_terminal_developer_mode_policy_matrix() {
                     continue;
                 }
                 assert_terminal_routes_refused(&app, &token).await;
+                if developer_mode && !registration_enabled {
+                    let refused = app
+                        .clone()
+                        .oneshot(
+                            test_browser_request("localhost:61180", "null")
+                                .method("POST")
+                                .uri("/api/apps/home-cli/terminal/sessions")
+                                .header("x-elastos-home-token", &token)
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    let body = axum::body::to_bytes(refused.into_body(), usize::MAX)
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        String::from_utf8_lossy(&body),
+                        "Only the Home owner can use the web terminal."
+                    );
+                }
             }
         }
     }
@@ -793,8 +818,9 @@ async fn test_home_cli_terminal_developer_mode_policy_matrix() {
     assert!(!marker.exists(), "a refused request started a host process");
 
     // The same command fixture must start when the policy permits the owner.
-    // Then each policy switch must close the existing process as well.
-    for enable_registration in [false, true] {
+    // Then each policy switch, and demoting the owner, must close the existing
+    // process as well.
+    for switch in ["developer mode off", "registration on", "owner demoted"] {
         let dir = tempfile::tempdir().unwrap();
         let owner = passkey_authority(dir.path());
         std::fs::write(dir.path().join("config.toml"), "developer_mode = true\n").unwrap();
@@ -828,11 +854,36 @@ async fn test_home_cli_terminal_developer_mode_policy_matrix() {
         })
         .await
         .unwrap();
-        if enable_registration {
-            crate::auth::set_guest_registration_enabled(dir.path(), true, crate::auth::now_ts())
+        match switch {
+            "developer mode off" => {
+                std::fs::write(dir.path().join("config.toml"), "developer_mode = false\n").unwrap();
+            }
+            "registration on" => {
+                crate::auth::set_guest_registration_enabled(
+                    dir.path(),
+                    true,
+                    crate::auth::now_ts(),
+                )
                 .unwrap();
-        } else {
-            std::fs::write(dir.path().join("config.toml"), "developer_mode = false\n").unwrap();
+            }
+            _ => {
+                // Another admin keeps the Home owned, so only the demotion
+                // closes the terminal.
+                passkey_authority_with_profile_role_credential(
+                    dir.path(),
+                    "Other admin",
+                    crate::auth::RuntimePrincipalRole::Admin,
+                    "other-terminal-admin",
+                );
+                let mut auth = crate::auth::load_auth_state(dir.path()).unwrap();
+                auth.principals
+                    .iter_mut()
+                    .find(|entry| entry.principal_id == owner.principal_id)
+                    .unwrap()
+                    .role = crate::auth::RuntimePrincipalRole::Guest;
+                crate::auth::save_auth_state(dir.path(), &auth).unwrap();
+                assert!(home_terminal_policy_allows(dir.path()));
+            }
         }
         assert_terminal_routes_refused(&app, &token).await;
         tokio::time::timeout(Duration::from_secs(3), async {
