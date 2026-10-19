@@ -122,7 +122,7 @@ impl CollaborationChatProductPort {
             } else if connected {
                 "Community is connected.".to_string()
             } else if self.community_recovery_exhausted.load(Ordering::Relaxed) {
-                "Community cannot connect. Restart Home to reconnect.".to_string()
+                "Community can't connect. Restart Home to reconnect.".to_string()
             } else {
                 "Community is unreachable. Retained messages stay available.".to_string()
             }),
@@ -989,7 +989,7 @@ mod tests {
         let exhausted = serde_json::to_value(other_port.conversation_transport_view()).unwrap();
         assert_eq!(
             exhausted["status"],
-            "Community cannot connect. Restart Home to reconnect."
+            "Community can't connect. Restart Home to reconnect."
         );
         assert_eq!(exhausted["configured"], true);
         assert_eq!(exhausted["available"], false);

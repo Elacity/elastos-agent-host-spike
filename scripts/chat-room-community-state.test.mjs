@@ -84,6 +84,22 @@ test("joined but unreachable shows the failure and blocks Community Send", () =>
   assert.deepEqual(chat.submits, []);
 });
 
+test("exhausted recovery shows Home restart guidance and keeps Direct controls", () => {
+  const chat = loadChat();
+  chat.render("recovery_exhausted", true, true);
+  checkState(chat, "recovery_exhausted", "Community can't connect. Restart Home to reconnect.", false);
+  chat.pressEnter();
+  assert.deepEqual(chat.submits, []);
+  chat.input.disabled = false;
+  chat.send.disabled = false;
+  chat.render("recovery_exhausted", false, true);
+  assert.equal(chat.input.disabled, false);
+  assert.equal(chat.send.disabled, false);
+  assert.equal(chat.status.hidden, false);
+  chat.render("live", true, true);
+  checkState(chat, "live", "Community live", true);
+});
+
 test("live enables one Enter submission while the base Send guard still applies", () => {
   const chat = loadChat();
   chat.render("live", true, true);

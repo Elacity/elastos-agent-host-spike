@@ -92,9 +92,9 @@ bootstrap Runtime without people, as the release does:
 ### Community stays unreachable after the Community node comes back
 
 A Home that kept running while the bootstrap Runtime was down, with no other
-Home connected, can show **Community unreachable** for up to about five
-minutes after the bootstrap is back. Reopening Chat does not help; the Home
-recovers by itself.
+Home connected, can show **Community unreachable** after the bootstrap is
+back, until its next repair. Home usually recovers by itself; when Chat says
+**Community can't connect. Restart Home to reconnect.**, restart Home.
 
 This is a known iroh-gossip 0.101.0 issue. Upstream
 [n0-computer/iroh-gossip#161](https://github.com/n0-computer/iroh-gossip/pull/161)
@@ -110,11 +110,19 @@ peer every second with no further `start to dial`.
 Runtime's Community link watchdog clears it. A joined Home with no Community
 peer for 60 seconds leaves and rejoins the Community topic; a minute later it
 replaces its Carrier gossip actor, and it keeps repairing while no peer
-returns, waiting twice as long each time up to five minutes. A Home replaces
-its gossip actor at most six times per start (each replacement leaves a small
-address lookup behind in iroh); after that it only rejoins, and restarting
-Home allows replacements again. A quiet Community with a peer listed is left
-alone. The Home's log names each step (`Community link looks dead`,
+returns, waiting twice as long each time up to five minutes, then fifteen
+minutes after six replacements in one outage. While Home has no peer, a
+change in its host address set that holds for ten seconds brings the next
+replacement forward. Loopback, unspecified and link-local addresses do not
+count; repairs stay at least a minute apart. Each process requests at most
+120 replacements. Runtime counts each request before it sends it and keeps
+the count if a request fails or times out, a peer returns, or the user leaves
+Community. Each replacement leaves an iroh address lookup and its task behind.
+After the cap, Home only rejoins; a new outage's rejoin wait grows to five
+minutes. Chat then says **Community can't connect. Restart Home to reconnect.**
+while Community is unreachable. Restarting Home allows replacements again.
+A quiet Community with a peer listed is left alone. The Home's log names each
+step (`Community link looks dead`,
 `rebuilding Carrier gossip`, `rebuilds are capped`, `Community link
 recovered`). A bootstrap Runtime never runs these steps.
 

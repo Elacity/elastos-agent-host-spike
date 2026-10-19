@@ -42,6 +42,14 @@ const COMMUNITY_ADDRESS_STABILITY: Duration = Duration::from_secs(10);
 
 pub(crate) type CommunityHostAddresses = BTreeSet<IpAddr>;
 
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+fn is_community_host_address(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => !ip.is_loopback() && !ip.is_unspecified() && !ip.is_link_local(),
+        IpAddr::V6(ip) => !ip.is_loopback() && !ip.is_unspecified() && !ip.is_unicast_link_local(),
+    }
+}
+
 /// Runtime samples host interfaces as a repair hint, not as connectivity proof.
 /// Unsupported hosts and enumeration failures keep the scheduled repair path.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -85,7 +93,7 @@ fn community_host_addresses() -> Option<CommunityHostAddresses> {
                 }
                 _ => None,
             };
-            if let Some(ip) = ip.filter(|ip| !ip.is_loopback() && !ip.is_unspecified()) {
+            if let Some(ip) = ip.filter(is_community_host_address) {
                 addresses.insert(ip);
             }
         }
@@ -651,8 +659,10 @@ impl CommunityLinkWatchdog {
         let wait = if self.outage_rebuilds >= COMMUNITY_OUTAGE_FAST_REBUILDS {
             COMMUNITY_LONG_OUTAGE_RETRY
         } else {
+            // Rejoin-only repairs after the lifetime cap keep backing off.
+            let doublings = self.outage_rebuilds.max(self.steps.saturating_sub(1));
             self.silence
-                .saturating_mul(1 << self.outage_rebuilds.min(8))
+                .saturating_mul(1 << doublings.min(8))
                 .min(MAX_COMMUNITY_LINK_RETRY)
         };
         let anchor = match (self.steps, self.last_step_at) {
@@ -824,6 +834,91 @@ mod tests {
             peer_count: 1,
             received_frames: 0,
         })
+    }
+
+    #[test]
+    fn community_link_host_addresses_exclude_link_local_offline_samples() {
+        let filtered = |addresses: &[&str]| {
+            Some(
+                addresses
+                    .iter()
+                    .map(|address| address.parse::<IpAddr>().unwrap())
+                    .filter(is_community_host_address)
+                    .collect::<CommunityHostAddresses>(),
+            )
+        };
+        let offline = [
+            "127.0.0.1",
+            "0.0.0.0",
+            "169.254.1.2",
+            "::1",
+            "::",
+            "fe80::1",
+            "febf::1",
+        ];
+        assert_eq!(filtered(&offline), host_addresses(&[]));
+        let online = ["10.0.0.1", "192.0.2.1", "2001:db8::1", "fd00::1"];
+        assert_eq!(filtered(&online), host_addresses(&online));
+
+        let mut watchdog = CommunityLinkWatchdog::new(COMMUNITY_LINK_SILENCE);
+        let start = Instant::now();
+        assert_eq!(
+            watchdog.observe(healthy_link(), filtered(&online), start),
+            None
+        );
+        for second in (5..=20).step_by(5) {
+            assert_eq!(
+                watchdog.observe(
+                    None,
+                    filtered(&offline),
+                    start + Duration::from_secs(second)
+                ),
+                None
+            );
+        }
+        for second in [25, 30] {
+            assert_eq!(
+                watchdog.observe(None, filtered(&online), start + Duration::from_secs(second)),
+                None
+            );
+        }
+        assert_eq!(
+            watchdog.observe(None, filtered(&online), start + Duration::from_secs(35)),
+            Some(CommunityLinkStep::Rebuild)
+        );
+        assert_eq!(
+            watchdog.rebuilds, 1,
+            "only stable network restoration spends a request"
+        );
+    }
+
+    #[test]
+    fn community_link_watchdog_rejoin_only_after_cap_backs_off_in_each_new_outage() {
+        let mut watchdog = CommunityLinkWatchdog::new(COMMUNITY_LINK_SILENCE);
+        watchdog.rebuilds = MAX_COMMUNITY_GOSSIP_REBUILDS;
+        let start = Instant::now();
+        for outage_start in [0, 1200] {
+            let mut steps = Vec::new();
+            for second in (0..=1080).step_by(5) {
+                let now = start + Duration::from_secs(outage_start + second);
+                if let Some(step) = watchdog.observe(None, None, now) {
+                    steps.push((step, second));
+                    watchdog.step_finished(now);
+                }
+            }
+            assert_eq!(
+                steps,
+                [60, 120, 240, 480, 780, 1080].map(|second| (CommunityLinkStep::Rejoin, second))
+            );
+            assert_eq!(watchdog.rebuilds, MAX_COMMUNITY_GOSSIP_REBUILDS);
+            assert!(watchdog.recovery_exhausted());
+            watchdog.observe(
+                healthy_link(),
+                None,
+                start + Duration::from_secs(outage_start + 1085),
+            );
+            assert!(!watchdog.recovery_exhausted());
+        }
     }
 
     #[test]

@@ -78,6 +78,7 @@ enum CommunityState {
     NotJoined,
     Left,
     JoinedUnreachable,
+    RecoveryExhausted,
     Live,
 }
 
@@ -87,6 +88,7 @@ impl CommunityState {
             Self::NotJoined => "not_joined",
             Self::Left => "left",
             Self::JoinedUnreachable => "joined_unreachable",
+            Self::RecoveryExhausted => "recovery_exhausted",
             Self::Live => "live",
         }
     }
@@ -96,6 +98,7 @@ impl CommunityState {
             Self::NotJoined => "Not joined",
             Self::Left => "Left Community",
             Self::JoinedUnreachable => "Community unreachable",
+            Self::RecoveryExhausted => "Community can't connect. Restart Home to reconnect.",
             Self::Live => "Live",
         }
     }
@@ -522,6 +525,11 @@ impl RoomTransportView {
     fn community_state(&self) -> CommunityState {
         match (self.configured, self.community_joined, self.available) {
             (true, Some(false), _) => CommunityState::Left,
+            (true, Some(true), false)
+                if self.status.as_deref() == Some(CommunityState::RecoveryExhausted.label()) =>
+            {
+                CommunityState::RecoveryExhausted
+            }
             (true, Some(true), false) => CommunityState::JoinedUnreachable,
             (true, Some(true), true) => CommunityState::Live,
             _ => CommunityState::NotJoined,
@@ -6743,6 +6751,64 @@ mod tests {
                 let projection = render_projection(&shared, shell_mode);
                 assert!(!projection.direct_mode);
             }
+        }
+    }
+
+    #[test]
+    fn exhausted_runtime_poll_and_summary_show_restart_guidance_in_home() {
+        let mut state = two_direct_conversations();
+        state.session_active = true;
+        state
+            .drafts
+            .insert(None, ("Keep my Community draft".into(), 1));
+        state.direct.selected_conversation_id = Some("direct:sha256:a".into());
+        let direct = state.direct.clone();
+        let drafts = state.drafts.clone();
+        let detail = "Community can't connect. Restart Home to reconnect.";
+        let mut poll = shared_poll(0);
+        poll.transport = serde_json::from_value(serde_json::json!({
+            "configured": true,
+            "available": false,
+            "community_joined": true,
+            "status": detail
+        }))
+        .unwrap();
+        let mut transport = poll.transport.clone();
+        apply_active_poll_state(&mut state, poll);
+        assert_eq!(state.community_state, CommunityState::RecoveryExhausted);
+        assert_eq!(state.community_state.as_str(), "recovery_exhausted");
+        assert_eq!(state.community_state.label(), detail);
+        assert_eq!(state.status_badge, detail);
+        assert_eq!(state.status_detail, detail);
+        assert!(!state.community_send_enabled());
+        assert_eq!(state.direct, direct);
+        assert_eq!(state.drafts, drafts);
+        assert!(render_projection(&state, true).direct_mode);
+
+        // Runtime membership and availability keep priority over status copy.
+        for (configured, available, joined, expected) in [
+            (true, true, Some(true), CommunityState::Live),
+            (true, false, Some(false), CommunityState::Left),
+            (false, false, None, CommunityState::NotJoined),
+            (true, false, Some(true), CommunityState::RecoveryExhausted),
+        ] {
+            transport.configured = configured;
+            transport.available = available;
+            transport.community_joined = joined;
+            let mut summary: SummaryView = serde_json::from_value(serde_json::json!({
+                "room_slug": "chat-room", "pending_count": 0, "active_session_count": 1
+            }))
+            .unwrap();
+            summary.transport = transport.clone();
+            super::apply_summary_state(&mut state, &summary, AccessMode::Shell);
+            assert_eq!(state.community_state, expected);
+            assert_eq!(state.status_badge, expected.label());
+            assert_eq!(
+                state.community_send_enabled(),
+                expected == CommunityState::Live
+            );
+            assert_eq!(state.direct, direct);
+            assert_eq!(state.drafts, drafts);
         }
     }
 

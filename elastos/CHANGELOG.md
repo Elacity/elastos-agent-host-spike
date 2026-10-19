@@ -55,10 +55,17 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   Home that has had no Community peer for 60 seconds, whatever stalled it: it
   rejoins the topic, then replaces Carrier's gossip actor a minute later, and
   keeps repairing while no peer returns, waiting twice as long each time up to
-  five minutes. It replaces the actor at most six times per process
-  (`MAX_COMMUNITY_GOSSIP_REBUILDS`; each replacement leaves an iroh address
-  lookup behind), then only rejoins. A quiet Community with a peer listed and
-  a bootstrap node never get a step. Carrier's Runtime-only
+  five minutes, then fifteen minutes after six replacements in one outage.
+  While Home has no peer, a change in its host address set that holds for ten
+  seconds brings the next replacement forward; loopback, unspecified and
+  link-local addresses do not count, and repairs stay at least a minute apart.
+  A process requests at most 120 replacements (`MAX_COMMUNITY_GOSSIP_REBUILDS`;
+  counted before each request and never returned; each leaves an iroh address
+  lookup and its task behind), then only rejoins. Peer recovery and leaving
+  Community preserve that lifetime count. After the cap, a new outage's
+  rejoin wait grows to five minutes, and an unreachable Community tells the
+  user to restart Home (#451). A quiet Community with a
+  peer listed and a bootstrap node never get a step. Carrier's Runtime-only
   `gossip_topic_health`, `gossip_rejoin` and `gossip_rebuild` operations carry
   it, and Carrier shutdown no longer waits forever on a stalled gossip actor.
 - `scripts/release-publish.sh` publishes a final version `X.Y.Z` on `stable`

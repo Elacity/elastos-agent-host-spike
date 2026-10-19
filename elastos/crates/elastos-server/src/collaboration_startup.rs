@@ -629,7 +629,7 @@ async fn run_community_link_watchdog<L: CommunityLink>(
                         reason,
                         received_frames,
                         silence_secs,
-                        "Community link still dead after a rejoin; rebuilding Carrier gossip"
+                        "Community link has no peer; rebuilding Carrier gossip"
                     );
                     match tokio::time::timeout(COMMUNITY_LINK_STEP_TIMEOUT, link.rebuild_gossip())
                         .await
@@ -3805,7 +3805,7 @@ mod tests {
             *statuses.lock().unwrap(),
             [
                 "Community is unreachable. Retained messages stay available.",
-                "Community cannot connect. Restart Home to reconnect.",
+                "Community can't connect. Restart Home to reconnect.",
                 "Community is unreachable. Retained messages stay available.",
             ]
         );
