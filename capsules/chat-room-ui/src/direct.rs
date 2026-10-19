@@ -104,6 +104,34 @@ pub(super) fn terminal_retry_detail(code: Option<&str>) -> Option<&'static str> 
     }
 }
 
+/// How long a sent direct message stays "Sending" before Chat explains it.
+/// The Runtime retries pending envelopes every 15 seconds, up to four per pass
+/// (`DIRECT_SYNC_CADENCE_SECS`, `retry_pending`), so after a minute the first
+/// automatic retries have already failed.
+pub(super) const PENDING_NOTE_AFTER_SECS: u64 = 60;
+
+/// The note under an outgoing direct message that is still pending: shown once
+/// it has been pending for `PENDING_NOTE_AFTER_SECS`, or after a manual Retry
+/// (with when it ran). The Runtime keeps retrying until the envelope's 24-hour
+/// lifetime ends, while it runs; Chat cannot know why a peer is unreachable.
+pub(super) fn pending_delivery_note(
+    state: DirectDeliveryState,
+    created_at: u64,
+    now: u64,
+    retried_at: Option<&str>,
+) -> Option<String> {
+    if state != DirectDeliveryState::Pending
+        || (retried_at.is_none() && now.saturating_sub(created_at) < PENDING_NOTE_AFTER_SECS)
+    {
+        return None;
+    }
+    let note = "Not delivered yet. Your Home keeps trying while it is on, for up to 24 hours.";
+    Some(match retried_at {
+        Some(time) => format!("{note} Tried again at {time}."),
+        None => note.to_string(),
+    })
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum DirectSendStatus {
@@ -378,6 +406,40 @@ mod tests {
             DirectDeliveryState::Expired
         );
         assert_eq!(state.messages[0].delivery_state.label(), "Expired");
+    }
+
+    #[test]
+    fn pending_note_appears_after_the_first_automatic_retries_or_a_manual_retry() {
+        let sent = 1_000;
+        let threshold = sent + PENDING_NOTE_AFTER_SECS;
+        let pending = DirectDeliveryState::Pending;
+        assert_eq!(pending_delivery_note(pending, sent, sent, None), None);
+        assert_eq!(
+            pending_delivery_note(pending, sent, threshold - 1, None),
+            None
+        );
+        let note = pending_delivery_note(pending, sent, threshold, None).unwrap();
+        assert_eq!(
+            note,
+            "Not delivered yet. Your Home keeps trying while it is on, for up to 24 hours."
+        );
+        // A manual Retry shows when it ran, even before the threshold.
+        assert_eq!(
+            pending_delivery_note(pending, sent, sent + 5, Some("14:03")).unwrap(),
+            format!("{note} Tried again at 14:03.")
+        );
+        // A clock behind the send time never shows the note early.
+        assert_eq!(pending_delivery_note(pending, sent, sent - 500, None), None);
+        for settled in [
+            DirectDeliveryState::Received,
+            DirectDeliveryState::ReceiptSettled,
+            DirectDeliveryState::Expired,
+        ] {
+            assert_eq!(
+                pending_delivery_note(settled, sent, sent + 3_600, Some("14:03")),
+                None
+            );
+        }
     }
 
     #[test]

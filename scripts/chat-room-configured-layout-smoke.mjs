@@ -561,7 +561,7 @@ function startServer(scenario) {
         }
         if (retryScenario) {
           const outgoing = { message_id:"message:retry-original", request_id:"chat-message:original",
-            direction:"outgoing", text:"Original pending text", created_at:1_725_000_000,
+            direction:"outgoing", text:"Original pending text", created_at:trace.retryCreatedAt ??= Math.floor(Date.now() / 1000),
             delivery_state:trace.retryMode === "settled" ? "receipt_settled" : "pending" };
           return json(response, { conversation_id:directConversation().conversation_id,
             messages:[outgoing, ...(trace.sentAgain ? [trace.sentAgain] : [])] });
@@ -1247,6 +1247,14 @@ async function runScenario(scenario) {
       const original = frame.locator('[data-direct-message-id="message:retry-original"]');
       await original.locator('[data-direct-action="retry"]').waitFor({ state:"visible" });
       assert((await original.innerText()).includes("Sending"), "pending delivery copy is inaccurate");
+      // The note waits for the first automatic retries (60 s after sending);
+      // the fixture ages the message instead of waiting.
+      const pendingNote = "Not delivered yet. Your Home keeps trying while it is on, for up to 24 hours.";
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 1500));
+      assert(!(await original.innerText()).includes(pendingNote), "the pending note appeared before 60 seconds");
+      trace.retryCreatedAt -= 61;
+      await frame.waitForFunction(note => document.querySelector('[data-direct-message-id="message:retry-original"]')?.textContent.includes(note), pendingNote);
+      assert((await original.innerText()).includes("Sending"), "the pending note replaced the Sending label");
       const draft = "Keep my current draft while retrying a different message";
       await frame.locator("#message-input").fill(draft);
       await original.locator('[data-direct-action="retry"]').click();
@@ -1254,7 +1262,8 @@ async function runScenario(scenario) {
       if (holds.retry) {
         await frame.waitForFunction(() => document.querySelector('[data-direct-message-id="message:retry-original"]')?.textContent.includes("Sending"));
         assert(await frame.locator("#send-button").isDisabled()
-          && await original.locator('[data-direct-action="retry"]').isDisabled(), "in-flight send controls permit duplicate intent");
+          && await original.locator('[data-direct-action="retry"]').isDisabled()
+          && await original.locator('[data-direct-action="retry"]').innerText() === "Trying again", "in-flight Retry gives no feedback or permits duplicate intent");
         await clickSharedChoice(frame);
         await frame.locator("#message-input").fill("Different Community draft");
         holds.retry.release();
@@ -1269,6 +1278,7 @@ async function runScenario(scenario) {
         const text = await original.innerText();
         assert(text.includes("Delivery is unconfirmed") && text.includes(scenario === "direct-retry-terminal" ? "24-hour" : "unavailable"),
           "terminal refusal lacks honest recovery explanation", text);
+        assert(!text.includes(pendingNote), "a terminal message still shows the pending note", text);
         assert(await frame.locator("#message-input").inputValue() === draft, "terminal refusal changed the composer");
         await original.locator('[data-direct-action="send-again"]').click();
         await frame.locator('[data-direct-message-id="message:retry-new"]').waitFor({ state:"visible" });

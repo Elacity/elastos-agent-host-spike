@@ -19,7 +19,7 @@ use web_sys::{
 mod direct;
 
 use direct::{
-    apply_direct_messages, encode_path_segment, pending_direct_request_id,
+    apply_direct_messages, encode_path_segment, pending_delivery_note, pending_direct_request_id,
     remove_unavailable_conversation, requested_conversation_decision, selected_conversation,
     should_clear_polled_transient_error, terminal_retry_detail, valid_direct_send_response,
     DirectConversationList, DirectDeliveryState, DirectMessageDirection, DirectMessageList,
@@ -163,6 +163,8 @@ struct AppState {
     /// Action state is ephemeral. Runtime owns signed intent and delivery truth.
     direct_in_flight: BTreeMap<String, String>,
     direct_retry_terminal: BTreeMap<String, String>,
+    /// When a manual Retry of a pending message was last accepted.
+    direct_retried_at: BTreeMap<String, u64>,
     direct_send_again: BTreeMap<String, PendingDirectSend>,
 }
 
@@ -2948,10 +2950,16 @@ impl App {
                         .direct_send_again
                         .remove(original_request_id);
                 }
-                self.state
-                    .borrow_mut()
-                    .direct_retry_terminal
-                    .remove(original_request_id);
+                {
+                    let mut state = self.state.borrow_mut();
+                    state.direct_retry_terminal.remove(original_request_id);
+                    if !send_again {
+                        state.direct_retried_at.insert(
+                            original_request_id.to_string(),
+                            (js_sys::Date::now() / 1000.0) as u64,
+                        );
+                    }
+                }
                 let _ = self.refresh_direct_messages_for_guard(&guard).await;
                 Ok(())
             }
@@ -4308,10 +4316,22 @@ impl App {
                             (message.delivery_state == DirectDeliveryState::Expired)
                                 .then(|| terminal_retry_detail(Some("retry_expired")).unwrap())
                         });
-                    if let Some(detail) = terminal {
+                    let pending_note = terminal.is_none().then(|| {
+                        pending_delivery_note(
+                            message.delivery_state,
+                            message.created_at,
+                            (js_sys::Date::now() / 1000.0) as u64,
+                            state
+                                .direct_retried_at
+                                .get(request_id)
+                                .map(|at| format_time(*at))
+                                .as_deref(),
+                        )
+                    });
+                    if let Some(detail) = terminal.map(str::to_string).or(pending_note.flatten()) {
                         let note = self.document.create_element("p")?;
                         note.set_class_name("message-meta");
-                        note.set_text_content(Some(detail));
+                        note.set_text_content(Some(&detail));
                         item.append_child(&note)?;
                     }
                     let action = self
@@ -4330,6 +4350,8 @@ impl App {
                     action.set_attribute("data-request-id", request_id)?;
                     action.set_text_content(Some(if terminal.is_some() {
                         "Send again"
+                    } else if state.direct_in_flight.contains_key(request_id) {
+                        "Trying again"
                     } else {
                         "Retry"
                     }));
@@ -5728,6 +5750,7 @@ fn load_state(session_storage: Option<&Storage>, config: &AppConfig) -> AppState
         community_presence: None,
         direct_in_flight: BTreeMap::new(),
         direct_retry_terminal: BTreeMap::new(),
+        direct_retried_at: BTreeMap::new(),
         direct_send_again: BTreeMap::new(),
         error_text: None,
     }
