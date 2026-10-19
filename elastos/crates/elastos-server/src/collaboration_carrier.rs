@@ -972,6 +972,10 @@ mod tests {
 
     #[test]
     fn community_link_watchdog_caps_address_and_timer_requests_without_refunds() {
+        assert_eq!(
+            MAX_COMMUNITY_GOSSIP_REBUILDS, 120,
+            "the lifetime request policy is explicit"
+        );
         let mut watchdog = CommunityLinkWatchdog::new(COMMUNITY_LINK_SILENCE);
         let start = Instant::now();
         let mut count = 0;
