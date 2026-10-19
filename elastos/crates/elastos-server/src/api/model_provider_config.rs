@@ -1899,6 +1899,90 @@ fn read_model_provider_private_file(
     Ok(bytes)
 }
 
+#[cfg(all(test, unix))]
+mod hosted_decision_write_fault_tests {
+    #[tokio::test]
+    async fn decision_writer_reports_post_rename_durability_failure() {
+        const CHILD: &str = "ELASTOS_TEST_HOSTED_POST_RENAME_FAULT";
+        if std::env::var_os(CHILD).is_none() {
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "decision_writer_reports_post_rename_durability_failure",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .kill_on_drop(true);
+            let output = tokio::time::timeout(std::time::Duration::from_secs(30), child.output())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated post-rename control failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        struct RestoreDescriptorLimit(libc::rlimit);
+        impl Drop for RestoreDescriptorLimit {
+            fn drop(&mut self) {
+                assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &self.0) }, 0);
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        super::seed_model_provider_operator_offers_for_test(dir.path(), vec![]).unwrap();
+        super::write_hosted_egress_decisions(dir.path(), b"before").unwrap();
+        let mut original = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut original) },
+            0
+        );
+        let limit = libc::rlimit {
+            rlim_cur: original.rlim_cur.min(64),
+            rlim_max: original.rlim_max,
+        };
+        let restore = RestoreDescriptorLimit(original);
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+        let mut files = Vec::new();
+        let exhausted = loop {
+            match std::fs::File::open("/dev/null") {
+                Ok(file) => {
+                    files.push(file);
+                    assert!(files.len() <= 64, "descriptor fault control stays bounded");
+                }
+                Err(error) => break error,
+            }
+        };
+        assert_eq!(exhausted.raw_os_error(), Some(libc::EMFILE));
+        drop(files.pop().unwrap()); // Leave one slot for the staged file.
+        let result = super::write_hosted_egress_decisions(dir.path(), b"after");
+        drop(files);
+        drop(restore);
+        let error = result.unwrap_err();
+        assert_eq!(
+            error
+                .root_cause()
+                .downcast_ref::<std::io::Error>()
+                .and_then(std::io::Error::raw_os_error),
+            Some(libc::EMFILE)
+        );
+        // Record the existing boundary: replacement is visible while the
+        // directory sync could not confirm durability. Security review owns
+        // the commit/uncertainty result before the writer contract changes.
+        assert_eq!(
+            super::read_hosted_egress_decisions(dir.path())
+                .unwrap()
+                .unwrap(),
+            b"after"
+        );
+    }
+}
+
 #[cfg(test)]
 mod hosted_hint_tests {
     use super::{

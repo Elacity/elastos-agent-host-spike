@@ -1902,12 +1902,35 @@ async fn owner_inbox_end_keeps_competing_decision_from_cancelling_without_commit
 #[cfg(unix)]
 #[tokio::test]
 async fn owner_end_failed_save_preserves_admission_and_saved_connection() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    struct RestorePermissions(std::path::PathBuf, std::fs::Permissions);
-    impl Drop for RestorePermissions {
+    const CHILD: &str = "ELASTOS_TEST_HOSTED_DECISION_WRITE_FAULT";
+    if std::env::var_os(CHILD).is_none() {
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "owner_end_failed_save_preserves_admission_and_saved_connection",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(std::time::Duration::from_secs(30), child.output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated write-fault control failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    struct RestoreFileLimit(libc::rlimit, libc::sighandler_t);
+    impl Drop for RestoreFileLimit {
         fn drop(&mut self) {
-            std::fs::set_permissions(&self.0, self.1.clone()).unwrap();
+            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &self.0) }, 0);
+            unsafe {
+                libc::signal(libc::SIGXFSZ, self.1);
+            }
         }
     }
 
@@ -1958,12 +1981,41 @@ async fn owner_end_failed_save_preserves_admission_and_saved_connection() {
                 .await;
         let app = gateway_router(test_state(dir.path()));
         let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &authority);
-        let provider_dir = dir.path().join("providers/model-provider");
         let restore = if fail_write {
-            let permissions = std::fs::metadata(&provider_dir).unwrap().permissions();
-            std::fs::set_permissions(&provider_dir, std::fs::Permissions::from_mode(0o500))
+            let mut original = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            assert_eq!(
+                unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut original) },
+                0
+            );
+            let limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: original.rlim_max,
+            };
+            let signal = unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
+            assert_ne!(signal, libc::SIG_ERR);
+            let restore = RestoreFileLimit(original, signal);
+            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limit) }, 0);
+            // Keep valid owner metadata and prove that the real decision writer
+            // reaches a refused write, before asking the Inbox handler to End.
+            let bytes = crate::api::model_provider_config::read_hosted_egress_decisions(dir.path())
+                .unwrap()
                 .unwrap();
-            Some(RestorePermissions(provider_dir, permissions))
+            let error = crate::api::model_provider_config::write_hosted_egress_decisions(
+                dir.path(),
+                &bytes,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error
+                    .root_cause()
+                    .downcast_ref::<std::io::Error>()
+                    .and_then(std::io::Error::raw_os_error),
+                Some(libc::EFBIG)
+            );
+            Some(restore)
         } else {
             None
         };
