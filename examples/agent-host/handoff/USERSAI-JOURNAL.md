@@ -37,6 +37,7 @@ trailer  head [32]
 
 - `link_0 = sha256(header)`. For each record, `link_i = sha256(link_(i-1) | tag | len | payload)`, and the record stores `link_i`. Every record is hash-linked to the one before it. The trailer `head` equals the last link (or `link_0` with no records).
 - A change to any byte breaks either the format check or the chain.
+- **The chain detects corruption, not tampering.** It is plain SHA-256 with no key, so anyone who can write the object can recompute every link. Protection against a hostile writer comes from the Runtime: the object sits in the agent principal's owner-only root, and only the Runtime writes it, by compare-and-swap. For bytes that are re-linked but malformed, decode also refuses non-canonical input on its own: tags out of order, a bool that is not 0 or 1, an absent option with a non-zero value, or a backup or pending record without its flag.
 - Record tags must come in this order, never decreasing:
   - 1 model event
   - 2 marker
@@ -84,6 +85,8 @@ trailer  head [32]
 - `node_zero_and_the_epoch_survive_a_round_trip`: before and after compaction (epoch 1, then 2).
 - `a_grant_is_never_stored`: the grant string is not in the bytes, a decoded step has no grant, and a decoded Prepared step is Denied at dispatch.
 - `a_journal_over_the_cap_is_refused`: both encode and decode.
+- `the_cap_holds_at_the_last_byte`: exactly 256 KiB encodes and decodes; one byte more is refused.
+- `a_relinked_but_malformed_journal_is_refused`: records out of order, a bad bool, a non-canonical option, an unflagged backup or pending record, and an unknown tag are refused even with every link recomputed.
 - `the_previous_head_links_two_versions`: version 2's `prev_head` is version 1's head.
 
 ## Not in S2

@@ -8435,6 +8435,97 @@ mod tests {
     }
 
     #[test]
+    fn the_cap_holds_at_the_last_byte() {
+        let base = encode_journal(&two_turns(), &[0; 32]).unwrap().len();
+        let mut fits = two_turns();
+        let text = JOURNAL_CAP - base - 4 - 2 - 32 - 1 - 4;
+        admit_user(&mut fits, &"x".repeat(text));
+        let exact = encode_journal(&fits, &[0; 32]).unwrap();
+        assert_eq!(exact.len(), JOURNAL_CAP);
+        assert_eq!(decode_journal(&exact).unwrap().0, fits);
+        let mut over = two_turns();
+        admit_user(&mut over, &"x".repeat(text + 1));
+        assert_eq!(encode_journal(&over, &[0; 32]), None);
+    }
+
+    /// Split format 1 bytes into the header and the records.
+    fn journal_records(bytes: &[u8]) -> (Vec<u8>, Vec<(u8, Vec<u8>)>) {
+        let header = bytes[..JOURNAL_HEADER].to_vec();
+        let mut records = Vec::new();
+        let mut at = JOURNAL_HEADER;
+        while at + 32 < bytes.len() {
+            let tag = bytes[at];
+            let len = u32::from_le_bytes(bytes[at + 1..at + 5].try_into().unwrap()) as usize;
+            records.push((tag, bytes[at + 5..at + 5 + len].to_vec()));
+            at += 5 + len + 32;
+        }
+        (header, records)
+    }
+
+    /// Build format 1 bytes with every link and the head recomputed. The hash
+    /// chain has no key, so anyone who can write the object can do this.
+    fn relinked(mut header: Vec<u8>, records: &[(u8, Vec<u8>)]) -> Vec<u8> {
+        header[JOURNAL_HEADER - 4..].copy_from_slice(&(records.len() as u32).to_le_bytes());
+        let mut link = sha256(&header);
+        let mut out = header;
+        for (tag, payload) in records {
+            link = journal_link(&link, *tag, payload).unwrap();
+            out.push(*tag);
+            out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            out.extend_from_slice(payload);
+            out.extend_from_slice(&link);
+        }
+        out.extend_from_slice(&link);
+        out
+    }
+
+    #[test]
+    fn a_relinked_but_malformed_journal_is_refused() {
+        let mut journal = two_turns();
+        propose_step(&mut journal);
+        let bytes = encode_journal(&journal, &[0; 32]).unwrap();
+        let (header, records) = journal_records(&bytes);
+        assert_eq!(relinked(header.clone(), &records), bytes);
+        let step_at = records.iter().position(|(tag, _)| *tag == 3).unwrap();
+        let mut reordered = records.clone();
+        let event = reordered.remove(0);
+        reordered.insert(step_at, event);
+        assert_eq!(
+            decode_journal(&relinked(header.clone(), &reordered)).unwrap_err(),
+            "record"
+        );
+        // Step payload of an empty step: has_result at 22, parent flag at 35, parent value at 36.
+        for (offset, value) in [(22, 2u8), (35, 2), (36, 5)] {
+            let mut bad = records.clone();
+            bad[step_at].1[offset] = value;
+            assert_eq!(
+                decode_journal(&relinked(header.clone(), &bad)).unwrap_err(),
+                "record",
+                "offset {offset}"
+            );
+        }
+        for tag in [5u8, 6, 7, 0] {
+            let mut extra = records.clone();
+            extra.push((tag, node_payload(&journal.events[0]).unwrap()));
+            assert_eq!(
+                decode_journal(&relinked(header.clone(), &extra)).unwrap_err(),
+                "record",
+                "tag {tag}"
+            );
+        }
+        // Header: compaction_open at 14, backup flag at 15, backup epoch at 16.
+        for (offset, value) in [(14, 2u8), (15, 2), (16, 7)] {
+            let mut bad_header = header.clone();
+            bad_header[offset] = value;
+            assert_eq!(
+                decode_journal(&relinked(bad_header, &records)).unwrap_err(),
+                "record",
+                "header offset {offset}"
+            );
+        }
+    }
+
+    #[test]
     fn the_previous_head_links_two_versions() {
         let mut journal = two_turns();
         let first = encode_journal(&journal, &[0; 32]).unwrap();
