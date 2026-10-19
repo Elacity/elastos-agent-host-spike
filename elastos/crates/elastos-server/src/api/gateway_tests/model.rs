@@ -2347,12 +2347,14 @@ async fn owner_end_cancels_system_validation_while_setup_is_held() {
             .expect("End saves and cancels Validate while setup remains held");
         let (status, body) = status_json(end_response.unwrap()).await;
         assert_eq!(status, StatusCode::OK, "{action}: {body}");
-        let (status, body) = status_json(validate_response.unwrap()).await;
-        assert!(!status.is_success(), "{body}");
-        assert!(
-            body.to_string()
-                .contains("This Home could not check the hosted connection. Try again."),
-            "{body}"
+        let response = validate_response.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            body.as_ref(),
+            b"This Home could not check the hosted connection. Try again."
         );
         assert!(ended.has_changed().unwrap(), "End cancels admitted sends");
         let history = serde_json::to_value(
