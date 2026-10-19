@@ -298,11 +298,13 @@ function createAppServer() {
     }
     if (url.pathname === "/home-fixture") {
       // Documents framed as Home frames it; the page records what it asks Home.
+      // ?without_origin drops home_origin, so Documents has no Home bridge.
       const homeOrigin = `http://${req.headers.host}`;
+      const query = url.searchParams.has("without_origin") ? "" : `?home_origin=${encodeURIComponent(homeOrigin)}`;
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(`<!doctype html><script>window.homeMessages = [];
 addEventListener("message", (event) => window.homeMessages.push(event.data));</script>
-<iframe title="Documents" style="width:1200px;height:850px" src="/apps/documents/?home_origin=${encodeURIComponent(homeOrigin)}#home_token=documents-link-token"></iframe>`);
+<iframe title="Documents" style="width:1200px;height:850px" src="/apps/documents/${query}#home_token=documents-link-token"></iframe>`);
       return;
     }
 
@@ -768,35 +770,54 @@ async function run() {
       await parserPage.close();
     }
 
-    // #436: a preview web link inside Home asks Home to confirm the exact
-    // address (home:open-external) and never navigates the Documents frame.
-    resetDocumentsFixture();
-    const linkPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
-    trackPage(linkPage, consoleErrors, pageErrors, failedRequests, errorResponses);
-    try {
-      await linkPage.goto(`http://127.0.0.1:${port}/home-fixture`);
-      const frame = await (await linkPage.locator('iframe[title="Documents"]').elementHandle()).contentFrame();
-      await frame.locator('.document-list-item[data-doc-did="doc-beta"]').click();
-      await frame.waitForFunction(() => document.getElementById("title-input")?.value === "Beta");
-      const webLink = "https://example.invalid/documents-link?from=preview";
-      await frame.locator("#editor").fill(`[Example](${webLink}) and [Section](#notes)`);
-      await frame.locator("#mode-read").click();
-      const frameUrl = frame.url();
-      await frame.locator('#preview a[href^="https://"]').click();
-      await linkPage.waitForFunction(() => window.homeMessages.some((message) => message?.type === "home:open-external"),
-        null, { timeout: 4000 });
-      const homeRequests = () => linkPage.evaluate(() => window.homeMessages
-        .filter((message) => message?.type === "home:open-external"));
-      const requests = await homeRequests();
-      assert(
-        JSON.stringify(requests) === JSON.stringify([{ type: "home:open-external", url: webLink, homeToken: "documents-link-token" }]),
-        `Documents preview link must send one exact Home request. Got ${JSON.stringify(requests)}`,
-      );
-      assert(frame.url() === frameUrl, `Documents preview link navigated its frame to ${frame.url()}`);
-      await frame.locator('#preview a[href="#notes"]').click();
-      assert((await homeRequests()).length === 1, "An in-document anchor must stay inside Documents.");
-    } finally {
-      await linkPage.close();
+    // #436: inside Home a preview web link has no href, so click, middle-click
+    // and the keyboard cannot navigate the Documents frame; click, Enter and
+    // Space ask Home to confirm the exact address (home:open-external).
+    // Without the Home bridge it refuses with a message and still navigates
+    // nowhere.
+    for (const withoutOrigin of [false, true]) {
+      resetDocumentsFixture();
+      const linkPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+      trackPage(linkPage, consoleErrors, pageErrors, failedRequests, errorResponses);
+      try {
+        await linkPage.goto(`http://127.0.0.1:${port}/home-fixture${withoutOrigin ? "?without_origin" : ""}`);
+        const frame = await (await linkPage.locator('iframe[title="Documents"]').elementHandle()).contentFrame();
+        await frame.locator('.document-list-item[data-doc-did="doc-beta"]').click();
+        await frame.waitForFunction(() => document.getElementById("title-input")?.value === "Beta");
+        const webLink = "https://example.invalid/documents-link?from=preview";
+        await frame.locator("#editor").fill(`[Example](${webLink}) and [Section](#notes)`);
+        await frame.locator("#mode-read").click();
+        const frameUrl = frame.url();
+        const pagesBefore = browser.contexts().reduce((count, context) => count + context.pages().length, 0);
+        const link = frame.locator('#preview a[data-open-external]');
+        assert(await link.count() === 1 && await link.getAttribute("href") === null
+          && await link.getAttribute("data-open-external") === webLink,
+          "A preview web link inside Home must be one navigation-free control with no href.");
+        const homeRequests = () => linkPage.evaluate(() => window.homeMessages
+          .filter((message) => message?.type === "home:open-external"));
+        await link.click({ button: "middle" });
+        await link.click();
+        await link.focus();
+        await linkPage.keyboard.press("Enter");
+        await linkPage.keyboard.press("Space");
+        await linkPage.waitForTimeout(200);
+        const expected = withoutOrigin ? [] : Array.from({ length: 3 }, () =>
+          ({ type: "home:open-external", url: webLink, homeToken: "documents-link-token" }));
+        const requests = await homeRequests();
+        assert(JSON.stringify(requests) === JSON.stringify(expected),
+          `Documents preview link (click, Enter, Space; middle-click sends nothing) must send ${expected.length} exact Home requests. Got ${JSON.stringify(requests)}`);
+        if (withoutOrigin) {
+          assert(await frame.locator("#status-text").textContent() === "Open Documents from Home to open web links.",
+            "Without the Home bridge a preview web link must say why it did not open.");
+        }
+        const pagesAfter = browser.contexts().reduce((count, context) => count + context.pages().length, 0);
+        assert(frame.url() === frameUrl && pagesAfter === pagesBefore,
+          `Documents preview link navigated (${frame.url()}) or opened a page (${pagesBefore} -> ${pagesAfter}).`);
+        await frame.locator('#preview a[href="#notes"]').click();
+        assert((await homeRequests()).length === expected.length, "An in-document anchor must stay inside Documents.");
+      } finally {
+        await linkPage.close();
+      }
     }
 
     resetDocumentsFixture();

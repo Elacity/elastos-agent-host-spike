@@ -116,3 +116,22 @@ test("safe Markdown retains formatting, tasks, links, tables, and fence language
   assert.match(html, /<hr>/);
   assertSafeHtml(html);
 });
+
+test("inside Home a web link has no href; other links and outside Home are unchanged (#436)", () => {
+  const options = { webLinksAskHome: true };
+  const markdown = "# [Head](https://example.test/h)\n\n- **[item](http://example.test/?a=1&b=2)**\n\n| [cell](https://example.test/c) |\n| --- |\n| x |";
+  const { html } = renderer.renderMarkdownDocument(markdown, options);
+  assert.doesNotMatch(html, /href=/);
+  assert.equal((html.match(/<a data-open-external="[^"]*" role="link" tabindex="0">/g) || []).length, 3);
+  assert.match(html, /data-open-external="http:\/\/example\.test\/\?a=1&amp;b=2"/);
+  assertSafeHtml(html);
+  // A hostile address stays inside the quoted attribute value.
+  assert.equal(renderer.renderInlineMarkdown('[x](https://example.test/" onmouseover="alert)', options),
+    '<a data-open-external="https://example.test/&quot; onmouseover=&quot;alert" role="link" tabindex="0">x</a>');
+  for (const href of ["#notes", "elastos://document/example", "/document/example", "javascript:alert(1"]) {
+    assert.equal(renderer.renderInlineMarkdown("[label](" + href + ")", options),
+      '<a href="' + renderer.safeMarkdownHref(href) + '" rel="noopener noreferrer">label</a>');
+  }
+  assert.equal(renderer.renderInlineMarkdown("[label](https://example.test/)"),
+    '<a href="https://example.test/" rel="noopener noreferrer">label</a>');
+});

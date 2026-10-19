@@ -128,7 +128,10 @@ function hasExactKeys(value, expectedKeys) {
     actual.every((key, index) => key === expected[index]);
 }
 
-function renderInlineMarkdown(text) {
+// Inside Home (options.webLinksAskHome) a web link has no href, so the
+// browser has no navigation to perform (click, middle-click, keyboard or
+// context menu); the preview's own handlers ask Home instead (#436, as Chat).
+function renderInlineMarkdown(text, options) {
   const tokens = /`([^`]+)`|\*\*([^*]+)\*\*|\*([^*]+)\*|\[([^\]]+)\]\(([^)]+)\)/g;
   let html = "";
   let offset = 0;
@@ -137,11 +140,13 @@ function renderInlineMarkdown(text) {
     if (match[1] !== undefined) {
       html += "<code>" + escapeHtml(match[1]) + "</code>";
     } else if (match[2] !== undefined) {
-      html += "<strong>" + renderInlineMarkdown(match[2]) + "</strong>";
+      html += "<strong>" + renderInlineMarkdown(match[2], options) + "</strong>";
     } else if (match[3] !== undefined) {
-      html += "<em>" + renderInlineMarkdown(match[3]) + "</em>";
+      html += "<em>" + renderInlineMarkdown(match[3], options) + "</em>";
+    } else if (options && options.webLinksAskHome && /^https?:\/\//i.test(match[5].trim())) {
+      html += '<a data-open-external="' + escapeHtml(match[5].trim()) + '" role="link" tabindex="0">' + renderInlineMarkdown(match[4], options) + "</a>";
     } else {
-      html += '<a href="' + safeMarkdownHref(match[5]) + '" rel="noopener noreferrer">' + renderInlineMarkdown(match[4]) + "</a>";
+      html += '<a href="' + safeMarkdownHref(match[5]) + '" rel="noopener noreferrer">' + renderInlineMarkdown(match[4], options) + "</a>";
     }
     offset = match.index + match[0].length;
   }
@@ -166,6 +171,7 @@ function headingSlug(text, number) {
 
 function renderMarkdownDocument(source, options) {
   const interactiveTasks = !!(options && options.interactiveTasks);
+  const inline = (text) => renderInlineMarkdown(text, options);
   const lines = String(source || "").replace(/\r\n/g, "\n").split("\n");
   const blocks = [];
   const outline = [];
@@ -200,7 +206,7 @@ function renderMarkdownDocument(source, options) {
       headingIndex += 1;
       const title = heading[2].trim();
       const id = headingSlug(title, headingIndex);
-      blocks.push("<h" + heading[1].length + ' id="' + id + '">' + renderInlineMarkdown(title) + "</h" + heading[1].length + ">");
+      blocks.push("<h" + heading[1].length + ' id="' + id + '">' + inline(title) + "</h" + heading[1].length + ">");
       outline.push({ depth: heading[1].length, title: title, id: id });
       index += 1;
       continue;
@@ -209,7 +215,7 @@ function renderMarkdownDocument(source, options) {
     if (/^>\s?/.test(line)) {
       const quote = [];
       while (index < lines.length && /^>\s?/.test(lines[index])) {
-        quote.push(renderInlineMarkdown(lines[index].replace(/^>\s?/, "")));
+        quote.push(inline(lines[index].replace(/^>\s?/, "")));
         index += 1;
       }
       blocks.push("<blockquote><p>" + quote.join("<br>") + "</p></blockquote>");
@@ -224,8 +230,8 @@ function renderMarkdownDocument(source, options) {
         const checked = !!taskMatch && String(taskMatch[1]).toLowerCase() === "x";
         const label = taskMatch ? taskMatch[2] : taskLine.replace(/^[-*]\s+/, "");
         const checkbox = interactiveTasks
-          ? '<label class="task-item-label"><input class="task-checkbox" type="checkbox" aria-label="Toggle task completion" data-source-line="' + String(index) + '"' + (checked ? " checked" : "") + '><span>' + renderInlineMarkdown(label) + "</span></label>"
-          : '<span>' + renderInlineMarkdown((checked ? "[x] " : "[ ] ") + label) + "</span>";
+          ? '<label class="task-item-label"><input class="task-checkbox" type="checkbox" aria-label="Toggle task completion" data-source-line="' + String(index) + '"' + (checked ? " checked" : "") + '><span>' + inline(label) + "</span></label>"
+          : '<span>' + inline((checked ? "[x] " : "[ ] ") + label) + "</span>";
         items.push('<li class="task-item">' + checkbox + "</li>");
         index += 1;
       }
@@ -236,7 +242,7 @@ function renderMarkdownDocument(source, options) {
     if (/^[-*]\s+/.test(line)) {
       const items = [];
       while (index < lines.length && /^[-*]\s+/.test(lines[index])) {
-        items.push("<li>" + renderInlineMarkdown(lines[index].replace(/^[-*]\s+/, "")) + "</li>");
+        items.push("<li>" + inline(lines[index].replace(/^[-*]\s+/, "")) + "</li>");
         index += 1;
       }
       blocks.push("<ul>" + items.join("") + "</ul>");
@@ -246,7 +252,7 @@ function renderMarkdownDocument(source, options) {
     if (/^\d+\.\s+/.test(line)) {
       const items = [];
       while (index < lines.length && /^\d+\.\s+/.test(lines[index])) {
-        items.push("<li>" + renderInlineMarkdown(lines[index].replace(/^\d+\.\s+/, "")) + "</li>");
+        items.push("<li>" + inline(lines[index].replace(/^\d+\.\s+/, "")) + "</li>");
         index += 1;
       }
       blocks.push("<ol>" + items.join("") + "</ol>");
@@ -254,11 +260,11 @@ function renderMarkdownDocument(source, options) {
     }
 
     if (/^\|.*\|$/.test(line) && index + 1 < lines.length && /^\|?[\s:-]+\|[\s|:-]*$/.test(lines[index + 1])) {
-      const headerCells = line.split("|").slice(1, -1).map((cell) => "<th>" + renderInlineMarkdown(cell.trim()) + "</th>");
+      const headerCells = line.split("|").slice(1, -1).map((cell) => "<th>" + inline(cell.trim()) + "</th>");
       index += 2;
       const rows = [];
       while (index < lines.length && /^\|.*\|$/.test(lines[index])) {
-        const cells = lines[index].split("|").slice(1, -1).map((cell) => "<td>" + renderInlineMarkdown(cell.trim()) + "</td>");
+        const cells = lines[index].split("|").slice(1, -1).map((cell) => "<td>" + inline(cell.trim()) + "</td>");
         rows.push("<tr>" + cells.join("") + "</tr>");
         index += 1;
       }
@@ -273,11 +279,11 @@ function renderMarkdownDocument(source, options) {
 
     const paragraph = [];
     while (index < lines.length && lines[index].trim() && !/^(#{1,6})\s+/.test(lines[index]) && !/^```/.test(lines[index]) && !/^>\s?/.test(lines[index]) && !/^[-*]\s+/.test(lines[index]) && !/^\d+\.\s+/.test(lines[index]) && !/^(\*{3,}|-{3,}|_{3,})\s*$/.test(lines[index])) {
-      paragraph.push(renderInlineMarkdown(lines[index]));
+      paragraph.push(inline(lines[index]));
       index += 1;
     }
     if (!paragraph.length) {
-      blocks.push("<p>" + renderInlineMarkdown(line) + "</p>");
+      blocks.push("<p>" + inline(line) + "</p>");
       index += 1;
       continue;
     }
@@ -577,16 +583,29 @@ function announceHomeChrome() {
   syncHomeMenuManifest();
 }
 
-// Home frames apps without popups or top navigation, so a web link in the
-// preview asks Home to show the exact address and open it only when the
-// person chooses Open (#436, the same request as Chat's links).
-function openPreviewWebLinkThroughHome(event) {
-  const link = event.target instanceof Element ? event.target.closest("a[href]") : null;
-  const url = link?.getAttribute("href") || "";
-  if (!/^https?:\/\//i.test(url) || !canAnnounceHomeChrome()) {
+// Home frames apps without popups or top navigation, so inside Home a web
+// link in the preview has no href (renderInlineMarkdown) and asks Home to
+// show the exact address and open it only when the person chooses Open
+// (#436, the same request as Chat's links). Without the Home session it
+// refuses and says so; nothing navigates either way.
+function activatePreviewWebLink(event) {
+  if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") {
+    return;
+  }
+  const link = event.target instanceof Element ? event.target.closest("[data-open-external]") : null;
+  if (!link) {
     return;
   }
   event.preventDefault();
+  const selection = window.getSelection();
+  if (event.type === "click" && selection && !selection.isCollapsed && selection.containsNode(link, true)) {
+    return;
+  }
+  if (!canAnnounceHomeChrome()) {
+    setStatus("Open Documents from Home to open web links.", "warning");
+    return;
+  }
+  const url = link.getAttribute("data-open-external") || "";
   window.top.postMessage({ type: "home:open-external", url, homeToken: state.homeToken }, homeOrigin);
 }
 
@@ -858,7 +877,10 @@ function closeFindBar() {
 }
 
 function refreshPreviewFromEditor() {
-  const rendered = renderMarkdownDocument(elements.editor.value || "", { interactiveTasks: true });
+  const rendered = renderMarkdownDocument(elements.editor.value || "", {
+    interactiveTasks: true,
+    webLinksAskHome: window.top !== window,
+  });
   elements.preview.innerHTML = rendered.html;
   renderOutline(rendered.outline);
   if (!elements.findBar.classList.contains("hidden")) {
@@ -2082,7 +2104,8 @@ function wireShellEvents() {
   elements.panePreview.addEventListener("click", () => setInspectorView("preview"));
   elements.paneOutline.addEventListener("click", () => setInspectorView("outline"));
   elements.paneHistory.addEventListener("click", () => setInspectorView("history"));
-  elements.preview.addEventListener("click", openPreviewWebLinkThroughHome);
+  elements.preview.addEventListener("click", activatePreviewWebLink);
+  elements.preview.addEventListener("keydown", activatePreviewWebLink);
   elements.preview.addEventListener("change", (event) => {
     const target = event.target;
     if (!(target instanceof HTMLInputElement) || !target.classList.contains("task-checkbox")) {
