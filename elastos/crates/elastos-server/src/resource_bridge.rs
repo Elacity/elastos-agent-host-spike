@@ -408,7 +408,7 @@ async fn authorize_and_dispatch_resource_invoke(
         );
     }
 
-    if let Some(refusal) = agents_area_refusal(bridge_ctx, &dispatch) {
+    if let Some(refusal) = agents_area_dispatch_refusal(&dispatch) {
         return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
     }
 
@@ -418,10 +418,7 @@ async fn authorize_and_dispatch_resource_invoke(
         &dispatch.request,
     ) {
         let outcome = match response.get("type").and_then(|value| value.as_str()) {
-            Some("resource_result") if response["result"]["code"] == "revision_conflict" => {
-                "conflict"
-            }
-            Some("resource_result") => "ok",
+            Some("resource_result") => invoke_outcome(&response["result"]),
             _ => "error",
         };
         return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, outcome, response);
@@ -436,7 +433,7 @@ async fn authorize_and_dispatch_resource_invoke(
             bridge_ctx,
             &audit_id,
             &dispatch,
-            "ok",
+            invoke_outcome(&result),
             serde_json::json!({
                 "type": "resource_result",
                 "result": result,
@@ -489,10 +486,10 @@ fn protected_principal_root_resource_response(
 
     // The dispatch already ran this rule; it runs again here so this storage
     // path never depends on the caller's order of checks.
-    if let Some(refusal) = agent_path_refusal(&localhost_root, &rooted, operation) {
+    if let Some(refusal) = agent_path_refusal(&rooted, operation) {
         return Some(refusal);
     }
-    let agent_path = agent_area_segments(&localhost_root, &rooted).is_some();
+    let agent_path = crate::provider_resource::in_agents_area(&rooted);
     let agent_journal = operation == "write" && agent_path;
     match crate::auth::load_principal_root_protection(data_dir, principal_id, &localhost_root) {
         Ok(Some(_)) => {}
@@ -644,81 +641,37 @@ fn protected_principal_root_resource_response(
     }
 }
 
-/// Agent Host journals live under `<root>/.AppData/Agents/`. The data directory
-/// may sit on a filesystem that ignores case with Unicode folding (APFS) and
-/// drops empty and `.` segments, so the area is found that way: the first two
-/// segments under the person's root, ignoring empty and `.` ones, that fold to
-/// `.appdata/agents`. Returns every raw segment under the root.
-fn agent_area_segments<'a>(localhost_root: &str, rooted: &'a str) -> Option<Vec<&'a str>> {
-    let rest = rooted.strip_prefix(localhost_root)?.strip_prefix('/')?;
-    let segments: Vec<&str> = rest.split('/').collect();
-    let mut named = segments
-        .iter()
-        .filter(|segment| !matches!(**segment, "" | "."));
-    let folds_to = |segment: &str, target: &str| segment.to_uppercase().to_lowercase() == target;
-    let first = named.next()?;
-    let second = named.next()?;
-    (folds_to(first, ".appdata") && folds_to(second, "agents")).then_some(segments)
-}
-
-/// One spelling only: `.AppData/Agents`, then segments matching
-/// `^[a-z0-9][a-z0-9._-]*$`. The stored object is labelled with the URI it was
-/// written under, so no second spelling may reach it.
-fn agent_path_is_exact(segments: &[&str]) -> bool {
-    segments.len() >= 2
-        && segments[0] == ".AppData"
-        && segments[1] == "Agents"
-        && segments[2..].iter().all(|segment| {
-            segment
-                .bytes()
-                .next()
-                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-                && segment.bytes().all(|byte| {
-                    byte.is_ascii_lowercase()
-                        || byte.is_ascii_digit()
-                        || matches!(byte, b'.' | b'_' | b'-')
-                })
-        })
-}
-
-/// In the Agents area only read and write are allowed, only on the exact
-/// spelling, and a write needs a name below `Agents`.
-fn agent_path_refusal(
-    localhost_root: &str,
-    rooted: &str,
-    operation: &str,
-) -> Option<serde_json::Value> {
-    let segments = agent_area_segments(localhost_root, rooted)?;
-    if !matches!(operation, "read" | "write") {
-        return Some(resource_error_response(
-            "operation_not_allowed",
-            "only read and write are allowed under .AppData/Agents/",
-        ));
-    }
-    if !agent_path_is_exact(&segments) || (operation == "write" && segments.len() < 3) {
-        return Some(resource_error_response(
-            "invalid_localhost_path",
-            "paths under .AppData/Agents/ must be spelled exactly, with lower-case segments of letters, digits, '.', '_' or '-'",
-        ));
-    }
-    None
+/// The one Agents rule (`provider_resource::agents_area_refusal`) in the
+/// bridge's error shape.
+fn agent_path_refusal(rooted: &str, operation: &str) -> Option<serde_json::Value> {
+    crate::provider_resource::agents_area_refusal(rooted, operation)
+        .map(|(code, message)| resource_error_response(code, message))
 }
 
 /// The Agents rule for a localhost invoke, on the scoped path the provider would use.
-fn agents_area_refusal(
-    bridge_ctx: &BridgeContext,
-    dispatch: &ResourceInvokeDispatch,
-) -> Option<serde_json::Value> {
+fn agents_area_dispatch_refusal(dispatch: &ResourceInvokeDispatch) -> Option<serde_json::Value> {
     if dispatch.scheme != "localhost" {
         return None;
     }
-    let principal_id = bridge_ctx.principal_id.as_deref()?;
     let rooted = rooted_localhost_uri(dispatch.request.get("path")?.as_str()?)?;
-    agent_path_refusal(
-        &crate::auth::principal_localhost_root(principal_id),
-        &rooted,
-        &dispatch.operation,
-    )
+    agent_path_refusal(&rooted, &dispatch.operation)
+}
+
+/// The Agents rule for a capability request, on the scoped resource: inside the
+/// area only read and write may be asked for, so anything else is refused at
+/// once instead of waiting for the shell.
+fn agents_area_capability_refusal(resource: &str, action: &str) -> Option<serde_json::Value> {
+    agent_path_refusal(&rooted_localhost_uri(resource)?, action)
+}
+
+/// What a completed invoke is audited as: a result whose status is not ok is
+/// an error, and a revision conflict is a conflict.
+fn invoke_outcome(result: &serde_json::Value) -> &'static str {
+    match result.get("status").and_then(|value| value.as_str()) {
+        None | Some("ok") => "ok",
+        Some(_) if result["code"] == "revision_conflict" => "conflict",
+        Some(_) => "error",
+    }
 }
 
 /// The optional precondition of a protected write: `create_only` for a new
@@ -983,6 +936,12 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                         }
                     };
                 let resource = scoped_resource.as_str();
+                if let Some(refusal) = agents_area_capability_refusal(resource, action_str) {
+                    return Ok(serde_json::json!({
+                        "id": id,
+                        "response": refusal,
+                    }));
+                }
                 let action = match parse_action(action_str) {
                     Some(a) => a,
                     None => {
@@ -1251,6 +1210,12 @@ pub async fn handle_remote_request_with_audit_dir(
                 }));
             }
 
+            if let Some(refusal) = agents_area_dispatch_refusal(&dispatch) {
+                return Ok(serde_json::json!({
+                    "id": id,
+                    "response": refusal,
+                }));
+            }
             if principal_root_read_write_uri(&dispatch.operation, &dispatch.request).is_some() {
                 return Ok(serde_json::json!({
                     "id": id,
@@ -1335,7 +1300,11 @@ pub async fn handle_remote_request_with_audit_dir(
                         phase: "completed",
                         resource: &dispatch.resource,
                         operation: &dispatch.operation,
-                        outcome: if status.is_success() { "ok" } else { "error" },
+                        outcome: if status.is_success() {
+                            invoke_outcome(&body)
+                        } else {
+                            "error"
+                        },
                     },
                 )?;
             }
@@ -1364,6 +1333,12 @@ pub async fn handle_remote_request_with_audit_dir(
                 }
             };
             let resource = scoped_resource.as_str();
+            if let Some(refusal) = agents_area_capability_refusal(resource, action_str) {
+                return Ok(serde_json::json!({
+                    "id": id,
+                    "response": refusal,
+                }));
+            }
             if is_wallet_resource(resource) {
                 let action = match parse_action(action_str) {
                     Some(action) => action,
@@ -2794,8 +2769,8 @@ mod tests {
     fn the_agents_area_folds_unicode_case_and_allows_one_spelling() {
         let root = crate::auth::principal_localhost_root("person:local:journal-owner");
         let exact = format!("{root}/.AppData/Agents/demo-agent/tasks/task-1/journal");
-        assert_eq!(agent_path_refusal(&root, &exact, "read"), None);
-        assert_eq!(agent_path_refusal(&root, &exact, "write"), None);
+        assert_eq!(agent_path_refusal(&exact, "read"), None);
+        assert_eq!(agent_path_refusal(&exact, "write"), None);
         for rest in MISSPELLED_JOURNAL_PATHS.iter().copied().chain([
             "/.AppData/Agents/demo-agent/tasks/task-1/journal",
             "./.AppData/Agents/demo-agent/tasks/task-1/journal",
@@ -2809,13 +2784,17 @@ mod tests {
             let rooted = format!("{root}/{rest}");
             if rest.starts_with(".AppDat\u{212a}") {
                 // The Kelvin sign folds to "k", not "a": not the Agents area.
-                assert_eq!(agent_area_segments(&root, &rooted), None, "{rest}");
+                assert_eq!(
+                    crate::provider_resource::in_agents_area(&rooted),
+                    false,
+                    "{rest}"
+                );
                 continue;
             }
-            assert!(agent_area_segments(&root, &rooted).is_some(), "{rest}");
+            assert!(crate::provider_resource::in_agents_area(&rooted), "{rest}");
             for operation in ["read", "write"] {
                 assert_eq!(
-                    agent_path_refusal(&root, &rooted, operation).unwrap()["code"],
+                    agent_path_refusal(&rooted, operation).unwrap()["code"],
                     "invalid_localhost_path",
                     "{rest} {operation}"
                 );
@@ -2828,20 +2807,26 @@ mod tests {
             ".AppData",
         ] {
             let rooted = format!("{root}/{rest}");
-            assert_eq!(agent_area_segments(&root, &rooted), None, "{rest}");
-            assert_eq!(agent_path_refusal(&root, &rooted, "delete"), None, "{rest}");
+            assert_eq!(
+                crate::provider_resource::in_agents_area(&rooted),
+                false,
+                "{rest}"
+            );
+            assert_eq!(agent_path_refusal(&rooted, "delete"), None, "{rest}");
         }
         let bare = format!("{root}/.AppData/Agents");
-        assert_eq!(agent_path_refusal(&root, &bare, "read"), None);
+        assert_eq!(agent_path_refusal(&bare, "read"), None);
         assert_eq!(
-            agent_path_refusal(&root, &bare, "write").unwrap()["code"],
+            agent_path_refusal(&bare, "write").unwrap()["code"],
             "invalid_localhost_path"
         );
         let other_root = crate::auth::principal_localhost_root("person:local:someone-else");
-        assert_eq!(
-            agent_area_segments(&root, &format!("{other_root}/{}", ".AppData/Agents/x")),
-            None
-        );
+        assert!(crate::provider_resource::in_agents_area(&format!(
+            "{other_root}/.AppData/Agents/x"
+        )));
+        assert!(crate::provider_resource::in_agents_area(
+            "localhost://Users/self/.AppData/Agents/x"
+        ));
     }
 
     /// The alias path is absent (Linux ext4 keeps the names apart), or it is the
@@ -3006,6 +2991,242 @@ mod tests {
         .to_string();
         handle_request(&line, &Some(ctx.clone())).await.unwrap();
         assert_eq!(provider.requests().await.len(), 1);
+    }
+
+    /// The attached bridge (`elastos run` against a running Runtime) talks to
+    /// `/api/provider/:scheme/:op` over HTTP. The Agents rule runs before any
+    /// HTTP call: the API URL here has nothing listening, so a request that got
+    /// past the rule would fail to connect instead of returning a refusal.
+    #[tokio::test]
+    async fn the_attached_bridge_applies_the_agents_rule_before_http() {
+        let manifest = ["localhost://Users/self/*".to_string()];
+        let journal = "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal";
+        let folder = "localhost://Users/self/.AppData/Agents/agent-host";
+        for (id, operation, uri, refused) in [
+            (71, "delete", journal, "operation_not_allowed"),
+            (72, "mkdir", journal, "operation_not_allowed"),
+            (73, "list", folder, "operation_not_allowed"),
+            (74, "stat", journal, "operation_not_allowed"),
+            (75, "exists", journal, "operation_not_allowed"),
+            (
+                76,
+                "delete",
+                "localhost://Users/self/.appdata/AGENTS/agent-host",
+                "operation_not_allowed",
+            ),
+            (
+                77,
+                "write",
+                "localhost://Users/self/.AppData/Agent\u{17f}/agent-host/tasks/demo/journal",
+                "invalid_localhost_path",
+            ),
+            (
+                78,
+                "read",
+                "localhost://Users/self//.AppData/Agents/agent-host/tasks/demo/journal",
+                "invalid_localhost_path",
+            ),
+        ] {
+            let line = serde_json::json!({
+                "id": id,
+                "request": {
+                    "type": "resource_invoke",
+                    "uri": uri,
+                    "operation": operation,
+                    "token": "tok",
+                    "body": {},
+                }
+            })
+            .to_string();
+            let response = handle_remote_request(
+                &line,
+                "http://127.0.0.1:12345",
+                "client-token",
+                "test-capsule",
+                &manifest,
+                Some("person:local:journal-owner"),
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{operation} {uri} reached HTTP: {err}"));
+            assert_eq!(response["response"]["code"], refused, "{operation} {uri}");
+        }
+    }
+
+    /// Inside the Agents area only read and write may be asked for. Anything
+    /// else is refused at once, on both handlers, without a pending request.
+    #[tokio::test]
+    async fn a_forbidden_agents_capability_request_is_refused_at_once() {
+        let (_temp, mut ctx, _) = journal_context("person:local:journal-owner");
+        let root = crate::auth::principal_localhost_root("person:local:journal-owner");
+        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        let started = std::time::Instant::now();
+        for (id, action, resource) in [
+            (
+                79,
+                "delete",
+                "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal",
+            ),
+            (
+                80,
+                "execute",
+                "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal",
+            ),
+            (
+                81,
+                "admin",
+                "localhost://Users/self/.AppData/Agents/agent-host",
+            ),
+            (
+                82,
+                "delete",
+                "localhost://Users/self/.appdata/agents/agent-host",
+            ),
+        ] {
+            let line = serde_json::json!({
+                "id": id,
+                "request": {
+                    "type": "request_capability",
+                    "resource": resource,
+                    "action": action,
+                    "reason": "test",
+                }
+            })
+            .to_string();
+            let local = handle_request(&line, &Some(ctx.clone())).await.unwrap();
+            assert_eq!(
+                local["response"]["code"], "operation_not_allowed",
+                "{action} {resource}"
+            );
+            let remote = handle_remote_request(
+                &line,
+                "http://127.0.0.1:12345",
+                "client-token",
+                "test-capsule",
+                &["localhost://Users/self/*".to_string()],
+                Some("person:local:journal-owner"),
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{action} {resource} reached HTTP: {err}"));
+            assert_eq!(
+                remote["response"]["code"], "operation_not_allowed",
+                "{action} {resource}"
+            );
+        }
+        // The shell is never asked: no pending request, and no 30 s wait.
+        assert!(ctx.pending_store.list_pending().await.is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        // A misspelled read or write request is refused too.
+        let line = serde_json::json!({
+            "id": 83,
+            "request": {
+                "type": "request_capability",
+                "resource": "localhost://Users/self/.AppData/Agents/Demo-Agent/tasks/demo/journal",
+                "action": "write",
+                "reason": "test",
+            }
+        })
+        .to_string();
+        let local = handle_request(&line, &Some(ctx.clone())).await.unwrap();
+        assert_eq!(local["response"]["code"], "invalid_localhost_path");
+    }
+
+    #[tokio::test]
+    async fn a_missing_journal_read_is_audited_as_an_error() {
+        let (_temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let token = bridge_token(&ctx, &object_uri, Action::Read);
+        let read = handle_request(
+            &journal_read_line(84, JOURNAL_SELF_URI, token),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(read["response"]["type"], "resource_result");
+        assert_eq!(read["response"]["result"]["status"], "error");
+        let outcomes: Vec<String> = ctx
+            .pending_store
+            .audit_log()
+            .recent_events(100)
+            .iter()
+            .filter_map(|event| match event {
+                elastos_runtime::primitives::audit::AuditEvent::Custom {
+                    event_type,
+                    details,
+                } if event_type == "component.invoke.completed" => {
+                    details["outcome"].as_str().map(str::to_string)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outcomes, vec!["error".to_string()]);
+    }
+
+    /// A localhost provider that answers every request with a failed result.
+    struct FailingProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for FailingProvider {
+        async fn handle(
+            &self,
+            _request: ResourceRequest,
+        ) -> Result<ResourceResponse, ProviderError> {
+            Err(ProviderError::Provider("raw only".to_string()))
+        }
+
+        fn schemes(&self) -> Vec<&'static str> {
+            vec!["localhost"]
+        }
+
+        fn name(&self) -> &'static str {
+            "failing-localhost"
+        }
+
+        async fn send_raw(
+            &self,
+            _request: &serde_json::Value,
+        ) -> std::result::Result<serde_json::Value, ProviderError> {
+            Ok(serde_json::json!({ "status": "error", "code": "read_failed" }))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_provider_result_is_audited_as_an_error() {
+        let mut ctx = bridge_context();
+        ctx.manifest_capabilities =
+            vec!["localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string()];
+        ctx.provider_registry
+            .register(Arc::new(FailingProvider))
+            .await;
+        let resource = "localhost://Local/SharedByLocalUsersAndBots/Home/a.md";
+        let token = bridge_token(&ctx, resource, Action::Read);
+        let line = serde_json::json!({
+            "id": 85,
+            "request": {
+                "type": "resource_invoke",
+                "uri": resource,
+                "operation": "read",
+                "token": token,
+                "body": {},
+            }
+        })
+        .to_string();
+        let response = handle_request(&line, &Some(ctx.clone())).await.unwrap();
+        assert_eq!(response["response"]["result"]["status"], "error");
+        let outcomes: Vec<String> = ctx
+            .pending_store
+            .audit_log()
+            .recent_events(100)
+            .iter()
+            .filter_map(|event| match event {
+                elastos_runtime::primitives::audit::AuditEvent::Custom {
+                    event_type,
+                    details,
+                } if event_type == "component.invoke.completed" => {
+                    details["outcome"].as_str().map(str::to_string)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outcomes, vec!["error".to_string()]);
     }
 
     #[tokio::test]

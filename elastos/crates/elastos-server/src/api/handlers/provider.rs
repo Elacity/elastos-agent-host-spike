@@ -13,7 +13,8 @@ use axum::{
 use serde_json::Value;
 
 use crate::provider_resource::{
-    build_capability_resource, ensure_generic_wallet_capability, provider_operation_action,
+    agents_area_refusal, build_capability_resource, ensure_generic_wallet_capability,
+    provider_operation_action,
 };
 use elastos_runtime::capability::{Action, CapabilityManager, CapabilityToken, ResourceId};
 use elastos_runtime::provider::ProviderRegistry;
@@ -57,6 +58,13 @@ pub async fn provider_proxy(
     })?;
     ensure_generic_wallet_capability(&resource, required_action)
         .map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
+    // The one Agents rule, for every session, before any token is looked at:
+    // the localhost resource is the rooted path the provider will use.
+    if scheme == "localhost" {
+        if let Some((code, message)) = agents_area_refusal(&resource, &op) {
+            return Err((StatusCode::FORBIDDEN, format!("{code}: {message}")));
+        }
+    }
     if scheme == "wallet" {
         request = serde_json::json!({"op": "status"});
     }
@@ -284,10 +292,15 @@ mod tests {
     ) {
         let registry = Arc::new(ProviderRegistry::new());
         let provider = Arc::new(CapturingSchemeProvider::new(scheme));
-        registry
-            .register_sub_provider(scheme, provider.clone())
-            .await
-            .unwrap();
+        if scheme == "localhost" {
+            // localhost is a full provider, not a reserved sub-provider name.
+            registry.register(provider.clone()).await;
+        } else {
+            registry
+                .register_sub_provider(scheme, provider.clone())
+                .await
+                .unwrap();
+        }
         let state = ProviderProxyState {
             registry,
             capability_manager: None,
@@ -301,6 +314,57 @@ mod tests {
         )
         .await;
         (provider, result)
+    }
+
+    /// The provider proxy is the route every attached caller uses to reach the
+    /// localhost provider. The Agents rule runs for every session, even the
+    /// shell with no token, and nothing refused reaches the provider.
+    #[tokio::test]
+    async fn the_provider_proxy_applies_the_agents_rule_for_every_session() {
+        let journal = "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal";
+        for (op, path, refused) in [
+            ("delete", journal, "operation_not_allowed"),
+            ("mkdir", journal, "operation_not_allowed"),
+            (
+                "list",
+                "localhost://Users/self/.AppData/Agents/agent-host",
+                "operation_not_allowed",
+            ),
+            ("stat", journal, "operation_not_allowed"),
+            ("exists", journal, "operation_not_allowed"),
+            (
+                "delete",
+                "Users/self/.appdata/AGENTS/agent-host",
+                "operation_not_allowed",
+            ),
+            (
+                "write",
+                "localhost://Users/self/.AppData/Agent\u{17f}/agent-host/tasks/demo/journal",
+                "invalid_localhost_path",
+            ),
+            (
+                "read",
+                "localhost://Users/self/./.AppData/Agents/agent-host/tasks/demo/journal",
+                "invalid_localhost_path",
+            ),
+        ] {
+            let body = serde_json::json!({ "path": path }).to_string();
+            let (provider, result) = proxy_as_shell("localhost", op, HeaderMap::new(), &body).await;
+            let (status, message) = result.expect_err(op);
+            assert_eq!(status, StatusCode::FORBIDDEN, "{op} {path}");
+            assert!(message.starts_with(refused), "{op} {path}: {message}");
+            assert!(provider.requests.lock().await.is_empty(), "{op} {path}");
+        }
+        // The exact journal read, and a delete outside the area, still reach the provider.
+        for (op, path) in [
+            ("read", journal),
+            ("delete", "localhost://Users/self/Documents/old.txt"),
+        ] {
+            let body = serde_json::json!({ "path": path }).to_string();
+            let (provider, result) = proxy_as_shell("localhost", op, HeaderMap::new(), &body).await;
+            assert!(result.is_ok(), "{op} {path}");
+            assert_eq!(provider.requests.lock().await.len(), 1, "{op} {path}");
+        }
     }
 
     #[test]
