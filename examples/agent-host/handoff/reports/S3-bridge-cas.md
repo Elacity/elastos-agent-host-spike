@@ -152,3 +152,64 @@ Guest hash:   unchanged by the fix (no guest change).
 - **(finding 6) Only ASCII case is folded.** On NTFS, and maybe APFS, `Agentſ` (U+017F) or a trailing dot (`Agents.`) could alias `Agents`. This matters only if the data directory sits on such a filesystem.
 - **(finding 8) Audit outcome.** The audit outcome is keyed on `type == resource_result`, so a `revision_conflict` (a result with status error) is audited as ok. `write_failed` already worked this way before this PR.
 - **Not from the review, noticed while fixing.** `scope_current_user_alias` lets a `..` through, for example `Users/<own root>/../<other>/x`. Both the file path and the localhost provider refuse `..`, so I found no way through. This is older shipping code, not this PR.
+
+## Fix 2: after the review of 4584bf357 (20 Oct)
+
+The review found one more blocking hole, proven on a Mac (APFS: case-insensitive, with Unicode folding). `is_agent_journal_path` folded ASCII only. `localhost://Users/self/.AppData/Agentſ/demo-agent/tasks/task-1/journal` (U+017F, long s) reaches the Agents directory on APFS, but the bridge did not treat it as an Agents path. With a manifest and token covering `{root}/*`:
+1. `create_only` v1 was accepted;
+2. a write to the alias with no precondition was accepted;
+3. the real journal file changed;
+4. the canonical read then failed ("damaged ... labelled for .AppData/Agentſ/...").
+
+Linux ext4 keeps the two names apart, so the rule is tested on the strings themselves. Fixed in `c184382`:
+
+1. **One spelling.**
+   - **Finding the area:** the first two segments under the person's root, ignoring empty and `.` ones, fold to `.appdata/agents` under full case folding (`to_uppercase().to_lowercase()`).
+   - **Inside the area:** a path must be spelled exactly `.AppData/Agents`, and every segment below must match `^[a-z0-9][a-z0-9._-]*$`. Anything else is refused with `invalid_localhost_path` on read and write.
+   - **Extra (flagged):** a write needs a name below `Agents`, so the `Agents` folder itself cannot be replaced by a file.
+2. **Only read and write in the area.** `delete`, `mkdir`, `list`, `stat` and `exists` get `operation_not_allowed`. This also covers misspelled forms such as `.appdata/AGENTS/...`. The rule runs in the dispatch, after the token check, for every localhost operation. It runs again in the protected storage path, so that path never depends on the caller's order.
+3. **Audit.** A `revision_conflict` is audited as `conflict`, not `ok`.
+
+`canonical_rooted_uri` and `is_agent_journal_path` are replaced by `agent_area_segments`, `agent_path_is_exact`, `agent_path_refusal` and `agents_area_refusal`. The old `a_journal_path_is_matched_without_regard_to_case` test is replaced: lower-case forms are now refused as misspellings, not accepted as Agents paths.
+
+```text
+Commit:       c184382
+Tests run:    (cd elastos && cargo test -p elastos-server --lib -- resource_bridge::tests) -> "61 passed"
+              (cd elastos && cargo clippy -p elastos-server --lib --tests -- -D warnings) -> clean; fmt -> ok
+New tests:    the_agents_area_folds_unicode_case_and_allows_one_spelling (strings: Agentſ, AGENTS, .appdata, .APPDATA,
+                Demo-Agent, Tasks, -task, leading empty or "." segments, "..", a space, a non-ASCII letter, the bare
+                Agents folder, the Kelvin sign that folds to "k", another person's root, near misses)
+              a_folded_or_misspelled_agents_path_is_refused_before_storage (handle_request, manifest and token {root}/*,
+                the reviewer's setup: writes with and without create_only, reads; the stored journal is unchanged)
+              only_read_and_write_are_allowed_under_agents (delete, mkdir, list, stat, exists, and a folded delete; no
+                provider call; a delete outside the area still reaches the provider)
+              a_revision_conflict_is_audited_as_a_conflict
+Falsifiers:   one at a time on c184382, undone with git checkout; tree clean after.
+              D01 the Agents area folds ASCII only            -> the_agents_area_folds_unicode_case_and_allows_one_spelling,
+                                                                 a_folded_or_misspelled_agents_path_is_refused_before_storage FAILED
+              D02 the Agents area is not folded at all        -> 8 FAILED
+              D03 the exact .AppData/Agents spelling is dropped -> the same two FAILED
+              D04 segments below Agents are not checked       -> 4 FAILED
+              D05 a segment may start with any allowed byte   -> the same two FAILED
+              D06 empty and "." segments count for the area   -> 3 FAILED (incl. both odd-path tests)
+              D07 every operation is allowed in the area      -> only_read_and_write_are_allowed_under_agents FAILED
+              D08 the dispatch skips the Agents rule          -> only_read_and_write_are_allowed_under_agents FAILED
+              D09 the protected path skips the Agents rule    -> SURVIVES, by design: the dispatch rule (D08) always runs
+                                                                 first, so the copy in the storage path is a second
+                                                                 guard that no input reaches today. Same pattern as J14w.
+              D10 the bare Agents folder may be written       -> the_agents_area_folds_unicode_case_and_allows_one_spelling FAILED
+              D11 a conflict is audited as ok                 -> a_revision_conflict_is_audited_as_a_conflict FAILED
+Guest hash:   unchanged by this fix (no guest change on this branch): f300c0b1.
+```
+
+**On Sasha's private list; no spike change** (from the review):
+- the protection re-check inside the mutation lock;
+- older write failures audited as ok;
+- `scope_current_user_alias` letting `..` through.
+
+The earlier "recorded, not changed" items are settled:
+- finding 4 is done (only read and write under Agents);
+- finding 6 is done (full folding);
+- finding 8 is done for conflicts.
+
+**For PR #9 (next, after this review).** The guest's `journal_id_ok` allows upper-case ASCII letters, and a leading `-`. The bridge now refuses both under Agents. So the guest rule must become `^[a-z0-9][a-z0-9._-]*$` too, or the guest would build paths the bridge refuses. That change goes in the PR #9 update, with option B and the error mapping.
