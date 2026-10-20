@@ -482,13 +482,32 @@ fn protected_principal_root_resource_response(
         ));
     };
 
-    let agent_journal = operation == "write" && is_agent_journal_path(&localhost_root, &rooted);
+    // The file path and token matching both drop empty and `.` segments, so the
+    // Agents rule must see the same path, and an Agents path must arrive in that
+    // canonical form: the stored object is labelled with the URI it was written under.
+    let canonical = canonical_rooted_uri(&rooted);
+    let agent_path = canonical
+        .as_deref()
+        .is_some_and(|canonical| is_agent_journal_path(&localhost_root, canonical));
+    if agent_path && canonical.as_deref() != Some(rooted.as_str()) {
+        return Some(resource_error_response(
+            "invalid_localhost_path",
+            "Agent journal paths must not contain empty or '.' segments",
+        ));
+    }
+    let agent_journal = operation == "write" && agent_path;
     match crate::auth::load_principal_root_protection(data_dir, principal_id, &localhost_root) {
         Ok(Some(_)) => {}
-        Ok(None) if agent_journal => {
+        Ok(None) if agent_path => {
             return Some(resource_error_response(
                 "principal_root_protection_required",
                 "Agent journals under .AppData/Agents/ require principal-root protection",
+            ));
+        }
+        Ok(None) if operation == "write" && !matches!(write_precondition(request), Ok(None)) => {
+            return Some(resource_error_response(
+                "principal_root_protection_required",
+                "create_only and if_revision need principal-root protection",
             ));
         }
         Ok(None) => return None,
@@ -636,6 +655,22 @@ fn is_agent_journal_path(localhost_root: &str, rooted: &str) -> bool {
     };
     let rest = rest.to_ascii_lowercase();
     rest == "/.appdata/agents" || rest.starts_with("/.appdata/agents/")
+}
+
+/// The rooted URI as the file path sees it: empty and `.` segments dropped.
+/// None for a `..` or `\` segment, which the file path refuses anyway.
+fn canonical_rooted_uri(rooted: &str) -> Option<String> {
+    let rest = rooted.strip_prefix("localhost://")?;
+    let mut segments = Vec::new();
+    for segment in rest.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => return None,
+            _ if segment.contains('\\') => return None,
+            _ => segments.push(segment),
+        }
+    }
+    Some(format!("localhost://{}", segments.join("/")))
 }
 
 /// The optional precondition of a protected write: `create_only` for a new
@@ -2564,6 +2599,134 @@ mod tests {
         );
         handle_request(&line, &Some(ctx)).await.unwrap();
         assert_eq!(provider.requests().await.len(), 1);
+    }
+
+    /// Paths that reach the journal file but are not its canonical URI. The file
+    /// path and token matching drop empty and `.` segments.
+    const ODD_JOURNAL_URIS: [&str; 4] = [
+        "localhost://Users/self//.AppData/Agents/demo-agent/tasks/task-1/journal",
+        "localhost://Users/self/./.AppData/Agents/demo-agent/tasks/task-1/journal",
+        "localhost://Users/self/.AppData/Agents/demo-agent//tasks/task-1/journal",
+        "localhost://Users/self/.AppData/./Agents/demo-agent/tasks/task-1/journal",
+    ];
+
+    #[tokio::test]
+    async fn a_journal_path_with_empty_or_dot_segments_is_refused() {
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let first = journal_write(
+            &ctx,
+            &object_uri,
+            JOURNAL_SELF_URI,
+            b"journal v1",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        let v1 = first["response"]["result"]["data"]["revision"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let stored = std::fs::read(journal_path(&temp, &object_uri)).unwrap();
+        for uri in ODD_JOURNAL_URIS {
+            for precondition in [
+                serde_json::json!({}),
+                serde_json::json!({ "if_revision": v1 }),
+                serde_json::json!({ "create_only": true }),
+            ] {
+                let response =
+                    journal_write(&ctx, &object_uri, uri, b"{}", precondition.clone()).await;
+                assert_eq!(
+                    response["response"]["code"], "invalid_localhost_path",
+                    "{uri} {precondition}"
+                );
+            }
+            let token = bridge_token(&ctx, &object_uri, Action::Read);
+            let read = handle_request(&journal_read_line(62, uri, token), &Some(ctx.clone()))
+                .await
+                .unwrap();
+            assert_eq!(read["response"]["code"], "invalid_localhost_path", "{uri}");
+        }
+        assert_eq!(
+            std::fs::read(journal_path(&temp, &object_uri)).unwrap(),
+            stored
+        );
+        let token = bridge_token(&ctx, &object_uri, Action::Read);
+        let read = handle_request(
+            &journal_read_line(63, JOURNAL_SELF_URI, token),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read["response"]["result"]["data"]["content"],
+            serde_json::json!(b"journal v1".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn an_odd_journal_path_on_a_root_without_protection_never_reaches_the_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:unprotected";
+        let root = crate::auth::principal_localhost_root(principal_id);
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(principal_id.to_string());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        let provider = Arc::new(CapturingProvider::default());
+        ctx.provider_registry.register(provider.clone()).await;
+        let object_uri = format!("{root}/.AppData/Agents/demo-agent/tasks/task-1/journal");
+        for uri in ODD_JOURNAL_URIS {
+            let response =
+                journal_write(&ctx, &object_uri, uri, b"{}", serde_json::json!({})).await;
+            assert_eq!(
+                response["response"]["code"], "invalid_localhost_path",
+                "{uri}"
+            );
+        }
+        let token = bridge_token(&ctx, &object_uri, Action::Read);
+        let read = handle_request(
+            &journal_read_line(64, JOURNAL_SELF_URI, token),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read["response"]["code"],
+            "principal_root_protection_required"
+        );
+        assert!(provider.requests().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_precondition_on_a_root_without_protection_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:unprotected";
+        let root = crate::auth::principal_localhost_root(principal_id);
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(principal_id.to_string());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        let provider = Arc::new(CapturingProvider::default());
+        ctx.provider_registry.register(provider.clone()).await;
+        let other = format!("{root}/Documents/note.txt");
+        for precondition in [
+            serde_json::json!({ "create_only": true }),
+            serde_json::json!({ "if_revision": "\"rev\"" }),
+            serde_json::json!({ "create_only": "yes" }),
+        ] {
+            let response = journal_write(
+                &ctx,
+                &other,
+                "localhost://Users/self/Documents/note.txt",
+                b"hello",
+                precondition.clone(),
+            )
+            .await;
+            assert_eq!(
+                response["response"]["code"], "principal_root_protection_required",
+                "{precondition}"
+            );
+        }
+        assert!(provider.requests().await.is_empty());
     }
 
     #[tokio::test]
