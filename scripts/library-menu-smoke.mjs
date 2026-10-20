@@ -291,6 +291,7 @@ const localVideoFile = object(`${documentsUri}/Clip.mp4`, "Clip.mp4", "file", [
   "move",
   "copy",
   "publish",
+  "protect",
   "trash",
   "properties",
 ], {
@@ -1813,6 +1814,108 @@ function excludesAll(actual, forbidden, context) {
   }
 }
 
+// #441: search hides items, so Delete, Shift+Delete and the item menu act only on what is visible.
+async function assertSearchKeepsDeleteTargetsVisible(page) {
+  const names = ["Alpha Clip.txt", "Beta Clip.txt", "Gamma Clip.txt", "Delta Clip.txt"];
+  const uri = (name) => childUri(videosUri, name);
+  for (const name of names) {
+    putObject(videosUri, createFileObject(uri(name), name, { capabilities: ["delete_permanently"] }));
+  }
+  const item = (name) => page.locator(".item").filter({ hasText: name }).first();
+  const itemCount = (count) => page.waitForFunction(
+    (expected) => document.querySelectorAll("#content .item[data-uri]").length === expected,
+    count,
+  );
+  const search = async (query, expectedCount) => {
+    await page.locator("#search").fill(query);
+    await itemCount(expectedCount);
+  };
+  const footer = () => page.locator("#footer-left").textContent();
+  const destructiveOps = (from) => ops.slice(from)
+    .filter((entry) => entry.op === "trash" || entry.op === "delete_permanently")
+    .map((entry) => `${entry.op}:${entry.payload.uri}`);
+
+  await page.locator(".place").filter({ hasText: "Videos" }).first().click();
+  await page.locator(".crumb-current").filter({ hasText: "Videos" }).first().waitFor();
+  await itemCount(names.length);
+  await page.locator("#search-toggle-button").click();
+
+  // Mixed selection: Alpha stays visible, Beta is hidden by search; Delete trashes only Alpha.
+  await item("Alpha Clip.txt").click();
+  await item("Beta Clip.txt").click({ modifiers: [multiSelectModifier] });
+  assert(await footer() === `2 selected · ${names.length} items`, "Alpha and Beta must start selected");
+  await search("Alpha", 1);
+  assert(await footer() === "1 selected · 1 item", `Search must drop hidden Beta from the selection; footer=${await footer()}`);
+  let mark = ops.length;
+  await item("Alpha Clip.txt").focus();
+  await page.keyboard.press("Delete");
+  await waitForOp((entry) => entry.op === "trash" && entry.payload.uri === uri("Alpha Clip.txt"), "Delete must trash visible Alpha");
+  await itemCount(0);
+  assert(
+    JSON.stringify(destructiveOps(mark)) === JSON.stringify([`trash:${uri("Alpha Clip.txt")}`]),
+    `Delete after search must trash only visible Alpha; ops=${JSON.stringify(destructiveOps(mark))}`,
+  );
+  await search("", 3);
+  assert(await page.locator(".item[data-selected='true']").count() === 0, "Clearing search must not bring hidden Beta back into the selection");
+
+  // Shift+Delete: Beta visible, Gamma hidden; the dialog names Beta and only Beta is removed.
+  await item("Beta Clip.txt").click();
+  await item("Gamma Clip.txt").click({ modifiers: [multiSelectModifier] });
+  await search("Beta", 1);
+  mark = ops.length;
+  await item("Beta Clip.txt").focus();
+  await page.keyboard.press("Shift+Delete");
+  const dialog = page.locator("#dialog").filter({ hasText: "Delete permanently?" }).first();
+  await dialog.waitFor();
+  const dialogText = await dialog.textContent();
+  assert(
+    dialogText.includes("1 item (Beta Clip.txt) will be permanently removed") && !dialogText.includes("Gamma"),
+    `Permanent delete dialog must name only visible Beta; text=${dialogText}`,
+  );
+  await page.locator("#dialog button").filter({ hasText: "Delete Permanently" }).first().click();
+  await waitForOp((entry) => entry.op === "delete_permanently" && entry.payload.uri === uri("Beta Clip.txt"), "Shift+Delete must remove visible Beta");
+  await itemCount(0);
+  assert(
+    JSON.stringify(destructiveOps(mark)) === JSON.stringify([`delete_permanently:${uri("Beta Clip.txt")}`]),
+    `Shift+Delete after search must remove only visible Beta; ops=${JSON.stringify(destructiveOps(mark))}`,
+  );
+
+  // Zero results: nothing visible, so Delete does nothing.
+  await search("", 2);
+  await item("Gamma Clip.txt").click();
+  await search("no such clip", 0);
+  assert(await footer() === "0 items", `Zero search results must leave nothing selected; footer=${await footer()}`);
+  mark = ops.length;
+  await page.locator("#content").focus();
+  await page.keyboard.press("Delete");
+  await page.keyboard.press("Shift+Delete");
+  await page.waitForTimeout(150);
+  assert(destructiveOps(mark).length === 0, `Delete with zero visible results must not act; ops=${JSON.stringify(destructiveOps(mark))}`);
+
+  // Item menu: Gamma visible, Delta hidden; menu Delete trashes only Gamma.
+  await search("", 2);
+  await item("Gamma Clip.txt").click();
+  await item("Delta Clip.txt").click({ modifiers: [multiSelectModifier] });
+  await search("Gamma", 1);
+  mark = ops.length;
+  await item("Gamma Clip.txt").click({ button: "right" });
+  await page.locator(".context-menu").waitFor();
+  await clickMenu(page, "Delete");
+  await waitForOp((entry) => entry.op === "trash" && entry.payload.uri === uri("Gamma Clip.txt"), "Menu Delete must trash visible Gamma");
+  await itemCount(0);
+  assert(
+    JSON.stringify(destructiveOps(mark)) === JSON.stringify([`trash:${uri("Gamma Clip.txt")}`]),
+    `Menu Delete after search must trash only visible Gamma; ops=${JSON.stringify(destructiveOps(mark))}`,
+  );
+
+  await page.locator("#search-toggle-button").click();
+  await itemCount(1);
+  for (const name of names) {
+    removeObject(uri(name));
+    removeObject(childUri(`${principalRoot}/.Trash`, name));
+  }
+}
+
 async function run() {
   const server = createServer();
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -1882,6 +1985,7 @@ async function run() {
       await page.locator(".crumb-current").filter({ hasText: label }).first().waitFor();
       await assertOnlyActivePlace(page, label);
     }
+    await assertSearchKeepsDeleteTargetsVisible(page);
     await reorderSidebarPlace(page, "Public", "Desktop", "before");
     assert(
       (await sidebarLabels(page)).slice(0, 3).join("|") === "Home|Public|Desktop",

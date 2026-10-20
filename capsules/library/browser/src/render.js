@@ -24,6 +24,7 @@ export function createLibraryRenderer({
   elements,
   isSelected,
   perf,
+  pruneSelectionToVisible,
   selectedObjects,
   state,
   visibleObjects,
@@ -34,6 +35,7 @@ export function createLibraryRenderer({
     elements.content.dataset.view = state.view === "list" ? "list" : "grid";
     elements.sortSelect.value = state.sort;
     const objects = visibleObjects();
+    pruneSelectionToVisible();
     if (!objects.length) {
       elements.content.dataset.empty = "true";
       const copy = emptyStateCopy(state);

@@ -638,8 +638,8 @@ export function createLibraryActions({
     const confirmed = await confirmDestructive({
       title: "Delete permanently?",
       message: allTrash
-        ? `${objects.length} item${objects.length === 1 ? "" : "s"} will be removed from Trash and cannot be restored.`
-        : `${objects.length} item${objects.length === 1 ? "" : "s"} will be permanently removed. This cannot be restored.`,
+        ? `${describeObjects(objects)} will be removed from Trash and cannot be restored.`
+        : `${describeObjects(objects)} will be permanently removed. This cannot be restored.`,
       confirmLabel: "Delete Permanently",
     });
     if (!confirmed) return;
@@ -739,4 +739,11 @@ export function createLibraryActions({
     unpublishSelectedObjects,
     uploadFiles,
   };
+}
+
+function describeObjects(objects, limit = 3) {
+  const count = `${objects.length} item${objects.length === 1 ? "" : "s"}`;
+  const names = objects.slice(0, limit).map((object) => object.name || object.uri);
+  const more = objects.length - names.length;
+  return `${count} (${names.join(", ")}${more ? ` and ${more} more` : ""})`;
 }
