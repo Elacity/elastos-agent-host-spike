@@ -316,6 +316,8 @@ Falsifiers:   G01 the shared rule allows every operation      -> 4 FAILED (proxy
               G08 the provider path audits ok                 -> a_failed_provider_result_is_audited_as_an_error FAILED
               G09 a conflict is audited as error              -> a_revision_conflict_is_audited_as_a_conflict FAILED
               G10 local dispatch skips the rule               -> only_read_and_write_are_allowed_under_agents FAILED
+Full suite:   on the PR #20 merge, which has all of #8, #9 and #19: (cd elastos && cargo test -p elastos-server --lib)
+                -> "3028 passed; 13 failed; 24 ignored"; the 13 are the same container limits as before, none new.
 Not proven:   The attached bridge's audit classification of a 200 reply with an error body is not tested (it would need
               a listening HTTP server); it uses the same invoke_outcome that G07 pins.
 Guest hash:   no guest change on this branch.
