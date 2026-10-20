@@ -53,7 +53,7 @@ trailer  head [32]
   - step: id u64 | state u8 | kind u8 | resource | effect_id u64 | has_result u8 | old | new | argv (u32 count + strings) | parent_id (u8 flag + u64) | seat | seen_version (u8 flag + u64) | inbox.
   - turn: id u64 | step ids (u32 count + u64 each).
   - A string is u32 length plus UTF-8 bytes. A bool is exactly 0 or 1.
-- **Size cap: 256 KiB of encoded bytes.** After base64 that is about 342 KiB, inside the 1 MiB Runtime frame with room for the envelope. `encode` refuses a bigger journal, and `decode` refuses bigger input. Compaction is what keeps a long task under the cap.
+- **Size cap: 192 KiB of encoded bytes** (lowered from 256 KiB on 20 Oct, after review). The Runtime bridge carries the bytes as a JSON number array (`request_content_bytes`, `resource_bridge.rs`), so each byte costs up to four characters (`255,`). The worst case at the cap, all `0xFF`, is about 768 KiB: inside the 1 MiB `MAX_RESOURCE_FRAME_BYTES`, with room for the envelope and token. 256 KiB of `0xFF` would be about 1 MiB, and the frame is refused. `a_worst_case_journal_at_the_cap_fits_through_the_bridge` writes both through the bridge. `encode` refuses a bigger journal, and `decode` refuses bigger input. Compaction is what keeps a long task under the cap.
 
 **What is stored, and what is model-visible.**
 - **Model-visible:** only `derive(events)`. That excludes markers, observations, and an empty assistant line.
@@ -68,7 +68,7 @@ trailer  head [32]
 
 | Input | Error |
 | --- | --- |
-| more than 256 KiB | `too large` |
+| more than 192 KiB | `too large` |
 | shorter than a header, or a record or trailer cut short | `truncated` |
 | magic is not `EAHJ` | `not a journal` |
 | format is not 1 | `format version` |
@@ -87,7 +87,7 @@ trailer  head [32]
 - `node_zero_and_the_epoch_survive_a_round_trip`: before and after compaction (epoch 1, then 2).
 - `a_grant_is_never_stored`: the grant string is not in the bytes, a decoded step has no grant, and a decoded Prepared step is Denied at dispatch.
 - `a_journal_over_the_cap_is_refused`: both encode and decode.
-- `the_cap_holds_at_the_last_byte`: exactly 256 KiB encodes and decodes; one byte more is refused.
+- `the_cap_holds_at_the_last_byte`: exactly 192 KiB encodes and decodes; one byte more is refused.
 - `a_relinked_but_malformed_journal_is_refused`: records out of order, a bad bool, a non-canonical option, an unflagged backup or pending record, and an unknown tag are refused even with every link recomputed.
 - `the_previous_head_links_two_versions`: version 2's `prev_head` is version 1's head.
 

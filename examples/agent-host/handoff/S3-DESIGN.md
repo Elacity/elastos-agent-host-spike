@@ -72,7 +72,7 @@ Every line reference below is at branch `claude/overnight-1`, checked by reading
 ### 1f. Size limits on the path
 
 - A Runtime resource frame is at most 1 MiB (`resource_bridge.rs:32`), checked on the envelope line.
-- The S2 journal cap is 256 KiB, which is about 342 KiB in base64, so it fits.
+- The S2 journal cap is now 192 KiB (20 Oct). Bytes cross the bridge as a JSON number array, up to four characters per byte, so the worst case is about 768 KiB, inside the frame. The earlier 256 KiB worst case (about 1 MiB) did not fit. See USERSAI-JOURNAL.md.
 - Wasmtime: 128 MiB memory and 100 M fuel (`component.rs:28-29`).
 
 ## 2. Proposed design (smallest diff)
@@ -99,7 +99,7 @@ Every line reference below is at branch `claude/overnight-1`, checked by reading
    - The resource must be rooted (`rooted_localhost_uri`) and free of `..`. The guest already refuses host paths with `host_path`.
 4. **Runtime storage.**
    - A `journal_append` operation in the in-Runtime protected-storage branch. It does not go to the localhost provider.
-   - It decodes base64 and refuses more than 256 KiB.
+   - (Superseded 20 Oct: bytes come as the existing JSON number array; the guest cap is 192 KiB; the 1 MiB frame is the Runtime-side limit.)
    - It calls the S2 `decode_journal` logic, or a Runtime copy of it, so it never stores bytes it cannot read back.
    - It writes with `write_principal_root_object_if_revision`, widened to accept the agent's `UsersAI` root: `Absent` for the first append, `Revision(seen)` after that.
    - A conflict returns a typed `journal_revision_conflict` mapped to `Invalid`, not `Internal`.
@@ -124,7 +124,7 @@ Every line reference below is at branch `claude/overnight-1`, checked by reading
 | A replayed old version: an old revision as `if_revision`, or an old encoding | compare-and-swap under the lock; `prev_head` mismatch | `journal_revision_conflict`, nothing written |
 | A grant for a different resource or action (for example a read token, or another task's journal) | `capability_manager.validate` on the scoped resource and the write action | `capability_denied` |
 | A crash between the write and the result | guest `note_crash` after dispatch | `SettlementUnknown`, no second dispatch; resume uses the head hash |
-| An oversized append: more than 256 KiB decoded, or more than 1 MiB frame | guest `encode_journal`; Runtime decode; `MAX_RESOURCE_FRAME_BYTES` | refused, nothing written |
+| An oversized append: more than 192 KiB encoded, or more than 1 MiB frame | guest `encode_journal`; Runtime decode; `MAX_RESOURCE_FRAME_BYTES` | refused, nothing written |
 | A host path or `..` in the resource | guest `host_path`; Runtime `rooted_localhost_uri` | refused, no step, no provider call |
 | Bytes that are re-linked but malformed | Runtime decode (S2 canonical checks) | refused, nothing written |
 | An attached Runtime trying to write | `resource_bridge.rs:1075-1083` | `principal_context_required` |

@@ -270,8 +270,10 @@ fn replay(bytes: &[u8]) -> Option<Vec<SurfaceNode>> {
 const JOURNAL_MAGIC: &[u8; 4] = b"EAHJ";
 #[cfg(any(test, target_arch = "wasm32"))]
 const JOURNAL_FORMAT: u16 = 1;
+/// Bytes cross the Runtime bridge as a JSON number array, up to four characters
+/// per byte ("255,"), inside a 1 MiB frame. 192 KiB of 0xFF fits; 256 KiB does not.
 #[cfg(any(test, target_arch = "wasm32"))]
-const JOURNAL_CAP: usize = 256 * 1024;
+const JOURNAL_CAP: usize = 192 * 1024;
 #[cfg(any(test, target_arch = "wasm32"))]
 const JOURNAL_HEADER: usize = 4 + 2 + 8 + 1 + 1 + 8 + 1 + 32 + 4;
 
@@ -8432,6 +8434,20 @@ mod tests {
         let bytes = encode_journal(&near, &[0; 32]).unwrap();
         assert!(bytes.len() <= JOURNAL_CAP);
         assert_eq!(decode_journal(&bytes).unwrap().0, near);
+    }
+
+    /// The bridge carries bytes as a JSON number array, up to four characters per
+    /// byte. The cap, at worst, must leave room for the envelope inside the frame,
+    /// and the bridge test that writes a worst-case journal must use the same cap.
+    #[test]
+    fn the_cap_fits_the_runtime_frame_at_four_bytes_per_byte() {
+        let bridge = include_str!("../../../elastos/crates/elastos-server/src/resource_bridge.rs");
+        assert!(bridge.contains("const MAX_RESOURCE_FRAME_BYTES: usize = 1_048_576;"));
+        assert!(bridge.contains(&format!(
+            "const JOURNAL_CAP_BYTES: usize = {} * 1024;",
+            JOURNAL_CAP / 1024
+        )));
+        assert!(JOURNAL_CAP * 4 + 64 * 1024 <= 1_048_576);
     }
 
     #[test]

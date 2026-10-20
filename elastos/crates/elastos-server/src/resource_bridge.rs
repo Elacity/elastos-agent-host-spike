@@ -482,8 +482,15 @@ fn protected_principal_root_resource_response(
         ));
     };
 
+    let agent_journal = operation == "write" && is_agent_journal_path(&localhost_root, &rooted);
     match crate::auth::load_principal_root_protection(data_dir, principal_id, &localhost_root) {
         Ok(Some(_)) => {}
+        Ok(None) if agent_journal => {
+            return Some(resource_error_response(
+                "principal_root_protection_required",
+                "Agent journals under .AppData/Agents/ require principal-root protection",
+            ));
+        }
         Ok(None) => return None,
         Err(err) => {
             return Some(resource_error_response(
@@ -512,6 +519,8 @@ fn protected_principal_root_resource_response(
                 Ok(bytes) => bytes,
                 Err(err) => return Some(provider_error_result("read_failed", &err.to_string())),
             };
+            let revision =
+                crate::auth::principal_root_object_revision(principal_id, &rooted, &bytes);
             let bytes = apply_read_window(
                 bytes,
                 request.get("offset").and_then(|value| value.as_u64()),
@@ -520,6 +529,7 @@ fn protected_principal_root_resource_response(
             Some(provider_ok_result(serde_json::json!({
                 "content": bytes,
                 "size": bytes.len(),
+                "revision": revision,
             })))
         }
         "write" => {
@@ -531,6 +541,28 @@ fn protected_principal_root_resource_response(
                 .get("append")
                 .and_then(|value| value.as_bool())
                 .unwrap_or(false);
+            let precondition = match write_precondition(request) {
+                Ok(precondition) => precondition,
+                Err(message) => return Some(resource_error_response("invalid_content", &message)),
+            };
+            if agent_journal && append {
+                return Some(resource_error_response(
+                    "append_not_allowed",
+                    "append is read-then-write; Agent journals are written whole with a revision precondition",
+                ));
+            }
+            if append && precondition.is_some() {
+                return Some(resource_error_response(
+                    "invalid_content",
+                    "append does not take create_only or if_revision",
+                ));
+            }
+            if agent_journal && precondition.is_none() {
+                return Some(resource_error_response(
+                    "revision_required",
+                    "Agent journal writes need create_only or if_revision",
+                ));
+            }
             let bytes = if append && path.is_file() {
                 match crate::auth::read_principal_root_object(
                     data_dir,
@@ -550,21 +582,85 @@ fn protected_principal_root_resource_response(
             } else {
                 content.clone()
             };
-            match crate::auth::write_principal_root_object(
-                data_dir,
-                principal_id,
-                &localhost_root,
-                &rooted,
-                &path,
-                &bytes,
-            ) {
+            let written = match &precondition {
+                Some(precondition) => crate::auth::write_principal_root_object_if_revision(
+                    data_dir,
+                    principal_id,
+                    &localhost_root,
+                    &rooted,
+                    &path,
+                    &bytes,
+                    match precondition {
+                        WritePrecondition::Absent => {
+                            crate::auth::PrincipalRootObjectPrecondition::Absent
+                        }
+                        WritePrecondition::Revision(revision) => {
+                            crate::auth::PrincipalRootObjectPrecondition::Revision(revision)
+                        }
+                    },
+                ),
+                None => crate::auth::write_principal_root_object(
+                    data_dir,
+                    principal_id,
+                    &localhost_root,
+                    &rooted,
+                    &path,
+                    &bytes,
+                ),
+            };
+            match written {
                 Ok(()) => Some(provider_ok_result(serde_json::json!({
                     "bytes_written": content.len(),
+                    "revision": crate::auth::principal_root_object_revision(
+                        principal_id,
+                        &rooted,
+                        &bytes,
+                    ),
                 }))),
+                Err(err) if err.is::<crate::auth::PrincipalRootObjectWriteConflict>() => {
+                    Some(provider_error_result("revision_conflict", &err.to_string()))
+                }
                 Err(err) => Some(provider_error_result("write_failed", &err.to_string())),
             }
         }
         _ => None,
+    }
+}
+
+/// Agent Host journals live under `<root>/.AppData/Agents/`. A write there must
+/// carry a revision precondition and may not append. The match ignores ASCII
+/// case because the data directory may sit on a case-insensitive filesystem.
+fn is_agent_journal_path(localhost_root: &str, rooted: &str) -> bool {
+    let Some(rest) = rooted.strip_prefix(localhost_root) else {
+        return false;
+    };
+    let rest = rest.to_ascii_lowercase();
+    rest == "/.appdata/agents" || rest.starts_with("/.appdata/agents/")
+}
+
+/// The optional precondition of a protected write: `create_only` for a new
+/// object, or `if_revision` naming the revision the caller last read.
+enum WritePrecondition {
+    Absent,
+    Revision(String),
+}
+
+fn write_precondition(request: &serde_json::Value) -> Result<Option<WritePrecondition>, String> {
+    let create_only = match request.get("create_only") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(_) => return Err("create_only must be a boolean".to_string()),
+    };
+    let if_revision = match request.get("if_revision") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value)) if !value.is_empty() => Some(value.clone()),
+        Some(_) => return Err("if_revision must be a non-empty string".to_string()),
+    };
+    match (create_only, if_revision) {
+        (true, Some(_)) => Err("create_only and if_revision cannot both be set".to_string()),
+        (true, None) => Ok(Some(WritePrecondition::Absent)),
+        (false, Some(revision)) => Ok(Some(WritePrecondition::Revision(revision))),
+        (false, None) => Ok(None),
     }
 }
 
@@ -2264,7 +2360,7 @@ mod tests {
             JOURNAL_SELF_URI,
             Some(token),
             b"EAHJ journal v1",
-            serde_json::json!({}),
+            serde_json::json!({ "create_only": true }),
         );
         let response = handle_request(&line, &Some(ctx)).await.unwrap();
         assert_eq!(response["response"]["result"]["status"], "ok");
@@ -2289,11 +2385,9 @@ mod tests {
         assert!(!journal_path(&temp, &object_uri).exists());
     }
 
-    /// Needs the S3 shipping change: the protected write accepts `create_only`
-    /// and `if_revision`, writes through write_principal_root_object_if_revision,
-    /// and returns the new revision.
+    /// The protected write accepts `create_only` and `if_revision`, writes
+    /// through write_principal_root_object_if_revision, and returns the new revision.
     #[tokio::test]
-    #[ignore = "S3: protected write needs create_only/if_revision (shipping change not made)"]
     async fn a_stale_journal_revision_is_refused_and_the_stored_journal_is_kept() {
         let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
         let write = |id: u64, content: &[u8], precondition: serde_json::Value| {
@@ -2345,10 +2439,9 @@ mod tests {
         );
     }
 
-    /// Needs the S3 shipping change: a write under .AppData/Agents/ must carry
-    /// create_only or if_revision, so a journal is never overwritten blind.
+    /// A write under .AppData/Agents/ must carry create_only or if_revision, so a
+    /// journal is never overwritten blind.
     #[tokio::test]
-    #[ignore = "S3: unconditional journal writes are not refused yet (shipping change not made)"]
     async fn an_unconditional_journal_write_is_refused() {
         let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
         let token = bridge_token(&ctx, &object_uri, Action::Write);
@@ -2360,7 +2453,289 @@ mod tests {
             serde_json::json!({}),
         );
         let response = handle_request(&line, &Some(ctx)).await.unwrap();
-        assert_eq!(response["response"]["result"]["code"], "revision_required");
+        assert_eq!(response["response"]["code"], "revision_required");
+        assert!(!journal_path(&temp, &object_uri).exists());
+    }
+
+    fn journal_read_line(id: u64, uri: &str, token: String) -> String {
+        serde_json::json!({
+            "id": id,
+            "request": {
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "read",
+                "token": token,
+                "body": {},
+            }
+        })
+        .to_string()
+    }
+
+    async fn journal_write(
+        ctx: &BridgeContext,
+        object_uri: &str,
+        uri: &str,
+        content: &[u8],
+        precondition: serde_json::Value,
+    ) -> serde_json::Value {
+        let token = bridge_token(ctx, object_uri, Action::Write);
+        let line = journal_write_line(60, uri, Some(token), content, precondition);
+        handle_request(&line, &Some(ctx.clone())).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_append_to_a_journal_is_refused() {
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let first = journal_write(
+            &ctx,
+            &object_uri,
+            JOURNAL_SELF_URI,
+            b"journal v1",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        let v1 = first["response"]["result"]["data"]["revision"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for precondition in [
+            serde_json::json!({ "append": true }),
+            serde_json::json!({ "append": true, "if_revision": v1 }),
+        ] {
+            let response =
+                journal_write(&ctx, &object_uri, JOURNAL_SELF_URI, b" more", precondition).await;
+            assert_eq!(response["response"]["code"], "append_not_allowed");
+        }
+        let root = crate::auth::principal_localhost_root("person:local:journal-owner");
+        let path = journal_path(&temp, &object_uri);
+        assert_eq!(
+            crate::auth::read_principal_root_object(
+                temp.path(),
+                "person:local:journal-owner",
+                &root,
+                &object_uri,
+                &path
+            )
+            .unwrap(),
+            b"journal v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_journal_on_a_root_without_protection_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:unprotected";
+        let root = crate::auth::principal_localhost_root(principal_id);
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(principal_id.to_string());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        let provider = Arc::new(CapturingProvider::default());
+        ctx.provider_registry.register(provider.clone()).await;
+        let object_uri = format!("{root}/.AppData/Agents/demo-agent/tasks/task-1/journal");
+        for precondition in [
+            serde_json::json!({ "create_only": true }),
+            serde_json::json!({}),
+        ] {
+            let response = journal_write(
+                &ctx,
+                &object_uri,
+                JOURNAL_SELF_URI,
+                b"journal v1",
+                precondition,
+            )
+            .await;
+            assert_eq!(
+                response["response"]["code"],
+                "principal_root_protection_required"
+            );
+        }
+        assert!(provider.requests().await.is_empty());
+        assert!(!journal_path(&temp, &object_uri).exists());
+        // Outside .AppData/Agents/ an unprotected root still goes to the provider, as before.
+        let other = format!("{root}/Documents/note.txt");
+        let token = bridge_token(&ctx, &other, Action::Write);
+        let line = journal_write_line(
+            61,
+            "localhost://Users/self/Documents/note.txt",
+            Some(token),
+            b"hello",
+            serde_json::json!({}),
+        );
+        handle_request(&line, &Some(ctx)).await.unwrap();
+        assert_eq!(provider.requests().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_journal_path_is_matched_without_regard_to_case() {
+        let (temp, mut ctx, _object_uri) = journal_context("person:local:journal-owner");
+        let root = crate::auth::principal_localhost_root("person:local:journal-owner");
+        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        for (uri, rooted) in [
+            (
+                "localhost://Users/self/.appdata/agents/demo-agent/tasks/task-1/journal",
+                format!("{root}/.appdata/agents/demo-agent/tasks/task-1/journal"),
+            ),
+            (
+                "localhost://Users/self/.AppData/AGENTS/demo-agent/tasks/task-1/journal",
+                format!("{root}/.AppData/AGENTS/demo-agent/tasks/task-1/journal"),
+            ),
+        ] {
+            let response = journal_write(&ctx, &rooted, uri, b"blind", serde_json::json!({})).await;
+            assert_eq!(response["response"]["code"], "revision_required", "{uri}");
+            assert!(!journal_path(&temp, &rooted).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn preconditions_are_optional_outside_agents_and_honoured_when_sent() {
+        let (_temp, mut ctx, _object_uri) = journal_context("person:local:journal-owner");
+        let root = crate::auth::principal_localhost_root("person:local:journal-owner");
+        let state = format!("{root}/.AppData/LocalHost/Chat/state.json");
+        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        let uri = "localhost://Users/self/.AppData/LocalHost/Chat/state.json";
+        let blind = journal_write(&ctx, &state, uri, b"one", serde_json::json!({})).await;
+        assert_eq!(blind["response"]["result"]["status"], "ok");
+        let rev_one = blind["response"]["result"]["data"]["revision"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let again = journal_write(&ctx, &state, uri, b"two", serde_json::json!({})).await;
+        assert_eq!(again["response"]["result"]["status"], "ok");
+        let exists = journal_write(
+            &ctx,
+            &state,
+            uri,
+            b"x",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(exists["response"]["result"]["code"], "revision_conflict");
+        let stale = journal_write(
+            &ctx,
+            &state,
+            uri,
+            b"x",
+            serde_json::json!({ "if_revision": rev_one }),
+        )
+        .await;
+        assert_eq!(stale["response"]["result"]["code"], "revision_conflict");
+        let rev_two = crate::auth::principal_root_object_revision(
+            "person:local:journal-owner",
+            &state,
+            b"two",
+        );
+        let current = journal_write(
+            &ctx,
+            &state,
+            uri,
+            b"three",
+            serde_json::json!({ "if_revision": rev_two }),
+        )
+        .await;
+        assert_eq!(current["response"]["result"]["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_precondition_is_refused_before_storage() {
+        let (temp, mut ctx, _object_uri) = journal_context("person:local:journal-owner");
+        let root = crate::auth::principal_localhost_root("person:local:journal-owner");
+        let state = format!("{root}/.AppData/LocalHost/Chat/state.json");
+        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        let uri = "localhost://Users/self/.AppData/LocalHost/Chat/state.json";
+        for precondition in [
+            serde_json::json!({ "create_only": true, "if_revision": "\"abc\"" }),
+            serde_json::json!({ "create_only": "yes" }),
+            serde_json::json!({ "if_revision": 7 }),
+            serde_json::json!({ "if_revision": "" }),
+            serde_json::json!({ "append": true, "if_revision": "\"abc\"" }),
+            serde_json::json!({ "append": true, "create_only": true }),
+        ] {
+            let response = journal_write(&ctx, &state, uri, b"x", precondition.clone()).await;
+            assert_eq!(
+                response["response"]["code"], "invalid_content",
+                "{precondition}"
+            );
+            assert!(!journal_path(&temp, &state).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_read_returns_the_revision_the_next_write_needs() {
+        let (_temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let first = journal_write(
+            &ctx,
+            &object_uri,
+            JOURNAL_SELF_URI,
+            b"journal v1",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        let written = first["response"]["result"]["data"]["revision"].clone();
+        assert!(
+            written.as_str().is_some_and(|rev| rev.len() == 66),
+            "{written}"
+        );
+        let token = bridge_token(&ctx, &object_uri, Action::Read);
+        let read = handle_request(
+            &journal_read_line(62, JOURNAL_SELF_URI, token),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(read["response"]["result"]["data"]["revision"], written);
+        let next = journal_write(
+            &ctx,
+            &object_uri,
+            JOURNAL_SELF_URI,
+            b"journal v2",
+            serde_json::json!({ "if_revision": written }),
+        )
+        .await;
+        assert_eq!(next["response"]["result"]["status"], "ok");
+    }
+
+    /// Bytes cross the bridge as a JSON number array: up to four characters per
+    /// byte ("255,"). The guest journal cap (USERSAI-JOURNAL.md) must fit inside
+    /// MAX_RESOURCE_FRAME_BYTES even when every byte is 0xFF.
+    const JOURNAL_CAP_BYTES: usize = 192 * 1024;
+
+    #[tokio::test]
+    async fn a_worst_case_journal_at_the_cap_fits_through_the_bridge() {
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let full = vec![0xFF_u8; JOURNAL_CAP_BYTES];
+        let response = journal_write(
+            &ctx,
+            &object_uri,
+            JOURNAL_SELF_URI,
+            &full,
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(response["response"]["result"]["status"], "ok");
+        let root = crate::auth::principal_localhost_root("person:local:journal-owner");
+        assert_eq!(
+            crate::auth::read_principal_root_object(
+                temp.path(),
+                "person:local:journal-owner",
+                &root,
+                &object_uri,
+                &journal_path(&temp, &object_uri),
+            )
+            .unwrap(),
+            full
+        );
+        // The earlier 256 KiB cap does not fit: the frame is refused before storage.
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let response = journal_write(
+            &ctx,
+            &object_uri,
+            JOURNAL_SELF_URI,
+            &vec![0xFF_u8; 256 * 1024],
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(response["response"]["code"], "request_too_large");
         assert!(!journal_path(&temp, &object_uri).exists());
     }
 
