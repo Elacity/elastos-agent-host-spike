@@ -104,3 +104,51 @@ Questions:    none for this PR. For the adversarial review: please look hardest 
 ## What is next
 
 The GPT-family adversarial review of this PR. Then the guest side: the providers import, a launch grant held in memory and never journaled, `propose_journal_append`, and resume by head hash. Then tests for the sweep's gaps, `begin_exec` first.
+
+## Fix after self-review (20 Oct)
+
+Sasha could not run the GPT-family review yet, so another Claude agent did a read-only adversarial review of this PR with no memory of writing it. **This is not the independent review that HANDOFF asks for, and it does not replace it.** It found **two blocking holes**, both confirmed by running them, and both with one cause. Fixed in `0b0b02b`.
+
+**The cause.** `is_agent_journal_path` matched the raw rooted URI. `rooted_localhost_uri` keeps empty (`//`) and `.` segments. But the file path (`rooted_localhost_fs_path`) skips empty segments, and token matching (`ResourceId::matches`) drops both. So `localhost://Users/self//.AppData/Agents/...` and `.../self/./.AppData/Agents/...` reached the journal file, and the Agent Host's own exact journal token authorised them, but they did not match the Agents prefix.
+
+1. **On a protected root:** a write to the `//` form with no precondition was accepted. It replaced the journal and labelled the new envelope with the `//` URI, so the next canonical read failed with "damaged". The journal was destroyed.
+2. **On a root with no protection:** the `//` or `/./` form skipped `principal_root_protection_required` and fell through to the generic localhost provider, which writes the same file.
+
+**The fix.**
+- The Agents rule now checks `canonical_rooted_uri(rooted)`, which drops empty and `.` segments as the file path does. A `..` or `\` segment gives none; the file path and the localhost provider both refuse those already.
+- An Agents path that is not in canonical form is refused with `invalid_localhost_path`, on read and on write, before the protection check. The stored object is labelled with the URI it was written under, so only one URI may name it.
+- Also from the review:
+  - (finding 7) a **read** under Agents on a root with no protection is refused, not sent to the provider;
+  - (finding 3) `create_only` / `if_revision` on a root with no protection is refused (`principal_root_protection_required`) instead of being silently dropped on the way to the provider, which has no such fields. No caller sends them today.
+
+```text
+Commit:       0b0b02b (fix)
+Tests run:    (cd elastos && cargo test -p elastos-server --lib -- resource_bridge::tests) -> "58 passed" (55 + 3 new)
+              (cd elastos && cargo clippy -p elastos-server --lib --tests -- -D warnings) -> clean; fmt -> ok
+              (cd elastos && cargo test -p elastos-server --lib) -> "3017 passed; 14 failed; 22 ignored". Before the fix
+                the same run had 13 failures. The extra one,
+                remote_model::denial_authority::a_denial_that_could_not_be_saved_cancels_nothing, forces a save failure
+                with chmod 0o500, and this container runs as root (uid 0). It fails the same way with the bridge file
+                from before the fix (2396520), checked by swapping the file in and back. The other 13 are the same
+                custody, process, room, gateway-child and IPv6 tests as before.
+New tests:    a_journal_path_with_empty_or_dot_segments_is_refused (protected root: 4 odd URIs x 3 bodies, and reads;
+                the stored journal is unchanged and still reads back)
+              an_odd_journal_path_on_a_root_without_protection_never_reaches_the_provider (and the canonical read)
+              a_precondition_on_a_root_without_protection_is_refused
+Falsifiers:   C01 a non-canonical Agents path is not refused     -> both odd-path tests FAILED
+              C02 the Agents rule matches the raw path            -> both odd-path tests FAILED
+              C03 canonical form keeps "." segments               -> ..._never_reaches_the_provider FAILED (on a protected
+                                                                     root the file path already refuses "/./")
+              C04 canonical form keeps empty segments             -> both odd-path tests FAILED
+              C05 a precondition on an unprotected root goes on   -> a_precondition_on_a_root_without_protection_is_refused FAILED
+              C06 an unprotected Agents read goes to the provider -> ..._never_reaches_the_provider FAILED
+Guest hash:   unchanged by the fix (no guest change).
+```
+
+**Recorded, not changed** (questions for Sasha):
+
+- **(finding 4) `delete` and `mkdir` under Agents skip the new rules.** `principal_root_read_write_uri` covers only read and write. A delete needs a Delete grant, which the Agent Host is not given. A `mkdir` at the journal path would block the journal: that harms only the caller's own journal, and only with a grant for that path. Should Agents paths refuse every operation except read and write?
+- **(finding 5) No protection check inside the mutation lock.** Writes under Agents pass `require_protection: false`. The check runs just before, outside the lock. Making it `true` means a new parameter on `write_principal_root_object_if_revision`, which `viewer_gateway.rs` also calls. The reviewer found no way to remove protection, so this is defence in depth only.
+- **(finding 6) Only ASCII case is folded.** On NTFS, and maybe APFS, `Agentſ` (U+017F) or a trailing dot (`Agents.`) could alias `Agents`. This matters only if the data directory sits on such a filesystem.
+- **(finding 8) Audit outcome.** The audit outcome is keyed on `type == resource_result`, so a `revision_conflict` (a result with status error) is audited as ok. `write_failed` already worked this way before this PR.
+- **Not from the review, noticed while fixing.** `scope_current_user_alias` lets a `..` through, for example `Users/<own root>/../<other>/x`. Both the file path and the localhost provider refuse `..`, so I found no way through. This is older shipping code, not this PR.
