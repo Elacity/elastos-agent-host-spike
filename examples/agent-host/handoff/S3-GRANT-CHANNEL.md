@@ -1,5 +1,7 @@
 # How the guest gets its journal grant: options
 
+**Decided 20 Oct: option B.** Sasha chose the `capabilities` import, reversing answer 3. The guest asks for exactly two grants, read and write, on its own journal; the manifest declares only `.AppData/Agents/<agent-id>/*`. Built on `claude/s3-guest-journal` (PR #9). The grant type is now `JournalGrant`.
+
 Written 20 Oct 2026 for PR #9, questions 1 and 2. No code. Sasha decides.
 
 ## The problem in three lines

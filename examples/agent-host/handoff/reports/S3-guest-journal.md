@@ -155,3 +155,55 @@ Also raised by the review; recorded here and not changed:
 - **Question 3 (new): some refusals made before storage come back as "unknown".** The component host's `bus_error` (`component.rs`) maps only a few bridge codes to `Denied` or `Invalid`. Others become `Internal`, which the guest treats as `settlement_unknown`: `revision_required`, `principal_root_protection_required`, `principal_context_required`, `invalid_content`, `append_not_allowed`, and the manifest refusal. That is safe, but a Runtime with no principal-root protection then leaves the guest stuck on its first append: nothing is stored, so resume reads `read_failed` and stays unknown. Mapping those codes to `Invalid` would fix it. That is a shipping change to `elastos-compute`, so I did not make it. Should I?
 - **The Wasmtime "no bridge line" check is weaker than it reads.** The host refuses an empty grant before the bridge, so an empty bridge log cannot tell "the guest sent nothing" from "the guest sent with no grant". The guest's own check in `run()` proves the first. J18w shows the bridge log does catch a guest that sends a non-empty grant.
 - **Small things, left as is:** a journal over the cap gains one cancelled step per try. A settled resume leaves the step `settlement_unknown` with its result word.
+
+## Update: option B (20 Oct)
+
+Sasha's answers: question 1, option B (the `capabilities` import, reversing answer 3); question 2, ask for exactly two grants, read and write, on the agent's own journal, with the manifest declaring only `.AppData/Agents/<agent-id>/*`; question 3, the error mapping goes in its own `elastos-compute` PR. PR #8 fixes 2 and 3 are merged in (`4db812b`).
+
+```text
+Commit:       85186ec (option B), plus a test-only commit for an id falsifier that survived (P04, see below)
+Changed:      examples/agent-host/src/lib.rs - request_journal_grants; JournalGrant (was LaunchGrant); id rule; run()
+              examples/agent-host/capsule.json - capabilities: ["localhost://Users/self/.AppData/Agents/agent-host/*"]
+              elastos/crates/elastos-compute/src/providers/component.rs - TEST ONLY: import list and bridge lines
+              elastos/crates/elastos-server/src/resource_bridge.rs - TEST ONLY: the manifest and grants cannot delete
+Invariant:    The guest asks for exactly two grants, write then read, on its own journal, through the existing Runtime
+              path (Users/self scoping, manifest bound, pending request, shell decision, audit). It never asks for
+              anything else. A refusal leaves that grant empty and nothing is sent with it.
+Refusals:     a cursor outside Users/self/.AppData/Agents/ or with ".."    -> no grant is asked for
+              a refused grant request                                      -> no grant; append Denied; nothing sent
+              an agent or task id not matching ^[a-z0-9][a-z0-9._-]*$      -> "journal id" (the bridge's segment rule)
+              the Agent Host's manifest and its two grants: delete on .AppData, the person's root, the Agents folder
+                -> manifest_capability_denied; delete on the journal -> capability_denied (no Delete grant); with a
+                Delete grant inside the bound -> operation_not_allowed (the Agents rule from PR #8)
+Tests run:    ./examples/agent-host/verify.sh -> "108 passed", OK
+              ./examples/agent-host/run-local.sh -> "1 passed": imports capabilities, identity, providers, runtime,
+                types; with no Runtime answering, each guest sends exactly two request_capability lines (write, read)
+                for its own journal and no resource call
+              (cd elastos && cargo test -p elastos-server --lib -- resource_bridge::tests) -> "63 passed"
+              (cd elastos && cargo test -p elastos-compute --lib -- --include-ignored) -> "16 passed"; clippy clean
+New tests:    the_guest_asks_for_exactly_two_grants_on_its_own_journal, a_refused_grant_request_sends_nothing,
+              no_grant_is_asked_for_a_path_outside_the_agents_journal,
+              the_agent_host_manifest_and_grants_cannot_delete_appdata_or_the_root (bridge; reads the real capsule.json)
+Falsifiers:   P01 the guest asks for a third grant           -> the_guest_asks_for_exactly_two_grants_on_its_own_journal,
+                                                                a_refused_grant_request_sends_nothing FAILED
+              P02 the guest asks for the Agents folder        -> the_guest_asks_for_exactly_two_grants_on_its_own_journal FAILED
+              P03 grants asked for any cursor path            -> no_grant_is_asked_for_a_path_outside_the_agents_journal FAILED
+              P04 ids may hold upper case                     -> SURVIVED at first: every upper-case id in the test began
+                                                                with an upper-case letter, caught by the first-byte check.
+                                                                Added "aB" and "demo-Agent"; now
+                                                                a_journal_id_is_letters_digits_and_dashes FAILED
+              P05 ids may start with any allowed byte         -> a_journal_id_is_letters_digits_and_dashes FAILED
+              P07 the guest never calls capabilities          -> agent_host_example_keeps_the_head_across_a_compaction FAILED
+              P08 the manifest declares all of Users/self     -> the_agent_host_manifest_and_grants_cannot_delete_appdata_or_the_root FAILED
+Guest hash:   99bacd9df2b448a9b94e579754644a217d74f718662702e29973d44d7f4e583c on two builds (verify.sh, build.sh).
+              wasm_sections.py: file 405170 bytes; /1/10 304296 3fee1380a0f27311.
+Import list:  CHANGED to elastos:bus/capabilities, identity, providers, runtime, types (all @1.0.0). capabilities asks
+              for the two journal grants. Security change: needs the GPT-family review.
+Not proven:   No end-to-end write through a real Runtime yet. That is the next test, after the elastos-compute PR.
+              WasmBus refuses a grant whose resource or actions differ from the request; the host builds the grant
+              from the request, so no input reaches that check today (defence).
+Questions:    One gap found while writing the delete test. A request_capability for a delete inside the manifest bound
+              (for example on the journal) is not refused at request time: it waits up to 30 s for the shell to decide.
+              Even if granted, using it is refused (operation_not_allowed). Should request_capability refuse every
+              action except read and write under Agents too? That is shipping Runtime code; I left it.
+```

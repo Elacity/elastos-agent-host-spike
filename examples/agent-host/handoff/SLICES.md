@@ -159,13 +159,13 @@ todos:
     content: "Done locally. Sasha opened Approval. Tool and hosted model share Once, This session, and Until I stop it. This session on the hosted model said Not allowed. The log is not uploaded. No commit."
     status: completed
   - id: hold-bus-fixture
-    content: "Done locally. The loaded component imports only elastos:bus identity, runtime, and types. capabilities and providers are absent. No push. Changed in S3 (20 Oct): providers is added for the task journal only; capabilities is still absent; the Wasmtime test expects identity, providers, runtime, types."
+    content: "Done locally. The loaded component imports only elastos:bus identity, runtime, and types. capabilities and providers are absent. No push. Changed in S3 (20 Oct): providers is added for the task journal only; capabilities is still absent; the Wasmtime test expects identity, providers, runtime, types. Option B (20 Oct): capabilities is added too, for the two journal grants only."
     status: completed
   - id: hold-gateway-denied
     content: "Done locally. A component read with no grant is Denied before the bridge. The resource bridge already returns missing_token and does not call the provider. No new HTTP route. No push."
     status: completed
   - id: hold-usersai
-    content: "Section 12. Durable journal is a Runtime resource under UsersAI, written by the host, not a path inside the guest. S3 (20 Oct): under Users/self/.AppData/Agents/ for now; bridge rules (PR #8) and guest append and resume (claude/s3-guest-journal) are in. Still open: the Runtime has no channel to hand the guest its launch grant, and resume needs a read grant."
+    content: "Section 12. Durable journal is a Runtime resource under UsersAI, written by the host, not a path inside the guest. S3 (20 Oct): under Users/self/.AppData/Agents/ for now; bridge rules (PR #8) and guest append and resume (claude/s3-guest-journal) are in. Option B (20 Oct): the guest asks for write and read grants on its own journal with the capabilities import; the manifest declares only .AppData/Agents/agent-host/*. Still open: the end-to-end Wasmtime test through the real bridge."
     status: pending
   - id: hold-adversarial
     content: "Section 12. Independent adversarial review, VERDICT PASS, from another model family, on that exact head, before any push."
