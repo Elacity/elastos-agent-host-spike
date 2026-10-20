@@ -8447,7 +8447,7 @@ mod tests {
             "const JOURNAL_CAP_BYTES: usize = {} * 1024;",
             JOURNAL_CAP / 1024
         )));
-        assert!(JOURNAL_CAP * 4 + 64 * 1024 <= 1_048_576);
+        const { assert!(JOURNAL_CAP * 4 + 64 * 1024 <= 1_048_576) };
     }
 
     #[test]
