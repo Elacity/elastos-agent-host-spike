@@ -11964,4 +11964,43 @@ mod tests {
             include_str!("../../../elastos/crates/elastos-compute/src/providers/component.rs");
         assert!(host.contains("let body = serde_json::to_vec(&result)"));
     }
+
+    /// Gives one fixed reply to every call, after the write it was asked for.
+    struct ScriptedBus(Vec<u8>);
+
+    impl ResourceBus for ScriptedBus {
+        fn invoke(
+            &mut self,
+            _resource: &str,
+            _operation: &str,
+            _body: &[u8],
+            _grant: &str,
+        ) -> Result<Vec<u8>, BusFailure> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn only_an_ok_reply_with_a_revision_counts_as_written() {
+        for reply in [
+            r#"{"status":"ok","data":{"bytes_written":10}}"#,
+            r#"{"status":"ok","data":{"bytes_written":10,"revision":""}}"#,
+            r#"{"status":"ok"}"#,
+            r#"{"status":"error","code":"write_failed"}"#,
+            r#"{"status":"pending"}"#,
+            "not json",
+        ] {
+            let mut bus = ScriptedBus(reply.as_bytes().to_vec());
+            let mut cursor = journal_cursor("demo-agent", "task-1").unwrap();
+            let mut journal = two_turns();
+            assert_eq!(
+                append_journal(&mut bus, &mut journal, &mut cursor, Some(&write_grant())),
+                AppendOutcome::Unknown,
+                "{reply}"
+            );
+            assert!(cursor.pending.is_some(), "{reply}");
+            assert!(cursor.revision.is_none(), "{reply}");
+            assert_eq!(last_step(&journal).state, StepState::SettlementUnknown);
+        }
+    }
 }
