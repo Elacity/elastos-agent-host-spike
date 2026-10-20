@@ -667,6 +667,53 @@ fn an_older_policy_cannot_be_replayed_after_a_revocation() {
 }
 
 #[test]
+fn two_policies_loaded_at_once_never_lower_the_floor() {
+    let world = World::new();
+    let root_did = sign::did(&world.release_root);
+    let first = world.release().sign(&world.release_root);
+    let mut second = world.release();
+    second.sequence = 2;
+    let second = second.sign(&world.release_root);
+    for round in 0..200 {
+        let path = world.root.path().join(format!("race-{round}"));
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for release in [&first, &second] {
+                let (barrier, path, root_did) = (&barrier, &path, &root_did);
+                scope.spawn(move || {
+                    barrier.wait();
+                    // Either may be refused (the lower one, if it loses).
+                    let _ = effective_policy(
+                        release,
+                        root_did,
+                        &LocalConfig::default(),
+                        NOW,
+                        &PolicyFloor::at(path),
+                    );
+                });
+            }
+        });
+        let floor = PolicyFloor::at(&path);
+        assert_eq!(
+            floor.seen().unwrap().map(|(sequence, _)| sequence),
+            Some(2),
+            "round {round}"
+        );
+        assert_eq!(
+            refused(effective_policy(
+                &first,
+                &root_did,
+                &LocalConfig::default(),
+                NOW,
+                &floor
+            )),
+            "policy_rollback",
+            "round {round}"
+        );
+    }
+}
+
+#[test]
 fn one_sequence_names_one_policy() {
     let world = World::new();
     let root_did = sign::did(&world.release_root);

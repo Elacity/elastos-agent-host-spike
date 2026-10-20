@@ -104,7 +104,12 @@ pub struct TrustPolicy {
 
 /// The highest policy sequence this device has accepted, and the sha256 of
 /// that policy, kept in one file. The Runtime would keep it in its own state.
-#[derive(Clone, Debug)]
+///
+/// Reading, checking and raising it happen under an exclusive lock on
+/// `<path>.lock`, so two policies loaded at once cannot both read the old
+/// floor and leave the lower one written. Each writer uses its own temporary
+/// file.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolicyFloor {
     path: PathBuf,
 }
@@ -134,21 +139,41 @@ impl PolicyFloor {
         Ok(Some((record.sequence, record.sha256)))
     }
 
+    /// Held for the whole read, check and raise; released on drop.
+    fn lock(&self) -> Result<std::fs::File, Refusal> {
+        let path = sibling_path(&self.path, ".lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|err| io(err, &path))?;
+        file.lock().map_err(|err| io(err, &path))?;
+        Ok(file)
+    }
+
     fn raise(&self, sequence: u64, sha256: &str) -> Result<(), Refusal> {
         let record = FloorRecord {
             sequence,
             sha256: sha256.to_string(),
         };
-        let temporary = temporary_path(&self.path);
+        let temporary = sibling_path(
+            &self.path,
+            &format!(
+                ".next-{}-{}",
+                std::process::id(),
+                hex::encode(rand::random::<[u8; 8]>())
+            ),
+        );
         std::fs::write(&temporary, serde_json::to_vec(&record).unwrap())
             .map_err(|err| io(err, &temporary))?;
         std::fs::rename(&temporary, &self.path).map_err(|err| io(err, &self.path))
     }
 }
 
-fn temporary_path(path: &Path) -> PathBuf {
+fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".next");
+    name.push(suffix);
     path.with_file_name(name)
 }
 
@@ -222,6 +247,7 @@ pub fn effective_policy(
     }
     // Only a genuine, current, bounded policy moves the floor.
     let sha256 = hex::encode(Sha256::digest(canonical(policy)));
+    let lock = floor.lock()?;
     match floor.seen()? {
         Some((seen, _)) if policy.sequence < seen => {
             return Err(Refusal::PolicyRollback {
@@ -235,6 +261,7 @@ pub fn effective_policy(
         Some((seen, _)) if policy.sequence == seen => {}
         _ => floor.raise(policy.sequence, &sha256)?,
     }
+    drop(lock);
 
     let mut publishers: Vec<TrustedPublisher> = policy
         .publishers
