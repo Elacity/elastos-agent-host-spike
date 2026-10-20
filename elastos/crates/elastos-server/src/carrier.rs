@@ -1769,16 +1769,19 @@ fn short_lived_endpoint_builder(
             approved_relay,
         ),
     };
+    Ok(builder.transport_config(carrier_transport_config()))
+}
+
+fn carrier_transport_config() -> iroh::endpoint::QuicTransportConfig {
+    // Carrier uses no QUIC datagrams. With no receive buffer the endpoint does
+    // not offer them, and a peer that sends one anyway loses the connection.
+    let config = iroh::endpoint::QuicTransportConfig::builder().datagram_receive_buffer_size(None);
     // Some Linux network drivers reject batched UDP sends (segmentation offload)
     // with EIO, and the UDP layer reports success, so whole QUIC batches vanish
     // (seen on the Jetson's Wi-Fi). Send one datagram per call on Linux.
     #[cfg(target_os = "linux")]
-    let builder = builder.transport_config(
-        iroh::endpoint::QuicTransportConfig::builder()
-            .enable_segmentation_offload(false)
-            .build(),
-    );
-    Ok(builder)
+    let config = config.enable_segmentation_offload(false);
+    config.build()
 }
 
 async fn bind_carrier_endpoint(
@@ -11904,6 +11907,47 @@ pub(crate) mod tests {
             .unwrap();
         runtime.close().await;
         server.close().await;
+    }
+
+    #[tokio::test]
+    async fn carrier_endpoints_offer_peers_no_quic_datagrams() {
+        let carrier = bind_carrier_endpoint(
+            SecretKey::from_bytes(&[151; 32]),
+            CarrierNodeNetwork::Isolated,
+            None,
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
+        carrier.set_alpns(vec![CARRIER_ALPN.to_vec()]);
+        let peer = Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .bind()
+            .await
+            .unwrap();
+        let address = wait_for_direct_endpoint_addr(&carrier).await;
+        let carrier_endpoint = carrier.clone();
+        let accepted =
+            tokio::spawn(async move { carrier_endpoint.accept().await.unwrap().await.unwrap() });
+        let connection =
+            tokio::time::timeout(Duration::from_secs(5), peer.connect(address, CARRIER_ALPN))
+                .await
+                .unwrap()
+                .unwrap();
+        let carrier_side = tokio::time::timeout(Duration::from_secs(5), accepted)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The peer runs iroh's defaults and offers datagrams; Carrier offers none,
+        // so the peer cannot send even an empty one.
+        assert!(carrier_side.max_datagram_size().is_some());
+        assert_eq!(connection.max_datagram_size(), None);
+        assert!(connection.send_datagram(Vec::new().into()).is_err());
+
+        connection.close(0u32.into(), b"done");
+        peer.close().await;
+        carrier.close().await;
     }
 
     #[tokio::test]
