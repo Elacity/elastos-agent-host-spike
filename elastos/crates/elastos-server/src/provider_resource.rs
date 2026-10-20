@@ -334,6 +334,74 @@ fn simple_elastos_resource(provider: &str, op: &str, supported: &[&str]) -> Resu
     Ok(format!("elastos://{provider}/{op}"))
 }
 
+/// Agent Host journals live under `.AppData/Agents/` in a person's root. The
+/// data directory may sit on a filesystem that folds case and Unicode (APFS)
+/// and drops empty and `.` segments, so the area is found that way: under
+/// `localhost://Users/<root>/`, the first two segments, ignoring empty and `.`
+/// ones, fold to `.appdata/agents` under `to_uppercase().to_lowercase()`. The
+/// rule does not depend on whose root it is.
+pub(crate) fn in_agents_area(rooted: &str) -> bool {
+    let Some(rest) = rooted.strip_prefix("localhost://Users/") else {
+        return false;
+    };
+    let named: Vec<&str> = rest
+        .split('/')
+        .filter(|segment| !matches!(*segment, "" | "."))
+        .collect();
+    let folds_to = |segment: &str, target: &str| segment.to_uppercase().to_lowercase() == target;
+    named.len() >= 3 && folds_to(named[1], ".appdata") && folds_to(named[2], "agents")
+}
+
+/// The one Agents rule, for every route a capsule can use to reach localhost
+/// there: local dispatch, the attached (HTTP) bridge, the provider proxy, the
+/// protected storage path, and both capability request handlers. In the area
+/// only read and write are allowed, only on one spelling: `.AppData/Agents`,
+/// then segments matching `^[a-z0-9][a-z0-9._-]*$`, with no empty or `.`
+/// segment anywhere. A write needs a name below `Agents`. Returns the refusal
+/// code and message.
+pub(crate) fn agents_area_refusal(
+    rooted: &str,
+    operation: &str,
+) -> Option<(&'static str, &'static str)> {
+    if !in_agents_area(rooted) {
+        return None;
+    }
+    if !matches!(operation, "read" | "write") {
+        return Some((
+            "operation_not_allowed",
+            "only read and write are allowed under .AppData/Agents/",
+        ));
+    }
+    let segments: Vec<&str> = rooted
+        .strip_prefix("localhost://Users/")
+        .unwrap_or_default()
+        .split('/')
+        .collect();
+    let segment_ok = |segment: &&str| {
+        segment
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            && segment.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'.' | b'_' | b'-')
+            })
+    };
+    let exact = segments.len() >= 3
+        && !segments.iter().any(|segment| matches!(*segment, "" | "."))
+        && segments[1] == ".AppData"
+        && segments[2] == "Agents"
+        && segments[3..].iter().all(segment_ok);
+    if !exact || (operation == "write" && segments.len() < 4) {
+        return Some((
+            "invalid_localhost_path",
+            "paths under .AppData/Agents/ must be spelled exactly, with lower-case segments of letters, digits, '.', '_' or '-'",
+        ));
+    }
+    None
+}
+
 fn localhost_resource(op: &str, request: &Value) -> Result<String, String> {
     ensure_supported_operation(
         "localhost",
