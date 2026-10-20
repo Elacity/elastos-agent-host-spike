@@ -714,6 +714,54 @@ fn two_policies_loaded_at_once_never_lower_the_floor() {
 }
 
 #[test]
+fn a_policy_held_from_before_a_revocation_does_not_admit() {
+    // Codex's case: cache sequence 1, accept sequence 2 revoking the
+    // publisher, then admit with the cached policy.
+    let world = World::new();
+    let root_did = sign::did(&world.release_root);
+    let local = LocalConfig::default();
+    let floor = world.floor();
+    let cached = effective_policy(
+        &world.release().sign(&world.release_root),
+        &root_did,
+        &local,
+        NOW,
+        &floor,
+    )
+    .unwrap();
+    let dir = world.capsule("source", "0.1.0");
+    let claim = world.claim(&dir, "0.1.0");
+
+    let mut revoking = world.release();
+    revoking.sequence = 2;
+    revoking.revoked_dids.push(sign::did(&world.publisher));
+    let current = effective_policy(
+        &revoking.sign(&world.release_root),
+        &root_did,
+        &local,
+        NOW,
+        &floor,
+    )
+    .unwrap();
+    assert_eq!(
+        refused(admit(&dir, &claim, &cached, &[], &world.store(), NOW)),
+        "policy_stale"
+    );
+    assert_eq!(
+        refused(admit(&dir, &claim, &current, &[], &world.store(), NOW)),
+        "publisher_revoked"
+    );
+    assert!(!world.store().exists(), "nothing was staged");
+
+    // A floor that is gone is not "nothing newer".
+    std::fs::remove_file(world.root.path().join("floor-1")).unwrap();
+    assert_eq!(
+        refused(admit(&dir, &claim, &current, &[], &world.store(), NOW)),
+        "policy_stale"
+    );
+}
+
+#[test]
 fn one_sequence_names_one_policy() {
     let world = World::new();
     let root_did = sign::did(&world.release_root);

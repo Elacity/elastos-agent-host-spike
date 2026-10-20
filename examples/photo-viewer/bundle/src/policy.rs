@@ -92,10 +92,15 @@ pub struct TrustedPublisher {
     pub expires_at: Option<u64>,
 }
 
-/// What admission checks against.
+/// What admission checks against. It keeps the floor it was accepted
+/// against, and admission checks that floor again every time, so a policy
+/// held since before a newer one was accepted is refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrustPolicy {
     pub sequence: u64,
+    /// sha256 of the accepted release policy.
+    pub sha256: String,
+    pub floor: PolicyFloor,
     pub expires_at: u64,
     pub publishers: Vec<TrustedPublisher>,
     pub revoked_dids: Vec<String>,
@@ -309,6 +314,8 @@ pub fn effective_policy(
     }
     Ok(TrustPolicy {
         sequence: policy.sequence,
+        sha256,
+        floor: floor.clone(),
         expires_at: policy.expires_at,
         publishers,
         revoked_dids: policy.revoked_dids.clone(),

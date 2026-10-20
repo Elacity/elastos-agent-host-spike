@@ -64,6 +64,9 @@ pub enum Refusal {
     PolicyLifetimeTooLong { expires_at: u64, latest: u64 },
     /// The release policy's sequence is below the highest this device accepted.
     PolicyRollback { offered: u64, seen: u64 },
+    /// Admission with a policy older than the floor (or with no floor): a
+    /// newer policy was accepted since, or the floor is gone.
+    PolicyStale { sequence: u64, seen: Option<u64> },
     /// Another policy with the same sequence was already accepted.
     PolicySequenceConflict(u64),
     /// A local dev key outside dev mode.
@@ -141,6 +144,7 @@ impl Refusal {
             Refusal::PolicyExpired { .. } => "policy_expired",
             Refusal::PolicyLifetimeTooLong { .. } => "policy_lifetime_too_long",
             Refusal::PolicyRollback { .. } => "policy_rollback",
+            Refusal::PolicyStale { .. } => "policy_stale",
             Refusal::PolicySequenceConflict(_) => "policy_sequence_conflict",
             Refusal::DevKeyOutsideDevMode(_) => "dev_key_outside_dev_mode",
             Refusal::DevKeyUnscoped(_) => "dev_key_unscoped",

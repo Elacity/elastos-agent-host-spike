@@ -81,6 +81,18 @@ pub fn admit(
             now,
         });
     }
+    // A newer policy may have been accepted since this one: it may revoke.
+    match policy.floor.seen()? {
+        Some((seen, seen_sha256))
+            if seen < policy.sequence
+                || (seen == policy.sequence && seen_sha256 == policy.sha256) => {}
+        seen => {
+            return Err(Refusal::PolicyStale {
+                sequence: policy.sequence,
+                seen: seen.map(|(seen, _)| seen),
+            });
+        }
+    }
     if policy.revoked_cids.contains(&claimed.cid) {
         return Err(Refusal::CidRevoked(claimed.cid.clone()));
     }
