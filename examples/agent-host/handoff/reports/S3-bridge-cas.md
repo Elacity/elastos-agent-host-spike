@@ -316,7 +316,59 @@ Falsifiers:   G01 the shared rule allows every operation      -> 4 FAILED (proxy
               G08 the provider path audits ok                 -> a_failed_provider_result_is_audited_as_an_error FAILED
               G09 a conflict is audited as error              -> a_revision_conflict_is_audited_as_a_conflict FAILED
               G10 local dispatch skips the rule               -> only_read_and_write_are_allowed_under_agents FAILED
+Full suite:   on the PR #20 merge, which has all of #8, #9 and #19: (cd elastos && cargo test -p elastos-server --lib)
+                -> "3028 passed; 13 failed; 24 ignored"; the 13 are the same container limits as before, none new.
 Not proven:   The attached bridge's audit classification of a 200 reply with an error body is not tested (it would need
               a listening HTTP server); it uses the same invoke_outcome that G07 pins.
 Guest hash:   no guest change on this branch.
 ```
+
+## Fix 5: Library, storage and proxy routes, after a second self-review of fix 4 (20 Oct)
+
+Sasha asked to keep going while the Codex re-review waits. Another Claude agent did a read-only adversarial review of fix 4. It is not the Codex review. It confirmed three gaps with probes in a scratch worktree.
+
+1. **Blocking: the object provider (Library) ignored the Agents area.** `handle_object_provider_raw_request` checks paths only in `library_target` / `clean_library_uri`, which knew nothing about Agents.
+   - `write` (with no precondition), `read`, `move`, `copy`, `rename`, `mkdir` and `trash` all worked there.
+   - Callers: the Library capsule through the Home gateway (`/api/provider/object/<op>`), and any capsule holding an `elastos://object/write` token.
+   - A probe wrote a forged journal with status ok. **Fix:** `clean_library_uri` refuses any path in the Agents area. Every object operation goes through it, including move and copy targets and rename's new URI.
+2. **The `/api/localhost/*` storage route** checked `Users` on the raw text. A leading space (`" Users/..."`, or `%20` in the URL) got past the check, and the path was trimmed later. **Fix:** the check also runs on the canonical URI the route uses.
+3. **The Runtime API provider proxy** checked the trimmed, rooted path, but forwarded the raw text, so a trailing space or `\u{a0}` made a second file named `journal ` on disk. It also let an exact journal read or write reach the plain localhost provider, without principal-root protection or the revision check. **Fix:** the proxy refuses every Agents-area operation (`principal_context_required`; journals are reachable only through the in-Runtime protected bridge), and forwards the rooted path the rule checked.
+
+```text
+Commit:       fe1d2dd
+Changed:      elastos/crates/elastos-server/src/library.rs - SHIPPING: clean_library_uri refuses the Agents area; test
+              elastos/crates/elastos-server/src/api/handlers/storage.rs - SHIPPING: Users check on the canonical URI; test
+              elastos/crates/elastos-server/src/api/handlers/provider.rs - SHIPPING: no Agents path on the proxy; rooted
+                path forwarded; test updated
+Tests run:    (cd elastos && cargo test -p elastos-server --lib -- api::handlers::provider::tests resource_bridge::tests
+                api::handlers::storage::tests library::tests::agent_journals) -> "92 passed"; clippy clean
+              (cd elastos && cargo test -p elastos-server --lib library) -> "115 passed; 4 failed": the 4 are the custody
+                tests that fail in this container before and after (same names as the full-suite list)
+New tests:    library::tests::agent_journals_are_not_library_objects (write, folded write, read, stat, list, trash, mkdir,
+                move, copy, rename into Agents: all refused; no Agents folder is created; the source document stays)
+              api::handlers::storage::tests::a_users_path_is_refused_however_it_is_spaced
+              the_provider_proxy_applies_the_agents_rule_for_every_session, extended: exact read and write, trailing space
+                and \u{a0} refused; a path outside the area is forwarded rooted and trimmed
+Falsifiers:   H01 Library allows the Agents area              -> agent_journals_are_not_library_objects FAILED
+              H02 storage checks only the raw text            -> a_users_path_is_refused_however_it_is_spaced FAILED
+              H03 proxy lets exact Agents paths through       -> the_provider_proxy_applies_the_agents_rule_for_every_session FAILED
+              H04 proxy forwards the raw path                 -> same FAILED
+```
+
+**Checked and safe** (from the review):
+- the webspace scheme;
+- carrier targets;
+- the Home gateway proxy (it does not serve localhost);
+- the supervisor;
+- `..`;
+- percent-encoding and backslashes (not decoded, so they name a different file);
+- NFD/NFC, the Kelvin sign and the long s against the area rule;
+- a `users` root, or a hash root in upper case.
+
+**Notes, not changed:**
+- **Broad capability requests.** A `request_capability` for a scope above the area (`Users/self/*` or `Users/self/.AppData/*` with `delete`) is not refused at once. Every route now refuses its use in the area: local dispatch, the attached bridge, the proxy, Library and storage.
+- **`invoke_outcome` and a missing `status`.** A result with no `status` field is audited "ok", which matches how the component host reads it.
+- **The attached bridge's own refusals** (manifest, missing token, Agents) are not audited, as before this PR. A non-JSON reply leaves a "requested" entry with no "completed".
+- **A trailing `.` in a segment** (`journal.`) matches the segment rule. On Windows, `journal.` and `journal` are the same file. **Question:** should the rule also refuse a trailing `.`? It is a one-line change, stricter than the rule as given.
+
+**Security finding, details for Sasha** (older shipping code, not this PR): outside the Agents area, the Runtime API provider proxy (`POST /api/provider/localhost/<op>`) lets read and write under `localhost://Users/<root>/` reach the plain localhost provider. That skips principal-root protection and its encryption. The attached bridge refuses this on its own side, but other callers of the proxy (the guest SDK in HTTP mode, the shell) are not refused on the server. I did not change it, because existing callers may depend on it.

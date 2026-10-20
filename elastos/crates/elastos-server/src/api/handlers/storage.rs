@@ -506,7 +506,14 @@ fn canonical_local_uri(path: &str) -> Result<String, StorageApiError> {
 }
 
 fn reject_principal_root_storage_path(path: &str) -> Result<(), StorageApiError> {
-    if path == "Users" || path.starts_with("Users/") {
+    // Check the canonical URI too: it is what the route uses, and it trims
+    // whitespace the raw text keeps (" Users/...").
+    let canonical = rooted_localhost_uri(path).unwrap_or_default();
+    if path == "Users"
+        || path.starts_with("Users/")
+        || canonical == "localhost://Users"
+        || canonical.starts_with("localhost://Users/")
+    {
         return Err(StorageApiError::PermissionDenied(
             "principal-root storage requires a runtime principal-scoped provider route".into(),
         ));
@@ -607,6 +614,37 @@ mod tests {
     use elastos_runtime::capability::{CapabilityStore, TokenConstraints};
     use elastos_runtime::primitives::metrics::MetricsManager;
     use elastos_runtime::session::SessionType;
+
+    /// Every principal-root path is refused on this route, however it is
+    /// spelled: the guard must see what the route will use, after trimming.
+    #[test]
+    fn a_users_path_is_refused_however_it_is_spaced() {
+        for raw in [
+            "Users/h/.AppData/Agents/agent-host",
+            " Users/h/.AppData/Agents/agent-host",
+            "/ Users/h/.AppData/Agents/agent-host",
+            "/\tUsers/h/.AppData/Agents/agent-host",
+            "localhost:// Users/h/.AppData/Agents/agent-host",
+            "\u{a0}Users/h/Documents/a.md",
+            "Users",
+            " Users ",
+        ] {
+            let path = normalize_path(raw);
+            assert!(
+                reject_principal_root_storage_path(&path).is_err(),
+                "{raw:?} -> {path:?} must be refused"
+            );
+        }
+        for raw in [
+            "Local/SharedByLocalUsersAndBots/Home/a.md",
+            "MyWebSite/index.html",
+        ] {
+            assert!(
+                reject_principal_root_storage_path(&normalize_path(raw)).is_ok(),
+                "{raw}"
+            );
+        }
+    }
 
     fn make_capability_manager() -> Arc<CapabilityManager> {
         let store = Arc::new(CapabilityStore::new());
