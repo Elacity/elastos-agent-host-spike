@@ -311,8 +311,9 @@ fn names_must_be_unique_under_case_folding() {
     assert!(check_unique_under_case_folding(["a.png", "b.png", "a/b.png"]).is_ok());
 
     // Through the walk, wherever the disk can hold both spellings. A
-    // case-insensitive disk (the macOS default) cannot hold "A" and "a", and
-    // then has one file, which the walk lists once.
+    // case-insensitive disk (the macOS APFS default) cannot hold "A" and "a",
+    // nor "straße" and "strasse", and then has one file, which the walk lists
+    // once: one more than the fixture had.
     let world = World::new();
     for (index, (a, b)) in [
         ("Photo.png", "photo.png"),
@@ -322,6 +323,7 @@ fn names_must_be_unique_under_case_folding() {
     .enumerate()
     {
         let dir = world.capsule(&format!("case-{index}"), "0.1.0");
+        let fixture = list_closure(&dir).unwrap().len();
         std::fs::write(dir.join(a), b"1").unwrap();
         let both = std::fs::OpenOptions::new()
             .write(true)
@@ -336,7 +338,7 @@ fn names_must_be_unique_under_case_folding() {
             );
         } else {
             println!("this disk holds one of {a:?} and {b:?}");
-            assert_eq!(list_closure(&dir).unwrap().len(), 3);
+            assert_eq!(list_closure(&dir).unwrap().len(), fixture + 1);
         }
     }
 }
