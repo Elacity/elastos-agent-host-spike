@@ -4,7 +4,7 @@
 Slice:        S3, the end-to-end Wasmtime test (after PR #9 option B and the elastos-compute mapping, PR #19).
 Branch / PR:  claude/s3-e2e  (draft PR in this repo, base spike/agent-host). It merges PR #9 (which holds PR #8) and
               PR #19, so its diff shows all three until they merge; the new work is two tests and one script.
-Commit:       e2e tests in the commit after cbc0592 (the merge of PR #19); this report is the next commit
+Commit:       0d3dd84 (e2e tests and run-e2e.sh); parent cbc0592 (merge of PR #19); report ea37b68
 Develop:      Elacity develop 3beb816438fd567145a8d725e22465bd83277cf0, merged, behind 0.
 Machine:      Linux 6.18.44 x86_64 (cloud container), rustc 1.91.0.
 Changed:      elastos/crates/elastos-server/src/runtime.rs - TEST MODULE ONLY: two ignored end-to-end tests
