@@ -371,6 +371,5 @@ Falsifiers:   H01 Library allows the Agents area              -> agent_journals_
 - **Broad capability requests.** A `request_capability` for a scope above the area (`Users/self/*` or `Users/self/.AppData/*` with `delete`) is not refused at once. Every route now refuses its use in the area: local dispatch, the attached bridge, the proxy, Library and storage.
 - **`invoke_outcome` and a missing `status`.** A result with no `status` field is audited "ok", which matches how the component host reads it.
 - **The attached bridge's own refusals** (manifest, missing token, Agents) are not audited, as before this PR. A non-JSON reply leaves a "requested" entry with no "completed".
-- **A trailing `.` in a segment** (`journal.`) matches the segment rule. On Windows, `journal.` and `journal` are the same file. **Question:** should the rule also refuse a trailing `.`? It is a one-line change, stricter than the rule as given.
+- **A trailing `.` in a segment** (`journal.`): answered yes, done in fix 6 below.
 
-**Security finding, details for Sasha** (older shipping code, not this PR): outside the Agents area, the Runtime API provider proxy (`POST /api/provider/localhost/<op>`) lets read and write under `localhost://Users/<root>/` reach the plain localhost provider. That skips principal-root protection and its encryption. The attached bridge refuses this on its own side, but other callers of the proxy (the guest SDK in HTTP mode, the shell) are not refused on the server. I did not change it, because existing callers may depend on it.
