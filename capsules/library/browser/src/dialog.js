@@ -15,6 +15,7 @@ import {
 } from "./model.js";
 
 export function createLibraryDialog({
+  allVisible,
   copyText,
   dialog,
   hideMenu,
@@ -22,6 +23,8 @@ export function createLibraryDialog({
   onBeforeClose,
 }) {
   let pendingDialogResolve = null;
+  // Item URIs a decision dialog acts on; it never confirms once any is hidden (#441).
+  let decisionTargetUris = [];
   const propertyCopyResetTimers = new WeakMap();
 
   function showProperties(object) {
@@ -780,6 +783,7 @@ export function createLibraryDialog({
   function showShareDialog(object) {
     hideMenu();
     hideDialog();
+    decisionTargetUris = [object.uri];
     return new Promise((resolve) => {
       pendingDialogResolve = resolve;
       dialog.innerHTML = `
@@ -838,6 +842,7 @@ export function createLibraryDialog({
   function showProtectAndListDialog(object) {
     hideMenu();
     hideDialog();
+    decisionTargetUris = [object.uri];
     return new Promise((resolve) => {
       pendingDialogResolve = resolve;
       dialog.innerHTML = `
@@ -885,9 +890,10 @@ export function createLibraryDialog({
       : `Protect ${objectName}, then create one listing with the copies and price shown here.`;
   }
 
-  function confirmDestructive({ title, message, confirmLabel }) {
+  function confirmDestructive({ title, message, confirmLabel, targetUris = [] }) {
     hideMenu();
     hideDialog();
+    decisionTargetUris = targetUris;
     return new Promise((resolve) => {
       pendingDialogResolve = resolve;
       dialog.innerHTML = `
@@ -910,8 +916,10 @@ export function createLibraryDialog({
   function resolveDialogDecision(value) {
     if (!pendingDialogResolve) return;
     const resolve = pendingDialogResolve;
+    const targetsVisible = allVisible(decisionTargetUris);
     pendingDialogResolve = null;
-    resolve(value);
+    decisionTargetUris = [];
+    resolve(value && !targetsVisible ? false : value);
   }
 
   function hideDialog() {
@@ -920,6 +928,10 @@ export function createLibraryDialog({
     dialog.classList.add("hidden");
     dialog.innerHTML = "";
     resolveDialogDecision(false);
+  }
+
+  function hideDialogIfTargetsHidden() {
+    if (pendingDialogResolve && decisionTargetUris.length && !allVisible(decisionTargetUris)) hideDialog();
   }
 
   function bindDialogEvents() {
@@ -1034,6 +1046,7 @@ export function createLibraryDialog({
     bindDialogEvents,
     confirmDestructive,
     hideDialog,
+    hideDialogIfTargetsHidden,
     showProtectAndListDialog,
     showObjectStatus,
     showProperties,

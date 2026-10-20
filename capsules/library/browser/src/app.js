@@ -153,6 +153,7 @@ import {
     let unpublishSelectedObjects = async () => {};
     let uploadFiles = async () => {};
     const {
+      allVisible,
       clearSelection,
       isSelected,
       objectByUri,
@@ -200,9 +201,11 @@ import {
     });
     const {
       hideMenu,
+      hideMenuIfTargetsHidden,
       menuAction,
       renderMenu,
     } = createLibraryMenu({
+      allVisible,
       contextMenu: elements.contextMenu,
       perf,
       showError,
@@ -211,6 +214,7 @@ import {
       bindDialogEvents,
       confirmDestructive,
       hideDialog,
+      hideDialogIfTargetsHidden,
       showObjectStatus,
       showProtectAndListDialog,
       showProperties,
@@ -218,6 +222,7 @@ import {
       showShareReceipt,
       showSharedAccessReceipt,
     } = createLibraryDialog({
+      allVisible,
       copyText: (...args) => copyText(...args),
       dialog: elements.dialog,
       hideMenu,
@@ -244,7 +249,7 @@ import {
       elements,
       isSelected,
       perf,
-      pruneSelectionToVisible,
+      releaseHiddenTargets,
       selectedObjects,
       state,
       visibleObjects,
@@ -960,6 +965,13 @@ import {
       return visibleObjectsForState(state);
     }
 
+    // A redraw that hides items drops them from the selection and closes menus or dialogs bound to them (#441).
+    function releaseHiddenTargets() {
+      pruneSelectionToVisible();
+      hideMenuIfTargetsHidden();
+      hideDialogIfTargetsHidden();
+    }
+
     function showMenuForObject(object, x, y) {
       if (!isSelected(object.uri)) {
         selectOnly(object.uri);
@@ -972,7 +984,7 @@ import {
       const actions = [];
       if (isBlockedObject(object)) {
         actions.push(menuAction("Properties", () => showProperties(object)));
-        renderMenu(actions, x, y);
+        renderMenu(actions, x, y, [object.uri]);
         return;
       }
       if (isDirectory(object)) {
@@ -1059,7 +1071,7 @@ import {
         )));
       }
       actions.push(menuAction("Properties", () => showProperties(object)));
-      renderMenu(actions, x, y);
+      renderMenu(actions, x, y, [object.uri]);
     }
 
     function isPolicyGatedArchive(object) {
@@ -1125,7 +1137,7 @@ import {
       if (active.some((object) => hasCapability(object, "trash"))) actions.push(menuAction("Delete", trashSelectedObjects));
       if (trash.length) actions.push(menuAction("Restore", restoreSelectedObjects));
       if (permanentlyDeletable) actions.push(menuAction("Delete Permanently", deleteSelectedObjects));
-      renderMenu(actions, x, y);
+      renderMenu(actions, x, y, objects.map((object) => object.uri));
     }
 
     function showBackgroundMenu(x, y) {

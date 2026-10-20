@@ -1908,6 +1908,59 @@ async function assertSearchKeepsDeleteTargetsVisible(page) {
     `Menu Delete after search must trash only visible Gamma; ops=${JSON.stringify(destructiveOps(mark))}`,
   );
 
+  // A menu or confirmation opened before search stays bound to its item. A redraw that hides
+  // Delta closes it, and an action fired before that redraw does nothing.
+  const surfaceOpen = (selector) => page.evaluate((sel) => !document.querySelector(sel).classList.contains("hidden"), selector);
+  const pasteOffered = async () => {
+    const rows = await openBackgroundMenu(page);
+    await page.keyboard.press("Escape");
+    return rows.includes("Paste");
+  };
+  const openDeltaMenu = async () => {
+    await search("", 1);
+    await item("Delta Clip.txt").click({ button: "right" });
+    await page.locator("#context-menu:not(.hidden)").waitFor();
+  };
+  const hideDeltaThenClick = (buttonSelector) => page.evaluate((selector) => {
+    const input = document.querySelector("#search");
+    input.value = "no such clip";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector(selector).click();
+  }, buttonSelector);
+  assert(!(await pasteOffered()), "Clipboard must start empty for the open-menu checks");
+  mark = ops.length;
+
+  await openDeltaMenu();
+  await page.locator("#search").focus();
+  await page.keyboard.type("no such clip");
+  await itemCount(0);
+  assert(!(await surfaceOpen("#context-menu")), "A redraw that hides Delta must close the menu opened for it");
+  await page.evaluate(() => document.querySelector("#context-menu .menu-item[title='Delete']").click());
+
+  for (const label of ["Delete", "Cut", "Copy"]) {
+    await openDeltaMenu();
+    await hideDeltaThenClick(`#context-menu .menu-item[title='${label}']`);
+    await itemCount(0);
+  }
+
+  await openDeltaMenu();
+  await clickMenu(page, "Delete Permanently");
+  await page.locator("#dialog").filter({ hasText: "Delta Clip.txt will be permanently removed" }).first().waitFor();
+  await page.locator("#search").focus();
+  await page.keyboard.type("no such clip");
+  await itemCount(0);
+  assert(!(await surfaceOpen("#dialog")), "A redraw that hides Delta must close its delete confirmation");
+
+  await openDeltaMenu();
+  await clickMenu(page, "Delete Permanently");
+  await page.locator("#dialog [data-dialog-confirm]").waitFor();
+  await hideDeltaThenClick("#dialog [data-dialog-confirm]");
+  await itemCount(0);
+  await page.waitForTimeout(150);
+  assert(destructiveOps(mark).length === 0, `Actions bound to hidden Delta must not run; ops=${JSON.stringify(destructiveOps(mark))}`);
+  await search("", 1);
+  assert(!(await pasteOffered()), "Cut or Copy bound to hidden Delta must leave the clipboard empty");
+
   await page.locator("#search-toggle-button").click();
   await itemCount(1);
   for (const name of names) {

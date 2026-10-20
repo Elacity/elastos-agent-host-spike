@@ -20,6 +20,11 @@ export function createLibrarySelection({
     return visibleUriSet;
   }
 
+  function allVisible(uris) {
+    const visible = visibleUris();
+    return uris.every((uri) => visible.has(uri));
+  }
+
   // Only items the person can see are selected or acted on (#441).
   function selectedObjects() {
     const visible = visibleUris();
@@ -114,6 +119,7 @@ export function createLibrarySelection({
   }
 
   return {
+    allVisible,
     clearSelection,
     isSelected,
     objectByUri,

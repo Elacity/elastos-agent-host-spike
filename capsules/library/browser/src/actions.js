@@ -487,6 +487,7 @@ export function createLibraryActions({
         ? `${object.name} will be removed from Trash and cannot be restored.`
         : `${object.name} will be permanently removed from this location. This cannot be restored.`,
       confirmLabel: "Delete Permanently",
+      targetUris: [object.uri],
     });
     if (!confirmed) return;
     await providerApi("delete_permanently", { uri: object.uri, if_revision: object.revision });
@@ -641,6 +642,7 @@ export function createLibraryActions({
         ? `${describeObjects(objects)} will be removed from Trash and cannot be restored.`
         : `${describeObjects(objects)} will be permanently removed. This cannot be restored.`,
       confirmLabel: "Delete Permanently",
+      targetUris: objects.map((object) => object.uri),
     });
     if (!confirmed) return;
     await runBatchAction("Deleted", objects, (object) => providerApi("delete_permanently", {
