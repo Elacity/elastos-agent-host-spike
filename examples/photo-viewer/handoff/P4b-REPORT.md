@@ -7,6 +7,12 @@ construction.
 
 Branch `claude/photo-p4b`, from `claude/photo-p4` (the design note).
 
+**Round 2** (Sasha's answers to the first report's questions):
+- the signed policy gets a sequence floor against rollback, and an expiry;
+- dev keys must name their capsules and carry an expiry;
+- strict verification stays. Bringing the Runtime up to the same standard is a separate note for Anders,
+  `NOTE-STRICT-SIGNATURES.md`, and is not built here.
+
 ## Decisions recorded (review answers 4 to 8)
 
 | # | Decision | Where in the tool |
@@ -16,6 +22,9 @@ Branch `claude/photo-p4b`, from `claude/photo-p4` (the design note).
 | 6 | A DID-to-roles table in the signed release source. Local config may only add a dev key, only in dev mode | `policy.rs` |
 | 7 | `requires[].cid` on the existing requirement entry | `admit::resolve_requires` |
 | 8 | Provenance is a separate record naming the CID. Independent rebuilders add their own. The claim stays minimal | `provenance.rs`; `Claim` has five fields |
+| R2 | The policy has a sequence; the device stores the highest seen and refuses lower. The policy expires | `ReleasePolicy.sequence`, `.expires_at`, `PolicyFloor` |
+| R2 | A dev key names capsules, never a whole role, and expires; none outside dev mode | `DevKey` |
+| R2 | Keep `verify_strict`; raise the Runtime to it as its own fix | `sign.rs`; `NOTE-STRICT-SIGNATURES.md` |
 
 ## What it does
 
@@ -36,12 +45,27 @@ Branch `claude/photo-p4b`, from `claude/photo-p4` (the design note).
    construction of `elastos-server/src/crypto.rs:88-128`. The signer is `publisher_did`, a did:key decoded by
    `elastos_identity::decode_did_key`.
 4. **Trust policy**, `elastos.release.trust-policy/v1`:
-   - `{publishers: [{did, roles, names?}], revoked_dids, revoked_cids}`, signed by a **pinned** release root
-     DID. The DID the document names for itself is not trusted.
-   - `LocalConfig` is `{dev_mode, dev_keys}` and nothing else (unknown fields refused). It cannot add
+   - `{sequence, expires_at, publishers: [{did, roles, names?}], revoked_dids, revoked_cids}`, signed by a
+     **pinned** release root DID. The DID the document names for itself is not trusted.
+   - **Rollback.** `effective_policy(release, root, local, now, floor)` keeps the highest accepted sequence
+     and the policy's sha256 in a `PolicyFloor` file (written with a rename):
+     - a lower sequence is `policy_rollback`;
+     - the same sequence with other content is `policy_sequence_conflict`;
+     - the same policy again is accepted;
+     - the floor survives a restart.
+
+     So once a revoking policy is seen, the policy from before it is refused. A floor file that does not
+     parse is refused (`io`), not read as "nothing seen".
+   - **Expiry.** At or after `expires_at` the policy is `policy_expired`, both when loaded and at
+     admission.
+   - Only a policy whose signature verifies and which has not expired moves the floor.
+   - `LocalConfig` is `{dev_mode, dev_keys}` and nothing else (unknown fields are refused). It cannot add
      revocations, lift them or widen a release publisher.
-   - A dev key is refused outside dev mode. In dev mode, a dev key that is the release root, a release
-     publisher, a revoked DID, or listed twice is refused.
+   - **Dev keys** are `{did, roles, names, expires_at}`, every field required:
+     - outside dev mode: `dev_key_outside_dev_mode`;
+     - an empty `names`: `dev_key_unscoped`, because a dev key never ships a whole role;
+     - expired: `dev_key_expired`, when loaded and at admission;
+     - the release root, a release publisher, a revoked DID, or listed twice: `dev_key_conflict`.
 5. **Admission** (`admit`), in order. Each step fails closed:
 
    | Step | Refusal |
@@ -50,8 +74,9 @@ Branch `claude/photo-p4b`, from `claude/photo-p4` (the design note).
    | Recompute the CID, compare with the claim | `cid_mismatch` (also an unlisted extra file) |
    | Verify the claim's signature | `signature_invalid` (another key, a changed field, another domain, malformed hex, not a did:key) |
    | The claim's name, version and role are the manifest's | `claim_manifest_mismatch`; `claim_malformed` for bad JSON or a non-semver version |
+   | The policy is still current | `policy_expired` |
    | Revocations | `cid_revoked`, `publisher_revoked` |
-   | Publisher, roles and names | `publisher_untrusted`, `publisher_role_refused` |
+   | Publisher, roles and names | `publisher_untrusted`, `dev_key_expired`, `publisher_role_refused` |
    | Inventory | `version_downgrade` (a lower semver of an installed name, pre-release ordering included); `version_conflict` (the same version with another CID) |
    | Stage | `staged_mismatch` |
 
@@ -80,7 +105,7 @@ CLI: `cargo run -- cid <dir>` prints the CID; `cargo run -- listing <dir>` print
 
 | Suite | Result |
 |---|---|
-| `cargo test` | 30 passed (3 unit, 27 integration) |
+| `cargo test` | 36 passed (3 unit, 33 integration) |
 | `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` | clean |
 
 Tests asked for in answer 9, and where:
@@ -93,6 +118,9 @@ Tests asked for in answer 9, and where:
 | verify, then load from a read-only copy staged by CID | `admission_stages_a_read_only_copy_by_cid_and_loads_only_from_it`, `load_refuses_a_staged_copy_that_is_writable`, `load_refuses_a_staged_copy_that_no_longer_hashes_to_its_cid`, `load_takes_only_a_cid`, `admit::tests::a_source_changed_after_verification_is_not_staged` |
 | a lower version of the same name | `admission_refuses_a_lower_version_of_an_installed_name`, `one_version_of_a_name_has_one_cid` |
 | revoked DID or revoked CID | `admission_refuses_a_revoked_publisher_or_a_revoked_cid` |
+| R2: policy rollback | `an_older_policy_cannot_be_replayed_after_a_revocation` (replay after a revocation, restart), `one_sequence_names_one_policy`, `a_policy_that_is_refused_does_not_move_the_floor`, `a_policy_floor_that_does_not_parse_is_refused` |
+| R2: policy expiry | `an_expired_policy_is_refused_at_load_and_at_admission` |
+| R2: dev keys named and expiring | `a_dev_key_names_its_capsules_and_expires` (also: the release publisher is unaffected) |
 
 Others: `the_listing_is_canonical_and_names_every_shipped_file` (the exact bytes),
 `the_listing_is_sorted_by_path_bytes_not_by_walk_order`, `any_change_to_the_closure_changes_the_cid`,
@@ -111,7 +139,7 @@ non-root run cleans up.
 
 ## Falsifiers
 
-`RUST_TEST_THREADS=2 python3 -I examples/photo-viewer/falsify-bundle.py`: **33 of 33 caught**. Each
+`RUST_TEST_THREADS=2 python3 -I examples/photo-viewer/falsify-bundle.py`: **43 of 43 caught**. Each
 mutant must compile, each named test must exist and fail, and the file is restored from saved bytes;
 `git status` after the run was clean.
 
@@ -121,6 +149,8 @@ mutant must compile, each named test must exist and fail, and the file is restor
 | Claim (6) | CID not checked; signature not checked; no signing domain; claim need not match the manifest; unknown claim fields taken; another claim schema taken |
 | Policy (5) | checked against the DID it names, not the pinned root (both checks removed together, since either alone still refuses); signature not checked; dev keys outside dev mode; a dev key may be a release key; local config takes more than dev keys |
 | Trust (5) | revoked CIDs admit; revoked publishers admit; any publisher trusted; any role; any name |
+| Rollback and expiry (7) | an older policy accepted after a newer one; two policies share a sequence; the floor never written; a refused policy moves the floor; a floor that does not parse counts as none; an expired policy loads; an expired policy admits |
+| Dev keys (3) | a dev key ships a whole role; an expired dev key loads; an expired dev key admits |
 | Inventory (2) | a lower version admits; one version may have two CIDs |
 | Staging and load (5) | the copy not re-hashed; the copy left writable; load skips the read-only check; load skips the re-hash; load takes any path |
 | Core and provenance (3) | a requirement with no CID skipped; the core found by name; provenance for another CID verifies |
@@ -146,8 +176,10 @@ another CID. The release CID comes from the P2 recipe output, once the P2 Mac ex
 
 ## Known limits (spike)
 
-1. **No policy rollback check.** An older signed policy, one from before a revocation, still verifies.
-   Phase 2 needs a sequence number in the policy, and Runtime refusing one lower than it has seen.
+1. **The floor is a file, and expiry trusts the clock.** The Runtime would keep the floor in its own
+   state. A device whose clock is set back accepts an expired policy, but the floor still refuses one older
+   than it has seen. Deleting the floor file resets it; in the Runtime that state needs the same protection
+   as the rest of its data.
 2. **The inventory is an input.** Runtime would hold the installed list and record install receipts (P4
    design 2.3 step 5). Not built.
 3. **Read-only is mode bits.** Root ignores them, and so do the tests in this container. The re-hash at every
@@ -156,11 +188,11 @@ another CID. The release CID comes from the P2 recipe output, once the P2 Mac ex
 
 ## Principles checked
 
-- **3 (no ambient authority).** Trust comes only from the signed release table or a dev key in dev mode; a
-  name, a path or a self-named signer grants nothing.
+- **3 (no ambient authority).** Trust comes only from a current, non-rolled-back signed release table, or
+  a named, expiring dev key in dev mode; a name, a path or a self-named signer grants nothing.
 - **10 (one path).** Load from `store/<cid>` is the only way in; admission itself goes through it.
-- **11 (fail closed, then explain).** 25 refusal codes, each naming what was expected and each with a
-  test; 33 falsifiers over the checks behind them.
+- **11 (fail closed, then explain).** 30 refusal codes, each naming what was expected and each with a
+  test; 43 falsifiers over the checks behind them.
 - **13 (objects vs capsules).** One CID per capsule closure; the surface pins its core by CID.
 - **15 (content-addressed).** Identity is the closure listing CID; IPFS CIDs stay delivery details.
 - **16 (UI is not authority).** Nothing here is set from a UI; local config cannot widen release trust.
@@ -173,9 +205,11 @@ Phase 2 prerequisite: correction 1 (per-publisher trust policy by role), proven 
 
 ## Questions for Sasha
 
-1. Policy rollback (limit 1): a monotonic `sequence` in the signed policy, refused below the highest seen?
-2. Should a dev key be required to list `names`, so it can never ship a whole role?
-3. Keep `verify_strict` (stricter than the Runtime) when this moves to Runtime, or match the Runtime?
+Round 1's three are answered and built (1, 2) or written up (3).
+
+1. How long should a release policy be valid: days, or one release cycle? The tool takes any `expires_at`
+   in the future; a cap on how far ahead would stop a policy that is valid "forever".
+2. Should a dev key's lifetime be capped too (for example 30 days)?
 
 ## Next slice
 
