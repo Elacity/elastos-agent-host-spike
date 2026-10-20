@@ -170,7 +170,7 @@ S0b found three rules in `examples/agent-host/src/lib.rs` that are right today b
 ### S2 - UsersAI journal format, guest only, no I/O (cloud)
 
 - `docs/AGENT_ARCHITECTURE.md` (around lines 330-350) says agent state lives under `UsersAI/...` and that the path layout needs a versioned object contract first. Write that contract as `examples/agent-host/handoff/USERSAI-JOURNAL.md`: resource name, object versions, append as compare-and-swap on the previous version, a hash link from each record to the last, a size cap, and what is model-visible. Check how the object provider names resources and versions today before you choose.
-- In the guest: `encode` and `decode` for the journal with a format version. Tests: decode(encode(j)) is j; replay bytes are unchanged; one flipped byte is refused; a wrong format version is refused; a truncated journal is refused; node 0 and the epoch survive the round trip.
+- In the guest: `encode` and `decode` for the journal with a format version. Tests: decode(encode(j)) is without_grants(j), because grant strings are never stored (confirmed in the PR #3 review); replay bytes are unchanged; one flipped byte is refused; a wrong format version is refused; a truncated journal is refused; node 0 and the epoch survive the round trip.
 - No file, no Bus call, no import change.
 
 ### S3 - `hold-usersai`: the Runtime stores the journal (cloud). Ask Sasha before starting.
@@ -221,7 +221,11 @@ sha256sum examples/agent-host/agent-host.component.wasm
 (cd elastos && cargo test -p elastos-compute --lib -- --include-ignored)            # 16 on Mac
 cargo test --manifest-path capsules/model-provider/Cargo.toml local_memory          # 7 tests
 node --test scripts/home-agent-prefix.test.mjs                                       # 2 tests
+(cd elastos && cargo test -p elastos-server launch_refuses_untrusted)              # 1 test (S1); first build is long
+node --test scripts/home-agent-no-store.test.mjs                                     # 2 tests (S1)
 ```
+
+Counts since then: 86 host tests after S2 (overnight 1); the guest hash changed in S2.
 
 Optional, only if Playwright and Chromium install cleanly (do not commit `node_modules`):
 
