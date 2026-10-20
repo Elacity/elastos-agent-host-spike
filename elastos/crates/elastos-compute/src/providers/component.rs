@@ -282,7 +282,10 @@ fn bus_error(code: &str, message: impl Into<String>) -> elastos::bus::types::Bus
         | "revision_required"
         | "revision_conflict"
         | "principal_root_protection_required"
-        | "invalid_localhost_path" => elastos::bus::types::BusError::Invalid(message),
+        | "invalid_localhost_path"
+        | "append_not_allowed"
+        | "operation_not_allowed"
+        | "invalid_content" => elastos::bus::types::BusError::Invalid(message),
         _ => elastos::bus::types::BusError::Internal(message),
     }
 }
@@ -574,6 +577,9 @@ mod tests {
             "revision_conflict",
             "principal_root_protection_required",
             "invalid_localhost_path",
+            "append_not_allowed",
+            "operation_not_allowed",
+            "invalid_content",
         ] {
             assert!(
                 matches!(invoke_with(code), elastos::bus::types::BusError::Invalid(_)),
