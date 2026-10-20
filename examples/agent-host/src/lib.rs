@@ -5860,6 +5860,98 @@ export!(AgentHost);
 mod tests {
     use super::*;
 
+    // Sweep gaps (reports/guard-sweep.md): the child and grant checks.
+
+    #[test]
+    fn a_child_grant_needs_a_child_step() {
+        let mut journal = two_turns();
+        let read = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
+        assert!(!authorize_child(&mut journal, read, Some("child-grant")));
+        assert_eq!(step_state(&journal, read), Some(StepState::Prepared));
+        assert!(journal.steps.iter().all(|step| step.grant.is_none()));
+        assert!(!authorize_child(&mut journal, 99, Some("child-grant")));
+    }
+
+    #[test]
+    fn only_an_earlier_run_holds_a_later_run() {
+        let project = "localhost://Users/self/Projects/demo";
+        let mut journal = two_turns();
+        let run = propose_run(&mut journal, project, &[]).unwrap();
+        assert!(authorize(&mut journal, run, Some("run-grant")));
+        assert!(dispatch(&mut journal, run));
+        let read = propose_read(&mut journal, project);
+        assert!(authorize(&mut journal, read, Some("read-grant")));
+        assert!(dispatch(&mut journal, read));
+        let again = propose_run(&mut journal, project, &[]).unwrap();
+        assert!(authorize(&mut journal, again, Some("run-grant-2")));
+        assert!(!dispatch(&mut journal, again));
+    }
+
+    #[test]
+    fn an_empty_grant_string_cannot_ask_for_a_write() {
+        let note = "localhost://Users/self/Projects/demo/notes.txt";
+        let mut journal = two_turns();
+        assert!(observe(&mut journal, note, 1, "hello"));
+        let edit = propose_edit(&mut journal, note, "hello", "hi", Some(1)).unwrap();
+        journal.steps[edit as usize - 1].grant = Some("write-grant".to_string());
+        assert!(provider_write_may_be_asked(&journal, edit, 1));
+        journal.steps[edit as usize - 1].grant = Some(String::new());
+        assert!(!provider_write_may_be_asked(&journal, edit, 1));
+    }
+
+    #[test]
+    fn an_edit_at_the_last_version_number_is_denied_and_not_recorded() {
+        let note = "localhost://Users/self/Projects/demo/notes.txt";
+        let mut journal = two_turns();
+        assert!(observe(&mut journal, note, u64::MAX, "hello"));
+        let edit = propose_edit(&mut journal, note, "hello", "hi", Some(u64::MAX)).unwrap();
+        assert!(authorize(&mut journal, edit, Some("write-grant")));
+        assert!(dispatch(&mut journal, edit));
+        let events = journal.events.len();
+        assert!(!note_provider_wrote(&mut journal, edit));
+        assert_eq!(step_state(&journal, edit), Some(StepState::Denied));
+        assert_eq!(journal.events.len(), events);
+        assert_eq!(
+            current_observed_text(&journal.events, note).as_deref(),
+            Some("hello")
+        );
+    }
+
+    // Sweep gaps: the S2 decoder's tag and length refusals, with every link recomputed.
+
+    #[test]
+    fn a_relinked_journal_with_an_unknown_tag_or_spare_bytes_is_refused() {
+        let mut journal = two_turns();
+        let turn = open_turn(&mut journal);
+        open_step(&mut journal, turn).unwrap();
+        let bytes = encode_journal(&journal, &[0; 32]).unwrap();
+        let (header, records) = journal_records(&bytes);
+        assert_eq!(relinked(header.clone(), &records), bytes);
+        let at = |tag: u8| records.iter().position(|(t, _)| *t == tag).unwrap();
+        let (node, step, turn) = (at(1), at(3), at(4));
+        // Node payload: role at 0, source at 1. Step payload: state at 8, kind at 9.
+        for (record, offset) in [(node, 0), (node, 1), (step, 8), (step, 9)] {
+            for value in [0u8, 99] {
+                let mut bad = records.clone();
+                bad[record].1[offset] = value;
+                assert_eq!(
+                    decode_journal(&relinked(header.clone(), &bad)).unwrap_err(),
+                    "record",
+                    "record {record} offset {offset} value {value}"
+                );
+            }
+        }
+        for record in [node, step, turn] {
+            let mut spare = records.clone();
+            spare[record].1.push(0);
+            assert_eq!(
+                decode_journal(&relinked(header.clone(), &spare)).unwrap_err(),
+                "record",
+                "record {record}"
+            );
+        }
+    }
+
     #[test]
     fn open_turn_returns_a_turn_id_and_leaves_the_epoch() {
         let mut journal = empty_journal();
