@@ -2784,11 +2784,7 @@ mod tests {
             let rooted = format!("{root}/{rest}");
             if rest.starts_with(".AppDat\u{212a}") {
                 // The Kelvin sign folds to "k", not "a": not the Agents area.
-                assert_eq!(
-                    crate::provider_resource::in_agents_area(&rooted),
-                    false,
-                    "{rest}"
-                );
+                assert!(!crate::provider_resource::in_agents_area(&rooted), "{rest}");
                 continue;
             }
             assert!(crate::provider_resource::in_agents_area(&rooted), "{rest}");
@@ -2807,11 +2803,7 @@ mod tests {
             ".AppData",
         ] {
             let rooted = format!("{root}/{rest}");
-            assert_eq!(
-                crate::provider_resource::in_agents_area(&rooted),
-                false,
-                "{rest}"
-            );
+            assert!(!crate::provider_resource::in_agents_area(&rooted), "{rest}");
             assert_eq!(agent_path_refusal(&rooted, "delete"), None, "{rest}");
         }
         let bare = format!("{root}/.AppData/Agents");
