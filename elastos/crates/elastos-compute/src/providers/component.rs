@@ -645,8 +645,11 @@ mod tests {
             .map(|(name, _item)| name.to_string())
             .collect();
         imports.sort();
+        // `providers` writes the guest's own task journal, and only with the
+        // launch grant. There is still no `capabilities` import.
         let mut expected = vec![
             "elastos:bus/identity@1.0.0".to_string(),
+            "elastos:bus/providers@1.0.0".to_string(),
             "elastos:bus/runtime@1.0.0".to_string(),
             "elastos:bus/types@1.0.0".to_string(),
         ];
@@ -667,6 +670,12 @@ mod tests {
         );
 
         let provider = ComponentProvider::new();
+        let bridge_lines = Arc::new(Mutex::new(Vec::new()));
+        let bridge_seen = bridge_lines.clone();
+        provider.set_bus_hostcall(Arc::new(move |line, _capsule, _principal| {
+            bridge_seen.lock().unwrap().push(line.to_string());
+            Err("this test gives the guest no bridge".to_string())
+        }));
         let parent = provider
             .load(&root, manifest.clone())
             .await
@@ -687,5 +696,9 @@ mod tests {
             .start(&child)
             .await
             .expect("the second component lifecycle run");
+        assert!(
+            bridge_lines.lock().unwrap().is_empty(),
+            "with no launch grant, the guest must send nothing to the bridge"
+        );
     }
 }

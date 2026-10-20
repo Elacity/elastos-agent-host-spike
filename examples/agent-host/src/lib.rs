@@ -39,9 +39,12 @@
 //! write follows the read and version rules and does not apply. A run seat
 //! is `microvm`. A run result is an exit code and a capped log, recorded
 //! only after a granted dispatch. The guest does not run the test.
-//! The WASM guest runs
-//! that fold inside Wasmtime and exits.
-//! It does not call a provider and it has no Home window.
+//! A journal append writes the whole encoding with a revision precondition,
+//! only with the launch grant, which is held in memory and never stored. A
+//! lost reply is `settlement_unknown`; resume reads the head back and nothing
+//! is appended until it settles. The WASM guest runs that fold inside
+//! Wasmtime and exits. It calls a provider only to write its own journal, and
+//! with no launch grant it sends nothing. It has no Home window.
 
 #[cfg(target_arch = "wasm32")]
 wit_bindgen::generate!({
@@ -115,6 +118,7 @@ enum ProposalKind {
     Hosted,
     Child,
     Init,
+    JournalAppend,
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -320,6 +324,7 @@ fn kind_tag(kind: ProposalKind) -> u8 {
         ProposalKind::Hosted => 6,
         ProposalKind::Child => 7,
         ProposalKind::Init => 8,
+        ProposalKind::JournalAppend => 9,
     }
 }
 
@@ -537,6 +542,7 @@ fn decode_step(payload: &[u8]) -> Result<Step, &'static str> {
         6 => ProposalKind::Hosted,
         7 => ProposalKind::Child,
         8 => ProposalKind::Init,
+        9 => ProposalKind::JournalAppend,
         _ => return Err("record"),
     };
     let resource = reader.text()?;
@@ -2279,6 +2285,377 @@ fn note_crash(journal: &mut Journal, id: u64) -> bool {
             true
         }
         StepState::Denied | StepState::Cancelled => false,
+    }
+}
+
+/// An agent id or a task id: ASCII letters, digits and `-`, 1 to 64 bytes.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn journal_id_ok(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+/// The one place a task journal lives. The guest names only `Users/self`.
+/// The Runtime scopes that to the launching person.
+#[cfg(any(test, target_arch = "wasm32"))]
+const JOURNAL_ROOT: &str = "localhost://Users/self/.AppData/Agents/";
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn journal_resource(agent_id: &str, task_id: &str) -> Result<String, &'static str> {
+    if !journal_id_ok(agent_id) || !journal_id_ok(task_id) {
+        return Err("journal id");
+    }
+    Ok(format!("{JOURNAL_ROOT}{agent_id}/tasks/{task_id}/journal"))
+}
+
+/// The grant the Runtime gave this guest at launch, for one journal and one
+/// action. It is held in memory only: the journal format has no field for it,
+/// and `Debug` does not print it.
+#[cfg(any(test, target_arch = "wasm32"))]
+struct LaunchGrant(String);
+
+#[cfg(any(test, target_arch = "wasm32"))]
+impl LaunchGrant {
+    fn new(id: &str) -> Option<Self> {
+        (!id.is_empty()).then(|| Self(id.to_string()))
+    }
+
+    fn id(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+impl core::fmt::Debug for LaunchGrant {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("LaunchGrant(..)")
+    }
+}
+
+/// An append that was sent and has no result the guest can trust.
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingAppend {
+    step_id: u64,
+    sent_head: [u8; 32],
+}
+
+/// What the guest knows about the stored journal. `revision` is the Runtime's
+/// revision of the last version the guest saw, or none before the first.
+/// `head` is that version's head, or zeros. `pending` is an append whose
+/// result is not known. The Runtime computes revisions; the guest only
+/// repeats them.
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct JournalCursor {
+    resource: String,
+    revision: Option<String>,
+    head: [u8; 32],
+    pending: Option<PendingAppend>,
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn journal_cursor(agent_id: &str, task_id: &str) -> Result<JournalCursor, &'static str> {
+    Ok(JournalCursor {
+        resource: journal_resource(agent_id, task_id)?,
+        revision: None,
+        head: [0; 32],
+        pending: None,
+    })
+}
+
+/// A Bus failure as the guest sees it. The Runtime refuses `denied` and
+/// `invalid` before storage. Any other failure leaves the result unknown.
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BusFailure {
+    Denied,
+    Invalid,
+    Other,
+}
+
+/// The guest's one effect call. In WebAssembly it is `providers.invoke`. A
+/// call always carries a grant: there is no way to send one without.
+#[cfg(any(test, target_arch = "wasm32"))]
+trait ResourceBus {
+    fn invoke(
+        &mut self,
+        resource: &str,
+        operation: &str,
+        body: &[u8],
+        grant: &str,
+    ) -> Result<Vec<u8>, BusFailure>;
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AppendOutcome {
+    /// The Runtime stored this version. The cursor moved to it.
+    Written,
+    /// The stored version was not the one the guest saw. Nothing was written.
+    /// The guest must read again; it does not retry.
+    Conflict,
+    /// The Runtime refused before storage. Nothing was written.
+    Refused,
+    /// No answer the guest can trust. Resume reads the head back.
+    Unknown,
+    /// No grant. Nothing was sent.
+    Denied,
+    /// An earlier append has no result yet. Nothing was sent.
+    Held,
+    /// Over the journal cap. Nothing was sent.
+    TooLarge,
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResumeOutcome {
+    /// No append is waiting for a result.
+    Nothing,
+    /// The stored head is the head the guest sent.
+    Written,
+    /// The stored head is the parent: the append did not land. Propose again.
+    NotWritten,
+    /// Anything else. A person decides; the guest does not append.
+    Unknown,
+    /// No read grant. Nothing was sent.
+    Denied,
+}
+
+/// An append records a step. It waits while an earlier append has no result,
+/// so a lost reply is never followed by a second write.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn propose_journal_append(
+    journal: &mut Journal,
+    cursor: &JournalCursor,
+) -> Result<u64, &'static str> {
+    if !cursor.resource.starts_with(JOURNAL_ROOT) || host_path(&cursor.resource) {
+        return Err("host path");
+    }
+    let open = journal.steps.iter().any(|step| {
+        step.kind == ProposalKind::JournalAppend
+            && !step.has_result
+            && matches!(
+                step.state,
+                StepState::Prepared | StepState::Dispatched | StepState::SettlementUnknown
+            )
+    });
+    if cursor.pending.is_some() || open {
+        return Err("held");
+    }
+    let id = propose_step(journal);
+    let step = journal
+        .steps
+        .iter_mut()
+        .find(|step| step.id == id)
+        .expect("just pushed");
+    step.kind = ProposalKind::JournalAppend;
+    step.resource = cursor.resource.clone();
+    step.old = cursor.revision.clone().unwrap_or_default();
+    Ok(id)
+}
+
+/// The write body the Runtime bridge reads: the whole encoding as `content`,
+/// and `create_only` for the first version or `if_revision` after that.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn journal_write_body(bytes: &[u8], revision: Option<&str>) -> Vec<u8> {
+    let body = match revision {
+        None => serde_json::json!({ "content": bytes, "create_only": true }),
+        Some(revision) => serde_json::json!({ "content": bytes, "if_revision": revision }),
+    };
+    body.to_string().into_bytes()
+}
+
+/// A provider result: `status` ok with its `data`, or error with its `code`.
+#[cfg(any(test, target_arch = "wasm32"))]
+enum ProviderReply {
+    Ok(serde_json::Value),
+    Error(String),
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn provider_reply(body: &[u8]) -> Option<ProviderReply> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    match value.get("status")?.as_str()? {
+        "ok" => Some(ProviderReply::Ok(
+            value
+                .get("data")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        )),
+        "error" => Some(ProviderReply::Error(
+            value.get("code")?.as_str()?.to_string(),
+        )),
+        _ => None,
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn reply_revision(data: &serde_json::Value) -> Option<String> {
+    data.get("revision")?
+        .as_str()
+        .filter(|revision| !revision.is_empty())
+        .map(str::to_string)
+}
+
+/// Close a journal append with its outcome word. It does not enter the model view.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn close_journal_append(journal: &mut Journal, step_id: u64, word: &str) {
+    if let Some(step) = journal.steps.iter_mut().find(|step| step.id == step_id) {
+        step.has_result = true;
+        step.new = word.to_string();
+    }
+}
+
+/// Write the whole journal as the next version, with the launch grant.
+/// No grant, an open append, or a journal over the cap sends nothing. The
+/// stored copy shows this step as dispatched with no result.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn append_journal(
+    bus: &mut impl ResourceBus,
+    journal: &mut Journal,
+    cursor: &mut JournalCursor,
+    grant: Option<&LaunchGrant>,
+) -> AppendOutcome {
+    let Ok(id) = propose_journal_append(journal, cursor) else {
+        return AppendOutcome::Held;
+    };
+    if !authorize(journal, id, grant.map(LaunchGrant::id)) {
+        return AppendOutcome::Denied;
+    }
+    let Some(grant) = grant else {
+        return AppendOutcome::Denied;
+    };
+    let mut sent = journal.clone();
+    if !dispatch(&mut sent, id) {
+        *journal = sent;
+        return AppendOutcome::Denied;
+    }
+    let Some(bytes) = encode_journal(&sent, &cursor.head) else {
+        cancel(journal, id);
+        return AppendOutcome::TooLarge;
+    };
+    *journal = sent;
+    let mut sent_head = [0; 32];
+    sent_head.copy_from_slice(&bytes[bytes.len() - 32..]);
+    cursor.pending = Some(PendingAppend {
+        step_id: id,
+        sent_head,
+    });
+    let body = journal_write_body(&bytes, cursor.revision.as_deref());
+    let reply = bus.invoke(&cursor.resource, "write", &body, grant.id());
+    let refused = |journal: &mut Journal, cursor: &mut JournalCursor, word: &str| {
+        close_journal_append(journal, id, word);
+        cursor.pending = None;
+    };
+    match reply.as_deref().map(provider_reply) {
+        Err(BusFailure::Denied | BusFailure::Invalid) => {
+            refused(journal, cursor, "refused");
+            AppendOutcome::Refused
+        }
+        Ok(Some(ProviderReply::Error(code))) if code == "revision_conflict" => {
+            refused(journal, cursor, "conflict");
+            AppendOutcome::Conflict
+        }
+        Ok(Some(ProviderReply::Ok(data))) if reply_revision(&data).is_some() => {
+            close_journal_append(journal, id, "written");
+            cursor.revision = reply_revision(&data);
+            cursor.head = sent_head;
+            cursor.pending = None;
+            AppendOutcome::Written
+        }
+        _ => {
+            note_crash(journal, id);
+            AppendOutcome::Unknown
+        }
+    }
+}
+
+/// Settle an append with no trusted result by reading the stored head. The
+/// sent head means it landed. The parent head means it did not; the revision
+/// check then stops the old write and a new one from both landing. Anything
+/// else stays unknown.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn resume_journal(
+    bus: &mut impl ResourceBus,
+    journal: &mut Journal,
+    cursor: &mut JournalCursor,
+    grant: Option<&LaunchGrant>,
+) -> ResumeOutcome {
+    let Some(pending) = cursor.pending.clone() else {
+        return ResumeOutcome::Nothing;
+    };
+    let Some(grant) = grant else {
+        return ResumeOutcome::Denied;
+    };
+    let reply = bus.invoke(&cursor.resource, "read", b"{}", grant.id());
+    let Ok(Some(ProviderReply::Ok(data))) = reply.as_deref().map(provider_reply) else {
+        return ResumeOutcome::Unknown;
+    };
+    let content = data
+        .get("content")
+        .cloned()
+        .and_then(|content| serde_json::from_value::<Vec<u8>>(content).ok());
+    let (Some(content), Some(revision)) = (content, reply_revision(&data)) else {
+        return ResumeOutcome::Unknown;
+    };
+    let Ok((_, _, head)) = decode_journal(&content) else {
+        return ResumeOutcome::Unknown;
+    };
+    let (outcome, word) = if head == pending.sent_head {
+        (ResumeOutcome::Written, "written")
+    } else if head == cursor.head && cursor.revision.is_some() {
+        (ResumeOutcome::NotWritten, "not written")
+    } else {
+        return ResumeOutcome::Unknown;
+    };
+    close_journal_append(journal, pending.step_id, word);
+    cursor.revision = Some(revision);
+    cursor.head = head;
+    cursor.pending = None;
+    outcome
+}
+
+/// The Runtime has no way yet to hand this guest its launch grant. The WIT
+/// world has no launch argument, and the guest does not import
+/// `capabilities`. Until it does, the id is empty, there is no grant, and
+/// nothing is sent.
+#[cfg(target_arch = "wasm32")]
+const LAUNCH_GRANT_ID: &str = "";
+
+#[cfg(target_arch = "wasm32")]
+fn launch_grant() -> Option<LaunchGrant> {
+    LaunchGrant::new(LAUNCH_GRANT_ID)
+}
+
+#[cfg(target_arch = "wasm32")]
+struct WasmBus;
+
+#[cfg(target_arch = "wasm32")]
+impl ResourceBus for WasmBus {
+    fn invoke(
+        &mut self,
+        resource: &str,
+        operation: &str,
+        body: &[u8],
+        grant: &str,
+    ) -> Result<Vec<u8>, BusFailure> {
+        use elastos::bus::types::{BusError, InvokeRequest};
+        let request = InvokeRequest {
+            resource: resource.to_string(),
+            operation: operation.to_string(),
+            body: body.to_vec(),
+            grant: Some(grant.to_string()),
+        };
+        match elastos::bus::providers::invoke(&request) {
+            Ok(response) => Ok(response.body),
+            Err(BusError::Denied(_)) => Err(BusFailure::Denied),
+            Err(BusError::Invalid(_)) => Err(BusFailure::Invalid),
+            Err(_) => Err(BusFailure::Other),
+        }
     }
 }
 
@@ -5851,6 +6228,25 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 "the journal did not round-trip through format 1".to_string(),
             ));
         }
+        // With no launch grant, the append is denied and nothing is sent.
+        let mut cursor = journal_cursor("agent-host", "demo").map_err(|_| {
+            elastos::bus::types::BusError::Invalid("the journal id was refused".to_string())
+        })?;
+        let grant = launch_grant();
+        let appended = append_journal(&mut WasmBus, &mut journal, &mut cursor, grant.as_ref());
+        if appended != AppendOutcome::Denied
+            || resume_journal(&mut WasmBus, &mut journal, &mut cursor, grant.as_ref())
+                != ResumeOutcome::Nothing
+            || cursor.pending.is_some()
+            || cursor.revision.is_some()
+            || !journal.steps.last().is_some_and(|step| {
+                step.kind == ProposalKind::JournalAppend && step.state == StepState::Denied
+            })
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "a journal append without a launch grant was sent".to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -8292,6 +8688,10 @@ mod tests {
             "localhost://Users/self/Projects/demo/src",
         )
         .unwrap();
+        let mut cursor = journal_cursor("demo-agent", "task-1").unwrap();
+        cursor.revision = Some("fixture-revision".to_string());
+        let append = propose_journal_append(&mut journal, &cursor).unwrap();
+        assert!(note_crash(&mut journal, append));
         assert!(begin_compact(&mut journal, COMPACTION_SUMMARY));
         journal
     }
@@ -10921,5 +11321,647 @@ mod tests {
         let restored = replay(&recorded).unwrap();
         assert_eq!(restored, journal.events);
         assert_eq!(restored.last().unwrap().source, NodeSource::Skill);
+    }
+
+    const WRITE_GRANT: &str = "fixture-journal-write-grant";
+    const READ_GRANT: &str = "fixture-journal-read-grant";
+
+    fn fake_revision(bytes: &[u8]) -> String {
+        sha256(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    /// A stand-in for the Runtime bridge with its journal rules: one write
+    /// grant and one read grant for one resource, a precondition on every
+    /// write, a compare-and-swap, and the bridge's reply shapes. The bridge
+    /// itself is tested in `resource_bridge.rs`.
+    struct FakeRuntime {
+        resource: String,
+        stored: Option<Vec<u8>>,
+        calls: Vec<(String, String)>,
+        /// Store the write, then give no answer.
+        lose_reply: bool,
+        /// Give no answer and store nothing.
+        drop_write: bool,
+    }
+
+    impl ResourceBus for FakeRuntime {
+        fn invoke(
+            &mut self,
+            resource: &str,
+            operation: &str,
+            body: &[u8],
+            grant: &str,
+        ) -> Result<Vec<u8>, BusFailure> {
+            self.calls.push((
+                operation.to_string(),
+                String::from_utf8_lossy(body).into_owned(),
+            ));
+            if resource != self.resource {
+                return Err(BusFailure::Invalid);
+            }
+            let request: serde_json::Value =
+                serde_json::from_slice(body).map_err(|_| BusFailure::Invalid)?;
+            let reply = match operation {
+                "write" => {
+                    if grant != WRITE_GRANT {
+                        return Err(BusFailure::Denied);
+                    }
+                    let content: Vec<u8> = serde_json::from_value(request["content"].clone())
+                        .map_err(|_| BusFailure::Other)?;
+                    let create_only = request["create_only"].as_bool().unwrap_or(false);
+                    let if_revision = request["if_revision"].as_str();
+                    if create_only == if_revision.is_some() {
+                        return Err(BusFailure::Other);
+                    }
+                    if self.drop_write {
+                        return Err(BusFailure::Other);
+                    }
+                    let current = self.stored.as_deref().map(fake_revision);
+                    if current.as_deref() != if_revision {
+                        serde_json::json!({ "status": "error", "code": "revision_conflict" })
+                    } else {
+                        let revision = fake_revision(&content);
+                        let written = content.len();
+                        self.stored = Some(content);
+                        if self.lose_reply {
+                            return Err(BusFailure::Other);
+                        }
+                        serde_json::json!({
+                            "status": "ok",
+                            "data": { "bytes_written": written, "revision": revision },
+                        })
+                    }
+                }
+                "read" => {
+                    if grant != READ_GRANT {
+                        return Err(BusFailure::Denied);
+                    }
+                    match &self.stored {
+                        Some(bytes) => serde_json::json!({
+                            "status": "ok",
+                            "data": {
+                                "content": bytes,
+                                "size": bytes.len(),
+                                "revision": fake_revision(bytes),
+                            },
+                        }),
+                        None => serde_json::json!({ "status": "error", "code": "read_failed" }),
+                    }
+                }
+                _ => return Err(BusFailure::Invalid),
+            };
+            Ok(reply.to_string().into_bytes())
+        }
+    }
+
+    fn fake_runtime() -> (FakeRuntime, JournalCursor) {
+        let cursor = journal_cursor("demo-agent", "task-1").unwrap();
+        let runtime = FakeRuntime {
+            resource: cursor.resource.clone(),
+            stored: None,
+            calls: Vec::new(),
+            lose_reply: false,
+            drop_write: false,
+        };
+        (runtime, cursor)
+    }
+
+    fn write_grant() -> LaunchGrant {
+        LaunchGrant::new(WRITE_GRANT).unwrap()
+    }
+
+    fn read_grant() -> LaunchGrant {
+        LaunchGrant::new(READ_GRANT).unwrap()
+    }
+
+    /// The journal as the guest sent it: the append step dispatched, with no
+    /// result and no grant.
+    fn as_sent(journal: &Journal, step_id: u64) -> Journal {
+        let mut sent = without_grants(journal);
+        let step = sent
+            .steps
+            .iter_mut()
+            .find(|step| step.id == step_id)
+            .unwrap();
+        step.state = StepState::Dispatched;
+        step.has_result = false;
+        step.new.clear();
+        sent
+    }
+
+    fn last_step(journal: &Journal) -> &Step {
+        journal.steps.last().unwrap()
+    }
+
+    fn body(call: &(String, String)) -> serde_json::Value {
+        serde_json::from_str(&call.1).unwrap()
+    }
+
+    #[test]
+    fn a_journal_append_without_a_grant_sends_nothing() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        let fresh = cursor.clone();
+        let mut journal = two_turns();
+        assert_eq!(
+            append_journal(&mut runtime, &mut journal, &mut cursor, None),
+            AppendOutcome::Denied
+        );
+        assert!(runtime.calls.is_empty());
+        assert!(runtime.stored.is_none());
+        assert_eq!(cursor, fresh);
+        let step = last_step(&journal);
+        assert_eq!(step.kind, ProposalKind::JournalAppend);
+        assert_eq!(step.state, StepState::Denied);
+        assert!(step.grant.is_none());
+        assert!(LaunchGrant::new("").is_none());
+    }
+
+    #[test]
+    fn the_first_append_creates_the_journal_and_the_next_names_its_revision() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        let mut journal = two_turns();
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Written
+        );
+        let first_id = last_step(&journal).id;
+        let first = runtime.stored.clone().unwrap();
+        let (back, prev, head) = decode_journal(&first).unwrap();
+        assert_eq!(back, as_sent(&journal, first_id));
+        assert_eq!(prev, [0; 32]);
+        assert_eq!(cursor.head, head);
+        assert_eq!(
+            cursor.revision.as_deref(),
+            Some(fake_revision(&first).as_str())
+        );
+        assert!(cursor.pending.is_none());
+        assert_eq!(runtime.calls.len(), 1);
+        assert_eq!(runtime.calls[0].0, "write");
+        assert_eq!(body(&runtime.calls[0])["create_only"], true);
+        assert!(body(&runtime.calls[0]).get("if_revision").is_none());
+        let step = last_step(&journal);
+        assert!(step.has_result);
+        assert_eq!(step.new, "written");
+        assert_eq!(step.old, "");
+
+        admit_user(&mut journal, "third turn");
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Written
+        );
+        assert_eq!(
+            body(&runtime.calls[1])["if_revision"],
+            fake_revision(&first).as_str()
+        );
+        assert!(body(&runtime.calls[1]).get("create_only").is_none());
+        let second = runtime.stored.clone().unwrap();
+        let (back, prev, _) = decode_journal(&second).unwrap();
+        assert_eq!(prev, head);
+        assert_eq!(back, as_sent(&journal, last_step(&journal).id));
+        assert_eq!(last_step(&journal).old, fake_revision(&first));
+    }
+
+    #[test]
+    fn a_stale_journal_revision_is_refused_and_nothing_is_written() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        let mut journal = two_turns();
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Written
+        );
+        let seen = cursor.clone();
+        let mut other = two_turns();
+        admit_user(&mut other, "another writer");
+        let other_bytes = encode_journal(&other, &cursor.head).unwrap();
+        runtime.stored = Some(other_bytes.clone());
+
+        admit_user(&mut journal, "third turn");
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Conflict
+        );
+        assert_eq!(runtime.stored.as_deref(), Some(other_bytes.as_slice()));
+        assert_eq!(runtime.calls.len(), 2);
+        assert_eq!(cursor, seen);
+        let step = last_step(&journal);
+        assert!(step.has_result);
+        assert_eq!(step.new, "conflict");
+    }
+
+    #[test]
+    fn a_crash_between_append_and_result_is_settlement_unknown_and_not_retried() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        runtime.lose_reply = true;
+        let mut journal = two_turns();
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Unknown
+        );
+        let id = last_step(&journal).id;
+        assert_eq!(step_state(&journal, id), Some(StepState::SettlementUnknown));
+        assert!(!last_step(&journal).has_result);
+        assert!(cursor.pending.is_some());
+        assert_eq!(runtime.calls.len(), 1);
+
+        runtime.lose_reply = false;
+        admit_user(&mut journal, "third turn");
+        let before = journal.clone();
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Held
+        );
+        assert_eq!(journal, before);
+        assert_eq!(propose_journal_append(&mut journal, &cursor), Err("held"));
+        assert!(!dispatch(&mut journal, id));
+        assert!(note_crash(&mut journal, id));
+        assert_eq!(step_state(&journal, id), Some(StepState::SettlementUnknown));
+        assert_eq!(runtime.calls.len(), 1);
+    }
+
+    #[test]
+    fn resume_reads_back_the_same_bytes() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        runtime.lose_reply = true;
+        let mut journal = two_turns();
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Unknown
+        );
+        let id = last_step(&journal).id;
+        let sent = as_sent(&journal, id);
+        assert_eq!(
+            resume_journal(&mut runtime, &mut journal, &mut cursor, Some(&read_grant())),
+            ResumeOutcome::Written
+        );
+        let stored = runtime.stored.clone().unwrap();
+        let (back, prev, head) = decode_journal(&stored).unwrap();
+        assert_eq!(back, sent);
+        assert_eq!(prev, [0; 32]);
+        assert_eq!(cursor.head, head);
+        assert_eq!(
+            cursor.revision.as_deref(),
+            Some(fake_revision(&stored).as_str())
+        );
+        assert!(cursor.pending.is_none());
+        assert_eq!(last_step(&journal).new, "written");
+        assert_eq!(runtime.calls[1].0, "read");
+
+        runtime.lose_reply = false;
+        admit_user(&mut journal, "third turn");
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Written
+        );
+        assert_eq!(
+            body(&runtime.calls[2])["if_revision"],
+            fake_revision(&stored).as_str()
+        );
+    }
+
+    #[test]
+    fn resume_on_the_parent_head_lets_the_append_be_proposed_again() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        let mut journal = two_turns();
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Written
+        );
+        let parent = cursor.clone();
+        runtime.drop_write = true;
+        admit_user(&mut journal, "third turn");
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Unknown
+        );
+        assert_eq!(
+            resume_journal(&mut runtime, &mut journal, &mut cursor, Some(&read_grant())),
+            ResumeOutcome::NotWritten
+        );
+        assert_eq!(last_step(&journal).new, "not written");
+        assert!(last_step(&journal).has_result);
+        assert_eq!(cursor, parent);
+
+        runtime.drop_write = false;
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Written
+        );
+        let last = runtime.calls.last().unwrap();
+        assert_eq!(body(last)["if_revision"], parent.revision.unwrap().as_str());
+    }
+
+    #[test]
+    fn resume_on_another_head_stays_unknown_and_holds_appends() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        let mut journal = two_turns();
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Written
+        );
+        runtime.drop_write = true;
+        admit_user(&mut journal, "third turn");
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Unknown
+        );
+        let waiting = cursor.clone();
+        let id = last_step(&journal).id;
+        let mut other = two_turns();
+        admit_user(&mut other, "another writer");
+        runtime.stored = Some(encode_journal(&other, &cursor.head).unwrap());
+        assert_eq!(
+            resume_journal(&mut runtime, &mut journal, &mut cursor, Some(&read_grant())),
+            ResumeOutcome::Unknown
+        );
+        let mut flipped = runtime.stored.clone().unwrap();
+        flipped[JOURNAL_HEADER + 9] ^= 1;
+        runtime.stored = Some(flipped);
+        assert_eq!(
+            resume_journal(&mut runtime, &mut journal, &mut cursor, Some(&read_grant())),
+            ResumeOutcome::Unknown
+        );
+        assert_eq!(cursor, waiting);
+        assert_eq!(step_state(&journal, id), Some(StepState::SettlementUnknown));
+        assert!(!last_step(&journal).has_result);
+        runtime.drop_write = false;
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Held
+        );
+    }
+
+    #[test]
+    fn a_lost_first_append_with_nothing_stored_stays_unknown() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        runtime.drop_write = true;
+        let mut journal = two_turns();
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Unknown
+        );
+        assert_eq!(
+            resume_journal(&mut runtime, &mut journal, &mut cursor, Some(&read_grant())),
+            ResumeOutcome::Unknown
+        );
+        assert!(cursor.pending.is_some());
+    }
+
+    #[test]
+    fn resume_without_a_read_grant_sends_nothing() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        runtime.lose_reply = true;
+        let mut journal = two_turns();
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Unknown
+        );
+        let waiting = cursor.clone();
+        assert_eq!(
+            resume_journal(&mut runtime, &mut journal, &mut cursor, None),
+            ResumeOutcome::Denied
+        );
+        assert_eq!(runtime.calls.len(), 1);
+        assert_eq!(
+            resume_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            ResumeOutcome::Unknown
+        );
+        assert_eq!(cursor, waiting);
+        let mut idle = journal_cursor("demo-agent", "task-2").unwrap();
+        assert_eq!(
+            resume_journal(&mut runtime, &mut journal, &mut idle, Some(&read_grant())),
+            ResumeOutcome::Nothing
+        );
+        assert_eq!(runtime.calls.len(), 2);
+    }
+
+    #[test]
+    fn a_refused_append_is_closed_and_not_sent_again() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        let fresh = cursor.clone();
+        let mut journal = two_turns();
+        let other = LaunchGrant::new("fixture-another-tasks-grant").unwrap();
+        assert_eq!(
+            append_journal(&mut runtime, &mut journal, &mut cursor, Some(&other)),
+            AppendOutcome::Refused
+        );
+        assert!(runtime.stored.is_none());
+        assert_eq!(runtime.calls.len(), 1);
+        assert_eq!(cursor, fresh);
+        let step = last_step(&journal);
+        assert!(step.has_result);
+        assert_eq!(step.new, "refused");
+    }
+
+    #[test]
+    fn an_append_over_the_cap_is_not_sent() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        let fresh = cursor.clone();
+        let mut journal = two_turns();
+        admit_user(&mut journal, &"x".repeat(JOURNAL_CAP));
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::TooLarge
+        );
+        assert!(runtime.calls.is_empty());
+        assert_eq!(cursor, fresh);
+        assert_eq!(last_step(&journal).state, StepState::Cancelled);
+    }
+
+    #[test]
+    fn a_journal_id_is_letters_digits_and_dashes() {
+        assert_eq!(
+            journal_resource("demo-agent", "task-1").unwrap(),
+            "localhost://Users/self/.AppData/Agents/demo-agent/tasks/task-1/journal"
+        );
+        assert!(journal_resource("A9-", &"x".repeat(64)).is_ok());
+        for bad in [
+            "",
+            &"x".repeat(65),
+            "a/b",
+            "..",
+            "a b",
+            "a.b",
+            "\u{e9}",
+            "a\\b",
+            "self/../other",
+        ] {
+            assert_eq!(
+                journal_resource(bad, "task-1"),
+                Err("journal id"),
+                "{bad:?}"
+            );
+            assert_eq!(
+                journal_resource("demo-agent", bad),
+                Err("journal id"),
+                "{bad:?}"
+            );
+        }
+        let (mut runtime, mut cursor) = fake_runtime();
+        let mut journal = two_turns();
+        for resource in [
+            "localhost://Users/other/.AppData/Agents/demo-agent/tasks/task-1/journal",
+            "localhost://Users/self/.AppData/Agents/../../Documents/journal",
+            "/Users/sash/journal",
+        ] {
+            cursor.resource = resource.to_string();
+            assert_eq!(
+                propose_journal_append(&mut journal, &cursor),
+                Err("host path")
+            );
+            assert_eq!(
+                append_journal(
+                    &mut runtime,
+                    &mut journal,
+                    &mut cursor,
+                    Some(&write_grant())
+                ),
+                AppendOutcome::Held
+            );
+        }
+        assert!(runtime.calls.is_empty());
+        assert_eq!(journal, two_turns());
+    }
+
+    #[test]
+    fn a_launch_grant_is_held_in_memory_only() {
+        let grant = write_grant();
+        assert!(!format!("{grant:?}").contains(WRITE_GRANT));
+        let (mut runtime, mut cursor) = fake_runtime();
+        let mut journal = two_turns();
+        assert_eq!(
+            append_journal(&mut runtime, &mut journal, &mut cursor, Some(&grant)),
+            AppendOutcome::Written
+        );
+        let stored = runtime.stored.clone().unwrap();
+        assert!(!stored
+            .windows(WRITE_GRANT.len())
+            .any(|window| window == WRITE_GRANT.as_bytes()));
+        assert!(!runtime.calls[0].1.contains(WRITE_GRANT));
+        let (back, _, _) = decode_journal(&stored).unwrap();
+        assert!(back.steps.iter().all(|step| step.grant.is_none()));
+    }
+
+    /// The guest's request and reply shapes are the ones the bridge reads and
+    /// writes. A rename on either side fails here.
+    #[test]
+    fn the_write_body_is_what_the_bridge_reads() {
+        assert_eq!(
+            journal_write_body(&[0, 255], None),
+            br#"{"content":[0,255],"create_only":true}"#
+        );
+        assert_eq!(
+            journal_write_body(&[7], Some("rev")),
+            br#"{"content":[7],"if_revision":"rev"}"#
+        );
+        let bridge = include_str!("../../../elastos/crates/elastos-server/src/resource_bridge.rs");
+        for text in [
+            r#"request.get("content")"#,
+            r#"request.get("create_only")"#,
+            r#"request.get("if_revision")"#,
+            r#""content": bytes,"#,
+            r#""revision": revision,"#,
+            r#""revision": crate::auth::principal_root_object_revision("#,
+            r#""data": data,"#,
+            r#""code": code,"#,
+            r#"provider_error_result("revision_conflict""#,
+        ] {
+            assert!(bridge.contains(text), "{text}");
+        }
+        let host =
+            include_str!("../../../elastos/crates/elastos-compute/src/providers/component.rs");
+        assert!(host.contains("let body = serde_json::to_vec(&result)"));
     }
 }
