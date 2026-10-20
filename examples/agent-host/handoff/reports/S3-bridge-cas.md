@@ -240,3 +240,83 @@ Falsifiers:   E01 the helper compares the device only          -> absent_or_same
 Not run here: the macOS run of the portable test (this container is Linux ext4).
 ```
 
+
+## Fix 4: one Agents rule on every route, after the Codex review of c85c2755 (20 Oct)
+
+Codex: **FAIL**, confirmed in code by Cursor. Cursor's Mac results at that head: #8 63 of 63 pass on APFS; #20 `run-e2e.sh` 2 of 2 pass on APFS.
+
+1. **The attached (HTTP) bridge skipped the Agents rule.** `handle_remote_request_with_audit_dir` refused only principal-root read and write. It forwarded `mkdir`, `list`, `stat`, `exists` and `delete` to `/api/provider/localhost/<op>`, and the Runtime API proxy (`handlers/provider.rs`, `provider_proxy`) forwarded them to the localhost provider with no Agents rule.
+2. **Audit.** A `resource_result` whose result was not ok (for example `read_failed`) was audited as ok.
+
+**The fix** (code `89ff7d6`, clippy fix `5bf47d8`):
+
+- **One rule function**, `provider_resource::agents_area_refusal(rooted, operation)`, with `in_agents_area(rooted)`.
+  - It no longer depends on whose root the path is in, so the proxy, which has no principal, can use it.
+  - The area is found under `localhost://Users/<root>/` by full case folding, ignoring empty and `.` segments.
+  - Inside the area: only read and write; only the exact spelling `.AppData/Agents/<seg>...`, with `^[a-z0-9][a-z0-9._-]*$` segments and no empty or `.` segment anywhere; a write needs a name below `Agents`.
+- **It runs on every route a capsule can use** to reach localhost under Agents:
+
+| Route | Where | Before or after the token check |
+| --- | --- | --- |
+| Local dispatch (in-Runtime bridge, component hostcall) | `authorize_and_dispatch_resource_invoke` -> `agents_area_dispatch_refusal` | after the token check, before storage or provider |
+| Protected storage | `protected_principal_root_resource_response` -> `agent_path_refusal` | second guard on the same path |
+| Attached bridge (`elastos run` / `elastos capsule` attached to a running Runtime) | `handle_remote_request_with_audit_dir` -> `agents_area_dispatch_refusal` | after the manifest and token-present checks, **before any HTTP call** |
+| Runtime API provider proxy, `POST /api/provider/localhost/<op>` | `handlers/provider.rs` `provider_proxy` -> `agents_area_refusal` on the rooted `resource` | for **every session**, before `enforce_capability`, so also before the shell's no-token path |
+| `request_capability`, local | `handle_request` -> `agents_area_capability_refusal` on the scoped resource | at once, before `parse_action`, the manifest bound and the pending request |
+| `request_capability`, attached | `handle_remote_request_with_audit_dir` -> same | at once, before the manifest bound and any HTTP call |
+
+- **Audit:** `invoke_outcome(result)` gives "ok" only for status ok (or no status), "conflict" for `revision_conflict`, and "error" for anything else. It is used on the local protected path, the local provider path, and the attached bridge (when the HTTP status is a success).
+
+**Every caller of `/api/provider/localhost`** (searched by a read-only agent and checked):
+
+| Caller | Who runs it | Localhost operations | How it is covered |
+| --- | --- | --- | --- |
+| `resource_bridge.rs` `handle_remote_request_with_audit_dir`, used by `run_cmd.rs:247` and `capsule_cmd.rs:158` | a component capsule run attached to a running Runtime (this includes the agent-host guest) | any the manifest allows | the bridge refuses before HTTP; the API proxy refuses again |
+| `elastos-guest/src/runtime.rs` `http_call` (guest SDK in HTTP mode) | carrier-service providers (`supervisor.rs`), the Home CLI renderer, the shell | any | the API proxy (`provider_proxy`) |
+| `capsules/home-cli/src/runtime_io.rs` (`storage_read_utf8`, `storage_write`) | Home CLI renderer, through the guest SDK | read, write on `Local/SharedByLocalUsersAndBots/Home/sessions/...` | not under Users; the API proxy rule does not apply there |
+| `elastos-server/src/home_cmd.rs` `provider_call` | the `elastos home` CLI, host side | exists, read, write on the same session root | not under Users; the API proxy rule does not apply there |
+
+- **Not reachable for localhost:**
+  - The Home gateway route `/api/provider/:scheme/:op` (`gateway_provider_proxy`) serves only `documents`, `object`, `chain`, `net`, `inspect` and `model`. `localhost` gets 404, so browser capsule pages in Home cannot reach it.
+  - The shell capsule calls only `tunnel/start`.
+  - `chat_cmd`, `operator_control`, `gateway_room`, `gateway_home_system`, `gateway_local_control` and `inspect_provider` use other schemes.
+- **The sibling storage route** `/api/localhost/*path` (`handlers/storage.rs`, six handlers) refuses every `Users` path (`reject_principal_root_storage_path`). A lower-case `users/...` is not a known root, so `rooted_localhost_uri` gives none and the request fails as an invalid path. No change.
+- **Tests** that call the route (`home_cmd.rs` mock router, `handlers/provider.rs`, `resource_bridge.rs`, `api/gateway_tests/*`) are not callers.
+
+3. **(Your #9 question, yes.)** `request_capability`, both handlers, refuses any action other than read or write in the Agents area at once, with the same rule. A request for a wildcard under Agents (a `*` segment) is refused as a misspelling too; the manifest bound is where patterns belong.
+
+```text
+Commit:       89ff7d6 (code and tests), 5bf47d8 (clippy, test only)
+Changed:      elastos/crates/elastos-server/src/provider_resource.rs - SHIPPING: agents_area_refusal, in_agents_area
+              elastos/crates/elastos-server/src/resource_bridge.rs - SHIPPING: the rule on the attached bridge and both
+                capability request handlers; invoke_outcome for the audit; tests
+              elastos/crates/elastos-server/src/api/handlers/provider.rs - SHIPPING: the rule in provider_proxy; test
+Tests run:    (cd elastos && cargo test -p elastos-server --lib -- resource_bridge::tests api::handlers::provider::tests)
+                -> "82 passed" (66 bridge, 16 proxy); clippy clean; fmt ok
+New tests:    the_attached_bridge_applies_the_agents_rule_before_http (delete, mkdir, list, stat, exists, a folded delete,
+                an Agentſ write, a "//" read; the API URL has nothing listening, so a request past the rule would fail
+                to connect instead of returning the refusal)
+              the_provider_proxy_applies_the_agents_rule_for_every_session (shell session with no token: the same eight
+                requests are refused and the provider sees none; the exact journal read and a delete outside the area
+                still reach the provider)
+              a_forbidden_agents_capability_request_is_refused_at_once (delete, execute, admin and a folded delete, local
+                and attached; no pending request; under 5 s, not the 30 s approval wait; a misspelled write request is
+                refused too)
+              a_missing_journal_read_is_audited_as_an_error
+              a_failed_provider_result_is_audited_as_an_error (the local provider path)
+Falsifiers:   G01 the shared rule allows every operation      -> 4 FAILED (proxy, attached, capability, local)
+              G02 the shared rule folds ASCII only            -> 4 FAILED (proxy, attached, string test, alias test)
+              G03 the attached bridge skips the rule          -> the_attached_bridge_applies_the_agents_rule_before_http FAILED
+              G04 the provider proxy skips the rule           -> the_provider_proxy_applies_the_agents_rule_for_every_session FAILED
+              G05 local request_capability skips the rule     -> a_forbidden_agents_capability_request_is_refused_at_once FAILED
+                                                                 (it waited the full 30 s for the shell)
+              G06 attached request_capability skips the rule  -> same FAILED (it reached HTTP)
+              G07 every result is audited ok                  -> a_missing_journal_read_is_audited_as_an_error,
+                                                                 a_failed_provider_result_is_audited_as_an_error FAILED
+              G08 the provider path audits ok                 -> a_failed_provider_result_is_audited_as_an_error FAILED
+              G09 a conflict is audited as error              -> a_revision_conflict_is_audited_as_a_conflict FAILED
+              G10 local dispatch skips the rule               -> only_read_and_write_are_allowed_under_agents FAILED
+Not proven:   The attached bridge's audit classification of a 200 reply with an error body is not tested (it would need
+              a listening HTTP server); it uses the same invoke_outcome that G07 pins.
+Guest hash:   no guest change on this branch.
+```
