@@ -373,3 +373,31 @@ Falsifiers:   H01 Library allows the Agents area              -> agent_journals_
 - **The attached bridge's own refusals** (manifest, missing token, Agents) are not audited, as before this PR. A non-JSON reply leaves a "requested" entry with no "completed".
 - **A trailing `.` in a segment** (`journal.`): answered yes, done in fix 6 below.
 
+
+## Fix 6: refuse a segment that ends in "." (20 Oct)
+
+```text
+Commit:       d358ba79a75cbfe99e94b7761a22a23dcdc18430 (rule, test cases, report edit); this section is the next commit
+Changed:      elastos/crates/elastos-server/src/provider_resource.rs - agents_area_refusal: a segment below
+                .AppData/Agents/ may not end in '.'; the refusal message says so
+              elastos/crates/elastos-server/src/resource_bridge.rs - three cases in
+                the_agents_area_folds_unicode_case_and_allows_one_spelling
+Why:          On Windows, "journal." and "journal" name the same file. Answered yes in the review of fix 5.
+Refusals:     .AppData/Agents/demo-agent/tasks/task-1/journal.    read, write -> invalid_localhost_path
+              .AppData/Agents/demo-agent./tasks/task-1/journal    read, write -> invalid_localhost_path
+              .AppData/Agents/demo-agent/tasks/task-1/journal...  read, write -> invalid_localhost_path
+              The rule is shared, so every route gets it: local dispatch, protected storage, the attached
+              bridge, the provider proxy, request_capability, Library, storage.
+Not done:     Windows device names (con, nul and so on), left for when Windows is a target.
+Tests:        cargo test -p elastos-server --lib -- resource_bridge::tests provider -> 367 passed, 0 failed
+              cargo clippy -p elastos-server --all-targets -- -D warnings -> clean
+Falsifier:    T01 remove the ends_with('.') check -> FAILED
+                the_agents_area_folds_unicode_case_and_allows_one_spelling; restored, tree clean
+Guest:        the guest's journal_id_ok (#9) still allows an id that ends in '.'. The bridge now refuses such a
+              path, so the guest fails closed. Aligning the guest rule is a small change on #9 for later.
+Principles:   fail closed; one rule, many routes.
+DeepSeek:     none used.
+Guest hash:   unchanged (no guest change in this PR).
+```
+
+**What is next:** stop. Codex re-reviews #8, #9, #19 and #20. After that, #9 and #20 merge in this commit.
