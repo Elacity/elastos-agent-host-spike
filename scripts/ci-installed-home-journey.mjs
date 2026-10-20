@@ -316,15 +316,22 @@ async function repairJourney(assistant, offer) {
   const restarted = await resourceAction("restart_get");
   assert(restarted.home_restarted && restarted.weights_bytes > 0);
   modelRepair.interrupted_get = { kept_weights_bytes: restarted.weights_bytes, kept_weights_prefix_sha256: restarted.weights_prefix_sha256 };
-  subcheck = "restarted_home";
+  // Each wait after the restart has its own fixed label, so a failure names it.
+  subcheck = "restarted_page_load";
   assert((await page.goto(`${base}/home/`, { waitUntil: "domcontentloaded" })).ok());
+  subcheck = "restarted_home_ready";
   await page.waitForFunction(() => document.body.dataset.homeStatus === "ready" || document.querySelector("#home-unlock")?.hidden === false, null, { timeout: 60000 });
   if (await page.locator("#home-unlock").isVisible()) await page.locator("#home-unlock-primary").click();
+  subcheck = "restarted_signed_in";
   await page.waitForFunction(() => document.body.dataset.homeStatus === "ready" && document.body.dataset.homeAuthority === "signed", null, { timeout: 60000 });
   const shell = page.frameLocator("#active-shell-frame");
+  subcheck = "restarted_desktop";
   await shell.locator("#desktop").waitFor({ state: "visible", timeout: 60000 });
+  subcheck = "restarted_marketplace";
   marketplace = await app("marketplace");
+  subcheck = "restarted_model_detail";
   await showModelDetail(marketplace, other.cid);
+  subcheck = "restarted_retry_text";
   await marketplace.getByText("The download stopped before it finished. Retry.", { exact: true }).waitFor({ state: "visible", timeout: 60000 });
   await page.screenshot({ path: join(evidence, "repair-restart-retry.png"), fullPage: true });
   subcheck = "retry_retained_get";

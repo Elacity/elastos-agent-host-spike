@@ -8,7 +8,8 @@ export function publicJourneyFailure(error, stage, subcheck) {
     installed_runtime_reply: ["request_cap", "request_authority", "terminal_status", "terminal_output", "reply_display", "reply_bounds"],
     finite_resource_lifecycle: ["owner_configure", "contender_launch", "open_assistant", "contender_configure", "owner_start", "busy", "stop", "stop_recovery", "idle", "idle_recovery", "crash", "crash_recovery"],
     model_stop_get_different: ["stop_real_stream", "get_other_model", "open_assistant", "other_model_reply"],
-    model_interrupted_get_retry: ["fresh_get_precondition", "partial_get", "restarted_home", "retry_retained_get"],
+    model_interrupted_get_retry: ["fresh_get_precondition", "partial_get", "restarted_page_load", "restarted_home_ready", "restarted_signed_in",
+      "restarted_desktop", "restarted_marketplace", "restarted_model_detail", "restarted_retry_text", "retry_retained_get"],
   };
   const failure_check = checks[failure_stage]?.includes(subcheck) ? subcheck : null;
   return { failure_stage, failure, ...(failure_check ? { failure_check } : {}) };
