@@ -992,6 +992,213 @@ mod tests {
         assert_eq!(loads.load(Ordering::SeqCst), 0);
     }
 
+    /// A Runtime with the component provider, the real resource bridge, and a
+    /// person whose root has principal-root protection, as on a Home.
+    struct AgentHostRuntime {
+        runtime: Arc<Runtime>,
+        capability_manager: Arc<CapabilityManager>,
+        pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+        audit_log: Arc<AuditLog>,
+        data_dir: std::path::PathBuf,
+        _temp: tempfile::TempDir,
+    }
+
+    const AGENT_HOST_PERSON: &str = "person:local:agent-host-e2e";
+
+    async fn agent_host_runtime() -> AgentHostRuntime {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let component_provider = Arc::new(ComponentProvider::new());
+        let runtime = Arc::new(Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            Some(component_provider),
+        ));
+        runtime
+            .configure_capsule_admission(temp.path(), &[], true)
+            .await
+            .unwrap();
+        let audit_log = Arc::new(AuditLog::new());
+        let capability_manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            audit_log.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending_store = Arc::new(
+            elastos_runtime::capability::pending::PendingRequestStore::new(audit_log.clone()),
+        );
+        let data_dir = temp.path().join("runtime-data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        crate::auth::store_test_principal_root_protection(&data_dir, AGENT_HOST_PERSON);
+        runtime
+            .set_provider_registry(
+                Arc::new(ProviderRegistry::new()),
+                capability_manager.clone(),
+                pending_store.clone(),
+                data_dir.clone(),
+            )
+            .await;
+        AgentHostRuntime {
+            runtime,
+            capability_manager,
+            pending_store,
+            audit_log,
+            data_dir,
+            _temp: temp,
+        }
+    }
+
+    fn agent_host_journal() -> (String, String) {
+        let root = crate::auth::principal_localhost_root(AGENT_HOST_PERSON);
+        let journal = format!("{root}/.AppData/Agents/agent-host/tasks/demo/journal");
+        (root, journal)
+    }
+
+    fn launch_agent_host(
+        fx: &AgentHostRuntime,
+    ) -> tokio::task::JoinHandle<elastos_common::Result<elastos_compute::CapsuleHandle>> {
+        let runtime = fx.runtime.clone();
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples/agent-host");
+        tokio::spawn(async move {
+            runtime
+                .run_local_with_principal(&dir, Vec::new(), Some(AGENT_HOST_PERSON.to_string()))
+                .await
+        })
+    }
+
+    async fn next_pending(
+        store: &elastos_runtime::capability::pending::PendingRequestStore,
+    ) -> elastos_runtime::capability::pending::PendingCapabilityRequest {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(request) = store.list_pending().await.into_iter().next() {
+                    break request;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the agent host must ask for a journal grant")
+    }
+
+    fn component_invoke_outcomes(audit_log: &AuditLog) -> Vec<(String, String)> {
+        audit_log
+            .recent_events(100)
+            .iter()
+            .filter_map(|event| match event {
+                AuditEvent::Custom {
+                    event_type,
+                    details,
+                } if event_type == "component.invoke.completed" => Some((
+                    details["operation"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                    details["outcome"].as_str().unwrap_or_default().to_string(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The whole S3 route in one process: the guest asks for its two grants,
+    /// the shell (this test) grants them, the guest writes its journal through
+    /// the real bridge with a revision precondition, and reads it back.
+    #[tokio::test]
+    #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
+    async fn the_agent_host_writes_and_reads_its_journal_through_the_real_bridge() {
+        let fx = agent_host_runtime().await;
+        let (root, journal) = agent_host_journal();
+        let launch = launch_agent_host(&fx);
+        let mut asked = Vec::new();
+        for _ in 0..2 {
+            let pending = next_pending(&fx.pending_store).await;
+            asked.push((pending.resource.as_str().to_string(), pending.action));
+            let token = fx.capability_manager.grant(
+                pending.session_id.as_str(),
+                pending.resource.clone(),
+                pending.action,
+                TokenConstraints::default(),
+                None,
+            );
+            fx.pending_store
+                .grant_request(pending.id.as_str(), token, GrantDuration::Session)
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), launch)
+            .await
+            .expect("the agent host must finish after its grants")
+            .expect("the launch task must not panic")
+            .expect("the agent host must write and read back its journal");
+        assert_eq!(
+            asked,
+            vec![
+                (journal.clone(), elastos_runtime::capability::Action::Write),
+                (journal.clone(), elastos_runtime::capability::Action::Read),
+            ]
+        );
+        assert!(fx.pending_store.list_pending().await.is_empty());
+
+        let path =
+            elastos_common::localhost::rooted_localhost_fs_path(&fx.data_dir, &journal).unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        assert!(
+            !raw.windows(4).any(|window| window == b"EAHJ"),
+            "stored encrypted"
+        );
+        let plain = crate::auth::read_principal_root_object(
+            &fx.data_dir,
+            AGENT_HOST_PERSON,
+            &root,
+            &journal,
+            &path,
+        )
+        .unwrap();
+        assert_eq!(&plain[..4], b"EAHJ");
+        assert_eq!(plain[4..6], 1u16.to_le_bytes());
+        let outcomes = component_invoke_outcomes(&fx.audit_log);
+        assert!(
+            outcomes.contains(&("write".to_string(), "ok".to_string())),
+            "{outcomes:?}"
+        );
+        assert!(
+            outcomes.contains(&("read".to_string(), "ok".to_string())),
+            "{outcomes:?}"
+        );
+    }
+
+    /// The shell denies both requests: the guest finishes, sends no resource
+    /// call, and nothing is stored.
+    #[tokio::test]
+    #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
+    async fn the_agent_host_stores_nothing_when_its_journal_grants_are_denied() {
+        let fx = agent_host_runtime().await;
+        let (_root, journal) = agent_host_journal();
+        let launch = launch_agent_host(&fx);
+        for _ in 0..2 {
+            let pending = next_pending(&fx.pending_store).await;
+            assert_eq!(pending.resource.as_str(), journal);
+            fx.pending_store
+                .deny_request(pending.id.as_str(), "not now")
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), launch)
+            .await
+            .expect("the agent host must finish after the denials")
+            .expect("the launch task must not panic")
+            .expect("a denied agent host still finishes cleanly");
+        let path =
+            elastos_common::localhost::rooted_localhost_fs_path(&fx.data_dir, &journal).unwrap();
+        assert!(!path.exists());
+        assert!(component_invoke_outcomes(&fx.audit_log).is_empty());
+    }
+
     #[tokio::test]
     async fn component_conformance_exercises_bus_authorization_dispatch_and_audit() {
         let temp_dir = tempfile::tempdir().unwrap();
