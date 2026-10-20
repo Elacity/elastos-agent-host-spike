@@ -127,3 +127,31 @@ Questions:    1. How does the Runtime hand the guest its launch grant? The WIT w
 1. Sasha decides the grant channel (question 1) and the read grant (question 2). Then a small Runtime slice wires it, with an end-to-end Wasmtime test that writes a journal through the real bridge.
 2. The GPT-family review of PR #8 and this PR.
 3. Tests for the guard sweep's gaps, `begin_exec` first (next PR, as planned).
+
+## Fix after self-review (20 Oct)
+
+Sasha could not run the GPT-family review yet, so another Claude agent did a read-only adversarial review of this PR with no memory of writing it. **This is not the independent review that HANDOFF asks for, and it does not replace it.** It found nothing blocking, and two real problems, fixed in `54d9a04`:
+
+1. **The grant stayed in the append step after dispatch.** `authorize` copies it into `step.grant`, and `Journal` derives `Debug`, so printing the journal showed it. It never reached the stored bytes. Now the step drops the grant once it is dispatched, and on the over-cap path. Test: `no_journal_step_keeps_the_launch_grant` (written, conflict, unknown, over the cap, refused).
+2. **After a conflict, every later append conflicted again.** The cursor kept the stale precondition, and nothing read the stored copy unless an append was pending. A conflict now marks the cursor `stale`, and appends are held until `reread_journal` reads the stored version. `reread_journal` returns that version for the caller to look at; it does not merge. It waits while an append is unknown, because `resume_journal` handles that case. Tests: `after_a_conflict_appends_wait_for_a_reread`, `a_reread_waits_while_an_append_is_unknown`, and `a_stale_journal_revision_is_refused_and_nothing_is_written` (now also checks `stale`).
+
+```text
+Commit:       54d9a04 (fix), on top of 06e52fd (grant channel note, S3-GRANT-CHANNEL.md)
+Tests run:    ./examples/agent-host/verify.sh -> "105 passed", OK; ./examples/agent-host/run-local.sh -> "1 passed"
+Falsifiers:   K01 the step keeps the grant after dispatch    -> no_journal_step_keeps_the_launch_grant FAILED
+              K02 the over-cap step keeps the grant           -> same FAILED
+              K03 a conflict does not mark the cursor stale   -> a_stale_journal_revision_is_refused_and_nothing_is_written,
+                                                                 after_a_conflict_appends_wait_for_a_reread FAILED
+              K04 propose ignores a stale cursor              -> after_a_conflict_appends_wait_for_a_reread FAILED
+              K05 reread runs while an append is unknown      -> a_reread_waits_while_an_append_is_unknown FAILED
+              K06 reread keeps the cursor stale               -> after_a_conflict_appends_wait_for_a_reread FAILED
+Guest hash:   457ef823e77644c2b46e430c2be26190d49a99943ef516870574cf7545d51f6e on two builds.
+              wasm_sections.py: file 375413 bytes; /1/10 285437 1fb48843638d9158.
+Import list:  unchanged by the fix (identity, providers, runtime, types).
+```
+
+Also raised by the review; recorded here and not changed:
+
+- **Question 3 (new): some refusals made before storage come back as "unknown".** The component host's `bus_error` (`component.rs`) maps only a few bridge codes to `Denied` or `Invalid`. Others become `Internal`, which the guest treats as `settlement_unknown`: `revision_required`, `principal_root_protection_required`, `principal_context_required`, `invalid_content`, `append_not_allowed`, and the manifest refusal. That is safe, but a Runtime with no principal-root protection then leaves the guest stuck on its first append: nothing is stored, so resume reads `read_failed` and stays unknown. Mapping those codes to `Invalid` would fix it. That is a shipping change to `elastos-compute`, so I did not make it. Should I?
+- **The Wasmtime "no bridge line" check is weaker than it reads.** The host refuses an empty grant before the bridge, so an empty bridge log cannot tell "the guest sent nothing" from "the guest sent with no grant". The guest's own check in `run()` proves the first. J18w shows the bridge log does catch a guest that sends a non-empty grant.
+- **Small things, left as is:** a journal over the cap gains one cancelled step per try. A settled resume leaves the step `settlement_unknown` with its result word.
