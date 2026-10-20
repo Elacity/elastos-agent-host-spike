@@ -21,9 +21,10 @@ item. Paths under `elastos/crates/elastos-server/src/` are shortened to `server/
 | `server/api/gateway_home_runtime.rs` | `home_launch` checks the binding before any side effect and mints with its selected resource and lifetime; title "Photos" | 2, 4, 5 |
 | `server/library.rs` | Viewer label `image-viewer` → "Photos" | 4 |
 | `capsules/home/browser/home-shell-host.js` | Home asks to bind the playlist when Photos is opened as an app (5 lines) | 2 |
-| `server/api/gateway_tests/photos.rs`, `gateway_tests/mod.rs` | 19 tests | all |
+| `server/api/gateway_tests/photos.rs`, `gateway_tests/mod.rs` | 24 tests | all |
+| `server/api/gateway_server.rs` | Writes the open pre-token refusal window at shutdown (round 3) | Sasha, round 3 |
 | `scripts/home-photos-launch.test.mjs`, `justfile` | 3 Home tests, added to `just verify` | 2 |
-| `examples/photo-viewer/falsify-seam.py` | 17 seam falsifiers | all |
+| `examples/photo-viewer/falsify-seam.py` | 21 seam falsifiers; `--check` and name filters (round 3) | all |
 
 ## The seam
 
@@ -96,8 +97,9 @@ refuses it, because its selected resource is the playlist, not the viewer
   | `reason` | `playlist=<uri> sha256=<hex> position=<n> item=<uri> result=served <N> bytes` or `result=refused <status>: <reason>`; `-` for a field not reached |
 
   Principal, proof binding and session come from the launch token, as before.
-- A request refused before the token check (no token, a bad or expired token, another viewer's token) leaves
-  no record: there is no launch to name. The gateway front door refuses most of these before the route runs.
+- A request refused before the token check (no token, a bad or expired token, another viewer's token) has
+  no launch to name. Round 3 counts it, one event per window (below). The gateway front door refuses most of
+  these before the route runs.
 
 ### The 15-minute token is for the playlist launch only (change 2)
 
@@ -110,7 +112,7 @@ launch keeps the default 12 hours. Only the launch bound to the playlist gets 15
   same launch, of the playlist or an item, with other bytes is refused (409). A new launch reads and pins the
   new playlist.
 - Entries are pruned once older than the 15-minute lifetime, which a pin cannot outlive: the token expires
-  first.
+  first. Round 3 bounds the table (below).
 - **Limit:** the pins are in memory. After a Runtime restart, a token that is still valid pins again at its
   next read. Keeping them across restarts would need a store; I did not add one.
 
@@ -121,13 +123,44 @@ whose storage grant matches it could write it (P3 design, section 3). This is ac
 binds the core's run output to the launch, so the surface reads only what that run wrote. The constant's doc
 comment says so too.
 
+## Round 3 changes
+
+### Refusals before the token check are counted, one event per window (Sasha)
+
+The shape Sasha approved, with one change: ONE event per window carrying all the counts.
+- **Key:** `(route, code)`.
+  - The route is the matched route's fixed name, `playlist` or `item`, passed by the handler, never taken
+    from the request path.
+  - The code comes from a fixed list: `missing_token` (Runtime's own "missing home launch token" message),
+    `token_refused` (any other token refusal), and `other`.
+  - Any name off those lists becomes `other`. Request text never becomes a key.
+- **Window:** fixed 60-second windows, counted in memory, one open window per data root.
+- **Record:** one `photos.viewer.unadmitted` event per window, with no principal. Reason
+  `window=<start>-<end> counts=<route>/<code>:<n>,... overflow=<n> total=<n>`. A steady flood therefore
+  costs one event a minute of the 512-event audit tail, not 17.
+- **Cap:** at most 16 keys per window, then an overflow count. Counters saturate at `u32::MAX`. With the
+  fixed lists today there are at most 6 keys (2 routes x 3 codes), so the cap is a backstop that is not
+  reached.
+- **Written:** at the first request of a later window, or at gateway shutdown (`gateway_server.rs`, after
+  the connections drain). A crash loses the open window. If the write fails, the request is still refused
+  and a warning is logged. A clock that steps back keeps counting into the open window.
+- At the seam only. The front door's refusals are not counted; that is a separate decision.
+
+### The pin table is bounded (Codex finding 3)
+
+- At most `PHOTOS_MAX_PINS` = 1024 launches hold a pin.
+- A new launch is refused while the table is full: 503, "too many Photos launches are open (1024); try
+  again when one ends". A live pin is never evicted to make room.
+- Expired pins are pruned only when a new launch pins. A request from a launch already pinned does a single
+  lookup and no scan. The scan is at most 1024 entries.
+
 ## Tests run and results
 
 `export RUST_TEST_THREADS=2`:
 
 | Suite | Result |
 |---|---|
-| `cargo test -p elastos-server --lib gateway_tests::photos` | 19 passed |
+| `cargo test -p elastos-server --lib gateway_tests::photos` | 24 passed (round 3) |
 | `node --test scripts/home-photos-launch.test.mjs` | 3 passed |
 | `node scripts/home-library-picker-smoke.mjs`, `node --test scripts/browser-window-close-handshake.test.mjs` (both read `launchHomeTarget`) | 18 passed, 29 passed |
 | `cargo test -p elastos-server --lib viewer` (the generic viewer read, now a wrapper) | 51 passed |
@@ -189,7 +222,7 @@ Refusals covered, each with its test:
 
 ## Falsifiers
 
-`RUST_TEST_THREADS=2 python3 -I examples/photo-viewer/falsify-seam.py`: **17 of 17 caught**. Each mutant must
+`RUST_TEST_THREADS=2 python3 -I examples/photo-viewer/falsify-seam.py`: **21 of 21 caught** (round 3). Each mutant must
 compile and is restored from saved bytes; `git status` after the run was clean.
 
 | Falsifier | Caught by |
@@ -211,6 +244,10 @@ compile and is restored from saved bytes; `git status` after the run was clean.
 | Home may bind any resource for Photos | `home_cannot_bind_anything_else` |
 | Home may bind a resource for other targets | `home_cannot_bind_anything_else` |
 | Photos gets the default 12-hour token | `home_binds_the_photos_playlist_with_a_short_lived_token` |
+| round 3: an unknown route or code creates its own key | `an_unknown_route_or_code_cannot_create_a_key` |
+| round 3: each refusal before the token writes its own event | `refusals_before_the_token_leave_one_event_per_window` |
+| round 3: past the key cap a refusal still makes a key | `past_the_key_cap_refusals_are_counted_as_overflow` |
+| round 3: the pin table has no limit | `a_full_pin_table_refuses_a_new_launch_and_keeps_live_pins` |
 
 Not falsified separately, and said plainly:
 
@@ -252,14 +289,12 @@ section 4), used here for the fixed spike playlist.
 1. **Pins in memory are fine for the spike.** In the Runtime, the playlist's sha256 is written into the
    launch's signed token, or its launch record, when the launch is issued. The seam then compares against
    that, and pins nothing on first read. A restart cannot re-pin, and there are no pins to store.
-2. **Refusals before the token check** are recorded without a principal, but **counted per source** rather
-   than logged one by one, so nobody can flood the audit log for free. To propose before building:
-   - one counter per peer address and time window;
-   - one record per window: source, window, count, first and last reason.
+2. **Refusals before the token check:** built in round 3 at the seam, counted by fixed route and code and
+   written as one event per window. Per peer address was dropped, because every local caller is
+   127.0.0.1. Counting at the front door is a separate decision.
 
-No code for these yet.
+Item 1 has no code yet.
 
 ## Next slice
 
-The Mac re-check and the Codex review of this branch. P4b (the bundle tool) is on its own branch. After the
-review: the `image-viewer` surface page (P3 design section 6, item 1).
+The Codex review of this branch with #21. Not the Photos surface page yet (Sasha).
