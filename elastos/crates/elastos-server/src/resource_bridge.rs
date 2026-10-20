@@ -3008,6 +3008,106 @@ mod tests {
         assert_eq!(provider.requests().await.len(), 1);
     }
 
+    /// The Agent Host as shipped: its own manifest, and only the two grants it
+    /// asks for. Neither can delete `.AppData`, the person's root, or the journal.
+    #[tokio::test]
+    async fn the_agent_host_manifest_and_grants_cannot_delete_appdata_or_the_root() {
+        let manifest: elastos_common::CapsuleManifest =
+            serde_json::from_str(include_str!("../../../../examples/agent-host/capsule.json"))
+                .unwrap();
+        assert_eq!(
+            manifest.resource_authority_bounds(),
+            vec!["localhost://Users/self/.AppData/Agents/agent-host/*".to_string()]
+        );
+        let (temp, mut ctx, _) = journal_context("person:local:journal-owner");
+        ctx.manifest_capabilities = manifest.resource_authority_bounds();
+        let provider = Arc::new(CapturingProvider::default());
+        ctx.provider_registry.register(provider.clone()).await;
+        let root = crate::auth::principal_localhost_root("person:local:journal-owner");
+        let journal = format!("{root}/.AppData/Agents/agent-host/tasks/demo/journal");
+        let journal_self = "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal";
+        let first = journal_write(
+            &ctx,
+            &journal,
+            journal_self,
+            b"journal v1",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(first["response"]["result"]["status"], "ok", "{first}");
+        let grants = [
+            bridge_token(&ctx, &journal, Action::Write),
+            bridge_token(&ctx, &journal, Action::Read),
+        ];
+        for (uri, refused) in [
+            (
+                "localhost://Users/self/.AppData",
+                "manifest_capability_denied",
+            ),
+            ("localhost://Users/self", "manifest_capability_denied"),
+            (
+                "localhost://Users/self/.AppData/Agents",
+                "manifest_capability_denied",
+            ),
+            (journal_self, "capability_denied"),
+        ] {
+            for grant in &grants {
+                let line = serde_json::json!({
+                    "id": 68,
+                    "request": {
+                        "type": "resource_invoke",
+                        "uri": uri,
+                        "operation": "delete",
+                        "token": grant,
+                        "body": {},
+                    }
+                })
+                .to_string();
+                let response = handle_request(&line, &Some(ctx.clone())).await.unwrap();
+                assert_eq!(response["response"]["code"], refused, "delete {uri}");
+            }
+            if uri == journal_self {
+                continue;
+            }
+            // Asking for a delete grant outside the manifest bound is refused
+            // at once, with no approval.
+            let ask = serde_json::json!({
+                "id": 69,
+                "request": {
+                    "type": "request_capability",
+                    "resource": uri,
+                    "action": "delete",
+                    "reason": "test",
+                }
+            })
+            .to_string();
+            let asked = handle_request(&ask, &Some(ctx.clone())).await.unwrap();
+            assert_eq!(
+                asked["response"]["code"], "manifest_capability_denied",
+                "{uri}"
+            );
+        }
+        // Inside the bound a delete grant could be approved, but using it on the
+        // journal is still refused by the Agents rule.
+        let delete = bridge_token(&ctx, &journal, Action::Delete);
+        let line = serde_json::json!({
+            "id": 70,
+            "request": {
+                "type": "resource_invoke",
+                "uri": journal_self,
+                "operation": "delete",
+                "token": delete,
+                "body": {},
+            }
+        })
+        .to_string();
+        let response = handle_request(&line, &Some(ctx.clone())).await.unwrap();
+        assert_eq!(response["response"]["code"], "operation_not_allowed");
+        assert!(provider.requests().await.is_empty());
+        assert!(journal_path(&temp, &journal).is_file());
+        assert!(temp.path().join("Users").is_dir());
+    }
+
     #[tokio::test]
     async fn a_revision_conflict_is_audited_as_a_conflict() {
         let (_temp, ctx, object_uri) = journal_context("person:local:journal-owner");

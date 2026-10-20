@@ -40,11 +40,13 @@
 //! is `microvm`. A run result is an exit code and a capped log, recorded
 //! only after a granted dispatch. The guest does not run the test.
 //! A journal append writes the whole encoding with a revision precondition,
-//! only with the launch grant, which is held in memory and never stored. A
-//! lost reply is `settlement_unknown`; resume reads the head back and nothing
-//! is appended until it settles. The WASM guest runs that fold inside
-//! Wasmtime and exits. It calls a provider only to write its own journal, and
-//! with no launch grant it sends nothing. It has no Home window.
+//! only with a write grant for the agent's own journal. The guest asks the
+//! Runtime for exactly two grants, write and read, on that journal; they are
+//! held in memory and never stored. A lost reply is `settlement_unknown`;
+//! resume reads the head back and nothing is appended until it settles. The
+//! WASM guest runs that fold inside Wasmtime and exits. It calls a provider
+//! only for its own journal, and with no grant it sends nothing. It has no
+//! Home window.
 
 #[cfg(target_arch = "wasm32")]
 wit_bindgen::generate!({
@@ -2288,14 +2290,18 @@ fn note_crash(journal: &mut Journal, id: u64) -> bool {
     }
 }
 
-/// An agent id or a task id: ASCII letters, digits and `-`, 1 to 64 bytes.
+/// An agent id or a task id: 1 to 64 bytes matching `^[a-z0-9][a-z0-9._-]*$`,
+/// the rule the Runtime bridge applies to every segment under Agents.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn journal_id_ok(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 64
+    id.len() <= 64
         && id
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
 }
 
 /// The one place a task journal lives. The guest names only `Users/self`.
@@ -2311,14 +2317,14 @@ fn journal_resource(agent_id: &str, task_id: &str) -> Result<String, &'static st
     Ok(format!("{JOURNAL_ROOT}{agent_id}/tasks/{task_id}/journal"))
 }
 
-/// The grant the Runtime gave this guest at launch, for one journal and one
-/// action. It is held in memory only: the journal format has no field for it,
-/// and `Debug` does not print it.
+/// A grant the Runtime gave this guest for its own journal, one resource and
+/// one action. It is held in memory only: the journal format has no field for
+/// it, and `Debug` does not print it.
 #[cfg(any(test, target_arch = "wasm32"))]
-struct LaunchGrant(String);
+struct JournalGrant(String);
 
 #[cfg(any(test, target_arch = "wasm32"))]
-impl LaunchGrant {
+impl JournalGrant {
     fn new(id: &str) -> Option<Self> {
         (!id.is_empty()).then(|| Self(id.to_string()))
     }
@@ -2329,9 +2335,9 @@ impl LaunchGrant {
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
-impl core::fmt::Debug for LaunchGrant {
+impl core::fmt::Debug for JournalGrant {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("LaunchGrant(..)")
+        f.write_str("JournalGrant(..)")
     }
 }
 
@@ -2370,6 +2376,34 @@ fn journal_cursor(agent_id: &str, task_id: &str) -> Result<JournalCursor, &'stat
     })
 }
 
+/// The two grants an append and a resume need.
+#[cfg(any(test, target_arch = "wasm32"))]
+struct JournalGrants {
+    write: Option<JournalGrant>,
+    read: Option<JournalGrant>,
+}
+
+/// Ask the Runtime for exactly two grants on this agent's own journal: write,
+/// then read. Nothing else is asked for. A refusal leaves that grant empty, so
+/// nothing is sent with it.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn request_journal_grants(bus: &mut impl ResourceBus, cursor: &JournalCursor) -> JournalGrants {
+    if !cursor.resource.starts_with(JOURNAL_ROOT) || host_path(&cursor.resource) {
+        return JournalGrants {
+            write: None,
+            read: None,
+        };
+    }
+    let mut ask = |action: &str| {
+        bus.request_grant(&cursor.resource, action, "Agent Host task journal")
+            .ok()
+            .and_then(|id| JournalGrant::new(&id))
+    };
+    let write = ask("write");
+    let read = ask("read");
+    JournalGrants { write, read }
+}
+
 /// A Bus failure as the guest sees it. The Runtime refuses `denied` and
 /// `invalid` before storage. Any other failure leaves the result unknown.
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -2380,10 +2414,20 @@ enum BusFailure {
     Other,
 }
 
-/// The guest's one effect call. In WebAssembly it is `providers.invoke`. A
-/// call always carries a grant: there is no way to send one without.
+/// The guest's Bus calls. In WebAssembly they are `capabilities.request` and
+/// `providers.invoke`. An invoke always carries a grant: there is no way to
+/// send one without.
 #[cfg(any(test, target_arch = "wasm32"))]
 trait ResourceBus {
+    /// Ask for one action on one resource. The Runtime decides; the guest
+    /// gets a grant id or a refusal.
+    fn request_grant(
+        &mut self,
+        resource: &str,
+        action: &str,
+        reason: &str,
+    ) -> Result<String, BusFailure>;
+
     fn invoke(
         &mut self,
         resource: &str,
@@ -2522,7 +2566,7 @@ fn close_journal_append(journal: &mut Journal, step_id: u64, word: &str) {
     }
 }
 
-/// Write the whole journal as the next version, with the launch grant.
+/// Write the whole journal as the next version, with the journal write grant.
 /// No grant, an open append, or a journal over the cap sends nothing. The
 /// stored copy shows this step as dispatched with no result.
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -2530,12 +2574,12 @@ fn append_journal(
     bus: &mut impl ResourceBus,
     journal: &mut Journal,
     cursor: &mut JournalCursor,
-    grant: Option<&LaunchGrant>,
+    grant: Option<&JournalGrant>,
 ) -> AppendOutcome {
     let Ok(id) = propose_journal_append(journal, cursor) else {
         return AppendOutcome::Held;
     };
-    if !authorize(journal, id, grant.map(LaunchGrant::id)) {
+    if !authorize(journal, id, grant.map(JournalGrant::id)) {
         return AppendOutcome::Denied;
     }
     let Some(grant) = grant else {
@@ -2599,7 +2643,7 @@ fn resume_journal(
     bus: &mut impl ResourceBus,
     journal: &mut Journal,
     cursor: &mut JournalCursor,
-    grant: Option<&LaunchGrant>,
+    grant: Option<&JournalGrant>,
 ) -> ResumeOutcome {
     let Some(pending) = cursor.pending.clone() else {
         return ResumeOutcome::Nothing;
@@ -2629,7 +2673,7 @@ fn resume_journal(
 fn read_stored_journal(
     bus: &mut impl ResourceBus,
     cursor: &JournalCursor,
-    grant: &LaunchGrant,
+    grant: &JournalGrant,
 ) -> Option<(Journal, [u8; 32], String)> {
     let reply = bus
         .invoke(&cursor.resource, "read", b"{}", grant.id())
@@ -2650,7 +2694,7 @@ fn read_stored_journal(
 fn reread_journal(
     bus: &mut impl ResourceBus,
     cursor: &mut JournalCursor,
-    grant: Option<&LaunchGrant>,
+    grant: Option<&JournalGrant>,
 ) -> Option<Journal> {
     if cursor.pending.is_some() {
         return None;
@@ -2662,23 +2706,32 @@ fn reread_journal(
     Some(stored)
 }
 
-/// The Runtime has no way yet to hand this guest its launch grant. The WIT
-/// world has no launch argument, and the guest does not import
-/// `capabilities`. Until it does, the id is empty, there is no grant, and
-/// nothing is sent.
-#[cfg(target_arch = "wasm32")]
-const LAUNCH_GRANT_ID: &str = "";
-
-#[cfg(target_arch = "wasm32")]
-fn launch_grant() -> Option<LaunchGrant> {
-    LaunchGrant::new(LAUNCH_GRANT_ID)
-}
-
 #[cfg(target_arch = "wasm32")]
 struct WasmBus;
 
 #[cfg(target_arch = "wasm32")]
 impl ResourceBus for WasmBus {
+    fn request_grant(
+        &mut self,
+        resource: &str,
+        action: &str,
+        reason: &str,
+    ) -> Result<String, BusFailure> {
+        use elastos::bus::types::{BusError, CapabilityRequest};
+        let request = CapabilityRequest {
+            resource: resource.to_string(),
+            actions: vec![action.to_string()],
+            reason: reason.to_string(),
+        };
+        match elastos::bus::capabilities::request(&request) {
+            Ok(grant) if grant.resource == resource && grant.actions == [action] => Ok(grant.id),
+            Ok(_) => Err(BusFailure::Invalid),
+            Err(BusError::Denied(_)) => Err(BusFailure::Denied),
+            Err(BusError::Invalid(_)) => Err(BusFailure::Invalid),
+            Err(_) => Err(BusFailure::Other),
+        }
+    }
+
     fn invoke(
         &mut self,
         resource: &str,
@@ -6271,24 +6324,50 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 "the journal did not round-trip through format 1".to_string(),
             ));
         }
-        // With no launch grant, the append is denied and nothing is sent.
+        // Ask for the two journal grants. With no write grant the append is
+        // denied and nothing is sent; with both, the journal is written and
+        // read back.
         let mut cursor = journal_cursor("agent-host", "demo").map_err(|_| {
             elastos::bus::types::BusError::Invalid("the journal id was refused".to_string())
         })?;
-        let grant = launch_grant();
-        let appended = append_journal(&mut WasmBus, &mut journal, &mut cursor, grant.as_ref());
-        if appended != AppendOutcome::Denied
-            || resume_journal(&mut WasmBus, &mut journal, &mut cursor, grant.as_ref())
-                != ResumeOutcome::Nothing
-            || reread_journal(&mut WasmBus, &mut cursor, grant.as_ref()).is_some()
+        let grants = request_journal_grants(&mut WasmBus, &cursor);
+        let appended = append_journal(
+            &mut WasmBus,
+            &mut journal,
+            &mut cursor,
+            grants.write.as_ref(),
+        );
+        let followed = match (&grants.write, appended) {
+            (None, AppendOutcome::Denied) => {
+                cursor.revision.is_none()
+                    && journal.steps.last().is_some_and(|step| {
+                        step.kind == ProposalKind::JournalAppend && step.state == StepState::Denied
+                    })
+            }
+            (Some(_), AppendOutcome::Written) => {
+                cursor.revision.is_some()
+                    && reread_journal(&mut WasmBus, &mut cursor, grants.read.as_ref()).is_some_and(
+                        |stored| {
+                            stored.steps.last().is_some_and(|step| {
+                                step.kind == ProposalKind::JournalAppend
+                                    && step.state == StepState::Dispatched
+                            })
+                        },
+                    )
+            }
+            _ => false,
+        };
+        if !followed
             || cursor.pending.is_some()
-            || cursor.revision.is_some()
-            || !journal.steps.last().is_some_and(|step| {
-                step.kind == ProposalKind::JournalAppend && step.state == StepState::Denied
-            })
+            || resume_journal(
+                &mut WasmBus,
+                &mut journal,
+                &mut cursor,
+                grants.read.as_ref(),
+            ) != ResumeOutcome::Nothing
         {
             return Err(elastos::bus::types::BusError::Invalid(
-                "a journal append without a launch grant was sent".to_string(),
+                "the journal append did not follow its grants".to_string(),
             ));
         }
         Ok(())
@@ -11389,9 +11468,31 @@ mod tests {
         lose_reply: bool,
         /// Give no answer and store nothing.
         drop_write: bool,
+        /// Refuse every grant request.
+        refuse_grants: bool,
     }
 
     impl ResourceBus for FakeRuntime {
+        /// Grants only the journal, and only write or read, like a manifest that
+        /// declares `.AppData/Agents/<agent-id>/*` and a token per action.
+        fn request_grant(
+            &mut self,
+            resource: &str,
+            action: &str,
+            _reason: &str,
+        ) -> Result<String, BusFailure> {
+            self.calls
+                .push(("request".to_string(), format!("{action} {resource}")));
+            if self.refuse_grants || resource != self.resource {
+                return Err(BusFailure::Denied);
+            }
+            match action {
+                "write" => Ok(WRITE_GRANT.to_string()),
+                "read" => Ok(READ_GRANT.to_string()),
+                _ => Err(BusFailure::Denied),
+            }
+        }
+
         fn invoke(
             &mut self,
             resource: &str,
@@ -11469,16 +11570,17 @@ mod tests {
             calls: Vec::new(),
             lose_reply: false,
             drop_write: false,
+            refuse_grants: false,
         };
         (runtime, cursor)
     }
 
-    fn write_grant() -> LaunchGrant {
-        LaunchGrant::new(WRITE_GRANT).unwrap()
+    fn write_grant() -> JournalGrant {
+        JournalGrant::new(WRITE_GRANT).unwrap()
     }
 
-    fn read_grant() -> LaunchGrant {
-        LaunchGrant::new(READ_GRANT).unwrap()
+    fn read_grant() -> JournalGrant {
+        JournalGrant::new(READ_GRANT).unwrap()
     }
 
     /// The journal as the guest sent it: the append step dispatched, with no
@@ -11520,7 +11622,7 @@ mod tests {
         assert_eq!(step.kind, ProposalKind::JournalAppend);
         assert_eq!(step.state, StepState::Denied);
         assert!(step.grant.is_none());
-        assert!(LaunchGrant::new("").is_none());
+        assert!(JournalGrant::new("").is_none());
     }
 
     #[test]
@@ -11701,7 +11803,7 @@ mod tests {
     }
 
     #[test]
-    fn no_journal_step_keeps_the_launch_grant() {
+    fn no_journal_step_keeps_the_journal_grant() {
         let printed = |journal: &Journal| format!("{journal:?}");
         let (mut runtime, mut cursor) = fake_runtime();
         let mut journal = two_turns();
@@ -11746,7 +11848,7 @@ mod tests {
         );
         assert!(!printed(&large).contains(WRITE_GRANT));
 
-        let other = LaunchGrant::new("fixture-another-tasks-grant").unwrap();
+        let other = JournalGrant::new("fixture-another-tasks-grant").unwrap();
         let mut refused = two_turns();
         assert_eq!(
             append_journal(&mut runtime, &mut refused, &mut cursor, Some(&other)),
@@ -12011,7 +12113,7 @@ mod tests {
         let (mut runtime, mut cursor) = fake_runtime();
         let fresh = cursor.clone();
         let mut journal = two_turns();
-        let other = LaunchGrant::new("fixture-another-tasks-grant").unwrap();
+        let other = JournalGrant::new("fixture-another-tasks-grant").unwrap();
         assert_eq!(
             append_journal(&mut runtime, &mut journal, &mut cursor, Some(&other)),
             AppendOutcome::Refused
@@ -12050,15 +12152,21 @@ mod tests {
             journal_resource("demo-agent", "task-1").unwrap(),
             "localhost://Users/self/.AppData/Agents/demo-agent/tasks/task-1/journal"
         );
-        assert!(journal_resource("A9-", &"x".repeat(64)).is_ok());
+        assert!(journal_resource("a9-", &"x".repeat(64)).is_ok());
+        assert!(journal_resource("agent.v2", "task_1").is_ok());
         for bad in [
             "",
             &"x".repeat(65),
             "a/b",
             "..",
+            ".a",
+            "-a",
+            "_a",
+            "A9-",
+            "Demo-Agent",
             "a b",
-            "a.b",
             "\u{e9}",
+            "\u{17f}",
             "a\\b",
             "self/../other",
         ] {
@@ -12100,7 +12208,7 @@ mod tests {
     }
 
     #[test]
-    fn a_launch_grant_is_held_in_memory_only() {
+    fn a_journal_grant_is_held_in_memory_only() {
         let grant = write_grant();
         assert!(!format!("{grant:?}").contains(WRITE_GRANT));
         let (mut runtime, mut cursor) = fake_runtime();
@@ -12153,6 +12261,15 @@ mod tests {
     struct ScriptedBus(Vec<u8>);
 
     impl ResourceBus for ScriptedBus {
+        fn request_grant(
+            &mut self,
+            _resource: &str,
+            _action: &str,
+            _reason: &str,
+        ) -> Result<String, BusFailure> {
+            Err(BusFailure::Other)
+        }
+
         fn invoke(
             &mut self,
             _resource: &str,
@@ -12186,5 +12303,78 @@ mod tests {
             assert!(cursor.revision.is_none(), "{reply}");
             assert_eq!(last_step(&journal).state, StepState::SettlementUnknown);
         }
+    }
+
+    #[test]
+    fn the_guest_asks_for_exactly_two_grants_on_its_own_journal() {
+        let (mut runtime, cursor) = fake_runtime();
+        let grants = request_journal_grants(&mut runtime, &cursor);
+        assert_eq!(
+            grants.write.as_ref().map(JournalGrant::id),
+            Some(WRITE_GRANT)
+        );
+        assert_eq!(grants.read.as_ref().map(JournalGrant::id), Some(READ_GRANT));
+        assert_eq!(
+            runtime.calls,
+            vec![
+                ("request".to_string(), format!("write {}", cursor.resource)),
+                ("request".to_string(), format!("read {}", cursor.resource)),
+            ]
+        );
+
+        let mut journal = two_turns();
+        let mut cursor = cursor;
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                grants.write.as_ref()
+            ),
+            AppendOutcome::Written
+        );
+        assert!(reread_journal(&mut runtime, &mut cursor, grants.read.as_ref()).is_some());
+    }
+
+    #[test]
+    fn a_refused_grant_request_sends_nothing() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        runtime.refuse_grants = true;
+        let grants = request_journal_grants(&mut runtime, &cursor);
+        assert!(grants.write.is_none() && grants.read.is_none());
+        let mut journal = two_turns();
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                grants.write.as_ref()
+            ),
+            AppendOutcome::Denied
+        );
+        assert_eq!(
+            reread_journal(&mut runtime, &mut cursor, grants.read.as_ref()),
+            None
+        );
+        assert!(runtime.calls.iter().all(|(kind, _)| kind == "request"));
+        assert_eq!(runtime.calls.len(), 2);
+    }
+
+    #[test]
+    fn no_grant_is_asked_for_a_path_outside_the_agents_journal() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        for resource in [
+            "localhost://Users/self/.AppData",
+            "localhost://Users/self",
+            "localhost://Users/self/.AppData/Agents/../../Documents/journal",
+        ] {
+            cursor.resource = resource.to_string();
+            let grants = request_journal_grants(&mut runtime, &cursor);
+            assert!(
+                grants.write.is_none() && grants.read.is_none(),
+                "{resource}"
+            );
+        }
+        assert!(runtime.calls.is_empty());
     }
 }
