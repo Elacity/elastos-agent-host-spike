@@ -42,7 +42,7 @@ const AUTHORIZED_ATTACHMENT_TARGET_TITLES = Object.freeze({
   "wallet-unisat": "UniSat",
 });
 let currentSummary = null;
-let restoredSession = false;
+let sessionRestore = null;
 
 if (!homeToken || !homeOrigin || window.parent === window) {
   throw new Error("Home GUI requires an isolated Home launch");
@@ -138,16 +138,38 @@ async function applySummary(summary, options = {}) {
   document.body.dataset.homeStatus = "ready";
 }
 
-async function restoreSessionWhenReady() {
+// Home is ready only once saved windows have reopened: every summary waits for
+// the one restore. A restore that fails is logged and Home opens without those
+// windows; it is never left booting or in error.
+function restoreSessionWhenReady() {
   if (
-    restoredSession ||
-    currentSummary?.authority?.signed_in !== true ||
-    !hasHomeBrowserContextId()
+    !sessionRestore &&
+    currentSummary?.authority?.signed_in === true &&
+    hasHomeBrowserContextId()
   ) {
+    sessionRestore = restoreHomeGuiSession().catch((error) => {
+      console.error("home-gui session restore failed", error);
+    });
+  }
+  return sessionRestore;
+}
+
+function acceptShellContext(browserContextId) {
+  if (!acceptHomeBrowserContextId(browserContextId) || sessionRestore) {
     return;
   }
-  restoredSession = true;
-  await restoreHomeGuiSession();
+  const restore = restoreSessionWhenReady();
+  // A summary applied before the context marked Home ready with nothing
+  // restored; readiness now waits for the restore that starts here.
+  if (!restore || document.body.dataset.homeStatus !== "ready") {
+    return;
+  }
+  document.body.dataset.homeStatus = "booting";
+  restore.then(() => {
+    if (document.body.dataset.homeStatus === "booting") {
+      document.body.dataset.homeStatus = "ready";
+    }
+  });
 }
 
 function handleGuiCommand(message) {
@@ -376,12 +398,7 @@ window.addEventListener("message", (event) => {
     return;
   }
   if (message.type === "home:shell-context") {
-    if (acceptHomeBrowserContextId(message.browserContextId)) {
-      restoreSessionWhenReady().catch((error) => {
-        document.body.dataset.homeStatus = "error";
-        console.error("home-gui session restore failed", error);
-      });
-    }
+    acceptShellContext(message.browserContextId);
     return;
   }
   if (message.type === "home:shell-response") {
