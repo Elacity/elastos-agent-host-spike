@@ -77,3 +77,17 @@ Tests run:    ./examples/agent-host/run-e2e.sh -> "2 passed"
               (cd elastos && cargo test -p elastos-server --lib) -> "3030 passed; 13 failed; 24 ignored". The same 13
                 container failures as the previous run, none new; +2 passing are fix 5's new tests.
 ```
+
+## Update: PR #9 with PR #8 fixes 6 and 7 merged in (20 Oct)
+
+Merge `08e5256` (PR #9 at `149ebf8`, which carries PR #8 at `4d8cfae`: the trailing "." rule, viewer storage, and the
+attached-bridge audit; and the guest id "." check). PR #19 at `4077b32` was already in. No conflicts.
+
+```text
+Tests run:    ./examples/agent-host/run-e2e.sh -> "2 passed" (it runs build.sh first, so it uses the new guest)
+              (cd elastos && cargo test -p elastos-server --lib) -> "3033 passed; 13 failed; 24 ignored". The same 13
+                container failures as before, none new; +3 passing are #8 fix 7's new tests.
+Guest hash:   70a95319c4996f6a7607f4ad02380c19d861d0d5107d0a286e8d6f334b1d52a3 (new, from #9; import list unchanged)
+```
+
+**What is next:** stop for Codex on #8, #9 and #20.
