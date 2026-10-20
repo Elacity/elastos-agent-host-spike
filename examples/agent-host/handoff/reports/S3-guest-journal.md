@@ -207,3 +207,16 @@ Questions:    One gap found while writing the delete test. A request_capability 
               Even if granted, using it is refused (operation_not_allowed). Should request_capability refuse every
               action except read and write under Agents too? That is shipping Runtime code; I left it.
 ```
+
+## Update: PR #8 fix 4 merged in (20 Oct)
+
+Merge `0aa92bf`. The only conflict was in `resource_bridge.rs` tests, where both sides had added tests at the same place. I kept PR #8's file and re-added this branch's `the_agent_host_manifest_and_grants_cannot_delete_appdata_or_the_root`, updated for fix 4: a delete-grant request inside the Agents area is now refused at once by the Agents rule (`operation_not_allowed`), not left waiting for the shell. This closes the question raised in the option B section.
+
+```text
+Tests run:    (cd elastos && cargo test -p elastos-server --lib -- resource_bridge::tests api::handlers::provider::tests)
+                -> "83 passed"; clippy clean
+              ./examples/agent-host/verify.sh -> "108 passed", OK; ./examples/agent-host/run-local.sh -> "1 passed"
+              The full server suite on the PR #20 merge (all of #8, #9, #19): "3028 passed; 13 failed" (container
+                limits only).
+Guest hash:   99bacd9df2b448a9b94e579754644a217d74f718662702e29973d44d7f4e583c (unchanged)
+```
