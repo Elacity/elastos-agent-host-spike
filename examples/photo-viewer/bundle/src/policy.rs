@@ -1,16 +1,26 @@
-//! The trust policy (review answer 6).
+//! The trust policy (review answer 6, and the rollback and dev-key answers
+//! of the P4b review).
 //!
 //! The signed release source carries the table: publisher DID to the roles
 //! (and optionally the names) it may ship, plus revoked DIDs and CIDs. It is
-//! signed by the pinned release root DID. Local config may only add a dev
-//! key, and only in dev mode; it cannot add roles to a release publisher,
-//! lift a revocation, or add one.
+//! signed by the pinned release root DID, carries a sequence number and an
+//! expiry. A device keeps the highest sequence it has accepted and refuses a
+//! lower one, so an old policy from before a revocation cannot be replayed;
+//! the expiry stops a device being held on an old policy by never sending it
+//! a new one.
+//!
+//! Local config may only add a dev key, only in dev mode. A dev key names
+//! the capsules it may ship (never a whole role) and expires. Local config
+//! cannot add roles to a release publisher, lift a revocation, or add one.
+
+use std::path::{Path, PathBuf};
 
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::claim::canonical;
-use crate::{sign, Refusal};
+use crate::{io, sign, Refusal};
 
 pub const POLICY_SCHEMA: &str = "elastos.release.trust-policy/v1";
 
@@ -27,6 +37,10 @@ pub struct PublisherEntry {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReleasePolicy {
+    /// Raised by every release of the policy; never reused.
+    pub sequence: u64,
+    /// Unix seconds. The policy is refused from this time on.
+    pub expires_at: u64,
     pub publishers: Vec<PublisherEntry>,
     pub revoked_dids: Vec<String>,
     pub revoked_cids: Vec<String>,
@@ -41,6 +55,17 @@ pub struct SignedReleasePolicy {
     pub signature: String,
 }
 
+/// A development key: named capsules only, and an expiry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevKey {
+    pub did: String,
+    pub roles: Vec<String>,
+    pub names: Vec<String>,
+    /// Unix seconds.
+    pub expires_at: u64,
+}
+
 /// The only thing a person's machine adds.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,15 +73,77 @@ pub struct LocalConfig {
     #[serde(default)]
     pub dev_mode: bool,
     #[serde(default)]
-    pub dev_keys: Vec<PublisherEntry>,
+    pub dev_keys: Vec<DevKey>,
+}
+
+/// One publisher admission may accept.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrustedPublisher {
+    pub did: String,
+    pub roles: Vec<String>,
+    pub names: Option<Vec<String>>,
+    /// Set for dev keys.
+    pub expires_at: Option<u64>,
 }
 
 /// What admission checks against.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrustPolicy {
-    pub publishers: Vec<PublisherEntry>,
+    pub sequence: u64,
+    pub expires_at: u64,
+    pub publishers: Vec<TrustedPublisher>,
     pub revoked_dids: Vec<String>,
     pub revoked_cids: Vec<String>,
+}
+
+/// The highest policy sequence this device has accepted, and the sha256 of
+/// that policy, kept in one file. The Runtime would keep it in its own state.
+#[derive(Clone, Debug)]
+pub struct PolicyFloor {
+    path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FloorRecord {
+    sequence: u64,
+    sha256: String,
+}
+
+impl PolicyFloor {
+    pub fn at(path: impl Into<PathBuf>) -> PolicyFloor {
+        PolicyFloor { path: path.into() }
+    }
+
+    /// `None` before any policy was accepted. A record that does not parse
+    /// is refused, not treated as none.
+    pub fn seen(&self) -> Result<Option<(u64, String)>, Refusal> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(io(err, &self.path)),
+        };
+        let record: FloorRecord = serde_json::from_slice(&bytes)
+            .map_err(|err| Refusal::Io(format!("{}: {err}", self.path.display())))?;
+        Ok(Some((record.sequence, record.sha256)))
+    }
+
+    fn raise(&self, sequence: u64, sha256: &str) -> Result<(), Refusal> {
+        let record = FloorRecord {
+            sequence,
+            sha256: sha256.to_string(),
+        };
+        let temporary = temporary_path(&self.path);
+        std::fs::write(&temporary, serde_json::to_vec(&record).unwrap())
+            .map_err(|err| io(err, &temporary))?;
+        std::fs::rename(&temporary, &self.path).map_err(|err| io(err, &self.path))
+    }
+}
+
+fn temporary_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".next");
+    path.with_file_name(name)
 }
 
 impl ReleasePolicy {
@@ -104,27 +191,79 @@ impl SignedReleasePolicy {
     }
 }
 
+/// Verifies the release policy, refuses an expired one or one older than the
+/// floor, raises the floor, then adds the local dev keys. `now` is Unix
+/// seconds.
 pub fn effective_policy(
     release: &SignedReleasePolicy,
     release_root_did: &str,
     local: &LocalConfig,
+    now: u64,
+    floor: &PolicyFloor,
 ) -> Result<TrustPolicy, Refusal> {
     let policy = release.verify(release_root_did)?;
-    let mut publishers = policy.publishers.clone();
+    if now >= policy.expires_at {
+        return Err(Refusal::PolicyExpired {
+            expires_at: policy.expires_at,
+            now,
+        });
+    }
+    // Only a genuine, current policy moves the floor.
+    let sha256 = hex::encode(Sha256::digest(canonical(policy)));
+    match floor.seen()? {
+        Some((seen, _)) if policy.sequence < seen => {
+            return Err(Refusal::PolicyRollback {
+                offered: policy.sequence,
+                seen,
+            });
+        }
+        Some((seen, seen_sha256)) if policy.sequence == seen && seen_sha256 != sha256 => {
+            return Err(Refusal::PolicySequenceConflict(seen));
+        }
+        Some((seen, _)) if policy.sequence == seen => {}
+        _ => floor.raise(policy.sequence, &sha256)?,
+    }
+
+    let mut publishers: Vec<TrustedPublisher> = policy
+        .publishers
+        .iter()
+        .map(|entry| TrustedPublisher {
+            did: entry.did.clone(),
+            roles: entry.roles.clone(),
+            names: entry.names.clone(),
+            expires_at: None,
+        })
+        .collect();
     if !local.dev_mode {
         if let Some(key) = local.dev_keys.first() {
             return Err(Refusal::DevKeyOutsideDevMode(key.did.clone()));
         }
     }
     for key in &local.dev_keys {
+        if key.names.is_empty() {
+            return Err(Refusal::DevKeyUnscoped(key.did.clone()));
+        }
+        if now >= key.expires_at {
+            return Err(Refusal::DevKeyExpired {
+                did: key.did.clone(),
+                expires_at: key.expires_at,
+            });
+        }
         let known =
             key.did == release_root_did || publishers.iter().any(|entry| entry.did == key.did);
         if known || policy.revoked_dids.contains(&key.did) {
             return Err(Refusal::DevKeyConflict(key.did.clone()));
         }
-        publishers.push(key.clone());
+        publishers.push(TrustedPublisher {
+            did: key.did.clone(),
+            roles: key.roles.clone(),
+            names: Some(key.names.clone()),
+            expires_at: Some(key.expires_at),
+        });
     }
     Ok(TrustPolicy {
+        sequence: policy.sequence,
+        expires_at: policy.expires_at,
         publishers,
         revoked_dids: policy.revoked_dids.clone(),
         revoked_cids: policy.revoked_cids.clone(),

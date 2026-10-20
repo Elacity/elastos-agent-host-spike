@@ -5,7 +5,8 @@
 //! detached, minimal claim for that CID. Rebuilders may add separate signed
 //! provenance records that name the CID. Admission verifies the closure and
 //! the claim, applies the trust policy (a signed release table of publisher
-//! DID to roles, revocations, and dev keys only in dev mode), refuses a lower
+//! DID to roles with revocations, a sequence floor against rollback and an
+//! expiry; dev keys only in dev mode, named capsules only, expiring), refuses a lower
 //! version of an installed name, then stages a read-only copy under its CID,
 //! verifies that copy, and loads only from it.
 //!
@@ -27,8 +28,8 @@ pub use listing::{
     LISTING_SCHEMA,
 };
 pub use policy::{
-    effective_policy, LocalConfig, PublisherEntry, ReleasePolicy, SignedReleasePolicy, TrustPolicy,
-    POLICY_SCHEMA,
+    effective_policy, DevKey, LocalConfig, PolicyFloor, PublisherEntry, ReleasePolicy,
+    SignedReleasePolicy, TrustPolicy, TrustedPublisher, POLICY_SCHEMA,
 };
 pub use provenance::{Provenance, SignedProvenance, PROVENANCE_SCHEMA};
 
@@ -56,8 +57,18 @@ pub enum Refusal {
     ClaimManifestMismatch(String),
     /// The release policy is not signed by the pinned release root.
     PolicySignatureInvalid(String),
+    /// The release policy's expiry has passed.
+    PolicyExpired { expires_at: u64, now: u64 },
+    /// The release policy's sequence is below the highest this device accepted.
+    PolicyRollback { offered: u64, seen: u64 },
+    /// Another policy with the same sequence was already accepted.
+    PolicySequenceConflict(u64),
     /// A local dev key outside dev mode.
     DevKeyOutsideDevMode(String),
+    /// A dev key that names no capsule (it would ship a whole role).
+    DevKeyUnscoped(String),
+    /// A dev key past its expiry.
+    DevKeyExpired { did: String, expires_at: u64 },
     /// A local dev key that is already a release publisher.
     DevKeyConflict(String),
     /// No trust policy entry for the publisher DID.
@@ -118,7 +129,12 @@ impl Refusal {
             Refusal::SignatureInvalid(_) => "signature_invalid",
             Refusal::ClaimManifestMismatch(_) => "claim_manifest_mismatch",
             Refusal::PolicySignatureInvalid(_) => "policy_signature_invalid",
+            Refusal::PolicyExpired { .. } => "policy_expired",
+            Refusal::PolicyRollback { .. } => "policy_rollback",
+            Refusal::PolicySequenceConflict(_) => "policy_sequence_conflict",
             Refusal::DevKeyOutsideDevMode(_) => "dev_key_outside_dev_mode",
+            Refusal::DevKeyUnscoped(_) => "dev_key_unscoped",
+            Refusal::DevKeyExpired { .. } => "dev_key_expired",
             Refusal::DevKeyConflict(_) => "dev_key_conflict",
             Refusal::PublisherUntrusted(_) => "publisher_untrusted",
             Refusal::PublisherRoleRefused { .. } => "publisher_role_refused",

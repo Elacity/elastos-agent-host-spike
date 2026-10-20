@@ -45,6 +45,7 @@ pub fn admit(
     policy: &TrustPolicy,
     installed: &[Installed],
     store: &Path,
+    now: u64,
 ) -> Result<Admitted, Refusal> {
     // 1. The closure, and its CID.
     let (entries, manifest) = read_closure(source)?;
@@ -73,7 +74,13 @@ pub fn admit(
         }
     }
     let offered = parse_version(&claimed.name, &claimed.version)?;
-    // 4. Revocations, then the publisher's roles and names.
+    // 4. A current policy, revocations, then the publisher's roles and names.
+    if now >= policy.expires_at {
+        return Err(Refusal::PolicyExpired {
+            expires_at: policy.expires_at,
+            now,
+        });
+    }
     if policy.revoked_cids.contains(&claimed.cid) {
         return Err(Refusal::CidRevoked(claimed.cid.clone()));
     }
@@ -85,6 +92,12 @@ pub fn admit(
         .iter()
         .find(|entry| entry.did == claimed.publisher_did)
         .ok_or_else(|| Refusal::PublisherUntrusted(claimed.publisher_did.clone()))?;
+    if let Some(expires_at) = entry.expires_at.filter(|expires_at| now >= *expires_at) {
+        return Err(Refusal::DevKeyExpired {
+            did: entry.did.clone(),
+            expires_at,
+        });
+    }
     let role_allowed = entry.roles.contains(&claimed.role);
     let name_allowed = entry
         .names

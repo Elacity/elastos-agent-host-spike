@@ -7,8 +7,13 @@ use capsule_bundle::sign;
 use capsule_bundle::*;
 use ed25519_dalek::SigningKey;
 
+/// Unix seconds; every test runs at this time.
+const NOW: u64 = 1_800_000_000;
+const HOUR: u64 = 3600;
+
 struct World {
     root: tempfile::TempDir,
+    floors: std::cell::Cell<u32>,
     release_root: SigningKey,
     publisher: SigningKey,
 }
@@ -17,6 +22,7 @@ impl World {
     fn new() -> World {
         World {
             root: tempfile::tempdir().unwrap(),
+            floors: std::cell::Cell::new(0),
             release_root: sign::generate(),
             publisher: sign::generate(),
         }
@@ -46,8 +52,20 @@ impl World {
         dir
     }
 
+    /// A new device's policy floor: nothing accepted yet.
+    fn floor(&self) -> PolicyFloor {
+        self.floors.set(self.floors.get() + 1);
+        PolicyFloor::at(
+            self.root
+                .path()
+                .join(format!("floor-{}", self.floors.get())),
+        )
+    }
+
     fn release(&self) -> ReleasePolicy {
         ReleasePolicy {
+            sequence: 1,
+            expires_at: NOW + HOUR,
             publishers: vec![PublisherEntry {
                 did: sign::did(&self.publisher),
                 roles: vec!["app".into()],
@@ -64,6 +82,8 @@ impl World {
             &signed,
             &sign::did(&self.release_root),
             &LocalConfig::default(),
+            NOW,
+            &self.floor(),
         )
         .unwrap()
     }
@@ -393,7 +413,14 @@ fn admission_refuses_a_closure_that_is_not_the_claimed_cid() {
     )
     .unwrap();
     assert_eq!(
-        refused(admit(&dir, &claim, &world.policy(), &[], &world.store())),
+        refused(admit(
+            &dir,
+            &claim,
+            &world.policy(),
+            &[],
+            &world.store(),
+            NOW
+        )),
         "cid_mismatch"
     );
 
@@ -401,7 +428,14 @@ fn admission_refuses_a_closure_that_is_not_the_claimed_cid() {
     let claim = world.claim(&dir, "0.1.0");
     std::fs::write(dir.join("notes.txt"), b"unlisted").unwrap();
     assert_eq!(
-        refused(admit(&dir, &claim, &world.policy(), &[], &world.store())),
+        refused(admit(
+            &dir,
+            &claim,
+            &world.policy(),
+            &[],
+            &world.store(),
+            NOW
+        )),
         "cid_mismatch"
     );
     assert!(!world.store().exists(), "nothing staged");
@@ -417,7 +451,7 @@ fn admission_refuses_a_claim_its_publisher_did_not_sign() {
     let mut forged = claim_by(&sign::generate(), &dir, "photo-viewer", "0.1.0", "app");
     forged.claim.publisher_did = sign::did(&world.publisher);
     assert_eq!(
-        refused(admit(&dir, &forged, &policy, &[], &world.store())),
+        refused(admit(&dir, &forged, &policy, &[], &world.store(), NOW)),
         "signature_invalid"
     );
 
@@ -425,7 +459,7 @@ fn admission_refuses_a_claim_its_publisher_did_not_sign() {
     let mut changed = world.claim(&dir, "0.1.0");
     changed.claim.role = "system".into();
     assert_eq!(
-        refused(admit(&dir, &changed, &policy, &[], &world.store())),
+        refused(admit(&dir, &changed, &policy, &[], &world.store(), NOW)),
         "signature_invalid"
     );
 
@@ -434,7 +468,14 @@ fn admission_refuses_a_claim_its_publisher_did_not_sign() {
     let payload = serde_json::to_vec(&serde_json::to_value(&other_domain.claim).unwrap()).unwrap();
     other_domain.signature = sign::sign(&world.publisher, POLICY_SCHEMA, &payload).0;
     assert_eq!(
-        refused(admit(&dir, &other_domain, &policy, &[], &world.store())),
+        refused(admit(
+            &dir,
+            &other_domain,
+            &policy,
+            &[],
+            &world.store(),
+            NOW
+        )),
         "signature_invalid"
     );
 
@@ -442,19 +483,19 @@ fn admission_refuses_a_claim_its_publisher_did_not_sign() {
     let mut garbage = world.claim(&dir, "0.1.0");
     garbage.signature = "zz".into();
     assert_eq!(
-        refused(admit(&dir, &garbage, &policy, &[], &world.store())),
+        refused(admit(&dir, &garbage, &policy, &[], &world.store(), NOW)),
         "signature_invalid"
     );
     let mut short = world.claim(&dir, "0.1.0");
     short.signature = "00".repeat(63);
     assert_eq!(
-        refused(admit(&dir, &short, &policy, &[], &world.store())),
+        refused(admit(&dir, &short, &policy, &[], &world.store(), NOW)),
         "signature_invalid"
     );
     let mut not_did = world.claim(&dir, "0.1.0");
     not_did.claim.publisher_did = "did:web:example.com".into();
     assert_eq!(
-        refused(admit(&dir, &not_did, &policy, &[], &world.store())),
+        refused(admit(&dir, &not_did, &policy, &[], &world.store(), NOW)),
         "signature_invalid"
     );
 }
@@ -471,7 +512,7 @@ fn admission_refuses_a_claim_that_is_not_what_the_manifest_says() {
     ] {
         let claim = claim_by(&world.publisher, &dir, name, version, role);
         assert_eq!(
-            refused(admit(&dir, &claim, &policy, &[], &world.store())),
+            refused(admit(&dir, &claim, &policy, &[], &world.store(), NOW)),
             "claim_manifest_mismatch",
             "{name} {version} {role}"
         );
@@ -481,13 +522,13 @@ fn admission_refuses_a_claim_that_is_not_what_the_manifest_says() {
     std::fs::write(dir.join("capsule.json"), b"not json").unwrap();
     let claim = world.claim(&dir, "0.1.0");
     assert_eq!(
-        refused(admit(&dir, &claim, &policy, &[], &world.store())),
+        refused(admit(&dir, &claim, &policy, &[], &world.store(), NOW)),
         "claim_malformed"
     );
     write_manifest(&dir, "photo-viewer", "1.0", "app", None);
     let claim = world.claim(&dir, "1.0");
     assert_eq!(
-        refused(admit(&dir, &claim, &policy, &[], &world.store())),
+        refused(admit(&dir, &claim, &policy, &[], &world.store(), NOW)),
         "claim_malformed"
     );
 }
@@ -502,7 +543,13 @@ fn the_release_policy_must_be_signed_by_the_pinned_root() {
 
     let by_other = world.release().sign(&sign::generate());
     assert_eq!(
-        refused(effective_policy(&by_other, &root_did, &local)),
+        refused(effective_policy(
+            &by_other,
+            &root_did,
+            &local,
+            NOW,
+            &world.floor()
+        )),
         "policy_signature_invalid"
     );
 
@@ -510,7 +557,13 @@ fn the_release_policy_must_be_signed_by_the_pinned_root() {
     let mut claims_root = world.release().sign(&sign::generate());
     claims_root.signer_did = root_did.clone();
     assert_eq!(
-        refused(effective_policy(&claims_root, &root_did, &local)),
+        refused(effective_policy(
+            &claims_root,
+            &root_did,
+            &local,
+            NOW,
+            &world.floor()
+        )),
         "policy_signature_invalid"
     );
 
@@ -522,7 +575,13 @@ fn the_release_policy_must_be_signed_by_the_pinned_root() {
         names: None,
     });
     assert_eq!(
-        refused(effective_policy(&widened, &root_did, &local)),
+        refused(effective_policy(
+            &widened,
+            &root_did,
+            &local,
+            NOW,
+            &world.floor()
+        )),
         "policy_signature_invalid"
     );
 
@@ -532,13 +591,292 @@ fn the_release_policy_must_be_signed_by_the_pinned_root() {
     let mut unrevoked = release.sign(&world.release_root);
     unrevoked.policy.revoked_dids.clear();
     assert_eq!(
-        refused(effective_policy(&unrevoked, &root_did, &local)),
+        refused(effective_policy(
+            &unrevoked,
+            &root_did,
+            &local,
+            NOW,
+            &world.floor()
+        )),
         "policy_signature_invalid"
     );
 
     let good = world.release().sign(&world.release_root);
     let parsed = SignedReleasePolicy::parse(&serde_json::to_vec(&good).unwrap()).unwrap();
-    assert!(effective_policy(&parsed, &root_did, &local).is_ok());
+    assert!(effective_policy(&parsed, &root_did, &local, NOW, &world.floor()).is_ok());
+}
+
+#[test]
+fn an_older_policy_cannot_be_replayed_after_a_revocation() {
+    let world = World::new();
+    let root_did = sign::did(&world.release_root);
+    let local = LocalConfig::default();
+    let floor_path = world.root.path().join("device-floor");
+    let floor = PolicyFloor::at(&floor_path);
+    let dir = world.capsule("source", "0.1.0");
+    let claim = world.claim(&dir, "0.1.0");
+
+    let before = world.release().sign(&world.release_root);
+    let mut revoking = world.release();
+    revoking.sequence = 2;
+    revoking.revoked_dids.push(sign::did(&world.publisher));
+    let revoking = revoking.sign(&world.release_root);
+
+    effective_policy(&before, &root_did, &local, NOW, &floor).unwrap();
+    let current = effective_policy(&revoking, &root_did, &local, NOW, &floor).unwrap();
+    assert_eq!(
+        refused(admit(&dir, &claim, &current, &[], &world.store(), NOW)),
+        "publisher_revoked"
+    );
+
+    // The policy from before the revocation is genuine and current, and refused.
+    assert_eq!(
+        refused(effective_policy(&before, &root_did, &local, NOW, &floor)),
+        "policy_rollback"
+    );
+    // The same policy again is fine; so is a higher one.
+    effective_policy(&revoking, &root_did, &local, NOW, &floor).unwrap();
+    // The floor survives a restart.
+    let restarted = PolicyFloor::at(&floor_path);
+    assert_eq!(
+        restarted.seen().unwrap().map(|(sequence, _)| sequence),
+        Some(2)
+    );
+    assert_eq!(
+        refused(effective_policy(
+            &before, &root_did, &local, NOW, &restarted
+        )),
+        "policy_rollback"
+    );
+    let mut later = world.release();
+    later.sequence = 3;
+    effective_policy(
+        &later.sign(&world.release_root),
+        &root_did,
+        &local,
+        NOW,
+        &restarted,
+    )
+    .unwrap();
+    assert_eq!(
+        restarted.seen().unwrap().map(|(sequence, _)| sequence),
+        Some(3)
+    );
+}
+
+#[test]
+fn one_sequence_names_one_policy() {
+    let world = World::new();
+    let root_did = sign::did(&world.release_root);
+    let local = LocalConfig::default();
+    let floor = world.floor();
+    effective_policy(
+        &world.release().sign(&world.release_root),
+        &root_did,
+        &local,
+        NOW,
+        &floor,
+    )
+    .unwrap();
+
+    let mut other = world.release();
+    other.publishers[0].roles.push("system".into());
+    assert_eq!(
+        refused(effective_policy(
+            &other.sign(&world.release_root),
+            &root_did,
+            &local,
+            NOW,
+            &floor
+        )),
+        "policy_sequence_conflict"
+    );
+}
+
+#[test]
+fn a_policy_that_is_refused_does_not_move_the_floor() {
+    let world = World::new();
+    let root_did = sign::did(&world.release_root);
+    let local = LocalConfig::default();
+    let floor = world.floor();
+
+    let mut expired = world.release();
+    expired.sequence = 9;
+    expired.expires_at = NOW;
+    assert_eq!(
+        refused(effective_policy(
+            &expired.sign(&world.release_root),
+            &root_did,
+            &local,
+            NOW,
+            &floor
+        )),
+        "policy_expired"
+    );
+    let mut forged = world.release();
+    forged.sequence = 9;
+    assert_eq!(
+        refused(effective_policy(
+            &forged.sign(&sign::generate()),
+            &root_did,
+            &local,
+            NOW,
+            &floor
+        )),
+        "policy_signature_invalid"
+    );
+    assert_eq!(floor.seen().unwrap(), None);
+
+    let mut next = world.release();
+    next.sequence = 2;
+    effective_policy(
+        &next.sign(&world.release_root),
+        &root_did,
+        &local,
+        NOW,
+        &floor,
+    )
+    .unwrap();
+    assert_eq!(floor.seen().unwrap().map(|(sequence, _)| sequence), Some(2));
+}
+
+#[test]
+fn an_expired_policy_is_refused_at_load_and_at_admission() {
+    let world = World::new();
+    let root_did = sign::did(&world.release_root);
+    let local = LocalConfig::default();
+
+    let mut ends_now = world.release();
+    ends_now.expires_at = NOW;
+    assert_eq!(
+        refused(effective_policy(
+            &ends_now.sign(&world.release_root),
+            &root_did,
+            &local,
+            NOW,
+            &world.floor()
+        )),
+        "policy_expired"
+    );
+
+    // A policy accepted while current does not admit after it expires.
+    let policy = world.policy();
+    let dir = world.capsule("source", "0.1.0");
+    let claim = world.claim(&dir, "0.1.0");
+    assert_eq!(
+        refused(admit(
+            &dir,
+            &claim,
+            &policy,
+            &[],
+            &world.store(),
+            NOW + HOUR
+        )),
+        "policy_expired"
+    );
+    admit(&dir, &claim, &policy, &[], &world.store(), NOW + HOUR - 1).unwrap();
+}
+
+#[test]
+fn a_policy_floor_that_does_not_parse_is_refused() {
+    let world = World::new();
+    let path = world.root.path().join("broken-floor");
+    std::fs::write(&path, b"sequence 0").unwrap();
+    let release = world.release().sign(&world.release_root);
+    assert_eq!(
+        refused(effective_policy(
+            &release,
+            &sign::did(&world.release_root),
+            &LocalConfig::default(),
+            NOW,
+            &PolicyFloor::at(&path)
+        )),
+        "io"
+    );
+}
+
+#[test]
+fn a_dev_key_names_its_capsules_and_expires() {
+    let world = World::new();
+    let root_did = sign::did(&world.release_root);
+    let mut long = world.release();
+    long.expires_at = NOW + 10 * HOUR;
+    let release = long.sign(&world.release_root);
+    let dev = sign::generate();
+    let key = |names: Vec<String>, expires_at: u64| LocalConfig {
+        dev_mode: true,
+        dev_keys: vec![DevKey {
+            did: sign::did(&dev),
+            roles: vec!["app".into()],
+            names,
+            expires_at,
+        }],
+    };
+
+    // Never a whole role.
+    assert_eq!(
+        refused(effective_policy(
+            &release,
+            &root_did,
+            &key(vec![], NOW + HOUR),
+            NOW,
+            &world.floor()
+        )),
+        "dev_key_unscoped"
+    );
+    let no_names = serde_json::json!({ "dev_mode": true, "dev_keys": [
+        { "did": sign::did(&dev), "roles": ["app"], "expires_at": NOW + HOUR }
+    ] });
+    assert!(serde_json::from_value::<LocalConfig>(no_names).is_err());
+    let no_expiry = serde_json::json!({ "dev_mode": true, "dev_keys": [
+        { "did": sign::did(&dev), "roles": ["app"], "names": ["photo-viewer"] }
+    ] });
+    assert!(serde_json::from_value::<LocalConfig>(no_expiry).is_err());
+
+    // Expired when loaded.
+    assert_eq!(
+        refused(effective_policy(
+            &release,
+            &root_did,
+            &key(vec!["photo-viewer".into()], NOW),
+            NOW,
+            &world.floor()
+        )),
+        "dev_key_expired"
+    );
+
+    // Expired by the time it is used; the release publisher is not affected.
+    let policy = effective_policy(
+        &release,
+        &root_did,
+        &key(vec!["photo-viewer".into()], NOW + HOUR),
+        NOW,
+        &world.floor(),
+    )
+    .unwrap();
+    let dir = world.capsule("source", "0.1.0");
+    let by_dev = claim_by(&dev, &dir, "photo-viewer", "0.1.0", "app");
+    admit(&dir, &by_dev, &policy, &[], &world.store(), NOW).unwrap();
+    assert_eq!(
+        refused(admit(
+            &dir,
+            &by_dev,
+            &policy,
+            &[],
+            &world.store(),
+            NOW + 2 * HOUR
+        )),
+        "dev_key_expired"
+    );
+    admit(
+        &dir,
+        &world.claim(&dir, "0.1.0"),
+        &policy,
+        &[],
+        &world.store(),
+        NOW + 2 * HOUR,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -547,10 +885,11 @@ fn local_config_adds_a_dev_key_only_in_dev_mode() {
     let root_did = sign::did(&world.release_root);
     let release = world.release().sign(&world.release_root);
     let dev = sign::generate();
-    let dev_entry = PublisherEntry {
+    let dev_entry = DevKey {
         did: sign::did(&dev),
         roles: vec!["app".into()],
-        names: Some(vec!["photo-viewer".into()]),
+        names: vec!["photo-viewer".into()],
+        expires_at: NOW + HOUR,
     };
 
     let off = LocalConfig {
@@ -558,7 +897,13 @@ fn local_config_adds_a_dev_key_only_in_dev_mode() {
         dev_keys: vec![dev_entry.clone()],
     };
     assert_eq!(
-        refused(effective_policy(&release, &root_did, &off)),
+        refused(effective_policy(
+            &release,
+            &root_did,
+            &off,
+            NOW,
+            &world.floor()
+        )),
         "dev_key_outside_dev_mode"
     );
 
@@ -566,17 +911,17 @@ fn local_config_adds_a_dev_key_only_in_dev_mode() {
         dev_mode: true,
         dev_keys: vec![dev_entry.clone()],
     };
-    let policy = effective_policy(&release, &root_did, &on).unwrap();
+    let policy = effective_policy(&release, &root_did, &on, NOW, &world.floor()).unwrap();
     let dir = world.capsule("source", "0.1.0");
     let claim = claim_by(&dev, &dir, "photo-viewer", "0.1.0", "app");
-    admit(&dir, &claim, &policy, &[], &world.store()).unwrap();
+    admit(&dir, &claim, &policy, &[], &world.store(), NOW).unwrap();
 
     // The dev key ships only what it lists.
     let other = world.capsule("other", "0.1.0");
     write_manifest(&other, "documents", "0.1.0", "app", None);
     let claim = claim_by(&dev, &other, "documents", "0.1.0", "app");
     assert_eq!(
-        refused(admit(&other, &claim, &policy, &[], &world.store())),
+        refused(admit(&other, &claim, &policy, &[], &world.store(), NOW)),
         "publisher_role_refused"
     );
 
@@ -595,10 +940,11 @@ fn a_dev_key_cannot_stand_in_for_a_release_key() {
     let mut release = world.release();
     release.revoked_dids.push(sign::did(&revoked));
     let release = release.sign(&world.release_root);
-    let entry = |did: String| PublisherEntry {
+    let entry = |did: String| DevKey {
         did,
         roles: vec!["system".into()],
-        names: None,
+        names: vec!["home".into()],
+        expires_at: NOW + HOUR,
     };
 
     for did in [
@@ -611,7 +957,13 @@ fn a_dev_key_cannot_stand_in_for_a_release_key() {
             dev_keys: vec![entry(did.clone())],
         };
         assert_eq!(
-            refused(effective_policy(&release, &root_did, &local)),
+            refused(effective_policy(
+                &release,
+                &root_did,
+                &local,
+                NOW,
+                &world.floor()
+            )),
             "dev_key_conflict",
             "{did}"
         );
@@ -622,7 +974,13 @@ fn a_dev_key_cannot_stand_in_for_a_release_key() {
         dev_keys: vec![entry(twice.clone()), entry(twice)],
     };
     assert_eq!(
-        refused(effective_policy(&release, &root_did, &local)),
+        refused(effective_policy(
+            &release,
+            &root_did,
+            &local,
+            NOW,
+            &world.floor()
+        )),
         "dev_key_conflict"
     );
 }
@@ -634,7 +992,14 @@ fn admission_refuses_an_untrusted_publisher_or_a_role_it_may_not_ship() {
 
     let stranger = claim_by(&sign::generate(), &dir, "photo-viewer", "0.1.0", "app");
     assert_eq!(
-        refused(admit(&dir, &stranger, &world.policy(), &[], &world.store())),
+        refused(admit(
+            &dir,
+            &stranger,
+            &world.policy(),
+            &[],
+            &world.store(),
+            NOW
+        )),
         "publisher_untrusted"
     );
 
@@ -647,7 +1012,8 @@ fn admission_refuses_an_untrusted_publisher_or_a_role_it_may_not_ship() {
             &claim,
             &world.policy_from(viewers_only),
             &[],
-            &world.store()
+            &world.store(),
+            NOW
         )),
         "publisher_role_refused"
     );
@@ -660,7 +1026,8 @@ fn admission_refuses_an_untrusted_publisher_or_a_role_it_may_not_ship() {
             &claim,
             &world.policy_from(named),
             &[],
-            &world.store()
+            &world.store(),
+            NOW
         )),
         "publisher_role_refused"
     );
@@ -681,7 +1048,8 @@ fn admission_refuses_a_revoked_publisher_or_a_revoked_cid() {
             &claim,
             &world.policy_from(by_did),
             &[],
-            &world.store()
+            &world.store(),
+            NOW
         )),
         "publisher_revoked"
     );
@@ -694,7 +1062,8 @@ fn admission_refuses_a_revoked_publisher_or_a_revoked_cid() {
             &claim,
             &world.policy_from(by_cid),
             &[],
-            &world.store()
+            &world.store(),
+            NOW
         )),
         "cid_revoked"
     );
@@ -710,6 +1079,7 @@ fn admission_refuses_a_revoked_publisher_or_a_revoked_cid() {
         &world.policy_from(by_cid),
         &[],
         &world.store(),
+        NOW,
     )
     .unwrap();
 
@@ -722,7 +1092,8 @@ fn admission_refuses_a_revoked_publisher_or_a_revoked_cid() {
             &next_claim,
             &world.policy_from(later),
             &[],
-            &world.store()
+            &world.store(),
+            NOW
         )),
         "cid_revoked"
     );
@@ -737,7 +1108,14 @@ fn admission_refuses_a_lower_version_of_an_installed_name() {
     let claim = world.claim(&old, "0.1.0");
     let have = [installed("photo-viewer", "0.2.0", "bafkreiinstalled")];
     assert_eq!(
-        refused(admit(&old, &claim, &world.policy(), &have, &world.store())),
+        refused(admit(
+            &old,
+            &claim,
+            &world.policy(),
+            &have,
+            &world.store(),
+            NOW
+        )),
         "version_downgrade"
     );
 
@@ -745,7 +1123,14 @@ fn admission_refuses_a_lower_version_of_an_installed_name() {
     let rc = world.capsule("rc", "0.2.0-rc.1");
     let claim = world.claim(&rc, "0.2.0-rc.1");
     assert_eq!(
-        refused(admit(&rc, &claim, &world.policy(), &have, &world.store())),
+        refused(admit(
+            &rc,
+            &claim,
+            &world.policy(),
+            &have,
+            &world.store(),
+            NOW
+        )),
         "version_downgrade"
     );
 
@@ -757,6 +1142,7 @@ fn admission_refuses_a_lower_version_of_an_installed_name() {
         &world.policy(),
         &others,
         &world.store(),
+        NOW,
     )
     .unwrap();
     let new = world.capsule("new", "0.3.0");
@@ -766,6 +1152,7 @@ fn admission_refuses_a_lower_version_of_an_installed_name() {
         &world.policy(),
         &have,
         &world.store(),
+        NOW,
     )
     .unwrap();
 }
@@ -777,14 +1164,21 @@ fn one_version_of_a_name_has_one_cid() {
     let claim = world.claim(&dir, "0.2.0");
     let have = [installed("photo-viewer", "0.2.0", "bafkreiinstalled")];
     assert_eq!(
-        refused(admit(&dir, &claim, &world.policy(), &have, &world.store())),
+        refused(admit(
+            &dir,
+            &claim,
+            &world.policy(),
+            &have,
+            &world.store(),
+            NOW
+        )),
         "version_conflict"
     );
 
     // The same CID again is the same capsule.
-    let first = admit(&dir, &claim, &world.policy(), &[], &world.store()).unwrap();
+    let first = admit(&dir, &claim, &world.policy(), &[], &world.store(), NOW).unwrap();
     let have = [installed("photo-viewer", "0.2.0", &first.cid)];
-    let again = admit(&dir, &claim, &world.policy(), &have, &world.store()).unwrap();
+    let again = admit(&dir, &claim, &world.policy(), &have, &world.store(), NOW).unwrap();
     assert_eq!(again, first);
 }
 
@@ -799,7 +1193,8 @@ fn an_installed_version_that_is_not_semver_is_refused() {
             &world.claim(&dir, "0.1.0"),
             &world.policy(),
             &have,
-            &world.store()
+            &world.store(),
+            NOW
         )),
         "claim_malformed"
     );
@@ -812,7 +1207,7 @@ fn admission_stages_a_read_only_copy_by_cid_and_loads_only_from_it() {
     let world = World::new();
     let dir = world.capsule("source", "0.1.0");
     let claim = world.claim(&dir, "0.1.0");
-    let admitted = admit(&dir, &claim, &world.policy(), &[], &world.store()).unwrap();
+    let admitted = admit(&dir, &claim, &world.policy(), &[], &world.store(), NOW).unwrap();
 
     assert_eq!(admitted.cid, claim.claim.cid);
     assert_eq!(admitted.path, world.store().join(&admitted.cid));
@@ -861,6 +1256,7 @@ fn load_refuses_a_staged_copy_that_is_writable() {
         &world.policy(),
         &[],
         &world.store(),
+        NOW,
     )
     .unwrap();
 
@@ -895,7 +1291,7 @@ fn load_refuses_a_staged_copy_that_no_longer_hashes_to_its_cid() {
     let world = World::new();
     let dir = world.capsule("source", "0.1.0");
     let claim = world.claim(&dir, "0.1.0");
-    let admitted = admit(&dir, &claim, &world.policy(), &[], &world.store()).unwrap();
+    let admitted = admit(&dir, &claim, &world.policy(), &[], &world.store(), NOW).unwrap();
 
     // Opened, changed and sealed again.
     let wasm = admitted.path.join("photo-viewer.component.wasm");
@@ -909,7 +1305,14 @@ fn load_refuses_a_staged_copy_that_no_longer_hashes_to_its_cid() {
 
     // Admission does not trust what is already under the CID either.
     assert_eq!(
-        refused(admit(&dir, &claim, &world.policy(), &[], &world.store())),
+        refused(admit(
+            &dir,
+            &claim,
+            &world.policy(),
+            &[],
+            &world.store(),
+            NOW
+        )),
         "staged_mismatch"
     );
 }
@@ -948,6 +1351,7 @@ fn a_surface_resolves_its_core_by_cid_only() {
         &world.policy(),
         &[],
         &world.store(),
+        NOW,
     )
     .unwrap();
     let have = [installed("photo-viewer", "0.1.0", &core.cid)];
@@ -1053,5 +1457,5 @@ fn provenance_is_a_separate_record_that_names_the_cid() {
     );
 
     // Admission takes no provenance and does not need one.
-    admit(&dir, &claim, &world.policy(), &[], &world.store()).unwrap();
+    admit(&dir, &claim, &world.policy(), &[], &world.store(), NOW).unwrap();
 }
