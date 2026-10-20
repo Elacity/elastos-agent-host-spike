@@ -24,6 +24,12 @@ use crate::{io, sign, Refusal};
 
 pub const POLICY_SCHEMA: &str = "elastos.release.trust-policy/v1";
 
+const DAY: u64 = 24 * 60 * 60;
+/// A release policy may run at most this long past the time it is loaded.
+pub const MAX_POLICY_LIFETIME_SECS: u64 = 90 * DAY;
+/// A dev key may run at most this long past the time it is loaded.
+pub const MAX_DEV_KEY_LIFETIME_SECS: u64 = 30 * DAY;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublisherEntry {
@@ -208,7 +214,13 @@ pub fn effective_policy(
             now,
         });
     }
-    // Only a genuine, current policy moves the floor.
+    if policy.expires_at > now.saturating_add(MAX_POLICY_LIFETIME_SECS) {
+        return Err(Refusal::PolicyLifetimeTooLong {
+            expires_at: policy.expires_at,
+            latest: now.saturating_add(MAX_POLICY_LIFETIME_SECS),
+        });
+    }
+    // Only a genuine, current, bounded policy moves the floor.
     let sha256 = hex::encode(Sha256::digest(canonical(policy)));
     match floor.seen()? {
         Some((seen, _)) if policy.sequence < seen => {
@@ -247,6 +259,13 @@ pub fn effective_policy(
             return Err(Refusal::DevKeyExpired {
                 did: key.did.clone(),
                 expires_at: key.expires_at,
+            });
+        }
+        if key.expires_at > now.saturating_add(MAX_DEV_KEY_LIFETIME_SECS) {
+            return Err(Refusal::DevKeyLifetimeTooLong {
+                did: key.did.clone(),
+                expires_at: key.expires_at,
+                latest: now.saturating_add(MAX_DEV_KEY_LIFETIME_SECS),
             });
         }
         let known =

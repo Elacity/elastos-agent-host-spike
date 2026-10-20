@@ -882,6 +882,91 @@ fn a_dev_key_names_its_capsules_and_expires() {
 }
 
 #[test]
+fn a_release_policy_runs_at_most_90_days() {
+    let world = World::new();
+    let root_did = sign::did(&world.release_root);
+    let local = LocalConfig::default();
+    assert_eq!(MAX_POLICY_LIFETIME_SECS, 90 * 24 * HOUR);
+    let floor = world.floor();
+
+    let mut too_long = world.release();
+    too_long.sequence = 9;
+    too_long.expires_at = NOW + MAX_POLICY_LIFETIME_SECS + 1;
+    assert_eq!(
+        refused(effective_policy(
+            &too_long.sign(&world.release_root),
+            &root_did,
+            &local,
+            NOW,
+            &floor
+        )),
+        "policy_lifetime_too_long"
+    );
+    let mut forever = world.release();
+    forever.expires_at = u64::MAX;
+    assert_eq!(
+        refused(effective_policy(
+            &forever.sign(&world.release_root),
+            &root_did,
+            &local,
+            NOW,
+            &floor
+        )),
+        "policy_lifetime_too_long"
+    );
+    // Refused, so the floor did not move.
+    assert_eq!(floor.seen().unwrap(), None);
+
+    let mut longest = world.release();
+    longest.expires_at = NOW + MAX_POLICY_LIFETIME_SECS;
+    effective_policy(
+        &longest.sign(&world.release_root),
+        &root_did,
+        &local,
+        NOW,
+        &floor,
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_dev_key_runs_at_most_30_days() {
+    let world = World::new();
+    let root_did = sign::did(&world.release_root);
+    let release = world.release().sign(&world.release_root);
+    assert_eq!(MAX_DEV_KEY_LIFETIME_SECS, 30 * 24 * HOUR);
+    let key = |expires_at: u64| LocalConfig {
+        dev_mode: true,
+        dev_keys: vec![DevKey {
+            did: sign::did(&sign::generate()),
+            roles: vec!["app".into()],
+            names: vec!["photo-viewer".into()],
+            expires_at,
+        }],
+    };
+    for expires_at in [NOW + MAX_DEV_KEY_LIFETIME_SECS + 1, u64::MAX] {
+        assert_eq!(
+            refused(effective_policy(
+                &release,
+                &root_did,
+                &key(expires_at),
+                NOW,
+                &world.floor()
+            )),
+            "dev_key_lifetime_too_long"
+        );
+    }
+    effective_policy(
+        &release,
+        &root_did,
+        &key(NOW + MAX_DEV_KEY_LIFETIME_SECS),
+        NOW,
+        &world.floor(),
+    )
+    .unwrap();
+}
+
+#[test]
 fn local_config_adds_a_dev_key_only_in_dev_mode() {
     let world = World::new();
     let root_did = sign::did(&world.release_root);

@@ -29,7 +29,8 @@ pub use listing::{
 };
 pub use policy::{
     effective_policy, DevKey, LocalConfig, PolicyFloor, PublisherEntry, ReleasePolicy,
-    SignedReleasePolicy, TrustPolicy, TrustedPublisher, POLICY_SCHEMA,
+    SignedReleasePolicy, TrustPolicy, TrustedPublisher, MAX_DEV_KEY_LIFETIME_SECS,
+    MAX_POLICY_LIFETIME_SECS, POLICY_SCHEMA,
 };
 pub use provenance::{Provenance, SignedProvenance, PROVENANCE_SCHEMA};
 
@@ -59,6 +60,8 @@ pub enum Refusal {
     PolicySignatureInvalid(String),
     /// The release policy's expiry has passed.
     PolicyExpired { expires_at: u64, now: u64 },
+    /// The release policy runs more than 90 days past now.
+    PolicyLifetimeTooLong { expires_at: u64, latest: u64 },
     /// The release policy's sequence is below the highest this device accepted.
     PolicyRollback { offered: u64, seen: u64 },
     /// Another policy with the same sequence was already accepted.
@@ -67,6 +70,12 @@ pub enum Refusal {
     DevKeyOutsideDevMode(String),
     /// A dev key that names no capsule (it would ship a whole role).
     DevKeyUnscoped(String),
+    /// A dev key that runs more than 30 days past now.
+    DevKeyLifetimeTooLong {
+        did: String,
+        expires_at: u64,
+        latest: u64,
+    },
     /// A dev key past its expiry.
     DevKeyExpired { did: String, expires_at: u64 },
     /// A local dev key that is already a release publisher.
@@ -130,10 +139,12 @@ impl Refusal {
             Refusal::ClaimManifestMismatch(_) => "claim_manifest_mismatch",
             Refusal::PolicySignatureInvalid(_) => "policy_signature_invalid",
             Refusal::PolicyExpired { .. } => "policy_expired",
+            Refusal::PolicyLifetimeTooLong { .. } => "policy_lifetime_too_long",
             Refusal::PolicyRollback { .. } => "policy_rollback",
             Refusal::PolicySequenceConflict(_) => "policy_sequence_conflict",
             Refusal::DevKeyOutsideDevMode(_) => "dev_key_outside_dev_mode",
             Refusal::DevKeyUnscoped(_) => "dev_key_unscoped",
+            Refusal::DevKeyLifetimeTooLong { .. } => "dev_key_lifetime_too_long",
             Refusal::DevKeyExpired { .. } => "dev_key_expired",
             Refusal::DevKeyConflict(_) => "dev_key_conflict",
             Refusal::PublisherUntrusted(_) => "publisher_untrusted",
