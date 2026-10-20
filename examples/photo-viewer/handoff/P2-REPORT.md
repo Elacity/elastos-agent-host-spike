@@ -117,3 +117,10 @@ change.
 
 P3 design (render-only surface) waits for your answers in the KICKOFF order. The fuel-cause fix PR is open
 separately.
+
+## Addendum (P2b, after review)
+
+`python3` is now pinned: `python3=3.11.2-1+b1` from the Debian snapshot `20261015T000000Z`, bookworm main only.
+The snapshot is immutable, so the dependency versions are fixed too. The cloud container rebuild at the P2b
+head still gives `add93842bb7253bdab18d27067d0976558913fda6bd354f772f04c5e9fc9dd22`. P2's exit stays **open**
+until the Mac runs the recipe (skipped while Sasha travels).

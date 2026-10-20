@@ -19,11 +19,13 @@ and the artifact, written to `examples/photo-viewer/photo-viewer.component.wasm`
 | Toolchain | Rust 1.91.0 (image and `rust-toolchain.toml`), target `wasm32-unknown-unknown` |
 | Crates | `Cargo.lock` of the guest and of `elastos/tools/componentize`, built `--locked` |
 | Paths | Repository mounted at `/src/elastos-runtime`, the path the builder remaps to; `HOME=/home/builder` |
+| `python3` | `3.11.2-1+b1` from `snapshot.debian.org/archive/debian/20261015T000000Z` (bookworm main only) |
 | Builder | The repository's own `scripts/build-component-capsule.sh`: `SOURCE_DATE_EPOCH=0`, no incremental, path remapping, componentize |
 
-`python3` is installed in the container from Debian at run time. It runs the
-builder's manifest checks and prints the hash; it does not touch the
-artifact bytes.
+`python3` runs the builder's manifest checks and prints the hash; it does not
+touch the artifact bytes. It is pinned all the same, as `python3=3.11.2-1+b1`
+from the Debian snapshot `20261015T000000Z`. The snapshot is immutable, so its
+dependencies are fixed too.
 
 ## Why one platform
 
@@ -65,7 +67,7 @@ HTTPS_PROXY="$HTTPS_PROXY" ELASTOS_REPRO_CA=/root/.ccr/ca-bundle.crt \
   examples/photo-viewer/repro/build-in-container.sh
 ```
 
-apt uses the HTTPS Debian mirror, because some proxies refuse plain HTTP. A
+apt reads the snapshot over HTTPS, because some proxies refuse plain HTTP. A
 plain host such as a Mac sets neither variable.
 
 Docker Hub limits anonymous pulls. The image is pulled once per machine and

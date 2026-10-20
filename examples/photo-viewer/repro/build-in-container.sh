@@ -38,12 +38,19 @@ docker run --rm --platform "${PLATFORM}" \
     "${IMAGE}" \
     bash -euo pipefail -c '
         # python3 runs the builder checks and prints the hash; it does not
-        # touch the artifact bytes. HTTPS mirror: some proxies refuse plain HTTP.
-        sed -i "s|http://deb.debian.org|https://deb.debian.org|g" /etc/apt/sources.list.d/debian.sources
-        apt_ca=()
-        if [[ -n "${SSL_CERT_FILE:-}" ]]; then apt_ca=(-o "Acquire::https::CAInfo=${SSL_CERT_FILE}"); fi
-        apt-get -qq "${apt_ca[@]}" update >/dev/null
-        apt-get -qq "${apt_ca[@]}" install -y --no-install-recommends python3 >/dev/null
+        # touch the artifact bytes. It still comes from one fixed place: the
+        # Debian snapshot of 2026-10-15 (immutable, so every dependency is
+        # fixed too) and an exact version. HTTPS: some proxies refuse HTTP.
+        printf "%s\n" "Types: deb" \
+            "URIs: https://snapshot.debian.org/archive/debian/20261015T000000Z" \
+            "Suites: bookworm" "Components: main" \
+            "Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg" \
+            > /etc/apt/sources.list.d/debian.sources
+        apt_opts=(-o Acquire::Check-Valid-Until=false)
+        if [[ -n "${SSL_CERT_FILE:-}" ]]; then apt_opts+=(-o "Acquire::https::CAInfo=${SSL_CERT_FILE}"); fi
+        apt-get -qq "${apt_opts[@]}" update >/dev/null
+        apt-get -qq "${apt_opts[@]}" install -y --no-install-recommends python3=3.11.2-1+b1 >/dev/null
+        python3 --version
         rustup target add wasm32-unknown-unknown >/dev/null 2>&1
         rustc -vV | sed -n "1p;/^host/p"
         scripts/build-component-capsule.sh examples/photo-viewer
