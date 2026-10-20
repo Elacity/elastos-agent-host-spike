@@ -387,6 +387,8 @@ pub(crate) fn agents_area_refusal(
                     || byte.is_ascii_digit()
                     || matches!(byte, b'.' | b'_' | b'-')
             })
+            // Windows drops a trailing '.', so "journal." would name "journal".
+            && !segment.ends_with('.')
     };
     let exact = segments.len() >= 3
         && !segments.iter().any(|segment| matches!(*segment, "" | "."))
@@ -396,7 +398,7 @@ pub(crate) fn agents_area_refusal(
     if !exact || (operation == "write" && segments.len() < 4) {
         return Some((
             "invalid_localhost_path",
-            "paths under .AppData/Agents/ must be spelled exactly, with lower-case segments of letters, digits, '.', '_' or '-'",
+            "paths under .AppData/Agents/ must be spelled exactly, with lower-case segments of letters, digits, '.', '_' or '-' that do not end in '.'",
         ));
     }
     None
