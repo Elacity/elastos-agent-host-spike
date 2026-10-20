@@ -502,11 +502,13 @@ Runtime validates and enforces capability tokens. The built-in shell evaluates
 the local approval policy for interactive and operator flows:
 
 - In `cli` mode, the terminal asks the operator to approve or deny each request.
-- In `agent` mode, the shell applies the policy file and built-in defaults.
+- In `agent` mode, the shell grants only what the policy file's `allow` list
+  matches. A missing, unreadable or malformed policy file denies every request.
 
 The default policy file is
 `~/.local/share/elastos/policy.json`. Set `ELASTOS_POLICY_FILE` to use a
-different operator-managed file.
+different operator-managed file. With neither `ELASTOS_POLICY_FILE` nor `HOME`
+set, agent mode denies every request.
 
 ## Trust model
 
