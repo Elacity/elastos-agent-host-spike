@@ -453,6 +453,16 @@ pub(crate) fn require_home_viewer_launch_token_context(
     Ok((required.launch_context.selected_resource, required.context))
 }
 
+/// Like `require_home_viewer_launch_token_context`, also returning the
+/// signed launch id, so per-launch records can name the launch.
+pub(crate) fn require_home_viewer_launch(
+    data_dir: &std::path::Path,
+    headers: &HeaderMap,
+    executable_actor: &str,
+) -> anyhow::Result<RequiredHomeLaunchToken> {
+    require_home_launch_token_for_any_from(data_dir, headers, &[executable_actor], None)
+}
+
 pub(crate) fn require_internal_shell_launch_grant_for_any_context(
     data_dir: &std::path::Path,
     headers: &HeaderMap,

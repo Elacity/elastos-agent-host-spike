@@ -223,13 +223,47 @@ fn other_person(data_dir: &std::path::Path, mine: &TestPasskeyAuthority) -> Test
 }
 
 fn photos_audit_events(data_dir: &std::path::Path) -> Vec<(String, String, String)> {
+    photos_audit_records(data_dir)
+        .into_iter()
+        .map(|event| (event.event_type, event.result, event.reason))
+        .collect()
+}
+
+fn photos_audit_records(data_dir: &std::path::Path) -> Vec<RuntimeAuditEventV1> {
     crate::auth::load_auth_state(data_dir)
         .unwrap()
         .audit
         .into_iter()
         .filter(|event| event.event_type.starts_with("photos.viewer."))
-        .map(|event| (event.event_type, event.result, event.reason))
         .collect()
+}
+
+/// Library viewer events written for the Photos viewer (the per-operation
+/// stat and read records Photos must not leave).
+fn library_viewer_events_for_photos(data_dir: &std::path::Path) -> usize {
+    crate::auth::load_auth_state(data_dir)
+        .unwrap()
+        .audit
+        .into_iter()
+        .filter(|event| {
+            event.event_type.starts_with("library.viewer.")
+                && event.capsule_id.as_deref() == Some(PHOTOS_VIEWER)
+        })
+        .count()
+}
+
+/// The signed launch id inside a launch token.
+fn token_launch_id(token: &str) -> String {
+    let envelope: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(token)
+            .unwrap(),
+    )
+    .unwrap();
+    envelope["payload"]["launch_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 const PLAYLIST_ROUTE: &str = "/api/viewers/image-viewer/playlist";
@@ -262,8 +296,23 @@ async fn photos_serves_its_bound_playlist_and_the_items_it_lists() {
 
     let events = photos_audit_events(photos.dir.path());
     assert_eq!(events.len(), 3, "{events:?}");
-    assert!(events.iter().all(|(_, result, _)| result == "completed"));
-    assert!(events[1].2.contains("position 0") && events[1].2.contains("Pictures/a.png"));
+    assert!(events.iter().all(|(_, result, _)| result == "served"));
+    let playlist = photos.playlist_path();
+    assert!(
+        events[0]
+            .2
+            .starts_with(&format!("playlist={playlist} sha256="))
+            && events[0].2.contains("position=- item=- result=served"),
+        "{}",
+        events[0].2
+    );
+    assert!(
+        events[1]
+            .2
+            .contains("position=0 item=localhost://Users/self/Pictures/a.png result=served"),
+        "{}",
+        events[1].2
+    );
 }
 
 // --- launch token ------------------------------------------------------------
@@ -398,6 +447,7 @@ async fn photos_refuses_a_position_out_of_range_or_not_listed() {
     let events = photos_audit_events(photos.dir.path());
     assert_eq!(events.len(), 9, "{events:?}");
     assert!(events.iter().all(|(_, result, _)| result == "refused"));
+    assert!(events[0].2.contains("position=1 item=- result=refused 404"));
 }
 
 #[tokio::test]
@@ -472,7 +522,6 @@ async fn photos_refuses_items_outside_pictures_or_not_viewable() {
 #[tokio::test]
 async fn photos_refuses_a_malformed_or_oversize_playlist() {
     let photos = photos().await;
-    let token = photos.token(PHOTOS_PLAYLIST_URI);
     for bad in [
         json!({ "schema": "other/v1", "items": [] }),
         json!({ "schema": "elastos.photo-viewer.playlist/v1" }),
@@ -483,6 +532,8 @@ async fn photos_refuses_a_malformed_or_oversize_playlist() {
         playlist(json!([{ "uri": "localhost://Users/self/Pictures/a.png" }])),
     ] {
         photos.write_playlist(&bad).await;
+        // A fresh launch for each playlist: a launch keeps the one it read.
+        let token = photos.token(PHOTOS_PLAYLIST_URI);
         let (status, body) = photos.get(&item_route("0"), Some(&token)).await;
         assert_eq!(
             status,
@@ -494,6 +545,7 @@ async fn photos_refuses_a_malformed_or_oversize_playlist() {
     let mut oversize = playlist(json!([item(0, "localhost://Users/self/Pictures/a.png")]));
     oversize["padding"] = json!("x".repeat(64 * 1024));
     photos.write_playlist(&oversize).await;
+    let token = photos.token(PHOTOS_PLAYLIST_URI);
     for path in [PLAYLIST_ROUTE.to_string(), item_route("0")] {
         let (status, _) = photos.get(&path, Some(&token)).await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{path}");
@@ -615,7 +667,7 @@ async fn home_binds_the_photos_playlist_with_a_short_lived_token() {
     );
 
     // Without a selected resource (opened from the Library for one image)
-    // the token is short-lived too, and binds no playlist.
+    // no playlist is bound and the token keeps the default lifetime.
     let (status, launch) = home_launch(dir.path(), &app, json!({ "target": PHOTOS_VIEWER })).await;
     assert_eq!(status, StatusCode::OK, "{launch}");
     let payload = launched_token_payload(&launch);
@@ -625,7 +677,7 @@ async fn home_binds_the_photos_playlist_with_a_short_lived_token() {
     );
     assert_eq!(
         payload["exp"].as_u64().unwrap() - payload["iat"].as_u64().unwrap(),
-        PHOTOS_LAUNCH_TOKEN_TTL_SECS
+        12 * 60 * 60
     );
 }
 
@@ -666,4 +718,94 @@ async fn home_cannot_bind_anything_else() {
         payload["exp"].as_u64().unwrap() - payload["iat"].as_u64().unwrap(),
         12 * 60 * 60
     );
+}
+
+// --- one audit record per request, and the pinned playlist --------------------------
+
+#[tokio::test]
+async fn each_photos_request_leaves_exactly_one_audit_record() {
+    let photos = photos().await;
+    let token = photos.token(PHOTOS_PLAYLIST_URI);
+    let launch_id = token_launch_id(&token);
+    // Served and refused reads, item and playlist routes.
+    let paths = [
+        item_route("0"),
+        item_route("2"),
+        item_route("1"),
+        item_route("x"),
+        item_route("0"),
+        PLAYLIST_ROUTE.to_string(),
+        item_route("2"),
+    ];
+    for (count, path) in paths.iter().enumerate() {
+        photos.get(path, Some(&token)).await;
+        let records = photos_audit_records(photos.dir.path());
+        assert_eq!(records.len(), count + 1, "after {path}");
+    }
+    let records = photos_audit_records(photos.dir.path());
+    assert_eq!(
+        library_viewer_events_for_photos(photos.dir.path()),
+        0,
+        "the internal stat and read leave no records"
+    );
+    let ids: std::collections::BTreeSet<&str> = records
+        .iter()
+        .map(|event| event.event_id.as_str())
+        .collect();
+    assert_eq!(ids.len(), records.len(), "record ids are unique");
+    for record in &records {
+        assert!(
+            record.event_id.contains(&format!(":{launch_id}:")),
+            "the id names the launch: {}",
+            record.event_id
+        );
+        assert_eq!(record.challenge_id.as_deref(), Some(launch_id.as_str()));
+        assert_eq!(
+            record.principal_id.as_deref(),
+            Some(photos.authority.principal_id.as_str())
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_refusal_after_the_token_leaves_one_record() {
+    let photos = photos().await;
+    let unbound = photos.token(PHOTOS_VIEWER);
+    for path in [PLAYLIST_ROUTE.to_string(), item_route("0")] {
+        let (status, _) = photos.get(&path, Some(&unbound)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    let events = photos_audit_events(photos.dir.path());
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert!(events.iter().all(
+        |(_, result, reason)| result == "refused" && reason.contains("not bound to a playlist")
+    ));
+}
+
+#[tokio::test]
+async fn a_launch_keeps_the_playlist_it_read_first() {
+    let photos = photos().await;
+    let token = photos.token(PHOTOS_PLAYLIST_URI);
+    let (status, body) = photos.get(&item_route("0"), Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, PNG_A);
+
+    // Another writer swaps the playlist during the launch.
+    photos
+        .write_playlist(&playlist(json!([item(
+            0,
+            "localhost://Users/self/Pictures/unlisted.png"
+        )])))
+        .await;
+    for path in [item_route("0"), PLAYLIST_ROUTE.to_string()] {
+        let (status, body) = photos.get(&path, Some(&token)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{path}");
+        assert_ne!(body, UNLISTED);
+        assert!(String::from_utf8_lossy(&body).contains("changed during this launch"));
+    }
+    // A new launch reads the new playlist.
+    let fresh = photos.token(PHOTOS_PLAYLIST_URI);
+    let (status, body) = photos.get(&item_route("0"), Some(&fresh)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, UNLISTED);
 }

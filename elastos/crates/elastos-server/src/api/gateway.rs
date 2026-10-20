@@ -157,8 +157,8 @@ pub(super) use gateway_home_token::{
     require_home_launch_token_binding, require_home_launch_token_context,
     require_home_launch_token_for_any_app_context, require_home_launch_token_for_any_context,
     require_home_projection_launch_token_context, require_home_runtime_wallet_authority,
-    require_home_token, require_home_token_context, require_home_viewer_launch_token_context,
-    require_internal_shell_launch_grant_for_any_context,
+    require_home_token, require_home_token_context, require_home_viewer_launch,
+    require_home_viewer_launch_token_context, require_internal_shell_launch_grant_for_any_context,
     require_internal_shell_runtime_wallet_authority, require_runtime_wallet_authority,
     runtime_wallet_authority, HomeLaunchContext, RequiredHomeLaunchToken,
 };
