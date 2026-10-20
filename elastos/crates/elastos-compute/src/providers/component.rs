@@ -645,8 +645,12 @@ mod tests {
             .map(|(name, _item)| name.to_string())
             .collect();
         imports.sort();
+        // `capabilities` asks for the two journal grants; `providers` writes
+        // and reads the guest's own task journal with them.
         let mut expected = vec![
+            "elastos:bus/capabilities@1.0.0".to_string(),
             "elastos:bus/identity@1.0.0".to_string(),
+            "elastos:bus/providers@1.0.0".to_string(),
             "elastos:bus/runtime@1.0.0".to_string(),
             "elastos:bus/types@1.0.0".to_string(),
         ];
@@ -667,6 +671,12 @@ mod tests {
         );
 
         let provider = ComponentProvider::new();
+        let bridge_lines = Arc::new(Mutex::new(Vec::new()));
+        let bridge_seen = bridge_lines.clone();
+        provider.set_bus_hostcall(Arc::new(move |line, _capsule, _principal| {
+            bridge_seen.lock().unwrap().push(line.to_string());
+            Err("this test gives the guest no bridge".to_string())
+        }));
         let parent = provider
             .load(&root, manifest.clone())
             .await
@@ -687,5 +697,30 @@ mod tests {
             .start(&child)
             .await
             .expect("the second component lifecycle run");
+        // With no Runtime to answer, each guest asks for exactly two grants on
+        // its own journal and, refused, sends no resource call.
+        let lines: Vec<serde_json::Value> = bridge_lines
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|line| json_line(line))
+            .collect();
+        let journal = "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal";
+        let asked: Vec<(String, String)> = lines
+            .iter()
+            .map(|line| {
+                assert_eq!(line["request"]["type"], "request_capability", "{line}");
+                assert_eq!(line["request"]["resource"], journal, "{line}");
+                (
+                    line["request"]["resource"].as_str().unwrap().to_string(),
+                    line["request"]["action"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        let pair = [
+            (journal.to_string(), "write".to_string()),
+            (journal.to_string(), "read".to_string()),
+        ];
+        assert_eq!(asked, [pair.clone(), pair].concat());
     }
 }
