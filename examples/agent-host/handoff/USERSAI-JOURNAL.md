@@ -13,7 +13,9 @@ Written 20 Oct 2026 for slice S2 (overnight 1). `docs/AGENT_ARCHITECTURE.md` lin
 
 ## The contract
 
-**Resource.** `localhost://UsersAI/self/.AppData/ElastOS/AgentHost/tasks/<task-id>/journal`
+**Resource (changed after the PR #3 review, 20 Oct).** For the spike, `localhost://Users/self/.AppData/Agents/<agent-id>/tasks/<task-id>/journal`, under the launching person, whom the bridge already scopes. It moves to the original choice below once the Runtime scopes `UsersAI` like `Users/self`.
+
+Original choice: `localhost://UsersAI/self/.AppData/ElastOS/AgentHost/tasks/<task-id>/journal`
 - The guest only ever names `UsersAI/self`. The Runtime rewrites `self` to the active agent principal's root, the same way it rewrites `Users/self` today (`resource_bridge.rs` `scope_current_user_alias`). Any other `UsersAI/<root>` from the guest is refused. That rule is S3 work.
 - `<task-id>` is the durable task id from `docs/AGENT_ARCHITECTURE.md` (session and interaction contract): ASCII letters, digits, `-`, at most 64 bytes.
 - The relative path mirrors workspace v2 (`.AppData/ElastOS/Assistant/workspace-v2.json`).

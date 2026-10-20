@@ -77,6 +77,15 @@ Every line reference below is at branch `claude/overnight-1`, checked by reading
 
 ## 2. Proposed design (smallest diff)
 
+**Changes from the PR #3 review (20 Oct). These win over the list below.**
+
+- **Where the journal lives (answer 1).** `localhost://Users/self/.AppData/Agents/<agent-id>/tasks/<task-id>/journal`. The bridge already scopes `Users/self` to the launching principal (`resource_bridge.rs:671-709`), and the atomic compare-and-swap already accepts `Users/` roots (`auth.rs:7081`). So items 3 and 4 below need no new scoping rule. **The journal moves to `UsersAI` once the Runtime scopes `UsersAI`** the way it scopes `Users/self`.
+- **Owner (answer 2).** The launching person principal owns the journal. `<agent-id>` is a name under that person's space: ASCII letters, digits and `-`, at most 64 bytes. No new principal type in the spike.
+- **Grant (answer 3).** The Runtime gives the guest a grant at launch, scoped to that one journal path and the write action. No `capabilities` import.
+- **Writes.** Only through `write_principal_root_object_if_revision`. Never the library `Write` path, whose revision check is not atomic (section 1c).
+- **Round trip (answer 4).** `decode(encode(j)) == without_grants(j)` is confirmed.
+- **Open: the import list.** Answer 3 also says the import list stays identity, runtime, types. But those three interfaces offer only `runtime.info()` and `identity.context()` (`elastos/wit/elastos-bus-v1.wit:63-73`). With them, the guest has no call that can hand bytes to the Runtime. Proposing an append needs `elastos:bus/providers@1.0.0` (item 1 below, and HANDOFF S3), or a WIT change, which the plan forbids. See question 5.
+
 1. **Imports (a security change, needs the adversarial review).** The guest adds `elastos:bus/providers@1.0.0`, and `elastos:bus/capabilities@1.0.0` only if the guest must ask for its own grant. The ignored Wasmtime test's expected list changes in the same commit.
 2. **Guest.**
    - A new step kind, `ProposalKind::JournalAppend`.
@@ -126,6 +135,12 @@ Every line reference below is at branch `claude/overnight-1`, checked by reading
    - (a) `UsersAI` paths are not scoped to a principal anywhere in the Runtime. The shell capsule's agent mode, with no policy file, auto-allows `localhost://UsersAI/*` (`elastos/capsules/shell/src/main.rs:227-240`).
    - (b) Two Runtime launch paths default the shell's decision mode to `auto` when `ELASTOS_SHELL_MODE` is unset (`elastos/crates/elastos-server/src/main.rs:1912`, `serve_cmd.rs:333`). The managed path sets `agent` (`runtime_control.rs:1320`).
    I did not test what either means on an installed Home. Please decide whether this goes to the team, and whether S3 waits for it.
+   Note added after review: `UsersAI` is `0700` on disk, so only the operating-system owner can read it (`localhost.rs:118-136`). But the Runtime has no principal mapping for it like `Users/self`.
+   **Answer (20 Oct):** on Sasha's Mac the installed Home runs the shell in agent mode with policy `home-auto.json`. That allows peer, did, `Users/*` and one shared Home folder. No `UsersAI`, no auto-grant, so this is not live today. Sasha raises it with the team privately. S3 does not wait: the journal goes under `Users/self` (section 2).
 2. **Which principal owns the journal?** `docs/AGENT_ARCHITECTURE.md` says the agent principal. Today only `person:` and `device:` principals exist, and the bridge principal is the launching person. S3 needs a rule for the agent principal id, and who may create one.
 3. **Does the guest ask for its own grant (`capabilities` import), or does the Runtime hand it one at launch?** The first adds a second import and an approval card. The second needs a launch-time grant scoped to one task journal.
 4. **Confirm the S2 choice** that grant strings are not stored in the journal.
+
+Answers (20 Oct): 2, the launching person principal; 3, a grant at launch, no `capabilities` import; 4, confirmed.
+
+5. **(new, open)** Answer 3 keeps the import list at identity, runtime, types, but the guest needs `providers.invoke` to propose an append (section 2, "Open: the import list"). Is adding `elastos:bus/providers@1.0.0` allowed for S3, with the adversarial review HANDOFF S3 already asks for?
