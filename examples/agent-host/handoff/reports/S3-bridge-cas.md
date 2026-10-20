@@ -342,6 +342,8 @@ Changed:      elastos/crates/elastos-server/src/library.rs - SHIPPING: clean_lib
                 path forwarded; test updated
 Tests run:    (cd elastos && cargo test -p elastos-server --lib -- api::handlers::provider::tests resource_bridge::tests
                 api::handlers::storage::tests library::tests::agent_journals) -> "92 passed"; clippy clean
+              Full suite on the PR #20 merge (all of #8, #9, #19): "3030 passed; 13 failed; 24 ignored"; the same 13
+                container failures as before, none new.
               (cd elastos && cargo test -p elastos-server --lib library) -> "115 passed; 4 failed": the 4 are the custody
                 tests that fail in this container before and after (same names as the full-suite list)
 New tests:    library::tests::agent_journals_are_not_library_objects (write, folded write, read, stat, list, trash, mkdir,
