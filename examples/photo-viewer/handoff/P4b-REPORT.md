@@ -26,6 +26,8 @@ Branch `claude/photo-p4b`, from `claude/photo-p4` (the design note).
 | R2 | A dev key names capsules, never a whole role, and expires; none outside dev mode | `DevKey` |
 | R2 | Keep `verify_strict`; raise the Runtime to it as its own fix | `sign.rs`; `NOTE-STRICT-SIGNATURES.md` |
 | R3 | A release policy runs at most 90 days past now; a dev key at most 30 | `MAX_POLICY_LIFETIME_SECS`, `MAX_DEV_KEY_LIFETIME_SECS` |
+| Codex 4 | The floor's read, check and raise are serialized; each writer has its own temporary file | `PolicyFloor::lock` (`std::fs::File::lock` on `<floor>.lock`) |
+| Codex 5 | Admission checks the floor every time; a policy older than it is refused | `policy_stale` in `admit` |
 
 ## What it does
 
@@ -61,6 +63,14 @@ Branch `claude/photo-p4b`, from `claude/photo-p4` (the design note).
      admission. An `expires_at` more than 90 days past now is `policy_lifetime_too_long` (exactly 90 days is
      accepted).
    - Only a policy whose signature verifies, which has not expired and is within the cap moves the floor.
+   - **Concurrent loads** (Codex finding 4):
+     - the read, the check and the raise run under an exclusive lock on `<floor>.lock`;
+     - each writer writes its own temporary file, `<floor>.next-<pid>-<random>`;
+     - so two policies loaded at once cannot leave the lower one written.
+   - **A held policy** (Codex finding 5): the accepted `TrustPolicy` keeps its floor and its sha256.
+     Every admission reads the floor again and refuses with `policy_stale` if a newer policy, or another
+     with the same sequence, was accepted since, or if the floor is gone. So a policy cached from before a
+     revocation cannot admit the revoked publisher.
    - `LocalConfig` is `{dev_mode, dev_keys}` and nothing else (unknown fields are refused). It cannot add
      revocations, lift them or widen a release publisher.
    - **Dev keys** are `{did, roles, names, expires_at}`, every field required:
@@ -77,7 +87,7 @@ Branch `claude/photo-p4b`, from `claude/photo-p4` (the design note).
    | Recompute the CID, compare with the claim | `cid_mismatch` (also an unlisted extra file) |
    | Verify the claim's signature | `signature_invalid` (another key, a changed field, another domain, malformed hex, not a did:key) |
    | The claim's name, version and role are the manifest's | `claim_manifest_mismatch`; `claim_malformed` for bad JSON or a non-semver version |
-   | The policy is still current | `policy_expired` |
+   | The policy is still current, and no newer one was accepted | `policy_expired`, `policy_stale` |
    | Revocations | `cid_revoked`, `publisher_revoked` |
    | Publisher, roles and names | `publisher_untrusted`, `dev_key_expired`, `publisher_role_refused` |
    | Inventory | `version_downgrade` (a lower semver of an installed name, pre-release ordering included); `version_conflict` (the same version with another CID) |
@@ -108,7 +118,7 @@ CLI: `cargo run -- cid <dir>` prints the CID; `cargo run -- listing <dir>` print
 
 | Suite | Result |
 |---|---|
-| `cargo test` | 38 passed (3 unit, 35 integration) |
+| `cargo test` | 40 passed (3 unit, 37 integration) |
 | `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` | clean |
 
 Tests asked for in answer 9, and where:
@@ -125,6 +135,8 @@ Tests asked for in answer 9, and where:
 | R2: policy expiry | `an_expired_policy_is_refused_at_load_and_at_admission` |
 | R2: dev keys named and expiring | `a_dev_key_names_its_capsules_and_expires` (also: the release publisher is unaffected) |
 | R3: lifetime caps | `a_release_policy_runs_at_most_90_days` (also: a refused policy does not move the floor), `a_dev_key_runs_at_most_30_days` |
+| Codex 4: concurrent loads | `two_policies_loaded_at_once_never_lower_the_floor`: 200 rounds of sequences 1 and 2 loaded at once on two threads; after every round the floor is 2 and 1 is refused |
+| Codex 5: a held policy | `a_policy_held_from_before_a_revocation_does_not_admit`: Codex's case (cache 1, accept 2 revoking the publisher, admit with 1 → `policy_stale`); with 2 → `publisher_revoked`; a deleted floor → `policy_stale` |
 
 Others: `the_listing_is_canonical_and_names_every_shipped_file` (the exact bytes),
 `the_listing_is_sorted_by_path_bytes_not_by_walk_order`, `any_change_to_the_closure_changes_the_cid`,
@@ -144,7 +156,7 @@ non-root run cleans up.
 
 ## Falsifiers
 
-`RUST_TEST_THREADS=2 python3 -I examples/photo-viewer/falsify-bundle.py`: **47 of 47 caught**. Each
+`RUST_TEST_THREADS=2 python3 -I examples/photo-viewer/falsify-bundle.py`: **49 of 49 caught**. Each
 mutant must compile, each named test must exist and fail, and the file is restored from saved bytes;
 `git status` after the run was clean.
 
@@ -154,7 +166,7 @@ mutant must compile, each named test must exist and fail, and the file is restor
 | Claim (6) | CID not checked; signature not checked; no signing domain; claim need not match the manifest; unknown claim fields taken; another claim schema taken |
 | Policy (5) | checked against the DID it names, not the pinned root (both checks removed together, since either alone still refuses); signature not checked; dev keys outside dev mode; a dev key may be a release key; local config takes more than dev keys |
 | Trust (5) | revoked CIDs admit; revoked publishers admit; any publisher trusted; any role; any name |
-| Rollback and expiry (9) | an older policy accepted after a newer one; two policies share a sequence; the floor never written; a refused policy moves the floor; a floor that does not parse counts as none; an expired policy loads; an expired policy admits; a release policy may run forever; the 90-day cap refuses exactly 90 days |
+| Rollback and expiry (11) | an older policy accepted after a newer one; the floor read, checked and raised without the lock (fails within the first 3 of 200 rounds, 5 of 5 runs); admission takes a policy older than the floor; two policies share a sequence; the floor never written; a refused policy moves the floor; a floor that does not parse counts as none; an expired policy loads; an expired policy admits; a release policy may run forever; the 90-day cap refuses exactly 90 days |
 | Dev keys (5) | a dev key ships a whole role; an expired dev key loads; an expired dev key admits; a dev key may run forever; the 30-day cap refuses exactly 30 days |
 | Inventory (2) | a lower version admits; one version may have two CIDs |
 | Staging and load (5) | the copy not re-hashed; the copy left writable; load skips the read-only check; load skips the re-hash; load takes any path |
@@ -199,8 +211,8 @@ another CID. The release CID comes from the P2 recipe output, once the P2 Mac ex
 - **3 (no ambient authority).** Trust comes only from a current, non-rolled-back signed release table, or
   a named, expiring dev key in dev mode; a name, a path or a self-named signer grants nothing.
 - **10 (one path).** Load from `store/<cid>` is the only way in; admission itself goes through it.
-- **11 (fail closed, then explain).** 32 refusal codes, each naming what was expected and each with a
-  test; 47 falsifiers over the checks behind them.
+- **11 (fail closed, then explain).** 33 refusal codes, each naming what was expected and each with a
+  test; 49 falsifiers over the checks behind them.
 - **13 (objects vs capsules).** One CID per capsule closure; the surface pins its core by CID.
 - **15 (content-addressed).** Identity is the closure listing CID; IPFS CIDs stay delivery details.
 - **16 (UI is not authority).** Nothing here is set from a UI; local config cannot widen release trust.
@@ -213,7 +225,8 @@ Phase 2 prerequisite: correction 1 (per-publisher trust policy by role), proven 
 
 ## Questions for Sasha
 
-None open. Round 1's three are built (1, 2) or written up (3); round 2's two are built (90 and 30 days).
+None open. Round 1's three are built (1, 2) or written up (3); round 2's two are built (90 and 30 days);
+Codex findings 4 and 5 are fixed.
 
 ## Next slice
 
