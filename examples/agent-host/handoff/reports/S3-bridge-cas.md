@@ -184,6 +184,10 @@ New tests:    the_agents_area_folds_unicode_case_and_allows_one_spelling (string
               only_read_and_write_are_allowed_under_agents (delete, mkdir, list, stat, exists, and a folded delete; no
                 provider call; a delete outside the area still reaches the provider)
               a_revision_conflict_is_audited_as_a_conflict
+Full suite:   (cd elastos && cargo test -p elastos-server --lib) -> "3021 passed; 13 failed; 22 ignored". All 13 are in
+                the previous run's 14 (container limits); term_drains_gateway_streams_and_separate_owned_child_groups
+                passed this time, so it depends on timing.
+              ./examples/agent-host/verify.sh -> "87 passed", OK (the guest test that reads resource_bridge.rs still holds)
 Falsifiers:   one at a time on c184382, undone with git checkout; tree clean after.
               D01 the Agents area folds ASCII only            -> the_agents_area_folds_unicode_case_and_allows_one_spelling,
                                                                  a_folded_or_misspelled_agents_path_is_refused_before_storage FAILED
