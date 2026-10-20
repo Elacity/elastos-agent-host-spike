@@ -981,16 +981,27 @@ struct PhotosRecord {
 }
 
 /// The launch token, for the Photos viewer only. Before it is valid there is
-/// no principal to record, so a refusal here leaves no audit record (and the
-/// gateway front door refuses requests with no valid token at all).
+/// no principal or launch to record, so a refusal here is counted, not
+/// recorded on its own (`count_photos_unadmitted`); the error carries its
+/// fixed code. The gateway front door refuses requests with no valid token at
+/// all before they reach this.
 fn require_photos_token(
     data_dir: &FsPath,
     headers: &HeaderMap,
-) -> Result<super::gateway::RequiredHomeLaunchToken, PhotosRefusal> {
+) -> Result<super::gateway::RequiredHomeLaunchToken, (PhotosRefusal, &'static str)> {
     super::gateway::require_home_viewer_launch(data_dir, headers, PHOTOS_VIEWER).map_err(|err| {
-        PhotosRefusal::new(
-            StatusCode::UNAUTHORIZED,
-            format!("Photos needs its own launch token: {err}"),
+        // Runtime's own message, never request text.
+        let code = if err.to_string() == "missing home launch token" {
+            "missing_token"
+        } else {
+            "token_refused"
+        };
+        (
+            PhotosRefusal::new(
+                StatusCode::UNAUTHORIZED,
+                format!("Photos needs its own launch token: {err}"),
+            ),
+            code,
         )
     })
 }
@@ -1273,6 +1284,188 @@ fn photos_audit(
     })
 }
 
+// ---- Refusals before the token check: counted per window ----
+//
+// A request refused before its launch token is accepted has no principal and
+// no launch, and anyone can send one. Each is counted by (route, code) in a
+// 60-second window, and the window is written as ONE audit event carrying all
+// its counts, so a steady flood costs one event a minute out of the 512-event
+// audit tail. The route is the matched route's fixed name and the code comes
+// from a fixed list; request text never becomes a key. The window is written
+// at the first request of a later window, or at gateway shutdown. A crash
+// loses the open window.
+
+const PHOTOS_UNADMITTED_WINDOW_SECS: u64 = 60;
+/// A backstop for distinct keys per window. The fixed lists give at most
+/// 2 routes x 3 codes = 6 keys today, so it is not reached.
+const PHOTOS_UNADMITTED_KEY_CAP: usize = 16;
+const PHOTOS_UNADMITTED_ROUTES: [&str; 2] = ["playlist", "item"];
+const PHOTOS_UNADMITTED_CODES: [&str; 3] = ["missing_token", "token_refused", "other"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PhotosUnadmittedWindow {
+    pub(crate) start: u64,
+    pub(crate) counts: std::collections::BTreeMap<(&'static str, &'static str), u32>,
+    pub(crate) overflow: u32,
+    cap: usize,
+}
+
+/// `name` if it is on `known`, else `"other"`.
+fn photos_fixed_name(known: &[&'static str], name: &str) -> &'static str {
+    known
+        .iter()
+        .find(|known| **known == name)
+        .copied()
+        .unwrap_or("other")
+}
+
+impl PhotosUnadmittedWindow {
+    pub(crate) fn new(start: u64, cap: usize) -> Self {
+        Self {
+            start,
+            counts: std::collections::BTreeMap::new(),
+            overflow: 0,
+            cap,
+        }
+    }
+
+    pub(crate) fn add(&mut self, route: &str, code: &str) {
+        let key = (
+            photos_fixed_name(&PHOTOS_UNADMITTED_ROUTES, route),
+            photos_fixed_name(&PHOTOS_UNADMITTED_CODES, code),
+        );
+        if let Some(count) = self.counts.get_mut(&key) {
+            *count = count.saturating_add(1);
+        } else if self.counts.len() < self.cap {
+            self.counts.insert(key, 1);
+        } else {
+            self.overflow = self.overflow.saturating_add(1);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.counts.is_empty() && self.overflow == 0
+    }
+
+    /// `window=<start>-<end> counts=<route>/<code>:<n>,... overflow=<n> total=<n>`
+    pub(crate) fn reason(&self) -> String {
+        let counts: Vec<String> = self
+            .counts
+            .iter()
+            .map(|((route, code), count)| format!("{route}/{code}:{count}"))
+            .collect();
+        let total = self
+            .counts
+            .values()
+            .fold(self.overflow, |total, count| total.saturating_add(*count));
+        let counts = if counts.is_empty() {
+            "-".to_string()
+        } else {
+            counts.join(",")
+        };
+        format!(
+            "window={}-{} counts={counts} overflow={} total={total}",
+            self.start,
+            self.start + PHOTOS_UNADMITTED_WINDOW_SECS,
+            self.overflow,
+        )
+    }
+}
+
+type PhotosUnadmittedWindows =
+    std::sync::Mutex<std::collections::HashMap<PathBuf, PhotosUnadmittedWindow>>;
+
+/// One open window per data root (one per Runtime; tests run many).
+fn photos_unadmitted_windows() -> &'static PhotosUnadmittedWindows {
+    static WINDOWS: std::sync::OnceLock<PhotosUnadmittedWindows> = std::sync::OnceLock::new();
+    WINDOWS.get_or_init(Default::default)
+}
+
+/// Counts one refusal before the token check at `now`, first writing the
+/// previous window if `now` is in a later one.
+pub(crate) fn count_photos_unadmitted_at(
+    data_dir: &FsPath,
+    route: &str,
+    code: &str,
+    now: u64,
+) -> anyhow::Result<()> {
+    let start = now - now % PHOTOS_UNADMITTED_WINDOW_SECS;
+    let finished = {
+        let mut windows = photos_unadmitted_windows()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Photos refusal counts are unavailable"))?;
+        let window = windows
+            .entry(data_dir.to_path_buf())
+            .or_insert_with(|| PhotosUnadmittedWindow::new(start, PHOTOS_UNADMITTED_KEY_CAP));
+        // A clock that steps back keeps counting into the open window.
+        let finished = (start > window.start).then(|| {
+            std::mem::replace(
+                window,
+                PhotosUnadmittedWindow::new(start, PHOTOS_UNADMITTED_KEY_CAP),
+            )
+        });
+        window.add(route, code);
+        finished
+    };
+    match finished {
+        Some(window) => write_photos_unadmitted(data_dir, &window),
+        None => Ok(()),
+    }
+}
+
+/// Writes the open window, if it counted anything. Called at gateway shutdown.
+pub(crate) fn flush_photos_unadmitted(data_dir: &FsPath) -> anyhow::Result<()> {
+    let window = photos_unadmitted_windows()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Photos refusal counts are unavailable"))?
+        .remove(data_dir);
+    match window {
+        Some(window) => write_photos_unadmitted(data_dir, &window),
+        None => Ok(()),
+    }
+}
+
+fn write_photos_unadmitted(
+    data_dir: &FsPath,
+    window: &PhotosUnadmittedWindow,
+) -> anyhow::Result<()> {
+    if window.is_empty() {
+        return Ok(());
+    }
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let event_type = "photos.viewer.unadmitted";
+    crate::auth::append_audit_event(
+        data_dir,
+        RuntimeAuditEventV1 {
+            schema: RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: format!(
+                "audit:{event_type}:{}:{}:{sequence}",
+                window.start,
+                photos_record_boot()
+            ),
+            event_type: event_type.to_string(),
+            principal_id: None,
+            proof_binding_id: None,
+            session_id: None,
+            challenge_id: None,
+            capsule_id: Some(PHOTOS_VIEWER.to_string()),
+            result: "refused".to_string(),
+            reason: window.reason(),
+            occurred_at: crate::auth::now_ts(),
+            signer_did: None,
+            signature: None,
+        },
+    )
+}
+
+/// The request is refused whatever happens here; a failed write is logged.
+fn count_photos_unadmitted(data_dir: &FsPath, route: &'static str, code: &'static str) {
+    if let Err(err) = count_photos_unadmitted_at(data_dir, route, code, crate::auth::now_ts()) {
+        tracing::warn!("Photos refusal counts were not written: {err}");
+    }
+}
+
 fn photos_bytes_response(content_type: &'static str, bytes: Vec<u8>) -> Response {
     (
         StatusCode::OK,
@@ -1292,7 +1485,10 @@ pub async fn photos_playlist_get(
 ) -> Response {
     let launch = match require_photos_token(&state.data_dir, &headers) {
         Ok(launch) => launch,
-        Err(refusal) => return refusal.into_response(),
+        Err((refusal, code)) => {
+            count_photos_unadmitted(&state.data_dir, "playlist", code);
+            return refusal.into_response();
+        }
     };
     let mut record = PhotosRecord {
         playlist: None,
@@ -1322,7 +1518,10 @@ pub async fn photos_playlist_item_get(
 ) -> Response {
     let launch = match require_photos_token(&state.data_dir, &headers) {
         Ok(launch) => launch,
-        Err(refusal) => return refusal.into_response(),
+        Err((refusal, code)) => {
+            count_photos_unadmitted(&state.data_dir, "item", code);
+            return refusal.into_response();
+        }
     };
     let mut record = PhotosRecord {
         playlist: None,

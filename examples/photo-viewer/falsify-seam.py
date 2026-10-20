@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Break each check of the Photos seam, see its test fail, restore it.
 
-Usage: RUST_TEST_THREADS=2 python3 -I falsify-seam.py
+Usage: RUST_TEST_THREADS=2 python3 -I falsify-seam.py [--check] [name-part ...]
+
+--check only confirms every anchor occurs once. Name parts run only the
+falsifiers whose name contains one of them.
 
 The seam is Runtime code (elastos-server). Each falsifier replaces one exact
 line, rebuilds the crate's tests (a mutant that does not compile proves
@@ -95,8 +98,8 @@ CASES = [
     (
         "the record id uses the second, not a counter",
         VIEWER,
-        "let sequence = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;",
-        "let sequence = crate::auth::now_ts() + 0 * COUNTER.load(std::sync::atomic::Ordering::Relaxed);",
+        'let sequence = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;\n    let event_type = format!("photos.viewer.{route}");',
+        'let sequence = crate::auth::now_ts() + 0 * COUNTER.load(std::sync::atomic::Ordering::Relaxed);\n    let event_type = format!("photos.viewer.{route}");',
         ["each_photos_request_leaves_exactly_one_audit_record"],
     ),
     (
@@ -112,6 +115,27 @@ CASES = [
         "None => Ok((target.to_string(), None)),",
         "None => Ok((target.to_string(), Some(PHOTOS_LAUNCH_TOKEN_TTL_SECS))),",
         ["home_binds_the_photos_playlist_with_a_short_lived_token"],
+    ),
+    (
+        "an unknown route or code creates its own key",
+        VIEWER,
+        '    known\n        .iter()\n        .find(|known| **known == name)\n        .copied()\n        .unwrap_or("other")',
+        "    let _ = known;\n    Box::leak(name.to_string().into_boxed_str())",
+        ["an_unknown_route_or_code_cannot_create_a_key"],
+    ),
+    (
+        "each refusal before the token writes its own event",
+        VIEWER,
+        "let finished = (start > window.start).then(|| {",
+        "let finished = (start >= window.start).then(|| {",
+        ["refusals_before_the_token_leave_one_event_per_window"],
+    ),
+    (
+        "past the key cap a refusal still makes a key",
+        VIEWER,
+        "} else if self.counts.len() < self.cap {",
+        "} else if true || self.counts.len() < self.cap {",
+        ["past_the_key_cap_refusals_are_counted_as_overflow"],
     ),
     (
         "the playlist route also takes POST",
@@ -173,6 +197,10 @@ def tests_fail(filters):
 
 
 def main():
+    import sys
+    args = sys.argv[1:]
+    check_only = "--check" in args
+    parts = [arg for arg in args if arg != "--check"]
     missed = []
     for name, relative, old, new, filters in CASES:
         path = ELASTOS / relative
@@ -180,6 +208,8 @@ def main():
         text = saved.decode()
         if text.count(old) != 1:
             raise SystemExit(f"{name}: expected the line once in {relative}, found {text.count(old)}")
+        if check_only or (parts and not any(part in name for part in parts)):
+            continue
         try:
             path.write_text(text.replace(old, new))
             caught = tests_fail(filters)
@@ -190,7 +220,10 @@ def main():
             missed.append(name)
     if missed:
         raise SystemExit(f"{len(missed)} falsifier(s) not caught: {missed}")
-    print("all seam falsifiers caught")
+    if check_only:
+        print(f"all {len(CASES)} anchors found once")
+    else:
+        print("all selected seam falsifiers caught")
 
 
 if __name__ == "__main__":

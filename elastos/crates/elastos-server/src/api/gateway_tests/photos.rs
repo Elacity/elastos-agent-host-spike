@@ -4,6 +4,7 @@
 use super::*;
 
 use crate::api::viewer_gateway::{
+    count_photos_unadmitted_at, flush_photos_unadmitted, PhotosUnadmittedWindow,
     PHOTOS_LAUNCH_TOKEN_TTL_SECS, PHOTOS_PLAYLIST_URI, PHOTOS_VIEWER,
 };
 
@@ -808,4 +809,159 @@ async fn a_launch_keeps_the_playlist_it_read_first() {
     let (status, body) = photos.get(&item_route("0"), Some(&fresh)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, UNLISTED);
+}
+
+// ---- Refusals before the token check ----
+
+fn unadmitted_events(data_dir: &std::path::Path) -> Vec<RuntimeAuditEventV1> {
+    photos_audit_records(data_dir)
+        .into_iter()
+        .filter(|event| event.event_type == "photos.viewer.unadmitted")
+        .collect()
+}
+
+#[test]
+fn an_unknown_route_or_code_cannot_create_a_key() {
+    let mut window = PhotosUnadmittedWindow::new(0, 16);
+    window.add("item", "<script>alert(1)</script>");
+    window.add(
+        "/api/viewers/image-viewer/playlist/item/../../x",
+        "token_refused",
+    );
+    window.add("item", "token_refused");
+    window.add("playlist", "missing_token");
+    let keys: Vec<_> = window.counts.keys().copied().collect();
+    assert_eq!(
+        keys,
+        vec![
+            ("item", "other"),
+            ("item", "token_refused"),
+            ("other", "token_refused"),
+            ("playlist", "missing_token"),
+        ]
+    );
+    let reason = window.reason();
+    assert!(
+        !reason.contains("script") && !reason.contains(".."),
+        "{reason}"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_token_is_counted_by_its_fixed_route_and_code() {
+    let photos = photos().await;
+    write_test_static_capsule(
+        photos.dir.path(),
+        DOCUMENTS_CAPSULE_ID,
+        "viewer",
+        "Test Documents viewer",
+        "<!doctype html><title>Documents</title>",
+    );
+    let documents =
+        app_token_for_authority(photos.dir.path(), DOCUMENTS_CAPSULE_ID, &photos.authority);
+    for path in [item_route("0"), item_route("7"), PLAYLIST_ROUTE.to_string()] {
+        let (status, _) = photos.get(&path, Some(&documents)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    flush_photos_unadmitted(photos.dir.path()).unwrap();
+    // One event, or two if the requests straddled a window boundary.
+    let events = unadmitted_events(photos.dir.path());
+    assert!(matches!(events.len(), 1 | 2), "{events:?}");
+    let mut totals = std::collections::BTreeMap::new();
+    for event in &events {
+        assert_eq!(event.principal_id, None);
+        assert_eq!(event.result, "refused");
+        let counts = event
+            .reason
+            .split(' ')
+            .find_map(|part| part.strip_prefix("counts="))
+            .unwrap();
+        for entry in counts.split(',') {
+            // Only fixed names: no position, no path from the request.
+            let (key, count) = entry.rsplit_once(':').unwrap();
+            assert!(
+                ["item/token_refused", "playlist/token_refused"].contains(&key),
+                "{}",
+                event.reason
+            );
+            *totals.entry(key.to_string()).or_insert(0) += count.parse::<u32>().unwrap();
+        }
+    }
+    assert_eq!(totals["item/token_refused"], 2);
+    assert_eq!(totals["playlist/token_refused"], 1);
+}
+
+#[test]
+fn refusals_before_the_token_leave_one_event_per_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path();
+    let window = 1_800_000_000; // a window start: a multiple of 60
+    for (route, code, at) in [
+        ("item", "token_refused", window),
+        ("item", "token_refused", window + 1),
+        ("playlist", "missing_token", window + 30),
+        ("item", "missing_token", window + 59),
+    ] {
+        count_photos_unadmitted_at(data_dir, route, code, at).unwrap();
+    }
+    assert!(
+        unadmitted_events(data_dir).is_empty(),
+        "the window is still open"
+    );
+
+    // The first request of a later window writes the finished one, once.
+    count_photos_unadmitted_at(data_dir, "playlist", "token_refused", window + 60).unwrap();
+    count_photos_unadmitted_at(data_dir, "playlist", "token_refused", window + 61).unwrap();
+    let events = unadmitted_events(data_dir);
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].reason,
+        format!(
+            "window={window}-{} counts=item/missing_token:1,item/token_refused:2,playlist/missing_token:1 overflow=0 total=4",
+            window + 60
+        )
+    );
+
+    // A clock that steps back counts into the open window.
+    count_photos_unadmitted_at(data_dir, "item", "token_refused", window + 5).unwrap();
+    // Shutdown writes the open window.
+    flush_photos_unadmitted(data_dir).unwrap();
+    flush_photos_unadmitted(data_dir).unwrap();
+    let events = unadmitted_events(data_dir);
+    assert_eq!(events.len(), 2);
+    assert!(
+        events[1]
+            .reason
+            .ends_with("counts=item/token_refused:1,playlist/token_refused:2 overflow=0 total=3"),
+        "{}",
+        events[1].reason
+    );
+    assert_ne!(events[0].event_id, events[1].event_id);
+}
+
+#[test]
+fn past_the_key_cap_refusals_are_counted_as_overflow() {
+    let mut window = PhotosUnadmittedWindow::new(0, 2);
+    window.add("item", "token_refused");
+    window.add("playlist", "token_refused");
+    window.add("item", "missing_token");
+    window.add("item", "missing_token");
+    window.add("item", "token_refused");
+    assert_eq!(window.counts.len(), 2);
+    assert_eq!(window.counts[&("item", "token_refused")], 2);
+    assert_eq!(window.overflow, 2);
+    assert!(
+        window.reason().ends_with("overflow=2 total=5"),
+        "{}",
+        window.reason()
+    );
+
+    // Counters saturate rather than wrap.
+    window.counts.insert(("item", "token_refused"), u32::MAX);
+    window.overflow = u32::MAX;
+    window.add("item", "token_refused");
+    window.add("item", "other");
+    assert_eq!(window.counts[&("item", "token_refused")], u32::MAX);
+    assert_eq!(window.overflow, u32::MAX);
+    assert!(window.reason().ends_with(&format!("total={}", u32::MAX)));
 }
