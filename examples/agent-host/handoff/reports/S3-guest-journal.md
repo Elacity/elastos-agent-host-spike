@@ -220,3 +220,33 @@ Tests run:    (cd elastos && cargo test -p elastos-server --lib -- resource_brid
                 limits only).
 Guest hash:   99bacd9df2b448a9b94e579754644a217d74f718662702e29973d44d7f4e583c (unchanged)
 ```
+
+## Update: PR #8 fixes 6 and 7 merged in; guest id may not end in "." (20 Oct)
+
+After the Codex verdict on 004962206 (#8 FAIL on viewer storage and bridge audit, fixed in #8 fix 7), PR #8 at
+4d8cfae is merged in (`dcceffe`, no conflicts). Then one guest change, as asked: the guest's id rule now matches the
+bridge's trailing "." rule from #8 fix 6.
+
+```text
+Commits:      dcceffe merge of claude/s3-bridge-cas at 4d8cfae
+              0b0934a guest refuses a journal id that ends in '.'
+              this section is the next commit
+Changed:      examples/agent-host/src/lib.rs - journal_id_ok: `&& !id.ends_with('.')`; doc comment says why (Windows
+                drops a trailing '.'); test a_journal_id_is_letters_digits_and_dashes gets "demo-agent.", "task-1.", "a.."
+                as agent id and as task id
+Tests run:    ./examples/agent-host/verify.sh -> fmt, "108 passed", clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"
+              (cd elastos && cargo test -p elastos-server --lib -- resource_bridge::tests api::handlers::provider::tests
+                gateway_tests::gba) -> "94 passed"; clippy clean
+Falsifier:    L01 guest id may end in "." -> a_journal_id_is_letters_digits_and_dashes FAILED; restored, tree clean
+Guest hash:   70a95319c4996f6a7607f4ad02380c19d861d0d5107d0a286e8d6f334b1d52a3 on two builds (verify.sh, build.sh).
+              Was 99bacd9df2b448a9b94e579754644a217d74f718662702e29973d44d7f4e583c; the old head e690cb5 rebuilt in a
+              scratch worktree gives that same old hash.
+              wasm_sections.py: file 405184 bytes; /1/10 304308 3c5a5c37ce9afde0.
+Import list:  UNCHANGED. Old against new build: only /1/10 (code), /1/11 (data) and the name section differ. Every
+              import and type section, top level and nested, is byte-identical.
+Principles:   fail closed; the guest and the bridge apply one rule.
+DeepSeek:     none used.
+```
+
+**What is next:** stop for Codex on #8, #9 and #20.
