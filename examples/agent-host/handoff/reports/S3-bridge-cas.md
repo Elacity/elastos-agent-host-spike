@@ -125,6 +125,12 @@ Sasha could not run the GPT-family review yet, so another Claude agent did a rea
 Commit:       0b0b02b (fix)
 Tests run:    (cd elastos && cargo test -p elastos-server --lib -- resource_bridge::tests) -> "58 passed" (55 + 3 new)
               (cd elastos && cargo clippy -p elastos-server --lib --tests -- -D warnings) -> clean; fmt -> ok
+              (cd elastos && cargo test -p elastos-server --lib) -> "3017 passed; 14 failed; 22 ignored". Before the fix
+                the same run had 13 failures. The extra one,
+                remote_model::denial_authority::a_denial_that_could_not_be_saved_cancels_nothing, forces a save failure
+                with chmod 0o500, and this container runs as root (uid 0). It fails the same way with the bridge file
+                from before the fix (2396520), checked by swapping the file in and back. The other 13 are the same
+                custody, process, room, gateway-child and IPv6 tests as before.
 New tests:    a_journal_path_with_empty_or_dot_segments_is_refused (protected root: 4 odd URIs x 3 bodies, and reads;
                 the stored journal is unchanged and still reads back)
               an_odd_journal_path_on_a_root_without_protection_never_reaches_the_provider (and the canonical read)
