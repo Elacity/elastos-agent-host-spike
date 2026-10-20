@@ -274,9 +274,15 @@ fn bus_error(code: &str, message: impl Into<String>) -> elastos::bus::types::Bus
         "not_found" => elastos::bus::types::BusError::NotFound(message),
         "timeout" => elastos::bus::types::BusError::Timeout(message),
         "unavailable" => elastos::bus::types::BusError::Unavailable(message),
-        "invalid" | "invalid_action" | "invalid_resource_invoke" => {
-            elastos::bus::types::BusError::Invalid(message)
-        }
+        // The bridge refuses these before storage, so nothing was written: the
+        // guest may treat them as a refusal, not an unknown result.
+        "invalid"
+        | "invalid_action"
+        | "invalid_resource_invoke"
+        | "revision_required"
+        | "revision_conflict"
+        | "principal_root_protection_required"
+        | "invalid_localhost_path" => elastos::bus::types::BusError::Invalid(message),
         _ => elastos::bus::types::BusError::Internal(message),
     }
 }
@@ -535,6 +541,65 @@ mod tests {
         )
         .unwrap();
         assert_eq!(json_line(&line), json_line(&expected));
+    }
+
+    #[test]
+    fn bridge_refusals_made_before_storage_are_invalid() {
+        let invoke_with = |code: &'static str| {
+            let mut state = ComponentState {
+                hostcall: Some(Arc::new(move |_line, _capsule, _principal| {
+                    Ok(serde_json::json!({
+                        "id": 1,
+                        "response": { "type": "error", "code": code, "message": "refused" }
+                    })
+                    .to_string())
+                })),
+                capsule_id: "capsule-1".into(),
+                principal_id: Some("person:local:test".into()),
+                limits: ComponentProvider::store_limits(),
+            };
+            elastos::bus::providers::Host::invoke(
+                &mut state,
+                elastos::bus::types::InvokeRequest {
+                    resource: "localhost://Users/self/.AppData/Agents/demo/tasks/t/journal".into(),
+                    operation: "write".into(),
+                    body: br#"{"content":[1]}"#.to_vec(),
+                    grant: Some("grant-token".into()),
+                },
+            )
+            .unwrap_err()
+        };
+        for code in [
+            "revision_required",
+            "revision_conflict",
+            "principal_root_protection_required",
+            "invalid_localhost_path",
+        ] {
+            assert!(
+                matches!(invoke_with(code), elastos::bus::types::BusError::Invalid(_)),
+                "{code}"
+            );
+        }
+        // A failure that may come after storage stays Internal, and a token
+        // refusal stays Denied.
+        for code in [
+            "write_failed",
+            "read_failed",
+            "provider_error",
+            "something_new",
+        ] {
+            assert!(
+                matches!(
+                    invoke_with(code),
+                    elastos::bus::types::BusError::Internal(_)
+                ),
+                "{code}"
+            );
+        }
+        assert!(matches!(
+            invoke_with("capability_denied"),
+            elastos::bus::types::BusError::Denied(_)
+        ));
     }
 
     #[test]
