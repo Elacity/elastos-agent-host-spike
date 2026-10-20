@@ -2844,6 +2844,40 @@ mod tests {
         );
     }
 
+    /// The alias path is absent (Linux ext4 keeps the names apart), or it is the
+    /// journal itself (APFS folds case and Unicode): the same device and inode.
+    fn absent_or_same_file(alias: &std::path::Path, journal: &std::path::Path) -> bool {
+        let Ok(alias) = std::fs::metadata(alias) else {
+            return true;
+        };
+        let journal = std::fs::metadata(journal).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            alias.dev() == journal.dev() && alias.ino() == journal.ino()
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (alias, journal);
+            false
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absent_or_same_file_tells_the_journal_from_a_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = temp.path().join("journal");
+        std::fs::write(&journal, b"journal v1").unwrap();
+        let link = temp.path().join("link");
+        std::fs::hard_link(&journal, &link).unwrap();
+        let copy = temp.path().join("copy");
+        std::fs::write(&copy, b"journal v1").unwrap();
+        assert!(absent_or_same_file(&temp.path().join("missing"), &journal));
+        assert!(absent_or_same_file(&link, &journal));
+        assert!(!absent_or_same_file(&copy, &journal));
+    }
+
     #[tokio::test]
     async fn a_folded_or_misspelled_agents_path_is_refused_before_storage() {
         let (temp, mut ctx, object_uri) = journal_context("person:local:journal-owner");
@@ -2884,7 +2918,15 @@ mod tests {
                 .unwrap();
             assert_eq!(read["response"]["code"], "invalid_localhost_path", "{rest}");
             assert!(
-                !journal_path(&temp, &format!("{root}/{rest}")).exists(),
+                absent_or_same_file(
+                    &journal_path(&temp, &format!("{root}/{rest}")),
+                    &journal_path(&temp, &object_uri)
+                ),
+                "{rest}"
+            );
+            assert_eq!(
+                std::fs::read(journal_path(&temp, &object_uri)).unwrap(),
+                stored,
                 "{rest}"
             );
         }
