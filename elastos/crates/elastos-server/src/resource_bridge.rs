@@ -1168,7 +1168,7 @@ pub async fn handle_remote_request_with_audit_dir(
             "attached component bridge requires a local runtime API URL; rejecting remote transport: {}",
             e
         )
-    })?;
+    });
 
     let envelope: serde_json::Value =
         serde_json::from_str(line.trim()).context("Invalid JSON from guest")?;
@@ -1176,6 +1176,14 @@ pub async fn handle_remote_request_with_audit_dir(
     let id = envelope["id"].as_u64().unwrap_or(0);
     let request = &envelope["request"];
     let request_type = request["type"].as_str().unwrap_or("");
+    // A resource_invoke checks the URL after its "requested" record, so a bad
+    // URL still leaves a "completed / error" record. Every other request is
+    // refused here, as before.
+    let api_base = if request_type == "resource_invoke" {
+        api_base
+    } else {
+        Ok(api_base?)
+    };
     let client = reqwest::Client::new();
 
     let response = match request_type {
@@ -1219,6 +1227,13 @@ pub async fn handle_remote_request_with_audit_dir(
                 }
             };
             audit("requested", "pending")?;
+            let api_base = match api_base {
+                Ok(api_base) => api_base,
+                Err(err) => {
+                    audit("completed", "error")?;
+                    return Err(err);
+                }
+            };
             let refusal = if !manifest_allows_resource(
                 manifest_capabilities,
                 &dispatch.resource,
@@ -1321,6 +1336,7 @@ pub async fn handle_remote_request_with_audit_dir(
             })
         }
         "request_capability" => {
+            let api_base = api_base?;
             let resource = request["resource"].as_str().unwrap_or("");
             let action_str = request["action"].as_str().unwrap_or("execute");
             let reason = request["reason"].as_str().unwrap_or("");
@@ -2788,6 +2804,11 @@ mod tests {
             ".AppData/Agents/demo-agent/tasks/task-1/journal.",
             ".AppData/Agents/demo-agent./tasks/task-1/journal",
             ".AppData/Agents/demo-agent/tasks/task-1/journal...",
+            ".AppData/Agents/demo-agent/tasks/task-1/journal ",
+            ".AppData/Agents/demo-agent/tasks/task-1/journal\t",
+            ".AppData/Agents/demo-agent/tasks/task-1/journal\n",
+            ".AppData/Agents/demo-agent/tasks/task-1/journal/",
+            ".AppData/Agents \t",
             ".AppDat\u{212a}/Agents/x",
         ]) {
             let rooted = format!("{root}/{rest}");
@@ -3146,6 +3167,51 @@ mod tests {
             assert_eq!(new[0].2, new[1].2);
             assert_eq!(response["response"]["audit"], new[1].2.as_str());
         }
+    }
+
+    /// A bad API URL is found after the "requested" record and leaves a
+    /// "completed / error" record; other request types still fail at once.
+    #[tokio::test]
+    async fn a_bad_api_url_is_audited_as_an_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let result = handle_remote_request_with_audit_dir(
+            &remote_invoke_line(97, "read", "localhost://MyWebSite/index.html", "tok"),
+            "http://example.com:8080",
+            "client-token",
+            "test-capsule",
+            &["localhost://MyWebSite/*".to_string()],
+            Some("person:local:journal-owner"),
+            Some(temp.path()),
+        )
+        .await;
+        let err = result.expect_err("a remote API URL is refused");
+        assert!(
+            format!("{err:#}").contains("local runtime API URL"),
+            "{err:#}"
+        );
+        let events = remote_invoke_audit(temp.path());
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(
+            (events[0].0.as_str(), events[0].1.as_str()),
+            ("component.invoke.requested", "pending")
+        );
+        assert_eq!(
+            (events[1].0.as_str(), events[1].1.as_str()),
+            ("component.invoke.completed", "error")
+        );
+        assert_eq!(events[0].2, events[1].2);
+        let ping = handle_remote_request_with_audit_dir(
+            r#"{"id":98,"request":{"type":"ping"}}"#,
+            "http://example.com:8080",
+            "client-token",
+            "test-capsule",
+            &[],
+            None,
+            Some(temp.path()),
+        )
+        .await;
+        assert!(ping.is_err(), "a bad API URL still refuses every request");
+        assert_eq!(remote_invoke_audit(temp.path()).len(), 2);
     }
 
     /// A provider reply that is not JSON (here a plain-text 403) is an error

@@ -420,6 +420,7 @@ Changed:      elastos/crates/elastos-server/src/api/viewer_gateway.rs - viewer_s
                 ok/conflict/error  a JSON reply, as before
 Not audited:  a resource_invoke that does not parse (invalid_resource_invoke): there is no resource to record. Local
                 dispatch does the same.
+              (Corrected in fix 8: a bad API URL also exited before "requested".)
 Finding 1:    Before: a viewer manifest with storage under Users/self/.AppData/Agents/... could PUT and GET files there
                 (on Linux both journal and Journal), with no journal rule. After: refused before any file access.
               Also refused: a .AppData/* root saving a file named Agents (the object check, not only the root).
@@ -445,4 +446,69 @@ DeepSeek:     none used.
 Guest hash:   unchanged (no guest change in this PR).
 ```
 
-**What is next:** merge #8 into #9 and #20, the #9 guest id "." check with its new guest hash, then stop for Codex.
+## Fix 8: check the string that is resolved; audit a bad API URL, after Codex round 3 on 4d8cfae37 (20 Oct)
+
+Codex round 3: #19 PASS stands; the merges, #9's guest change and its hash confirmed; #8 FAIL on two findings (both
+checked by Cursor).
+
+```text
+Commits:      944bc26 check the Agents rule on the string that is resolved
+              cb00fcf attached bridge audits a bad API URL
+              8e13a61 drop a redundant canonical check in the Agents rule (falsifier W03 survived, see below)
+              this section is the next commit
+Finding 1:    The path resolver (elastos-common parse_localhost_path) trims surrounding whitespace and slashes. A viewer
+                storage grant "localhost://Users/self/.AppData/Agents /*" (space, tab or newline) was checked as "Agents "
+                and resolved as the real Agents folder (Codex read a plaintext file there with 200). Library had the same
+                hole: "<root>/.AppData/Agents \t/" is trimmed of "/" only, checked as "Agents \t", resolved as "Agents"
+                (so list, stat or trash of the whole folder).
+Changed:      provider_resource.rs - in_agents_area canonicalises its own input with rooted_localhost_uri, the same parse
+                the resolver uses. agents_area_refusal finds the area through it; its exact-spelling rule then refuses any
+                path in the area that is not already canonical (whitespace or a trailing "/" makes a bad or empty segment).
+              api/viewer_gateway.rs - the storage root is canonicalised once (refused if it does not canonicalise), and
+                that one string is used for the principal-scope check, the Agents guard, the object URI and the path.
+              library.rs - clean_library_uri cleans to the canonical URI, and library_target resolves that same string.
+Callers:      every caller now checks exactly the string it resolves:
+                resource_bridge.rs protected storage (~489): rooted_localhost_uri -> check -> rooted_localhost_fs_path, same
+                  string (already so)
+                api/handlers/provider.rs proxy (~64): build_capability_resource gives rooted_localhost_uri; that string is
+                  checked and forwarded as the path (already so since fix 5)
+                library.rs (~3304): now the canonical URI
+                api/viewer_gateway.rs: now the canonical root
+                api/handlers/storage.rs: checks the canonical URI (fix 5)
+              and the shared rule canonicalises anyway, so a caller that passes a raw string is still covered.
+Not an alias: "<root>/.AppData/Agents\n/" as a raw path: the resolver strips the "/" and keeps the "\n", so it names a
+                different folder; the rule treats it as outside the area, which matches.
+Finding 2:    LoopbackHttpBaseUrl::parse ran before the request was parsed, so a bad API URL left no record. A
+                resource_invoke now checks it right after "requested" and records "completed / error". Other request types
+                (ping, request_capability, ...) are still refused at once, as before.
+Tests:        cargo test -p elastos-server --lib -- resource_bridge::tests api::handlers::provider::tests
+                api::handlers::storage::tests gateway_tests::gba library::tests -> "113 passed; 1 ignored"
+              cargo clippy -p elastos-server --all-targets -- -D warnings -> clean
+              cargo test -p elastos-server --lib -> "3035 passed; 13 failed; 22 ignored"; the same 13 container failures
+                as fix 7, none new; +3 passing are the new tests
+New tests:    gateway_tests::gba::viewer_storage_whitespace_root_cannot_reach_the_agents_area: space, tab, newline in the
+                declared root x viewer and content-capsule grants x save and state x GET and PUT, against planted
+                plaintext journals: all 403, no "planted" in any body, both files unchanged, no other file under Agents
+              library::tests::whitespace_after_agents_does_not_reach_the_agents_folder: list, stat, trash on
+                "Agents<ws>/" and ".appdata/agents<ws>/" for space, tab, newline, CRLF: all error, journal unchanged
+              the_agents_area_folds_unicode_case_and_allows_one_spelling: "journal " "journal\t" "journal\n" "journal/"
+                and ".AppData/Agents \t" are in the area and refused (invalid_localhost_path) for read and write
+              resource_bridge::tests::a_bad_api_url_is_audited_as_an_error: Err, requested + completed/error with one id;
+                a ping with the same URL still fails and writes nothing
+Falsifiers:   W01 every guard on the raw string (rule, viewer, Library) -> viewer whitespace test, Library whitespace test
+                and the rule test FAILED
+              W02 in_agents_area on the raw string only     -> the rule test FAILED
+              W04 bad API URL checked before "requested"    -> a_bad_api_url_is_audited_as_an_error FAILED
+              W05 viewer root raw only                      -> survives, by design: the shared rule canonicalises
+              W06 Library URI raw only                      -> survives, by design: same
+              W03 remove the extra "is canonical" test in agents_area_refusal -> survived; the exact-spelling rule
+                already refuses every such path, so the extra test was dead code and is removed (8e13a61)
+              each restored; tree clean
+Not done:     Windows also drops trailing spaces inside a segment ("Agents /journal"); left with the device names for when
+                Windows is a target.
+Principles:   fail closed; one rule, many routes; check the string you resolve; every request leaves a complete audit record.
+DeepSeek:     none used.
+Guest hash:   unchanged (no guest change in this PR).
+```
+
+**What is next:** merge into #9 and #20, then stop for Codex.
