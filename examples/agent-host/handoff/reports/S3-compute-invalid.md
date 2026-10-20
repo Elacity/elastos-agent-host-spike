@@ -50,3 +50,16 @@ Questions:    Map append_not_allowed, operation_not_allowed and invalid_content 
 ## What is next
 
 The end-to-end Wasmtime test through the real bridge. It needs PR #8, PR #9 and this PR together, so it goes on a branch that merges all three.
+
+## Update: three more codes (20 Oct)
+
+Review answer to this PR's question: yes. `append_not_allowed`, `operation_not_allowed` and `invalid_content` are refused by the bridge before storage, so they now map to `Invalid` too.
+
+```text
+Commit:       the commit after 3ceac3e ("also map append_not_allowed, operation_not_allowed, invalid_content")
+Tests run:    (cd elastos && cargo test -p elastos-compute --lib) -> "16 passed; 1 ignored"; clippy clean
+Test:         bridge_refusals_made_before_storage_are_invalid now covers seven codes
+Falsifiers:   append_not_allowed stays Internal    -> bridge_refusals_made_before_storage_are_invalid FAILED
+              operation_not_allowed stays Internal -> same FAILED
+              invalid_content stays Internal       -> same FAILED
+```
