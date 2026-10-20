@@ -247,15 +247,17 @@ Not falsified separately, and said plainly:
 2.5 (first app, photo viewer). The binding in the signed launch context is the Phase 2 mechanism (P3 design
 section 4), used here for the fixed spike playlist.
 
-## Questions for the review
+## Phase 2 decisions (Sasha's answers to round 2)
 
-Round 1's three questions are answered (one record; the fixed path is a known limit; the base failures are
-listed above). New:
+1. **Pins in memory are fine for the spike.** In the Runtime, the playlist's sha256 is written into the
+   launch's signed token, or its launch record, when the launch is issued. The seam then compares against
+   that, and pins nothing on first read. A restart cannot re-pin, and there are no pins to store.
+2. **Refusals before the token check** are recorded without a principal, but **counted per source** rather
+   than logged one by one, so nobody can flood the audit log for free. To propose before building:
+   - one counter per peer address and time window;
+   - one record per window: source, window, count, first and last reason.
 
-1. The pins are in memory, so a restart lets a still-valid token pin again. Is that acceptable for the
-   spike, given the 15-minute token?
-2. A refused request before the token check leaves no record, because there is no launch to name. The front
-   door already refuses most of them. Should the seam also write a principal-less record there?
+No code for these yet.
 
 ## Next slice
 
