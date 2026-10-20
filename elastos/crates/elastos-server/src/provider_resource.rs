@@ -364,9 +364,10 @@ pub(crate) fn in_agents_area(path: &str) -> bool {
 /// protected storage path, and both capability request handlers. In the area
 /// only read and write are allowed, only on one spelling: `.AppData/Agents`,
 /// then segments matching `^[a-z0-9][a-z0-9._-]*$`, with no empty or `.`
-/// segment anywhere. A write needs a name below `Agents`. A path in the area
-/// that is not already canonical (surrounding whitespace or slashes) is
-/// refused, so the spelling checked is the spelling resolved. Returns the
+/// segment anywhere. A write needs a name below `Agents`. The area is found on
+/// the canonical string (see `in_agents_area`); the exact spelling then
+/// refuses any path that is not already canonical, because surrounding
+/// whitespace or a trailing slash makes a bad or empty segment. Returns the
 /// refusal code and message.
 pub(crate) fn agents_area_refusal(
     rooted: &str,
@@ -375,7 +376,6 @@ pub(crate) fn agents_area_refusal(
     if !in_agents_area(rooted) {
         return None;
     }
-    let canonical = rooted_localhost_uri(rooted).is_some_and(|canonical| canonical == rooted);
     if !matches!(operation, "read" | "write") {
         return Some((
             "operation_not_allowed",
@@ -400,8 +400,7 @@ pub(crate) fn agents_area_refusal(
             // Windows drops a trailing '.', so "journal." would name "journal".
             && !segment.ends_with('.')
     };
-    let exact = canonical
-        && segments.len() >= 3
+    let exact = segments.len() >= 3
         && !segments.iter().any(|segment| matches!(*segment, "" | "."))
         && segments[1] == ".AppData"
         && segments[2] == "Agents"
