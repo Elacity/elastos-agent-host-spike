@@ -47,7 +47,7 @@ No code in the repository matches the old text, so no caller depends on it (sear
 | `cargo test -p elastos-compute` with the fix | 5 passed |
 | `cargo fmt -p elastos-compute -- --check`, `cargo clippy -p elastos-compute --all-targets -D warnings` | clean |
 | Falsifier: old `format!` put back, test run, file restored from saved bytes | failed, then passed after restore |
-| `cargo test -p elastos-server component_conformance_exercises_bus_authorization_dispatch_and_audit` | see PR |
+| `cargo test -p elastos-server component_conformance_exercises_bus_authorization_dispatch_and_audit` (the Runtime's Component path end to end) | 1 passed |
 
 ## Principles checked
 
