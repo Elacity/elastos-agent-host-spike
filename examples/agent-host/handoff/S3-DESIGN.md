@@ -107,6 +107,11 @@ Every line reference below is at branch `claude/overnight-1`, checked by reading
    - The attached Runtime (`elastos run`) keeps refusing it with `principal_context_required`.
 5. **Resume.** Read back the object. If its head hash equals the guest's last head, the append settled. If it equals the parent, the append did not happen; propose again with a new step. If it is anything else, the state is `settlement_unknown` until a person decides.
 
+**Guest side done (20 Oct, branch `claude/s3-guest-journal`).** The guest imports `providers` (no `capabilities`), writes the journal through the bridge rules from PR #8, holds the launch grant in memory, and resumes by head hash. See `reports/S3-guest-journal.md` and the guest section of `USERSAI-JOURNAL.md`. Two gaps found while building it:
+
+- **No channel for the launch grant.** The WIT world has no launch argument, `lifecycle.run` takes nothing, and the guest does not import `capabilities`. So the Runtime has no way today to hand the guest the grant id. The wasm build uses an empty id, which means no grant, so it sends nothing. The Wasmtime test checks that no bridge line is sent.
+- **Resume needs a read grant.** A capability token covers one resource and one action, so the write grant cannot read the journal back.
+
 ## 3. Tests (from HANDOFF S3, plus where to model each)
 
 - `journal_append_without_a_grant_is_denied_before_the_provider`: like `component.rs:541` and `resource_bridge.rs:2398`. The provider sees no request.

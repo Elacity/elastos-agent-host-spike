@@ -51,6 +51,7 @@ trailer  head [32]
 - Payloads:
   - node: role u8 | source u8 | text. The role and source tags are the ones `model_bytes` uses.
   - step: id u64 | state u8 | kind u8 | resource | effect_id u64 | has_result u8 | old | new | argv (u32 count + strings) | parent_id (u8 flag + u64) | seat | seen_version (u8 flag + u64) | inbox.
+    Kind tags: 1 unspecified, 2 read, 3 edit, 4 run, 5 restore, 6 hosted, 7 child, 8 init, 9 journal append (added in S3). State tags: 1 prepared, 2 not started, 3 denied, 4 cancelled, 5 dispatched, 6 settlement unknown.
   - turn: id u64 | step ids (u32 count + u64 each).
   - A string is u32 length plus UTF-8 bytes. A bool is exactly 0 or 1.
 - **Size cap: 192 KiB of encoded bytes** (lowered from 256 KiB on 20 Oct, after review). The Runtime bridge carries the bytes as a JSON number array (`request_content_bytes`, `resource_bridge.rs`), so each byte costs up to four characters (`255,`). The worst case at the cap, all `0xFF`, is about 768 KiB: inside the 1 MiB `MAX_RESOURCE_FRAME_BYTES`, with room for the envelope and token. 256 KiB of `0xFF` would be about 1 MiB, and the frame is refused. `a_worst_case_journal_at_the_cap_fits_through_the_bridge` writes both through the bridge. `encode` refuses a bigger journal, and `decode` refuses bigger input. Compaction is what keeps a long task under the cap.
@@ -94,3 +95,12 @@ trailer  head [32]
 ## Not in S2
 
 No file, no Bus call, no import change. Computing the revision, the compare-and-swap, the `UsersAI/self` rewrite, and refusing another principal's root are S3.
+
+## Guest side (S3, 20 Oct)
+
+- **Writing.** `append_journal` records a `journal append` step, then writes the whole encoding with `write`. The body is `{"content": [bytes], "create_only": true}` for the first version, and `{"content": [bytes], "if_revision": "<revision>"}` after that. The revision comes from the Runtime's last reply; the guest never computes it. The stored copy shows the append step as dispatched with no result. The step's `old` field keeps the revision it replaces.
+- **The grant.** The launch grant is a `LaunchGrant` held in memory, sent only as `invoke-request.grant`. `Debug` does not print it. The format still has no field for it.
+- **Outcomes.** An ok reply with a revision: written, and the cursor moves. `revision_conflict`: nothing written, no retry; the guest must read again. `denied` or `invalid` from the Bus: refused before storage. No grant, an append still open, or a journal over the cap: nothing sent. Anything else is unknown: the step is `settlement_unknown`.
+- **Resume by head hash.** `resume_journal` reads the object with a read grant and decodes it. If the stored head is the head the guest sent, the append landed. If it is the parent head, it did not, and a new append may be proposed. The revision check means the old write and a new one cannot both land. Anything else, including bytes that do not decode, stays unknown for a person. No append is sent while one is unknown.
+- **Words in `new`** when a journal append closes: `written`, `not written`, `conflict`, `refused`. None enter the model view.
+- **Not yet.** The Runtime has no channel to hand the guest its launch grant (see the S3 guest report), and resume needs a read grant as well as the write grant.
