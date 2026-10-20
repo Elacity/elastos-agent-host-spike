@@ -370,7 +370,7 @@ Falsifiers:   H01 Library allows the Agents area              -> agent_journals_
 **Notes, not changed:**
 - **Broad capability requests.** A `request_capability` for a scope above the area (`Users/self/*` or `Users/self/.AppData/*` with `delete`) is not refused at once. Every route now refuses its use in the area: local dispatch, the attached bridge, the proxy, Library and storage.
 - **`invoke_outcome` and a missing `status`.** A result with no `status` field is audited "ok", which matches how the component host reads it.
-- **The attached bridge's own refusals** (manifest, missing token, Agents) are not audited, as before this PR. A non-JSON reply leaves a "requested" entry with no "completed".
+- **The attached bridge's own refusals** (manifest, missing token, Agents) and a non-JSON reply: now audited, in fix 7 below.
 - **A trailing `.` in a segment** (`journal.`): answered yes, done in fix 6 below.
 
 
@@ -400,4 +400,49 @@ DeepSeek:     none used.
 Guest hash:   unchanged (no guest change in this PR).
 ```
 
-**What is next:** stop. Codex re-reviews #8, #9, #19 and #20. After that, #9 and #20 merge in this commit.
+## Fix 7: viewer storage and attached-bridge audit, after the Codex review of 004962206 (20 Oct)
+
+Codex: #19 PASS, #8 FAIL on two new findings (both checked by Cursor). Fixes 1 to 6 confirmed.
+
+```text
+Commits:      2962c75 viewer storage refuses the Agents area
+              440774a attached bridge audits refusals and non-JSON replies
+              this section is the next commit
+Changed:      elastos/crates/elastos-server/src/api/viewer_gateway.rs - viewer_storage_target refuses a storage root or
+                object inside .AppData/Agents/ (in_agents_area, any case) -> 403 "viewer storage does not support
+                .AppData/Agents/ (agent journals)"; save and state scopes, viewer and content-capsule routes, GET and PUT
+              elastos/crates/elastos-server/src/resource_bridge.rs - handle_remote_request_with_audit_dir: "requested" is
+                recorded as soon as the resource_invoke parses; every way out then writes one "completed" record:
+                denied   manifest_capability_denied, missing_token, the Agents rule, principal_context_required
+                         (the refusal carries the audit id, as local dispatch does)
+                error    send failure, bad API URL, a reply body that does not read or is not JSON (Err to the
+                         caller, as before, now with "was not JSON (HTTP <status>)")
+                ok/conflict/error  a JSON reply, as before
+Not audited:  a resource_invoke that does not parse (invalid_resource_invoke): there is no resource to record. Local
+                dispatch does the same.
+Finding 1:    Before: a viewer manifest with storage under Users/self/.AppData/Agents/... could PUT and GET files there
+                (on Linux both journal and Journal), with no journal rule. After: refused before any file access.
+              Also refused: a .AppData/* root saving a file named Agents (the object check, not only the root).
+Tests:        cargo test -p elastos-server --lib -- resource_bridge::tests api::handlers::provider::tests gateway_tests::gba
+                -> 93 passed, 0 failed
+              cargo clippy -p elastos-server --all-targets -- -D warnings -> clean
+              cargo test -p elastos-server --lib -> "3032 passed; 13 failed; 22 ignored"; the same 13 container failures
+                as fix 5 (custody, room, gateway-child, IPv6, the chmod-as-root save test), none new
+New tests:    api::gateway::gateway_tests::gba::viewer_storage_cannot_reach_the_agents_area (5 manifests x PUT/GET: exact,
+                Journal, .appdata/AGENTS, .AppData root + "Agents", content capsule; all 403; no file under Agents on disk)
+              resource_bridge::tests::attached_bridge_refusals_are_audited (5 refusals: requested + completed/denied,
+                same id, id in the response)
+              resource_bridge::tests::a_non_json_provider_reply_is_audited_as_an_error (a real socket answers a
+                plain-text 403: Err, requested + completed/error, same id)
+Falsifiers:   V01 viewer storage may reach Agents            -> viewer_storage_cannot_reach_the_agents_area FAILED
+              V02 viewer storage checks the root only        -> same FAILED (the .AppData + "Agents" case)
+              A01 bridge refusal skips "completed"           -> attached_bridge_refusals_are_audited FAILED
+              A02 non-JSON reply skips "completed"           -> a_non_json_provider_reply_is_audited_as_an_error FAILED
+              A03 refusals checked before "requested"        -> both audit tests FAILED
+              each restored; tree clean
+Principles:   fail closed; one rule, many routes; every request leaves a complete audit record.
+DeepSeek:     none used.
+Guest hash:   unchanged (no guest change in this PR).
+```
+
+**What is next:** merge #8 into #9 and #20, the #9 guest id "." check with its new guest hash, then stop for Codex.
