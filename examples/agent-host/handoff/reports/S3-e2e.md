@@ -67,3 +67,13 @@ Tests run:    ./examples/agent-host/run-e2e.sh -> "2 passed"
                 is new. The 24 ignored include the two e2e tests.
 Guest hash:   99bacd9df2b448a9b94e579754644a217d74f718662702e29973d44d7f4e583c (unchanged)
 ```
+
+## Update: PR #8 fix 5 merged in (20 Oct)
+
+Merge `0e088ab` (PR #9 at `e690cb5`, which carries PR #8 fix 5: the Library, storage and proxy routes).
+
+```text
+Tests run:    ./examples/agent-host/run-e2e.sh -> "2 passed"
+              (cd elastos && cargo test -p elastos-server --lib) -> "3030 passed; 13 failed; 24 ignored". The same 13
+                container failures as the previous run, none new; +2 passing are fix 5's new tests.
+```
