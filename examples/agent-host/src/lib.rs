@@ -12164,6 +12164,8 @@ mod tests {
             "_a",
             "A9-",
             "Demo-Agent",
+            "aB",
+            "demo-Agent",
             "a b",
             "\u{e9}",
             "\u{17f}",
