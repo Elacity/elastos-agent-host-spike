@@ -718,7 +718,6 @@ dependencies = [
  "elastos-common",
  "elastos-compute",
  "serde_json",
- "sha2",
  "tokio",
  "wasmparser 0.236.1",
  "wasmtime",

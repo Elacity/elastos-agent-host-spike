@@ -1,5 +1,4 @@
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::fake::{Call, FakeBus};
 use crate::*;
@@ -93,6 +92,53 @@ fn assert_nothing_written(bus: &FakeBus) {
     );
 }
 
+/// A JPEG whose frame header follows APPn segments of these payload sizes.
+fn jpeg_after(segments: &[usize], width: u16, height: u16) -> Vec<u8> {
+    let mut bytes = vec![0xff, 0xd8];
+    for (index, size) in segments.iter().enumerate() {
+        bytes.extend_from_slice(&[0xff, 0xe1 + (index % 14) as u8]);
+        bytes.extend_from_slice(&((size + 2) as u16).to_be_bytes());
+        bytes.extend(std::iter::repeat_n(0x45u8, *size));
+    }
+    bytes.extend_from_slice(&jpeg(width, height)[20..]);
+    bytes
+}
+
+fn skipped(bus: &FakeBus) -> Vec<(u64, String, String)> {
+    written(bus)["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|skip| {
+            (
+                skip["order"].as_u64().unwrap(),
+                skip["uri"].as_str().unwrap().to_string(),
+                skip["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+fn played(bus: &FakeBus) -> Vec<String> {
+    written(bus)["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["uri"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// One item with these bytes; it must be skipped for `reason`.
+fn assert_skipped(bytes: Vec<u8>, reason: &str) -> FakeBus {
+    let mut bus = granted(&[(A, bytes)]);
+    run(&mut bus).unwrap_or_else(|err| panic!("{reason}: the run must not stop: {err:?}"));
+    assert_eq!(skipped(&bus), vec![(0, A.to_string(), reason.to_string())]);
+    assert!(played(&bus).is_empty());
+    bus
+}
+
+// --- plays ------------------------------------------------------------------
+
 #[test]
 fn plays_png_jpeg_and_webp_in_album_order() {
     let mut bus = FakeBus::default()
@@ -118,8 +164,10 @@ fn plays_png_jpeg_and_webp_in_album_order() {
     assert_eq!(text, bus.written[PLAYLIST_URI]);
     assert_eq!(playlist["schema"], PLAYLIST_SCHEMA);
     assert_eq!(playlist["album"], ALBUM_URI);
-    let items = playlist["items"].as_array().unwrap();
-    let summary: Vec<_> = items
+    assert_eq!(playlist["skipped"], json!([]));
+    let summary: Vec<_> = playlist["items"]
+        .as_array()
+        .unwrap()
         .iter()
         .map(|item| {
             (
@@ -140,71 +188,281 @@ fn plays_png_jpeg_and_webp_in_album_order() {
             (2, C, "image/webp", 4000, 3000, 60000),
         ]
     );
-}
-
-#[test]
-fn playlist_records_the_size_and_sha256_of_the_bytes_read() {
-    let bytes = png(10, 20, 100_000);
-    let mut bus = granted(&[(A, bytes.clone())]);
-    run(&mut bus).unwrap();
-    let item = &written(&bus)["items"][0];
-    assert_eq!(item["bytes"], bytes.len() as u64);
-    let expected: String = Sha256::digest(&bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
+    // No body hash and no size: Runtime is to name the bytes by CID.
+    let keys: Vec<&str> = playlist["items"][0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
         .collect();
-    assert_eq!(item["sha256"], expected);
-    // 100 000 bytes need four 32 KiB reads; each stays under the bridge frame.
-    assert!(bus.invokes_on(A).iter().all(|call| match call {
-        Call::Invoke { body, .. } => body["length"].as_u64().unwrap() <= READ_CHUNK_BYTES,
-        _ => true,
-    }));
+    assert_eq!(
+        keys,
+        vec!["duration_ms", "height", "mime", "order", "uri", "width"]
+    );
 }
 
 #[test]
 fn every_webp_frame_header_gives_its_dimensions() {
     let mut bus = granted(&[
-        (A, webp_vp8x(1, 16384)),
-        (B, webp_vp8l(300, 200)),
+        (A, webp_vp8x(300, 200)),
+        (B, webp_vp8l(301, 201)),
         (C, webp_vp8(1024, 768)),
     ]);
-    // VP8X 1x16384 is over the side limit; check the other two first.
-    let err = run(&mut bus).unwrap_err();
-    assert!(matches!(
-        err,
-        Refusal::Dimensions {
-            index: 0,
-            width: 1,
-            height: 16384,
-            ..
-        }
-    ));
-
-    let mut bus = granted(&[(B, webp_vp8l(300, 200)), (C, webp_vp8(1024, 768))]);
     run(&mut bus).unwrap();
     let items = written(&bus)["items"].clone();
+    let sizes: Vec<_> = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            (
+                item["width"].as_u64().unwrap(),
+                item["height"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(sizes, vec![(300, 200), (301, 201), (1024, 768)]);
+}
+
+#[test]
+fn a_large_image_is_checked_from_its_header_alone() {
+    let mut bus = granted(&[(A, png(4000, 3000, 10 * 1024 * 1024))]);
+    run(&mut bus).unwrap();
+    assert_eq!(played(&bus), vec![A]);
     assert_eq!(
-        (items[0]["width"].clone(), items[0]["height"].clone()),
-        (json!(300), json!(200))
-    );
-    assert_eq!(
-        (items[1]["width"].clone(), items[1]["height"].clone()),
-        (json!(1024), json!(768))
+        bus.bytes_served(A),
+        HEADER_BYTES,
+        "the header only; the size probe past the limit is empty"
     );
 }
 
 #[test]
+fn a_jpeg_frame_header_after_large_exif_is_found_without_reading_the_payloads() {
+    let bytes = jpeg_after(&[60_000, 60_000, 4_000], 6000, 4000);
+    let mut bus = granted(&[(B, bytes)]);
+    run(&mut bus).unwrap();
+    let item = &written(&bus)["items"][0];
+    assert_eq!(
+        (item["width"].clone(), item["height"].clone()),
+        (json!(6000), json!(4000))
+    );
+    // Header, then 4 bytes per APPn marker, the APP0 and SOF markers, and the frame header.
+    assert!(bus.bytes_served(B) < 100, "served {}", bus.bytes_served(B));
+}
+
+#[test]
+fn an_object_of_exactly_the_size_limit_plays() {
+    let mut bus = granted(&[(A, png(10, 10, MAX_OBJECT_BYTES as usize))]);
+    run(&mut bus).unwrap();
+    assert_eq!(played(&bus), vec![A]);
+}
+
+#[test]
 fn playlist_text_is_the_same_on_every_run() {
-    let objects = [(A, png(1, 1, 64)), (B, jpeg(2, 3))];
+    let objects = [(A, png(1, 1, 64)), (B, b"not an image".to_vec())];
     let mut first = granted(&objects);
     let mut second = granted(&objects);
     assert_eq!(run(&mut first).unwrap(), run(&mut second).unwrap());
 }
 
-// --- grants -----------------------------------------------------------------
+#[test]
+fn the_playlist_is_written_as_bytes_with_append_false() {
+    let mut bus = granted(&[(A, png(1, 1, 64))]);
+    let text = run(&mut bus).unwrap();
+    let body = bus
+        .invokes_on(PLAYLIST_URI)
+        .into_iter()
+        .find_map(|call| match call {
+            Call::Invoke {
+                operation, body, ..
+            } if operation == "write" => Some(body.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(body["append"], json!(false));
+    assert_eq!(body["content"], json!(text.as_bytes()));
+}
 
 #[test]
-fn album_without_a_read_grant_is_denied_before_any_read() {
+fn the_fake_refuses_bodies_the_localhost_provider_refuses() {
+    let mut bus = FakeBus::default()
+        .allow(PLAYLIST_URI, "write")
+        .allow(A, "read");
+    let write = bus.request(PLAYLIST_URI, "write", "").unwrap();
+    let read = bus.request(A, "read", "").unwrap();
+    for (uri, operation, grant, body) in [
+        (
+            PLAYLIST_URI,
+            "write",
+            &write,
+            json!({ "path": PLAYLIST_URI, "content": "text", "append": false }),
+        ),
+        (
+            PLAYLIST_URI,
+            "write",
+            &write,
+            json!({ "path": PLAYLIST_URI, "content": [1] }),
+        ),
+        (A, "read", &read, json!({ "path": A, "offset": 0 })),
+        (
+            A,
+            "read",
+            &read,
+            json!({ "path": A, "offset": 0, "length": 1, "token": "t" }),
+        ),
+    ] {
+        let reply = bus
+            .invoke(uri, operation, body.to_string().as_bytes(), grant)
+            .unwrap();
+        assert_eq!(reply.status, "error", "{body}");
+    }
+}
+
+// --- content failures skip the item --------------------------------------------------
+
+#[test]
+fn wrong_type_is_skipped_after_reading_only_its_header() {
+    for bytes in [
+        b"GIF89a\x01\x00\x01\x00\x00\x00\x00".to_vec(),
+        b"just some text, not an image".to_vec(),
+        b"RIFF\x10\x00\x00\x00WAVEfmt ".to_vec(),
+        vec![0u8; 64],
+    ] {
+        let mut padded = bytes.clone();
+        padded.resize(200_000, b'x');
+        let bus = assert_skipped(padded, "wrong_type");
+        assert_eq!(bus.bytes_served(A), HEADER_BYTES, "{bytes:?}");
+    }
+}
+
+#[test]
+fn oversize_is_skipped_without_reading_the_body() {
+    let bus = assert_skipped(png(10, 10, MAX_OBJECT_BYTES as usize + 1), "oversize");
+    assert_eq!(bus.bytes_served(A), HEADER_BYTES + 1);
+}
+
+#[test]
+fn truncated_magic_is_skipped() {
+    for bytes in [
+        vec![],
+        b"\x89PN".to_vec(),
+        b"\x89PNG\r\n\x1a".to_vec(),
+        vec![0xff, 0xd8],
+        b"RIFF\x10\x00".to_vec(),
+        b"RIFF\x10\x00\x00\x00WE".to_vec(),
+    ] {
+        assert_skipped(bytes, "truncated");
+    }
+}
+
+#[test]
+fn an_image_cut_before_its_size_field_is_skipped_as_truncated() {
+    let mut png_cut = png(640, 480, 0);
+    png_cut.truncate(20);
+    let mut jpeg_cut = jpeg(640, 480);
+    jpeg_cut.truncate(24);
+    let mut jpeg_marker_cut = jpeg_after(&[100], 640, 480);
+    jpeg_marker_cut.truncate(2 + 4 + 100 + 3);
+    let mut vp8x_cut = webp_vp8x(640, 480);
+    vp8x_cut.truncate(27);
+    let mut vp8l_cut = webp_vp8l(640, 480);
+    vp8l_cut.truncate(22);
+    for bytes in [png_cut, jpeg_cut, jpeg_marker_cut, vp8x_cut, vp8l_cut] {
+        assert_skipped(bytes, "truncated");
+    }
+}
+
+#[test]
+fn malformed_headers_are_skipped() {
+    let mut no_ihdr = png(1, 1, 64);
+    no_ihdr[12..16].copy_from_slice(b"IDAT");
+    let mut jpeg_scan_first = vec![0xff, 0xd8, 0xff, 0xda, 0x00, 0x08];
+    jpeg_scan_first.resize(64, 0);
+    let too_many_segments = jpeg_after(&[0; MAX_JPEG_SEGMENTS], 10, 10);
+    for bytes in [
+        png(0, 10, 64),
+        png(10, 0, 64),
+        jpeg(0, 10),
+        no_ihdr,
+        jpeg_scan_first,
+        too_many_segments,
+    ] {
+        assert_skipped(bytes, "malformed");
+    }
+    // One segment fewer than the limit still reaches the frame header.
+    let mut bus = granted(&[(B, jpeg_after(&[0; MAX_JPEG_SEGMENTS - 2], 10, 10))]);
+    run(&mut bus).unwrap();
+    assert_eq!(played(&bus), vec![B]);
+}
+
+#[test]
+fn dimension_limits_are_enforced_at_the_boundary() {
+    for (width, height, plays) in [
+        (MAX_SIDE, 1, true),
+        (MAX_SIDE + 1, 1, false),
+        (1, MAX_SIDE + 1, false),
+        (8192, 4882, true),  // 39 993 344 pixels
+        (8192, 4883, false), // 40 001 536 pixels
+    ] {
+        let mut bus = granted(&[(A, png(width, height, 64))]);
+        run(&mut bus).unwrap();
+        if plays {
+            assert_eq!(played(&bus), vec![A], "{width}x{height}");
+        } else {
+            assert_eq!(
+                skipped(&bus),
+                vec![(0, A.to_string(), "dimensions".to_string())]
+            );
+            assert!(written(&bus)["skipped"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("{width}x{height}")));
+        }
+    }
+}
+
+#[test]
+fn a_bad_item_is_skipped_and_the_rest_play_in_order() {
+    let mut bus = granted(&[
+        (A, png(1, 1, 64)),
+        (B, b"not an image at all".to_vec()),
+        (C, webp_vp8l(2, 2)),
+    ]);
+    run(&mut bus).unwrap();
+    assert_eq!(played(&bus), vec![A, C]);
+    assert_eq!(
+        skipped(&bus),
+        vec![(1, B.to_string(), "wrong_type".to_string())]
+    );
+    let orders: Vec<u64> = written(&bus)["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["order"].as_u64().unwrap())
+        .collect();
+    assert_eq!(orders, vec![0, 2], "album order is kept");
+    let skip = &written(&bus)["skipped"][0];
+    assert_eq!(skip["message"], "not PNG, JPEG or WebP");
+}
+
+#[test]
+fn an_album_where_every_item_is_skipped_still_writes_a_playlist() {
+    let mut bus = granted(&[(A, b"text".to_vec()), (B, png(9000, 1, 64))]);
+    run(&mut bus).unwrap();
+    assert!(played(&bus).is_empty());
+    assert_eq!(
+        skipped(&bus),
+        vec![
+            (0, A.to_string(), "wrong_type".to_string()),
+            (1, B.to_string(), "dimensions".to_string()),
+        ]
+    );
+}
+
+// --- authority failures stop the run -------------------------------------------------
+
+#[test]
+fn album_without_a_read_grant_stops_before_any_read() {
     let mut bus = granted(&[(A, png(1, 1, 64))]);
     bus.allowed
         .remove(&(ALBUM_URI.to_string(), "read".to_string()));
@@ -221,7 +479,7 @@ fn album_without_a_read_grant_is_denied_before_any_read() {
 }
 
 #[test]
-fn image_without_a_read_grant_is_denied_before_any_read_of_it() {
+fn image_without_a_read_grant_stops_the_run_and_is_not_skipped() {
     let mut bus = granted(&[(A, png(1, 1, 64)), (B, jpeg(2, 2)), (C, webp_vp8l(3, 3))]);
     bus.allowed.remove(&(B.to_string(), "read".to_string()));
 
@@ -234,13 +492,13 @@ fn image_without_a_read_grant_is_denied_before_any_read_of_it() {
     );
     assert!(
         bus.invokes_on(C).is_empty(),
-        "the run stops at the first refusal"
+        "the run stops at the first authority failure"
     );
     assert_nothing_written(&bus);
 }
 
 #[test]
-fn playlist_without_a_write_grant_is_denied_and_not_written() {
+fn playlist_without_a_write_grant_stops_and_is_not_written() {
     let mut bus = granted(&[(A, png(1, 1, 64))]);
     bus.allowed
         .remove(&(PLAYLIST_URI.to_string(), "write".to_string()));
@@ -286,128 +544,41 @@ fn each_object_is_read_with_the_grant_issued_for_it() {
     );
 }
 
-// --- type -------------------------------------------------------------------
-
 #[test]
-fn wrong_type_is_refused_and_the_body_is_not_read() {
-    for bytes in [
-        b"GIF89a\x01\x00\x01\x00\x00\x00\x00".to_vec(),
-        b"just some text, not an image".to_vec(),
-        b"RIFF\x10\x00\x00\x00WAVEfmt ".to_vec(),
-        vec![0u8; 64],
-    ] {
-        let mut padded = bytes.clone();
-        padded.resize(200_000, b'x');
-        let mut bus = granted(&[(A, padded)]);
-        let err = run(&mut bus).unwrap_err();
-        assert!(
-            matches!(&err, Refusal::WrongType { index: 0, uri } if uri == A),
-            "{bytes:?}: {err:?}"
-        );
-        assert!(matches!(err.to_bus_failure(), BusFailure::Invalid(_)));
-        assert_eq!(bus.bytes_served(A), HEADER_BYTES, "only the header is read");
-        assert_nothing_written(&bus);
-    }
-}
-
-#[test]
-fn one_bad_item_stops_the_whole_album() {
-    let mut bus = granted(&[
-        (A, png(1, 1, 64)),
-        (B, b"not an image at all".to_vec()),
-        (C, webp_vp8l(2, 2)),
-    ]);
-    let err = run(&mut bus).unwrap_err();
-    assert!(matches!(err, Refusal::WrongType { index: 1, .. }));
-    assert!(bus.invokes_on(C).is_empty());
-    assert_nothing_written(&bus);
-}
-
-// --- truncated header ---------------------------------------------------------
-
-#[test]
-fn truncated_magic_is_refused() {
-    for bytes in [
-        vec![],
-        b"\x89PN".to_vec(),
-        b"\x89PNG\r\n\x1a".to_vec(),
-        vec![0xff, 0xd8],
-        b"RIFF\x10\x00".to_vec(),
-        b"RIFF\x10\x00\x00\x00WE".to_vec(),
-    ] {
-        let mut bus = granted(&[(A, bytes.clone())]);
-        let err = run(&mut bus).unwrap_err();
-        assert!(
-            matches!(&err, Refusal::Truncated { index: 0, uri } if uri == A),
-            "{bytes:?}: {err:?}"
-        );
-        assert_nothing_written(&bus);
-    }
-}
-
-#[test]
-fn image_cut_before_its_size_field_is_truncated() {
-    let mut png_cut = png(640, 480, 0);
-    png_cut.truncate(20);
-    let mut jpeg_cut = jpeg(640, 480);
-    jpeg_cut.truncate(24);
-    let mut vp8x_cut = webp_vp8x(640, 480);
-    vp8x_cut.truncate(27);
-    let mut vp8l_cut = webp_vp8l(640, 480);
-    vp8l_cut.truncate(22);
-    for bytes in [png_cut, jpeg_cut, vp8x_cut, vp8l_cut] {
-        let mut bus = granted(&[(A, bytes.clone())]);
-        let err = run(&mut bus).unwrap_err();
-        assert!(
-            matches!(&err, Refusal::Truncated { index: 0, .. }),
-            "{bytes:?}: {err:?}"
-        );
-        assert_nothing_written(&bus);
-    }
-}
-
-#[test]
-fn malformed_headers_are_refused() {
-    let mut no_ihdr = png(1, 1, 64);
-    no_ihdr[12..16].copy_from_slice(b"IDAT");
-    let mut jpeg_scan_first = vec![0xff, 0xd8, 0xff, 0xda, 0x00, 0x08];
-    jpeg_scan_first.resize(64, 0);
-    for bytes in [png(0, 10, 64), png(10, 0, 64), no_ihdr, jpeg_scan_first] {
-        let mut bus = granted(&[(A, bytes.clone())]);
-        let err = run(&mut bus).unwrap_err();
-        assert!(
-            matches!(&err, Refusal::Malformed { index: 0, .. }),
-            "{bytes:?}: {err:?}"
-        );
-        assert_nothing_written(&bus);
-    }
-}
-
-// --- size -------------------------------------------------------------------
-
-#[test]
-fn oversize_is_refused_without_reading_the_body() {
-    let mut bus = granted(&[(A, png(10, 10, MAX_OBJECT_BYTES as usize + 1))]);
-    let err = run(&mut bus).unwrap_err();
-    assert!(matches!(&err, Refusal::Oversize { index: 0, uri } if uri == A));
-    assert!(matches!(err.to_bus_failure(), BusFailure::Invalid(_)));
-    assert_eq!(
-        bus.bytes_served(A),
-        HEADER_BYTES + 1,
-        "only the header and one byte past the limit are read"
+fn a_provider_error_stops_the_run_and_is_not_skipped() {
+    let mut bus = granted(&[(A, png(1, 1, 64)), (B, png(1, 1, 64))]).provider_error(
+        A,
+        "read_failed",
+        "disk gone",
     );
+    let err = run(&mut bus).unwrap_err();
+    assert!(matches!(
+        &err,
+        Refusal::Call { resource, error: CallError::Provider { code, .. } } if resource == A && code == "read_failed"
+    ));
+    assert!(matches!(err.to_bus_failure(), BusFailure::Unavailable(_)));
+    assert!(err.message().contains("disk gone"));
+    assert!(bus.invokes_on(B).is_empty());
     assert_nothing_written(&bus);
 }
 
 #[test]
-fn an_object_of_exactly_the_size_limit_plays() {
-    let mut bus = granted(&[(A, png(10, 10, MAX_OBJECT_BYTES as usize))]);
-    run(&mut bus).unwrap();
-    assert_eq!(written(&bus)["items"][0]["bytes"], MAX_OBJECT_BYTES);
+fn a_missing_object_stops_the_run() {
+    let mut bus = granted(&[(A, png(1, 1, 64))]);
+    bus.objects.remove(A);
+    let err = run(&mut bus).unwrap_err();
+    assert!(matches!(
+        &err,
+        Refusal::Call {
+            error: CallError::Provider { .. },
+            ..
+        }
+    ));
+    assert_nothing_written(&bus);
 }
 
 #[test]
-fn album_larger_than_its_limit_is_refused() {
+fn album_larger_than_its_limit_stops_the_run() {
     let mut bus = granted(&[(A, png(1, 1, 64))]);
     let mut big = album(json!([{ "uri": A }]));
     big.resize(MAX_ALBUM_BYTES as usize + 1, b' ');
@@ -418,31 +589,8 @@ fn album_larger_than_its_limit_is_refused() {
     assert_nothing_written(&bus);
 }
 
-// --- dimensions ---------------------------------------------------------------
-
 #[test]
-fn dimension_limits_are_enforced_at_the_boundary() {
-    for (width, height, plays) in [
-        (MAX_SIDE, 1, true),
-        (MAX_SIDE + 1, 1, false),
-        (1, MAX_SIDE + 1, false),
-        (8192, 4882, true),  // 39 993 344 pixels
-        (8192, 4883, false), // 40 001 536 pixels
-    ] {
-        let mut bus = granted(&[(A, png(width, height, 64))]);
-        let result = run(&mut bus);
-        assert_eq!(result.is_ok(), plays, "{width}x{height}: {result:?}");
-        if !plays {
-            assert!(matches!(result, Err(Refusal::Dimensions { .. })));
-            assert_nothing_written(&bus);
-        }
-    }
-}
-
-// --- album shape ----------------------------------------------------------------
-
-#[test]
-fn malformed_albums_are_refused_before_any_image_is_read() {
+fn malformed_albums_stop_before_any_image_is_read() {
     let too_many: Vec<Value> = (0..=MAX_ALBUM_ITEMS).map(|_| json!({ "uri": A })).collect();
     let cases: Vec<(&str, Vec<u8>)> = vec![
         ("not json", b"{".to_vec()),
@@ -513,37 +661,9 @@ fn malformed_albums_are_refused_before_any_image_is_read() {
     }
 }
 
-// --- Runtime answers -------------------------------------------------------------
+// --- Runtime answers ----------------------------------------------------------------
 
-#[test]
-fn a_provider_error_answer_is_a_refusal_not_data() {
-    let mut bus = granted(&[(A, png(1, 1, 64))]).provider_error(A, "read_failed", "disk gone");
-    let err = run(&mut bus).unwrap_err();
-    assert!(matches!(
-        &err,
-        Refusal::Call { resource, error: CallError::Provider { code, .. } } if resource == A && code == "read_failed"
-    ));
-    assert!(matches!(err.to_bus_failure(), BusFailure::Unavailable(_)));
-    assert!(err.message().contains("disk gone"));
-    assert_nothing_written(&bus);
-}
-
-#[test]
-fn a_missing_object_is_a_refusal() {
-    let mut bus = granted(&[(A, png(1, 1, 64))]);
-    bus.objects.remove(A);
-    let err = run(&mut bus).unwrap_err();
-    assert!(matches!(
-        &err,
-        Refusal::Call {
-            error: CallError::Provider { .. },
-            ..
-        }
-    ));
-    assert_nothing_written(&bus);
-}
-
-/// A Runtime that answers every read with something other than bytes.
+/// A Runtime that grants everything and answers every call with `self.0`.
 struct OddAnswers(Value);
 
 impl Bus for OddAnswers {
@@ -560,7 +680,7 @@ impl Bus for OddAnswers {
 }
 
 #[test]
-fn an_answer_without_byte_content_is_refused() {
+fn an_answer_without_byte_content_stops_the_run() {
     for answer in [
         json!({ "status": "ok" }),
         json!({ "status": "ok", "data": {} }),
@@ -581,6 +701,21 @@ fn an_answer_without_byte_content_is_refused() {
         );
         assert!(matches!(err.to_bus_failure(), BusFailure::Internal(_)));
     }
+}
+
+#[test]
+fn an_error_answer_that_also_carries_data_is_still_an_error() {
+    let answer = json!({
+        "status": "error",
+        "code": "read_failed",
+        "message": "partial",
+        "data": { "content": [0x89, 0x50] },
+    });
+    let err = run(&mut OddAnswers(answer)).unwrap_err();
+    assert!(
+        matches!(&err, Refusal::Call { error: CallError::Provider { code, .. }, .. } if code == "read_failed"),
+        "{err:?}"
+    );
 }
 
 #[test]
@@ -609,63 +744,4 @@ fn a_runtime_denial_of_an_invoke_is_reported_as_denied() {
     }
     let err = run(&mut DeniesInvoke).unwrap_err();
     assert!(matches!(err.to_bus_failure(), BusFailure::Denied(_)));
-}
-
-// --- album body budget ------------------------------------------------------------
-
-#[test]
-fn album_whose_images_exceed_the_body_budget_is_refused_at_the_item_that_crosses_it() {
-    let half = MAX_ALBUM_BODY_BYTES as usize / 2;
-    let mut bus = granted(&[
-        (A, png(1, 1, half)),
-        (B, png(1, 1, half)),
-        (C, png(1, 1, 1)),
-    ]);
-    // A and B fill the budget exactly; C has no bytes left.
-    let err = run(&mut bus).unwrap_err();
-    assert!(
-        matches!(&err, Refusal::AlbumBodyBudget { index: 2, uri } if uri == C),
-        "{err:?}"
-    );
-    assert!(matches!(err.to_bus_failure(), BusFailure::Invalid(_)));
-    assert!(err.message().contains("the most one run can check"));
-    assert_eq!(
-        bus.bytes_served(C),
-        HEADER_BYTES + 1,
-        "only C's header and one byte past the budget are read"
-    );
-    assert_nothing_written(&bus);
-}
-
-#[test]
-fn album_that_fills_the_body_budget_exactly_plays() {
-    let half = MAX_ALBUM_BODY_BYTES as usize / 2;
-    let mut bus = granted(&[(A, png(1, 1, half)), (B, png(1, 1, half))]);
-    run(&mut bus).unwrap();
-    assert_eq!(written(&bus)["items"].as_array().unwrap().len(), 2);
-}
-
-#[test]
-fn an_oversize_object_is_reported_as_oversize_even_when_the_budget_is_low() {
-    let mut bus = granted(&[
-        (A, png(1, 1, MAX_ALBUM_BODY_BYTES as usize - 10)),
-        (B, png(1, 1, MAX_OBJECT_BYTES as usize + 1)),
-    ]);
-    let err = run(&mut bus).unwrap_err();
-    assert!(matches!(err, Refusal::Oversize { index: 1, .. }), "{err:?}");
-}
-
-#[test]
-fn an_error_answer_that_also_carries_data_is_still_an_error() {
-    let answer = json!({
-        "status": "error",
-        "code": "read_failed",
-        "message": "partial",
-        "data": { "content": [0x89, 0x50] },
-    });
-    let err = run(&mut OddAnswers(answer)).unwrap_err();
-    assert!(
-        matches!(&err, Refusal::Call { error: CallError::Provider { code, .. }, .. } if code == "read_failed"),
-        "{err:?}"
-    );
 }

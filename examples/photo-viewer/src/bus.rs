@@ -5,9 +5,11 @@
 //! request and response shapes follow the Runtime bridge:
 //! `providers.invoke` returns the provider result as JSON bytes
 //! (`elastos-compute/src/providers/component.rs:396-414`), and a
-//! principal-root `read` answers `{"content": [bytes], "size": n}` with an
-//! optional offset/length window
-//! (`elastos-server/src/resource_bridge.rs:503-524`, `594-604`).
+//! `read` answers `{"content": [bytes], "size": n}` and honors an
+//! offset/length window on both paths: Runtime-handled principal roots
+//! (`elastos-server/src/resource_bridge.rs:503-524`, `594-604`) and the
+//! localhost provider (`elastos/capsules/localhost-provider/src/main.rs:403-476`,
+//! `783-807`).
 
 use std::fmt;
 
@@ -95,13 +97,18 @@ pub fn read_window(
 }
 
 /// Writes `content` as the whole object.
-pub fn write_text(
+///
+/// `content` goes as a byte array with `append: false`. Runtime's principal
+/// root write accepts bytes or a string (`resource_bridge.rs:583-592`), but the
+/// localhost provider takes only bytes and requires `append`
+/// (`elastos/capsules/localhost-provider/src/main.rs:25`, `42-48`).
+pub fn write_bytes(
     bus: &mut dyn Bus,
     uri: &str,
     grant: &str,
-    content: &str,
+    content: &[u8],
 ) -> Result<(), CallError> {
-    let body = json!({ "path": uri, "content": content }).to_string();
+    let body = json!({ "path": uri, "content": content, "append": false }).to_string();
     let reply = bus
         .invoke(uri, "write", body.as_bytes(), grant)
         .map_err(CallError::Bus)?;

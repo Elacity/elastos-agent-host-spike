@@ -1,11 +1,18 @@
-//! Photo viewer core guest (slice P1).
+//! Photo viewer core guest (slices P1 and P1b).
 //!
-//! Runtime calls `lifecycle.run`. The guest reads one album object, then each
-//! image it names, through `providers.invoke` with a grant it requested for
-//! that object. It checks the magic bytes (PNG, JPEG, WebP), the object size
-//! and the frame dimensions, and writes one playlist object. Any refusal
-//! stops the run before the playlist is written, and `run` returns a
-//! `bus-error` that names the item and the reason.
+//! Runtime calls `lifecycle.run`. The guest reads one album object, then the
+//! header of each image it names, through `providers.invoke` with a grant it
+//! requested for that object. It reads headers only, with the offset/length
+//! read window: the magic bytes name the type (PNG, JPEG, WebP), the frame
+//! header gives the dimensions, and one byte past the size limit tells an
+//! oversize object. Image bodies are never read; Runtime is to name the bytes
+//! by CID (roadmap 2.2).
+//!
+//! An authority failure (no grant, a refused or failed call, an album that
+//! cannot be read or parsed) stops the run before anything is written, and
+//! `run` returns a `bus-error` that names the resource and the reason. A
+//! content failure (wrong type, truncated or malformed header, oversize,
+//! frame too large) skips that item; the playlist lists it with its reason.
 //!
 //! The Component ABI has no input argument and no return value
 //! (`elastos/wit/elastos-bus-v1.wit:84-88`), so the album and the playlist are
@@ -22,11 +29,10 @@ mod fake;
 mod tests;
 
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 pub use album::{AlbumItem, ALBUM_SCHEMA};
 pub use bus::{Bus, BusFailure, CallError, InvokeReply};
-pub use image::Kind;
+pub use image::{Kind, MAX_JPEG_SEGMENTS};
 
 /// The album the person asked to play.
 pub const ALBUM_URI: &str = "localhost://Users/self/.AppData/App/photo-viewer/album.json";
@@ -36,29 +42,23 @@ pub const PLAYLIST_URI: &str = "localhost://Users/self/.AppData/App/photo-viewer
 pub const PICTURES_PREFIX: &str = "localhost://Users/self/Pictures/";
 pub const PLAYLIST_SCHEMA: &str = "elastos.photo-viewer.playlist/v1";
 
-pub const MAX_ALBUM_BYTES: u64 = 64 * 1024;
+/// The album is read whole, so it keeps a small cap.
+pub const MAX_ALBUM_BYTES: u64 = 16 * 1024;
 pub const MAX_ALBUM_ITEMS: usize = 64;
-pub const MAX_OBJECT_BYTES: u64 = 128 * 1024;
-/// Image bytes read and hashed in one run, across the whole album.
-///
-/// Content crosses the Bus as a JSON array of numbers, and the guest parses
-/// and hashes it at about 415 fuel a byte. `ComponentProvider` gives each
-/// run a fixed 100,000,000 fuel (`elastos-compute/src/providers/component.rs:28`)
-/// and reports an exhausted run without its cause (`component.rs:134`). This
-/// budget keeps the worst album under 80% of that fuel, so the guest refuses
-/// with a reason instead of trapping. `host-test` gates the number.
-pub const MAX_ALBUM_BODY_BYTES: u64 = 128 * 1024;
+/// Checked with one byte past it; the body is not read.
+pub const MAX_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_SIDE: u32 = 8192;
 pub const MAX_PIXELS: u64 = 40_000_000;
 pub const DEFAULT_DURATION_MS: u64 = 5_000;
 pub const MIN_DURATION_MS: u64 = 1_000;
 pub const MAX_DURATION_MS: u64 = 60_000;
 
-/// Bytes per read. Content travels as a JSON array of numbers, up to four
-/// characters a byte, so 32 KiB stays well under the 1 MiB bridge frame
+/// Bytes per album read. Content travels as a JSON array of numbers, up to
+/// four characters a byte, so 8 KiB stays far under the 1 MiB bridge frame
 /// (`elastos-server/src/resource_bridge.rs:32`).
-pub const READ_CHUNK_BYTES: u64 = 32 * 1024;
-/// Bytes read before the type is known.
+pub const READ_CHUNK_BYTES: u64 = 8 * 1024;
+/// Bytes read before the type is known. Enough for the PNG IHDR and the
+/// WebP VP8, VP8L and VP8X frame headers.
 pub const HEADER_BYTES: u64 = 32;
 
 /// Why the run stopped. Each variant names what is missing.
@@ -74,43 +74,23 @@ pub enum Refusal {
     },
     AlbumTooLarge,
     Album(String),
-    WrongType {
-        index: usize,
-        uri: String,
-    },
-    Truncated {
-        index: usize,
-        uri: String,
-    },
-    Malformed {
-        index: usize,
-        uri: String,
-    },
-    Oversize {
-        index: usize,
-        uri: String,
-    },
-    AlbumBodyBudget {
-        index: usize,
-        uri: String,
-    },
-    Dimensions {
-        index: usize,
-        uri: String,
-        width: u32,
-        height: u32,
-    },
 }
 
 impl Refusal {
     pub fn message(&self) -> String {
         match self {
             Refusal::NoGrant { resource, failure } => {
-                format!("photo-viewer has no grant for {resource}: {}", failure.message())
+                format!(
+                    "photo-viewer has no grant for {resource}: {}",
+                    failure.message()
+                )
             }
             Refusal::Call { resource, error } => match error {
                 CallError::Bus(failure) => {
-                    format!("photo-viewer call on {resource} failed: {}", failure.message())
+                    format!(
+                        "photo-viewer call on {resource} failed: {}",
+                        failure.message()
+                    )
                 }
                 CallError::Provider { code, message } => {
                     format!("photo-viewer call on {resource} failed: {code}: {message}")
@@ -123,29 +103,6 @@ impl Refusal {
                 format!("photo-viewer album is larger than {MAX_ALBUM_BYTES} bytes")
             }
             Refusal::Album(message) => format!("photo-viewer album refused: {message}"),
-            Refusal::WrongType { index, uri } => {
-                format!("photo-viewer item {index} ({uri}) is not PNG, JPEG or WebP")
-            }
-            Refusal::Truncated { index, uri } => {
-                format!("photo-viewer item {index} ({uri}) ends before its image header")
-            }
-            Refusal::Malformed { index, uri } => {
-                format!("photo-viewer item {index} ({uri}) has a malformed image header")
-            }
-            Refusal::Oversize { index, uri } => {
-                format!("photo-viewer item {index} ({uri}) is larger than {MAX_OBJECT_BYTES} bytes")
-            }
-            Refusal::AlbumBodyBudget { index, uri } => format!(
-                "photo-viewer item {index} ({uri}) would take the album past {MAX_ALBUM_BODY_BYTES} image bytes, the most one run can check"
-            ),
-            Refusal::Dimensions {
-                index,
-                uri,
-                width,
-                height,
-            } => format!(
-                "photo-viewer item {index} ({uri}) is {width}x{height}; the limit is {MAX_SIDE} a side and {MAX_PIXELS} pixels"
-            ),
         }
     }
 
@@ -166,7 +123,51 @@ impl Refusal {
                     BusFailure::Internal(message)
                 }
             },
-            _ => BusFailure::Invalid(message),
+            Refusal::AlbumTooLarge | Refusal::Album(_) => BusFailure::Invalid(message),
+        }
+    }
+}
+
+/// Why one item is left out of the playlist.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Skip {
+    WrongType,
+    Truncated,
+    Malformed,
+    Oversize,
+    Dimensions { width: u32, height: u32 },
+}
+
+impl Skip {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Skip::WrongType => "wrong_type",
+            Skip::Truncated => "truncated",
+            Skip::Malformed => "malformed",
+            Skip::Oversize => "oversize",
+            Skip::Dimensions { .. } => "dimensions",
+        }
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            Skip::WrongType => "not PNG, JPEG or WebP".to_string(),
+            Skip::Truncated => "ends before its image header".to_string(),
+            Skip::Malformed => "has a malformed image header".to_string(),
+            Skip::Oversize => format!("is larger than {MAX_OBJECT_BYTES} bytes"),
+            Skip::Dimensions { width, height } => format!(
+                "is {width}x{height}; the limit is {MAX_SIDE} a side and {MAX_PIXELS} pixels"
+            ),
+        }
+    }
+}
+
+impl From<image::HeaderError> for Skip {
+    fn from(err: image::HeaderError) -> Self {
+        match err {
+            image::HeaderError::Truncated => Skip::Truncated,
+            image::HeaderError::UnknownType => Skip::WrongType,
+            image::HeaderError::Malformed => Skip::Malformed,
         }
     }
 }
@@ -179,11 +180,16 @@ pub struct PlaylistItem {
     pub width: u32,
     pub height: u32,
     pub duration_ms: u64,
-    pub bytes: u64,
-    pub sha256: String,
 }
 
-/// Reads the album and its images, checks them, and writes the playlist.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Skipped {
+    pub order: usize,
+    pub uri: String,
+    pub reason: Skip,
+}
+
+/// Reads the album and its image headers, and writes the playlist.
 /// Returns the playlist text that was written.
 pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
     let album_grant = grant(bus, ALBUM_URI, "read", "read the album to play")?;
@@ -192,18 +198,25 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
     let items = album::parse(&album_bytes).map_err(Refusal::Album)?;
 
     let mut playlist = Vec::with_capacity(items.len());
-    let mut body_bytes = 0;
-    for (index, item) in items.iter().enumerate() {
-        let checked = check_item(bus, index, item, MAX_ALBUM_BODY_BYTES - body_bytes)?;
-        body_bytes += checked.bytes;
-        playlist.push(checked);
+    let mut skipped = Vec::new();
+    for (order, item) in items.iter().enumerate() {
+        match check_item(bus, order, item)? {
+            Ok(checked) => playlist.push(checked),
+            Err(reason) => skipped.push(Skipped {
+                order,
+                uri: item.uri.clone(),
+                reason,
+            }),
+        }
     }
 
-    let text = playlist_json(&playlist);
+    let text = playlist_json(&playlist, &skipped);
     let write_grant = grant(bus, PLAYLIST_URI, "write", "write the checked playlist")?;
-    bus::write_text(bus, PLAYLIST_URI, &write_grant, &text).map_err(|error| Refusal::Call {
-        resource: PLAYLIST_URI.to_string(),
-        error,
+    bus::write_bytes(bus, PLAYLIST_URI, &write_grant, text.as_bytes()).map_err(|error| {
+        Refusal::Call {
+            resource: PLAYLIST_URI.to_string(),
+            error,
+        }
     })?;
     Ok(text)
 }
@@ -216,9 +229,15 @@ fn grant(bus: &mut dyn Bus, resource: &str, action: &str, reason: &str) -> Resul
         })
 }
 
-fn call<T>(resource: &str, result: Result<T, CallError>) -> Result<T, Refusal> {
-    result.map_err(|error| Refusal::Call {
-        resource: resource.to_string(),
+fn read_at(
+    bus: &mut dyn Bus,
+    uri: &str,
+    grant: &str,
+    offset: u64,
+    length: u64,
+) -> Result<Vec<u8>, Refusal> {
+    bus::read_window(bus, uri, grant, offset, length).map_err(|error| Refusal::Call {
+        resource: uri.to_string(),
         error,
     })
 }
@@ -235,7 +254,7 @@ fn read_bounded(
         let offset = bytes.len() as u64;
         // Ask for one byte past the limit so an exact fit is told apart from more.
         let ask = READ_CHUNK_BYTES.min(limit + 1 - offset);
-        let chunk = call(uri, bus::read_window(bus, uri, grant, offset, ask))?;
+        let chunk = read_at(bus, uri, grant, offset, ask)?;
         let short = (chunk.len() as u64) < ask;
         bytes.extend_from_slice(&chunk);
         if bytes.len() as u64 > limit {
@@ -247,108 +266,53 @@ fn read_bounded(
     }
 }
 
-/// `budget` is what is left of [`MAX_ALBUM_BODY_BYTES`] for this run.
+/// The outer error stops the run; the inner one skips the item.
 fn check_item(
     bus: &mut dyn Bus,
-    index: usize,
+    order: usize,
     item: &AlbumItem,
-    budget: u64,
-) -> Result<PlaylistItem, Refusal> {
+) -> Result<Result<PlaylistItem, Skip>, Refusal> {
     let uri = item.uri.as_str();
-    let item_grant = grant(bus, uri, "read", "read an image named in the album")?;
+    let item_grant = grant(bus, uri, "read", "read the header of an image in the album")?;
 
     // Type first, from the header alone.
-    let header = call(
-        uri,
-        bus::read_window(bus, uri, &item_grant, 0, HEADER_BYTES),
-    )?;
-    let kind = image::sniff(&header).map_err(|err| header_refusal(err, index, uri))?;
-
-    // Size next, with one byte past each limit, before reading the body.
-    if extends_past(bus, uri, &item_grant, MAX_OBJECT_BYTES)? {
-        return Err(oversize(index, uri));
-    }
-    let limit = MAX_OBJECT_BYTES.min(budget);
-    let over_budget = || Refusal::AlbumBodyBudget {
-        index,
-        uri: uri.to_string(),
+    let header = read_at(bus, uri, &item_grant, 0, HEADER_BYTES)?;
+    let kind = match image::sniff(&header) {
+        Ok(kind) => kind,
+        Err(err) => return Ok(Err(err.into())),
     };
-    if limit < MAX_OBJECT_BYTES && extends_past(bus, uri, &item_grant, limit)? {
-        return Err(over_budget());
+
+    // Size next: one byte past the limit.
+    if !read_at(bus, uri, &item_grant, MAX_OBJECT_BYTES, 1)?.is_empty() {
+        return Ok(Err(Skip::Oversize));
     }
 
-    // The bound holds even if the object grows after the size check.
-    let bytes = read_bounded(bus, uri, &item_grant, limit)?.ok_or_else(|| {
-        if limit < MAX_OBJECT_BYTES {
-            over_budget()
-        } else {
-            oversize(index, uri)
+    let dimensions = match kind {
+        Kind::Jpeg => {
+            image::jpeg_dimensions(|offset, length| read_at(bus, uri, &item_grant, offset, length))?
         }
-    })?;
-    // The type is checked again on the bytes that are hashed.
-    if image::sniff(&bytes).map_err(|err| header_refusal(err, index, uri))? != kind {
-        return Err(Refusal::Malformed {
-            index,
-            uri: uri.to_string(),
-        });
-    }
-    let (width, height) =
-        image::dimensions(kind, &bytes).map_err(|err| header_refusal(err, index, uri))?;
+        Kind::Png | Kind::Webp => image::header_dimensions(kind, &header),
+    };
+    let (width, height) = match dimensions {
+        Ok(dimensions) => dimensions,
+        Err(err) => return Ok(Err(err.into())),
+    };
     if width > MAX_SIDE || height > MAX_SIDE || u64::from(width) * u64::from(height) > MAX_PIXELS {
-        return Err(Refusal::Dimensions {
-            index,
-            uri: uri.to_string(),
-            width,
-            height,
-        });
+        return Ok(Err(Skip::Dimensions { width, height }));
     }
 
-    Ok(PlaylistItem {
-        order: index,
+    Ok(Ok(PlaylistItem {
+        order,
         uri: uri.to_string(),
         kind,
         width,
         height,
         duration_ms: item.duration_ms,
-        bytes: bytes.len() as u64,
-        sha256: hex(&Sha256::digest(&bytes)),
-    })
-}
-
-/// True when the object has a byte at `offset`.
-fn extends_past(bus: &mut dyn Bus, uri: &str, grant: &str, offset: u64) -> Result<bool, Refusal> {
-    let byte = call(uri, bus::read_window(bus, uri, grant, offset, 1))?;
-    Ok(!byte.is_empty())
-}
-
-fn oversize(index: usize, uri: &str) -> Refusal {
-    Refusal::Oversize {
-        index,
-        uri: uri.to_string(),
-    }
-}
-
-fn header_refusal(err: image::HeaderError, index: usize, uri: &str) -> Refusal {
-    let uri = uri.to_string();
-    match err {
-        image::HeaderError::Truncated => Refusal::Truncated { index, uri },
-        image::HeaderError::UnknownType => Refusal::WrongType { index, uri },
-        image::HeaderError::Malformed => Refusal::Malformed { index, uri },
-    }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(DIGITS[usize::from(byte >> 4)] as char);
-        out.push(DIGITS[usize::from(byte & 0x0f)] as char);
-    }
-    out
+    }))
 }
 
 /// Keys are sorted (`serde_json` default map), so the text is deterministic.
-pub fn playlist_json(items: &[PlaylistItem]) -> String {
+pub fn playlist_json(items: &[PlaylistItem], skipped: &[Skipped]) -> String {
     let items: Vec<Value> = items
         .iter()
         .map(|item| {
@@ -359,8 +323,17 @@ pub fn playlist_json(items: &[PlaylistItem]) -> String {
                 "width": item.width,
                 "height": item.height,
                 "duration_ms": item.duration_ms,
-                "bytes": item.bytes,
-                "sha256": item.sha256,
+            })
+        })
+        .collect();
+    let skipped: Vec<Value> = skipped
+        .iter()
+        .map(|skip| {
+            json!({
+                "order": skip.order,
+                "uri": skip.uri,
+                "reason": skip.reason.code(),
+                "message": skip.reason.message(),
             })
         })
         .collect();
@@ -368,6 +341,7 @@ pub fn playlist_json(items: &[PlaylistItem]) -> String {
         "schema": PLAYLIST_SCHEMA,
         "album": ALBUM_URI,
         "items": items,
+        "skipped": skipped,
     })
     .to_string()
 }

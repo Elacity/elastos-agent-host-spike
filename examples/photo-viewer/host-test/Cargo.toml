@@ -12,7 +12,6 @@ publish = false
 elastos-common = { path = "../../../elastos/crates/elastos-common" }
 elastos-compute = { path = "../../../elastos/crates/elastos-compute" }
 serde_json = "1"
-sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 wasmtime = "36"
 # Same pin as elastos-server, for the copied admission validator.

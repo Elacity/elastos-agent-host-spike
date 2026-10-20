@@ -12,16 +12,17 @@ use elastos_common::CapsuleManifest;
 use elastos_compute::providers::ComponentProvider;
 use elastos_compute::ComputeProvider;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 const ALBUM: &str = "localhost://Users/self/.AppData/App/photo-viewer/album.json";
 const PLAYLIST: &str = "localhost://Users/self/.AppData/App/photo-viewer/playlist.json";
 const A: &str = "localhost://Users/self/Pictures/a.png";
 const B: &str = "localhost://Users/self/Pictures/b.jpg";
 const C: &str = "localhost://Users/self/Pictures/c.webp";
-const MAX_OBJECT_BYTES: usize = 128 * 1024;
-const MAX_ALBUM_BODY_BYTES: usize = 128 * 1024;
+const MAX_OBJECT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_ALBUM_BYTES: usize = 16 * 1024;
 const MAX_ALBUM_ITEMS: usize = 64;
+const MAX_JPEG_SEGMENTS: usize = 32;
+const HEADER_BYTES: usize = 32;
 
 /// The imports `elastos-server/src/component.rs:6-12` allows.
 const ALLOWED_BUS_IMPORTS: &[&str] = &[
@@ -61,6 +62,7 @@ struct Bridge {
     written: BTreeMap<String, String>,
     lines: Vec<Value>,
     bytes_served: BTreeMap<String, usize>,
+    provider_errors: BTreeMap<String, String>,
 }
 
 impl Bridge {
@@ -154,7 +156,11 @@ impl Bridge {
         if body["path"].as_str() != Some(uri.as_str()) {
             return error("invalid_resource_invoke", "path must equal the resource");
         }
-        let result = if action == "read" {
+        let result = if let Some(problem) = provider_body_problem(action, body) {
+            json!({ "status": "error", "code": "invalid_request", "message": problem })
+        } else if let Some(message) = self.provider_errors.get(&uri) {
+            json!({ "status": "error", "code": "read_failed", "message": message })
+        } else if action == "read" {
             match self.objects.get(&uri) {
                 None => json!({ "status": "error", "code": "read_failed", "message": "not found" }),
                 Some(bytes) => {
@@ -163,9 +169,8 @@ impl Bridge {
                     let window: Vec<u8> = if start >= bytes.len() {
                         Vec::new()
                     } else {
-                        let end = body["length"].as_u64().map_or(bytes.len(), |length| {
-                            start.saturating_add(length as usize).min(bytes.len())
-                        });
+                        let length = body["length"].as_u64().unwrap() as usize;
+                        let end = start.saturating_add(length).min(bytes.len());
                         bytes[start..end].to_vec()
                     };
                     *self.bytes_served.entry(uri.clone()).or_default() += window.len();
@@ -173,13 +178,35 @@ impl Bridge {
                 }
             }
         } else {
-            let content = body["content"].as_str().unwrap_or_default().to_string();
+            let content: Vec<u8> = serde_json::from_value(body["content"].clone()).unwrap();
             let written = content.len();
-            self.written.insert(uri.clone(), content);
+            self.written
+                .insert(uri.clone(), String::from_utf8(content).unwrap());
             json!({ "status": "ok", "data": { "bytes_written": written } })
         };
         json!({ "type": "resource_result", "result": result, "audit": "component-invoke:test" })
     }
+}
+
+/// What the localhost provider would refuse in this body
+/// (`elastos/capsules/localhost-provider/src/main.rs:25-48`, unknown fields
+/// refused; `length` required here because the provider underflows without it).
+fn provider_body_problem(action: &str, body: &Value) -> Option<String> {
+    let allowed: &[&str] = match action {
+        "read" => &["path", "offset", "length", "encoding"],
+        _ => &["path", "content", "append"],
+    };
+    let object = body.as_object()?;
+    if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Some(format!("unknown field `{key}`"));
+    }
+    if action == "read" {
+        return (!body["length"].is_u64()).then(|| "read must name a length".into());
+    }
+    if serde_json::from_value::<Vec<u8>>(body["content"].clone()).is_err() {
+        return Some("write content must be a byte array".into());
+    }
+    (!body["append"].is_boolean()).then(|| "write must say append".into())
 }
 
 fn error(code: &str, message: &str) -> Value {
@@ -226,6 +253,18 @@ fn jpeg(width: u16, height: u16) -> Vec<u8> {
     bytes.extend_from_slice(&height.to_be_bytes());
     bytes.extend_from_slice(&width.to_be_bytes());
     bytes.extend_from_slice(&[3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1, 0xff, 0xd9]);
+    bytes
+}
+
+/// A JPEG whose frame header follows APPn segments of these payload sizes.
+fn jpeg_after(segments: &[usize], width: u16, height: u16) -> Vec<u8> {
+    let mut bytes = vec![0xff, 0xd8];
+    for (index, size) in segments.iter().enumerate() {
+        bytes.extend_from_slice(&[0xff, 0xe1 + (index % 14) as u8]);
+        bytes.extend_from_slice(&((size + 2) as u16).to_be_bytes());
+        bytes.extend(std::iter::repeat_n(0x45u8, *size));
+    }
+    bytes.extend_from_slice(&jpeg(width, height)[2..]);
     bytes
 }
 
@@ -388,6 +427,14 @@ fn manifest_is_a_valid_component_capsule_with_narrow_storage_bounds() {
 
 // --- runs in the Runtime's ComponentProvider ------------------------------------------
 
+fn playlist(bridge: &Bridge) -> Value {
+    serde_json::from_str(&bridge.written[PLAYLIST]).expect("playlist written")
+}
+
+fn denied(err: &str) -> bool {
+    err.contains("Component capsule denied: BusError::Denied(")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn album_plays_and_the_playlist_is_written() {
     let objects = [
@@ -397,79 +444,125 @@ async fn album_plays_and_the_playlist_is_written() {
     ];
     let (result, bridge) = run(Bridge::with(&objects)).await;
     result.expect("component run succeeds");
-    let playlist: Value = serde_json::from_str(&bridge.written[PLAYLIST]).unwrap();
+    let playlist = playlist(&bridge);
     println!("playlist: {playlist}");
-    let items = playlist["items"].as_array().unwrap();
-    assert_eq!(items.len(), 3);
-    for (item, (uri, bytes)) in items.iter().zip(objects.iter()) {
-        assert_eq!(item["uri"], *uri);
-        let sha: String = Sha256::digest(bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        assert_eq!(item["sha256"], sha);
-    }
+    let items: Vec<_> = playlist["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            (
+                item["uri"].as_str().unwrap(),
+                item["mime"].as_str().unwrap(),
+                item["width"].as_u64().unwrap(),
+                item["height"].as_u64().unwrap(),
+            )
+        })
+        .collect();
     assert_eq!(
-        (
-            items[0]["mime"].clone(),
-            items[0]["width"].clone(),
-            items[0]["height"].clone()
-        ),
-        (json!("image/png"), json!(640), json!(480))
+        items,
+        vec![
+            (A, "image/png", 640, 480),
+            (B, "image/jpeg", 1920, 1080),
+            (C, "image/webp", 300, 200),
+        ]
     );
-    assert_eq!(items[1]["mime"], "image/jpeg");
-    assert_eq!(items[2]["mime"], "image/webp");
+    assert_eq!(playlist["skipped"], json!([]));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn no_grant_is_denied_through_the_runtime() {
-    let mut bridge = Bridge::with(&[(A, png(1, 1, 64))]);
+async fn a_photo_sized_jpeg_plays_from_its_headers() {
+    // 12 MiB, frame header after 64 KiB of EXIF and a 40 KiB ICC profile.
+    let mut bytes = jpeg_after(&[65_000, 40_000], 6000, 4000);
+    bytes.resize(12 * 1024 * 1024, 0x11);
+    let (result, bridge) = run(Bridge::with(&[(B, bytes)])).await;
+    result.expect("component run succeeds");
+    let item = &playlist(&bridge)["items"][0];
+    assert_eq!(
+        (item["width"].clone(), item["height"].clone()),
+        (json!(6000), json!(4000))
+    );
+    println!("bytes served for a 12 MiB JPEG: {}", bridge.bytes_served[B]);
+    assert!(bridge.bytes_served[B] < 100);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn content_failures_are_skipped_and_listed_through_the_runtime() {
+    let objects = [
+        ("localhost://Users/self/Pictures/ok.png", png(10, 10, 64)),
+        (
+            "localhost://Users/self/Pictures/note.png",
+            b"GIF89a....".to_vec(),
+        ),
+        (
+            "localhost://Users/self/Pictures/cut.png",
+            b"\x89PNG\r\n\x1a\n\x00\x00".to_vec(),
+        ),
+        (
+            "localhost://Users/self/Pictures/huge.png",
+            png(10, 10, MAX_OBJECT_BYTES + 1),
+        ),
+        (
+            "localhost://Users/self/Pictures/wide.png",
+            png(9000, 10, 64),
+        ),
+        ("localhost://Users/self/Pictures/zero.png", png(0, 10, 64)),
+    ];
+    let (result, bridge) = run(Bridge::with(&objects)).await;
+    result.expect("content failures do not stop the run");
+    let playlist = playlist(&bridge);
+    assert_eq!(playlist["items"].as_array().unwrap().len(), 1);
+    assert_eq!(playlist["items"][0]["uri"], objects[0].0);
+    let skipped: Vec<_> = playlist["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|skip| {
+            (
+                skip["order"].as_u64().unwrap(),
+                skip["reason"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        skipped,
+        vec![
+            (1, "wrong_type"),
+            (2, "truncated"),
+            (3, "oversize"),
+            (4, "dimensions"),
+            (5, "malformed"),
+        ]
+    );
+    assert_eq!(bridge.bytes_served[objects[3].0], HEADER_BYTES + 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_grant_stops_the_run_through_the_runtime() {
+    let mut bridge = Bridge::with(&[(A, png(1, 1, 64)), (B, jpeg(2, 2))]);
     bridge.deny(A, "read");
     let (result, bridge) = run(bridge).await;
     let err = result.unwrap_err();
-    assert!(
-        err.contains("Component capsule denied: BusError::Denied("),
-        "{err}"
-    );
-    assert!(err.contains(A), "{err}");
+    assert!(denied(&err) && err.contains(A), "{err}");
     assert_eq!(bridge.invokes_on(A), 0);
+    assert_eq!(bridge.invokes_on(B), 0);
     assert!(bridge.written.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wrong_type_is_refused_through_the_runtime() {
-    let (result, bridge) = run(Bridge::with(&[(A, b"GIF89a....".to_vec())])).await;
+async fn provider_error_stops_the_run_through_the_runtime() {
+    let mut bridge = Bridge::with(&[(A, png(1, 1, 64)), (B, jpeg(2, 2))]);
+    bridge
+        .provider_errors
+        .insert(A.to_string(), "disk gone".to_string());
+    let (result, bridge) = run(bridge).await;
     let err = result.unwrap_err();
     assert!(
-        err.contains("Component capsule denied: BusError::Invalid(")
-            && err.contains("is not PNG, JPEG or WebP"),
+        err.contains("Component capsule denied: BusError::Unavailable(")
+            && err.contains("disk gone"),
         "{err}"
     );
-    assert!(bridge.written.is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn oversize_is_refused_through_the_runtime_without_reading_the_body() {
-    let (result, bridge) = run(Bridge::with(&[(A, png(1, 1, MAX_OBJECT_BYTES + 1))])).await;
-    let err = result.unwrap_err();
-    assert!(
-        err.contains("Component capsule denied: BusError::Invalid(")
-            && err.contains("is larger than"),
-        "{err}"
-    );
-    assert_eq!(bridge.bytes_served[A], 32 + 1);
-    assert!(bridge.written.is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn truncated_header_is_refused_through_the_runtime() {
-    let (result, bridge) = run(Bridge::with(&[(A, b"\x89PNG\r\n\x1a\n\x00\x00".to_vec())])).await;
-    let err = result.unwrap_err();
-    assert!(
-        err.contains("Component capsule denied: BusError::Invalid(")
-            && err.contains("ends before its image header"),
-        "{err}"
-    );
+    assert_eq!(bridge.invokes_on(B), 0);
     assert!(bridge.written.is_empty());
 }
 
@@ -479,34 +572,49 @@ async fn write_without_grant_is_denied_through_the_runtime() {
     bridge.deny(PLAYLIST, "write");
     let (result, bridge) = run(bridge).await;
     let err = result.unwrap_err();
-    assert!(
-        err.contains("Component capsule denied: BusError::Denied(") && err.contains(PLAYLIST),
-        "{err}"
-    );
+    assert!(denied(&err) && err.contains(PLAYLIST), "{err}");
     assert_eq!(bridge.invokes_on(PLAYLIST), 0);
 }
 
-/// The two albums that cost the most fuel within the guest's own limits.
+/// The two albums that cost the most fuel within the guest's own limits:
+/// the album object near its 16 KiB cap with 64 items, each a JPEG whose
+/// frame header sits after the most segments the guest walks.
 fn worst_case_albums() -> Vec<(&'static str, Bridge)> {
-    let many: Vec<(String, Vec<u8>)> = (0..MAX_ALBUM_ITEMS)
+    let name_len = MAX_ALBUM_BYTES / MAX_ALBUM_ITEMS - 64;
+    let walked: Vec<(String, Vec<u8>)> = (0..MAX_ALBUM_ITEMS)
         .map(|index| {
             (
-                format!("localhost://Users/self/Pictures/{index}.png"),
-                png(10, 10, MAX_ALBUM_BODY_BYTES / MAX_ALBUM_ITEMS),
+                format!(
+                    "localhost://Users/self/Pictures/{index:02}{}.jpg",
+                    "x".repeat(name_len)
+                ),
+                jpeg_after(&[0; MAX_JPEG_SEGMENTS - 2], 10, 10),
             )
         })
         .collect();
+    let skipped: Vec<(String, Vec<u8>)> = walked
+        .iter()
+        .map(|(uri, _)| (uri.clone(), jpeg_after(&[0; MAX_JPEG_SEGMENTS], 10, 10)))
+        .collect();
     vec![
-        (
-            "one image at the object limit",
-            Bridge::with(&[(A, png(10, 10, MAX_OBJECT_BYTES))]),
-        ),
-        ("64 images filling the body budget", Bridge::with(&many)),
+        ("64 JPEGs, 31 segments each", Bridge::with(&walked)),
+        ("64 JPEGs past the segment limit", Bridge::with(&skipped)),
     ]
 }
 
+#[test]
+fn the_worst_case_album_object_is_near_its_cap() {
+    for (name, bridge) in worst_case_albums() {
+        let size = bridge.objects[ALBUM].len();
+        assert!(
+            size <= MAX_ALBUM_BYTES && size > MAX_ALBUM_BYTES * 3 / 4,
+            "{name}: album is {size} bytes"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn worst_case_albums_play_in_the_runtime_component_provider() {
+async fn worst_case_albums_run_in_the_runtime_component_provider() {
     for (name, bridge) in worst_case_albums() {
         let (result, bridge) = run(bridge).await;
         result.unwrap_or_else(|err| panic!("{name}: {err}"));
@@ -656,20 +764,43 @@ mod measure {
     }
 }
 
-/// Measurement, not a gate: fuel used per object size, against the
-/// Runtime's fixed budget. Run with
+/// Named objects for one album.
+type Objects = Vec<(String, Vec<u8>)>;
+
+/// Measurement, not a gate: fuel per album shape. Run with
 /// `cargo test --locked -- --ignored --nocapture fuel_probe`.
 #[test]
 #[ignore]
 fn fuel_probe() {
-    for kib in [1, 64, 256, 512, 1024, 2048, 4096] {
-        let bridge = Bridge::with(&[(A, png(10, 10, kib * 1024))]);
-        let (outcome, used) = measure::run(bridge, u64::MAX / 2);
+    let shapes: Vec<(String, Objects)> = vec![
+        ("1 PNG".into(), vec![(A.to_string(), png(10, 10, 64))]),
+        (
+            "1 PNG of 12 MiB".into(),
+            vec![(A.to_string(), png(10, 10, 12 << 20))],
+        ),
+        (
+            "1 JPEG, 31 segments".into(),
+            vec![(B.to_string(), jpeg_after(&[0; 30], 10, 10))],
+        ),
+        (
+            "64 PNGs".into(),
+            (0..64)
+                .map(|index| {
+                    (
+                        format!("localhost://Users/self/Pictures/{index}.png"),
+                        png(10, 10, 64),
+                    )
+                })
+                .collect(),
+        ),
+    ];
+    for (name, objects) in shapes {
+        let (outcome, used) = measure::run(Bridge::with(&objects), u64::MAX / 2);
         println!(
-            "fuel_probe {kib:>5} KiB: {used:>12} fuel ({:>5.1}% of the Runtime budget), {}",
+            "fuel_probe {name}: {used} fuel ({:.1}% of the Runtime budget), {}",
             used as f64 * 100.0 / measure::RUNTIME_FUEL as f64,
             if outcome.is_ok() {
-                "plays".to_string()
+                "ok".to_string()
             } else {
                 format!("{outcome:?}")
             }

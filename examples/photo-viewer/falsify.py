@@ -19,61 +19,34 @@ HERE = pathlib.Path(__file__).resolve().parent
 
 # (name, file, exact old text, new text, guest test filters)
 GUEST = [
+    # Authority failures stop the run.
     (
         "album read without a grant",
         "src/lib.rs",
         'let album_grant = grant(bus, ALBUM_URI, "read", "read the album to play")?;',
         'let album_grant = grant(bus, ALBUM_URI, "read", "read the album to play").unwrap_or_default();',
-        ["album_without_a_read_grant_is_denied_before_any_read"],
+        ["album_without_a_read_grant_stops_before_any_read"],
     ),
     (
         "image read without a grant",
         "src/lib.rs",
-        'let item_grant = grant(bus, uri, "read", "read an image named in the album")?;',
-        'let item_grant = grant(bus, uri, "read", "read an image named in the album").unwrap_or_default();',
-        ["image_without_a_read_grant_is_denied_before_any_read_of_it"],
+        'let item_grant = grant(bus, uri, "read", "read the header of an image in the album")?;',
+        'let item_grant = grant(bus, uri, "read", "read the header of an image in the album").unwrap_or_default();',
+        ["image_without_a_read_grant_stops_the_run_and_is_not_skipped"],
     ),
     (
         "playlist write without a grant",
         "src/lib.rs",
         'let write_grant = grant(bus, PLAYLIST_URI, "write", "write the checked playlist")?;',
         'let write_grant = grant(bus, PLAYLIST_URI, "write", "write the checked playlist").unwrap_or_default();',
-        ["playlist_without_a_write_grant_is_denied_and_not_written"],
+        ["playlist_without_a_write_grant_stops_and_is_not_written"],
     ),
     (
-        "wrong type accepted as PNG",
-        "src/image.rs",
-        "    Err(HeaderError::UnknownType)\n}",
-        "    Ok(Kind::Png)\n}",
-        ["wrong_type_is_refused_and_the_body_is_not_read"],
-    ),
-    (
-        "truncated magic treated as unknown",
-        "src/image.rs",
-        "if is_prefix_of_magic(header) {",
-        "if false && is_prefix_of_magic(header) {",
-        ["truncated_magic_is_refused"],
-    ),
-    (
-        "size checked only after reading the body",
+        "provider error on a header read skipped instead of stopping",
         "src/lib.rs",
-        "if extends_past(bus, uri, &item_grant, MAX_OBJECT_BYTES)? {",
-        "if false && extends_past(bus, uri, &item_grant, MAX_OBJECT_BYTES)? {",
-        ["oversize_is_refused_without_reading_the_body"],
-    ),
-    (
-        "side limit removed",
-        "src/lib.rs",
-        "if width > MAX_SIDE || height > MAX_SIDE ||",
-        "if height > MAX_SIDE ||",
-        ["dimension_limits_are_enforced_at_the_boundary"],
-    ),
-    (
-        "album body budget not spent",
-        "src/lib.rs",
-        "check_item(bus, index, item, MAX_ALBUM_BODY_BYTES - body_bytes)?",
-        "check_item(bus, index, item, MAX_ALBUM_BODY_BYTES)?",
-        ["album_whose_images_exceed_the_body_budget_is_refused_at_the_item_that_crosses_it"],
+        "let header = read_at(bus, uri, &item_grant, 0, HEADER_BYTES)?;",
+        "let header = read_at(bus, uri, &item_grant, 0, HEADER_BYTES).unwrap_or_default();",
+        ["a_provider_error_stops_the_run_and_is_not_skipped"],
     ),
     (
         "provider status ignored",
@@ -87,14 +60,72 @@ GUEST = [
         "src/album.rs",
         '.find(|key| !matches!(key.as_str(), "schema" | "items"))',
         '.find(|key| !matches!(key.as_str(), "schema" | "items" | "x"))',
-        ["malformed_albums_are_refused_before_any_image_is_read"],
+        ["malformed_albums_stop_before_any_image_is_read"],
     ),
     (
         "dot-dot segments allowed",
         "src/album.rs",
         '.any(|part| part.is_empty() || part == "." || part == "..")',
         '.any(|part| part.is_empty() || part == ".")',
-        ["malformed_albums_are_refused_before_any_image_is_read"],
+        ["malformed_albums_stop_before_any_image_is_read"],
+    ),
+    # Content failures skip the item.
+    (
+        "content failure stops the run instead of skipping",
+        "src/lib.rs",
+        "match check_item(bus, order, item)? {",
+        "match check_item(bus, order, item)?.map_err(|_| Refusal::AlbumTooLarge).map(Ok)? {",
+        ["a_bad_item_is_skipped_and_the_rest_play_in_order"],
+    ),
+    (
+        "wrong type accepted as PNG",
+        "src/image.rs",
+        "    Err(HeaderError::UnknownType)\n}",
+        "    Ok(Kind::Png)\n}",
+        ["wrong_type_is_skipped_after_reading_only_its_header"],
+    ),
+    (
+        "truncated magic treated as unknown",
+        "src/image.rs",
+        "if is_prefix_of_magic(header) {",
+        "if false && is_prefix_of_magic(header) {",
+        ["truncated_magic_is_skipped"],
+    ),
+    (
+        "size limit not checked",
+        "src/lib.rs",
+        "if !read_at(bus, uri, &item_grant, MAX_OBJECT_BYTES, 1)?.is_empty() {",
+        "if false && !read_at(bus, uri, &item_grant, MAX_OBJECT_BYTES, 1)?.is_empty() {",
+        ["oversize_is_skipped_without_reading_the_body"],
+    ),
+    (
+        "side limit removed",
+        "src/lib.rs",
+        "if width > MAX_SIDE || height > MAX_SIDE ||",
+        "if height > MAX_SIDE ||",
+        ["dimension_limits_are_enforced_at_the_boundary"],
+    ),
+    (
+        "JPEG segment cap doubled",
+        "src/image.rs",
+        "for _ in 0..MAX_JPEG_SEGMENTS {",
+        "for _ in 0..MAX_JPEG_SEGMENTS * 2 {",
+        ["malformed_headers_are_skipped"],
+    ),
+    (
+        "JPEG segment payloads read",
+        "src/image.rs",
+        "let marker = read(at, 4)?;",
+        "let _payload = read(at, 70_000)?;\n        let marker = read(at, 4)?;",
+        ["a_jpeg_frame_header_after_large_exif_is_found_without_reading_the_payloads"],
+    ),
+    # Body shapes the localhost provider accepts.
+    (
+        "playlist written as a string without append (the P1 shape)",
+        "src/bus.rs",
+        'json!({ "path": uri, "content": content, "append": false })',
+        'json!({ "path": uri, "content": String::from_utf8_lossy(content) })',
+        ["the_playlist_is_written_as_bytes_with_append_false", "plays_png_jpeg_and_webp_in_album_order"],
     ),
 ]
 
@@ -105,14 +136,21 @@ RUNTIME = [
         "src/image.rs",
         "    Err(HeaderError::UnknownType)\n}",
         "    Ok(Kind::Png)\n}",
-        ["wrong_type_is_refused_through_the_runtime"],
+        ["content_failures_are_skipped_and_listed_through_the_runtime"],
     ),
     (
         "image read without a grant (in the component)",
         "src/lib.rs",
-        'let item_grant = grant(bus, uri, "read", "read an image named in the album")?;',
-        'let item_grant = grant(bus, uri, "read", "read an image named in the album").unwrap_or_default();',
-        ["no_grant_is_denied_through_the_runtime"],
+        'let item_grant = grant(bus, uri, "read", "read the header of an image in the album")?;',
+        'let item_grant = grant(bus, uri, "read", "read the header of an image in the album").unwrap_or_default();',
+        ["no_grant_stops_the_run_through_the_runtime"],
+    ),
+    (
+        "playlist written as a string (in the component)",
+        "src/bus.rs",
+        'json!({ "path": uri, "content": content, "append": false })',
+        'json!({ "path": uri, "content": String::from_utf8_lossy(content) })',
+        ["album_plays_and_the_playlist_is_written"],
     ),
 ]
 
@@ -128,6 +166,11 @@ def run(cmd, cwd):
 
 
 def guest_tests_fail(filters):
+    # A mutant that does not compile proves nothing.
+    build = run(["cargo", "test", "--locked", "--lib", "--no-run"], HERE)
+    if build.returncode != 0:
+        print(build.stderr[-2000:])
+        raise SystemExit("a falsifier does not compile")
     for name in filters:
         result = run(["cargo", "test", "--locked", "--lib", "--", "--exact", f"tests::{name}"], HERE)
         if result.returncode == 0:

@@ -6,7 +6,11 @@
 //!   `elastos-server/src/resource_bridge.rs:364-409`;
 //! - `read` applies the offset/length window of `resource_bridge.rs:594-604`
 //!   and answers `{"status":"ok","data":{"content":[..],"size":n}}`;
-//! - `write` stores the `content` string and answers `bytes_written`.
+//! - bodies are checked the way the localhost provider checks them
+//!   (`elastos/capsules/localhost-provider/src/main.rs:25-48`, unknown fields
+//!   refused): `read` takes `path`, `offset`, `length`; `write` takes `path`,
+//!   `content` as a byte array, and `append`;
+//! - `write` stores the bytes and answers `bytes_written`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -147,46 +151,70 @@ impl Bus for FakeBus {
         if body["path"].as_str() != Some(resource) {
             return Err(BusFailure::Invalid("path must equal the resource".into()));
         }
+        if let Some(problem) = provider_body_problem(operation, &body) {
+            return Ok(reply(
+                json!({ "status": "error", "code": "invalid_request", "message": problem }),
+            ));
+        }
         if let Some((code, message)) = self.provider_errors.get(resource) {
             return Ok(reply(
                 json!({ "status": "error", "code": code, "message": message }),
             ));
         }
-        match operation {
-            "read" => {
-                let Some(bytes) = self.objects.get(resource) else {
-                    return Ok(reply(json!({
-                        "status": "error",
-                        "code": "read_failed",
-                        "message": "object not found",
-                    })));
-                };
-                let start = body["offset"].as_u64().unwrap_or(0) as usize;
-                let window = if start >= bytes.len() {
-                    Vec::new()
-                } else {
-                    let end = match body["length"].as_u64() {
-                        Some(length) => start.saturating_add(length as usize).min(bytes.len()),
-                        None => bytes.len(),
-                    };
-                    bytes[start..end].to_vec()
-                };
-                Ok(reply(json!({
-                    "status": "ok",
-                    "data": { "content": window, "size": window.len() },
-                })))
+        if operation == "read" {
+            let Some(bytes) = self.objects.get(resource) else {
+                return Ok(reply(json!({
+                    "status": "error",
+                    "code": "read_failed",
+                    "message": "object not found",
+                })));
+            };
+            let start = body["offset"].as_u64().unwrap_or(0) as usize;
+            let length = body["length"].as_u64().unwrap() as usize;
+            let window = if start >= bytes.len() {
+                Vec::new()
+            } else {
+                bytes[start..start.saturating_add(length).min(bytes.len())].to_vec()
+            };
+            return Ok(reply(json!({
+                "status": "ok",
+                "data": { "content": window, "size": window.len() },
+            })));
+        }
+        let content: Vec<u8> = serde_json::from_value(body["content"].clone()).unwrap();
+        let text = String::from_utf8(content.clone())
+            .map_err(|_| BusFailure::Invalid("playlist must be UTF-8".into()))?;
+        self.written.insert(resource.to_string(), text);
+        Ok(reply(json!({
+            "status": "ok",
+            "data": { "bytes_written": content.len() },
+        })))
+    }
+}
+
+/// What the localhost provider would refuse in this body, if anything.
+fn provider_body_problem(operation: &str, body: &Value) -> Option<String> {
+    let allowed: &[&str] = match operation {
+        "read" => &["path", "offset", "length", "encoding"],
+        _ => &["path", "content", "append"],
+    };
+    let object = body.as_object()?;
+    if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Some(format!("unknown field `{key}`"));
+    }
+    match operation {
+        // Without `length` the provider computes `size - offset`, which
+        // underflows past the end (`main.rs:434`, `468`).
+        "read" if !body["length"].is_u64() => Some("read must name a length".into()),
+        "read" => None,
+        _ => {
+            if serde_json::from_value::<Vec<u8>>(body["content"].clone()).is_err() {
+                return Some("write content must be a byte array".into());
             }
-            _ => {
-                let content = body["content"]
-                    .as_str()
-                    .ok_or_else(|| BusFailure::Invalid("write content must be a string".into()))?;
-                self.written
-                    .insert(resource.to_string(), content.to_string());
-                Ok(reply(json!({
-                    "status": "ok",
-                    "data": { "bytes_written": content.len() },
-                })))
+            if !body["append"].is_boolean() {
+                return Some("write must say append".into());
             }
+            None
         }
     }
 }

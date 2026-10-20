@@ -77,17 +77,83 @@ fn is_prefix_of_magic(header: &[u8]) -> bool {
     false
 }
 
-/// Width and height from the frame header.
-pub fn dimensions(kind: Kind, bytes: &[u8]) -> Result<(u32, u32), HeaderError> {
+/// Width and height of a PNG or WebP from its first [`HEADER_BYTES`] bytes.
+///
+/// JPEG keeps its frame header after a run of marker segments; use
+/// [`jpeg_dimensions`] for it.
+///
+/// [`HEADER_BYTES`]: crate::HEADER_BYTES
+pub fn header_dimensions(kind: Kind, header: &[u8]) -> Result<(u32, u32), HeaderError> {
     let (width, height) = match kind {
-        Kind::Png => png_dimensions(bytes)?,
-        Kind::Jpeg => jpeg_dimensions(bytes)?,
-        Kind::Webp => webp_dimensions(bytes)?,
+        Kind::Png => png_dimensions(header)?,
+        Kind::Webp => webp_dimensions(header)?,
+        Kind::Jpeg => return Err(HeaderError::Malformed),
     };
+    nonzero(width, height)
+}
+
+fn nonzero(width: u32, height: u32) -> Result<(u32, u32), HeaderError> {
     if width == 0 || height == 0 {
         return Err(HeaderError::Malformed);
     }
     Ok((width, height))
+}
+
+/// Segments a JPEG may have before its frame header.
+pub const MAX_JPEG_SEGMENTS: usize = 32;
+
+/// JPEG: walk the marker segments to the first start-of-frame, reading only
+/// each 4-byte marker and length and the 5 bytes of the frame header.
+/// Segment payloads (EXIF, ICC, thumbnails) are skipped, not read.
+///
+/// `read(offset, length)` returns at most `length` bytes; fewer means the
+/// object ends there. Its error stops the walk unchanged.
+pub fn jpeg_dimensions<E>(
+    mut read: impl FnMut(u64, u64) -> Result<Vec<u8>, E>,
+) -> Result<Result<(u32, u32), HeaderError>, E> {
+    let mut at: u64 = 2;
+    for _ in 0..MAX_JPEG_SEGMENTS {
+        let marker = read(at, 4)?;
+        if marker.len() < 2 {
+            return Ok(Err(HeaderError::Truncated));
+        }
+        if marker[0] != 0xff {
+            return Ok(Err(HeaderError::Malformed));
+        }
+        match marker[1] {
+            // Fill byte before a marker.
+            0xff => {
+                at += 1;
+                continue;
+            }
+            // Markers without a length.
+            0x01 | 0xd0..=0xd7 => {
+                at += 2;
+                continue;
+            }
+            // Scan data or end of image before any frame header.
+            0xd9 | 0xda => return Ok(Err(HeaderError::Malformed)),
+            _ => {}
+        }
+        if marker.len() < 4 {
+            return Ok(Err(HeaderError::Truncated));
+        }
+        let segment = u64::from(be_u16(&marker, 2));
+        if segment < 2 {
+            return Ok(Err(HeaderError::Malformed));
+        }
+        let is_frame = matches!(marker[1], 0xc0..=0xcf) && !matches!(marker[1], 0xc4 | 0xc8 | 0xcc);
+        if is_frame {
+            // Precision (1), height (2), width (2).
+            let frame = read(at + 4, 5)?;
+            if frame.len() < 5 {
+                return Ok(Err(HeaderError::Truncated));
+            }
+            return Ok(nonzero(be_u16(&frame, 3), be_u16(&frame, 1)));
+        }
+        at += 2 + segment;
+    }
+    Ok(Err(HeaderError::Malformed))
 }
 
 fn need(bytes: &[u8], len: usize) -> Result<(), HeaderError> {
@@ -124,45 +190,6 @@ fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32), HeaderError> {
         return Err(HeaderError::Malformed);
     }
     Ok((be_u32(bytes, 16), be_u32(bytes, 20)))
-}
-
-/// JPEG: walk the marker segments up to the first start-of-frame.
-fn jpeg_dimensions(bytes: &[u8]) -> Result<(u32, u32), HeaderError> {
-    let mut at = 2;
-    loop {
-        need(bytes, at + 2)?;
-        if bytes[at] != 0xff {
-            return Err(HeaderError::Malformed);
-        }
-        let marker = bytes[at + 1];
-        match marker {
-            // Fill byte before a marker.
-            0xff => {
-                at += 1;
-                continue;
-            }
-            // Markers without a length.
-            0x01 | 0xd0..=0xd7 => {
-                at += 2;
-                continue;
-            }
-            // Scan data or end of image before any frame header.
-            0xd9 | 0xda => return Err(HeaderError::Malformed),
-            _ => {}
-        }
-        need(bytes, at + 4)?;
-        let segment = be_u16(bytes, at + 2) as usize;
-        if segment < 2 {
-            return Err(HeaderError::Malformed);
-        }
-        let is_frame = matches!(marker, 0xc0..=0xcf) && !matches!(marker, 0xc4 | 0xc8 | 0xcc);
-        if is_frame {
-            // Length (2), precision (1), height (2), width (2).
-            need(bytes, at + 9)?;
-            return Ok((be_u16(bytes, at + 7), be_u16(bytes, at + 5)));
-        }
-        at += 2 + segment;
-    }
 }
 
 /// WebP: the first chunk is VP8X (extended), VP8L (lossless) or "VP8 " (lossy).
