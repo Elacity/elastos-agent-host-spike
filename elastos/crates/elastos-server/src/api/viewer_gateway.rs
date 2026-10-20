@@ -1184,6 +1184,7 @@ impl PhotosPins {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
