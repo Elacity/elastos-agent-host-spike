@@ -91,3 +91,17 @@ Guest hash:   70a95319c4996f6a7607f4ad02380c19d861d0d5107d0a286e8d6f334b1d52a3 (
 ```
 
 **What is next:** stop for Codex on #8, #9 and #20.
+
+## Update: PR #8 fix 8 merged in (20 Oct)
+
+Merge `3d7ab1d` (PR #9 at `9cd7f09`, which carries PR #8 at `6c23213`: the Agents rule checks the string that is
+resolved; the attached bridge audits a bad API URL). No conflicts.
+
+```text
+Tests run:    ./examples/agent-host/run-e2e.sh -> "2 passed"
+              (cd elastos && cargo test -p elastos-server --lib) -> "3036 passed; 13 failed; 24 ignored". The same 13
+                container failures as the previous run (names compared), none new; +3 passing are fix 8's new tests.
+Guest hash:   70a95319c4996f6a7607f4ad02380c19d861d0d5107d0a286e8d6f334b1d52a3 (unchanged)
+```
+
+**What is next:** stop for Codex on #8, #9 and #20.
