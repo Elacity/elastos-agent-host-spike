@@ -792,7 +792,13 @@ fn viewer_storage_root_uri(
             .and_then(|capsule| capsule.storage.into_iter().next())
             .ok_or_else(|| anyhow::anyhow!("viewer content capsule has no storage grant"))?
     };
-    let root_uri = principal_scoped_storage_uri(&storage, context);
+    // One canonical string for every check and for the filesystem path: the
+    // path resolver trims surrounding whitespace and slashes, so a check on
+    // the raw grant could see "Agents " and resolve "Agents".
+    let root_uri = elastos_common::localhost::rooted_localhost_uri(&principal_scoped_storage_uri(
+        &storage, context,
+    ))
+    .ok_or_else(|| anyhow::anyhow!("invalid viewer storage root"))?;
     let localhost_root = crate::auth::principal_localhost_root(&context.principal_id);
     if root_uri != localhost_root
         && !root_uri

@@ -340,7 +340,14 @@ fn simple_elastos_resource(provider: &str, op: &str, supported: &[&str]) -> Resu
 /// `localhost://Users/<root>/`, the first two segments, ignoring empty and `.`
 /// ones, fold to `.appdata/agents` under `to_uppercase().to_lowercase()`. The
 /// rule does not depend on whose root it is.
-pub(crate) fn in_agents_area(rooted: &str) -> bool {
+///
+/// The input is canonicalised here first, the same way the filesystem path is
+/// resolved (`rooted_localhost_uri`: surrounding whitespace and slashes go), so
+/// no caller can check one string and resolve another.
+pub(crate) fn in_agents_area(path: &str) -> bool {
+    let Some(rooted) = rooted_localhost_uri(path) else {
+        return false;
+    };
     let Some(rest) = rooted.strip_prefix("localhost://Users/") else {
         return false;
     };
@@ -357,8 +364,10 @@ pub(crate) fn in_agents_area(rooted: &str) -> bool {
 /// protected storage path, and both capability request handlers. In the area
 /// only read and write are allowed, only on one spelling: `.AppData/Agents`,
 /// then segments matching `^[a-z0-9][a-z0-9._-]*$`, with no empty or `.`
-/// segment anywhere. A write needs a name below `Agents`. Returns the refusal
-/// code and message.
+/// segment anywhere. A write needs a name below `Agents`. A path in the area
+/// that is not already canonical (surrounding whitespace or slashes) is
+/// refused, so the spelling checked is the spelling resolved. Returns the
+/// refusal code and message.
 pub(crate) fn agents_area_refusal(
     rooted: &str,
     operation: &str,
@@ -366,6 +375,7 @@ pub(crate) fn agents_area_refusal(
     if !in_agents_area(rooted) {
         return None;
     }
+    let canonical = rooted_localhost_uri(rooted).is_some_and(|canonical| canonical == rooted);
     if !matches!(operation, "read" | "write") {
         return Some((
             "operation_not_allowed",
@@ -390,7 +400,8 @@ pub(crate) fn agents_area_refusal(
             // Windows drops a trailing '.', so "journal." would name "journal".
             && !segment.ends_with('.')
     };
-    let exact = segments.len() >= 3
+    let exact = canonical
+        && segments.len() >= 3
         && !segments.iter().any(|segment| matches!(*segment, "" | "."))
         && segments[1] == ".AppData"
         && segments[2] == "Agents"

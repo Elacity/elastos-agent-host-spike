@@ -2788,6 +2788,11 @@ mod tests {
             ".AppData/Agents/demo-agent/tasks/task-1/journal.",
             ".AppData/Agents/demo-agent./tasks/task-1/journal",
             ".AppData/Agents/demo-agent/tasks/task-1/journal...",
+            ".AppData/Agents/demo-agent/tasks/task-1/journal ",
+            ".AppData/Agents/demo-agent/tasks/task-1/journal\t",
+            ".AppData/Agents/demo-agent/tasks/task-1/journal\n",
+            ".AppData/Agents/demo-agent/tasks/task-1/journal/",
+            ".AppData/Agents \t",
             ".AppDat\u{212a}/Agents/x",
         ]) {
             let rooted = format!("{root}/{rest}");
