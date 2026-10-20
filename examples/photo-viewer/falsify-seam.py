@@ -105,9 +105,16 @@ CASES = [
     (
         "a launch does not keep its first playlist",
         VIEWER,
-        "Some((pinned, _)) if *pinned != sha256 =>",
-        "Some((pinned, _)) if false && *pinned != sha256 =>",
+        "Some((pinned, _)) if pinned != sha256 =>",
+        "Some((pinned, _)) if false && pinned != sha256 =>",
         ["a_launch_keeps_the_playlist_it_read_first"],
+    ),
+    (
+        "the pin table has no limit",
+        VIEWER,
+        "if self.entries.len() >= self.cap {",
+        "if false && self.entries.len() >= self.cap {",
+        ["a_full_pin_table_refuses_a_new_launch_and_keeps_live_pins"],
     ),
     (
         "a launch with no playlist gets the short token",

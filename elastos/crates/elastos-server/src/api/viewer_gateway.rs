@@ -952,9 +952,10 @@ pub(crate) fn photos_launch_binding(
     }
 }
 
-struct PhotosRefusal {
-    status: StatusCode,
-    reason: String,
+#[derive(Debug)]
+pub(crate) struct PhotosRefusal {
+    pub(crate) status: StatusCode,
+    pub(crate) reason: String,
 }
 
 impl PhotosRefusal {
@@ -1162,41 +1163,81 @@ async fn read_photos_object(
     Ok(bytes)
 }
 
+/// At most this many launches hold a pin at once. A new launch is refused
+/// while the table is full; a live pin is never evicted to make room.
+pub(crate) const PHOTOS_MAX_PINS: usize = 1024;
+
 /// The playlist sha256 each launch saw first, so a launch keeps playing the
 /// playlist it started with. Held in memory: entries older than a Photos
-/// token's lifetime are dropped, and a Runtime restart starts afresh.
-fn photos_playlist_pins(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>> {
-    static PINS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>,
-    > = std::sync::OnceLock::new();
-    PINS.get_or_init(Default::default)
+/// token's lifetime are dropped when a new launch pins, and a Runtime restart
+/// starts afresh.
+pub(crate) struct PhotosPins {
+    entries: std::collections::HashMap<String, (String, std::time::Instant)>,
+    cap: usize,
 }
 
-/// Binds the playlist's sha256 to the launch at its first read, and refuses
-/// a later read of different bytes.
+impl PhotosPins {
+    pub(crate) fn new(cap: usize) -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            cap,
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Binds `sha256` to the launch at its first read, and refuses a later
+    /// read of different bytes. The table is scanned only when a new launch
+    /// pins, and holds at most `cap` entries.
+    pub(crate) fn pin(
+        &mut self,
+        launch_id: &str,
+        sha256: &str,
+        now: std::time::Instant,
+    ) -> Result<(), PhotosRefusal> {
+        match self.entries.get(launch_id) {
+            Some((pinned, _)) if pinned != sha256 => Err(PhotosRefusal::new(
+                StatusCode::CONFLICT,
+                format!("the playlist changed during this launch (pinned sha256:{pinned})"),
+            )),
+            Some(_) => Ok(()),
+            None => {
+                let lifetime = std::time::Duration::from_secs(PHOTOS_LAUNCH_TOKEN_TTL_SECS);
+                self.entries.retain(|_, (_, pinned_at)| {
+                    now.saturating_duration_since(*pinned_at) <= lifetime
+                });
+                if self.entries.len() >= self.cap {
+                    return Err(PhotosRefusal::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        format!(
+                            "too many Photos launches are open ({}); try again when one ends",
+                            self.cap
+                        ),
+                    ));
+                }
+                self.entries
+                    .insert(launch_id.to_string(), (sha256.to_string(), now));
+                Ok(())
+            }
+        }
+    }
+}
+
+fn photos_playlist_pins() -> &'static std::sync::Mutex<PhotosPins> {
+    static PINS: std::sync::OnceLock<std::sync::Mutex<PhotosPins>> = std::sync::OnceLock::new();
+    PINS.get_or_init(|| std::sync::Mutex::new(PhotosPins::new(PHOTOS_MAX_PINS)))
+}
+
 fn pin_photos_playlist(launch_id: &str, playlist: &[u8]) -> Result<String, PhotosRefusal> {
     use sha2::Digest as _;
     let sha256 = hex::encode(sha2::Sha256::digest(playlist));
-    let mut pins = photos_playlist_pins()
+    photos_playlist_pins()
         .lock()
-        .map_err(|_| PhotosRefusal::new(StatusCode::INTERNAL_SERVER_ERROR, "playlist pins"))?;
-    let lifetime = std::time::Duration::from_secs(PHOTOS_LAUNCH_TOKEN_TTL_SECS);
-    pins.retain(|_, (_, pinned_at)| pinned_at.elapsed() <= lifetime);
-    match pins.get(launch_id) {
-        Some((pinned, _)) if *pinned != sha256 => Err(PhotosRefusal::new(
-            StatusCode::CONFLICT,
-            format!("the playlist changed during this launch (pinned sha256:{pinned})"),
-        )),
-        Some(_) => Ok(sha256),
-        None => {
-            pins.insert(
-                launch_id.to_string(),
-                (sha256.clone(), std::time::Instant::now()),
-            );
-            Ok(sha256)
-        }
-    }
+        .map_err(|_| PhotosRefusal::new(StatusCode::INTERNAL_SERVER_ERROR, "playlist pins"))?
+        .pin(launch_id, &sha256, std::time::Instant::now())?;
+    Ok(sha256)
 }
 
 /// The bound playlist's bytes for this launch, pinned by sha256.

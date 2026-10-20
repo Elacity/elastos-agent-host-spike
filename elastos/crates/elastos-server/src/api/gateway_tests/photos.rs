@@ -4,8 +4,8 @@
 use super::*;
 
 use crate::api::viewer_gateway::{
-    count_photos_unadmitted_at, flush_photos_unadmitted, PhotosUnadmittedWindow,
-    PHOTOS_LAUNCH_TOKEN_TTL_SECS, PHOTOS_PLAYLIST_URI, PHOTOS_VIEWER,
+    count_photos_unadmitted_at, flush_photos_unadmitted, PhotosPins, PhotosUnadmittedWindow,
+    PHOTOS_LAUNCH_TOKEN_TTL_SECS, PHOTOS_MAX_PINS, PHOTOS_PLAYLIST_URI, PHOTOS_VIEWER,
 };
 
 const PNG_A: &[u8] = b"\x89PNG\r\n\x1a\nimage-a";
@@ -964,4 +964,38 @@ fn past_the_key_cap_refusals_are_counted_as_overflow() {
     assert_eq!(window.counts[&("item", "token_refused")], u32::MAX);
     assert_eq!(window.overflow, u32::MAX);
     assert!(window.reason().ends_with(&format!("total={}", u32::MAX)));
+}
+
+// ---- The pin table is bounded ----
+
+#[test]
+fn a_full_pin_table_refuses_a_new_launch_and_keeps_live_pins() {
+    assert_eq!(PHOTOS_MAX_PINS, 1024);
+    let start = std::time::Instant::now();
+    let mut pins = PhotosPins::new(3);
+    for launch in ["a", "b", "c"] {
+        pins.pin(launch, "sha-1", start).unwrap();
+    }
+    let refusal = pins.pin("d", "sha-1", start).unwrap_err();
+    assert_eq!(refusal.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        refusal
+            .reason
+            .contains("too many Photos launches are open (3)"),
+        "{}",
+        refusal.reason
+    );
+    assert_eq!(pins.len(), 3, "no live pin was evicted");
+
+    // The launches already pinned keep reading, and keep their pin.
+    pins.pin("a", "sha-1", start).unwrap();
+    assert_eq!(
+        pins.pin("b", "sha-2", start).unwrap_err().status,
+        StatusCode::CONFLICT
+    );
+
+    // Once the pins outlive a Photos token, a new launch has room again.
+    let later = start + std::time::Duration::from_secs(PHOTOS_LAUNCH_TOKEN_TTL_SECS + 1);
+    pins.pin("d", "sha-1", later).unwrap();
+    assert_eq!(pins.len(), 1);
 }
