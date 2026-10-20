@@ -3299,6 +3299,11 @@ fn clean_library_uri(localhost_root: &str, uri: &str) -> anyhow::Result<String> 
     if uri.split('/').any(|part| part == ".." || part == ".") {
         bail!("library object URI must not contain traversal segments");
     }
+    // Agent journals are not Library objects: every object operation, including
+    // the source and target of move, copy and rename, comes through here.
+    if crate::provider_resource::in_agents_area(&uri) {
+        bail!("Agent journals under .AppData/Agents/ are not Library objects");
+    }
     Ok(uri)
 }
 
@@ -7361,6 +7366,81 @@ mod tests {
             .await
             .expect("shutdown live ipfs-provider");
         println!("library live IPFS provider route cid={cid}");
+    }
+
+    /// Agent journals live under `.AppData/Agents/` and are written only by the
+    /// Runtime's protected storage with a revision precondition. No Library
+    /// operation may read, write, move, copy, rename into, or trash them.
+    #[tokio::test]
+    async fn agent_journals_are_not_library_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(ProviderRegistry::new());
+        let principal_id = "did:key:z6MkAgentsAreaLibrary";
+        let root = crate::auth::principal_localhost_root(principal_id);
+        let journal = format!("{root}/.AppData/Agents/demo-agent/tasks/task-1/journal");
+        let doc = format!("{root}/Documents/x.txt");
+        let call = |request: Value| {
+            let registry = Arc::clone(&registry);
+            let dir = dir.path().to_path_buf();
+            async move { handle_object_provider_runtime_request(&dir, registry, &request).await }
+        };
+        let data = base64::engine::general_purpose::STANDARD.encode(b"forged");
+        let wrote = call(json!({
+            "op": "write", "principal_id": principal_id, "uri": doc, "data": data,
+        }))
+        .await;
+        assert_eq!(wrote["status"], "ok", "{wrote}");
+        let made = call(json!({
+            "op": "mkdir", "principal_id": principal_id,
+            "parent_uri": format!("{root}/.AppData"), "name": "Agentz",
+        }))
+        .await;
+        assert_eq!(made["status"], "ok", "{made}");
+        for request in [
+            json!({ "op": "write", "principal_id": principal_id, "uri": journal, "data": data }),
+            json!({
+                "op": "write", "principal_id": principal_id, "data": data,
+                "uri": format!("{root}/.appdata/AGENTS/demo-agent/tasks/task-1/journal"),
+            }),
+            json!({ "op": "read", "principal_id": principal_id, "uri": journal }),
+            json!({ "op": "stat", "principal_id": principal_id, "uri": journal }),
+            json!({ "op": "list", "principal_id": principal_id, "uri": format!("{root}/.AppData/Agents") }),
+            json!({ "op": "trash", "principal_id": principal_id, "uri": journal }),
+            json!({
+                "op": "mkdir", "principal_id": principal_id,
+                "parent_uri": format!("{root}/.AppData/Agents"), "name": "demo-agent",
+            }),
+            json!({
+                "op": "move", "principal_id": principal_id, "uri": doc,
+                "target_parent_uri": format!("{root}/.AppData/Agents"),
+            }),
+            json!({
+                "op": "copy", "principal_id": principal_id, "uri": doc,
+                "target_parent_uri": format!("{root}/.AppData/Agents/demo-agent"),
+            }),
+            json!({
+                "op": "rename", "principal_id": principal_id,
+                "uri": format!("{root}/.AppData/Agentz"), "name": "Agents",
+            }),
+        ] {
+            let response = call(request.clone()).await;
+            assert_eq!(response["status"], "error", "{request} -> {response}");
+        }
+        let agents = rooted_localhost_fs_path(
+            dir.path(),
+            format!("{root}/.AppData/Agents")
+                .strip_prefix("localhost://")
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !agents.exists(),
+            "nothing may create the Agents folder through Library"
+        );
+        let doc_path =
+            rooted_localhost_fs_path(dir.path(), doc.strip_prefix("localhost://").unwrap())
+                .unwrap();
+        assert!(doc_path.exists(), "the document stays where it was");
     }
 
     #[tokio::test]

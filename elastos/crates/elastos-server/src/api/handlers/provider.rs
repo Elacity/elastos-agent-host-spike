@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use crate::provider_resource::{
     agents_area_refusal, build_capability_resource, ensure_generic_wallet_capability,
-    provider_operation_action,
+    in_agents_area, provider_operation_action,
 };
 use elastos_runtime::capability::{Action, CapabilityManager, CapabilityToken, ResourceId};
 use elastos_runtime::provider::ProviderRegistry;
@@ -64,6 +64,16 @@ pub async fn provider_proxy(
         if let Some((code, message)) = agents_area_refusal(&resource, &op) {
             return Err((StatusCode::FORBIDDEN, format!("{code}: {message}")));
         }
+        // This route reaches the plain localhost provider, without principal-root
+        // protection or the revision check, so no Agents path may use it at all.
+        if in_agents_area(&resource) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "principal_context_required: Agent journals are reachable only through the in-Runtime protected storage bridge".to_string(),
+            ));
+        }
+        // Forward the path the rule checked, not the raw text.
+        request["path"] = Value::String(resource.clone());
     }
     if scheme == "wallet" {
         request = serde_json::json!({"op": "status"});
@@ -355,16 +365,39 @@ mod tests {
             assert!(message.starts_with(refused), "{op} {path}: {message}");
             assert!(provider.requests.lock().await.is_empty(), "{op} {path}");
         }
-        // The exact journal read, and a delete outside the area, still reach the provider.
+        // This route reaches the plain localhost provider, so even the exact
+        // journal read or write is refused here, with any trailing whitespace.
         for (op, path) in [
-            ("read", journal),
-            ("delete", "localhost://Users/self/Documents/old.txt"),
+            ("read", journal.to_string()),
+            ("write", journal.to_string()),
+            ("write", format!("{journal} ")),
+            (
+                "write",
+                "Users/self/.AppData/Agents/agent-host/tasks/demo/journal\u{a0}".to_string(),
+            ),
         ] {
             let body = serde_json::json!({ "path": path }).to_string();
             let (provider, result) = proxy_as_shell("localhost", op, HeaderMap::new(), &body).await;
-            assert!(result.is_ok(), "{op} {path}");
-            assert_eq!(provider.requests.lock().await.len(), 1, "{op} {path}");
+            let (status, message) = result.expect_err(op);
+            assert_eq!(status, StatusCode::FORBIDDEN, "{op} {path:?}");
+            assert!(
+                message.starts_with("principal_context_required"),
+                "{op} {path:?}: {message}"
+            );
+            assert!(provider.requests.lock().await.is_empty(), "{op} {path:?}");
         }
+        // Outside the area the request still reaches the provider, with the
+        // path the rule checked (rooted, trimmed), not the raw text.
+        let body = serde_json::json!({ "path": " Users/self/Documents/old.txt " }).to_string();
+        let (provider, result) =
+            proxy_as_shell("localhost", "delete", HeaderMap::new(), &body).await;
+        assert!(result.is_ok());
+        let requests = provider.requests.lock().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]["path"],
+            "localhost://Users/self/Documents/old.txt"
+        );
     }
 
     #[test]
