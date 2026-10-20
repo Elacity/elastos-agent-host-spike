@@ -510,6 +510,11 @@ The default policy file is
 different operator-managed file. With neither `ELASTOS_POLICY_FILE` nor `HOME`
 set, agent mode denies every request.
 
+`elastos serve`, and `elastos run` or `elastos open` for a data capsule, start
+the shell in `agent` mode unless `ELASTOS_SHELL_MODE` is set (`cli` gives the
+shell the terminal). `ELASTOS_SHELL_MODE=auto` grants every request; use it
+only for local development.
+
 ## Trust model
 
 The installer verifies:

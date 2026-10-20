@@ -42,6 +42,12 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - `elastos serve --capsule` starts its initial MicroVM capsule with a VM-bound
   Capsule session instead of a Shell session, because the guest can read its
   boot token; capability approval stays with the shell (#387).
+- The shell's agent mode grants only what its policy file's `allow` list
+  matches; a missing, unreadable or malformed file grants nothing.
+  `elastos serve`, and `elastos run` or `elastos open` for a data capsule,
+  start the shell in agent mode unless `ELASTOS_SHELL_MODE` is set;
+  `ELASTOS_SHELL_MODE=auto` remains for local development. Managed Home and
+  Chat runtimes keep their own policy files.
 - Community presence is a capability grant, not Discovery (#410). The
   Runtime mints a token for the person's principal (action `message`,
   resource `elastos://chat/presence/<network>/<conversation>/always` or
