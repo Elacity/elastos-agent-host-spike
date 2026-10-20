@@ -3289,6 +3289,11 @@ fn clean_library_uri(localhost_root: &str, uri: &str) -> anyhow::Result<String> 
     if !uri.starts_with("localhost://") {
         bail!("library object URI must be localhost://");
     }
+    // Every check below, and the filesystem path, use this one canonical
+    // string: "…/Agents /" would otherwise be checked as "Agents " and
+    // resolved as "Agents".
+    let uri = elastos_common::localhost::rooted_localhost_uri(&uri)
+        .ok_or_else(|| anyhow!("invalid library object URI"))?;
     let under_root = uri == localhost_root
         || uri
             .strip_prefix(localhost_root)
@@ -7441,6 +7446,42 @@ mod tests {
             rooted_localhost_fs_path(dir.path(), doc.strip_prefix("localhost://").unwrap())
                 .unwrap();
         assert!(doc_path.exists(), "the document stays where it was");
+    }
+
+    /// The path resolver trims surrounding whitespace, so "Agents \t/" names
+    /// the real Agents folder. Library checks the string it resolves.
+    #[tokio::test]
+    async fn whitespace_after_agents_does_not_reach_the_agents_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(ProviderRegistry::new());
+        let principal_id = "did:key:z6MkAgentsAreaWhitespace";
+        let root = crate::auth::principal_localhost_root(principal_id);
+        let journal = rooted_localhost_fs_path(
+            dir.path(),
+            format!("{root}/.AppData/Agents/demo-agent/tasks/task-1/journal")
+                .strip_prefix("localhost://")
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        std::fs::write(&journal, b"planted").unwrap();
+        for space in [" ", "\t", "\n", "\r\n"] {
+            for (op, uri) in [
+                ("list", format!("{root}/.AppData/Agents{space}/")),
+                ("stat", format!("{root}/.AppData/Agents{space}/")),
+                ("trash", format!("{root}/.AppData/Agents{space}/")),
+                ("trash", format!("{root}/.appdata/agents{space}/")),
+            ] {
+                let response = handle_object_provider_runtime_request(
+                    dir.path(),
+                    Arc::clone(&registry),
+                    &json!({ "op": op, "principal_id": principal_id, "uri": uri }),
+                )
+                .await;
+                assert_eq!(response["status"], "error", "{op} {uri:?} -> {response}");
+            }
+        }
+        assert_eq!(std::fs::read(&journal).unwrap(), b"planted");
     }
 
     #[tokio::test]

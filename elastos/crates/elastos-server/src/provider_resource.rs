@@ -340,7 +340,14 @@ fn simple_elastos_resource(provider: &str, op: &str, supported: &[&str]) -> Resu
 /// `localhost://Users/<root>/`, the first two segments, ignoring empty and `.`
 /// ones, fold to `.appdata/agents` under `to_uppercase().to_lowercase()`. The
 /// rule does not depend on whose root it is.
-pub(crate) fn in_agents_area(rooted: &str) -> bool {
+///
+/// The input is canonicalised here first, the same way the filesystem path is
+/// resolved (`rooted_localhost_uri`: surrounding whitespace and slashes go), so
+/// no caller can check one string and resolve another.
+pub(crate) fn in_agents_area(path: &str) -> bool {
+    let Some(rooted) = rooted_localhost_uri(path) else {
+        return false;
+    };
     let Some(rest) = rooted.strip_prefix("localhost://Users/") else {
         return false;
     };
@@ -357,8 +364,11 @@ pub(crate) fn in_agents_area(rooted: &str) -> bool {
 /// protected storage path, and both capability request handlers. In the area
 /// only read and write are allowed, only on one spelling: `.AppData/Agents`,
 /// then segments matching `^[a-z0-9][a-z0-9._-]*$`, with no empty or `.`
-/// segment anywhere. A write needs a name below `Agents`. Returns the refusal
-/// code and message.
+/// segment anywhere. A write needs a name below `Agents`. The area is found on
+/// the canonical string (see `in_agents_area`); the exact spelling then
+/// refuses any path that is not already canonical, because surrounding
+/// whitespace or a trailing slash makes a bad or empty segment. Returns the
+/// refusal code and message.
 pub(crate) fn agents_area_refusal(
     rooted: &str,
     operation: &str,
