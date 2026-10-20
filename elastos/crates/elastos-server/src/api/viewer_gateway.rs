@@ -757,6 +757,14 @@ fn viewer_storage_target(
         ),
         _ => anyhow::bail!("invalid viewer storage scope"),
     };
+    // Agent journals live under .AppData/Agents/ and are written only through
+    // the Runtime bridge, with its revision rule. Viewer storage may not reach
+    // them, whatever the manifest declares.
+    if crate::provider_resource::in_agents_area(&root_uri)
+        || crate::provider_resource::in_agents_area(&object_uri)
+    {
+        anyhow::bail!("viewer storage does not support .AppData/Agents/ (agent journals)");
+    }
     let principal_id = context.principal_id;
     let localhost_root = crate::auth::principal_localhost_root(&principal_id);
     Ok(ViewerStorageTarget {

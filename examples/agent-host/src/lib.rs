@@ -2291,7 +2291,8 @@ fn note_crash(journal: &mut Journal, id: u64) -> bool {
 }
 
 /// An agent id or a task id: 1 to 64 bytes matching `^[a-z0-9][a-z0-9._-]*$`,
-/// the rule the Runtime bridge applies to every segment under Agents.
+/// not ending in '.', the rule the Runtime bridge applies to every segment
+/// under Agents (Windows drops a trailing '.').
 #[cfg(any(test, target_arch = "wasm32"))]
 fn journal_id_ok(id: &str) -> bool {
     id.len() <= 64
@@ -2302,6 +2303,7 @@ fn journal_id_ok(id: &str) -> bool {
         && id.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
         })
+        && !id.ends_with('.')
 }
 
 /// The one place a task journal lives. The guest names only `Users/self`.
@@ -12171,6 +12173,9 @@ mod tests {
             "\u{17f}",
             "a\\b",
             "self/../other",
+            "demo-agent.",
+            "task-1.",
+            "a..",
         ] {
             assert_eq!(
                 journal_resource(bad, "task-1"),
