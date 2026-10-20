@@ -2140,6 +2140,230 @@ mod tests {
         assert_eq!(content, b"secret-chat-state");
     }
 
+    // S3 (spike): the Agent Host task journal lives under the launching
+    // person's root at .AppData/Agents/<agent-id>/tasks/<task-id>/journal.
+    const JOURNAL_SELF_URI: &str =
+        "localhost://Users/self/.AppData/Agents/demo-agent/tasks/task-1/journal";
+
+    fn journal_context(principal_id: &str) -> (tempfile::TempDir, BridgeContext, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let protection =
+            crate::auth::store_test_principal_root_protection(temp.path(), principal_id);
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(principal_id.to_string());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        ctx.manifest_capabilities = vec![format!(
+            "{}/.AppData/Agents/demo-agent/*",
+            protection.localhost_root
+        )];
+        let object_uri = format!(
+            "{}/.AppData/Agents/demo-agent/tasks/task-1/journal",
+            protection.localhost_root
+        );
+        (temp, ctx, object_uri)
+    }
+
+    fn journal_write_line(
+        id: u64,
+        uri: &str,
+        token: Option<String>,
+        content: &[u8],
+        precondition: serde_json::Value,
+    ) -> String {
+        let mut body = serde_json::json!({ "content": content.to_vec(), "append": false });
+        if let Some(extra) = precondition.as_object() {
+            for (key, value) in extra {
+                body[key] = value.clone();
+            }
+        }
+        let mut request = serde_json::json!({
+            "type": "resource_invoke",
+            "uri": uri,
+            "operation": "write",
+            "body": body,
+        });
+        if let Some(token) = token {
+            request["token"] = token.into();
+        }
+        serde_json::json!({ "id": id, "request": request }).to_string()
+    }
+
+    fn journal_path(temp: &tempfile::TempDir, object_uri: &str) -> std::path::PathBuf {
+        rooted_localhost_fs_path(temp.path(), object_uri).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_journal_write_without_a_grant_never_reaches_storage() {
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let line = journal_write_line(
+            41,
+            JOURNAL_SELF_URI,
+            None,
+            b"journal v1",
+            serde_json::json!({}),
+        );
+        let response = handle_request(&line, &Some(ctx)).await.unwrap();
+        assert_eq!(response["response"]["type"], "error");
+        assert_eq!(response["response"]["code"], "missing_token");
+        assert!(!journal_path(&temp, &object_uri).exists());
+    }
+
+    #[tokio::test]
+    async fn a_read_grant_or_another_tasks_grant_cannot_write_the_journal() {
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let other_task = object_uri.replace("/tasks/task-1/", "/tasks/task-2/");
+        for (resource, action) in [
+            (object_uri.as_str(), Action::Read),
+            (other_task.as_str(), Action::Write),
+        ] {
+            let token = bridge_token(&ctx, resource, action);
+            let line = journal_write_line(
+                42,
+                JOURNAL_SELF_URI,
+                Some(token),
+                b"journal v1",
+                serde_json::json!({}),
+            );
+            let response = handle_request(&line, &Some(ctx.clone())).await.unwrap();
+            assert_eq!(
+                response["response"]["code"], "capability_denied",
+                "{resource}"
+            );
+            assert!(!journal_path(&temp, &object_uri).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn another_principals_journal_is_refused_before_the_grant_check() {
+        let (temp, ctx, _object_uri) = journal_context("person:local:journal-owner");
+        let foreign_root = crate::auth::principal_localhost_root("person:local:someone-else");
+        let foreign = format!("{foreign_root}/.AppData/Agents/demo-agent/tasks/task-1/journal");
+        let token = bridge_token(&ctx, &foreign, Action::Write);
+        let line = journal_write_line(
+            43,
+            &foreign,
+            Some(token),
+            b"journal v1",
+            serde_json::json!({}),
+        );
+        let response = handle_request(&line, &Some(ctx)).await.unwrap();
+        assert_eq!(response["response"]["code"], "invalid_resource_invoke");
+        assert_eq!(
+            response["response"]["message"],
+            "localhost://Users roots must use Users/self or the active principal root"
+        );
+        assert!(!journal_path(&temp, &foreign).exists());
+    }
+
+    #[tokio::test]
+    async fn a_granted_journal_write_is_stored_encrypted_under_the_launching_person() {
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let token = bridge_token(&ctx, &object_uri, Action::Write);
+        let line = journal_write_line(
+            44,
+            JOURNAL_SELF_URI,
+            Some(token),
+            b"EAHJ journal v1",
+            serde_json::json!({}),
+        );
+        let response = handle_request(&line, &Some(ctx)).await.unwrap();
+        assert_eq!(response["response"]["result"]["status"], "ok");
+        let stored = std::fs::read_to_string(journal_path(&temp, &object_uri)).unwrap();
+        assert!(stored.contains("elastos.principal-root.object/v1"));
+        assert!(!stored.contains("EAHJ journal v1"));
+    }
+
+    #[tokio::test]
+    async fn an_oversized_journal_write_is_refused_by_the_frame_cap() {
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let token = bridge_token(&ctx, &object_uri, Action::Write);
+        let line = journal_write_line(
+            45,
+            JOURNAL_SELF_URI,
+            Some(token),
+            &vec![b'x'; MAX_RESOURCE_FRAME_BYTES],
+            serde_json::json!({}),
+        );
+        let response = handle_request(&line, &Some(ctx)).await.unwrap();
+        assert_eq!(response["response"]["code"], "request_too_large");
+        assert!(!journal_path(&temp, &object_uri).exists());
+    }
+
+    /// Needs the S3 shipping change: the protected write accepts `create_only`
+    /// and `if_revision`, writes through write_principal_root_object_if_revision,
+    /// and returns the new revision.
+    #[tokio::test]
+    #[ignore = "S3: protected write needs create_only/if_revision (shipping change not made)"]
+    async fn a_stale_journal_revision_is_refused_and_the_stored_journal_is_kept() {
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let write = |id: u64, content: &[u8], precondition: serde_json::Value| {
+            let token = bridge_token(&ctx, &object_uri, Action::Write);
+            let line = journal_write_line(id, JOURNAL_SELF_URI, Some(token), content, precondition);
+            let ctx = Some(ctx.clone());
+            async move { handle_request(&line, &ctx).await.unwrap() }
+        };
+        let first = write(
+            51,
+            b"journal v1",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(first["response"]["result"]["status"], "ok");
+        let v1 = first["response"]["result"]["data"]["revision"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let again = write(
+            52,
+            b"journal v1 again",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(again["response"]["result"]["code"], "revision_conflict");
+        let second = write(53, b"journal v2", serde_json::json!({ "if_revision": v1 })).await;
+        assert_eq!(second["response"]["result"]["status"], "ok");
+        let stale = write(
+            54,
+            b"journal v1 replayed",
+            serde_json::json!({ "if_revision": v1 }),
+        )
+        .await;
+        assert_eq!(stale["response"]["result"]["code"], "revision_conflict");
+        let path = journal_path(&temp, &object_uri);
+        let principal_id = "person:local:journal-owner";
+        let root = crate::auth::principal_localhost_root(principal_id);
+        assert_eq!(
+            crate::auth::read_principal_root_object(
+                temp.path(),
+                principal_id,
+                &root,
+                &object_uri,
+                &path
+            )
+            .unwrap(),
+            b"journal v2"
+        );
+    }
+
+    /// Needs the S3 shipping change: a write under .AppData/Agents/ must carry
+    /// create_only or if_revision, so a journal is never overwritten blind.
+    #[tokio::test]
+    #[ignore = "S3: unconditional journal writes are not refused yet (shipping change not made)"]
+    async fn an_unconditional_journal_write_is_refused() {
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let token = bridge_token(&ctx, &object_uri, Action::Write);
+        let line = journal_write_line(
+            55,
+            JOURNAL_SELF_URI,
+            Some(token),
+            b"blind",
+            serde_json::json!({}),
+        );
+        let response = handle_request(&line, &Some(ctx)).await.unwrap();
+        assert_eq!(response["response"]["result"]["code"], "revision_required");
+        assert!(!journal_path(&temp, &object_uri).exists());
+    }
+
     #[tokio::test]
     async fn resource_invoke_localhost_uses_envelope_token_and_redacts_body_token() {
         let ctx = bridge_context();
