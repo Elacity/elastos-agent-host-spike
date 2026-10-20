@@ -261,7 +261,13 @@ pub(in crate::api) fn issue_home_launch_token_with_context(
     app: &str,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<String> {
-    issue_home_launch_token_at(data_dir, &HomeLaunchContext::direct(app), context, now_ts())
+    issue_home_launch_token_at(
+        data_dir,
+        &HomeLaunchContext::direct(app),
+        context,
+        now_ts(),
+        HOME_LAUNCH_TOKEN_TTL_SECS,
+    )
 }
 
 pub(in crate::api) fn issue_home_projection_launch_token_with_context(
@@ -270,11 +276,30 @@ pub(in crate::api) fn issue_home_projection_launch_token_with_context(
     executable_actor: &str,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<String> {
+    issue_home_projection_launch_token_with_ttl(
+        data_dir,
+        selected_resource,
+        executable_actor,
+        context,
+        HOME_LAUNCH_TOKEN_TTL_SECS,
+    )
+}
+
+/// A projection launch token that expires after `ttl_secs` instead of the
+/// default. Validation already accepts any lifetime up to the default.
+pub(in crate::api) fn issue_home_projection_launch_token_with_ttl(
+    data_dir: &std::path::Path,
+    selected_resource: &str,
+    executable_actor: &str,
+    context: &HomeLaunchTokenContext,
+    ttl_secs: u64,
+) -> anyhow::Result<String> {
     issue_home_launch_token_at(
         data_dir,
         &HomeLaunchContext::projection(selected_resource, executable_actor),
         context,
         now_ts(),
+        ttl_secs,
     )
 }
 
@@ -283,8 +308,14 @@ fn issue_home_launch_token_at(
     launch_context: &HomeLaunchContext,
     context: &HomeLaunchTokenContext,
     issued_at: u64,
+    ttl_secs: u64,
 ) -> anyhow::Result<String> {
     launch_context.validate()?;
+    if ttl_secs == 0 || ttl_secs > HOME_LAUNCH_TOKEN_TTL_SECS {
+        anyhow::bail!(
+            "home launch token lifetime must be 1..={HOME_LAUNCH_TOKEN_TTL_SECS} seconds"
+        );
+    }
     if context.principal_id.trim().is_empty()
         || context.session_id.trim().is_empty()
         || context.grant_id.trim().is_empty()
@@ -298,7 +329,7 @@ fn issue_home_launch_token_at(
             launch_id: format!("launch:{}", uuid_like_token()),
             launch_context: launch_context.clone(),
             iat: issued_at,
-            exp: issued_at.saturating_add(HOME_LAUNCH_TOKEN_TTL_SECS),
+            exp: issued_at.saturating_add(ttl_secs),
             principal_id: context.principal_id.clone(),
             session_id: context.session_id.clone(),
             proof_binding_id: context.proof_binding_id.clone(),
@@ -333,6 +364,25 @@ pub(crate) fn issue_expired_home_launch_token_with_context(
         &HomeLaunchContext::direct(app),
         context,
         now_ts().saturating_sub(HOME_LAUNCH_TOKEN_TTL_SECS + 1),
+        HOME_LAUNCH_TOKEN_TTL_SECS,
+    )
+}
+
+/// A projection token issued `ttl_secs + 1` seconds ago, so it has expired.
+#[cfg(test)]
+pub(crate) fn issue_expired_home_projection_launch_token_with_ttl(
+    data_dir: &std::path::Path,
+    selected_resource: &str,
+    executable_actor: &str,
+    context: &HomeLaunchTokenContext,
+    ttl_secs: u64,
+) -> anyhow::Result<String> {
+    issue_home_launch_token_at(
+        data_dir,
+        &HomeLaunchContext::projection(selected_resource, executable_actor),
+        context,
+        now_ts().saturating_sub(ttl_secs + 1),
+        ttl_secs,
     )
 }
 

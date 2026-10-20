@@ -513,6 +513,12 @@ async function launchHomeTarget(target, query = {}) {
       home_origin: window.location.origin,
     },
   };
+  // Photos opened as an app plays the playlist the photo-viewer Component
+  // wrote; Runtime checks it and binds it to the launch. Opened from Library
+  // for one image (objectUri), it binds nothing.
+  if (target === "image-viewer" && !query.objectUri) {
+    body.selected_resource = "localhost://Users/self/.AppData/App/photo-viewer/playlist.json";
+  }
   const launched = await fetchJson("/api/apps/home/launch", {
     method: "POST",
     body: JSON.stringify(body),

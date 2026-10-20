@@ -889,3 +889,375 @@ fn viewer_error_response(err: anyhow::Error) -> Response {
     };
     (status, text).into_response()
 }
+
+// --- Photos surface --------------------------------------------------------
+//
+// The Photos surface (`image-viewer`) reads through these two routes only:
+// the playlist bound to its launch, and one item of that playlist by
+// position. It sends no path. Runtime takes the playlist from the signed
+// launch context, serves only items the playlist lists under Pictures/, and
+// audits every read. There is no write route.
+
+pub(crate) const PHOTOS_VIEWER: &str = "image-viewer";
+/// The one playlist a Photos launch may bind: the one the `photo-viewer`
+/// Component writes (examples/photo-viewer). Phase 2 binds the launch's own
+/// run output instead of a fixed path.
+pub(crate) const PHOTOS_PLAYLIST_URI: &str =
+    "localhost://Users/self/.AppData/App/photo-viewer/playlist.json";
+pub(crate) const PHOTOS_LAUNCH_TOKEN_TTL_SECS: u64 = 15 * 60;
+const PHOTOS_PLAYLIST_SCHEMA: &str = "elastos.photo-viewer.playlist/v1";
+const PHOTOS_PICTURES_PREFIX: &str = "localhost://Users/self/Pictures/";
+const MAX_PHOTOS_PLAYLIST_BYTES: u64 = 64 * 1024;
+const MAX_PHOTOS_ITEM_BYTES: u64 = 64 * 1024 * 1024;
+
+/// What Runtime binds when Home launches `target`: the token's selected
+/// resource and, for Photos, its shorter lifetime. Only Photos takes a
+/// selected resource from Home, and only its playlist.
+pub(crate) fn photos_launch_binding(
+    target: &str,
+    requested: Option<&str>,
+) -> anyhow::Result<(String, Option<u64>)> {
+    if target != PHOTOS_VIEWER {
+        if requested.is_some() {
+            anyhow::bail!("only Photos takes a selected resource");
+        }
+        return Ok((target.to_string(), None));
+    }
+    match requested {
+        // Opened from the Library for one image: no playlist is bound, so
+        // the Photos routes refuse it.
+        None => Ok((target.to_string(), Some(PHOTOS_LAUNCH_TOKEN_TTL_SECS))),
+        Some(PHOTOS_PLAYLIST_URI) => Ok((
+            PHOTOS_PLAYLIST_URI.to_string(),
+            Some(PHOTOS_LAUNCH_TOKEN_TTL_SECS),
+        )),
+        Some(_) => anyhow::bail!("Photos can bind only its playlist"),
+    }
+}
+
+struct PhotosRefusal {
+    status: StatusCode,
+    reason: String,
+}
+
+impl PhotosRefusal {
+    fn new(status: StatusCode, reason: impl Into<String>) -> Self {
+        Self {
+            status,
+            reason: reason.into(),
+        }
+    }
+}
+
+impl IntoResponse for PhotosRefusal {
+    fn into_response(self) -> Response {
+        (self.status, Json(json!({ "error": self.reason }))).into_response()
+    }
+}
+
+struct PhotosLaunch {
+    context: HomeLaunchTokenContext,
+    /// The bound playlist under the launch's own principal root.
+    playlist_uri: String,
+}
+
+fn require_photos_launch(
+    data_dir: &FsPath,
+    headers: &HeaderMap,
+) -> Result<PhotosLaunch, PhotosRefusal> {
+    if !super::browser_capsules::is_viewer_capsule(data_dir, PHOTOS_VIEWER) {
+        return Err(PhotosRefusal::new(
+            StatusCode::NOT_FOUND,
+            "the Photos viewer is not installed",
+        ));
+    }
+    let (selected_resource, context) =
+        require_home_viewer_launch_token_context(data_dir, headers, PHOTOS_VIEWER).map_err(
+            |err| {
+                PhotosRefusal::new(
+                    StatusCode::UNAUTHORIZED,
+                    format!("Photos needs its own launch token: {err}"),
+                )
+            },
+        )?;
+    if selected_resource != PHOTOS_PLAYLIST_URI {
+        return Err(PhotosRefusal::new(
+            StatusCode::FORBIDDEN,
+            "this Photos launch is not bound to a playlist",
+        ));
+    }
+    let playlist_uri =
+        principal_self_uri(PHOTOS_PLAYLIST_URI, &context.principal_id).ok_or_else(|| {
+            PhotosRefusal::new(StatusCode::INTERNAL_SERVER_ERROR, "invalid playlist path")
+        })?;
+    Ok(PhotosLaunch {
+        context,
+        playlist_uri,
+    })
+}
+
+/// `localhost://Users/self/<rest>` under the principal's own root.
+fn principal_self_uri(self_uri: &str, principal_id: &str) -> Option<String> {
+    let rest = self_uri.strip_prefix("localhost://Users/self/")?;
+    Some(format!(
+        "{}/{rest}",
+        crate::auth::principal_localhost_root(principal_id)
+    ))
+}
+
+/// A playlist item must name one object under the person's Pictures folder.
+fn photos_item_uri(uri: &str, principal_id: &str) -> Result<String, PhotosRefusal> {
+    let refuse = |why: &str| {
+        PhotosRefusal::new(
+            StatusCode::FORBIDDEN,
+            format!("playlist item {uri:?} {why}"),
+        )
+    };
+    let Some(rest) = uri.strip_prefix(PHOTOS_PICTURES_PREFIX) else {
+        return Err(refuse("is not under localhost://Users/self/Pictures/"));
+    };
+    if rest
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(refuse("has an empty, . or .. segment"));
+    }
+    if rest.contains(['?', '#', '\\']) || rest.chars().any(char::is_control) {
+        return Err(refuse("has ?, #, \\ or a control character"));
+    }
+    principal_self_uri(uri, principal_id).ok_or_else(|| refuse("is not a principal path"))
+}
+
+/// The `uri` of the item at `order` in the playlist. A skipped entry is not
+/// an item.
+fn photos_listed_item(playlist: &[u8], order: u64) -> Result<String, PhotosRefusal> {
+    let malformed = |why: &str| {
+        PhotosRefusal::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("the bound playlist {why}"),
+        )
+    };
+    let playlist: Value = serde_json::from_slice(playlist).map_err(|_| malformed("is not JSON"))?;
+    if playlist.get("schema").and_then(Value::as_str) != Some(PHOTOS_PLAYLIST_SCHEMA) {
+        return Err(malformed(&format!("is not {PHOTOS_PLAYLIST_SCHEMA}")));
+    }
+    let items = playlist
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| malformed("has no items list"))?;
+    let mut found = None;
+    for item in items {
+        let item_order = item
+            .get("order")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| malformed("has an item without an order"))?;
+        if item_order != order {
+            continue;
+        }
+        if found.is_some() {
+            return Err(malformed(&format!("lists position {order} twice")));
+        }
+        let uri = item
+            .get("uri")
+            .and_then(Value::as_str)
+            .ok_or_else(|| malformed("has an item without a uri"))?;
+        found = Some(uri.to_string());
+    }
+    found.ok_or_else(|| {
+        PhotosRefusal::new(
+            StatusCode::NOT_FOUND,
+            format!("position {order} is not a playable item in this launch's playlist"),
+        )
+    })
+}
+
+/// Reads one Library object of at most `limit` bytes, checking the size
+/// before the read. `viewable` also requires the object to be one the Photos
+/// viewer may open.
+async fn read_photos_object(
+    state: &GatewayState,
+    context: &HomeLaunchTokenContext,
+    uri: &str,
+    limit: u64,
+    viewable: bool,
+) -> Result<Vec<u8>, PhotosRefusal> {
+    let provider_failed =
+        |err: anyhow::Error| PhotosRefusal::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    let stat = viewer_object_provider_request(
+        state,
+        context,
+        PHOTOS_VIEWER,
+        "stat",
+        json!({ "uri": uri }),
+    )
+    .await
+    .map_err(provider_failed)?;
+    if stat.get("status").and_then(Value::as_str) != Some("ok") {
+        return Err(PhotosRefusal::new(
+            StatusCode::NOT_FOUND,
+            format!("{uri} not found"),
+        ));
+    }
+    if viewable {
+        ensure_viewer_can_view_library_object(&stat, PHOTOS_VIEWER)
+            .map_err(|err| PhotosRefusal::new(StatusCode::FORBIDDEN, err.to_string()))?;
+    }
+    let size = stat
+        .pointer("/data/object/size")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| PhotosRefusal::new(StatusCode::BAD_GATEWAY, "Library stat has no size"))?;
+    let too_large = || {
+        PhotosRefusal::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("{uri} is larger than {limit} bytes"),
+        )
+    };
+    if size > limit {
+        return Err(too_large());
+    }
+    let read = viewer_object_provider_request(
+        state,
+        context,
+        PHOTOS_VIEWER,
+        "read",
+        json!({ "uri": uri }),
+    )
+    .await
+    .map_err(provider_failed)?;
+    let encoded = read
+        .pointer("/data/data")
+        .and_then(Value::as_str)
+        .filter(|_| read.get("status").and_then(Value::as_str) == Some("ok"))
+        .ok_or_else(|| {
+            PhotosRefusal::new(StatusCode::BAD_GATEWAY, format!("{uri} could not be read"))
+        })?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| PhotosRefusal::new(StatusCode::BAD_GATEWAY, "Library read was not base64"))?;
+    // The object may have grown between stat and read.
+    if bytes.len() as u64 > limit {
+        return Err(too_large());
+    }
+    Ok(bytes)
+}
+
+/// Every Photos read, served or refused after the launch token is valid,
+/// leaves one audit event. If the event cannot be written, the read fails.
+fn photos_audit(
+    data_dir: &FsPath,
+    context: &HomeLaunchTokenContext,
+    event: &str,
+    outcome: &Result<Vec<u8>, PhotosRefusal>,
+    what: &str,
+) -> Result<(), PhotosRefusal> {
+    let (result, reason) = match outcome {
+        Ok(bytes) => (
+            "completed",
+            format!("Photos read {what} ({} bytes)", bytes.len()),
+        ),
+        Err(refusal) => (
+            "refused",
+            format!("Photos refused {what}: {}", refusal.reason),
+        ),
+    };
+    let request_id = format!("photos:{event}:{}", crate::auth::now_ts());
+    append_viewer_library_audit(
+        data_dir,
+        context,
+        PHOTOS_VIEWER,
+        &request_id,
+        &format!("photos.viewer.{event}"),
+        result,
+        &reason,
+    )
+    .map_err(|err| {
+        PhotosRefusal::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Photos read was not audited: {err}"),
+        )
+    })
+}
+
+fn photos_bytes_response(content_type: &'static str, bytes: Vec<u8>) -> Response {
+    (
+        StatusCode::OK,
+        [
+            ("content-type", content_type),
+            ("cache-control", "no-store"),
+            ("x-content-type-options", "nosniff"),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+pub async fn photos_playlist_get(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+) -> Response {
+    let launch = match require_photos_launch(&state.data_dir, &headers) {
+        Ok(launch) => launch,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let outcome = read_photos_object(
+        &state,
+        &launch.context,
+        &launch.playlist_uri,
+        MAX_PHOTOS_PLAYLIST_BYTES,
+        false,
+    )
+    .await;
+    if let Err(refusal) = photos_audit(
+        &state.data_dir,
+        &launch.context,
+        "playlist",
+        &outcome,
+        &format!("playlist {}", launch.playlist_uri),
+    ) {
+        return refusal.into_response();
+    }
+    match outcome {
+        Ok(bytes) => photos_bytes_response("application/json", bytes),
+        Err(refusal) => refusal.into_response(),
+    }
+}
+
+pub async fn photos_playlist_item_get(
+    State(state): State<GatewayState>,
+    Path(order): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let launch = match require_photos_launch(&state.data_dir, &headers) {
+        Ok(launch) => launch,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let mut what = format!("item at position {order}");
+    let outcome = async {
+        let order: u64 = order.parse().map_err(|_| {
+            PhotosRefusal::new(
+                StatusCode::BAD_REQUEST,
+                "a playlist position is a whole number",
+            )
+        })?;
+        let playlist = read_photos_object(
+            &state,
+            &launch.context,
+            &launch.playlist_uri,
+            MAX_PHOTOS_PLAYLIST_BYTES,
+            false,
+        )
+        .await?;
+        let listed = photos_listed_item(&playlist, order)?;
+        what = format!("item at position {order} ({listed})");
+        let uri = photos_item_uri(&listed, &launch.context.principal_id)?;
+        read_photos_object(&state, &launch.context, &uri, MAX_PHOTOS_ITEM_BYTES, true).await
+    }
+    .await;
+    if let Err(refusal) = photos_audit(&state.data_dir, &launch.context, "item", &outcome, &what) {
+        return refusal.into_response();
+    }
+    match outcome {
+        Ok(bytes) => photos_bytes_response("application/octet-stream", bytes),
+        Err(refusal) => refusal.into_response(),
+    }
+}

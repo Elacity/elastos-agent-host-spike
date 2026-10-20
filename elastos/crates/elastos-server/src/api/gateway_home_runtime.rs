@@ -25,6 +25,16 @@ pub(super) async fn home_launch(
             Json(serde_json::json!({ "error": "invalid Home target" })),
         ));
     }
+    // Home may ask to bind something other than the target only for Photos,
+    // and only its playlist. Checked before any launch side effect.
+    let (selected_resource, launch_ttl_secs) =
+        crate::api::viewer_gateway::photos_launch_binding(target, req.selected_resource.as_deref())
+            .map_err(|err| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": err.to_string() })),
+                )
+            })?;
 
     let mut target_summary = home_launch_target(&state.data_dir, target);
     if target_summary.is_none() || state.data_dir.join("capsules").join(target).exists() {
@@ -111,13 +121,14 @@ pub(super) async fn home_launch(
         .viewer
         .as_deref()
         .unwrap_or(target_summary.target.as_str());
-    let route = append_home_launch_token(
+    let route = append_home_launch_token_with_ttl(
         &state.data_dir,
         &target_summary.route,
-        &target_summary.target,
+        &selected_resource,
         executable_actor,
         &req.query,
         &context,
+        launch_ttl_secs.unwrap_or(HOME_LAUNCH_TOKEN_TTL_SECS),
     )
     .map_err(gateway_internal_error)?;
     let route =
@@ -152,11 +163,32 @@ pub(super) fn append_home_launch_token(
     query: &BTreeMap<String, String>,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<String> {
-    let token = issue_home_projection_launch_token_with_context(
+    append_home_launch_token_with_ttl(
+        data_dir,
+        route,
+        selected_resource,
+        executable_actor,
+        query,
+        context,
+        HOME_LAUNCH_TOKEN_TTL_SECS,
+    )
+}
+
+pub(super) fn append_home_launch_token_with_ttl(
+    data_dir: &std::path::Path,
+    route: &str,
+    selected_resource: &str,
+    executable_actor: &str,
+    query: &BTreeMap<String, String>,
+    context: &HomeLaunchTokenContext,
+    ttl_secs: u64,
+) -> anyhow::Result<String> {
+    let token = issue_home_projection_launch_token_with_ttl(
         data_dir,
         selected_resource,
         executable_actor,
         context,
+        ttl_secs,
     )?;
     append_home_launch_token_to_route(route, query, &token)
 }
@@ -873,6 +905,7 @@ fn app_shell_title(name: &str) -> String {
         "archive-manager" => "Archive".to_string(),
         "home-cli" => "Home CLI".to_string(),
         "gba-emulator" => "GBA Emulator".to_string(),
+        crate::api::viewer_gateway::PHOTOS_VIEWER => "Photos".to_string(),
         _ if is_wallet_connector_capsule_id(name) => wallet_connector_label(name).to_string(),
         _ => title_case_capsule_name(name),
     }

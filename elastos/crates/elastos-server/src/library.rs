@@ -7121,7 +7121,7 @@ fn installed_viewer_option(data_dir: &Path, id: &str) -> Option<LibraryViewerOpt
 fn viewer_label(id: &str) -> &str {
     match id {
         "documents" => "Documents",
-        "image-viewer" => "Image Viewer",
+        "image-viewer" => "Photos",
         "video-viewer" => "Video Viewer",
         "gba-emulator" => "GBA Emulator",
         "archive-manager" => "Archive",
