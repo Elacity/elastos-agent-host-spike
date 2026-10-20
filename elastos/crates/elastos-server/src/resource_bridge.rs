@@ -1194,55 +1194,61 @@ pub async fn handle_remote_request_with_audit_dir(
                 }
             };
             let cap_token = request["token"].as_str().unwrap_or("");
-            if !manifest_allows_resource(manifest_capabilities, &dispatch.resource, principal_id) {
-                return Ok(serde_json::json!({
-                    "id": id,
-                    "response": manifest_denied_response(&dispatch.resource),
-                }));
-            }
-            if cap_token.is_empty() {
-                return Ok(serde_json::json!({
-                    "id": id,
-                    "response": resource_error_response(
-                        "missing_token",
-                        "resource_invoke requires a capability token",
-                    ),
-                }));
-            }
-
-            if let Some(refusal) = agents_area_dispatch_refusal(&dispatch) {
-                return Ok(serde_json::json!({
-                    "id": id,
-                    "response": refusal,
-                }));
-            }
-            if principal_root_read_write_uri(&dispatch.operation, &dispatch.request).is_some() {
-                return Ok(serde_json::json!({
-                    "id": id,
-                    "response": resource_error_response(
-                        "principal_context_required",
-                        "principal-root storage requires an in-runtime protected storage bridge",
-                    ),
-                }));
-            }
-
+            // Audit as local dispatch does: "requested" once the request
+            // parses, then one "completed" record for every way out, refusals
+            // included.
             let audit_id = format!(
                 "component-invoke:{}",
                 elastos_runtime::capability::pending::RequestId::new()
             );
-            if let Some(data_dir) = audit_data_dir {
-                record_component_invoke_event(
-                    data_dir,
-                    ComponentInvokeAudit {
-                        capsule_id,
-                        principal_id,
-                        audit_id: &audit_id,
-                        phase: "requested",
-                        resource: &dispatch.resource,
-                        operation: &dispatch.operation,
-                        outcome: "pending",
-                    },
-                )?;
+            let audit = |phase: &str, outcome: &str| -> Result<()> {
+                match audit_data_dir {
+                    Some(data_dir) => record_component_invoke_event(
+                        data_dir,
+                        ComponentInvokeAudit {
+                            capsule_id,
+                            principal_id,
+                            audit_id: &audit_id,
+                            phase,
+                            resource: &dispatch.resource,
+                            operation: &dispatch.operation,
+                            outcome,
+                        },
+                    ),
+                    None => Ok(()),
+                }
+            };
+            audit("requested", "pending")?;
+            let refusal = if !manifest_allows_resource(
+                manifest_capabilities,
+                &dispatch.resource,
+                principal_id,
+            ) {
+                Some(manifest_denied_response(&dispatch.resource))
+            } else if cap_token.is_empty() {
+                Some(resource_error_response(
+                    "missing_token",
+                    "resource_invoke requires a capability token",
+                ))
+            } else if let Some(refusal) = agents_area_dispatch_refusal(&dispatch) {
+                Some(refusal)
+            } else if principal_root_read_write_uri(&dispatch.operation, &dispatch.request)
+                .is_some()
+            {
+                Some(resource_error_response(
+                    "principal_context_required",
+                    "principal-root storage requires an in-runtime protected storage bridge",
+                ))
+            } else {
+                None
+            };
+            if let Some(mut refusal) = refusal {
+                audit("completed", "denied")?;
+                refusal["audit"] = serde_json::Value::String(audit_id.clone());
+                return Ok(serde_json::json!({
+                    "id": id,
+                    "response": refusal,
+                }));
             }
 
             tracing::debug!(
@@ -1252,11 +1258,18 @@ pub async fn handle_remote_request_with_audit_dir(
                 !cap_token.is_empty()
             );
 
+            let url = match api_base.join(&format!(
+                "/api/provider/{}/{}",
+                dispatch.scheme, dispatch.operation
+            )) {
+                Ok(url) => url,
+                Err(err) => {
+                    audit("completed", "error")?;
+                    return Err(err);
+                }
+            };
             let req = client
-                .post(api_base.join(&format!(
-                    "/api/provider/{}/{}",
-                    dispatch.scheme, dispatch.operation
-                ))?)
+                .post(url)
                 .header("Authorization", format!("Bearer {}", client_token))
                 .header("X-Elastos-Capsule-Id", capsule_id)
                 .header("X-Capability-Token", cap_token)
@@ -1265,49 +1278,42 @@ pub async fn handle_remote_request_with_audit_dir(
             let resp = match req.send().await {
                 Ok(resp) => resp,
                 Err(err) => {
-                    if let Some(data_dir) = audit_data_dir {
-                        record_component_invoke_event(
-                            data_dir,
-                            ComponentInvokeAudit {
-                                capsule_id,
-                                principal_id,
-                                audit_id: &audit_id,
-                                phase: "completed",
-                                resource: &dispatch.resource,
-                                operation: &dispatch.operation,
-                                outcome: "error",
-                            },
-                        )?;
-                    }
+                    audit("completed", "error")?;
                     return Err(err.into());
                 }
             };
             let status = resp.status();
-            let body: serde_json::Value = resp.json().await?;
+            // A reply that is not JSON (a plain-text 403, a cut-off body) is
+            // an error outcome, and still gets its "completed" record.
+            let body: serde_json::Value = match resp
+                .bytes()
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|bytes| serde_json::from_slice(&bytes).map_err(anyhow::Error::from))
+            {
+                Ok(body) => body,
+                Err(err) => {
+                    audit("completed", "error")?;
+                    return Err(err.context(format!(
+                        "provider reply for {}/{} was not JSON (HTTP {status})",
+                        dispatch.scheme, dispatch.operation
+                    )));
+                }
+            };
             tracing::debug!(
                 "[remote-resource-bridge] {}/{} -> {}",
                 dispatch.scheme,
                 dispatch.operation,
                 status
             );
-            if let Some(data_dir) = audit_data_dir {
-                record_component_invoke_event(
-                    data_dir,
-                    ComponentInvokeAudit {
-                        capsule_id,
-                        principal_id,
-                        audit_id: &audit_id,
-                        phase: "completed",
-                        resource: &dispatch.resource,
-                        operation: &dispatch.operation,
-                        outcome: if status.is_success() {
-                            invoke_outcome(&body)
-                        } else {
-                            "error"
-                        },
-                    },
-                )?;
-            }
+            audit(
+                "completed",
+                if status.is_success() {
+                    invoke_outcome(&body)
+                } else {
+                    "error"
+                },
+            )?;
             serde_json::json!({
                 "type": "resource_result",
                 "result": body,
@@ -3045,6 +3051,146 @@ mod tests {
             .unwrap_or_else(|err| panic!("{operation} {uri} reached HTTP: {err}"));
             assert_eq!(response["response"]["code"], refused, "{operation} {uri}");
         }
+    }
+
+    fn remote_invoke_audit(data_dir: &Path) -> Vec<(String, String, String, String)> {
+        crate::auth::load_auth_state(data_dir)
+            .unwrap()
+            .audit
+            .into_iter()
+            .filter(|event| event.event_type.starts_with("component.invoke."))
+            .map(|event| {
+                (
+                    event.event_type,
+                    event.result,
+                    event.challenge_id.unwrap_or_default(),
+                    event.reason,
+                )
+            })
+            .collect()
+    }
+
+    fn remote_invoke_line(id: u64, operation: &str, uri: &str, token: &str) -> String {
+        serde_json::json!({
+            "id": id,
+            "request": {
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": operation,
+                "token": token,
+                "body": {},
+            }
+        })
+        .to_string()
+    }
+
+    /// Every refusal on the attached bridge leaves a "requested" and a
+    /// "completed / denied" record with the same id, as local dispatch does,
+    /// and the response names that id. Nothing listens on the API URL, so a
+    /// request that got past a refusal would fail to connect.
+    #[tokio::test]
+    async fn attached_bridge_refusals_are_audited() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = ["localhost://Users/self/*".to_string()];
+        let journal = "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal";
+        for (id, operation, uri, token, refused) in [
+            (91, "delete", journal, "tok", "operation_not_allowed"),
+            (
+                92,
+                "write",
+                &format!("{journal}."),
+                "tok",
+                "invalid_localhost_path",
+            ),
+            (93, "read", journal, "", "missing_token"),
+            (
+                94,
+                "read",
+                "localhost://MyWebSite/index.html",
+                "tok",
+                "manifest_capability_denied",
+            ),
+            (
+                95,
+                "read",
+                "localhost://Users/self/Documents/note",
+                "tok",
+                "principal_context_required",
+            ),
+        ] {
+            let before = remote_invoke_audit(temp.path()).len();
+            let response = handle_remote_request_with_audit_dir(
+                &remote_invoke_line(id, operation, uri, token),
+                "http://127.0.0.1:12345",
+                "client-token",
+                "test-capsule",
+                &manifest,
+                Some("person:local:journal-owner"),
+                Some(temp.path()),
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{operation} {uri} reached HTTP: {err}"));
+            assert_eq!(response["response"]["code"], refused, "{operation} {uri}");
+            let events = remote_invoke_audit(temp.path());
+            let new = &events[before..];
+            assert_eq!(new.len(), 2, "{operation} {uri}: {new:?}");
+            assert_eq!(
+                (new[0].0.as_str(), new[0].1.as_str()),
+                ("component.invoke.requested", "pending")
+            );
+            assert_eq!(
+                (new[1].0.as_str(), new[1].1.as_str()),
+                ("component.invoke.completed", "denied"),
+                "{operation} {uri}"
+            );
+            assert_eq!(new[0].2, new[1].2);
+            assert_eq!(response["response"]["audit"], new[1].2.as_str());
+        }
+    }
+
+    /// A provider reply that is not JSON (here a plain-text 403) is an error
+    /// for the guest and still leaves a "completed / error" record.
+    #[tokio::test]
+    async fn a_non_json_provider_reply_is_audited_as_an_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 16 * 1024];
+            let _ = socket.read(&mut buffer).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 403 Forbidden\r\ncontent-type: text/plain\r\ncontent-length: 9\r\nconnection: close\r\n\r\nforbidden",
+                )
+                .await
+                .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let result = handle_remote_request_with_audit_dir(
+            &remote_invoke_line(96, "read", "localhost://MyWebSite/index.html", "tok"),
+            &api_url,
+            "client-token",
+            "test-capsule",
+            &["localhost://MyWebSite/*".to_string()],
+            Some("person:local:journal-owner"),
+            Some(temp.path()),
+        )
+        .await;
+        server.await.unwrap();
+        let err = result.expect_err("a plain-text reply is not a result");
+        assert!(format!("{err:#}").contains("not JSON"), "{err:#}");
+        let events = remote_invoke_audit(temp.path());
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(
+            (events[0].0.as_str(), events[0].1.as_str()),
+            ("component.invoke.requested", "pending")
+        );
+        assert_eq!(
+            (events[1].0.as_str(), events[1].1.as_str()),
+            ("component.invoke.completed", "error")
+        );
+        assert_eq!(events[0].2, events[1].2);
     }
 
     /// Inside the Agents area only read and write may be asked for. Anything
