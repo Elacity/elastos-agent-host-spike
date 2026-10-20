@@ -53,3 +53,17 @@ Questions:    none.
 ## What is next
 
 The GPT-family review of PRs #8, #9, #19 and this one. After #8 and #9 merge, the omp audit (`handoff/OMP-AUDIT.md`).
+
+## Update: after the Codex review of #8 (20 Oct)
+
+Cursor's Mac results at the previous heads: `run-e2e.sh` 2 of 2 pass on APFS. This branch now merges PR #8 fix 4 (one Agents rule on every route, the audit fix) through PR #9 (`c113d56`), and PR #19 with the three extra `Invalid` codes (`be1f537`). The end-to-end tests did not change.
+
+```text
+Tests run:    ./examples/agent-host/run-e2e.sh -> "2 passed"
+              (cd elastos && cargo test -p elastos-compute --lib) -> "16 passed; 1 ignored"
+              (cd elastos && cargo test -p elastos-server --lib) -> "3028 passed; 13 failed; 24 ignored". These are all
+                the code from #8, #9 and #19 together. The 13 failures are the same container limits as every earlier
+                run (custody, process, room, gateway-child, IPv6, and the chmod test that cannot fail as root); none
+                is new. The 24 ignored include the two e2e tests.
+Guest hash:   99bacd9df2b448a9b94e579754644a217d74f718662702e29973d44d7f4e583c (unchanged)
+```
