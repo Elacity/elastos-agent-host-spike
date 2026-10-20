@@ -180,7 +180,10 @@ New tests:    the_agents_area_folds_unicode_case_and_allows_one_spelling (string
                 Demo-Agent, Tasks, -task, leading empty or "." segments, "..", a space, a non-ASCII letter, the bare
                 Agents folder, the Kelvin sign that folds to "k", another person's root, near misses)
               a_folded_or_misspelled_agents_path_is_refused_before_storage (handle_request, manifest and token {root}/*,
-                the reviewer's setup: writes with and without create_only, reads; the stored journal is unchanged)
+                as in the reviewer's probe: create_only v1 first, then each alias written with and without create_only
+                and read; every request is refused; after each alias the alias path is absent (ext4) or the journal
+                itself (APFS, same device and inode), and the journal bytes are unchanged. Corrected in edb6bd8: the
+                first version asserted the alias path does not exist, which is false on APFS.)
               only_read_and_write_are_allowed_under_agents (delete, mkdir, list, stat, exists, and a folded delete; no
                 provider call; a delete outside the area still reaches the provider)
               a_revision_conflict_is_audited_as_a_conflict
@@ -217,3 +220,23 @@ The earlier "recorded, not changed" items are settled:
 - finding 8 is done for conflicts.
 
 **For PR #9 (next, after this review).** The guest's `journal_id_ok` allows upper-case ASCII letters, and a leading `-`. The bridge now refuses both under Agents. So the guest rule must become `^[a-z0-9][a-z0-9._-]*$` too, or the guest would build paths the bridge refuses. That change goes in the PR #9 update, with option B and the error mapping.
+
+## Fix 3: portable alias test, after the Mac review of a759eef8a (20 Oct)
+
+Review on the Mac: **PASS on fix 2.** The real APFS check confirms that the six aliasing spellings are refused on write (with and without a precondition) and on read, and that the journal bytes stay unchanged. One test failed on macOS: `a_folded_or_misspelled_agents_path_is_refused_before_storage` asserted that the alias path does not exist, but on APFS the alias path *is* the journal.
+
+Test-only fix in `edb6bd8`:
+- After each alias request, the test now asserts that the alias path is absent, or is the same file as the journal (same device and inode).
+- It also asserts that the journal bytes are unchanged after each alias request, not only at the end.
+- A new unit test, `absent_or_same_file_tells_the_journal_from_a_copy`, pins the helper on Linux: a hard link counts as the same file, a copy with the same bytes does not, and a missing path counts as absent.
+
+```text
+Commit:       edb6bd8 (test only; no change outside the test module)
+Tests run:    (cd elastos && cargo test -p elastos-server --lib -- resource_bridge::tests) -> "62 passed"; clippy clean
+Falsifiers:   E01 the helper compares the device only          -> absent_or_same_file_tells_the_journal_from_a_copy FAILED
+              E02 the helper treats any existing alias as the journal -> same FAILED
+              D01, D03 rerun on edb6bd8                         -> a_folded_or_misspelled_agents_path_is_refused_before_storage
+                                                                   and the string test still FAILED (the portable test bites)
+Not run here: the macOS run of the portable test (this container is Linux ext4).
+```
+
