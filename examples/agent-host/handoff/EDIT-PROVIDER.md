@@ -31,14 +31,9 @@ request (`edit_request`) and records the reply (`note_change_wrote`).
    - Library objects: `rev:<sha256(plaintext)>` (`library.rs`, `library_object`).
    - Principal-root objects: `"<sha256(principal_id, 0, object_uri, 0, plaintext)>"`
      (`auth.rs`, `principal_root_object_revision`). The S3 journal bridge and viewer storage use this one.
-   - One rule in one place means picking one. **Proposal:** the principal-root revision. It binds the principal and
-     the object, and the S3 write path already checks it.
-2. **Library's write checks `if_revision` outside the object lock.**
-   - `write_library_file_bytes` calls `check_revision`, then `write_principal_root_object`. Each takes
-     `principal_root_object_mutation_lock` separately.
-   - A write that lands between the two is overwritten without a conflict.
-   - The S3 path does both under one lock (`write_principal_root_object_if_revision`). The edit path must do the
-     same. Whether Library's own write changes is a separate decision.
+   - One rule in one place means picking one. **Agreed (21 Oct):** the principal-root revision. It binds the
+     principal and the object, and the S3 write path already checks it.
+2. Library's conditional write must use the locked if_revision path (see private note).
 3. **One process-wide lock**, `principal_root_object_mutation_lock`. Reads (`read_principal_root_object`) take it too,
    so while a change holds it, no reader sees half a change.
 4. **A tested pattern for many objects across a crash:** the protection migration (`auth.rs`, from
@@ -88,7 +83,7 @@ So after any crash, either every file has its new revision or every file has its
 
 ## Not decided (for Anders)
 
-- Which revision formula wins (fact 1), and whether Library's own write moves the check inside the lock (fact 2).
+- How Library's revisions move to the principal-root formula (agreed in fact 1), and what happens to stored `rev:` values.
 - Whether the edit journal shares the migration journal's code or gets its own file.
 - How the error codes reach the guest. PR #19 already maps `revision_conflict` and `invalid_content` to Invalid in
   `elastos-compute`.

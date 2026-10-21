@@ -10,6 +10,8 @@ Changed:      examples/agent-host/handoff/OMP2-DESIGN.md - child limits: depth, 
                 whichever first, recorded), result cap as spill pointer, cancel; guest rules and the Runtime layer
               examples/agent-host/handoff/EDIT-PROVIDER.md - all-or-none multi-file write in the object provider
                 (if_revision per file), after 0.8.0, Anders decides
+              examples/agent-host/handoff/RUNTIME-BUDGET.md - budget fields on capability grants, for Anders after
+                0.8.0 (added after Sasha's answers)
               examples/agent-host/handoff/reports/OMP2-DESIGN.md - this report
               examples/agent-host/handoff/LOG.md - one line
 Invariant:    none (no code).
@@ -22,13 +24,28 @@ Principles:   3, 7 a child's budget, like its resource, is never wider than its 
                 object provider; 19 one change is one effect, all or none across a crash.
 DeepSeek:     none. omp at 2220e58 for ideas only (cited in both notes); no code copied.
 Not proven:   Everything here is a proposal. Facts about today's code were read at f5396709c and are cited by file
-              and function: the two revision formulas, Library's if_revision check outside the object lock, the one
+              and function: the two revision formulas, the one
               process-wide object lock, the migration journal's roll-back, and the token fields max_uses, expiry and
               delegatable.
 Checklist:    no item moves.
-Questions:    in OMP2-DESIGN.md (depth and cap values, what counts as a model request, top-task default budget,
-              option A or B, whether to write the Runtime budget note now) and EDIT-PROVIDER.md "Not decided" (for
-              Anders).
+Questions:    answered by Sasha on 21 Oct; see the update below.
 ```
 
-**What is next:** stop. Building idea 2 waits for Codex to pass PR #24 and for the answers above.
+## Update: Sasha's answers applied (21 Oct)
+
+- EDIT-PROVIDER.md: the Library write point is now one line, with a pointer to the private note. The principal-root
+  revision formula is agreed.
+- OMP2-DESIGN.md:
+  - depth limit 2 and a 4,000-byte result cap are kept;
+  - one counter for every model call, hosted or local;
+  - the top task's budget comes from its grant (host default, visible, raisable), and the guest never sets it;
+  - children need an explicit budget;
+  - cancel now stops the whole tree at the next model call, keeping partial results marked `cancelled`.
+- **Option A is not possible without changing what a field means**, so the draft uses option B (format 2):
+  - `argv` would change meaning;
+  - a labelled Person record can be forged by a person's message that starts with the label.
+
+  Format 2 needs Sasha's yes before building.
+- RUNTIME-BUDGET.md added, for Anders after 0.8.0.
+
+**What is next:** stop. Building idea 2 waits for Codex to pass PR #24 and for a yes on format 2.
