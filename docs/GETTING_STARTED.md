@@ -17,8 +17,9 @@ receives only the components in that manifest. Source and installed artifacts
 have separate identities. [Install/update acceptance](https://github.com/Elacity/elastos-runtime/issues/89)
 owns publication-parity evidence. The normal Home path does not need a separate `elastos serve` process.
 
-The current default Home exposes System, People, Services, Browser, Wallet,
-Documents, Library, Marketplace, Archive, and Inbox.
+The current default Home exposes System, People, Services, Wallet, Documents,
+Library, Marketplace, Archive, and Inbox. On Apple Silicon Macs it also
+exposes Browser; Linux Homes do not show Browser in 0.8.0.
 
 Only one live host may own an ElastOS data home at a time. Do not run
 `elastos` and `elastos serve` against the same home at the same time. The

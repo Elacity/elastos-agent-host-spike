@@ -470,15 +470,22 @@ HTTP here is a control-plane protocol. It is not the Carrier substrate.
 
 ### 2. Carrier network and content plane (node to world)
 
-Peer discovery, gossip messaging, relay, and peer-to-peer content transfer. Built into the runtime as `carrier.rs`.
+Peer discovery, gossip messaging, and peer-to-peer content transfer. Built into the runtime as `carrier.rs`.
 
 **Current implementation:**
-- Built-in Carrier node using **Iroh 1.0.2** with iroh-gossip 0.101.0,
-  distributed-topic-tracker 0.3.5, mDNS, and relay support
+- Built-in Carrier node using **Iroh 1.0.2** with iroh-gossip 0.101.0 and
+  mDNS
 - `tunnel-provider` capsule using **cloudflared** (HTTP tunnel to public internet)
 
-**Transport:** Iroh (QUIC + N0 DNS discovery + relay), with mainline DHT topic
-discovery through `distributed-topic-tracker` and mDNS on the local network.
+**Transport:** direct Iroh QUIC only. With `ELASTOS_CARRIER_NETWORK` unset or
+`direct`, Carrier uses Iroh's Minimal preset: no relay and no public address
+discovery. Peers resolve through mDNS on the local network and through
+explicit tickets and bootstrap peers; gossip topics join those peers directly.
+`ELASTOS_CARRIER_NETWORK=public` is refused, and so is `ELASTOS_RELAY_URL`
+with the direct network.
+Relay support is planned in
+[#345](https://github.com/Elacity/elastos-runtime/issues/345) and
+[#354](https://github.com/Elacity/elastos-runtime/issues/354).
 
 ### 3. Data plane (host to VM networking)
 
