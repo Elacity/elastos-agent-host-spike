@@ -13362,14 +13362,25 @@ mod tests {
             assert_eq!(step_state(&journal, *id), Some(StepState::Denied));
         }
 
-        // The provider names only one file: neither is recorded.
-        let (mut journal, ids) = start();
-        let events = journal.events.clone();
-        assert_eq!(
-            note_change_wrote(&mut journal, ids[0], &[(NOTES, "rn-2")]),
-            Err("written files do not match the change")
-        );
-        assert_eq!(journal.events, events);
+        // The provider's list must name each file of the change once, with
+        // one revision word, and no other file: otherwise nothing is recorded.
+        let other = "localhost://Users/self/Documents/other.txt";
+        for written in [
+            vec![(NOTES, "rn-2")],
+            vec![(NOTES, "rn-2"), (NOTES, "rn-3")],
+            vec![(NOTES, "rn-2"), (STYLE, "rs-2"), (other, "ro-2")],
+            vec![(NOTES, "rn-2"), (STYLE, "two words")],
+        ] {
+            let (mut journal, ids) = start();
+            let events = journal.events.clone();
+            assert_eq!(
+                note_change_wrote(&mut journal, ids[0], &written),
+                Err("written files do not match the change"),
+                "{written:?}"
+            );
+            assert_eq!(journal.events, events);
+            assert_eq!(step_state(&journal, ids[1]), Some(StepState::Denied));
+        }
 
         // One file of the change cannot be written alone.
         let (mut journal, ids) = start();
