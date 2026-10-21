@@ -678,6 +678,20 @@ async fn boot_exec_command(
     command: &str,
     console_lines: &LineBuffer,
 ) -> Result<elastos_compute::exec_vm::ExecBody, String> {
+    boot_exec_command_with(kernel, rootfs, initrd, command, console_lines, None).await
+}
+
+/// `kill_after`: stop the VM as soon as a console line contains this text,
+/// before init can report. The console line only times the kill; the result
+/// still comes from the exit port alone.
+async fn boot_exec_command_with(
+    kernel: &Path,
+    rootfs: &Path,
+    initrd: &Path,
+    command: &str,
+    console_lines: &LineBuffer,
+    kill_after: Option<&str>,
+) -> Result<elastos_compute::exec_vm::ExecBody, String> {
     let baseline_len = console_lines.lock().unwrap().len();
     let tmp = tempfile::tempdir().unwrap();
     let provider = VzProvider::new(
@@ -722,20 +736,37 @@ async fn boot_exec_command(
         .await
         .expect("exec image failed to start");
 
+    // The exit code comes only from init's exit port, which the command
+    // cannot write. Console lines are log; nothing here looks at them to
+    // decide whether the run ended or how.
     let deadline = Instant::now() + Duration::from_secs(45);
-    let mut found = false;
-    while Instant::now() < deadline {
-        let lines = console_lines.lock().unwrap();
-        if lines
-            .iter()
-            .skip(baseline_len)
-            .any(|line| line.starts_with(elastos_compute::exec_vm::EXEC_EXIT_MARK))
+    let mut exit_report = None;
+    if let Some(text) = kill_after {
+        while Instant::now() < deadline
+            && !console_lines
+                .lock()
+                .unwrap()
+                .iter()
+                .skip(baseline_len)
+                .any(|line| line.contains(text))
         {
-            found = true;
-            break;
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        drop(lines);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let _ = provider.stop(&handle).await;
+    }
+    while kill_after.is_none() && Instant::now() < deadline {
+        match provider
+            .vsock_connect(&handle, elastos_compute::exec_vm::EXEC_EXIT_PORT)
+            .await
+        {
+            Ok(fd) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                exit_report = read_exit_report(fd, left).await;
+                break;
+            }
+            // init may not be listening yet.
+            Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+        }
     }
     let captured: Vec<String> = console_lines
         .lock()
@@ -748,13 +779,29 @@ async fn boot_exec_command(
         eprintln!("    {command}: {line}");
     }
     let _ = provider.stop(&handle).await;
-    assert!(
-        found,
-        "exec smoke guest did not print an exit mark for {command}; captured {}",
-        captured.len()
-    );
-    elastos_compute::exec_vm::parse_exec_console(&captured.join("\n"))
-        .map_err(|err| format!("{command} console was not a run result: {err}"))
+    elastos_compute::exec_vm::exec_result(&elastos_compute::exec_vm::ExecRun {
+        console: captured.join("\n"),
+        exit_report,
+    })
+    .map_err(|err| format!("{command} did not report an exit: {err}"))
+}
+
+/// Read init's exit report: at most 16 bytes, to the end of the stream,
+/// within `left`. Nothing read in time is no report.
+async fn read_exit_report(fd: std::os::fd::OwnedFd, left: Duration) -> Option<Vec<u8>> {
+    let read = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::from(fd)
+            .take(16)
+            .read_to_end(&mut bytes)
+            .ok()
+            .map(|_| bytes)
+    });
+    match tokio::time::timeout(left, read).await {
+        Ok(Ok(Some(bytes))) if !bytes.is_empty() => Some(bytes),
+        _ => None,
+    }
 }
 
 /// Boot the exec smoke disk through Apple Virtualization. Set
@@ -915,4 +962,52 @@ async fn exec_smoke_image_prints_hello() {
     assert_eq!(refused.exit_code, 1);
     assert!(refused.log.contains("init: command refused"));
     assert!(!refused.log.contains("test result:"));
+}
+
+/// A command that prints a forged exit line early cannot end or decide the
+/// run, and a VM killed right after that line is a failure. Needs an exec
+/// image built with the `fake-exit` fixture command (prints
+/// `elastos-exec-exit 0`, then `after the fake line`, sleeps, exits 1); set
+/// `ELASTOS_EXEC_FAKE_EXIT=1` with the same variables as the hello test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forged_exit_line_cannot_pass() {
+    if !is_supported() || std::env::var("ELASTOS_EXEC_FAKE_EXIT").as_deref() != Ok("1") {
+        eprintln!(
+            "a_forged_exit_line_cannot_pass: skipping — needs a Mac and ELASTOS_EXEC_FAKE_EXIT=1"
+        );
+        return;
+    }
+    let var = |name: &str| std::env::var(name).ok().map(PathBuf::from);
+    let (Some(kernel), Some(rootfs), Some(initrd)) = (
+        var("ELASTOS_EXEC_KERNEL"),
+        var("ELASTOS_EXEC_ROOTFS"),
+        var("ELASTOS_EXEC_INITRD"),
+    ) else {
+        eprintln!("a_forged_exit_line_cannot_pass: skipping — exec image variables are unset");
+        return;
+    };
+    let console_lines = init_vm_console_capture();
+    let finished = boot_exec_command(&kernel, &rootfs, &initrd, "fake-exit", &console_lines)
+        .await
+        .expect("the run reports through the exit port");
+    assert_eq!(finished.exit_code, 1, "the forged 0 decided the run");
+    assert!(
+        finished.log.contains("after the fake line"),
+        "the forged line ended the run early"
+    );
+    let killed = boot_exec_command_with(
+        &kernel,
+        &rootfs,
+        &initrd,
+        "fake-exit",
+        &console_lines,
+        Some("elastos-exec-exit 0"),
+    )
+    .await;
+    assert!(
+        killed
+            .as_ref()
+            .is_err_and(|err| err.contains("exit marker missing")),
+        "a killed VM after a forged line must fail: {killed:?}"
+    );
 }

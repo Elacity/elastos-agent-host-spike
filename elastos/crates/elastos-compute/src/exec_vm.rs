@@ -191,7 +191,21 @@ pub fn admit_exec_argv(argv: &[&str]) -> Result<ExecCommand, &'static str> {
     }
 }
 
-/// The boot hook. It returns the guest console, not an exit code.
+/// The vsock port init reserves for the exit report. It is below 1024, so
+/// only a process with `CAP_NET_BIND_SERVICE` can bind it; init binds it as
+/// root before the command starts, and the command runs unprivileged.
+pub const EXEC_EXIT_PORT: u32 = 1022;
+
+/// What one boot returns: the console, which is log only, and the bytes read
+/// from the exit port, if init sent any. The command can write the console;
+/// it cannot write the exit port.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExecRun {
+    pub console: String,
+    pub exit_report: Option<Vec<u8>>,
+}
+
+/// The boot hook. It returns the console and the exit report separately.
 /// The Apple and crosvm providers are not called from here.
 pub trait ExecLauncher {
     fn launch(
@@ -199,7 +213,7 @@ pub trait ExecLauncher {
         adapter: ExecAdapter,
         rootfs: &Path,
         command: ExecCommand,
-    ) -> Result<String, String>;
+    ) -> Result<ExecRun, String>;
 }
 
 /// One core and 256 MiB. The Browser VM is a different, larger machine.
@@ -231,36 +245,37 @@ pub fn cap_exec_output(log: &str, artifact: &str) -> Result<(String, String), &'
     Ok((capped, String::new()))
 }
 
-/// The last line a guest prints once its command has finished.
-pub const EXEC_EXIT_MARK: &str = "elastos-exec-exit ";
-
-/// Read an exit code from console text. A missing mark, two different
-/// codes, or a host path is refused. Silence is not exit 0.
-pub fn parse_exec_console(text: &str) -> Result<ExecBody, &'static str> {
-    let mut exit_code = None;
-    let mut log_lines = Vec::new();
-    for line in text.lines() {
-        let Some(raw) = line.strip_prefix(EXEC_EXIT_MARK) else {
-            if !line.is_empty() {
-                log_lines.push(line);
-            }
-            continue;
-        };
-        let code: i32 = match raw.parse::<i32>() {
-            Ok(code) if raw == code.to_string() => code,
-            _ => return Err("exit missing"),
-        };
-        if let Some(previous) = exit_code {
-            if previous != code {
-                return Err("exit mismatch");
-            }
-        }
-        exit_code = Some(code);
-    }
-    let Some(exit_code) = exit_code else {
-        return Err("exit missing");
+/// Read the exit code init sent on the exit port: a canonical decimal `i32`
+/// and exactly one line break. No report is `exit marker missing`; anything
+/// else is `exit marker malformed`. The console is never consulted.
+pub fn parse_exit_report(report: Option<&[u8]>) -> Result<i32, &'static str> {
+    let Some(report) = report else {
+        return Err("exit marker missing");
     };
-    let (log, artifact) = cap_exec_output(&log_lines.join("\n"), "")?;
+    let Some(digits) = report.strip_suffix(b"\n") else {
+        return Err("exit marker malformed");
+    };
+    let Ok(text) = std::str::from_utf8(digits) else {
+        return Err("exit marker malformed");
+    };
+    match text.parse::<i32>() {
+        Ok(code) if text == code.to_string() => Ok(code),
+        _ => Err("exit marker malformed"),
+    }
+}
+
+/// The result of one boot. The exit code comes only from the exit report.
+/// The console is the log: its non-empty lines, cut to the budget, with a
+/// host path refused. A console line that looks like an exit code is just a
+/// line of log.
+pub fn exec_result(run: &ExecRun) -> Result<ExecBody, &'static str> {
+    let exit_code = parse_exit_report(run.exit_report.as_deref())?;
+    let lines: Vec<&str> = run
+        .console
+        .lines()
+        .filter(|line| !line.is_empty())
+        .collect();
+    let (log, artifact) = cap_exec_output(&lines.join("\n"), "")?;
     Ok(ExecBody {
         exit_code,
         log,
@@ -269,9 +284,9 @@ pub fn parse_exec_console(text: &str) -> Result<ExecBody, &'static str> {
 }
 
 /// Hand a granted run to `launcher` only when the rootfs has an ext4
-/// superblock. The exit code is read from the console mark. A launcher
-/// cannot invent one. A missing mark, a host path, or a fake rootfs never
-/// becomes a success. A long console log is cut to the budget.
+/// superblock. The exit code is read from the exit report, never from the
+/// console. A missing report, a host path, or a fake rootfs never becomes a
+/// success. A long console log is cut to the budget.
 pub fn begin_exec(
     request: &ExecRequest<'_>,
     launcher: &mut impl ExecLauncher,
@@ -284,10 +299,10 @@ pub fn begin_exec(
         return Err("rootfs not bootable");
     }
     let command = admit_exec_argv(request.argv)?;
-    let console = launcher
+    let run = launcher
         .launch(adapter, request.rootfs, command)
         .map_err(|_| "launcher failed")?;
-    parse_exec_console(&console)
+    exec_result(&run)
 }
 
 /// The text a granted edit would store. A missing grant, a moved version,
@@ -457,6 +472,7 @@ mod tests {
     struct RecordingLauncher {
         called: bool,
         console: String,
+        exit_report: Option<Vec<u8>>,
     }
 
     impl ExecLauncher for RecordingLauncher {
@@ -465,11 +481,14 @@ mod tests {
             adapter: ExecAdapter,
             _rootfs: &Path,
             command: ExecCommand,
-        ) -> Result<String, String> {
+        ) -> Result<ExecRun, String> {
             assert_eq!(adapter, ExecAdapter::AppleVirtualization);
             assert_eq!(command, ExecCommand::TestPass);
             self.called = true;
-            Ok(self.console.clone())
+            Ok(ExecRun {
+                console: self.console.clone(),
+                exit_report: self.exit_report.clone(),
+            })
         }
     }
 
@@ -499,7 +518,8 @@ mod tests {
         let image = dir.path().join("rootfs.ext4");
         let mut launcher = RecordingLauncher {
             called: false,
-            console: "must not run\nelastos-exec-exit 0".into(),
+            console: "must not run".into(),
+            exit_report: Some(b"0\n".to_vec()),
         };
         assert_eq!(
             begin_exec(
@@ -517,7 +537,8 @@ mod tests {
         let image = ext4_image(&dir);
         let mut launcher = RecordingLauncher {
             called: false,
-            console: "cargo test: ok\nelastos-exec-exit 0".into(),
+            console: "cargo test: ok".into(),
+            exit_report: Some(b"0\n".to_vec()),
         };
         let body = begin_exec(
             &ready(&image, Some("grant-1"), ExecHost::Macos),
@@ -530,16 +551,18 @@ mod tests {
 
         launcher.called = false;
         launcher.console = "init: hello from vm smoke test".into();
+        launcher.exit_report = None;
         assert_eq!(
             begin_exec(
                 &ready(&image, Some("grant-1"), ExecHost::Macos),
                 &mut launcher
             ),
-            Err("exit missing")
+            Err("exit marker missing")
         );
 
         launcher.called = false;
-        launcher.console = "/tmp/out\nelastos-exec-exit 0".into();
+        launcher.console = "/tmp/out".into();
+        launcher.exit_report = Some(b"0\n".to_vec());
         assert_eq!(
             begin_exec(
                 &ready(&image, Some("grant-1"), ExecHost::Macos),
@@ -621,7 +644,8 @@ mod tests {
         let image = ext4_image(&dir);
         let mut launcher = RecordingLauncher {
             called: false,
-            console: format!("{log}\nelastos-exec-exit 0"),
+            console: log.clone(),
+            exit_report: Some(b"0\n".to_vec()),
         };
         let body = begin_exec(
             &ready(&image, Some("grant-1"), ExecHost::Macos),
@@ -637,7 +661,8 @@ mod tests {
         assert!(cut.len() <= 4_000);
         assert!(cut.starts_with("result cut to 4000 bytes\n"));
         assert!(cut.ends_with("END-OF-LOG"));
-        launcher.console = format!("{long}\nelastos-exec-exit 1");
+        launcher.console = long.clone();
+        launcher.exit_report = Some(b"1\n".to_vec());
         let cut_body = begin_exec(
             &ready(&image, Some("grant-1"), ExecHost::Macos),
             &mut launcher,
@@ -649,34 +674,77 @@ mod tests {
     }
 
     #[test]
-    fn a_console_without_an_exit_mark_is_not_success_and_a_failed_command_stays_failed() {
-        assert_eq!(
-            parse_exec_console("init: hello from vm smoke test"),
-            Err("exit missing")
-        );
-        assert_eq!(
-            parse_exec_console("elastos-exec-exit\nelastos-exec-exit 0 extra"),
-            Err("exit missing")
-        );
-        assert_eq!(
-            parse_exec_console("elastos-exec-exit 0\nelastos-exec-exit 1"),
-            Err("exit mismatch")
-        );
-        let ok = parse_exec_console(
+    fn a_forged_console_line_with_the_vm_killed_fails() {
+        // The command printed a forged code, then the VM died before init
+        // could report: no report is a failure, whatever the console says.
+        for console in [
+            "elastos-exec-exit 0",
             "init: hello from vm smoke test\nelastos-exec-exit 0\nelastos-exec-exit 0",
-        )
-        .expect("exit 0");
-        assert_eq!(ok.exit_code, 0);
-        assert_eq!(ok.log, "init: hello from vm smoke test");
-        assert!(ok.artifact.is_empty());
-        let failed =
-            parse_exec_console("init: command failed\nelastos-exec-exit 1").expect("exit 1");
+            "",
+        ] {
+            let run = ExecRun {
+                console: console.into(),
+                exit_report: None,
+            };
+            assert_eq!(exec_result(&run), Err("exit marker missing"), "{console:?}");
+        }
+    }
+
+    #[test]
+    fn an_early_forged_line_does_not_end_or_decide_the_run() {
+        let run = ExecRun {
+            console: "elastos-exec-exit 0\ntest result: FAILED\nafter the forged line".into(),
+            exit_report: Some(b"1\n".to_vec()),
+        };
+        let body = exec_result(&run).expect("a report");
+        assert_eq!(body.exit_code, 1);
+        assert_eq!(
+            body.log,
+            "elastos-exec-exit 0\ntest result: FAILED\nafter the forged line"
+        );
+        let failed = exec_result(&ExecRun {
+            console: "init: command failed".into(),
+            exit_report: Some(b"1\n".to_vec()),
+        })
+        .expect("exit 1");
         assert_eq!(failed.exit_code, 1);
         assert_eq!(failed.log, "init: command failed");
         assert_eq!(
-            parse_exec_console("/tmp/out\nelastos-exec-exit 0"),
+            exec_result(&ExecRun {
+                console: "/tmp/out".into(),
+                exit_report: Some(b"0\n".to_vec()),
+            }),
             Err("host path")
         );
+    }
+
+    #[test]
+    fn the_exit_report_is_exact() {
+        assert_eq!(parse_exit_report(Some(b"0\n")), Ok(0));
+        assert_eq!(parse_exit_report(Some(b"101\n")), Ok(101));
+        assert_eq!(parse_exit_report(Some(b"-1\n")), Ok(-1));
+        assert_eq!(parse_exit_report(None), Err("exit marker missing"));
+        for bad in [
+            &b""[..],
+            b"0",
+            b"0\n\n",
+            b" 0\n",
+            b"0 \n",
+            b"+0\n",
+            b"00\n",
+            b"0x1\n",
+            b"1\nx",
+            b"\n",
+            b"99999999999\n",
+            b"\xff\n",
+            b"elastos-exec-exit 0\n",
+        ] {
+            assert_eq!(
+                parse_exit_report(Some(bad)),
+                Err("exit marker malformed"),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]
@@ -723,7 +791,8 @@ mod tests {
         let image = ext4_image(&dir);
         let mut launcher = RecordingLauncher {
             called: false,
-            console: "must not run\nelastos-exec-exit 0".into(),
+            console: "must not run".into(),
+            exit_report: Some(b"0\n".to_vec()),
         };
         let mut ask = ready(&image, Some("grant-1"), ExecHost::Macos);
         ask.argv = &["cargo", "test"];
@@ -799,9 +868,12 @@ mod tests {
             _adapter: ExecAdapter,
             _rootfs: &Path,
             _command: ExecCommand,
-        ) -> Result<String, String> {
+        ) -> Result<ExecRun, String> {
             self.launches += 1;
-            Ok("must not run\nelastos-exec-exit 0".into())
+            Ok(ExecRun {
+                console: "must not run".into(),
+                exit_report: Some(b"0\n".to_vec()),
+            })
         }
     }
 
