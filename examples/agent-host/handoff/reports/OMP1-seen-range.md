@@ -240,4 +240,104 @@ Not proven:   - A refusal record is a Person node with a label, like the existin
               - Windows' trailing-space aliases are still not handled (as in S3).
 ```
 
-**What is next:** Cursor verifies on the Mac, then Codex re-reviews. Building idea 2 still waits.
+## Fix 2, after the Codex re-review of bc7918e4b (21 Oct)
+
+Codex: FAIL, with four findings in `examples/agent-host/src/lib.rs`, all reproduced.
+
+```text
+Commits:      3337e8d (code and tests); this section is the next commit
+Changed:      examples/agent-host/src/lib.rs (guest), Cargo.toml and Cargo.lock (unicode-normalization 0.1.26,
+              which brings tinyvec 1.13.3). No journal format change, no import change.
+Finding 1:    u64::MAX was reused across revisions (next_version saturated).
+              Repro on bc7918e: a stored read at u64::MAX, rev-b; edits C and D made against rev-b; C written as
+                rev-c; D's request was then sent with if_revision "rev-c".
+              Now:
+                - u64::MAX is never a version: observe and observe_read refuse it, and a stored row that names it
+                  is not a read;
+                - next_version returns Option<u64>; None when no number is left;
+                - note_change_wrote then records nothing, denies every step of the change, and is refused with
+                  "no version number left".
+Finding 2:    A resumed legacy journal skipped the canonical-path and duplicate checks.
+              Now:
+                - every stored journal loads through decode_journal = decode_bytes, then stored_paths_ok;
+                - stored_paths_ok checks every read (in the log, the compaction backup and the pending nodes) and
+                  every step path with the live rule (path_refusal); no change may name one file twice (path_key);
+                - reread_journal returns Err(reason); resume_journal returns Refused(reason), for example
+                  Refused("path not canonical");
+                - other decode failures (hash, truncation) stay Unknown on resume, as before;
+                - bind_change also applies the path rule and the duplicate check, so a request or result for a
+                  journal built any other way is refused too.
+Finding 3:    NFC/NFD spellings were two files for the no-op count and the duplicate check.
+              Now:
+                - a path must already be NFC, or it is refused with "path not NFC" (observe, observe_read,
+                  propose_edit, propose_change, bind, and load); nothing is converted;
+                - the refusal record never writes the NFD path: "(a path that is not NFC)";
+                - every path that reaches path_key is NFC, so the key is the NFC path, case-folded;
+                - café (NFC) works, and CAFÉ counts as the same file; a Chinese name (笔记.txt) is read, edited
+                  and changed like any other.
+Finding 4:    A refused provider request or written result wrote no refusal record.
+              Now:
+                - every refusal reason is one variant of `Refusal`, defined once with `Refusal::ALL`;
+                - edit_request and note_change_wrote write exactly one record on every refusal, as propose_edit
+                  and propose_change do; edit_request takes &mut Journal for that;
+                - every_refusal_writes_exactly_one_record triggers each of the 19 reasons from every entry that can
+                  give it (51 cases). For each case it checks: the reason, exactly one new record, and no other
+                  change to the log;
+                - its trigger match has no wildcard, so a new reason does not compile until it has a trigger
+                  (falsifier OY19);
+                - scope: these are the refusals of the edit path (propose_edit, propose_change, edit_request,
+                  note_change_wrote). Other guest refusals (journal decode, runs, grants) write no refusal
+                  record, as before this PR.
+Failing first: five tests added before the fix; on bc7918e's code: "124 passed; 5 failed":
+                a_queued_edit_never_takes_a_newer_revision (the write at u64::MAX - 1 was accepted)
+                a_legacy_journal_with_a_path_alias_is_refused_on_load (left Ok(()), right Err("path not canonical"))
+                a_reread_of_a_legacy_journal_with_a_path_alias_is_refused (the legacy journal was returned)
+                a_path_must_be_nfc_and_non_ascii_names_still_work (the NFD path was accepted)
+                a_refused_request_or_result_writes_one_record (left 0, right 1)
+              The table test came with the enum; falsifiers OY15-OY18 show it failing when a record is missing.
+Changed tests: three older tests compared the whole log after a refused request or result. They now compare it
+              without refusal records and count one new record. The run() self-test now expects 3 refusal records
+              (the partial written list adds one). reread_journal tests expect the reason ("no read grant",
+              "an append is unknown").
+Tests run:    ./examples/agent-host/verify.sh -> fmt, "130 passed" (124 + 6), clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "2 passed"
+Falsifiers:   OY01 next_version saturates at u64::MAX          -> a_queued_edit_..., every_refusal_... FAILED
+              OY02 a stored row at u64::MAX is a read           -> a_queued_edit_... FAILED
+              OY03 observe accepts u64::MAX                     -> a_queued_edit_... FAILED
+              OY04 observe_read accepts u64::MAX                -> a_queued_edit_... FAILED
+              OY05 no version left falls back to a sentinel     -> a_queued_edit_..., every_refusal_... FAILED
+              OY06 a stored journal loads without the path rule -> a_legacy_journal_... FAILED
+              OY07 the backup and pending nodes are not checked -> a_legacy_journal_... FAILED
+              OY08 stored step paths are not checked            -> a_legacy_journal_..., a_reread_... FAILED
+              OY09 a stored change may name one file twice      -> a_legacy_journal_... FAILED
+              OY10 a resume hides the path reason               -> a_reread_... FAILED
+              OY11 bind skips the path rule                     -> every_refusal_... FAILED
+              OY12 bind lets one change name a file twice       -> every_refusal_... FAILED
+              OY13 NFC is not checked                           -> 3 tests FAILED
+              OY14 a refusal record names the NFD path          -> a_path_must_be_nfc_... FAILED
+              OY15 edit_request writes no record                -> a_refused_request_..., every_refusal_... FAILED
+              OY16 note_change_wrote writes no record           -> 5 tests FAILED
+              OY17 note_change_wrote writes two records         -> 5 tests FAILED
+              OY18 propose_edit writes no record                -> 5 tests FAILED
+              OY19 a new Refusal with no trigger                -> does not compile: "non-exhaustive patterns:
+                                                                   `Refusal::Extra` not covered"
+              Earlier falsifiers (27): 19 still fail as written. 7 were moved to the new code lines and fail: OR03,
+                OR04, OA02, OA03 (they now name Refusal variants), OX01, OX02 (record_refusal's new signature),
+                OV03 (next_version's new body). OS01 no longer applies since fix 1. Each restored; tree clean.
+Guest hash:   c6f4bbebb1240391ef3d8468359ca9fb2c3ab34526e5ea3deb976acb3b4a5d5a on two clean builds and verify.sh.
+              wasm_sections.py: file 629356 bytes (was 497980 at bc7918e); /1/10 369086 2d5b38ddb72d50ba (code, was
+              353148); /1/11 174719 7779c0adede1783b (data, was 61631): the growth is mostly NFC tables.
+Import list:  unchanged. Against a bc7918e build, the core import section (/1/2, 149 bytes, 5ee6b40d46f6a045)
+              and every top-level component section are byte-identical.
+Principles:   10 one path rule, live and on load; 11 fail closed: no sentinel version, a non-NFC path is refused,
+              not converted, and a legacy journal that breaks the rule does not load; every refusal leaves exactly
+              one record.
+DeepSeek:     none.
+Not proven:   - The guest is 131 KB larger (unicode-normalization's tables). If that is too much, the other choice
+                is ASCII-only paths, which would refuse Chinese names. Sasha's call.
+              - A stored row at u64::MAX is ignored, not refused at load: the read before it, if any, is then
+                current, and its edit names that older revision, which the provider's conditional write refuses.
+              - Windows' trailing-space aliases are still not handled (as in S3).
+```
+
+**What is next:** Cursor verifies on the Mac, then Codex re-reviews #24 and #27. Building idea 2 still waits.
