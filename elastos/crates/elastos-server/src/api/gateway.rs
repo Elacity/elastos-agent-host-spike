@@ -152,11 +152,12 @@ pub(crate) use gateway_home_token::RuntimeWalletAuthority;
 pub(super) use gateway_home_token::{
     home_browser_origin, home_launch_token_header, home_session_clear_cookie_header,
     home_session_cookie_header_for_token, issue_home_launch_token_for_auth_grant,
-    issue_home_projection_launch_token_with_context, require_carried_home_launch_token,
-    require_home_launch_token, require_home_launch_token_binding,
-    require_home_launch_token_context, require_home_launch_token_for_any_app_context,
-    require_home_launch_token_for_any_context, require_home_projection_launch_token_context,
-    require_home_runtime_wallet_authority, require_home_token, require_home_token_context,
+    issue_home_projection_launch_token_with_context, issue_home_projection_launch_token_with_ttl,
+    require_carried_home_launch_token, require_home_launch_token,
+    require_home_launch_token_binding, require_home_launch_token_context,
+    require_home_launch_token_for_any_app_context, require_home_launch_token_for_any_context,
+    require_home_projection_launch_token_context, require_home_runtime_wallet_authority,
+    require_home_token, require_home_token_context, require_home_viewer_launch,
     require_home_viewer_launch_token_context, require_internal_shell_launch_grant_for_any_context,
     require_internal_shell_runtime_wallet_authority, require_runtime_wallet_authority,
     runtime_wallet_authority, HomeLaunchContext, RequiredHomeLaunchToken,
@@ -1208,6 +1209,16 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
         .route(
             "/api/viewers/:viewer/content/:capsule",
             get(super::viewer_gateway::viewer_content),
+        )
+        // Photos: read-only, by playlist position, GET only (any other
+        // method is 405). See viewer_gateway.rs "Photos surface".
+        .route(
+            "/api/viewers/image-viewer/playlist",
+            get(super::viewer_gateway::photos_playlist_get),
+        )
+        .route(
+            "/api/viewers/image-viewer/playlist/item/:order",
+            get(super::viewer_gateway::photos_playlist_item_get),
         )
         .route(
             "/api/viewers/:viewer/library-object",

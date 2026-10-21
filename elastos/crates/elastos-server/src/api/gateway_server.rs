@@ -188,6 +188,10 @@ async fn start_gateway_server_with_shutdown(
     while connections.connection_count() != 0 {
         tokio::task::yield_now().await;
     }
+    // No request is left to count into the open window: write it.
+    if let Err(err) = crate::api::viewer_gateway::flush_photos_unadmitted(&data_dir) {
+        tracing::warn!("Photos refusal counts were not written at shutdown: {err}");
+    }
     browser_lifecycle_reconciler.cancel();
     let reconciliation_result = browser_lifecycle_reconciler.join().await;
     // Finish any synchronous spawn/registration before retiring this owner or

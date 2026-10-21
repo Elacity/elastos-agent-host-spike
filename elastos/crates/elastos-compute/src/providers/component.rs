@@ -131,7 +131,7 @@ impl ComponentProvider {
         bindings
             .elastos_bus_lifecycle()
             .call_run(&mut store)
-            .map_err(|err| ElastosError::Compute(format!("Component lifecycle run failed: {err}")))?
+            .map_err(|err| ElastosError::Compute(lifecycle_run_failure(&err)))?
             .map_err(|err| ElastosError::Compute(format!("Component capsule denied: {err:?}")))?;
 
         Ok(())
@@ -262,6 +262,19 @@ impl ComputeProvider for ComponentProvider {
 
     fn supports(&self, capsule_type: &CapsuleType) -> bool {
         matches!(capsule_type, CapsuleType::Wasm)
+    }
+}
+
+/// A trap's cause (such as "all fuel consumed by WebAssembly") is the root of
+/// the error chain; the outer context is only the wasm backtrace. Lead with the
+/// cause and keep the backtrace after it.
+fn lifecycle_run_failure(err: &wasmtime::Error) -> String {
+    let cause = err.root_cause().to_string();
+    let outer = err.to_string();
+    if cause == outer {
+        format!("Component lifecycle run failed: {cause}")
+    } else {
+        format!("Component lifecycle run failed: {cause}\n{outer}")
     }
 }
 
@@ -420,6 +433,68 @@ impl elastos::bus::providers::Host for ComponentState {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// A Bus v1 component whose `lifecycle.run` spins until fuel runs out.
+    const SPINNING_COMPONENT_WAT: &str = r#"
+        (component
+          (type $bus-error-def (variant
+            (case "denied" string) (case "not-found" string) (case "invalid" string)
+            (case "unavailable" string) (case "timeout" string) (case "internal" string)))
+          (import "elastos:bus/types@1.0.0" (instance $types
+            (export "bus-error" (type (eq $bus-error-def)))))
+          (alias export $types "bus-error" (type $bus-error))
+          (core module $m
+            (memory (export "memory") 1)
+            (func (export "run") (result i32)
+              (loop $spin (br $spin))
+              unreachable))
+          (core instance $i (instantiate $m))
+          (func $run (result (result (error $bus-error)))
+            (canon lift (core func $i "run") (memory $i "memory")))
+          (instance $lifecycle (export "run" (func $run)))
+          (export "elastos:bus/lifecycle@1.0.0" (instance $lifecycle)))
+    "#;
+
+    fn component_manifest(entrypoint: &str) -> CapsuleManifest {
+        serde_json::from_value(serde_json::json!({
+            "schema": "elastos.capsule/v1",
+            "version": "0.1.0",
+            "name": "spinning-component",
+            "role": "app",
+            "type": "wasm",
+            "runtime_abi": "elastos.component/v1",
+            "bus_contract": "elastos:bus@v1",
+            "wit_world_sha256": "7a026e0a641c8c04214576dc85a677e0b52c9f02866d231119f9a3ba609d49e2",
+            "execution": "component",
+            "entrypoint": entrypoint,
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn fuel_exhaustion_reaches_the_caller_with_its_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("spin.component.wasm"),
+            SPINNING_COMPONENT_WAT,
+        )
+        .unwrap();
+        let provider = ComponentProvider::new();
+        let handle = provider
+            .load(dir.path(), component_manifest("spin.component.wasm"))
+            .await
+            .unwrap();
+
+        let err = provider.start(&handle).await.unwrap_err().to_string();
+
+        let first_line = err.lines().next().unwrap_or_default();
+        assert!(
+            first_line.contains("Component lifecycle run failed: ")
+                && first_line.contains("all fuel consumed"),
+            "the cause must lead the message: {err}"
+        );
+        assert!(err.contains("wasm backtrace"), "the backtrace stays: {err}");
+    }
 
     fn json_line(line: &str) -> serde_json::Value {
         serde_json::from_str(line).expect("captured bridge line must be JSON")

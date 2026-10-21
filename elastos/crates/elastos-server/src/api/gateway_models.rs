@@ -911,6 +911,10 @@ struct HomeLaunchRequest {
     target: String,
     #[serde(default)]
     query: BTreeMap<String, String>,
+    /// What the launch binds, when it is not the target itself. Runtime
+    /// accepts it only for Photos and only as Photos' playlist.
+    #[serde(default)]
+    selected_resource: Option<String>,
 }
 
 #[derive(Deserialize)]

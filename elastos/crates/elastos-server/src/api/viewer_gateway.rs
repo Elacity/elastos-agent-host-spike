@@ -495,14 +495,11 @@ async fn viewer_object_provider_request(
     context: &HomeLaunchTokenContext,
     viewer: &str,
     op: &str,
-    mut request: Value,
+    request: Value,
 ) -> anyhow::Result<Value> {
-    let registry = state
-        .provider_registry
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("object provider unavailable"))?;
-    request["op"] = Value::String(op.to_string());
-    request["principal_id"] = Value::String(context.principal_id.clone());
+    if state.provider_registry.is_none() {
+        anyhow::bail!("object provider unavailable");
+    }
     let request_id = format!("viewer-library:{op}:{}", crate::auth::now_ts());
     append_viewer_library_audit(
         &state.data_dir,
@@ -513,12 +510,7 @@ async fn viewer_object_provider_request(
         "requested",
         &format!("Viewer requested Library object operation {op}"),
     )?;
-    let response = crate::library::handle_object_provider_runtime_request(
-        &state.data_dir,
-        Arc::clone(registry),
-        &request,
-    )
-    .await;
+    let response = object_provider_request(state, context, op, request).await?;
     let completed = response.get("status").and_then(Value::as_str) == Some("ok");
     if completed && op == "write" {
         crate::library::library_event_notifier().notify_waiters();
@@ -540,6 +532,28 @@ async fn viewer_object_provider_request(
         ),
     )?;
     Ok(response)
+}
+
+/// One Library object provider request for the launch's principal, with no
+/// audit of its own: the caller records the request it serves.
+async fn object_provider_request(
+    state: &GatewayState,
+    context: &HomeLaunchTokenContext,
+    op: &str,
+    mut request: Value,
+) -> anyhow::Result<Value> {
+    let registry = state
+        .provider_registry
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("object provider unavailable"))?;
+    request["op"] = Value::String(op.to_string());
+    request["principal_id"] = Value::String(context.principal_id.clone());
+    Ok(crate::library::handle_object_provider_runtime_request(
+        &state.data_dir,
+        Arc::clone(registry),
+        &request,
+    )
+    .await)
 }
 
 pub(super) async fn read_viewer_library_object_bytes(
@@ -888,4 +902,697 @@ fn viewer_error_response(err: anyhow::Error) -> Response {
         StatusCode::INTERNAL_SERVER_ERROR
     };
     (status, text).into_response()
+}
+
+// --- Photos surface --------------------------------------------------------
+//
+// The Photos surface (`image-viewer`) reads through these two routes only:
+// the playlist bound to its launch, and one item of that playlist by
+// position. It sends no path. Runtime takes the playlist from the signed
+// launch context, serves only items the playlist lists under Pictures/, and
+// leaves exactly one audit record per request. There is no write route.
+
+pub(crate) const PHOTOS_VIEWER: &str = "image-viewer";
+/// The one playlist a Photos launch may bind: the one the `photo-viewer`
+/// Component writes (examples/photo-viewer). Known spike limit: any capsule
+/// whose storage bounds cover this path could write it, which can only choose
+/// which of the person's own Pictures Photos shows. Phase 2 binds the
+/// launch's own run output instead of a fixed path.
+pub(crate) const PHOTOS_PLAYLIST_URI: &str =
+    "localhost://Users/self/.AppData/App/photo-viewer/playlist.json";
+/// The lifetime of a launch that binds the playlist.
+pub(crate) const PHOTOS_LAUNCH_TOKEN_TTL_SECS: u64 = 15 * 60;
+const PHOTOS_PLAYLIST_SCHEMA: &str = "elastos.photo-viewer.playlist/v1";
+const PHOTOS_PICTURES_PREFIX: &str = "localhost://Users/self/Pictures/";
+const MAX_PHOTOS_PLAYLIST_BYTES: u64 = 64 * 1024;
+const MAX_PHOTOS_ITEM_BYTES: u64 = 64 * 1024 * 1024;
+
+/// What Runtime binds when Home launches `target`: the token's selected
+/// resource and, for a Photos playlist launch, its shorter lifetime. Only
+/// Photos takes a selected resource from Home, and only its playlist.
+pub(crate) fn photos_launch_binding(
+    target: &str,
+    requested: Option<&str>,
+) -> anyhow::Result<(String, Option<u64>)> {
+    if target != PHOTOS_VIEWER {
+        if requested.is_some() {
+            anyhow::bail!("only Photos takes a selected resource");
+        }
+        return Ok((target.to_string(), None));
+    }
+    match requested {
+        // Opened from the Library for one image: no playlist is bound, the
+        // Photos routes refuse it, and the token keeps the default lifetime.
+        None => Ok((target.to_string(), None)),
+        Some(PHOTOS_PLAYLIST_URI) => Ok((
+            PHOTOS_PLAYLIST_URI.to_string(),
+            Some(PHOTOS_LAUNCH_TOKEN_TTL_SECS),
+        )),
+        Some(_) => anyhow::bail!("Photos can bind only its playlist"),
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct PhotosRefusal {
+    pub(crate) status: StatusCode,
+    pub(crate) reason: String,
+}
+
+impl PhotosRefusal {
+    fn new(status: StatusCode, reason: impl Into<String>) -> Self {
+        Self {
+            status,
+            reason: reason.into(),
+        }
+    }
+}
+
+impl IntoResponse for PhotosRefusal {
+    fn into_response(self) -> Response {
+        (self.status, Json(json!({ "error": self.reason }))).into_response()
+    }
+}
+
+/// What one Photos request touched, for its single audit record.
+struct PhotosRecord {
+    playlist: Option<String>,
+    playlist_sha256: Option<String>,
+    position: Option<String>,
+    item: Option<String>,
+}
+
+/// The launch token, for the Photos viewer only. Before it is valid there is
+/// no principal or launch to record, so a refusal here is counted, not
+/// recorded on its own (`count_photos_unadmitted`); the error carries its
+/// fixed code. The gateway front door refuses requests with no valid token at
+/// all before they reach this.
+fn require_photos_token(
+    data_dir: &FsPath,
+    headers: &HeaderMap,
+) -> Result<super::gateway::RequiredHomeLaunchToken, (PhotosRefusal, &'static str)> {
+    super::gateway::require_home_viewer_launch(data_dir, headers, PHOTOS_VIEWER).map_err(|err| {
+        // Runtime's own message, never request text.
+        let code = if err.to_string() == "missing home launch token" {
+            "missing_token"
+        } else {
+            "token_refused"
+        };
+        (
+            PhotosRefusal::new(
+                StatusCode::UNAUTHORIZED,
+                format!("Photos needs its own launch token: {err}"),
+            ),
+            code,
+        )
+    })
+}
+
+/// The bound playlist under the launch's own principal root.
+fn require_photos_playlist(
+    data_dir: &FsPath,
+    launch: &super::gateway::RequiredHomeLaunchToken,
+) -> Result<String, PhotosRefusal> {
+    if !super::browser_capsules::is_viewer_capsule(data_dir, PHOTOS_VIEWER) {
+        return Err(PhotosRefusal::new(
+            StatusCode::NOT_FOUND,
+            "the Photos viewer is not installed",
+        ));
+    }
+    if launch.launch_context.selected_resource != PHOTOS_PLAYLIST_URI {
+        return Err(PhotosRefusal::new(
+            StatusCode::FORBIDDEN,
+            "this Photos launch is not bound to a playlist",
+        ));
+    }
+    principal_self_uri(PHOTOS_PLAYLIST_URI, &launch.context.principal_id).ok_or_else(|| {
+        PhotosRefusal::new(StatusCode::INTERNAL_SERVER_ERROR, "invalid playlist path")
+    })
+}
+
+/// `localhost://Users/self/<rest>` under the principal's own root.
+fn principal_self_uri(self_uri: &str, principal_id: &str) -> Option<String> {
+    let rest = self_uri.strip_prefix("localhost://Users/self/")?;
+    Some(format!(
+        "{}/{rest}",
+        crate::auth::principal_localhost_root(principal_id)
+    ))
+}
+
+/// A playlist item must name one object under the person's Pictures folder.
+fn photos_item_uri(uri: &str, principal_id: &str) -> Result<String, PhotosRefusal> {
+    let refuse = |why: &str| {
+        PhotosRefusal::new(
+            StatusCode::FORBIDDEN,
+            format!("playlist item {uri:?} {why}"),
+        )
+    };
+    let Some(rest) = uri.strip_prefix(PHOTOS_PICTURES_PREFIX) else {
+        return Err(refuse("is not under localhost://Users/self/Pictures/"));
+    };
+    if rest
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(refuse("has an empty, . or .. segment"));
+    }
+    if rest.contains(['?', '#', '\\']) || rest.chars().any(char::is_control) {
+        return Err(refuse("has ?, #, \\ or a control character"));
+    }
+    principal_self_uri(uri, principal_id).ok_or_else(|| refuse("is not a principal path"))
+}
+
+/// The `uri` of the item at `order` in the playlist. A skipped entry is not
+/// an item.
+fn photos_listed_item(playlist: &[u8], order: u64) -> Result<String, PhotosRefusal> {
+    let malformed = |why: &str| {
+        PhotosRefusal::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("the bound playlist {why}"),
+        )
+    };
+    let playlist: Value = serde_json::from_slice(playlist).map_err(|_| malformed("is not JSON"))?;
+    if playlist.get("schema").and_then(Value::as_str) != Some(PHOTOS_PLAYLIST_SCHEMA) {
+        return Err(malformed(&format!("is not {PHOTOS_PLAYLIST_SCHEMA}")));
+    }
+    let items = playlist
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| malformed("has no items list"))?;
+    let mut found = None;
+    for item in items {
+        let item_order = item
+            .get("order")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| malformed("has an item without an order"))?;
+        if item_order != order {
+            continue;
+        }
+        if found.is_some() {
+            return Err(malformed(&format!("lists position {order} twice")));
+        }
+        let uri = item
+            .get("uri")
+            .and_then(Value::as_str)
+            .ok_or_else(|| malformed("has an item without a uri"))?;
+        found = Some(uri.to_string());
+    }
+    found.ok_or_else(|| {
+        PhotosRefusal::new(
+            StatusCode::NOT_FOUND,
+            format!("position {order} is not a playable item in this launch's playlist"),
+        )
+    })
+}
+
+/// Reads one Library object of at most `limit` bytes, checking the size
+/// before the read. `viewable` also requires the object to be one the Photos
+/// viewer may open. The stat and the read are internal to one Photos request
+/// and leave no audit record of their own.
+async fn read_photos_object(
+    state: &GatewayState,
+    context: &HomeLaunchTokenContext,
+    uri: &str,
+    limit: u64,
+    viewable: bool,
+) -> Result<Vec<u8>, PhotosRefusal> {
+    let provider_failed =
+        |err: anyhow::Error| PhotosRefusal::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    let stat = object_provider_request(state, context, "stat", json!({ "uri": uri }))
+        .await
+        .map_err(provider_failed)?;
+    if stat.get("status").and_then(Value::as_str) != Some("ok") {
+        return Err(PhotosRefusal::new(
+            StatusCode::NOT_FOUND,
+            format!("{uri} not found"),
+        ));
+    }
+    if viewable {
+        ensure_viewer_can_view_library_object(&stat, PHOTOS_VIEWER)
+            .map_err(|err| PhotosRefusal::new(StatusCode::FORBIDDEN, err.to_string()))?;
+    }
+    let size = stat
+        .pointer("/data/object/size")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| PhotosRefusal::new(StatusCode::BAD_GATEWAY, "Library stat has no size"))?;
+    let too_large = || {
+        PhotosRefusal::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("{uri} is larger than {limit} bytes"),
+        )
+    };
+    if size > limit {
+        return Err(too_large());
+    }
+    let read = object_provider_request(state, context, "read", json!({ "uri": uri }))
+        .await
+        .map_err(provider_failed)?;
+    let encoded = read
+        .pointer("/data/data")
+        .and_then(Value::as_str)
+        .filter(|_| read.get("status").and_then(Value::as_str) == Some("ok"))
+        .ok_or_else(|| {
+            PhotosRefusal::new(StatusCode::BAD_GATEWAY, format!("{uri} could not be read"))
+        })?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| PhotosRefusal::new(StatusCode::BAD_GATEWAY, "Library read was not base64"))?;
+    // The object may have grown between stat and read.
+    if bytes.len() as u64 > limit {
+        return Err(too_large());
+    }
+    Ok(bytes)
+}
+
+/// At most this many launches hold a pin at once. A new launch is refused
+/// while the table is full; a live pin is never evicted to make room.
+pub(crate) const PHOTOS_MAX_PINS: usize = 1024;
+
+/// The playlist sha256 each launch saw first, so a launch keeps playing the
+/// playlist it started with. Held in memory: entries older than a Photos
+/// token's lifetime are dropped when a new launch pins, and a Runtime restart
+/// starts afresh.
+pub(crate) struct PhotosPins {
+    entries: std::collections::HashMap<String, (String, std::time::Instant)>,
+    cap: usize,
+}
+
+impl PhotosPins {
+    pub(crate) fn new(cap: usize) -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            cap,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Binds `sha256` to the launch at its first read, and refuses a later
+    /// read of different bytes. The table is scanned only when a new launch
+    /// pins, and holds at most `cap` entries.
+    pub(crate) fn pin(
+        &mut self,
+        launch_id: &str,
+        sha256: &str,
+        now: std::time::Instant,
+    ) -> Result<(), PhotosRefusal> {
+        match self.entries.get(launch_id) {
+            Some((pinned, _)) if pinned != sha256 => Err(PhotosRefusal::new(
+                StatusCode::CONFLICT,
+                format!("the playlist changed during this launch (pinned sha256:{pinned})"),
+            )),
+            Some(_) => Ok(()),
+            None => {
+                let lifetime = std::time::Duration::from_secs(PHOTOS_LAUNCH_TOKEN_TTL_SECS);
+                self.entries.retain(|_, (_, pinned_at)| {
+                    now.saturating_duration_since(*pinned_at) <= lifetime
+                });
+                if self.entries.len() >= self.cap {
+                    return Err(PhotosRefusal::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        format!(
+                            "too many Photos launches are open ({}); try again when one ends",
+                            self.cap
+                        ),
+                    ));
+                }
+                self.entries
+                    .insert(launch_id.to_string(), (sha256.to_string(), now));
+                Ok(())
+            }
+        }
+    }
+}
+
+fn photos_playlist_pins() -> &'static std::sync::Mutex<PhotosPins> {
+    static PINS: std::sync::OnceLock<std::sync::Mutex<PhotosPins>> = std::sync::OnceLock::new();
+    PINS.get_or_init(|| std::sync::Mutex::new(PhotosPins::new(PHOTOS_MAX_PINS)))
+}
+
+fn pin_photos_playlist(launch_id: &str, playlist: &[u8]) -> Result<String, PhotosRefusal> {
+    use sha2::Digest as _;
+    let sha256 = hex::encode(sha2::Sha256::digest(playlist));
+    photos_playlist_pins()
+        .lock()
+        .map_err(|_| PhotosRefusal::new(StatusCode::INTERNAL_SERVER_ERROR, "playlist pins"))?
+        .pin(launch_id, &sha256, std::time::Instant::now())?;
+    Ok(sha256)
+}
+
+/// The bound playlist's bytes for this launch, pinned by sha256.
+async fn read_pinned_photos_playlist(
+    state: &GatewayState,
+    launch: &super::gateway::RequiredHomeLaunchToken,
+    playlist_uri: &str,
+    record: &mut PhotosRecord,
+) -> Result<Vec<u8>, PhotosRefusal> {
+    let bytes = read_photos_object(
+        state,
+        &launch.context,
+        playlist_uri,
+        MAX_PHOTOS_PLAYLIST_BYTES,
+        false,
+    )
+    .await?;
+    record.playlist_sha256 = Some(pin_photos_playlist(&launch.launch_id, &bytes)?);
+    Ok(bytes)
+}
+
+/// Distinguishes this Runtime process, so record ids stay unique when the
+/// counter restarts with the process while a launch token is still valid.
+fn photos_record_boot() -> &'static str {
+    static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BOOT.get_or_init(|| hex::encode(rand::random::<[u8; 8]>()))
+}
+
+/// The one audit record of a Photos request: the playlist (and its sha256),
+/// the position, the item URI and the result. Its id is the launch id and a
+/// counter. If the record cannot be written, the request fails.
+fn photos_audit(
+    data_dir: &FsPath,
+    launch: &super::gateway::RequiredHomeLaunchToken,
+    route: &str,
+    record: &PhotosRecord,
+    outcome: &Result<Vec<u8>, PhotosRefusal>,
+) -> Result<(), PhotosRefusal> {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let event_type = format!("photos.viewer.{route}");
+    let (result, outcome_text) = match outcome {
+        Ok(bytes) => ("served", format!("served {} bytes", bytes.len())),
+        Err(refusal) => (
+            "refused",
+            format!("refused {}: {}", refusal.status.as_u16(), refusal.reason),
+        ),
+    };
+    let field = |value: &Option<String>| value.clone().unwrap_or_else(|| "-".to_string());
+    let reason = format!(
+        "playlist={} sha256={} position={} item={} result={outcome_text}",
+        field(&record.playlist),
+        field(&record.playlist_sha256),
+        field(&record.position),
+        field(&record.item),
+    );
+    let context = &launch.context;
+    crate::auth::append_audit_event(
+        data_dir,
+        RuntimeAuditEventV1 {
+            schema: RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: format!(
+                "audit:{event_type}:{}:{}:{sequence}",
+                launch.launch_id,
+                photos_record_boot()
+            ),
+            event_type,
+            principal_id: Some(context.principal_id.clone()),
+            proof_binding_id: context.proof_binding_id.clone(),
+            session_id: Some(context.session_id.clone()),
+            challenge_id: Some(launch.launch_id.clone()),
+            capsule_id: Some(PHOTOS_VIEWER.to_string()),
+            result: result.to_string(),
+            reason,
+            occurred_at: crate::auth::now_ts(),
+            signer_did: None,
+            signature: None,
+        },
+    )
+    .map_err(|err| {
+        PhotosRefusal::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Photos read was not audited: {err}"),
+        )
+    })
+}
+
+// ---- Refusals before the token check: counted per window ----
+//
+// A request refused before its launch token is accepted has no principal and
+// no launch, and anyone can send one. Each is counted by (route, code) in a
+// 60-second window, and the window is written as ONE audit event carrying all
+// its counts, so a steady flood costs one event a minute out of the 512-event
+// audit tail. The route is the matched route's fixed name and the code comes
+// from a fixed list; request text never becomes a key. The window is written
+// at the first request of a later window, or at gateway shutdown. A crash
+// loses the open window.
+
+const PHOTOS_UNADMITTED_WINDOW_SECS: u64 = 60;
+/// A backstop for distinct keys per window. The fixed lists give at most
+/// 2 routes x 3 codes = 6 keys today, so it is not reached.
+const PHOTOS_UNADMITTED_KEY_CAP: usize = 16;
+const PHOTOS_UNADMITTED_ROUTES: [&str; 2] = ["playlist", "item"];
+const PHOTOS_UNADMITTED_CODES: [&str; 3] = ["missing_token", "token_refused", "other"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PhotosUnadmittedWindow {
+    pub(crate) start: u64,
+    pub(crate) counts: std::collections::BTreeMap<(&'static str, &'static str), u32>,
+    pub(crate) overflow: u32,
+    cap: usize,
+}
+
+/// `name` if it is on `known`, else `"other"`.
+fn photos_fixed_name(known: &[&'static str], name: &str) -> &'static str {
+    known
+        .iter()
+        .find(|known| **known == name)
+        .copied()
+        .unwrap_or("other")
+}
+
+impl PhotosUnadmittedWindow {
+    pub(crate) fn new(start: u64, cap: usize) -> Self {
+        Self {
+            start,
+            counts: std::collections::BTreeMap::new(),
+            overflow: 0,
+            cap,
+        }
+    }
+
+    pub(crate) fn add(&mut self, route: &str, code: &str) {
+        let key = (
+            photos_fixed_name(&PHOTOS_UNADMITTED_ROUTES, route),
+            photos_fixed_name(&PHOTOS_UNADMITTED_CODES, code),
+        );
+        if let Some(count) = self.counts.get_mut(&key) {
+            *count = count.saturating_add(1);
+        } else if self.counts.len() < self.cap {
+            self.counts.insert(key, 1);
+        } else {
+            self.overflow = self.overflow.saturating_add(1);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.counts.is_empty() && self.overflow == 0
+    }
+
+    /// `window=<start>-<end> counts=<route>/<code>:<n>,... overflow=<n> total=<n>`
+    pub(crate) fn reason(&self) -> String {
+        let counts: Vec<String> = self
+            .counts
+            .iter()
+            .map(|((route, code), count)| format!("{route}/{code}:{count}"))
+            .collect();
+        let total = self
+            .counts
+            .values()
+            .fold(self.overflow, |total, count| total.saturating_add(*count));
+        let counts = if counts.is_empty() {
+            "-".to_string()
+        } else {
+            counts.join(",")
+        };
+        format!(
+            "window={}-{} counts={counts} overflow={} total={total}",
+            self.start,
+            self.start + PHOTOS_UNADMITTED_WINDOW_SECS,
+            self.overflow,
+        )
+    }
+}
+
+type PhotosUnadmittedWindows =
+    std::sync::Mutex<std::collections::HashMap<PathBuf, PhotosUnadmittedWindow>>;
+
+/// One open window per data root (one per Runtime; tests run many).
+fn photos_unadmitted_windows() -> &'static PhotosUnadmittedWindows {
+    static WINDOWS: std::sync::OnceLock<PhotosUnadmittedWindows> = std::sync::OnceLock::new();
+    WINDOWS.get_or_init(Default::default)
+}
+
+/// Counts one refusal before the token check at `now`, first writing the
+/// previous window if `now` is in a later one.
+pub(crate) fn count_photos_unadmitted_at(
+    data_dir: &FsPath,
+    route: &str,
+    code: &str,
+    now: u64,
+) -> anyhow::Result<()> {
+    let start = now - now % PHOTOS_UNADMITTED_WINDOW_SECS;
+    let finished = {
+        let mut windows = photos_unadmitted_windows()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Photos refusal counts are unavailable"))?;
+        let window = windows
+            .entry(data_dir.to_path_buf())
+            .or_insert_with(|| PhotosUnadmittedWindow::new(start, PHOTOS_UNADMITTED_KEY_CAP));
+        // A clock that steps back keeps counting into the open window.
+        let finished = (start > window.start).then(|| {
+            std::mem::replace(
+                window,
+                PhotosUnadmittedWindow::new(start, PHOTOS_UNADMITTED_KEY_CAP),
+            )
+        });
+        window.add(route, code);
+        finished
+    };
+    match finished {
+        Some(window) => write_photos_unadmitted(data_dir, &window),
+        None => Ok(()),
+    }
+}
+
+/// Writes the open window, if it counted anything. Called at gateway shutdown.
+pub(crate) fn flush_photos_unadmitted(data_dir: &FsPath) -> anyhow::Result<()> {
+    let window = photos_unadmitted_windows()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Photos refusal counts are unavailable"))?
+        .remove(data_dir);
+    match window {
+        Some(window) => write_photos_unadmitted(data_dir, &window),
+        None => Ok(()),
+    }
+}
+
+fn write_photos_unadmitted(
+    data_dir: &FsPath,
+    window: &PhotosUnadmittedWindow,
+) -> anyhow::Result<()> {
+    if window.is_empty() {
+        return Ok(());
+    }
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let event_type = "photos.viewer.unadmitted";
+    crate::auth::append_audit_event(
+        data_dir,
+        RuntimeAuditEventV1 {
+            schema: RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: format!(
+                "audit:{event_type}:{}:{}:{sequence}",
+                window.start,
+                photos_record_boot()
+            ),
+            event_type: event_type.to_string(),
+            principal_id: None,
+            proof_binding_id: None,
+            session_id: None,
+            challenge_id: None,
+            capsule_id: Some(PHOTOS_VIEWER.to_string()),
+            result: "refused".to_string(),
+            reason: window.reason(),
+            occurred_at: crate::auth::now_ts(),
+            signer_did: None,
+            signature: None,
+        },
+    )
+}
+
+/// The request is refused whatever happens here; a failed write is logged.
+fn count_photos_unadmitted(data_dir: &FsPath, route: &'static str, code: &'static str) {
+    if let Err(err) = count_photos_unadmitted_at(data_dir, route, code, crate::auth::now_ts()) {
+        tracing::warn!("Photos refusal counts were not written: {err}");
+    }
+}
+
+fn photos_bytes_response(content_type: &'static str, bytes: Vec<u8>) -> Response {
+    (
+        StatusCode::OK,
+        [
+            ("content-type", content_type),
+            ("cache-control", "no-store"),
+            ("x-content-type-options", "nosniff"),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+pub async fn photos_playlist_get(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+) -> Response {
+    let launch = match require_photos_token(&state.data_dir, &headers) {
+        Ok(launch) => launch,
+        Err((refusal, code)) => {
+            count_photos_unadmitted(&state.data_dir, "playlist", code);
+            return refusal.into_response();
+        }
+    };
+    let mut record = PhotosRecord {
+        playlist: None,
+        playlist_sha256: None,
+        position: None,
+        item: None,
+    };
+    let outcome = async {
+        let playlist_uri = require_photos_playlist(&state.data_dir, &launch)?;
+        record.playlist = Some(playlist_uri.clone());
+        read_pinned_photos_playlist(&state, &launch, &playlist_uri, &mut record).await
+    }
+    .await;
+    if let Err(refusal) = photos_audit(&state.data_dir, &launch, "playlist", &record, &outcome) {
+        return refusal.into_response();
+    }
+    match outcome {
+        Ok(bytes) => photos_bytes_response("application/json", bytes),
+        Err(refusal) => refusal.into_response(),
+    }
+}
+
+pub async fn photos_playlist_item_get(
+    State(state): State<GatewayState>,
+    Path(order): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let launch = match require_photos_token(&state.data_dir, &headers) {
+        Ok(launch) => launch,
+        Err((refusal, code)) => {
+            count_photos_unadmitted(&state.data_dir, "item", code);
+            return refusal.into_response();
+        }
+    };
+    let mut record = PhotosRecord {
+        playlist: None,
+        playlist_sha256: None,
+        position: Some(order.clone()),
+        item: None,
+    };
+    let outcome = async {
+        let playlist_uri = require_photos_playlist(&state.data_dir, &launch)?;
+        record.playlist = Some(playlist_uri.clone());
+        let order: u64 = order.parse().map_err(|_| {
+            PhotosRefusal::new(
+                StatusCode::BAD_REQUEST,
+                "a playlist position is a whole number",
+            )
+        })?;
+        let playlist =
+            read_pinned_photos_playlist(&state, &launch, &playlist_uri, &mut record).await?;
+        let listed = photos_listed_item(&playlist, order)?;
+        record.item = Some(listed.clone());
+        let uri = photos_item_uri(&listed, &launch.context.principal_id)?;
+        read_photos_object(&state, &launch.context, &uri, MAX_PHOTOS_ITEM_BYTES, true).await
+    }
+    .await;
+    if let Err(refusal) = photos_audit(&state.data_dir, &launch, "item", &record, &outcome) {
+        return refusal.into_response();
+    }
+    match outcome {
+        Ok(bytes) => photos_bytes_response("application/octet-stream", bytes),
+        Err(refusal) => refusal.into_response(),
+    }
 }
