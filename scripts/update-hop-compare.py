@@ -52,7 +52,12 @@ is closed: each payload file occurs once and symlinks/hard links are refused.
 both selectors have empty refusals. The independently pinned operator package
 owns real M1/M2 acceptance. CI generates a separate `ci-rehearsal` package with
 old/new and wrong-signer-head, wrong-signer-release, tampered-binary, wrong-platform
-and wrong-version. Each maps head, release, receipt, binary, components and
+and wrong-version. It also publishes unknown-kind: new's components plus one
+external component of a kind no Runtime knows, signed with the approved key over
+the release after new (#89). Only an installed Home receives it, after
+https://publisher.invalid is added to its gateways; `update` must refuse it as
+InstallerRequired, print `curl -fsSL '<https gateway>/install.sh' | bash` and
+leave the Home unchanged. Each maps head, release, receipt, binary, components and
 catalogue to inventoried paths. Receipt bytes contain last_head_cid and
 last_release_cid. Metadata CIDs and signed envelope digests bind exact bytes.
 Old is the newest published release, pinned by release CID, SHA-256 and head CID
@@ -578,7 +583,13 @@ def run(config, output):
 
 CLI_MODE = "cli-install-update"
 CLI_REFUSALS = ("wrong-signer-head", "wrong-signer-release", "tampered-binary", "wrong-platform", "wrong-version")
-CLI_PHASES = ("old", "new", *CLI_REFUSALS)
+# A signed release whose components name a kind this Runtime does not know needs the
+# publisher's install command (#89); it is offered only to an installed Home.
+CLI_INSTALLER_CASE = "unknown-kind"
+CLI_FUTURE_COMPONENT, CLI_FUTURE_KIND = "update-hop-future", "update-hop-future-kind"
+# install_command() names only an https gateway; .invalid never resolves, so it adds no request.
+CLI_INSTALL_GATEWAY = "https://publisher.invalid"
+CLI_PHASES = ("old", "new", *CLI_REFUSALS, CLI_INSTALLER_CASE)
 # A cross-version fixture also publishes the release after new, which new's System applies.
 CLI_SYSTEM_PHASE = "next"
 CLI_DATA = "Library/Application Support/elastos" if sys.platform == "darwin" else ".local/share/elastos"
@@ -919,7 +930,15 @@ def cli_admit(config, local_rehearsal=None):
     for key in ("components", "catalogue"):
         need(all(manifest["files"][publication[key]]["sha256"] == manifest["files"][new[key]]["sha256"]
                  for name, publication in manifest["publications"].items()
-                 if not (key == "components" and name == "old" and "previous" in manifest)), "qualified support bytes changed")
+                 if not (key == "components" and (name == CLI_INSTALLER_CASE or name == "old" and "previous" in manifest))),
+             "qualified support bytes changed")
+    if CLI_INSTALLER_CASE in manifest["publications"]:
+        future = cli_json(cli_path(root, manifest["publications"][CLI_INSTALLER_CASE]["components"]))
+        expected = cli_json(cli_path(root, new["components"]))
+        extra = future.get("external", {}).pop(CLI_FUTURE_COMPONENT, None)
+        need(future == expected and extra is not None and extra.get("platforms")
+             and all(entry == {"strategy": CLI_FUTURE_KIND} for entry in extra["platforms"].values()),
+             "unknown-kind components must be new's plus one unknown external kind")
     if "previous" in manifest:
         cli_admit_previous(root, manifest, env)
     if manifest["proof_kind"] == "real-runtime":
@@ -2194,6 +2213,13 @@ def cli_generate_hop(root, runtime, next_runtime, system_runtime, build_receipt,
                          "profiles": {"home": {"description": "Qualified fixture Home", "components": list(CLI_SETUP_COMPONENTS)}},
                          "model_catalog": {"head_cid": manifest["files"][catalogue]["cid"], "publisher_dids": [manifest["signer_did"]]}})
         content(components)
+        if not prefix:
+            value = cli_json(root / components)
+            value["external"][CLI_FUTURE_COMPONENT] = {"install_path": "tools/update-hop-future",
+                                                       "platforms": {component_platform: {"strategy": CLI_FUTURE_KIND}}}
+            future = add(CLI_INSTALLER_CASE + "/components.json", value)
+            content(future)
+            manifest["future_components"] = future
         return {"components": components, "setup": setup, "support": mapping,
                 "qualified_capsules": add(prefix + "qualified-capsules.json", capsules)}
 
@@ -2280,7 +2306,7 @@ def cli_generate_hop(root, runtime, next_runtime, system_runtime, build_receipt,
 
         for phase in (*CLI_PHASES, CLI_SYSTEM_PHASE):
             binary_relative = {"tampered-binary": tampered, "old": runtime_relative, "wrong-version": runtime_relative,
-                               CLI_SYSTEM_PHASE: system_relative}.get(phase, next_relative)
+                               CLI_SYSTEM_PHASE: system_relative, CLI_INSTALLER_CASE: system_relative}.get(phase, next_relative)
             binary_binding = binding(binary_relative)
             if phase == "tampered-binary":
                 binary_binding["sha256"] = manifest["files"][runtime_relative]["sha256"]
@@ -2289,6 +2315,8 @@ def cli_generate_hop(root, runtime, next_runtime, system_runtime, build_receipt,
                 phase_platform = cli_other_architecture(phase_platform)
             version = cli_phase_version(manifest, phase)
             components = old["components"] if phase == "old" else new["components"]
+            if phase == CLI_INSTALLER_CASE:
+                components = manifest.pop("future_components")
             # Home's System check requires the signed source; the change note lets
             # the installed journey tell each offered publication apart.
             release_payload = {"schema": "elastos.release/v1", "channel": "canary", "version": version,
@@ -2765,7 +2793,8 @@ def cli_state(manifest, home_path):
 
 
 def cli_refusal(case, command, stdout, stderr, unchanged):
-    boundary = {"tampered-binary": "SHA-256", "wrong-platform": "platform", "wrong-version": "version"}.get(case, "sign")
+    boundary = {"tampered-binary": "SHA-256", "wrong-platform": "platform", "wrong-version": "version",
+                CLI_INSTALLER_CASE: "installer"}.get(case, "sign")
     # An unavailable holder, invalid CID or an unrelated failure is not a refusal proof.
     if case == "tampered-binary":
         evidence = "SHA-256 mismatch" in stderr and "Downloading binary" in stdout and "Downloading components" not in stdout and "Binary verified" not in stdout
@@ -2773,6 +2802,10 @@ def cli_refusal(case, command, stdout, stderr, unchanged):
         evidence = ("No release available for platform:" in stderr or "No binary CID for platform" in stderr) and "Downloading binary" not in stdout
     elif case == "wrong-version":
         evidence = ("Downloaded binary version mismatch" in stderr or "Installed binary version mismatch" in stderr) and "Downloading binary" in stdout
+    elif case == CLI_INSTALLER_CASE:
+        evidence = ("Run this once: curl -fsSL '" + CLI_INSTALL_GATEWAY + "/install.sh' | bash" in stderr
+                    and "does not know: " + CLI_FUTURE_COMPONENT in stderr
+                    and "not valid" not in stdout + stderr)
     else:
         evidence = ("Signer DID mismatch" in stderr or "Envelope signer differs from the pinned maintainer DID" in stderr)
         release_reached = "Fetching release:" in stdout or "Verifying release signature" in stdout
@@ -3475,16 +3508,19 @@ def cli_run(config, output, local_rehearsal=None):
             need(cli_success(processes, "m2-repeat", reply) and "Installed release is up to date." in processes.text("m2-repeat")
                  and cli_state(manifest, consumer) == after, "repeat update changed the installed fixture")
             result["paths"]["m2-discovery"]["checks"]["repeat"] = {"status": "passed", **reply}
-        for case in manifest["selectors"]["m1-install"]["refusals"]:
-            phase(case)
-            fresh = output / ("homes/m1-" + case)
-            fresh.mkdir(mode=0o700)
-            label = "m1-" + case
-            reply = install(fresh, label, "new")
-            unchanged = not files(fresh / ".local") and not files(fresh / CLI_DATA)
-            refusal = cli_refusal(case, reply, processes.text(label), processes.text(label, "stderr"), unchanged)
-            result["paths"]["m1-install"]["checks"][case] = refusal
-            need(refusal["status"] == "passed", "fresh installer refusal boundary differs")
+        refusals = manifest["selectors"]["m1-install"]["refusals"]
+        for case in [*refusals, CLI_INSTALLER_CASE] if refusals else []:
+            # A fresh install of a newer component kind is the installer's job, not a refusal.
+            if case != CLI_INSTALLER_CASE:
+                phase(case)
+                fresh = output / ("homes/m1-" + case)
+                fresh.mkdir(mode=0o700)
+                label = "m1-" + case
+                reply = install(fresh, label, "new")
+                unchanged = not files(fresh / ".local") and not files(fresh / CLI_DATA)
+                refusal = cli_refusal(case, reply, processes.text(label), processes.text(label, "stderr"), unchanged)
+                result["paths"]["m1-install"]["checks"][case] = refusal
+                need(refusal["status"] == "passed", "fresh installer refusal boundary differs")
             # Refusals are offered to this source's Runtime: the seed installs new, and every
             # refusal publication is labelled with the release after it.
             phase("new")
@@ -3495,6 +3531,12 @@ def cli_run(config, output, local_rehearsal=None):
             setup(target, "seed-setup-" + case, "new")
             verify(target, "new", "seed-version-" + case, fresh=True)
             prepare(target, "seed-" + case, "new")
+            if case == CLI_INSTALLER_CASE:
+                # The install command names the publisher's https gateway; the fixture serves loopback http.
+                sources_path = target / CLI_DATA / "sources.json"
+                sources = cli_json(sources_path)
+                next(s for s in sources["sources"] if s["name"] == sources["default_source"])["gateways"].append(CLI_INSTALL_GATEWAY)
+                sources_path.write_text(json.dumps(sources, indent=2) + "\n")
             original = cli_state(manifest, target)
             phase(case)
             if case.startswith("wrong-signer-"):
@@ -3569,7 +3611,8 @@ def cli_check_result(result):
     need(stages["refused"]["current_version"] == result["new"]["version"]
          and stages["next-updated"]["current_version"] == next_version,
          "System did not refuse the tampered offer and then apply " + next_version)
-    need(all(path["checks"][case]["status"] == "passed" for path in result["paths"].values() for case in CLI_REFUSALS),
+    need(all(path["checks"][case]["status"] == "passed" for path in result["paths"].values() for case in CLI_REFUSALS)
+         and result["paths"]["m2-discovery"]["checks"].get(CLI_INSTALLER_CASE, {}).get("status") == "passed",
          "a CLI refusal did not hold")
     undo = home.get("undo", {})
     need(undo.get("status") == "passed" and undo["version"] == previous["version"]
@@ -3577,6 +3620,7 @@ def cli_check_result(result):
          "the explicit Undo to the published release did not pass")
     return {"status": "passed", "from": previous["version"], "to": result["new"]["version"], "next": next_version,
             "system_refused": "tampered-binary", "cli_refused": {name: list(CLI_REFUSALS) for name in result["paths"]},
+            "cli_installer_required": CLI_INSTALLER_CASE,
             "provider_warnings_new": [], "undo": {"version": undo["version"], "plain_update_refused": True}}
 
 

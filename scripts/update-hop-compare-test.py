@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Observer regressions with mocked processes and transport; no Runtime Homes."""
 
+import copy
 import contextlib
 import base64
 import hashlib
@@ -419,9 +420,15 @@ class CliFixtureTests(unittest.TestCase):
         components = add("components.json", {"capsules": {"test": {"cid": "qualified"}}, "external": {},
                                                 "model_catalog": {"head_cid": self.manifest["files"][catalogue]["cid"],
                                                                   "publisher_dids": ["did:key:zcatalog"]}})
+        future_components = add(observer.CLI_INSTALLER_CASE + "/components.json", {
+            "capsules": {"test": {"cid": "qualified"}},
+            "external": {observer.CLI_FUTURE_COMPONENT: {"install_path": "tools/update-hop-future",
+                                                         "platforms": {"aarch64-darwin": {"strategy": observer.CLI_FUTURE_KIND}}}},
+            "model_catalog": {"head_cid": self.manifest["files"][catalogue]["cid"], "publisher_dids": ["did:key:zcatalog"]}})
         old_bin, new_bin, bad_bin = (add(name, value, 0o755) for name, value in
                                     (("old-bin", b"old"), ("new-bin", b"new"), ("bad-bin", b"bad")))
         for phase in observer.CLI_PHASES:
+            phase_components = future_components if phase == observer.CLI_INSTALLER_CASE else components
             bin_path = old_bin if phase in ("old", "wrong-version") else bad_bin if phase == "tampered-binary" else new_bin
             def binding(relative):
                 return {key: self.manifest["files"][relative][key] for key in ("cid", "sha256")} | {"size": self.manifest["files"][relative]["bytes"]}
@@ -430,7 +437,7 @@ class CliFixtureTests(unittest.TestCase):
                 binary_binding["sha256"] = self.manifest["files"][new_bin]["sha256"]
             payload = {"schema": "elastos.release/v1", "channel": "canary",
                        "version": observer.cli_phase_version(self.manifest, phase),
-                       "platforms": {"x86_64-darwin" if phase == "wrong-platform" else "aarch64-darwin": {"binary": binary_binding, "components": binding(components)}}}
+                       "platforms": {"x86_64-darwin" if phase == "wrong-platform" else "aarch64-darwin": {"binary": binary_binding, "components": binding(phase_components)}}}
             release = add(phase + "/release.json", {"payload": payload, "signature": "00" * 64,
                                                    "signer_did": "did:key:zother" if phase == "wrong-signer-release" else signer})
             head = add(phase + "/head.json", {"payload": {"schema": "elastos.release.head/v1", "channel": "canary", "version": payload["version"],
@@ -438,7 +445,7 @@ class CliFixtureTests(unittest.TestCase):
                                              "signature": "00" * 64, "signer_did": "did:key:zother" if phase == "wrong-signer-head" else signer})
             receipt = add(phase + "/receipt.json", {"last_head_cid": self.manifest["files"][head]["cid"], "last_release_cid": self.manifest["files"][release]["cid"]}, cid=False)
             self.manifest["publications"][phase] = {"head": head, "release": release, "receipt": receipt,
-                                                     "binary": bin_path, "components": components, "catalogue": catalogue}
+                                                     "binary": bin_path, "components": phase_components, "catalogue": catalogue}
         self.manifest["holder"] = {"files": {".local/bin/elastos": old_bin, observer.CLI_DATA + "/components.json": components,
                                                observer.CLI_DATA + "/bin/ipfs-provider": add("ipfs-provider", b"provider", 0o755),
                                                observer.CLI_DATA + "/bin/kubo": add("kubo", b"kubo", 0o755),
@@ -1018,6 +1025,20 @@ class CliFixtureTests(unittest.TestCase):
         failure = {"exit": 1}
         self.assertEqual(observer.cli_refusal("wrong-signer-head", failure, "Checking for updates", "Carrier connection failed", True)["status"], "failed")
         self.assertEqual(observer.cli_refusal("wrong-signer-release", failure, "Fetching release:", "Signer DID mismatch", True)["status"], "passed")
+        command_line = "Run this once: curl -fsSL '" + observer.CLI_INSTALL_GATEWAY + "/install.sh' | bash"
+        known = "does not know: " + observer.CLI_FUTURE_COMPONENT
+        installer = observer.cli_refusal(observer.CLI_INSTALLER_CASE, failure, "Components verified", command_line + "\n" + known, True)
+        self.assertEqual((installer["status"], installer["boundary"]), ("passed", "installer"))
+        for stdout, stderr, exit_code, unchanged in (
+                ("Components verified", command_line, 1, True),
+                ("Components verified", known + "\nRun the publisher's install command (install.sh) once.", 1, True),
+                ("Components verified", command_line.replace("https://publisher.invalid", "http://127.0.0.1:1") + "\n" + known, 1, True),
+                ("Components verified", command_line + "\n" + known + "\nThe signed release is not valid", 1, True),
+                ("Components verified", command_line + "\n" + known, 0, True),
+                ("Components verified", command_line + "\n" + known, 124, True),
+                ("Components verified", command_line + "\n" + known, 1, False)):
+            with self.subTest(stderr=stderr, exit=exit_code, unchanged=unchanged):
+                self.assertEqual(observer.cli_refusal(observer.CLI_INSTALLER_CASE, {"exit": exit_code}, stdout, stderr, unchanged)["status"], "failed")
         self.assertEqual(observer.cli_refusal("wrong-signer-head", failure, "Fetching release:", "Signer DID mismatch", True)["status"], "failed")
         for code, unchanged in ((0, True), (124, True), (1, False)):
             self.assertEqual(observer.cli_refusal("tampered-binary", {"exit": code}, "Downloading binary", "SHA-256 mismatch", unchanged)["status"], "failed")
@@ -1190,10 +1211,18 @@ class CliFixtureTests(unittest.TestCase):
         relative = self.add("components.json", components)
         binding = self.manifest["files"][relative]
         self.manifest["holder"]["content"][binding["cid"]] = relative
+        future = copy.deepcopy(components)
+        future["external"][observer.CLI_FUTURE_COMPONENT] = {
+            "install_path": "tools/update-hop-future", "platforms": {"darwin-arm64": {"strategy": observer.CLI_FUTURE_KIND}}}
+        future_relative = self.add(observer.CLI_INSTALLER_CASE + "/components.json", future)
+        self.manifest["holder"]["content"][self.manifest["files"][future_relative]["cid"]] = future_relative
         for phase, publication in self.manifest["publications"].items():
+            phase_binding = binding
+            if phase == observer.CLI_INSTALLER_CASE:
+                publication["components"], phase_binding = future_relative, self.manifest["files"][future_relative]
             release = observer.cli_json(self.root / publication["release"])
             selected = next(iter(release["payload"]["platforms"].values()))
-            selected["components"] = {"cid": binding["cid"], "sha256": binding["sha256"], "size": binding["bytes"]}
+            selected["components"] = {"cid": phase_binding["cid"], "sha256": phase_binding["sha256"], "size": phase_binding["bytes"]}
             publication["release"] = self.add(phase + "/release.json", release)
             head = observer.cli_json(self.root / publication["head"])
             head["payload"].update(latest_release_cid=self.manifest["files"][publication["release"]]["cid"],
@@ -1359,8 +1388,8 @@ class CliFixtureTests(unittest.TestCase):
         with patch.object(observer, "cli_initial_home", return_value={"status": "passed"}):
             code, calls, result = self.fake_run()
         self.assertEqual(code, 0, result)
-        self.assertEqual(len(result["setup"]), 2 + len(observer.CLI_REFUSALS))
-        for home in ("cli", "initial-home", *("m2-" + case for case in observer.CLI_REFUSALS)):
+        self.assertEqual(len(result["setup"]), 2 + len(observer.CLI_REFUSALS) + 1)
+        for home in ("cli", "initial-home", *("m2-" + case for case in (*observer.CLI_REFUSALS, observer.CLI_INSTALLER_CASE))):
             commands = [argv for argv, env in calls if Path(env["HOME"]).name == home]
             install = next(index for index, argv in enumerate(commands) if argv[0] == "/bin/bash")
             setup = next(index for index, argv in enumerate(commands) if argv[1:] == ["setup"])
@@ -2136,9 +2165,10 @@ class CliFixtureTests(unittest.TestCase):
                                               "next-updated": {"current_version": "0.8.0-alpha.10"}}},
                         "undo": {"status": "passed", "version": pinned,
                                  "refused_plain_update": {"exit": 1}, "rollback": {"exit": 0}}}}},
-                              "m2-discovery": {"checks": json.loads(json.dumps(refusals))}}}
+                              "m2-discovery": {"checks": {**json.loads(json.dumps(refusals)), observer.CLI_INSTALLER_CASE: {"status": "passed"}}}}}
         verdict = observer.cli_check_result(result())
         self.assertEqual((verdict["from"], verdict["to"], verdict["next"]), ("0.8.0-alpha.8", "0.8.0-alpha.9", "0.8.0-alpha.10"))
+        self.assertEqual(verdict["cli_installer_required"], observer.CLI_INSTALLER_CASE)
         # From 0.8.0-alpha.7 on, a published System installs changed support (#246), by version
         # precedence rather than text; an older pin cannot pass the journey at all.
         for pinned, installs in (("0.8.0-alpha.7", True), ("0.8.0-alpha.10", True), ("0.8.0", True),
@@ -2172,7 +2202,9 @@ class CliFixtureTests(unittest.TestCase):
                   "plain downgrade applied": lambda value: home(value)["undo"]["refused_plain_update"].update(exit=0),
                   "tampered offer applied": lambda value: home(value)["system"]["stages"]["refused"].update(current_version="0.8.0-alpha.10"),
                   "next release not applied": lambda value: home(value)["system"]["stages"]["next-updated"].update(current_version="0.8.0-alpha.9"),
-                  "CLI refusal failed": lambda value: value["paths"]["m2-discovery"]["checks"]["wrong-platform"].update(status="failed")}
+                  "CLI refusal failed": lambda value: value["paths"]["m2-discovery"]["checks"]["wrong-platform"].update(status="failed"),
+                  "install command case failed": lambda value: value["paths"]["m2-discovery"]["checks"][observer.CLI_INSTALLER_CASE].update(status="failed"),
+                  "install command case missing": lambda value: value["paths"]["m2-discovery"]["checks"].pop(observer.CLI_INSTALLER_CASE)}
         for name, fault in faults.items():
             with self.subTest(fault=name), self.assertRaises(ValueError):
                 value = result()
@@ -2449,7 +2481,14 @@ class CliFixtureTests(unittest.TestCase):
                                 target.write_bytes(b"wrong setup output")
                 elif argv[0] == "/bin/bash" or args[0] == "update":
                     name = phase()
-                    if name in observer.CLI_REFUSALS:
+                    if name == observer.CLI_INSTALLER_CASE:
+                        self.returncode = 1
+                        stdout = "Binary verified\nComponents verified"
+                        stderr = ("Error: This release needs the install command once; this Home cannot apply it itself. "
+                                  "Your current version is unchanged. Run this once: curl -fsSL '"
+                                  + observer.CLI_INSTALL_GATEWAY + "/install.sh' | bash\nThis Runtime does not know: "
+                                  + observer.CLI_FUTURE_COMPONENT)
+                    elif name in observer.CLI_REFUSALS:
                         self.returncode = 1
                         if name == "tampered-binary":
                             stdout, stderr = "Downloading binary", "SHA-256 mismatch"
@@ -2634,11 +2673,15 @@ class CliFixtureTests(unittest.TestCase):
         first_gateway = next(index for index, (argv, _) in enumerate(calls) if argv[1] == "gateway")
         self.assertLess(holder_identity, first_gateway)
         updates = [argv[1:] for argv, _ in calls if argv[1] == "update"]
-        self.assertEqual(updates, [["update", "--check"], ["update"], ["update"], ["update", "--check"], ["update"], ["update", "--check"], ["update"], *([["update"]] * 3)])
+        self.assertEqual(updates, [["update", "--check"], ["update"], ["update"], ["update", "--check"], ["update"], ["update", "--check"], ["update"], *([["update"]] * 4)])
         self.assertTrue(all("XDG_DATA_HOME" not in env for _, env in calls))
         self.assertTrue(all("--gateway" not in argv and "source" not in argv for argv, _ in calls))
         for selector in ("m1-install", "m2-discovery"):
             self.assertTrue(set(observer.CLI_REFUSALS) <= set(result["paths"][selector]["checks"]))
+        self.assertNotIn(observer.CLI_INSTALLER_CASE, result["paths"]["m1-install"]["checks"])
+        installer = result["paths"]["m2-discovery"]["checks"][observer.CLI_INSTALLER_CASE]
+        self.assertEqual((installer["status"], installer["boundary"]), ("passed", "installer"))
+        self.assertEqual(observer.source_for_home(self.root / "results/homes/m2-unknown-kind")["gateways"][-1], observer.CLI_INSTALL_GATEWAY)
 
     def test_runner_rejects_changed_user_data_despite_valid_coordination(self):
         code, _, result = self.fake_run(user_data_drift=True)
