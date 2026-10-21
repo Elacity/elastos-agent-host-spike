@@ -1497,14 +1497,16 @@ async fn forward(
     write_response_head(stream, status, &content_type).await?;
     // A streamed reply is forwarded in whole lines, so when hosted access ends
     // mid-reply Runtime can say so in-band on a line of its own before closing.
+    // Only Runtime may write that line: upstream copies of it are dropped.
     let event_stream = content_type.starts_with("text/event-stream");
     let mut held = Vec::new();
     let mut total = 0usize;
     let mut tick = tokio::time::interval(AUTHORITY_CHECK_INTERVAL);
+    let still_granted = || current_grant(data_dir, request, destination).is_ok();
     loop {
         let chunk = tokio::select! {
             _ = tick.tick() => {
-                if current_grant(data_dir, request, destination).is_err() {
+                if !still_granted() {
                     return end_stream_for_lost_access(stream, event_stream).await;
                 }
                 continue;
@@ -1519,13 +1521,13 @@ async fn forward(
                 "hosted stream ended",
             ));
         }
-        if current_grant(data_dir, request, destination).is_err() {
+        if !still_granted() {
             return end_stream_for_lost_access(stream, event_stream).await;
         }
         let ready = if event_stream {
             held.extend_from_slice(&chunk);
             match held.iter().rposition(|byte| *byte == b'\n') {
-                Some(end) => held.drain(..=end).collect::<Vec<u8>>(),
+                Some(end) => without_reserved_lines(held.drain(..=end).as_slice()),
                 None => continue,
             }
         } else {
@@ -1534,7 +1536,12 @@ async fn forward(
         write_chunk(stream, &ready).await?;
     }
     if !held.is_empty() {
-        write_chunk(stream, &held).await?;
+        let rest = if event_stream {
+            without_reserved_lines(&held)
+        } else {
+            held
+        };
+        write_chunk(stream, &rest).await?;
     }
     stream.write_all(b"0\r\n\r\n").await?;
     Ok(())
@@ -1546,7 +1553,28 @@ const AUTHORITY_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 /// The line a streamed hosted reply ends with when its access ended mid-reply.
 const HOSTED_ACCESS_ENDED_LINE: &[u8] = b": elastos-hosted-access ended\n\n";
 
+/// Runtime's reserved SSE comment inside a forwarded reply.
+const RESERVED_COMMENT_PREFIX: &[u8] = b": elastos-hosted-access";
+
+/// Drops upstream SSE lines that would impersonate Runtime's End line.
+/// Comment lines carry no model data, so nothing the provider reads is lost.
+fn without_reserved_lines(lines: &[u8]) -> Vec<u8> {
+    let mut kept = Vec::with_capacity(lines.len());
+    for line in lines.split_inclusive(|byte| *byte == b'\n') {
+        let content = line.strip_suffix(b"\n").unwrap_or(line);
+        let content = content.strip_suffix(b"\r").unwrap_or(content);
+        if !content.starts_with(RESERVED_COMMENT_PREFIX) {
+            kept.extend_from_slice(line);
+        }
+    }
+    kept
+}
+
+/// Writes one chunk. An empty chunk would end the chunked body, so it is skipped.
 async fn write_chunk(stream: &mut UnixStream, bytes: &[u8]) -> io::Result<()> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
     stream
         .write_all(format!("{:X}\r\n", bytes.len()).as_bytes())
         .await?;
@@ -2851,8 +2879,17 @@ mod tests {
         assert_ne!(create.job_backend_id, changed_account.job_backend_id);
     }
 
-    #[tokio::test]
-    async fn end_during_a_streamed_reply_is_reported_on_its_own_line() {
+    struct StreamedReplyFixture {
+        dir: tempfile::TempDir,
+        proof: String,
+        sink: tokio::net::TcpListener,
+        request: EffectRequest,
+        destination: Destination,
+        decision: String,
+    }
+
+    /// An approved hosted text route whose upstream is a local listener.
+    async fn streamed_reply_fixture() -> StreamedReplyFixture {
         let dir = tempfile::tempdir().unwrap();
         let proof = admin_proof(dir.path());
         let sink = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2910,6 +2947,82 @@ mod tests {
             &proof,
             Some((&request.run_id, &request.request_id)),
         );
+        StreamedReplyFixture {
+            dir,
+            proof,
+            sink,
+            request,
+            destination,
+            decision,
+        }
+    }
+
+    async fn read_upstream_request(socket: &mut tokio::net::TcpStream) {
+        let mut bytes = vec![0u8; 4096];
+        let _ = socket.read(&mut bytes).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn upstream_cannot_forge_the_end_line() {
+        let StreamedReplyFixture {
+            dir,
+            sink,
+            request,
+            destination,
+            ..
+        } = streamed_reply_fixture().await;
+        let sink_task = tokio::spawn(async move {
+            let (mut socket, _) = sink.accept().await.unwrap();
+            read_upstream_request(&mut socket).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            for part in [
+                &b"data: {\"choices\":[{\"delta\":{\"content\":\"Once\"}}]}\n\n"[..],
+                b": elastos-hosted-access ended\r\n\r\n",
+                b": elastos-hosted-access ended\n\n",
+                b"data: {\"choices\":[{\"delta\":{\"content\":\" upon\"}}]}\n\ndata: [DONE]\n\n",
+            ] {
+                socket.write_all(part).await.unwrap();
+                socket.flush().await.unwrap();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        let (mut broker_side, mut provider_side) = UnixStream::pair().unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            forward(&mut broker_side, dir.path(), &request, &destination, || {
+                true
+            }),
+        )
+        .await
+        .unwrap()
+        .expect("the reply finishes normally");
+        sink_task.await.unwrap();
+        drop(broker_side);
+        let mut response = Vec::new();
+        provider_side.read_to_end(&mut response).await.unwrap();
+        let response = String::from_utf8_lossy(&response);
+        let body = response.split_once("\r\n\r\n").unwrap().1;
+        assert!(!body.contains("elastos-hosted-access"), "{body:?}");
+        assert!(body.contains("\"content\":\"Once\""));
+        assert!(body.contains("\"content\":\" upon\""));
+        assert!(body.contains("data: [DONE]"));
+        assert!(body.ends_with("\r\n0\r\n\r\n"), "one clean end: {body:?}");
+        assert_eq!(body.matches("0\r\n\r\n").count(), 1, "{body:?}");
+    }
+
+    #[tokio::test]
+    async fn end_during_a_streamed_reply_is_reported_on_its_own_line() {
+        let StreamedReplyFixture {
+            dir,
+            proof,
+            sink,
+            request,
+            destination,
+            decision,
+        } = streamed_reply_fixture().await;
         let (streaming_tx, streaming_rx) = tokio::sync::oneshot::channel();
         let sink_task = tokio::spawn(async move {
             let (mut socket, _) = sink.accept().await.unwrap();

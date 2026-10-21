@@ -2000,6 +2000,14 @@ async fn run_local_text_worker_with_timing(
     if !response.status().is_success() {
         return Err(map_effect_http_status(&response, runtime_socket));
     }
+    // Runtime writes its End line only into event streams it brokers, and
+    // drops upstream copies there; any other body never carries it.
+    let runtime_end_line_possible = runtime_socket.is_some()
+        && response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream"));
 
     let mut response = response;
     let mut line = Vec::new();
@@ -2068,7 +2076,7 @@ async fn run_local_text_worker_with_timing(
             if current_line.ends_with(b"\r") {
                 current_line.pop();
             }
-            if runtime_socket.is_some() && current_line == HOSTED_ACCESS_ENDED_LINE {
+            if runtime_end_line_possible && current_line == HOSTED_ACCESS_ENDED_LINE {
                 // Keep the text that already arrived, then say why the reply stopped.
                 if !stream_state.delta_buffer.is_empty() {
                     flush_local_text_delta(
@@ -4965,48 +4973,52 @@ mod tests {
         }
     }
 
-    #[test]
-    fn hosted_reply_cut_off_by_end_keeps_its_text_and_says_access_ended() {
+    /// Runs one hosted text reply against a stand-in Runtime socket that
+    /// answers with `body` as `content_type`, and closes without a final chunk
+    /// when `cut_off`. Returns the worker result and the text it delivered.
+    fn run_hosted_reply(
+        content_type: &'static str,
+        body: Vec<u8>,
+        cut_off: bool,
+    ) -> (std::result::Result<ReconcileResult, AdapterFault>, String) {
         use std::os::unix::net::UnixListener;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
             .unwrap();
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let path = std::env::temp_dir().join(format!(
-            "elastos-hosted-ended-{}-{}",
+            "elastos-hosted-reply-{}-{}",
             std::process::id(),
-            now_ms()
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         let listener = UnixListener::bind(&path).unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0_u8; 4096];
             let _ = stream.read(&mut request).unwrap();
-            let mut body = sse_body(
-                &[r#"{"choices":[{"delta":{"content":"Once upon"}}]}"#],
-                false,
-            );
-            body.extend_from_slice(b": elastos-hosted-access ended\n\n");
             write!(
                 stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:X}\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:X}\r\n",
                 body.len()
             )
             .unwrap();
             stream.write_all(&body).unwrap();
             stream.write_all(b"\r\n").unwrap();
-            // Runtime closes without a terminating chunk, as on End.
+            if !cut_off {
+                stream.write_all(b"0\r\n\r\n").unwrap();
+            }
         });
         let (update_tx, mut update_rx) = mpsc::channel(1);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let socket = path.to_string_lossy().into_owned();
-        let (fault, delivered) = runtime.block_on(async move {
+        let outcome = runtime.block_on(async move {
             let worker = tokio::spawn(async move {
                 let mut task = LocalTextWorkerTask {
                     request_id: "fixture-request".into(),
                     hosted_socket: Some(socket),
-                    run_id: "run-hosted-ended".into(),
+                    run_id: "run-hosted-reply".into(),
                     generation: 1,
                     backend: LocalTextBackend::OpenAiCompatible {
                         api_url: "https://example.invalid/chat".into(),
@@ -5023,24 +5035,37 @@ mod tests {
             });
             let mut delivered = String::new();
             while let Some(update) = update_rx.recv().await {
-                match update {
-                    WorkerUpdate::Apply {
-                        result: ReconcileResult::StillRunning { events, .. },
-                        acknowledge,
-                        ..
-                    } => {
+                if let WorkerUpdate::Apply {
+                    result,
+                    acknowledge,
+                    ..
+                } = update
+                {
+                    if let ReconcileResult::StillRunning { events, .. } = result {
                         for event in events {
                             delivered.push_str(event.data["text"].as_str().unwrap_or_default());
                         }
-                        acknowledge.send(WorkerApplyAck::Applied).unwrap();
                     }
-                    other => panic!("unexpected streaming update: {other:?}"),
+                    acknowledge.send(WorkerApplyAck::Applied).unwrap();
                 }
             }
-            (worker.await.unwrap().unwrap_err(), delivered)
+            (worker.await.unwrap(), delivered)
         });
         server.join().unwrap();
         std::fs::remove_file(&path).unwrap();
+        outcome
+    }
+
+    #[test]
+    fn hosted_reply_cut_off_by_end_keeps_its_text_and_says_access_ended() {
+        let mut body = sse_body(
+            &[r#"{"choices":[{"delta":{"content":"Once upon"}}]}"#],
+            false,
+        );
+        body.extend_from_slice(b": elastos-hosted-access ended\n\n");
+        // Runtime closes without a terminating chunk, as on End.
+        let (result, delivered) = run_hosted_reply("text/event-stream", body, true);
+        let fault = result.unwrap_err();
         assert_eq!(delivered, "Once upon");
         assert_eq!(fault.error.code, "hosted_access_ended_during_reply");
         assert_eq!(fault.error.class, ErrorClass::AccessRefused);
@@ -5048,6 +5073,23 @@ mod tests {
             fault.error.message,
             "Hosted access ended during this reply. Approve the new request in Inbox to use it again."
         );
+    }
+
+    #[test]
+    fn end_line_in_a_body_that_is_not_an_event_stream_is_not_an_end() {
+        let mut body = sse_body(&[r#"{"choices":[{"delta":{"content":"Once"}}]}"#], false);
+        body.extend_from_slice(b": elastos-hosted-access ended\n\n");
+        body.extend_from_slice(&sse_body(
+            &[r#"{"choices":[{"delta":{"content":" upon"}}]}"#],
+            true,
+        ));
+        let (result, delivered) = run_hosted_reply("application/json", body, false);
+        let result = result.expect("the reply finishes normally");
+        assert!(
+            !format!("{result:?}").contains("hosted_access_ended"),
+            "{result:?}"
+        );
+        assert!(format!("{delivered}{result:?}").contains(" upon"));
     }
 
     #[test]
