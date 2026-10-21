@@ -79,10 +79,12 @@ test("saved hosted connections keep management controls while Inbox owns access"
   };
   collect(card);
   assert.ok(controls.includes("My hosted model"));
-  assert.ok(controls.includes("Hosted connection needs Inbox review"));
+  assert.ok(controls.includes("Needs Inbox review"));
+  assert.ok(!controls.some(text => /^Instance: /.test(text || "")));
   assert.ok(controls.includes("Disconnect"));
   assert.ok(controls.includes("Edit"));
-  assert.match(f.node("#ai-provider-egress-note").textContent, /Approve each hosted connection in Inbox/);
+  assert.equal(f.node("#ai-provider-egress-note").hidden, true);
+  assert.equal(f.node("#ai-provider-egress-note").textContent, "");
   assert.equal(f.attempts.length, 0);
 });
 
@@ -122,9 +124,9 @@ test("hosted Save keeps one identity and entered key across activation failure a
   assert.notEqual(f.attempts[2].id, first.id);
 });
 
-test("hosted key feedback separates paused egress, Home authority, and provider rejection", () => {
+test("hosted key check names each known Runtime outcome and hides unknown detail", () => {
   const functions = source.slice(
-    source.indexOf("function publicSystemError("),
+    source.indexOf("const HOSTED_KEY_CHECK_OUTCOMES = ["),
     source.indexOf("function showError("),
   );
   const context = vm.createContext({ readText: value => typeof value === "string" ? value.trim() : "" });
@@ -132,20 +134,40 @@ test("hosted key feedback separates paused egress, Home authority, and provider 
   const message = detail => vm.runInContext(
     `hostedProviderValidationError(new Error(${JSON.stringify(detail)}))`, context,
   );
-  assert.equal(
-    message("request failed: 400 Hosted external HTTPS is paused until Runtime network authority is available."),
-    "External HTTPS is paused on this Home. The key has not been checked.",
-  );
-  assert.equal(message("request failed: 403 admin passkey required"), "Sign in as the Home admin to check provider keys.");
-  assert.equal(message("request failed: 403 home launch token expired"), "This Home could not check the key. Try again.");
-  assert.equal(message("request failed: 400 invalid Venice key"), "The provider could not validate this key.");
-  assert.match(message("request failed: 400 The hosted connection request was denied. Try again after the decision window."), /was denied/);
-  assert.match(message("request failed: 400 Hosted access was denied or ended. Review Inbox."), /denied or ended/);
-  assert.match(message("request failed: 400 Hosted HTTPS was ended on this Home. Start a new connection check in Inbox."), /was ended/);
-  assert.match(message("request failed: 400 Runtime blocked this hosted route. Review the connection configuration."), /blocked this hosted route/);
-  assert.match(message("request failed: 400 Hosted HTTPS could not reach the host. Check the network and try again."), /network/);
-  assert.equal(message("request failed: 502 Bad Gateway"), "This Home could not check the key. Try again.");
-  assert(!source.includes('publicSystemError(error, "This key is invalid.")'));
+  // Each Runtime response below is copied from elastos-server api/gateway_home_system_ai_provider.rs.
+  const outcomes = [
+    ["request failed: 400 Approve this hosted connection in Inbox, then check the key again.",
+      "Approve this connection in Inbox, then check the key again."],
+    ["request failed: 400 The hosted connection request was denied. Try again after the decision window.",
+      "This connection was denied in Inbox. Try again later."],
+    ["request failed: 400 Hosted access was denied or ended. Review Inbox.",
+      "This connection was denied or ended. Review Inbox."],
+    ["request failed: 400 Hosted HTTPS was ended on this Home. Start a new connection check in Inbox.",
+      "Hosted access was ended. Check the key again to ask in Inbox."],
+    ["request failed: 400 Runtime blocked this hosted route. Review the connection configuration.",
+      "This Home blocked the route to the host."],
+    ["request failed: 400 Hosted HTTPS could not reach the host. Check the network and try again.",
+      "Could not reach the host. Check the network and try again."],
+    ["request failed: 400 invalid Venice key", "The provider rejected this key."],
+    ["request failed: 400 invalid OpenRouter key", "The provider rejected this key."],
+    ["request failed: 500 Venice validation unavailable", "The provider sent an unexpected response. Try again later."],
+    ["request failed: 500 OpenRouter validation unavailable", "The provider sent an unexpected response. Try again later."],
+    ["request failed: 403 admin passkey required", "Sign in with the Home admin passkey to check keys."],
+    ["request failed: 403 proof-bound passkey session required", "Sign in with the Home admin passkey to check keys."],
+    ["request failed: 400 Hosted external HTTPS is paused until Runtime network authority is available.",
+      "External HTTPS is paused on this Home."],
+  ];
+  for (const [detail, expected] of outcomes) assert.equal(message(detail), expected, detail);
+  const generic = "This Home could not check the key. Try again.";
+  for (const detail of [
+    "request failed: 400 This Home could not check the hosted connection. Try again.",
+    "request failed: 403 home launch token expired",
+    "request failed: 502 Bad Gateway",
+    "request failed: 500 OpenRouter validation transport unset",
+    "request failed: 400 invalid AI provider",
+    "request failed: 500 error sending request for url (https://api.venice.ai/api/v1/models?key=sk-secret)",
+    "",
+  ]) assert.equal(message(detail), generic, detail);
 });
 
 test("Cancel after a failed Add restores provider choice and gives the next form a new identity", async () => {
@@ -194,17 +216,18 @@ test("discarding a staged key change keeps the saved model card", async () => {
   await stagedCard.children[2].handlers.click();
   assert.deepEqual(f.discarded, [id]);
   assert.equal(f.node("#ai-provider-instances").children.length, 1);
-  assert.match(f.messages.at(-1), /saved model key remains/);
+  assert.equal(f.messages.at(-1), "Staged key removed.");
 });
 
-test("Edit uses the existing identity with a blank key and explains server-side key retention", async () => {
+test("Edit uses the existing identity with a blank key and marks the key field as optional", async () => {
   const id = `model:hosted-${"a".repeat(32)}`;
   const f = fixture([{ id, name: "Text model", provider: "openrouter", connected: true,
     selected_model: "openai/gpt-4o-mini", operation: "text.generate" }]);
   await new Promise(setImmediate);
   const card = f.node("#ai-provider-instances").children[0];
   card.children[2].children.find(button => button.textContent === "Edit").handlers.click();
-  assert.match(f.messages.at(-1), /Leave the API key blank to keep the stored key/);
+  assert.equal(f.messages.at(-1), "");
+  assert.equal(f.node("#ai-provider-key").placeholder, "Leave blank to keep the stored key");
   assert.equal(f.node("#ai-provider-kind").disabled, true);
   assert.equal(f.node("#ai-provider-key").value, "");
   f.activate();

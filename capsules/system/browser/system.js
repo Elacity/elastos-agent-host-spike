@@ -879,7 +879,6 @@ function configureAiProvider() {
   const validateButton = document.querySelector("#ai-provider-validate");
   const saveButton = document.querySelector("#ai-provider-save");
   const cancelButton = document.querySelector("#ai-provider-cancel");
-  const veniceFact = document.querySelector("[data-ai-provider-venice-fact]");
   if (!instancesNode || !addButton || !formNode || !nameInput || !providerSelect || !keyInput || !modelSelect || !validateButton || !saveButton || !cancelButton) {
     return;
   }
@@ -926,10 +925,6 @@ function configureAiProvider() {
       node.hidden = !text;
     }
   };
-  const applyProviderChrome = () => {
-    if (veniceFact) veniceFact.hidden = selectedProvider() !== "venice";
-    updateValidationEnd();
-  };
   const fillModels = (models, selected) => {
     const values = [];
     const privacyById = new Map();
@@ -965,7 +960,7 @@ function configureAiProvider() {
     keyInput.value = "";
     providerSelect.value = "openrouter";
     fillModels([], "");
-    applyProviderChrome();
+    updateValidationEnd();
     setBusy(false);
   };
   const showForm = (instance) => {
@@ -979,7 +974,9 @@ function configureAiProvider() {
     providerSelect.value = instance && instance.provider === "venice" ? "venice" : "openrouter";
     keyInput.value = "";
     fillModels([], instance && instance.selected_model ? instance.selected_model : "");
-    applyProviderChrome();
+    updateValidationEnd();
+    keyInput.placeholder = editingId ? "Leave blank to keep the stored key" : "";
+    showState("", "");
     document.querySelector("#ai-provider-form-title").textContent = editingId ? "Edit hosted model" : "Add hosted model";
     saveButton.textContent = "Save";
     keyInput.focus();
@@ -1019,7 +1016,6 @@ function configureAiProvider() {
       replaceButton.textContent = "Edit";
       replaceButton.addEventListener("click", () => {
         showForm(connection);
-        showState(`Edit ${readText(connection.name)}. Leave the API key blank to keep the stored key.`, "");
       });
       const disconnectButton = document.createElement("button");
       disconnectButton.className = "pc2-btn pc2-btn-secondary";
@@ -1046,21 +1042,15 @@ function configureAiProvider() {
       });
       const state = document.createElement("span");
       state.className = "ai-provider-state";
-      state.textContent = connection.egress_state === "ready" ? "Hosted connection approved"
-        : connection.egress_state === "paused" && connection.egress_approval_state === "approved" ? "Route approval recorded · external HTTPS paused"
-        : connection.egress_approval_state === "ended" ? "Hosted approval ended"
-        : connection.egress_state === "consent_required" || connection.egress_approval_state === "pending" ? "Hosted connection needs Inbox review"
+      state.textContent = connection.egress_approval_state === "ended" ? "Hosted approval ended"
+        : connection.egress_state === "consent_required" || connection.egress_approval_state === "pending" ? "Needs Inbox review"
         : connection.egress_state === "paused" ? "External HTTPS paused"
-        : connection.approval_state === "approved" ? "Assistant access approved"
-        : connection.share_enabled ? "Shared" : "Private";
-      title.append(state);
+        : "";
+      if (state.textContent) title.append(state);
       const more = document.createElement("details");
       more.className = "ai-provider-details";
       const summary = document.createElement("summary");
       summary.textContent = "Details and access";
-      const identity = document.createElement("p");
-      identity.className = "pc2-card-sublabel";
-      identity.textContent = `Instance: ${connection.id}`;
       const secondary = document.createElement("div");
       secondary.className = "system-inline-row";
       secondary.append(shareButton);
@@ -1087,7 +1077,7 @@ function configureAiProvider() {
         secondary.append(endApproval);
       }
       secondary.append(disconnectButton);
-      more.append(summary, identity, secondary);
+      more.append(summary, secondary);
       actions.append(useButton, replaceButton);
       card.append(title, detail, actions, more);
       instancesNode.append(card);
@@ -1106,7 +1096,6 @@ function configureAiProvider() {
       resume.addEventListener("click", () => {
         const saved = connections.find((entry) => entry.id === staged.id);
         showForm(saved || { id: staged.id, provider: String(staged.provider).toLowerCase() });
-        showState("This Home kept the staged key. Check it again, approve the connection in Inbox if asked, then choose a model.", "");
       });
       const discard = document.createElement("button");
       discard.className = "pc2-btn pc2-btn-secondary";
@@ -1122,9 +1111,7 @@ function configureAiProvider() {
             body: JSON.stringify({ id: staged.id }),
           });
           await refreshStatus();
-          showState(staged.has_saved_model
-            ? "Staged key removed. The saved model key remains. Check Inbox before its next request."
-            : "Staged key removed.", "success");
+          showState("Staged key removed.", "success");
         } catch (error) {
           showState(publicSystemError(error, "This Home could not discard the staged key."), "error");
           discard.disabled = false;
@@ -1189,7 +1176,6 @@ function configureAiProvider() {
     const connection = (latestStatus?.connections || []).find(c => c.id === lensModel.value && c.operation === "decision.evaluate");
     if (!connection) return;
     showForm(connection);
-    showState(`Edit ${readText(connection.name)}. Leave the API key blank to keep the stored key.`, "");
   });
   lensDisconnect.addEventListener("click", async () => {
     const connection = (latestStatus?.connections || []).find(c => c.id === lensModel.value && c.operation === "decision.evaluate");
@@ -1218,9 +1204,9 @@ function configureAiProvider() {
   });
   const refreshStatus = async () => {
     latestStatus = await fetchJson("/api/apps/system/ai-provider", { headers: shellHeaders() });
-    document.querySelector("#ai-provider-egress-note").textContent = latestStatus.hosted_external_https === "consent_required"
-        ? "This Home keeps provider keys. Approve each hosted connection in Inbox before its key check or model request."
-        : "External HTTPS is paused. Saved keys, models, and past results stay here.";
+    const egressNote = document.querySelector("#ai-provider-egress-note");
+    egressNote.hidden = latestStatus.hosted_external_https !== "paused";
+    egressNote.textContent = egressNote.hidden ? "" : "External HTTPS is paused on this Home.";
     renderInstances(latestStatus);
     renderLens(latestStatus);
     updateValidationEnd();
@@ -1244,14 +1230,13 @@ function configureAiProvider() {
   });
   addButton.addEventListener("click", () => {
     showForm(null);
-    showState("Choose a host, enter its key, then check and choose a model. The name is optional.", "");
   });
   cancelButton.addEventListener("click", () => {
     hideForm();
     addButton.focus();
     showState("", "");
   });
-  providerSelect.addEventListener("change", applyProviderChrome);
+  providerSelect.addEventListener("change", updateValidationEnd);
   modelSelect.addEventListener("change", () => {
     const selectedOption = modelSelect.selectedOptions[0];
     showPrivacy(selectedOption ? selectedOption.dataset.privacy : "");
@@ -1269,7 +1254,6 @@ function configureAiProvider() {
         body: JSON.stringify({ provider: selectedProvider(), api_key: keyInput.value, id: editingId }),
       });
       fillModels(Array.isArray(result.models) ? result.models : [], modelSelect.value);
-      showState("This key is valid.", "success");
     } catch (error) {
       showState(hostedProviderValidationError(error), "error");
     } finally {
@@ -1306,7 +1290,7 @@ function configureAiProvider() {
       const consentPending = String(error.message || error).includes("Approve this hosted connection in Inbox");
       showState(activationPending
         ? "This model is saved. Activation is waiting for current model work to finish. Select Save to try again."
-        : consentPending ? "The key is stored on this Home. Approve this connection in Inbox, then select Save again."
+        : consentPending ? "Approve this connection in Inbox, then select Save again."
         : publicSystemError(error, "This Home could not save that hosted model."), "error");
     } finally {
       setBusy(false);
@@ -4360,31 +4344,26 @@ function publicSystemError(value, fallback) {
   return message;
 }
 
+const HOSTED_KEY_CHECK_OUTCOMES = [
+  // Runtime copy: api/gateway_home_system_ai_provider.rs and gateway.rs system_error_response.
+  [/Approve this hosted connection in Inbox/, "Approve this connection in Inbox, then check the key again."],
+  [/The hosted connection request was denied\./, "This connection was denied in Inbox. Try again later."],
+  [/Hosted access was denied or ended\./, "This connection was denied or ended. Review Inbox."],
+  [/Hosted HTTPS was ended on this Home\./, "Hosted access was ended. Check the key again to ask in Inbox."],
+  [/Runtime blocked this hosted route\./, "This Home blocked the route to the host."],
+  [/Hosted HTTPS could not reach the host\./, "Could not reach the host. Check the network and try again."],
+  [/Hosted external HTTPS is paused/, "External HTTPS is paused on this Home."],
+  [/^request failed: 400 invalid (OpenRouter|Venice) key$/i, "The provider rejected this key."],
+  [/^request failed: 500 (OpenRouter|Venice) validation unavailable$/i, "The provider sent an unexpected response. Try again later."],
+  [/^request failed: 403 (admin passkey required|proof-bound passkey session required|.*fresh passkey|.*passkey step-up)/i, "Sign in with the Home admin passkey to check keys."],
+];
+
 function hostedProviderValidationError(value) {
   const message = readText(value && value.message ? value.message : value);
-  if (message.includes("Approve this hosted connection in Inbox")) {
-    return "The key is stored on this Home. Approve this connection in Inbox, then select Check key and load models again.";
+  for (const [pattern, text] of HOSTED_KEY_CHECK_OUTCOMES) {
+    if (pattern.test(message)) return text;
   }
-  for (const detail of [
-    "The hosted connection request was denied. Try again after the decision window.",
-    "Hosted access was denied or ended. Review Inbox.",
-    "Hosted HTTPS was ended on this Home. Start a new connection check in Inbox.",
-    "Runtime blocked this hosted route. Review the connection configuration.",
-    "Hosted HTTPS could not reach the host. Check the network and try again.",
-    "This Home could not check the hosted connection. Try again.",
-  ]) {
-    if (message.includes(detail)) return detail;
-  }
-  if (message.includes("Hosted external HTTPS is paused until Runtime network authority is available.")) {
-    return "External HTTPS is paused on this Home. The key has not been checked.";
-  }
-  if (/invalid (OpenRouter|Venice) key/i.test(message)) {
-    return "The provider could not validate this key.";
-  }
-  if (/^request failed: 403 admin passkey required$/i.test(message)) {
-    return "Sign in as the Home admin to check provider keys.";
-  }
-  return publicSystemError(value, "This Home could not check the key. Try again.");
+  return "This Home could not check the key. Try again.";
 }
 
 function showError(error) {
