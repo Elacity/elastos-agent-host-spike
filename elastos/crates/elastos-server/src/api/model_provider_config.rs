@@ -1515,6 +1515,11 @@ fn normalize_display_name(value: &str, fallback: &str) -> anyhow::Result<String>
     Ok(name.to_string())
 }
 
+/// True for a hosted AI offer id (named provider or saved hosted instance).
+pub(crate) fn is_hosted_offer_id(offer_id: &str) -> bool {
+    validate_hosted_instance_id(offer_id).is_ok()
+}
+
 fn validate_hosted_instance_id(offer_id: &str) -> anyhow::Result<()> {
     let offer_id = offer_id.trim();
     if HostedAiProvider::from_offer_id(offer_id).is_some() {

@@ -327,6 +327,90 @@ async fn model_runs_create_injects_verified_runtime_binding() {
 }
 
 #[tokio::test]
+async fn hosted_model_runs_are_for_admins_and_local_runs_stay_open_to_guests() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = RecordingModelProvider::default();
+    let app = gateway_router(model_test_state(dir.path(), provider.clone()).await);
+    let admin = passkey_authority_with_name(dir.path(), Some("admin"));
+    let guest = passkey_authority_with_name_role(
+        dir.path(),
+        Some("guest"),
+        crate::auth::RuntimePrincipalRole::Guest,
+    );
+    let token_for = |authority: &TestPasskeyAuthority| {
+        let grant = assistant_auth_grant(dir.path(), authority);
+        issue_home_launch_token_for_auth_grant(dir.path(), "assistant", &grant).unwrap()
+    };
+    let create = |offer_id: &str, request_id: &str| {
+        json!({
+            "offer_id": offer_id,
+            "operation": "text.generate",
+            "request_id": request_id,
+            "input": { "messages": [{ "role": "user", "content": "hello" }] },
+        })
+    };
+    let hosted = format!("model:hosted-{}", "a".repeat(32));
+
+    for (index, offer_id) in [hosted.as_str(), "model:openrouter", "model:venice"]
+        .into_iter()
+        .enumerate()
+    {
+        let response = app
+            .clone()
+            .oneshot(post_model(
+                token_for(&guest),
+                "runs_create",
+                create(offer_id, &format!("guest-hosted-{index}")),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{offer_id}");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&bytes).unwrap(),
+            "Hosted AI on this Home is for admins. Local models are still available."
+        );
+    }
+    assert!(
+        provider.requests.lock().await.is_empty(),
+        "a guest's hosted run never reaches the model provider"
+    );
+    assert!(
+        !dir.path()
+            .join("providers/model-provider/egress-decisions.json")
+            .exists(),
+        "a guest's hosted run creates no Inbox request"
+    );
+
+    let response = app
+        .clone()
+        .oneshot(post_model(
+            token_for(&guest),
+            "runs_create",
+            create("offer:flash-chat:pair-a", "guest-local"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = app
+        .clone()
+        .oneshot(post_model(
+            token_for(&admin),
+            "runs_create",
+            create(&hosted, "admin-hosted"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let requests = provider.requests.lock().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["offer_id"], "offer:flash-chat:pair-a");
+    assert_eq!(requests[1]["offer_id"], hosted.as_str());
+}
+
+#[tokio::test]
 async fn model_expired_request_refusal_is_bound_to_provider_validation() {
     let dir = tempfile::tempdir().unwrap();
     let provider = RecordingModelProvider::default();
