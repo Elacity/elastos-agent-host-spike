@@ -13,6 +13,23 @@ stub host inside a test process. The guest shows what the draft is like to write
 Branch `claude/bus2-proof`, from `spike/photo-viewer` at `9d449d95`. One draft PR. This note comes first,
 before any code.
 
+## 0. Review changes (Cursor, on `7f300800`): approved with these
+
+1. **The credential signature covers a domain-separated message**, not the bare hash:
+   `"elastos:bus2-proof:credential:v1\n" + kind + "\n" + subject-sha256 (hex)`.
+   - Falsifier: a valid signature by the pinned key, over the same hash, with another kind or another tag,
+     is refused.
+2. **No frame before the credential check passes.** The check runs after the read completes and before
+   `ui.present`. Test: a mismatch draws zero frames.
+3. **The guest ignores `signer`.** The report says whether it should become a key id that picks among pinned
+   keys, or be dropped.
+4. **`stop-requested` is tested as planned.** If closing the stream covers it, the report recommends dropping
+   it, so there is one way to stop.
+5. **`Cargo.lock` is committed**, and `verify.sh` runs every test and falsifier in one command (for the Mac).
+6. **Stay on Wasmtime 48**, the long-term-support release. Wasmtime 50 is mentioned in the report only.
+
+Sections 4.3 and 4.4 below are read with these changes.
+
 ## 1. Versions, pinned for this folder only
 
 | Piece | Pin | Why |
@@ -146,7 +163,7 @@ guest that must make its test fail.
   - `kind` is the pinned kind;
   - `signer` is the pinned did:key;
   - `body` is an Ed25519 signature by the **pinned** key (not by whatever `signer` says) over
-    `SHA256(domain || 0x00 || subject-sha256)`;
+    `"elastos:bus2-proof:credential:v1\n" + kind + "\n" + subject-sha256` (review change 1);
   - `subject-sha256` equals the SHA-256 of the photo bytes it streamed (proof 4.2), so the credential is
     for this content.
 - **On any mismatch the guest returns `err(denied("..."))`** before it presents a frame.

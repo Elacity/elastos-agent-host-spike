@@ -1,0 +1,17 @@
+# Guest-side Bus v2 proof. Its own workspace: outside the ElastOS workspace,
+# CI and release lists. See handoff/BUS2-PROOF-DESIGN.md.
+[workspace]
+resolver = "2"
+members = ["host", "guests/photo", "guests/busy"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+publish = false
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
