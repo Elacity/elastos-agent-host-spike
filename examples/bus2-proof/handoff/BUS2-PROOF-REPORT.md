@@ -21,7 +21,8 @@ How to check it:
 - **Wasmtime 48 needed three workarounds**, all in the host and none in the guest: fuel slices instead of a
   fuel top-up, the stop logic outside `run_concurrent`, and a separate start-up fuel budget.
 - **Sizes are small; compiling is the cost.** The photo guest is about 100 KB as a component. Compiling it
-  takes about 140 ms here. Loading already-compiled code takes about 0.3 ms.
+  takes about 140 ms in this container and about 70 ms on the Mac. Loading already-compiled code takes about
+  0.3 ms here and 0.14 ms on the Mac.
 
 ## Proofs
 
@@ -84,17 +85,18 @@ refill makes the busy guest end by fuel instead of by its deadline, which the fa
    - Tasks outside the store still ran on time, because the fuel yields do reach the executor.
    - So the driver and the grace timer must sit outside `run_concurrent`.
 3. **Instantiation cost differs by build machine.**
-   - Instantiating the same guest source used 1 unit of fuel here and more than 10,000 on the Mac. The guest
-     bytes or the compiled code differ between the two machines; I did not find out which.
+   - Instantiating the same guest source used 1 unit of fuel here and more than 10,000 on the Mac.
+   - The guest bytes differ: the photo component is 102,719 B on the Mac and 102,707 B here.
    - A budget shared by start-up and running passed here and failed there (found by Cursor's Mac run).
    - So start-up has its own fuel budget, and a trap during start-up is a named ending, never a bare error.
 4. **There is no cancel that the guest sees.** To cancel, the host stops driving the `run` call and drops the
    store. The guest gets no signal and no reason. The host records the reason in its ending, which is enough.
 5. **Async host imports must take the store.** An `async func` import gets `&Accessor<T, Self>` in a
    `HostWithStore<T>` trait, even when it only touches the guest's own state.
-6. **Compiled code is worth caching.** A warm start (load compiled code, then instantiate) took about 0.3 ms;
-   a cold start (compile, then instantiate) took 44 to 140 ms here. Loading compiled code trusts its input,
-   so such a cache must be one that only the Runtime writes.
+6. **Compiled code is worth caching.**
+   - A warm start (load compiled code, then instantiate) took 0.14 to 0.31 ms.
+   - A cold start (compile, then instantiate) took 44 to 140 ms in the container and 21 to 70 ms on the Mac.
+   - Loading compiled code trusts its input, so such a cache must be one that only the Runtime writes.
 
 ### Interface changes I recommend
 
@@ -130,14 +132,29 @@ refill makes the busy guest end by fuel instead of by its deadline, which the fa
 
 ## Measurements
 
-This container: Linux, 4 vCPUs (Intel Xeon), release build of the host. Median of 9 runs. The Mac numbers
-will differ, and so may the compiled sizes (Wasmtime behaviour 3).
+Two machines, each with a release build of the host and the median of 9 runs:
+- **container:** this Linux container, 4 vCPUs (Intel Xeon);
+- **Mac:** Cursor's Mac run of `bfafc3ed`.
 
-| Guest | Core module | Component | Compiled code | Cold start | Warm start | Instantiate only |
+A dash means that number was not reported for that machine.
+
+Sizes:
+
+| Guest | Core module (container) | Component (container) | Component (Mac) | Compiled code (container) |
+|---|---|---|---|---|
+| photo | 97,700 B | 102,707 B | 102,719 B | 405,096 B |
+| resident | 44,305 B | 46,679 B | — | 202,632 B |
+| busy | 28,664 B | 29,942 B | — | 132,008 B |
+
+Start-up times:
+
+| Guest | Cold start (container) | Cold start (Mac) | Warm start (container) | Warm start (Mac) | Instantiate only (container) | Instantiate only (Mac) |
 |---|---|---|---|---|---|---|
-| photo | 97,700 B | 102,707 B | 405,096 B | 141.6 ms | 0.31 ms | 0.03 ms |
-| resident | 44,305 B | 46,679 B | 202,632 B | 69.3 ms | 0.19 ms | 0.03 ms |
-| busy | 28,664 B | 29,942 B | 132,008 B | 44.2 ms | 0.16 ms | 0.03 ms |
+| photo | 141.6 ms | 69.52 ms | 0.31 ms | 0.14 ms | 0.03 ms | 0.03 ms |
+| resident | 69.3 ms | 34.07 ms | 0.19 ms | — | 0.03 ms | 0.03 ms |
+| busy | 44.2 ms | 21.32 ms | 0.16 ms | — | 0.03 ms | 0.03 ms |
+
+The Mac compiles about twice as fast. On both machines, warm start is hundreds of times faster than cold start.
 
 - **Core module:** the guest as built by `cargo build --release --target wasm32-unknown-unknown`, with
   `opt-level = "s"`, LTO, one codegen unit, stripped, `panic = "abort"`.
@@ -150,9 +167,10 @@ will differ, and so may the compiled sizes (Wasmtime behaviour 3).
 The design note asked for cold start "to the first event read". Instantiating takes about 0.03 ms, so cold
 start is almost all compile time. A whole job is measured as well: the photo guest, already compiled, is
 instantiated, reads a 1 MiB photo in 16 chunks, hashes it, checks its licence, draws a frame and stops, in
-**8.6 ms**.
+**8.6 ms** in the container and **5.07 ms** on the Mac.
 
-How much of the photo guest is the credential check, measured once in a scratch build with the check removed:
+How much of the photo guest is the credential check, measured once in the container, in a scratch build with
+the check removed:
 - without the check: 63,097 B;
 - with only SHA-256 kept: 68,083 B, so SHA-256 and its hex encoding are about 5 KB;
 - the full guest: 97,700 B, so Ed25519 verification is about 30 KB.
