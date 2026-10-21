@@ -5,12 +5,12 @@ import { createRequire } from "node:module";
 import { extname } from "node:path";
 import test from "node:test";
 
-const require = createRequire(import.meta.url);
+const require = createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url));
 const { chromium } = require(process.env.ELASTOS_PLAYWRIGHT_MODULE || "playwright");
 const origin = "https://system-window.test";
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 const template = await read("capsules/home-gui/browser/home-gui-template.html");
-const topHtml = `<iframe id="shell" sandbox="allow-scripts allow-forms allow-downloads" src="/shell"></iframe>
+const topHtml = `<iframe id="shell" sandbox="allow-scripts allow-forms allow-downloads" src="/apps/home-gui/shell"></iframe>
 <script>
 let cancelNextPasskey = false;
 window.cancelFixturePasskey = () => { cancelNextPasskey = true; };
@@ -67,7 +67,7 @@ const browser = await chromium.launch({
   headless: true,
 });
 try {
-  async function fixture(t) {
+  async function fixture(t, failure) {
     const context = await browser.newContext();
     const page = await context.newPage();
     const errors = [];
@@ -78,7 +78,7 @@ try {
     let exports = 0;
     page.on("pageerror", error => errors.push(error.message));
     // All traffic stays in this disposable fixture. No Runtime or user profile is used.
-    await context.route("**/*", async route => {
+    const serve = async route => {
       const url = new URL(route.request().url());
       assert.equal(url.origin, origin);
       const headers = { "access-control-allow-origin": "*" };
@@ -116,13 +116,16 @@ try {
         else if (url.pathname === "/api/capsules/catalog") body = {capsules:[]};
         else if (url.pathname === "/api/capsules/interfaces") body = {interfaces:[]};
         else if (url.pathname === "/api/provider/chain/networks") body = {status:'ok', data:{networks:[]}};
+        else if (url.pathname === "/api/apps/system/ai-provider") body = {connections:[]};
+        else if (url.pathname === "/api/apps/system/community") body = {configured:false, joined:false};
+        else if (url.pathname === "/api/apps/system/community/presence") body = {joined:false};
         else throw Error(`unexpected fixture API: ${url.pathname}`);
         return route.fulfill({ headers, json:body });
       }
       let body;
       let contentType = "text/html";
       if (url.pathname === "/") body = topHtml;
-      else if (url.pathname === "/shell") body = shellHtml;
+      else if (url.pathname === "/apps/home-gui/shell") body = shellHtml;
       else {
         const match = /^\/apps\/(home|home-gui|system)\/(.*)$/.exec(url.pathname);
         assert(match && !match[2].includes(".."), "fixture serves only the three capsule asset roots");
@@ -132,6 +135,19 @@ try {
           '.svg':'image/svg+xml', '.png':'image/png', '.webp':'image/webp', '.woff2':'font/woff2'})[extname(path)] || 'text/html';
       }
       await route.fulfill({body, contentType, headers});
+    };
+    // A request the fixture cannot serve ends the test now and names the URL;
+    // an unanswered request would otherwise hold the page until a timeout.
+    await context.route("**/*", async route => {
+      try {
+        await serve(route);
+      } catch (error) {
+        const message = `fixture cannot serve ${route.request().url()}: ${error.message}`;
+        failure.error ??= Error(message);
+        errors.push(message);
+        await route.abort().catch(() => {});
+        context.close().catch(() => {});
+      }
     });
     await page.goto(origin);
     const shell = await page.locator("#shell").elementHandle().then(handle => handle.contentFrame());
@@ -153,8 +169,18 @@ try {
     return {page, shell, currentSystem, exports:() => exports};
   }
 
-  await test("ordinary System Open reuses its frame and preserves an editable draft", async t => {
-    const f = await fixture(t);
+  function fixtureTest(body) {
+    return async t => {
+      const failure = {error:null};
+      try {
+        await body(await fixture(t, failure));
+      } catch (error) {
+        throw failure.error || error;
+      }
+    };
+  }
+
+  await test("ordinary System Open reuses its frame and preserves an editable draft", fixtureTest(async f => {
     await f.shell.evaluate(() => fixture.windows.openTarget('system', {query:{settings:'security'}}));
     const system = await f.currentSystem();
     await system.fill('#recovery-password', 'fixture-unsaved-draft');
@@ -162,10 +188,9 @@ try {
     await f.shell.evaluate(() => new Promise(requestAnimationFrame));
     assert.equal(await f.shell.locator('.window-frame').count(), 1);
     assert.equal(await system.inputValue('#recovery-password'), 'fixture-unsaved-draft');
-  });
+  }));
 
-  await test("concurrent ordinary Open, settings link and Home Save share one System frame", async t => {
-    const f = await fixture(t);
+  await test("concurrent ordinary Open, settings link and Home Save share one System frame", fixtureTest(async f => {
     await f.shell.evaluate(() => {
       fixture.hold();
       fixture.windows.openTarget('system');
@@ -177,10 +202,9 @@ try {
     assert.equal(await f.shell.locator('.window-frame').count(), 1);
     assert.equal(await f.shell.evaluate(() => fixture.save), true);
     assert.equal(f.exports(), 1);
-  });
+  }));
 
-  await test("an explicit settings link navigates the existing document without clearing its draft", async t => {
-    const f = await fixture(t);
+  await test("an explicit settings link navigates the existing document without clearing its draft", fixtureTest(async f => {
     await f.shell.evaluate(() => fixture.windows.openTarget('system', {query:{settings:'security'}}));
     const system = await f.currentSystem();
     await system.fill('#recovery-password', 'fixture-unsaved-draft');
@@ -193,10 +217,9 @@ try {
     assert.equal(await f.shell.locator('.window-frame').count(), 1);
     assert.equal(await system.inputValue('#recovery-password'), 'fixture-unsaved-draft');
     assert.equal(f.exports(), 0, 'settings navigation never exports');
-  });
+  }));
 
-  await test("sequential Save, cancelled Save and retry use the same running System document", async t => {
-    const f = await fixture(t);
+  await test("sequential Save, cancelled Save and retry use the same running System document", fixtureTest(async f => {
     async function save() {
       await f.shell.evaluate(() => {
         fixture.saveResult = 'pending';
@@ -217,7 +240,7 @@ try {
     assert.equal(await system.evaluate(() => window.fixtureDocumentMarker), 'original-document');
     assert.equal(await f.shell.locator('.window-frame').count(), 1);
     assert.equal(await f.shell.evaluate(() => fixture.calls.length), 1, 'reuse issues no new Runtime launch grant');
-  });
+  }));
 } finally {
   await browser.close();
 }

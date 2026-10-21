@@ -225,6 +225,7 @@ product-ui-browser:
     node scripts/library-product-layout-smoke.mjs
     node scripts/browser-product-layout-smoke.mjs
     node scripts/system-uiux-layout-smoke.mjs
+    node scripts/system-window-policy-browser-smoke.mjs
     node scripts/chat-room-configured-layout-smoke.mjs
     node scripts/home-phone-layout-smoke.mjs
 
