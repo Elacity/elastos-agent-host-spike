@@ -739,3 +739,199 @@ async fn gba_viewer_save_storage_is_scoped_to_the_launch_principal() {
         .unwrap();
     assert_eq!(&bytes[..], b"save bytes");
 }
+
+fn set_test_capsule_storage(data_dir: &std::path::Path, name: &str, storage: &str) {
+    let path = data_dir.join("capsules").join(name).join("capsule.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["permissions"]["storage"] = json!([storage]);
+    std::fs::write(path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn viewer_storage_cannot_reach_the_agents_area() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let viewer_token = issue_home_launch_token(dir.path(), GBA_EMULATOR_CAPSULE_ID).unwrap();
+    let content_token = issue_home_projection_launch_token_with_context(
+        dir.path(),
+        "gba-ucity",
+        GBA_EMULATOR_CAPSULE_ID,
+        &local_home_launch_token_context(dir.path()).unwrap(),
+    )
+    .unwrap();
+    let send = |method: &str, uri: String, token: &str| {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(HOST, "localhost:61180")
+            .header("origin", "null")
+            .header("x-elastos-home-token", token);
+        if method == "PUT" {
+            request = request.header("if-none-match", "*");
+        }
+        app.clone()
+            .oneshot(request.body(Body::from("not a journal")).unwrap())
+    };
+    for (capsule, storage, scope, name) in [
+        (
+            GBA_EMULATOR_CAPSULE_ID,
+            "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/*",
+            "save",
+            "journal",
+        ),
+        (
+            GBA_EMULATOR_CAPSULE_ID,
+            "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/*",
+            "save",
+            "Journal",
+        ),
+        (
+            GBA_EMULATOR_CAPSULE_ID,
+            "localhost://Users/self/.appdata/AGENTS/*",
+            "state",
+            "journal",
+        ),
+        (
+            GBA_EMULATOR_CAPSULE_ID,
+            "localhost://Users/self/.AppData/*",
+            "save",
+            "Agents",
+        ),
+        (
+            "gba-ucity",
+            "localhost://Users/self/.AppData/Agents/agent-host/*",
+            "save",
+            "journal",
+        ),
+    ] {
+        set_test_capsule_storage(dir.path(), capsule, storage);
+        let token = if capsule == GBA_EMULATOR_CAPSULE_ID {
+            &viewer_token
+        } else {
+            &content_token
+        };
+        let uri = format!("/api/viewers/gba-emulator/storage/{capsule}/{scope}/{name}");
+        for method in ["PUT", "GET"] {
+            let response = send(method, uri.clone(), token).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "{method} {storage} {scope} {name}"
+            );
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&body).contains(".AppData/Agents/"),
+                "{method} {storage} {scope} {name}"
+            );
+        }
+    }
+    let users = dir.path().join("Users");
+    let agents_files = walkdir_files(&users)
+        .into_iter()
+        .filter(|path| {
+            path.to_string_lossy()
+                .to_lowercase()
+                .contains("/.appdata/agents")
+        })
+        .collect::<Vec<_>>();
+    assert!(agents_files.is_empty(), "{agents_files:?}");
+}
+
+fn walkdir_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        found.push(path.clone());
+        if path.is_dir() {
+            found.extend(walkdir_files(&path));
+        }
+    }
+    found
+}
+
+/// The path resolver trims surrounding whitespace, so a grant for
+/// "Agents /*" (space, tab or newline) names the real Agents folder. The
+/// viewer checks the string it resolves: nothing there is read or written.
+#[tokio::test]
+async fn viewer_storage_whitespace_root_cannot_reach_the_agents_area() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let viewer_token = issue_home_launch_token(dir.path(), GBA_EMULATOR_CAPSULE_ID).unwrap();
+    let content_token = issue_home_projection_launch_token_with_context(
+        dir.path(),
+        "gba-ucity",
+        GBA_EMULATOR_CAPSULE_ID,
+        &context,
+    )
+    .unwrap();
+    let root = crate::auth::principal_localhost_root(&context.principal_id);
+    let planted = |rest: &str| {
+        elastos_common::localhost::rooted_localhost_fs_path(
+            dir.path(),
+            &format!("{root}/.AppData/Agents/{rest}"),
+        )
+        .unwrap()
+    };
+    for rest in ["journal", "states/journal"] {
+        std::fs::create_dir_all(planted(rest).parent().unwrap()).unwrap();
+        std::fs::write(planted(rest), b"planted").unwrap();
+    }
+    for space in [" ", "\t", "\n"] {
+        let storage = format!("localhost://Users/self/.AppData/Agents{space}/*");
+        for capsule in [GBA_EMULATOR_CAPSULE_ID, "gba-ucity"] {
+            set_test_capsule_storage(dir.path(), capsule, &storage);
+            let token = if capsule == GBA_EMULATOR_CAPSULE_ID {
+                &viewer_token
+            } else {
+                &content_token
+            };
+            for scope in ["save", "state"] {
+                let uri = format!("/api/viewers/gba-emulator/storage/{capsule}/{scope}/journal");
+                for method in ["GET", "PUT"] {
+                    let mut request = Request::builder()
+                        .method(method)
+                        .uri(&uri)
+                        .header(HOST, "localhost:61180")
+                        .header("origin", "null")
+                        .header("x-elastos-home-token", token);
+                    if method == "PUT" {
+                        request = request.header("if-none-match", "*");
+                    }
+                    let response = app
+                        .clone()
+                        .oneshot(request.body(Body::from("overwritten")).unwrap())
+                        .await
+                        .unwrap();
+                    let status = response.status();
+                    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        status,
+                        StatusCode::FORBIDDEN,
+                        "{method} {storage:?} {capsule} {scope}: {}",
+                        String::from_utf8_lossy(&body)
+                    );
+                    assert!(!String::from_utf8_lossy(&body).contains("planted"));
+                }
+            }
+        }
+    }
+    for rest in ["journal", "states/journal"] {
+        assert_eq!(std::fs::read(planted(rest)).unwrap(), b"planted", "{rest}");
+    }
+    let agents = planted("");
+    let mut files = walkdir_files(&agents)
+        .into_iter()
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    files.sort();
+    assert_eq!(files, vec![planted("journal"), planted("states/journal")]);
+}
