@@ -964,11 +964,17 @@ async fn exec_smoke_image_prints_hello() {
     assert!(!refused.log.contains("test result:"));
 }
 
-/// A command that prints a forged exit line early cannot end or decide the
-/// run, and a VM killed right after that line is a failure. Needs an exec
-/// image built with the `fake-exit` fixture command (prints
-/// `elastos-exec-exit 0`, then `after the fake line`, sleeps, exits 1); set
-/// `ELASTOS_EXEC_FAKE_EXIT=1` with the same variables as the hello test.
+/// The command cannot forge or take the exit report. Needs the exec image
+/// from scripts/build/build-exec-initrd.py, which has the fixture commands;
+/// set `ELASTOS_EXEC_FAKE_EXIT=1` with the same variables as the hello test.
+/// - `fake-exit` prints `elastos-exec-exit 0`, then `after the fake line`,
+///   sleeps and exits 1: the run reports 1 and keeps the later line, and a VM
+///   killed right after the forged line is `exit marker missing`;
+/// - `probe-bind` (as the command, uid 65534) gets EACCES on port 1022, and
+///   the supervisor confirms the port is held (a second bind is EADDRINUSE);
+/// - `probe-report` tries to write a forged `0` on the report channel and
+///   leaves a process behind that keeps trying, then exits 3: the report is 3;
+/// - `kill-self` is killed by SIGKILL: the report is 137, never 0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_forged_exit_line_cannot_pass() {
     if !is_supported() || std::env::var("ELASTOS_EXEC_FAKE_EXIT").as_deref() != Ok("1") {
@@ -1009,5 +1015,28 @@ async fn a_forged_exit_line_cannot_pass() {
             .as_ref()
             .is_err_and(|err| err.contains("exit marker missing")),
         "a killed VM after a forged line must fail: {killed:?}"
+    );
+
+    let bind = boot_exec_command(&kernel, &rootfs, &initrd, "probe-bind", &console_lines)
+        .await
+        .expect("probe-bind reports");
+    assert_eq!(bind.exit_code, 0, "the command could bind the exit port");
+    assert!(bind.log.contains("probe-bind: port 1022: EACCES"));
+    assert!(bind
+        .log
+        .contains("exec-supervisor: exit port 1022 held (a second bind gets EADDRINUSE)"));
+
+    let forged = boot_exec_command(&kernel, &rootfs, &initrd, "probe-report", &console_lines)
+        .await
+        .expect("probe-report reports");
+    assert_eq!(forged.exit_code, 3, "a forged report reached the host");
+    assert!(!forged.log.contains("wrote a forged report"));
+
+    let killed_self = boot_exec_command(&kernel, &rootfs, &initrd, "kill-self", &console_lines)
+        .await
+        .expect("kill-self reports");
+    assert_eq!(
+        killed_self.exit_code, 137,
+        "a killed command was not reported as killed"
     );
 }
