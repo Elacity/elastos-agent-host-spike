@@ -20,7 +20,7 @@ Source: OMP.md section 3 and reports/OMP-AUDIT.md row 2 (omp at `2220e58`):
 - **Cancel** stops the whole tree: no more model requests anywhere in it. Started children stop at their next model
   request; their partial results are kept and marked `cancelled`.
 - **Storage:** option A only if no existing field changes meaning; otherwise option B. It does, so this draft uses
-  **option B** (see "Where it is stored").
+  **option B**: journal format 2 (yes, 21 Oct), with typed records and no migration (see "Where it is stored").
 
 ## What the guest has today (spike/agent-host f5396709c, `examples/agent-host/src/lib.rs`)
 
@@ -96,19 +96,11 @@ There is no depth limit, no budget, no stop reason, and no result cap for childr
   same source as a person's own message (`admit_user`). Only the label line tells them apart, so a message that
   starts with the label would read as a budget record.
 
-**Option B: format 2.** The guest decodes format 1 and format 2, and writes only format 2.
-- A step gains typed fields:
-  - `depth u8`;
-  - `budget` (`u8` flag, then `requests u32` and `seconds u64`);
-  - `requests_used u32`;
-  - `stop u8` (none, requests, time, cancelled).
-- The journal header gains `cancelled_from` (a `u8` flag, then a `u64` step id), so a resumed journal still knows
-  that a tree was cancelled.
-- A child host journal stores its own depth and budget in the header.
-- **A format-1 journal decodes with:** depth from its `parent_id` chain, no budget, nothing used, and no stop
-  reason. A child there with no budget may not send a model call, so it fails closed.
-- The format number, USERSAI-JOURNAL.md, the cap test, and the format checks in the S3 e2e test all change. Golden
-  bytes in the tests move.
+**Option B: format 2 (decided 21 Oct; see JOURNAL-FORMAT-2.md).**
+- Every record has a typed kind, and a step has typed fields for depth, budget, requests used and stop reason.
+- The header has `cancelled_from`, `task_budget` and `depth`.
+- A format 1 journal is refused ("journal format 1 not supported; start a new task"). There is no migration code.
+- Format 2 lands in its own PR first, with those fields reserved and empty; this idea then gives them their rules.
 
 ## Tests and falsifiers
 
@@ -126,7 +118,6 @@ There is no depth limit, no budget, no stop reason, and no result cap for childr
 | `cancelling_a_parent_stops_started_children_at_their_next_model_call` (partial result kept, marked cancelled) | let the started child call once more |
 | `no_model_call_anywhere_in_a_cancelled_tree` (grandchild too) | check only direct children |
 | `a_cancelled_tree_stays_cancelled_after_resume` | drop `cancelled_from` on encode |
-| `a_format_1_journal_decodes_with_no_budget_and_fails_closed` | give it an unlimited budget |
 | `every_format_2_field_round_trips` | drop one field on encode |
 
 ## Not taken from omp
@@ -141,6 +132,6 @@ There is no depth limit, no budget, no stop reason, and no result cap for childr
 
 ## Open
 
-- Format 2 is a journal change. It needs Sasha's yes before building, as format 1 did.
+- Order (Sasha, 21 Oct): Codex passes PR #24, then the format 2 PR (JOURNAL-FORMAT-2.md), then this idea on top of it.
 - RUNTIME-BUDGET.md (for Anders, after 0.8.0) covers the Runtime side: grant limits, revoking a tree, and how the
   guest learns its granted limits.

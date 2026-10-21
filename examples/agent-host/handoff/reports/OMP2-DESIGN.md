@@ -48,4 +48,18 @@ Questions:    answered by Sasha on 21 Oct; see the update below.
   Format 2 needs Sasha's yes before building.
 - RUNTIME-BUDGET.md added, for Anders after 0.8.0.
 
-**What is next:** stop. Building idea 2 waits for Codex to pass PR #24 and for a yes on format 2.
+## Update: journal format 2 note (21 Oct)
+
+Sasha said yes to format 2:
+- a format 1 journal is refused with a clear reason, and there is no migration;
+- every record gets a typed kind, so a person's message can never read as a record;
+- one refusal record per refusal is right.
+
+JOURNAL-FORMAT-2.md is the design:
+- the header, node and step bytes, with room for the idea 2 fields (reserved, empty until then);
+- the decode refusals;
+- the tests, including the required falsifier "a message that starts with each label stays a message".
+
+No code until PR #24 passes Codex.
+
+**What is next:** wait for Codex on PR #24. Then the format 2 PR (code), then idea 2 on top of it.
