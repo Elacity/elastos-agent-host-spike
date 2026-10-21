@@ -21,7 +21,7 @@ RELEASE = "6.1.0-50-arm64"
 
 
 ET_REL, ET_EXEC, ET_DYN = 1, 2, 3
-PT_LOAD, PT_DYNAMIC = 1, 2
+PT_LOAD, PT_DYNAMIC, PT_NOTE = 1, 2, 4
 DT_NULL, DT_NEEDED, DT_RELA, DT_STRTAB, DT_RPATH, DT_RUNPATH = 0, 1, 7, 5, 15, 29
 SHT_PROGBITS, SHT_STRTAB = 1, 3
 
@@ -342,6 +342,7 @@ class BuildExecInitrd(unittest.TestCase):
         for bad in [
             elf(entry=0),
             elf(segments=[PT_DYNAMIC]),
+            elf(segments=[PT_NOTE]),  # no PT_LOAD and nothing else to refuse
             elf()[:100],
             elf()[:-4],  # the PT_LOAD runs past the end
             elf(e_type=ET_REL),
