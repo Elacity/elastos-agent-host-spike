@@ -16,9 +16,13 @@ const { chromium } = require("playwright");
 const token = "archive-layout-test-token";
 const archiveUri = "localhost://Users/archive/Documents/Portable.zip";
 const previewText = "Portable archive preview text.";
+// Rows carry the server's archive_entry_listing shape: `path` is the key sent
+// back to preview or extract; `display_path` and `name` are what is shown (#432).
 const entries = [
   {
     path: "docs/guide.md",
+    display_path: "docs/guide.md",
+    name: "guide.md",
     kind: "file",
     size: 128,
     modified_at: 1_780_000_000,
@@ -27,6 +31,8 @@ const entries = [
   },
   {
     path: "images/logo.txt",
+    display_path: "images/logo.txt",
+    name: "logo.txt",
     kind: "file",
     size: 64,
     modified_at: 1_780_000_100,
@@ -35,6 +41,8 @@ const entries = [
   },
   {
     path: "blocked/device.bin",
+    display_path: "blocked/device.bin",
+    name: "device.bin",
     kind: "file",
     size: 32,
     modified_at: 1_780_000_200,
