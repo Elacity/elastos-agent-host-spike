@@ -250,6 +250,28 @@ test("wrong source, origin, token, target, generation, or shape fails closed", a
   }
 });
 
+test("a Home page that does not know the purpose is told apart from other refusals", async () => {
+  // An older Home page answers an unknown purpose this way (replyRequestError).
+  const f = fixture("assistant");
+  const write = f.client.writeText("**Reply**", { purpose: "message.text" });
+  f.client.handleMessage(f.event(f.result("request-1", "write", "invalid", { ok: false, error: "malformed" })));
+  await assert.rejects(write, (error) => error.code === "unknown_purpose");
+
+  const malformed = fixture("assistant");
+  const refused = malformed.client.writeText("**Reply**", { purpose: "message.text" });
+  malformed.client.handleMessage(
+    malformed.event(malformed.result("request-1", "write", "message.text", { ok: false, error: "malformed" })),
+  );
+  await assert.rejects(refused, (error) => error.code === "malformed");
+
+  for (const fields of [{ ok: false, error: "busy" }, { ok: true }, { ok: false, error: "malformed", extra: true }]) {
+    const other = fixture("assistant");
+    const otherWrite = other.client.writeText("**Reply**", { purpose: "message.text" });
+    other.client.handleMessage(other.event(other.result("request-1", "write", "invalid", fields)));
+    await assert.rejects(otherWrite, /invalid Clipboard result/);
+  }
+});
+
 test("concurrency, payload bounds, timeout, cancellation, and teardown are closed", async () => {
   const f = fixture();
   const first = f.client.writeText("first", { requestId: "copy:1" });

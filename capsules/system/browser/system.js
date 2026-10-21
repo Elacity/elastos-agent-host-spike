@@ -4154,6 +4154,8 @@ function renderRuntimeUpdate(update) {
       ? RUNTIME_UPDATE_RESTART_TEXT : readText(controller?.message) || "Checking the signed update. Keep Home open.");
   } else if (runtimeUpdateFeedback) {
     showRuntimeUpdateStatus(runtimeUpdateFeedback);
+  } else if (phase === "updated" && systemReloadedForUpdate() && readText(controller.new_version)) {
+    showRuntimeUpdateStatus(`Updated to ${readText(controller.new_version)}. Reload Home to finish.`);
   } else if (["updated", "restored", "failed"].includes(phase)) {
     showRuntimeUpdateStatus(readText(controller.message) || "Check the update status again.");
   } else {
@@ -4181,6 +4183,15 @@ function markRuntimeUpdateInProgress() {
   runtimeUpdateInProgressSeen = true;
   runtimeUpdateReconnects = 0;
   if (runtimeUpdatePending) runtimeUpdatePending.polls = 0;
+}
+
+// Only an update reloads this frame (reloadForRuntimeUpdate), so a reloaded System has just loaded
+// the updated code; opening System again is a new navigation. The Home page and the windows above
+// still run the code from before the update, and System cannot reload them: it sits inside the
+// Home shell frame, whose sandbox allows no top navigation, and a nested frame inherits that. So
+// System asks the person to reload Home.
+function systemReloadedForUpdate() {
+  return globalThis.performance?.getEntriesByType?.("navigation")?.[0]?.type === "reload";
 }
 
 function reloadForRuntimeUpdate() {

@@ -292,6 +292,8 @@ const COPY_FAILURE_TEXT = {
   timeout: "Copy timed out.",
   unavailable: "Clipboard unavailable.",
   retired: "Copy stopped.",
+  // The Home page still runs code from before an update (home-clipboard-client.js).
+  unknown_purpose: "Reload Home to copy.",
 };
 const copyStatusTimers = new WeakMap();
 

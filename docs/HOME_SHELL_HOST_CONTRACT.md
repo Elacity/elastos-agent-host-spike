@@ -107,7 +107,11 @@ The Home host may:
   accepted active `home-gui` ready message;
 - mint target-scoped routes through Runtime using host-held authority;
 - route Runtime events and approved payloads to their registered child frame;
-- show a minimal reload, Desktop, or sign-out recovery surface.
+- show a minimal reload, Desktop, or sign-out recovery surface;
+- ask for a reload, never reload by itself, when a summary reports a Runtime
+  version other than the one that served the page: after an update the page,
+  the shell and open windows keep their old code until the page reloads, and
+  a reload would drop what open windows have not saved.
 
 The Home host must not:
 
@@ -181,7 +185,9 @@ Home token, random lifecycle generation, bounded random request id, operation,
 purpose, MIME type, and payload bound. Each frame may have at most one request
 in flight. Home keeps only bounded, expiring replay ids and text-free in-flight
 metadata. Concurrent, replayed, substituted, malformed, oversized, stale,
-retired, and timed-out requests fail closed.
+retired, and timed-out requests fail closed. A Home page whose code predates a
+purpose answers it as `malformed` with purpose `invalid`; the client reports
+that as `unknown_purpose`, so the app can ask for a Home reload.
 
 The purpose policy is closed. Browser may read or write bounded `text/plain`
 for `browser.text`. Wallet may write addresses and Wallet Recovery Keys.

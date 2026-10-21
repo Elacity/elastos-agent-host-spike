@@ -23,6 +23,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   Markdown, the code or the pasted text. If the copy does not happen, Assistant
   says why, for example when you cancel or the text is too long.
 - In Documents on the Desktop, a web link in a document or a published revision opens after Home shows the address and you choose Open; before, it did nothing, or replaced the Documents window so it could not be closed (#436). Links to a place in the same document still scroll there. Other links (relative paths, `elastos://` and `localhost://`) show as plain text in Documents on the Desktop.
+- After an update, Home shows a bar, "Home was updated. Reload to finish.",
+  with one Reload button, and System says to reload Home. Until you reload,
+  Assistant Copy says "Reload Home to copy." instead of "Copy failed.". Home
+  never reloads by itself, so open windows keep work you have not saved.
 
 ### Developer detail
 

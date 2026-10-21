@@ -4447,6 +4447,9 @@ async function checkSystemUpdate(page, passkey) {
     && state.changes === `Fixture ${publication}`;
   const upToDate = (version) => (state) => state.shown && !state.offer
     && state.status === "Home is up to date." && state.installed_version === version;
+  // System reloaded by its own update says the Home page above it still runs the old code.
+  const updatedTo = (version) => (state) => state.shown && !state.offer
+    && state.status === `Updated to ${version}. Reload Home to finish.` && state.installed_version === version;
   const approve = async () => {
     const frame = capsuleFrameForTarget(page, "system");
     await frame.evaluate(() => { window.__elastosUpdateWindowMarker = true; });
@@ -4480,7 +4483,7 @@ async function checkSystemUpdate(page, passkey) {
   await reach("new-offer", offered("new", SYSTEM_UPDATE_CURRENT, SYSTEM_UPDATE_NEW),
     "System did not offer the new release");
   await approve();
-  const updated = await reach("updated", upToDate(SYSTEM_UPDATE_NEW),
+  const updated = await reach("updated", updatedTo(SYSTEM_UPDATE_NEW),
     "System did not reconnect on the new release", 300);
   await waitForSignedHome(page, 60_000);
   await sameAccount("Home session did not survive the System update to the new release");
@@ -4497,7 +4500,7 @@ async function checkSystemUpdate(page, passkey) {
   const nextOffer = await reach("next-offer", offered("next", SYSTEM_UPDATE_NEW, SYSTEM_UPDATE_NEXT),
     "System did not offer the next signed version");
   await approve();
-  const nextUpdated = await reach("next-updated", upToDate(SYSTEM_UPDATE_NEXT), "System did not reconnect on the next version");
+  const nextUpdated = await reach("next-updated", updatedTo(SYSTEM_UPDATE_NEXT), "System did not reconnect on the next version");
   // Home reconnected by itself: no navigation, and the same account is signed in.
   await waitForSignedHome(page, 60_000);
   const token = await sameAccount("Home session did not survive the System update");

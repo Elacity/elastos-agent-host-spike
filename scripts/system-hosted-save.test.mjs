@@ -610,6 +610,25 @@ test("Home update freezes one exact passkey intent and retries a lost response w
   assert.equal(f.context.window.location.reloads, 1, "the finished update loads the new System");
 });
 
+test("System reloaded by its update says to reload Home; opened again it does not", () => {
+  const navigation = type => ({ performance: { getEntriesByType: kind => kind === "navigation" ? [{ type }] : [] } });
+  const updated = { phase: "updated", id: "a".repeat(32), new_version: "1.1.0", message: "Home is up to date." };
+  const reloaded = updateFixture(navigation("reload"));
+  reloaded.context.renderRuntimeUpdate({ ...reloaded.offer, available: false, current_version: "1.1.0", controller: updated });
+  assert.equal(reloaded.status.textContent, "Updated to 1.1.0. Reload Home to finish.");
+  assert.equal(reloaded.context.window.location.reloads, 0, "System never reloads Home or itself for it");
+  for (const [overrides, controller, text] of [
+    [navigation("navigate"), updated, "Home is up to date."],
+    [{}, updated, "Home is up to date."],
+    [navigation("reload"), { ...updated, phase: "restored", message: "The previous Runtime is ready." }, "The previous Runtime is ready."],
+    [navigation("reload"), { ...updated, phase: "failed", message: "The update failed." }, "The update failed."],
+  ]) {
+    const f = updateFixture(overrides);
+    f.context.renderRuntimeUpdate({ ...f.offer, available: false, controller });
+    assert.equal(f.status.textContent, text, controller.phase);
+  }
+});
+
 test("Home update keeps an ambiguous submission pending and stops bounded progress recovery", async () => {
   for (const status of [undefined, 503]) {
     const f = updateFixture();

@@ -150,6 +150,7 @@ const homeExternalLinkPrompt = createHomeExternalLinkPrompt({
   isLive: externalLinkSenderIsLive,
   otherSheetShown: () => !homeClipboardPromptRoot.hidden,
 });
+const homeUpdateBar = document.querySelector("#home-update-bar");
 
 function hideHostBootMask() {
   if (!homeShellBootMask) {
@@ -1314,6 +1315,20 @@ function reloadHomeShellHost() {
   window.location.href = "/home/";
 }
 
+// The Runtime version that served this page's code. After an update the page,
+// the shell and every open window keep running the code they loaded until the
+// page reloads (Home's files are never cached, so one reload loads it all).
+// Home does not reload by itself: open windows would lose what is not saved.
+let homePageRuntimeVersion = "";
+
+function syncHomeUpdateBar(summary) {
+  const version = typeof summary?.runtime?.version === "string" ? summary.runtime.version.trim() : "";
+  homePageRuntimeVersion ||= version;
+  if (homeUpdateBar) {
+    homeUpdateBar.hidden = !homeSummarySignedIn(summary) || !version || version === homePageRuntimeVersion;
+  }
+}
+
 async function recoverToHomeGui() {
   if (!hasHomeAuthorityToken()) {
     showShellHostRecovery(shellState.activeShellRootTarget, "No Home launch token is available.", {
@@ -1602,6 +1617,10 @@ shellHostRecoveryHomeButton?.addEventListener("click", () => {
 });
 
 shellHostRecoveryReloadButton?.addEventListener("click", () => {
+  reloadHomeShellHost();
+});
+
+document.querySelector("#home-update-reload")?.addEventListener("click", () => {
   reloadHomeShellHost();
 });
 
@@ -2526,6 +2545,7 @@ async function refreshShellSummary({
 } = {}) {
   const summary = await fetchJson("/api/apps/home/summary", { signal });
   shellState.currentSummary = summary;
+  syncHomeUpdateBar(summary);
   shellState.requestSummaryRefresh = refreshShellSummary;
   document.body.dataset.homeAuthority = homeSummarySignedIn(summary) ? "signed" : "unsigned";
   if (homeSummarySignedIn(summary)) {

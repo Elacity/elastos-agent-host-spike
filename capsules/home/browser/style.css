@@ -645,6 +645,41 @@ img {
   outline-offset: 3px;
 }
 
+/* After an update: one bar over the shell asking for a reload, centred below
+   the Desktop toolbar (at most 44 px tall: home-gui style.css --toolbar-h) so
+   it covers neither the toolbar nor the dock. It gives way to a Home sheet,
+   the lock screen and the recovery panel, so it never stacks. */
+.home-update-bar {
+  position: fixed;
+  left: 50%;
+  top: calc(env(safe-area-inset-top, 0px) + 44px + 12px);
+  z-index: 205000;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: max-content;
+  max-width: calc(100% - 24px);
+  padding: 6px 6px 6px 18px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: #1c1c1e;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.62);
+  color: var(--text);
+  transform: translateX(-50%);
+}
+
+.home-update-bar p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.home-update-bar[hidden],
+.home-prompt:not([hidden]) ~ .home-update-bar,
+.home-host-shell:has(> .home-unlock:not([hidden]), .shell-host-recovery:not([hidden])) > .home-update-bar {
+  display: none;
+}
+
 @media (max-width: 720px) {
   .home-unlock-face {
     min-height: min(560px, calc(100vh - 36px));

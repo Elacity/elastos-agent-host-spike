@@ -6,7 +6,9 @@
 // its Markdown source (while it streams, the source received so far; once a
 // stream ends without a confirmed outcome, the partial reply kept), Copy on a
 // code block writes the code, and Copy in the pasted-text editor writes the
-// pasted text. A cancelled or oversized copy says so instead of doing nothing.
+// pasted text. A cancelled or oversized copy says so instead of doing nothing,
+// and under a Home page from before the update (its Clipboard does not know
+// the message purpose yet) Copy says to reload Home.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
@@ -77,6 +79,9 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/") {
       // Home: the trusted top document, its Clipboard prompt and host. App
       // frames bind on their first exact home:app-ready, as in Home.
+      // ?home=before-update loads Home's Clipboard as it was before Assistant
+      // copied messages: a Home page not reloaded since the update.
+      const homeAssets = url.searchParams.get("home") === "before-update" ? "/apps/home-before-update" : "/apps/home";
       send(200, "text/html", `<!doctype html><style>html,body,iframe{width:100%;height:100%;margin:0;border:0}</style>
         <iframe id="gui" title="Home GUI" sandbox="allow-downloads allow-forms allow-modals allow-pointer-lock allow-scripts"
           src="/gui?home_origin=${encodeURIComponent(origin)}"></iframe>
@@ -87,7 +92,7 @@ const server = createServer(async (req, res) => {
           <button id="home-clipboard-cancel" type="button">Cancel</button>
         </section>
         <script type="module">
-          import { createHomeClipboardFrameState, createHomeClipboardHost, createHomeClipboardPrompt } from "/apps/home/home-clipboard-host.js";
+          import { createHomeClipboardFrameState, createHomeClipboardHost, createHomeClipboardPrompt } from "${homeAssets}/home-clipboard-host.js";
           const written = [];
           const prompt = createHomeClipboardPrompt({
             root: document.querySelector("#home-clipboard-prompt"),
@@ -159,13 +164,20 @@ const server = createServer(async (req, res) => {
       throw new Error(`Unexpected API operation: ${req.method} ${url.pathname}`);
     }
     if (url.pathname === "/favicon.ico") { res.writeHead(204); res.end(); return; }
-    const match = url.pathname.match(/^\/apps\/(assistant|home)\/(.*)$/);
+    const match = url.pathname.match(/^\/apps\/(assistant|home|home-before-update)\/(.*)$/);
     assert.ok(match, `Unexpected asset: ${url.pathname}`);
-    const base = resolve(root, "capsules", match[1], "browser");
+    const base = resolve(root, "capsules", match[1] === "assistant" ? "assistant" : "home", "browser");
     const path = resolve(base, match[2] || "index.html");
     assert.ok(path.startsWith(`${base}/`));
+    let content = await readFile(path);
+    if (match[1] === "home-before-update" && match[2] === "home-clipboard-protocol.js") {
+      const current = content.toString("utf8");
+      const before = current.replace(/\n {4}"message\.text": Object\.freeze\(\{[^}]*\}\),/, "");
+      assert.notEqual(before, current, "the fixture removes the message purpose from Home's Clipboard");
+      content = before;
+    }
     send(200, ({ ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css",
-      ".svg": "image/svg+xml", ".woff2": "font/woff2" })[extname(path)] || "application/octet-stream", await readFile(path));
+      ".svg": "image/svg+xml", ".woff2": "font/woff2" })[extname(path)] || "application/octet-stream", content);
   } catch (error) { errors.push(String(error)); json({ error: "fixture failure" }, 500); }
 });
 
@@ -177,12 +189,12 @@ try {
   browser = await chromium.launch({ headless: true, ...(process.env.BRAVE_BIN ? { executablePath: process.env.BRAVE_BIN } : {}) });
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin });
-  const open = async (document) => {
+  const open = async (document, query = "") => {
     fixture.stored = { schema, revision: 1, document: structuredClone(document) };
     await page?.close();
     page = await context.newPage();
     page.on("pageerror", error => pageErrors.push(`${stage}: ${error}`));
-    await page.goto(`${origin}/`);
+    await page.goto(`${origin}/${query}`);
     return page.frameLocator("#gui").frameLocator("iframe");
   };
   const clipboard = () => page.evaluate(() => navigator.clipboard.readText());
@@ -261,9 +273,22 @@ try {
 
   const written = await page.evaluate(() => window.__home.written);
   assert.deepEqual(written, [streamed.join(""), streamed.join("")], "Home wrote only what was confirmed");
+
+  stage = "Home page from before the update";
+  frame = await open(savedRoom, "?home=before-update");
+  rows = frame.locator(".agent-msg");
+  await rows.nth(3).waitFor({ state: "attached" });
+  const stale = rows.nth(1);
+  await stale.hover();
+  await stale.locator("[data-copy-message]").click();
+  const staleStatus = status(stale.locator("[data-copy-message]"));
+  await staleStatus.waitFor({ timeout: 3000 });
+  assert.equal(await staleStatus.textContent(), "Reload Home to copy.", "Copy under the old Home page says to reload Home");
+  assert.equal(await promptRoot().isVisible(), false, "the old Home page asks nothing");
+  assert.deepEqual(await page.evaluate(() => window.__home.written), [], "the old Home page writes nothing");
   assert.deepEqual(errors, []);
   assert.deepEqual(pageErrors, []);
-  console.log("PASS Assistant Copy: sent text, reply Markdown (also mid-stream and a kept partial), code and pasted text reach the clipboard through Home; cancelled and oversized copies say so");
+  console.log("PASS Assistant Copy: sent text, reply Markdown (also mid-stream and a kept partial), code and pasted text reach the clipboard through Home; cancelled and oversized copies say so; under a Home page from before the update Copy says to reload Home");
 } catch (error) {
   console.error(`Assistant message copy smoke failed at ${stage}`);
   console.error(JSON.stringify({ errors, pageErrors }, null, 1));
