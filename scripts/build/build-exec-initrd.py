@@ -19,8 +19,11 @@ a fixed home directory.
         [--kernel-release R]  default: 6.1.0-50-arm64
 
 A module that is built into the kernel (listed in modules.builtin) is
-skipped. Any other missing module, a module for another kernel, a binary
-that is not a static aarch64 ELF, or a missing project file stops the build.
+skipped. Any other missing module, a module that is not an AArch64 ELF
+relocatable object whose .modinfo section names this kernel, a binary that
+is not a static AArch64 ELF program, or a missing project file stops the
+build. Both are parsed through their ELF headers; nothing is a substring
+search.
 """
 
 import argparse
@@ -44,7 +47,9 @@ MODULES = [
 PROJECT_FILES = ["index.html", "style.css", "notes.txt"]
 EDITED_NOTE = b"hello again"
 EM_AARCH64 = 183
-PT_INTERP = 3
+ET_REL, ET_EXEC, ET_DYN = 1, 2, 3
+PT_LOAD, PT_INTERP = 1, 3
+SHT_STRTAB, SHT_NOBITS = 3, 8
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_INIT = os.path.join(REPO, "examples", "exec-image", "init")
@@ -62,23 +67,88 @@ def read(path, what):
         raise BuildError(f"{what}: cannot read {path}: {err.strerror}") from None
 
 
-def static_aarch64_elf(data, what):
-    """A 64-bit little-endian AArch64 ELF executable with no interpreter."""
+def elf_header(data, what):
+    """The fields of a 64-bit little-endian AArch64 ELF header, after checking
+    that the header and the section header table lie inside the file."""
     if len(data) < 64 or data[:4] != b"\x7fELF":
         raise BuildError(f"{what}: not an ELF file")
-    if data[4] != 2 or data[5] != 1:
+    if data[4] != 2 or data[5] != 1 or data[6] != 1:
         raise BuildError(f"{what}: not a 64-bit little-endian ELF")
-    machine = struct.unpack_from("<H", data, 18)[0]
+    (e_type, machine, version, entry, phoff, shoff, _flags, ehsize,
+     phentsize, phnum, shentsize, shnum, shstrndx) = struct.unpack_from("<HHIQQQIHHHHHH", data, 16)
+    if version != 1 or ehsize != 64:
+        raise BuildError(f"{what}: bad ELF header")
     if machine != EM_AARCH64:
         raise BuildError(f"{what}: not AArch64 (machine {machine})")
-    phoff = struct.unpack_from("<Q", data, 32)[0]
-    phentsize, phnum = struct.unpack_from("<HH", data, 54)
+    if shnum and (shentsize != 64 or shoff + 64 * shnum > len(data) or shstrndx >= shnum):
+        raise BuildError(f"{what}: section headers run past the file")
+    return {
+        "type": e_type, "entry": entry, "phoff": phoff, "phentsize": phentsize, "phnum": phnum,
+        "shoff": shoff, "shnum": shnum, "shstrndx": shstrndx,
+    }
+
+
+def static_aarch64_elf(data, what):
+    """A static AArch64 program: ET_EXEC, or ET_DYN for static-pie, with an
+    entry point, whole program headers, at least one PT_LOAD inside the file,
+    and no PT_INTERP."""
+    header = elf_header(data, what)
+    if header["type"] not in (ET_EXEC, ET_DYN):
+        raise BuildError(f"{what}: not an executable (type {header['type']})")
+    if header["entry"] == 0:
+        raise BuildError(f"{what}: no entry point")
+    phoff, phnum = header["phoff"], header["phnum"]
+    if phnum == 0 or header["phentsize"] != 56 or phoff + 56 * phnum > len(data):
+        raise BuildError(f"{what}: program headers missing or past the file")
+    loads = 0
     for index in range(phnum):
-        offset = phoff + index * phentsize
-        if offset + 4 > len(data):
-            raise BuildError(f"{what}: program headers run past the file")
-        if struct.unpack_from("<I", data, offset)[0] == PT_INTERP:
+        p_type, _, p_offset, _, _, p_filesz = struct.unpack_from("<IIQQQQ", data, phoff + 56 * index)
+        if p_type == PT_INTERP:
             raise BuildError(f"{what}: dynamically linked (has an interpreter)")
+        if p_type == PT_LOAD:
+            if p_offset + p_filesz > len(data):
+                raise BuildError(f"{what}: a loadable segment runs past the file")
+            loads += 1
+    if loads == 0:
+        raise BuildError(f"{what}: no loadable segment")
+
+
+def module_vermagic(data, what):
+    """The vermagic of a kernel module: an AArch64 ELF ET_REL whose one
+    .modinfo section, found through the section headers, holds exactly one
+    vermagic= entry."""
+    header = elf_header(data, what)
+    if header["type"] != ET_REL:
+        raise BuildError(f"{what}: not a relocatable object (type {header['type']})")
+    if header["shnum"] == 0:
+        raise BuildError(f"{what}: no section headers")
+    sections = []
+    for index in range(header["shnum"]):
+        name, kind, _, _, offset, size = struct.unpack_from("<IIQQQQ", data, header["shoff"] + 64 * index)
+        if kind != SHT_NOBITS and offset + size > len(data):
+            raise BuildError(f"{what}: section {index} runs past the file")
+        sections.append((name, kind, offset, size))
+    _, kind, names_at, names_size = sections[header["shstrndx"]]
+    if kind != SHT_STRTAB:
+        raise BuildError(f"{what}: no section name table")
+    names = data[names_at:names_at + names_size]
+
+    def section_name(at):
+        end = names.find(b"\0", at)
+        return names[at:end] if at < len(names) and end >= 0 else None
+
+    modinfo = [(offset, size) for name, kind, offset, size in sections
+               if kind != SHT_NOBITS and section_name(name) == b".modinfo"]
+    if len(modinfo) != 1:
+        raise BuildError(f"{what}: {len(modinfo)} .modinfo sections, not one")
+    offset, size = modinfo[0]
+    entries = [entry for entry in data[offset:offset + size].split(b"\0") if entry.startswith(b"vermagic=")]
+    if len(entries) != 1:
+        raise BuildError(f"{what}: {len(entries)} vermagic entries in .modinfo, not one")
+    try:
+        return entries[0][len(b"vermagic="):].decode("ascii")
+    except UnicodeDecodeError:
+        raise BuildError(f"{what}: vermagic is not ASCII") from None
 
 
 def find_module(modules_dir, name, release):
@@ -104,8 +174,9 @@ def find_module(modules_dir, name, release):
         data = lzma.decompress(data)
     elif not path.endswith(".ko"):
         raise BuildError(f"module {name}: {os.path.basename(path)} is compressed in a format this script does not read")
-    if f"vermagic={release} ".encode() not in data:
-        raise BuildError(f"module {name}: not built for {release}")
+    vermagic = module_vermagic(data, f"module {name}")
+    if vermagic.split(" ")[0] != release:
+        raise BuildError(f"module {name}: built for {vermagic.split(' ')[0]!r}, not {release}")
     return data
 
 

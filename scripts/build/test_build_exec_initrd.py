@@ -18,21 +18,62 @@ SPEC.loader.exec_module(builder)
 RELEASE = "6.1.0-50-arm64"
 
 
-def elf(machine=builder.EM_AARCH64, interpreter=False, tag=b""):
-    """A minimal 64-bit little-endian ELF header, with one program header."""
+ET_REL, ET_EXEC, ET_DYN = 1, 2, 3
+PT_LOAD, PT_DYNAMIC = 1, 2
+SHT_PROGBITS, SHT_STRTAB = 1, 3
+
+
+def elf_header(e_type, machine, entry=0, phoff=0, phnum=0, shoff=0, shnum=0, shstrndx=0):
     header = bytearray(64)
-    header[:4] = b"\x7fELF"
-    header[4], header[5] = 2, 1
-    struct.pack_into("<H", header, 18, machine)
-    struct.pack_into("<Q", header, 32, 64)  # e_phoff
-    struct.pack_into("<HH", header, 54, 56, 1)  # e_phentsize, e_phnum
-    program = bytearray(56)
-    struct.pack_into("<I", program, 0, builder.PT_INTERP if interpreter else 1)
-    return bytes(header + program) + tag
+    header[:7] = b"\x7fELF\x02\x01\x01"
+    struct.pack_into(
+        "<HHIQQQIHHHHHH", header, 16,
+        e_type, machine, 1, entry, phoff, shoff, 0, 64,
+        56 if phnum else 0, phnum, 64 if shnum else 0, shnum, shstrndx,
+    )
+    return header
 
 
-def module(name, release=RELEASE):
-    return b"\x7fELF fake " + name.encode() + b"\0vermagic=" + release.encode() + b" SMP mod_unload aarch64\0"
+def elf(machine=builder.EM_AARCH64, interpreter=False, tag=b"", e_type=ET_EXEC, entry=0x400078, segments=None):
+    """A 64-bit little-endian program: ELF header, program headers, then the
+    payload, covered by one PT_LOAD (plus PT_INTERP when asked)."""
+    types = segments if segments is not None else ([builder.PT_INTERP] if interpreter else []) + [PT_LOAD]
+    phoff = 64
+    payload_at = phoff + 56 * len(types)
+    payload = tag or b"\x00" * 8
+    out = elf_header(e_type, machine, entry=entry, phoff=phoff, phnum=len(types))
+    for p_type in types:
+        program = bytearray(56)
+        struct.pack_into("<IIQQQQQQ", program, 0, p_type, 5, payload_at, 0x400000, 0x400000,
+                         len(payload), len(payload), 0x1000)
+        out += program
+    return bytes(out) + payload
+
+
+def module(name, release=RELEASE, machine=builder.EM_AARCH64, e_type=ET_REL, vermagic_section=".modinfo"):
+    """A kernel module: ELF ET_REL with .modinfo, .data and .shstrtab sections
+    and their section headers. The vermagic sits in `vermagic_section`."""
+    vermagic = b"vermagic=" + release.encode() + b" SMP mod_unload modversions aarch64\0"
+    modinfo = b"license=GPL\0" + (vermagic if vermagic_section == ".modinfo" else b"") + b"name=" + name.encode() + b"\0"
+    data = b"some data\0" + (vermagic if vermagic_section == ".data" else b"")
+    shstrtab = b"\0.modinfo\0.data\0.shstrtab\0"
+    body = bytearray(elf_header(e_type, machine))
+    placed = []
+    for section in (modinfo, data, shstrtab):
+        placed.append((len(body), len(section)))
+        body += section
+    body += b"\0" * (-len(body) % 8)
+    shoff = len(body)
+    headers = [bytearray(64)]
+    for (offset, size), (name_at, kind) in zip(placed, [(1, SHT_PROGBITS), (10, SHT_PROGBITS), (16, SHT_STRTAB)]):
+        header = bytearray(64)
+        struct.pack_into("<IIQQQQIIQQ", header, 0, name_at, kind, 0, 0, offset, size, 0, 0, 1, 0)
+        headers.append(header)
+    for header in headers:
+        body += header
+    struct.pack_into("<Q", body, 40, shoff)  # e_shoff
+    struct.pack_into("<HHH", body, 58, 64, len(headers), 3)  # e_shentsize, e_shnum, e_shstrndx
+    return bytes(body)
 
 
 def parse(data):
@@ -230,6 +271,55 @@ class BuildExecInitrd(unittest.TestCase):
         # The only exit-looking line is the fixture's forged one.
         self.assertEqual(init.count("elastos-exec-exit"), 1)
         self.assertIn('echo "elastos-exec-exit 0"', cases["fake-exit"])
+
+    # Codex's probes (review of #27 at 4b79c71ab): each built before the
+    # builder parsed ELF headers and sections.
+
+    def test_a_bare_relocatable_header_is_not_a_program(self):
+        bare = self.inputs.write("bare", bytes(elf_header(ET_REL, builder.EM_AARCH64)))
+        self.assertEqual(self.build(supervisor=bare), 1)
+
+    def test_a_module_for_another_architecture_is_refused(self):
+        self.replace_module("virtio_console", module("virtio_console", machine=62))
+        self.assertEqual(self.build(), 1)
+
+    def test_a_text_file_with_the_vermagic_is_not_a_module(self):
+        self.replace_module("virtio_console", b"vermagic=" + RELEASE.encode() + b" SMP mod_unload aarch64\0")
+        self.assertEqual(self.build(), 1)
+
+    # More of the same kind.
+
+    def test_a_vermagic_outside_modinfo_does_not_count(self):
+        self.replace_module("virtio_console", module("virtio_console", vermagic_section=".data"))
+        self.assertEqual(self.build(), 1)
+
+    def test_a_module_must_be_relocatable(self):
+        self.replace_module("virtio_console", module("virtio_console", e_type=ET_EXEC))
+        self.assertEqual(self.build(), 1)
+
+    def test_a_module_with_section_headers_past_its_end_is_refused(self):
+        self.replace_module("virtio_console", module("virtio_console")[:-32])
+        self.assertEqual(self.build(), 1)
+
+    def test_a_program_needs_an_entry_a_loadable_segment_and_whole_headers(self):
+        for bad in [
+            elf(entry=0),
+            elf(segments=[PT_DYNAMIC]),
+            elf()[:100],
+            elf(e_type=ET_REL),
+            elf(e_type=4),
+        ]:
+            path = self.inputs.write("bad-program", bad)
+            self.assertEqual(self.build(**{"vm-smoke": path}), 1, bad[:20])
+
+    def test_a_static_pie_program_is_accepted(self):
+        pie = self.inputs.write("pie", elf(e_type=ET_DYN, segments=[PT_LOAD, PT_DYNAMIC]))
+        self.assertEqual(self.build(supervisor=pie), 0)
+
+    def replace_module(self, name, data):
+        drivers = os.path.join(self.inputs.modules, "kernel", "drivers")
+        with open(os.path.join(drivers, name + ".ko"), "wb") as handle:
+            handle.write(data)
 
     def test_an_init_that_prints_an_exit_line_is_refused(self):
         bad = self.inputs.write("init", b"#!/bin/busybox sh\necho elastos-exec-exit $?\n")

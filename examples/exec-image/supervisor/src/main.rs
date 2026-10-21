@@ -12,7 +12,9 @@
 //!    65534, `no_new_privs`, every capability dropped including the bounding
 //!    and ambient sets. Each step is checked; any miss stops the child.
 //! 3. Wait for the command. A command killed by a signal reports 128 + the
-//!    signal number. Then kill every process left running as 65534.
+//!    signal number. Then kill every process left running as 65534. If that
+//!    cannot be confirmed, stop here: no listen, no report ("cleanup failed;
+//!    no report"), so the host fails with "exit marker missing".
 //! 4. Only now listen on the port, accept the host's connection (peer CID 2),
 //!    write `<code>\n`, and wait for the host to close.
 //!
@@ -192,7 +194,13 @@ fn run(args: &[String]) -> i32 {
         console,
         "command finished; its code goes to the exit port only",
     );
-    kill_everything_unprivileged(console);
+    // A process of the command that may still run could reach the port once
+    // it listens, so without a confirmed cleanup there is no report at all:
+    // the host then fails with "exit marker missing".
+    if !kill_everything_unprivileged() {
+        say(console, "cleanup failed; no report");
+        return 1;
+    }
 
     // 4. Only now accept a report connection.
     let served = match options.report_unix.as_deref() {
@@ -427,8 +435,9 @@ fn wait_for(child: i32) -> Result<i32, Error> {
 /// 65534: `kill(-1)` then reaches exactly the processes it may signal, never
 /// root's. Orphans of the command come back to this process (it is a child
 /// subreaper), so they are reaped here. Then `/proc` is checked: no live
-/// process of 65534 may be left.
-fn kill_everything_unprivileged(console: i32) {
+/// process of 65534 may be left. True only when that is confirmed, within
+/// five rounds.
+fn kill_everything_unprivileged() -> bool {
     for _ in 0..5 {
         let helper = unsafe { libc::fork() };
         if helper == 0 {
@@ -452,10 +461,10 @@ fn kill_everything_unprivileged(console: i32) {
         let mut status = 0;
         while unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) } > 0 {}
         if live_unprivileged_processes() == 0 {
-            return;
+            return true;
         }
     }
-    say(console, "a process of the command is still running");
+    false
 }
 
 /// Processes running as 65534 that are not zombies.

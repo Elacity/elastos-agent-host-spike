@@ -52,6 +52,11 @@ mod tempfile_dir {
 }
 
 fn start(port: u32, program: &[&str]) -> Run {
+    start_with(&[], port, program)
+}
+
+/// `prefix` runs before the supervisor (for example `unshare --pid --fork`).
+fn start_with(prefix: &[&str], port: u32, program: &[&str]) -> Run {
     let dir = std::env::temp_dir().join(format!("exec-supervisor-{port}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -59,7 +64,15 @@ fn start(port: u32, program: &[&str]) -> Run {
     let console = dir.join("console");
     std::fs::write(&console, b"").unwrap();
     let socket = dir.join("report.sock");
-    let child = Command::new(SUPERVISOR)
+    let mut command = match prefix.split_first() {
+        Some((first, rest)) => {
+            let mut command = Command::new(first);
+            command.args(rest).arg(SUPERVISOR);
+            command
+        }
+        None => Command::new(SUPERVISOR),
+    };
+    let child = command
         .args(["run", "--port", &port.to_string(), "--console"])
         .arg(&console)
         .args(["--host-cid", "1", "--report-unix"])
@@ -300,4 +313,54 @@ fn nothing_runs_unless_the_exit_port_is_held() {
         .unwrap()
         .contains("cannot hold exit port 1007"));
     unsafe { libc::close(holder) };
+}
+
+fn tool(name: &str) -> bool {
+    Command::new(name)
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+/// A process of 65534 that the cleanup cannot kill: it lives outside the
+/// supervisor's PID namespace, so the helper's kill(-1) never reaches it,
+/// while /proc still shows it. Cleanup cannot be confirmed, so there is no
+/// report at all, even though the command exited 0.
+#[test]
+fn a_process_that_survives_cleanup_means_no_report() {
+    let _serial = serial();
+    if !can_run() || !tool("unshare") || !tool("setpriv") {
+        eprintln!("skipping: needs root, vsock, unshare and setpriv");
+        return;
+    }
+    let mut survivor = Command::new("setpriv")
+        .args([
+            "--reuid=65534",
+            "--regid=65534",
+            "--clear-groups",
+            "sleep",
+            "60",
+        ])
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    let mut run = start_with(
+        &["unshare", "--pid", "--fork", "--kill-child"],
+        1008,
+        &["/bin/sh", "-c", "exit 0"],
+    );
+    let report = read_report(&run.socket, Duration::from_secs(10));
+    let status = wait_within(&mut run.child, Duration::from_secs(10));
+    let console = std::fs::read_to_string(&run.console).unwrap();
+    let _ = survivor.kill();
+    let _ = survivor.wait();
+    assert_eq!(
+        report, None,
+        "a report was served after a failed cleanup: {console}"
+    );
+    assert!(
+        console.contains("exec-supervisor: cleanup failed; no report"),
+        "{console}"
+    );
+    assert_ne!(status, Some(0), "{console}");
 }
