@@ -1,0 +1,9 @@
+{
+  "name": "bus2-photo-guest",
+  "version": "0.1.0",
+  "bus": "elastos:bus@2.0.0",
+  "note": "A manifest for the Bus v2 proof only, not the ElastOS capsule schema. Compiled into the guest by build.rs.",
+  "photo": {
+    "max_bytes": 1048576
+  }
+}

@@ -36,6 +36,23 @@ recommendations come in step 7.
      `stop-requested`, or ignores both, is still ended by the grace cancel or the epoch deadline.
    - `stop_requested_adds_nothing_the_close_cannot_do` shows this.
    - **Recommendation: drop `stop-requested`, so there is one way to stop.**
+2. **`providers.invoke` has three places a read can fail, and the guest must watch all three.**
+   - The outer `result`: refused before any byte (no grant, over the cap, not found).
+   - The trailing `future<result>`: failed while streaming, for example an object that grew past the cap.
+   - The `invoke-status.status` string, which says nothing the other two do not. The guest ignores it.
+   - Because only the trailing future says whether the bytes are the object, the guest must hold the whole
+     read (up to its cap) before it can use any of it. A streaming consumer, such as a decoder, cannot start
+     safely.
+3. **No size before the stream.** `invoke-status` has no length. A guest cannot refuse a too-large object
+   itself before bytes arrive. It relies on the host refusing up front, and counts what arrives as a second
+   check (`a_guest_refuses_more_bytes_than_it_asked_for_even_if_they_arrive`).
+4. **`params: list<u8>` is untyped.** The cap travels as JSON (`{"max_bytes": N}`) by an agreement between
+   this guest and this stub. Nothing in the interface says so, so every provider and guest pair must agree
+   out of band.
+5. **The grant id and the resource travel separately.** `invoke-request` carries both `resource` and
+   `grant`. The host must check that they match (it does, and a falsifier pins that check). A grant id alone
+   would name the resource already.
+6. **`body: option<stream<u8>>` on a read** is unused, and must be refused if present.
 
 ## Proofs done
 
@@ -43,6 +60,14 @@ recommendations come in step 7.
 |---|---|---|
 | 5. Admission-like import check | 7 (`tests/admission.rs`) | 7 |
 | 1. Resident guest, stop by close, named endings | 8 (`tests/lifecycle.rs`) | 9 |
+| 2. Streaming read under a cap, refused not truncated | 7 (`tests/streaming.rs`) | 8 |
+
+The read path:
+- the guest asks for a grant on exactly the photo's URI;
+- the stub issues it only if the test policy allows it;
+- `read` checks the grant: it is held, it is for this resource, and it allows `read`;
+- the cap is the smaller of the guest's (from its manifest, sent in `params`) and the host's own;
+- the object is streamed in 64 KiB chunks.
 
 Endings recorded: `stopped`, `returned`, `returned-error`, `cancelled-after-grace`, `epoch-deadline`,
 `fuel-exhausted`, `trapped`.

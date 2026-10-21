@@ -97,6 +97,7 @@ dependencies = [
 name = "bus2-photo-guest"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "wit-bindgen",
 ]
 

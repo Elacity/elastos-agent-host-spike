@@ -18,6 +18,7 @@ use wasmtime::{Config, Engine};
 
 pub mod admission;
 mod imports;
+pub mod objects;
 pub mod run;
 
 wasmtime::component::bindgen!({
@@ -27,24 +28,48 @@ wasmtime::component::bindgen!({
 });
 
 pub use elastos::bus::types::{BusError, Credential, Event, Grant};
+pub use objects::{ReadRecord, StubObject, HOST_MAX_READ_BYTES, READ_CHUNK};
 pub use run::{run_resident, Ending, Events, Limits, Outcome};
 
 /// The one media type `ui.present` takes in this proof.
 pub const UI_MEDIA_TYPE: &str = "application/vnd.elastos.ui+json;v=0";
 
 /// The store data for one guest.
-#[derive(Default)]
 pub struct HostState {
     /// Test-set policy: the (resource, actions) pairs a grant may be issued for.
     pub policy: Vec<(String, Vec<String>)>,
     /// Grants issued to this guest.
     pub grants: Vec<Grant>,
-    /// Object URI to bytes, standing in for the Library.
-    pub objects: BTreeMap<String, Vec<u8>>,
+    /// Object URI to object, standing in for the Library.
+    pub objects: BTreeMap<String, StubObject>,
+    /// The host's own cap on one read.
+    pub max_read_bytes: usize,
+    /// Test only: a provider that ignores the guest's cap (the guest must
+    /// still refuse more than it asked for).
+    pub ignore_guest_cap: bool,
+    /// Every read the provider streamed, as the host saw it.
+    pub reads: Vec<ReadRecord>,
     /// What `credentials.presented` returns.
     pub credentials: Vec<Credential>,
     /// Every frame drawn by `ui.present`, in order; the last is on screen.
     pub frames: Vec<Vec<u8>>,
+    next_id: u64,
+}
+
+impl Default for HostState {
+    fn default() -> Self {
+        HostState {
+            policy: Vec::new(),
+            grants: Vec::new(),
+            objects: BTreeMap::new(),
+            max_read_bytes: HOST_MAX_READ_BYTES,
+            ignore_guest_cap: false,
+            reads: Vec::new(),
+            credentials: Vec::new(),
+            frames: Vec::new(),
+            next_id: 0,
+        }
+    }
 }
 
 /// One engine for every guest in a test: Component Model async, fuel and

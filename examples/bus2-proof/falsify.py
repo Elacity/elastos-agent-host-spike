@@ -118,6 +118,57 @@ CASES = [
         [("                Event::StopRequested | Event::GrantRevoked(_) => {}", "                Event::StopRequested => return Ok(()),\n                Event::GrantRevoked(_) => {}")],
         [("lifecycle", "stop_requested_adds_nothing_the_close_cannot_do")],
     ),
+    # Proof 2: streaming a read with a cap.
+    (
+        "an object over the cap is not refused before streaming",
+        "host/src/objects.rs",
+        [("    if object.bytes.len() > cap {", "    if false && object.bytes.len() > cap {")],
+        [("streaming", "an_object_over_the_cap_is_refused_before_any_byte_is_sent")],
+    ),
+    (
+        "a read that passes the cap ends short with ok (truncation)",
+        "host/src/objects.rs",
+        [("""                Err(BusError::Invalid(format!(
+                    "object grew past the cap of {cap} bytes while it was read"
+                ))),""", """                Ok(()),""")],
+        [("streaming", "an_object_that_grows_past_the_cap_is_refused_and_nothing_partial_is_used")],
+    ),
+    (
+        "the host ignores the guest's cap",
+        "host/src/objects.rs",
+        [("        guest_cap.min(state.max_read_bytes)", "        state.max_read_bytes")],
+        [("streaming", "an_object_over_the_cap_is_refused_before_any_byte_is_sent")],
+    ),
+    (
+        "the host has no cap of its own",
+        "host/src/objects.rs",
+        [("        guest_cap.min(state.max_read_bytes)", "        guest_cap")],
+        [("streaming", "the_host_cap_applies_whatever_the_guest_asks_for")],
+    ),
+    (
+        "the provider skips the grant's resource check",
+        "host/src/objects.rs",
+        [("    if grant.resource != request.resource {", "    if false && grant.resource != request.resource {")],
+        [("streaming", "the_provider_refuses_a_read_without_the_right_grant_or_params")],
+    ),
+    (
+        "a grant is issued without a policy",
+        "host/src/objects.rs",
+        [("    if !allowed || actions.is_empty() {", "    if false {")],
+        [("streaming", "a_guest_gets_no_grant_the_policy_does_not_allow")],
+    ),
+    (
+        "the guest uses the bytes without waiting for the trailing future",
+        "guests/photo/src/lib.rs",
+        [("    trailer.await?;\n", "    let _ = trailer;\n")],
+        [("streaming", "an_object_that_grows_past_the_cap_is_refused_and_nothing_partial_is_used")],
+    ),
+    (
+        "the guest does not count what arrives",
+        "guests/photo/src/lib.rs",
+        [("        if bytes.len() + chunk.len() > MAX_PHOTO_BYTES {", "        if false && bytes.len() + chunk.len() > MAX_PHOTO_BYTES {")],
+        [("streaming", "a_guest_refuses_more_bytes_than_it_asked_for_even_if_they_arrive")],
+    ),
 ]
 
 

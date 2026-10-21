@@ -2,12 +2,13 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use tokio::sync::oneshot;
 use wasmtime::component::{Accessor, FutureReader, HasSelf, StreamReader};
 
 use crate::elastos::bus::{
     capabilities, clock, credentials, identity, providers, random, runtime, types, ui,
 };
-use crate::{BusError, Credential, Grant, HostState, UI_MEDIA_TYPE};
+use crate::{objects, BusError, Credential, Grant, HostState, UI_MEDIA_TYPE};
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -45,8 +46,8 @@ impl clock::Host for HostState {
     }
 }
 
-impl<T: Send + 'static> clock::HostWithStore<T> for HasSelf<HostState> {
-    async fn sleep_until_ms(_accessor: &Accessor<T, Self>, deadline: u64) {
+impl clock::HostWithStore<HostState> for HasSelf<HostState> {
+    async fn sleep_until_ms(_accessor: &Accessor<HostState, Self>, deadline: u64) {
         let wait = deadline.saturating_sub(now_ms());
         match Duration::from_millis(wait) {
             // A deadline too far away to schedule is one that never comes.
@@ -71,26 +72,24 @@ impl credentials::Host for HostState {
 
 impl capabilities::Host for HostState {}
 
-impl<T: Send + 'static> capabilities::HostWithStore<T> for HasSelf<HostState> {
+impl capabilities::HostWithStore<HostState> for HasSelf<HostState> {
     async fn request(
-        _accessor: &Accessor<T, Self>,
+        accessor: &Accessor<HostState, Self>,
         resource: String,
-        _actions: Vec<String>,
+        actions: Vec<String>,
         _reason: String,
     ) -> Result<Grant, BusError> {
-        Err(BusError::Denied(format!(
-            "no grant for {resource} (step 3)"
-        )))
+        accessor.with(|mut access| objects::request_grant(access.get(), resource, actions))
     }
 }
 
 impl providers::Host for HostState {}
 
-impl<T: Send + 'static> providers::HostWithStore<T> for HasSelf<HostState> {
+impl providers::HostWithStore<HostState> for HasSelf<HostState> {
     async fn invoke(
-        _accessor: &Accessor<T, Self>,
+        accessor: &Accessor<HostState, Self>,
         request: types::InvokeRequest,
-        _body: Option<StreamReader<u8>>,
+        body: Option<StreamReader<u8>>,
     ) -> Result<
         (
             types::InvokeStatus,
@@ -99,18 +98,44 @@ impl<T: Send + 'static> providers::HostWithStore<T> for HasSelf<HostState> {
         ),
         BusError,
     > {
-        Err(BusError::Unavailable(format!(
-            "no provider for {} (step 3)",
-            request.resource
-        )))
+        let has_body = body.is_some();
+        if let Some(mut body) = body {
+            // Nothing here takes a body; close it so it is not left open.
+            let _ = accessor.with(|mut access| body.close(&mut access));
+        }
+        let read =
+            accessor.with(|mut access| objects::start_read(access.get(), request, has_body))?;
+        let audit = read.audit.clone();
+        let (done, result) = oneshot::channel();
+        accessor
+            .with(|mut access| {
+                let stream =
+                    StreamReader::new(&mut access, objects::ObjectStream::new(read, done))?;
+                let trailer = FutureReader::new(&mut access, async move {
+                    Ok::<_, wasmtime::Error>(result.await.unwrap_or_else(|_| {
+                        Err(BusError::Internal(
+                            "the provider ended without a result".into(),
+                        ))
+                    }))
+                })?;
+                Ok::<_, wasmtime::Error>((stream, trailer))
+            })
+            .map(|(stream, trailer)| {
+                let status = types::InvokeStatus {
+                    status: "ok".into(),
+                    audit: Some(audit),
+                };
+                (status, stream, trailer)
+            })
+            .map_err(|err| BusError::Internal(format!("could not open the read: {err}")))
     }
 }
 
 impl ui::Host for HostState {}
 
-impl<T: Send + 'static> ui::HostWithStore<T> for HasSelf<HostState> {
+impl ui::HostWithStore<HostState> for HasSelf<HostState> {
     async fn present(
-        accessor: &Accessor<T, Self>,
+        accessor: &Accessor<HostState, Self>,
         media_type: String,
         document: Vec<u8>,
     ) -> Result<(), BusError> {
