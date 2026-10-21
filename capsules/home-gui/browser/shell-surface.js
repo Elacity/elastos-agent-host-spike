@@ -2590,6 +2590,26 @@ const INBOX_REQUEST_KINDS = new Set([
   "community_presence_request",
 ]);
 
+/* Requests other people start carry text they chose (their display name),
+   so the toast shows fixed words and Inbox shows the details. */
+const OTHER_PERSON_REQUEST_TITLES = new Map([
+  ["contact_request", "Contact request"],
+  ["room_access_request", "Room access request"],
+  ["service_access_request", "Service access request"],
+]);
+const INBOX_REQUEST_FIXED_BODY = "A request waits for your answer in Inbox.";
+
+function homeNotificationToastCopy(entry) {
+  const fixedTitle = OTHER_PERSON_REQUEST_TITLES.get(entry.kind);
+  if (fixedTitle) {
+    return { title: fixedTitle, body: INBOX_REQUEST_FIXED_BODY };
+  }
+  return {
+    title: entry.title || "Inbox request",
+    body: entry.body || INBOX_REQUEST_FIXED_BODY,
+  };
+}
+
 export function maybeShowInboxRequestToast(previousSummary, summary) {
   if (!previousSummary || !targetById(summary, "inbox")) {
     return;
@@ -2636,8 +2656,9 @@ function showHomeNotificationToast(entry) {
   }
   bindHomeNotificationToast();
   lastHomeNotificationToastId = inboxRequestKey(entry);
-  homeNotificationTitle.textContent = entry.title || "Inbox request";
-  homeNotificationBody.textContent = entry.body || "A request waits for your answer in Inbox.";
+  const copy = homeNotificationToastCopy(entry);
+  homeNotificationTitle.textContent = copy.title;
+  homeNotificationBody.textContent = copy.body;
   homeNotificationAction.hidden = false;
   homeNotificationAction.textContent = "Review";
   setOverlayOpen(homeNotificationToast, true);
