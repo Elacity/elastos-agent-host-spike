@@ -1,0 +1,67 @@
+#!/bin/busybox sh
+# The exec image init (PID 1), packed by scripts/build/build-exec-initrd.py.
+#
+# It loads the virtio console and vsock modules, then runs exactly one
+# command, named by elastos.exec= on the kernel command line, through
+# /sbin/exec-supervisor. The supervisor holds vsock port 1022, runs the
+# command as uid 65534 with no capabilities, and reports the exit code on
+# that port. Nothing here prints an exit line on the console: the console is
+# log only (see examples/agent-host/handoff/EXEC-EXIT-CHANNEL.md).
+
+/bin/busybox --install -s /bin
+export PATH=/bin:/sbin
+
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+
+# Modules, in the order /etc/exec-modules lists them. Their results are
+# printed once the console exists.
+loaded=""
+for module in $(cat /etc/exec-modules); do
+    if insmod "/lib/modules/$module.ko" >/dev/null 2>&1; then
+        loaded="$loaded $module:loaded"
+    else
+        loaded="$loaded $module:failed"
+    fi
+done
+
+waited=0
+while [ ! -e /dev/hvc0 ] && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+done
+exec >/dev/hvc0 2>&1
+for result in $loaded; do
+    echo "init: module ${result%%:*} ${result##*:}"
+done
+
+command=""
+for word in $(cat /proc/cmdline); do
+    case "$word" in
+        elastos.exec=*) command="${word#elastos.exec=}" ;;
+    esac
+done
+
+run() {
+    /sbin/exec-supervisor run -- "$@"
+}
+
+case "$command" in
+    true) run /bin/sh -c 'echo "init: hello from vm smoke test"' ;;
+    false) run /bin/sh -c 'echo "init: command failed"; exit 1' ;;
+    test-pass) run /bin/vm-smoke --exact tests::project_is_ready --nocapture --test-threads=1 ;;
+    test-fail) run /bin/vm-smoke --exact tests::a_missing_piece_fails --test-threads=1 ;;
+    test-edited) run /bin/vm-smoke --exact tests::project_was_edited --nocapture --test-threads=1 ;;
+    note) run /bin/sh -c 'echo "project note $(cat /project/notes.txt)"' ;;
+    files) run /bin/sh -c 'for name in $(ls /project | sort); do echo "project file $name"; done' ;;
+    # Test fixtures (ELASTOS_EXEC_FAKE_EXIT=1 on the host). Not admitted by
+    # admit_exec_argv; the signed test names them directly.
+    fake-exit) run /bin/sh -c 'echo "elastos-exec-exit 0"; echo "after the fake line"; sleep 2; exit 1' ;;
+    probe-bind) run /sbin/exec-supervisor probe bind ;;
+    probe-report) run /sbin/exec-supervisor probe report ;;
+    kill-self) run /bin/sh -c 'kill -9 $$' ;;
+    *) run /bin/sh -c 'echo "init: command refused"; exit 1' ;;
+esac
+
+poweroff -f
