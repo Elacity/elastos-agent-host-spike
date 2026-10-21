@@ -340,4 +340,60 @@ Not proven:   - The guest is 131 KB larger (unicode-normalization's tables). If 
               - Windows' trailing-space aliases are still not handled (as in S3).
 ```
 
-**What is next:** Cursor verifies on the Mac, then Codex re-reviews #24 and #27. Building idea 2 still waits.
+## Fix 3, after the Codex review of 3d1ef56 (21 Oct)
+
+Codex: FAIL, with one finding: folding case can change the normal form, and `path_key` did not normalize after it.
+The two merge commits (ec4d4f0, 3d1ef56) were checked and found fine.
+
+```text
+Commits:      0577dfa (code and tests); this section is the next commit
+Changed:      examples/agent-host/src/lib.rs - path_key and its tests only; guest only, no import change
+Finding:      .../Documents/U+0390.txt and .../Documents/U+03AA U+0301.txt both pass the NFC check, but their keys
+              were U+03B9 U+0308 U+0301 and U+03CA U+0301. Codex's repro: after two no-ops with the first
+              spelling, a third with the second was accepted; a change with both spellings passed proposal,
+              reload and binding.
+Also found:   U+1E9E (capital sharp s): uppercase-then-lowercase gives U+00DF, whose own key is "ss". So
+              "ẞ.txt" and "ß.txt" had different keys, and the key was not its own key (57 of 650,000 swept
+              strings, all with U+1E9E).
+Fix:          path_key = NFD(fold(NFD(path))), Unicode's canonical caseless match, with
+              fold = lowercase, uppercase, lowercase. It is the one key for the no-op count, both duplicate
+              checks (propose_change, bind_change) and the check on load; nothing else compares paths by case.
+Failing first: three tests added before the fix; on 3d1ef56's code: "143 passed; 3 failed":
+                codex_greek_spellings_are_one_file_everywhere -> left Ok(3), right Err("repeated no-op edit")
+                spellings_equal_without_case_and_normal_form_share_one_key -> left "ι\u{308}\u{301}",
+                  right "ϊ\u{301}"
+                every_key_is_normalized_and_its_own_key -> failed
+New tests:    spellings_equal_without_case_and_normal_form_share_one_key: Codex's pair; U+01F0 and J U+030C;
+                U+1F80 U+0308 and U+1F00 U+0308 U+03B9 (needs the first NFD); U+1E9E, U+00DF and "ss";
+                café and CAFÉ; café is not cafe; a Chinese name is its own key
+              every_key_is_normalized_and_its_own_key: a sweep of about 90,000 strings (U+0020-U+2FFF and
+                U+1E00-U+1FFF alone, and Latin, Greek, Cyrillic and Greek Extended letters with one or two of
+                8 combining marks). Every key is NFD, key(key(x)) == key(x), and key(NFD(x)) == key(NFC(x)) ==
+                key(x)
+              codex_greek_spellings_are_one_file_everywhere: Codex's repro through the no-op count, a change,
+                a stored journal (load refused) and a bound request (refused)
+Tests run:    ./examples/agent-host/verify.sh -> fmt, "146 passed" (143 + 3), clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "2 passed"
+Falsifiers:   OZ02 the key skips the first NFD             -> 2 tests FAILED
+              OZ03 the case step is uppercase then lowercase -> 2 tests FAILED
+              OZ04 the key is the old one (no normalization) -> 3 tests FAILED
+              OZ01 the key is not normalized after the case step -> SURVIVES, by design. Outside the repo, 31
+                million strings were checked: every code point, letters with each of 120 combining marks, and
+                letters with three of 13 marks. With the crate's Unicode 18 tables, the case fold of an NFD
+                string was always NFD, so no input can tell the final NFD apart. It stays because Unicode's
+                definition (D145) has it, as a guard for later Unicode data.
+              OY01-OY19 rerun: each still FAILED (OY19 still does not compile); each restored; tree clean.
+Guest hash:   ed76d5351d16d9275e30488326b1f6be283af7e77acea0cba231aaf2353c253f on two clean builds and verify.sh.
+              wasm_sections.py: file 632777 bytes (was 629356).
+Import list:  unchanged: the core import section (/1/2, 149 bytes, 5ee6b40d46f6a045) and every top-level
+              component section are byte-identical to the fix 2 build.
+Principles:   10 one key, in one function, for every comparison of files; 11 fail closed: a spelling that is the
+              same name is the same file for every limit and check.
+DeepSeek:     none.
+Not proven:   - fold is not Unicode's full case folding (Rust's std has none); the sweep shows it agrees with
+                itself and with canonical equivalence, not that it equals CaseFolding.txt for every code point.
+                It errs towards one key (stricter), which is safe for a limit.
+```
+
+**What is next:** merge spike/agent-host (with #27) into #24, then Cursor verifies on the Mac, then Codex re-reviews.
+Building idea 2 still waits.
