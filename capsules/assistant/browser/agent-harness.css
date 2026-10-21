@@ -2201,8 +2201,22 @@ html[data-agent-reasoning="off"] .agent-thinking {
 }
 
 .agent-msg:hover .agent-msg-actions,
-.agent-msg:focus-within .agent-msg-actions {
+.agent-msg:focus-within .agent-msg-actions,
+.agent-msg-actions:has(.agent-copy-status) {
   opacity: 1;
+}
+
+/* The result of a Copy, beside the button that asked. */
+.agent-copy-status {
+  align-self: center;
+  color: color-mix(in srgb, var(--text) 58%, transparent);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 560;
+}
+
+.agent-copy-status[data-tone="error"] {
+  color: color-mix(in srgb, #e8a05d 75%, var(--text));
 }
 
 .agent-msg-actions[hidden] {
@@ -2263,8 +2277,13 @@ html[data-agent-reasoning="off"] .agent-thinking {
   grid-area: 1 / 1;
 }
 
-.agent-md-copy-check {
+.agent-md-copy-check,
+.agent-md-copy[data-copied="true"] .agent-md-copy-icon {
   opacity: 0;
+}
+
+.agent-md-copy[data-copied="true"] .agent-md-copy-check {
+  opacity: 1;
 }
 
 .agent-msg-action:hover,

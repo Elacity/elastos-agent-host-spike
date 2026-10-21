@@ -103,6 +103,7 @@ const canonicalClientImports = Object.freeze({
   "capsules/documents/browser/documents.js": 'targetId: "documents"',
   "capsules/system/browser/system.js": 'targetId: "system"',
   "capsules/chat-room/browser/chat-room.js": 'targetId: "chat-room"',
+  "capsules/assistant/browser/home-agent.js": 'targetId: "assistant"',
 });
 // A capsule can build its client options in a helper (Chat rebuilds its client
 // when Home renews its token), so the gate binds the target, not the call shape:

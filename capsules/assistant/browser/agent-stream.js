@@ -1289,6 +1289,19 @@ function settleStreamedReply(row, session) {
   }
 }
 
+/** What a message's Copy writes: a reply's Markdown source, or the text a sent
+    message shows (what the person typed; attachment chips are not text). */
+export function messageCopyText(row) {
+  const body = row?.querySelector(":scope > .agent-msg-body");
+  if (!body) {
+    return "";
+  }
+  if (row.dataset.role === "agent") {
+    return String(body.dataset.mdSource ?? body.textContent ?? "");
+  }
+  return body.querySelector(".agent-msg-user-text")?.textContent || "";
+}
+
 export function appendMessage(
   role,
   text,

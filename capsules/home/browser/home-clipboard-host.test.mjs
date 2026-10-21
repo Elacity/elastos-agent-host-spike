@@ -212,6 +212,7 @@ test("closed target and purpose policy accepts only approved writes", async () =
     ["library", "resource.identifier", "bafy-library-content"],
     ["documents", "resource.uri", "elastos://bafy-document"],
     ["assistant", "transcript.markdown", "# Assistant transcript\n\n## User\n\nHello"],
+    ["assistant", "message.text", "**Reply** with `code`\n\n```js\nconst x = 1;\n```"],
   ];
   for (const [targetId, purpose, text] of cases) {
     const writes = [];
@@ -230,7 +231,7 @@ test("closed target and purpose policy accepts only approved writes", async () =
   }
 });
 
-test("Assistant transcript prompt is explicit and does not render conversation text", async () => {
+test("Assistant prompts are explicit and do not render conversation text", async () => {
   function node() {
     const listeners = new Map();
     return {
@@ -246,30 +247,35 @@ test("Assistant transcript prompt is explicit and does not render conversation t
       focus() {},
     };
   }
-  const root = node();
-  const title = node();
-  const copy = node();
-  const allowButton = node();
-  const transcript = "# Assistant transcript\n\n## User\n\nprivate text";
-  const prompt = createHomeClipboardPrompt({
-    root,
-    title,
-    copy,
-    allowButton,
-    cancelButton: node(),
-  });
-  const decision = prompt.request({
-    requestId: "assistant:1",
-    targetId: "assistant",
-    operation: "write",
-    purpose: "transcript.markdown",
-    text: transcript,
-  });
-  assert.match(title.textContent, /Assistant transcript/);
-  assert.match(copy.textContent, /Markdown/);
-  assert.equal(`${title.textContent}${copy.textContent}`.includes(transcript), false);
-  allowButton.click();
-  assert.equal(await decision, true);
+  for (const [purpose, titleText, copyText] of [
+    ["transcript.markdown", /Assistant transcript/, /Markdown/],
+    ["message.text", /^Copy from Assistant\?$/, /Assistant conversation/],
+  ]) {
+    const root = node();
+    const title = node();
+    const copy = node();
+    const allowButton = node();
+    const conversation = "# Assistant transcript\n\n## User\n\nprivate text";
+    const prompt = createHomeClipboardPrompt({
+      root,
+      title,
+      copy,
+      allowButton,
+      cancelButton: node(),
+    });
+    const decision = prompt.request({
+      requestId: `assistant:${purpose}`,
+      targetId: "assistant",
+      operation: "write",
+      purpose,
+      text: conversation,
+    });
+    assert.match(title.textContent, titleText);
+    assert.match(copy.textContent, copyText);
+    assert.equal(`${title.textContent}${copy.textContent}`.includes("private text"), false);
+    allowButton.click();
+    assert.equal(await decision, true);
+  }
 });
 test("Clipboard prompt never stacks on Home's web-link sheet", async () => {
   function node() {

@@ -240,15 +240,19 @@ export async function flushAgentWorkspace() {
 
 /* ---- messaging ------------------------------------------------------------- */
 
-function postHomeOpenTarget(target, query) {
-  const value = new URL(window.location.href).searchParams.get("home_origin");
-  let origin;
+/* Home's origin as Home named it in the launch route; "" when it is missing
+   or not exactly an http(s) origin. */
+export function homeOrigin() {
   try {
+    const value = new URL(window.location.href).searchParams.get("home_origin");
     const parsed = new URL(value);
-    if (!["http:", "https:"].includes(parsed.protocol) || parsed.origin !== value) return false;
-    origin = parsed.origin;
-  } catch { return false; }
-  if (!homeToken || window.top === window) return false;
+    return ["http:", "https:"].includes(parsed.protocol) && parsed.origin === value ? value : "";
+  } catch { return ""; }
+}
+
+function postHomeOpenTarget(target, query) {
+  const origin = homeOrigin();
+  if (!origin || !homeToken || window.top === window) return false;
   window.top.postMessage({ type: "home:app-ready", homeToken }, origin);
   window.top.postMessage({ type: "home:open-target", target, query, homeToken }, origin);
   return true;

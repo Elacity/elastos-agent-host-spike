@@ -20,7 +20,16 @@ import { bindAssistantModes } from "./assistant-modes.js";
                       home-agent:shelf-metrics     composer pill size, so Home's pill matches
                       home-agent:close             user asks to leave from inside (Home, Esc)
                       home-agent:open-viewer       artifact to show in Documents
-                      home-agent:open-browser      web link to open in Browser */
+                      home-agent:open-browser      web link to open in Browser
+
+   Copy goes to Home itself (the top document), not to Home GUI: this frame is
+   opaque-sandboxed with no clipboard permission, so Home writes the text after
+   its own visible confirmation, through the shared Home Clipboard client. */
+
+import {
+  createHomeClipboardClient,
+  MAX_HOME_CLIPBOARD_TEXT_UTF8_BYTES,
+} from "/apps/home/home-clipboard-client.js?v=home-20260726a";
 
 import { bindAgentShelf, raiseComposerFace, agentShelfFaceActive, composerInput } from "./agent-shelf.js";
 import {
@@ -31,7 +40,14 @@ import {
   applyAgentWorkspaceSnapshot,
 } from "./agent-harness.js";
 import { handleShellEscape } from "./shell-popovers.js";
-import { postToHome, loadAgentWorkspace, bindWorkspaceApply, scheduleAgentWorkspacePersist } from "./harness-host.js";
+import {
+  postToHome,
+  loadAgentWorkspace,
+  bindWorkspaceApply,
+  scheduleAgentWorkspacePersist,
+  getHomeGuiLaunchToken,
+  homeOrigin,
+} from "./harness-host.js";
 import { createHomeMessageGate } from "./home-agent-gate.js";
 
 const HOME_MESSAGE_TYPES = new Set(["home-agent:open", "home-agent:shelf-handover", "home-agent:close"]);
@@ -176,8 +192,26 @@ document.addEventListener(
   true,
 );
 
+const homeClipboard = createHomeClipboardClient({
+  targetId: "assistant",
+  homeOrigin: homeOrigin(),
+  homeToken: getHomeGuiLaunchToken(),
+});
+homeClipboard.start();
+
+/* A copy Home would refuse for its size is refused here, by name, before Home
+   is asked to confirm it. */
+function copyThroughHome(text) {
+  if (new TextEncoder().encode(text).byteLength > MAX_HOME_CLIPBOARD_TEXT_UTF8_BYTES) {
+    const error = new Error("Text is too long for the Home clipboard.");
+    error.code = "too_large";
+    return Promise.reject(error);
+  }
+  return homeClipboard.writeText(text, { purpose: "message.text" });
+}
+
 bindAgentShelf();
-bindAgentHarness();
+bindAgentHarness({ copyText: copyThroughHome });
 
 const taskbar = taskbarEl();
 if (taskbar && typeof ResizeObserver === "function") {

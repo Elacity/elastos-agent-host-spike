@@ -101,6 +101,10 @@ const HOME_CLIPBOARD_TARGET_PURPOSE_POLICY = Object.freeze({
       operations: Object.freeze(["write"]),
       maxUtf8Bytes: MAX_HOME_CLIPBOARD_TEXT_UTF8_BYTES,
     }),
+    "message.text": Object.freeze({
+      operations: Object.freeze(["write"]),
+      maxUtf8Bytes: MAX_HOME_CLIPBOARD_TEXT_UTF8_BYTES,
+    }),
   }),
   system: Object.freeze({
     "identity.did": Object.freeze({
