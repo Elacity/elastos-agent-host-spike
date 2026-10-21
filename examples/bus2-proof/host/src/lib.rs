@@ -8,23 +8,29 @@
 //! Every refusal is a `bus-error` naming what was expected.
 
 use std::collections::BTreeMap;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
-use wasmtime::component::{
-    Accessor, Component, Destination, HasSelf, Linker, StreamProducer, StreamReader, StreamResult,
-};
+use wasmtime::component::{HasSelf, Linker};
 use wasmtime::Result;
-use wasmtime::{Config, Engine, Store, StoreContextMut};
+use wasmtime::{Config, Engine};
 
 pub mod admission;
+mod imports;
+pub mod run;
 
 wasmtime::component::bindgen!({
     path: "../wit",
     world: "product-capsule-v2",
+    additional_derives: [PartialEq],
 });
 
 pub use elastos::bus::types::{BusError, Credential, Event, Grant};
+pub use run::{run_resident, Ending, Events, Limits, Outcome};
+
+/// The one media type `ui.present` takes in this proof.
+pub const UI_MEDIA_TYPE: &str = "application/vnd.elastos.ui+json;v=0";
 
 /// The store data for one guest.
 #[derive(Default)]
@@ -37,6 +43,8 @@ pub struct HostState {
     pub objects: BTreeMap<String, Vec<u8>>,
     /// What `credentials.presented` returns.
     pub credentials: Vec<Credential>,
+    /// Every frame drawn by `ui.present`, in order; the last is on screen.
+    pub frames: Vec<Vec<u8>>,
 }
 
 /// One engine for every guest in a test: Component Model async, fuel and
@@ -68,138 +76,36 @@ pub fn linker(engine: &Engine) -> Result<Linker<HostState>> {
     Ok(linker)
 }
 
-/// Feeds events to a guest; dropping the sender closes the stream.
-struct EventFeed(tokio::sync::mpsc::UnboundedReceiver<Event>);
+/// Advances the engine's epoch every `tick` until dropped.
+pub struct Ticker {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
 
-impl<D> StreamProducer<D> for EventFeed {
-    type Item = Event;
-    type Buffer = Option<Event>;
-
-    fn poll_produce<'a>(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        _store: StoreContextMut<'a, D>,
-        mut destination: Destination<'a, Self::Item, Self::Buffer>,
-        finish: bool,
-    ) -> Poll<Result<StreamResult>> {
-        match self.0.poll_recv(cx) {
-            Poll::Ready(Some(event)) => {
-                destination.set_buffer(Some(event));
-                Poll::Ready(Ok(StreamResult::Completed))
-            }
-            Poll::Ready(None) => Poll::Ready(Ok(StreamResult::Dropped)),
-            Poll::Pending if finish => Poll::Ready(Ok(StreamResult::Cancelled)),
-            Poll::Pending => Poll::Pending,
+impl Ticker {
+    pub fn start(engine: &Engine, tick: Duration) -> Ticker {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let (engine, stop) = (engine.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(tick);
+                    engine.increment_epoch();
+                }
+            })
+        };
+        Ticker {
+            stop,
+            thread: Some(thread),
         }
     }
 }
 
-pub async fn run_once(
-    engine: &Engine,
-    component: &Component,
-    state: HostState,
-) -> Result<Result<(), BusError>> {
-    let linker = linker(engine)?;
-    let mut store = Store::new(engine, state);
-    store.set_fuel(u64::MAX)?;
-    store.set_epoch_deadline(u64::MAX);
-    let world = ProductCapsuleV2::instantiate_async(&mut store, component, &linker).await?;
-    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-    let events = StreamReader::new(&mut store, EventFeed(receiver))?;
-    drop(sender);
-    let result = store
-        .run_concurrent(async |accessor| {
-            world
-                .elastos_bus_lifecycle()
-                .call_run(accessor, events)
-                .await
-        })
-        .await??;
-    Ok(result)
-}
-
-impl elastos::bus::types::Host for HostState {}
-
-impl elastos::bus::runtime::Host for HostState {
-    fn info(&mut self) -> elastos::bus::runtime::RuntimeInfo {
-        elastos::bus::runtime::RuntimeInfo {
-            abi: "elastos:bus@2.0.0".into(),
-            runtime_version: "bus2-proof-stub".into(),
-            capsule_cid: None,
+impl Drop for Ticker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
-    }
-}
-
-impl elastos::bus::identity::Host for HostState {
-    fn context(&mut self) -> elastos::bus::identity::IdentityContext {
-        elastos::bus::identity::IdentityContext {
-            principal: None,
-            capsule: "bus2-photo-guest".into(),
-            session: "stub".into(),
-            device: None,
-        }
-    }
-}
-
-impl elastos::bus::clock::Host for HostState {
-    fn now_ms(&mut self) -> u64 {
-        0
-    }
-}
-
-impl<T: Send + 'static> elastos::bus::clock::HostWithStore<T> for HasSelf<HostState> {
-    async fn sleep_until_ms(_accessor: &Accessor<T, Self>, _deadline: u64) {}
-}
-
-impl elastos::bus::random::Host for HostState {
-    fn fill(&mut self, len: u32) -> Vec<u8> {
-        vec![0; len as usize]
-    }
-}
-
-impl elastos::bus::credentials::Host for HostState {
-    fn presented(&mut self) -> Vec<Credential> {
-        self.credentials.clone()
-    }
-}
-
-impl elastos::bus::capabilities::Host for HostState {}
-impl<T: Send + 'static> elastos::bus::capabilities::HostWithStore<T> for HasSelf<HostState> {
-    async fn request(
-        _accessor: &Accessor<T, Self>,
-        _resource: String,
-        _actions: Vec<String>,
-        _reason: String,
-    ) -> Result<Grant, BusError> {
-        Err(BusError::Denied("not yet".into()))
-    }
-}
-
-impl elastos::bus::providers::Host for HostState {}
-impl<T: Send + 'static> elastos::bus::providers::HostWithStore<T> for HasSelf<HostState> {
-    async fn invoke(
-        _accessor: &Accessor<T, Self>,
-        _request: elastos::bus::types::InvokeRequest,
-        _body: Option<StreamReader<u8>>,
-    ) -> Result<
-        (
-            elastos::bus::types::InvokeStatus,
-            StreamReader<u8>,
-            wasmtime::component::FutureReader<Result<(), BusError>>,
-        ),
-        BusError,
-    > {
-        Err(BusError::Unavailable("not yet".into()))
-    }
-}
-
-impl elastos::bus::ui::Host for HostState {}
-impl<T: Send + 'static> elastos::bus::ui::HostWithStore<T> for HasSelf<HostState> {
-    async fn present(
-        _accessor: &Accessor<T, Self>,
-        _media_type: String,
-        _document: Vec<u8>,
-    ) -> Result<(), BusError> {
-        Err(BusError::Unavailable("not yet".into()))
     }
 }

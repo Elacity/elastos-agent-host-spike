@@ -101,6 +101,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bus2-resident-guest"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "cc"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

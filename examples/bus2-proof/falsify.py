@@ -15,7 +15,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent
-GUESTS = ["-p", "bus2-photo-guest", "-p", "bus2-busy-guest"]
+GUESTS = ["-p", "bus2-photo-guest", "-p", "bus2-resident-guest", "-p", "bus2-busy-guest"]
 
 # (name, file, [(old, new)], [(test target, test name)])
 CASES = [
@@ -62,6 +62,61 @@ CASES = [
         "host/src/admission.rs",
         [("if matches!(import.ty, ComponentTypeRef::Module(_)) {", "if false && matches!(import.ty, ComponentTypeRef::Module(_)) {")],
         [("admission", "core_modules_are_refused")],
+    ),
+    # Proof 1: lifecycle and endings.
+    (
+        "the host never closes the events stream",
+        "host/src/run.rs",
+        [("        let drive = drive(Events(sender));\n", "        let _open = sender.clone();\n        let drive = drive(Events(sender));\n")],
+        [("lifecycle", "a_resident_guest_handles_events_and_stops_when_they_close")],
+    ),
+    (
+        "no cancel after the grace period",
+        "host/src/run.rs",
+        [("() = tokio::time::sleep(grace), if closed => {", "() = tokio::time::sleep(grace), if false => {")],
+        [("lifecycle", "a_guest_that_does_not_return_is_cancelled_after_the_grace_period")],
+    ),
+    (
+        "no epoch deadline",
+        "host/src/run.rs",
+        [("        if ticks > max_ticks {", "        if false && ticks > max_ticks {")],
+        [("lifecycle", "a_guest_that_never_awaits_is_ended_at_the_epoch_deadline")],
+    ),
+    (
+        "the deadline is recorded as a generic trap",
+        "host/src/run.rs",
+        [("        return Ending::EpochDeadline;", "        return Ending::Trapped(\"deadline\".into());")],
+        [("lifecycle", "a_guest_that_never_awaits_is_ended_at_the_epoch_deadline")],
+    ),
+    (
+        "fuel is not refilled at each tick",
+        "host/src/run.rs",
+        [("        context.set_fuel(fuel)?;\n", "")],
+        [("lifecycle", "a_busy_guest_that_yields_each_slice_can_still_be_cancelled")],
+    ),
+    (
+        "a running guest does not yield by fuel",
+        "host/src/run.rs",
+        [("    store.fuel_async_yield_interval(Some(limits.fuel_slice))?;\n", "")],
+        [("lifecycle", "a_busy_guest_that_yields_each_slice_can_still_be_cancelled")],
+    ),
+    (
+        "running out of fuel is recorded as a generic trap",
+        "host/src/run.rs",
+        [("        return Ending::FuelExhausted;", "        return Ending::Trapped(\"fuel\".into());")],
+        [("lifecycle", "a_guest_that_uses_up_a_slice_of_fuel_is_ended")],
+    ),
+    (
+        "an early return is recorded as stopped",
+        "host/src/run.rs",
+        [("Ok(Ok(())) if closed => Ending::Stopped,", "Ok(Ok(())) if true => Ending::Stopped,")],
+        [("lifecycle", "a_guest_that_returns_before_the_close_is_recorded_as_returned")],
+    ),
+    (
+        "the guest stops on stop-requested",
+        "guests/resident/src/lib.rs",
+        [("                Event::StopRequested | Event::GrantRevoked(_) => {}", "                Event::StopRequested => return Ok(()),\n                Event::GrantRevoked(_) => {}")],
+        [("lifecycle", "stop_requested_adds_nothing_the_close_cannot_do")],
     ),
 ]
 

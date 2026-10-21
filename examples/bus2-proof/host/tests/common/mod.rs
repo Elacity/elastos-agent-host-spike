@@ -25,3 +25,30 @@ pub fn guest(name: &str) -> Vec<u8> {
 pub fn fixture(name: &str) -> Vec<u8> {
     wat::parse_file(root().join("fixtures").join(name)).unwrap()
 }
+
+/// Runs `f` on its own thread with a single-threaded tokio runtime, and fails
+/// if it gives no result within `limit`. A guest that starves the executor
+/// cannot time itself out, so the watchdog is outside it.
+pub fn within<R: Send + 'static>(
+    limit: std::time::Duration,
+    f: impl std::future::Future<Output = R> + Send + 'static,
+) -> R {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        let _ = sender.send(local.block_on(&runtime, f));
+    });
+    match receiver.recv_timeout(limit) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("watchdog: no result within {limit:?}")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("the run panicked; see its output above")
+        }
+    }
+}
