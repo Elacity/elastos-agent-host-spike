@@ -366,7 +366,7 @@ Failing first: three tests added before the fix; on 3d1ef56's code: "143 passed;
 New tests:    spellings_equal_without_case_and_normal_form_share_one_key: Codex's pair; U+01F0 and J U+030C;
                 U+1F80 U+0308 and U+1F00 U+0308 U+03B9 (needs the first NFD); U+1E9E, U+00DF and "ss";
                 café and CAFÉ; café is not cafe; a Chinese name is its own key
-              every_key_is_normalized_and_its_own_key: a sweep of about 90,000 strings (U+0020-U+2FFF and
+              every_key_is_normalized_and_its_own_key: a sweep of 97,944 strings (U+0020-U+2FFF and
                 U+1E00-U+1FFF alone, and Latin, Greek, Cyrillic and Greek Extended letters with one or two of
                 8 combining marks). Every key is NFD, key(key(x)) == key(x), and key(NFD(x)) == key(NFC(x)) ==
                 key(x)
