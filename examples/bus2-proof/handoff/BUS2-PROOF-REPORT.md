@@ -25,7 +25,17 @@ recommendations come in step 7.
    - A grace timer placed inside the `run_concurrent` closure never fired against a busy guest.
    - Tasks outside the store did run on time (fuel yields do reach the executor).
    - So the stop logic (driver and grace timer) sits outside `run_concurrent`.
-5. **There is no host-side cancel that the guest sees.**
+5. **Start-up fuel differs by platform, so it has its own budget.**
+   - The same guest source compiles to different bytes on the Mac and on Linux; this is known.
+   - Instantiation used 1 unit of fuel here, and more than 10,000 on the Mac.
+   - A per-tick budget that started before instantiation made a test pass here and fail there.
+   - Now:
+     - instantiation runs on its own budget (`instantiate_fuel`), and the run's budget starts just before
+       `lifecycle.run`;
+     - a trap during instantiation is a named ending (`fuel-exhausted`, or `trapped` with its cause), with
+       `started: false`, never a bare error.
+   - Found by Cursor's Mac run of `938b8e0f`.
+6. **There is no host-side cancel that the guest sees.**
    - "Cancel" here means the host stops driving the `run` call and drops the store.
    - The guest gets no signal and no reason.
 
@@ -59,7 +69,7 @@ recommendations come in step 7.
 | Proof | Tests | Falsifiers |
 |---|---|---|
 | 5. Admission-like import check | 7 (`tests/admission.rs`) | 7 |
-| 1. Resident guest, stop by close, named endings | 8 (`tests/lifecycle.rs`) | 9 |
+| 1. Resident guest, stop by close, named endings | 10 (`tests/lifecycle.rs`) | 11 |
 | 2. Streaming read under a cap, refused not truncated | 7 (`tests/streaming.rs`) | 8 |
 
 The read path:

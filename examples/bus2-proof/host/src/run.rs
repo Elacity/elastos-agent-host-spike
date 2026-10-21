@@ -20,6 +20,10 @@ use crate::{linker, BusError, Event, HostState, ProductCapsuleV2};
 pub struct Limits {
     /// How long a guest has to return after its events close.
     pub grace: Duration,
+    /// Fuel for instantiation alone. The run's own budget (`fuel_per_tick`)
+    /// starts just before `lifecycle.run`, so it measures the run, not how
+    /// much start-up code the guest compiled to.
+    pub instantiate_fuel: u64,
     /// The longest a run may last, in epoch ticks (the `Ticker`'s period).
     pub max_ticks: u64,
     /// Fuel a guest may use between two epoch ticks. The epoch callback
@@ -37,6 +41,7 @@ impl Default for Limits {
     fn default() -> Self {
         Limits {
             grace: Duration::from_millis(300),
+            instantiate_fuel: 100_000_000,
             max_ticks: 500,
             fuel_per_tick: 10_000_000_000,
             fuel_slice: 10_000_000,
@@ -82,6 +87,8 @@ impl Ending {
 /// The result of a run: how it ended, and what the host saw.
 pub struct Outcome {
     pub ending: Ending,
+    /// Whether instantiation finished and `lifecycle.run` was called.
+    pub started: bool,
     pub state: HostState,
 }
 
@@ -155,12 +162,27 @@ pub async fn run_resident(
 ) -> Result<Outcome> {
     let linker = linker(engine)?;
     let mut store = Store::new(engine, state);
-    // Fuel set from the epoch callback does not reach code that is already
-    // running (Wasmtime 48 keeps the running count in the compiled code), so
-    // a slice ends by fuel: the guest yields, and takes its next slice from
-    // the store's reserve, which the epoch callback refills.
-    store.set_fuel(limits.fuel_per_tick)?;
+
+    // Start-up, on its own budget. A trap here is a run ending like any other.
+    store.set_fuel(limits.instantiate_fuel)?;
+    store.set_epoch_deadline(limits.max_ticks);
+    let world = match ProductCapsuleV2::instantiate_async(&mut store, component, &linker).await {
+        Ok(world) => world,
+        Err(error) => {
+            return Ok(Outcome {
+                ending: ending_of_trap(error),
+                started: false,
+                state: store.into_data(),
+            })
+        }
+    };
+
+    // The run's budget. Fuel set from the epoch callback does not reach code
+    // that is already running (Wasmtime 48 keeps the running count in the
+    // compiled code), so a slice ends by fuel: the guest yields, and takes its
+    // next slice from the store's reserve, which the epoch callback refills.
     store.fuel_async_yield_interval(Some(limits.fuel_slice))?;
+    store.set_fuel(limits.fuel_per_tick)?;
     store.set_epoch_deadline(1);
     let (max_ticks, fuel, yield_each_tick) = (
         limits.max_ticks,
@@ -181,7 +203,6 @@ pub async fn run_resident(
         })
     });
 
-    let world = ProductCapsuleV2::instantiate_async(&mut store, component, &linker).await?;
     let (sender, receiver) = unbounded_channel();
     let events = StreamReader::new(&mut store, EventFeed(receiver))?;
     let grace = limits.grace;
@@ -225,6 +246,7 @@ pub async fn run_resident(
     // and only its data is kept.
     Ok(Outcome {
         ending,
+        started: true,
         state: store.into_data(),
     })
 }

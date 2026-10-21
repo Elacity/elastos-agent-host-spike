@@ -118,6 +118,24 @@ CASES = [
         [("                Event::StopRequested | Event::GrantRevoked(_) => {}", "                Event::StopRequested => return Ok(()),\n                Event::GrantRevoked(_) => {}")],
         [("lifecycle", "stop_requested_adds_nothing_the_close_cannot_do")],
     ),
+    (
+        "a trap during instantiation is returned as a bare error",
+        "host/src/run.rs",
+        [("""        Err(error) => {
+            return Ok(Outcome {
+                ending: ending_of_trap(error),
+                started: false,
+                state: store.into_data(),
+            })
+        }""", """        Err(error) => return Err(error),""")],
+        [("lifecycle", "a_trap_during_instantiation_is_a_named_ending")],
+    ),
+    (
+        "start-up is paid from the run's budget",
+        "host/src/run.rs",
+        [("    store.set_fuel(limits.instantiate_fuel)?;", "    store.set_fuel(limits.fuel_per_tick)?;")],
+        [("lifecycle", "start_up_has_its_own_fuel_budget")],
+    ),
     # Proof 2: streaming a read with a cap.
     (
         "an object over the cap is not refused before streaming",

@@ -139,14 +139,47 @@ fn a_guest_that_never_awaits_is_ended_at_the_epoch_deadline() {
 
 #[test]
 fn a_guest_that_uses_up_a_slice_of_fuel_is_ended() {
+    // The run's own budget only: start-up has its own, so this does not
+    // depend on how many bytes the guest compiles to.
     let limits = Limits {
         fuel_per_tick: 10_000,
         fuel_slice: 1_000,
         ..Limits::default()
     };
     let (outcome, _) = run("bus2_busy_guest", limits, vec![], Duration::ZERO);
+    assert!(outcome.started, "start-up used its own budget");
     assert_eq!(outcome.ending, Ending::FuelExhausted);
     assert_eq!(outcome.ending.reason(), "fuel-exhausted");
+}
+
+#[test]
+fn start_up_has_its_own_fuel_budget() {
+    // Even a run budget of zero gets as far as calling run: start-up is paid
+    // from its own budget.
+    let limits = Limits {
+        fuel_per_tick: 0,
+        fuel_slice: 1,
+        ..Limits::default()
+    };
+    let (outcome, _) = run("bus2_resident_guest", limits, vec![], Duration::ZERO);
+    assert!(outcome.started);
+    assert_eq!(outcome.ending.reason(), "fuel-exhausted");
+}
+
+#[test]
+fn a_trap_during_instantiation_is_a_named_ending() {
+    // No fuel for start-up at all: instantiation traps, and that is a named
+    // ending, not an error or a panic.
+    for guest in ["bus2_resident_guest", "bus2_busy_guest", "bus2_photo_guest"] {
+        let limits = Limits {
+            instantiate_fuel: 0,
+            ..Limits::default()
+        };
+        let (outcome, _) = run(guest, limits, vec![], Duration::ZERO);
+        assert!(!outcome.started, "{guest}");
+        assert_eq!(outcome.ending, Ending::FuelExhausted, "{guest}");
+        assert!(outcome.state.frames.is_empty());
+    }
 }
 
 /// Review change 4: `stop-requested` adds nothing the close cannot do.
