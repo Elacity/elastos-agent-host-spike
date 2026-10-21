@@ -5,8 +5,10 @@ python3 -m unittest scripts/build/test_build_exec_initrd.py"""
 import importlib.util
 import lzma
 import os
+import shutil
 import stat
 import struct
+import subprocess
 import tempfile
 import unittest
 
@@ -20,6 +22,7 @@ RELEASE = "6.1.0-50-arm64"
 
 ET_REL, ET_EXEC, ET_DYN = 1, 2, 3
 PT_LOAD, PT_DYNAMIC = 1, 2
+DT_NULL, DT_NEEDED, DT_RELA, DT_STRTAB, DT_RPATH, DT_RUNPATH = 0, 1, 7, 5, 15, 29
 SHT_PROGBITS, SHT_STRTAB = 1, 3
 
 
@@ -34,20 +37,54 @@ def elf_header(e_type, machine, entry=0, phoff=0, phnum=0, shoff=0, shnum=0, shs
     return header
 
 
-def elf(machine=builder.EM_AARCH64, interpreter=False, tag=b"", e_type=ET_EXEC, entry=0x400078, segments=None):
+def elf(machine=builder.EM_AARCH64, interpreter=False, tag=b"", e_type=ET_EXEC, entry=0x400078, segments=None,
+        dynamic=None, load_size=None):
     """A 64-bit little-endian program: ELF header, program headers, then the
-    payload, covered by one PT_LOAD (plus PT_INTERP when asked)."""
-    types = segments if segments is not None else ([builder.PT_INTERP] if interpreter else []) + [PT_LOAD]
+    payload, covered by one PT_LOAD (plus PT_INTERP when asked). With
+    `dynamic`, a list of (d_tag, d_val), the payload is that dynamic table
+    and a PT_DYNAMIC covers it too. `load_size` shrinks what the PT_LOAD covers."""
+    if dynamic is not None:
+        types = segments if segments is not None else [PT_LOAD, PT_DYNAMIC]
+        payload = b"".join(struct.pack("<qQ", d_tag, d_val) for d_tag, d_val in dynamic)
+    else:
+        types = segments if segments is not None else ([builder.PT_INTERP] if interpreter else []) + [PT_LOAD]
+        payload = tag or b"\x00" * 8
     phoff = 64
     payload_at = phoff + 56 * len(types)
-    payload = tag or b"\x00" * 8
     out = elf_header(e_type, machine, entry=entry, phoff=phoff, phnum=len(types))
     for p_type in types:
+        size = load_size if p_type == PT_LOAD and load_size is not None else len(payload)
         program = bytearray(56)
         struct.pack_into("<IIQQQQQQ", program, 0, p_type, 5, payload_at, 0x400000, 0x400000,
-                         len(payload), len(payload), 0x1000)
+                         size, size, 0x1000)
         out += program
     return bytes(out) + payload
+
+
+STATIC_PIE_DYNAMIC = [(DT_RELA, 0x1000), (DT_NULL, 0)]
+
+
+def clang_aarch64(directory, needed):
+    """A real AArch64 PIE linked by clang and lld with no interpreter; with
+    `needed`, it also links against a stub libmissing.so (DT_NEEDED). None
+    when this machine has no clang and lld for AArch64."""
+    if not shutil.which("clang") or not shutil.which("ld.lld"):
+        return None
+    base = ["clang", "--target=aarch64-linux-gnu", "-nostdlib", "-fuse-ld=lld"]
+    with open(os.path.join(directory, "lib.c"), "w") as handle:
+        handle.write("int missing(void) { return 0; }\n")
+    with open(os.path.join(directory, "main.c"), "w") as handle:
+        handle.write(("int missing(void);\n" if needed else "") +
+                     "void _start(void) { " + ("missing(); " if needed else "") + "for (;;) {} }\n")
+    steps = []
+    if needed:
+        steps.append(base + ["-shared", "-fPIC", "-Wl,-soname,libmissing.so", "lib.c", "-o", "libmissing.so"])
+    steps.append(base + ["-fPIE", "-pie", "-Wl,--no-dynamic-linker", "main.c", "-o", "program"]
+                 + (["-L.", "-lmissing"] if needed else []))
+    for step in steps:
+        if subprocess.run(step, cwd=directory, capture_output=True).returncode != 0:
+            return None
+    return os.path.join(directory, "program")
 
 
 def module(name, release=RELEASE, machine=builder.EM_AARCH64, e_type=ET_REL, vermagic_section=".modinfo"):
@@ -314,8 +351,37 @@ class BuildExecInitrd(unittest.TestCase):
             self.assertEqual(self.build(**{"vm-smoke": path}), 1, bad[:20])
 
     def test_a_static_pie_program_is_accepted(self):
-        pie = self.inputs.write("pie", elf(e_type=ET_DYN, segments=[PT_LOAD, PT_DYNAMIC]))
+        pie = self.inputs.write("pie", elf(e_type=ET_DYN, dynamic=STATIC_PIE_DYNAMIC))
         self.assertEqual(self.build(supervisor=pie), 0)
+
+    # Codex's probe (review of #27 at a679e5d3): a PIE with no PT_INTERP that
+    # still needs a shared library.
+
+    def test_a_pie_that_needs_a_library_is_refused(self):
+        made = tempfile.mkdtemp(dir=self.tmp.name)
+        probe = clang_aarch64(made, needed=True)
+        if probe is None:
+            self.skipTest("needs clang and ld.lld for aarch64")
+        self.assertEqual(self.build(supervisor=probe), 1)
+        static = clang_aarch64(tempfile.mkdtemp(dir=self.tmp.name), needed=False)
+        self.assertEqual(self.build(supervisor=static), 0)
+
+    def test_a_program_with_external_dependencies_is_refused(self):
+        for d_tag in (DT_NEEDED, DT_RPATH, DT_RUNPATH):
+            for e_type in (ET_DYN, ET_EXEC):
+                table = [(DT_STRTAB, 0x1000), (d_tag, 1), (DT_NULL, 0)]
+                path = self.inputs.write("deps", elf(e_type=e_type, dynamic=table))
+                self.assertEqual(self.build(supervisor=path), 1, (d_tag, e_type))
+
+    def test_a_dynamic_table_must_be_whole_and_loaded(self):
+        for bad in [
+            elf(e_type=ET_DYN, dynamic=[(DT_RELA, 0x1000)]),  # no DT_NULL
+            elf(e_type=ET_DYN, dynamic=STATIC_PIE_DYNAMIC)[:-8],  # cut inside the table
+            elf(e_type=ET_DYN, dynamic=STATIC_PIE_DYNAMIC, load_size=16),  # not inside a PT_LOAD
+            elf(e_type=ET_DYN, dynamic=STATIC_PIE_DYNAMIC, segments=[PT_LOAD, PT_DYNAMIC, PT_DYNAMIC]),
+        ]:
+            path = self.inputs.write("bad-dynamic", bad)
+            self.assertEqual(self.build(supervisor=path), 1, bad[-48:])
 
     def replace_module(self, name, data):
         drivers = os.path.join(self.inputs.modules, "kernel", "drivers")

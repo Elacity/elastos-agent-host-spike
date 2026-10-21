@@ -48,7 +48,8 @@ PROJECT_FILES = ["index.html", "style.css", "notes.txt"]
 EDITED_NOTE = b"hello again"
 EM_AARCH64 = 183
 ET_REL, ET_EXEC, ET_DYN = 1, 2, 3
-PT_LOAD, PT_INTERP = 1, 3
+PT_LOAD, PT_DYNAMIC, PT_INTERP = 1, 2, 3
+DT_NULL, DT_NEEDED, DT_RPATH, DT_RUNPATH = 0, 1, 15, 29
 SHT_STRTAB, SHT_NOBITS = 3, 8
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -91,7 +92,9 @@ def elf_header(data, what):
 def static_aarch64_elf(data, what):
     """A static AArch64 program: ET_EXEC, or ET_DYN for static-pie, with an
     entry point, whole program headers, at least one PT_LOAD inside the file,
-    and no PT_INTERP."""
+    no PT_INTERP, and no external dependency: a PT_DYNAMIC, if any, is one
+    whole table inside a PT_LOAD, ended by DT_NULL, with no DT_NEEDED,
+    DT_RPATH or DT_RUNPATH."""
     header = elf_header(data, what)
     if header["type"] not in (ET_EXEC, ET_DYN):
         raise BuildError(f"{what}: not an executable (type {header['type']})")
@@ -100,7 +103,7 @@ def static_aarch64_elf(data, what):
     phoff, phnum = header["phoff"], header["phnum"]
     if phnum == 0 or header["phentsize"] != 56 or phoff + 56 * phnum > len(data):
         raise BuildError(f"{what}: program headers missing or past the file")
-    loads = 0
+    loads, dynamics = [], []
     for index in range(phnum):
         p_type, _, p_offset, _, _, p_filesz = struct.unpack_from("<IIQQQQ", data, phoff + 56 * index)
         if p_type == PT_INTERP:
@@ -108,9 +111,25 @@ def static_aarch64_elf(data, what):
         if p_type == PT_LOAD:
             if p_offset + p_filesz > len(data):
                 raise BuildError(f"{what}: a loadable segment runs past the file")
-            loads += 1
-    if loads == 0:
+            loads.append((p_offset, p_filesz))
+        if p_type == PT_DYNAMIC:
+            dynamics.append((p_offset, p_filesz))
+    if not loads:
         raise BuildError(f"{what}: no loadable segment")
+    if len(dynamics) > 1:
+        raise BuildError(f"{what}: more than one dynamic table")
+    for offset, size in dynamics:
+        # Inside a PT_LOAD is inside the file: each PT_LOAD was checked above.
+        if not any(start <= offset and offset + size <= start + length for start, length in loads):
+            raise BuildError(f"{what}: the dynamic table is not inside a loadable segment")
+        for at in range(offset, offset + size - size % 16, 16):
+            d_tag = struct.unpack_from("<q", data, at)[0]
+            if d_tag == DT_NULL:
+                break
+            if d_tag in (DT_NEEDED, DT_RPATH, DT_RUNPATH):
+                raise BuildError(f"{what}: needs a shared library (dynamic tag {d_tag})")
+        else:
+            raise BuildError(f"{what}: the dynamic table has no end (DT_NULL)")
 
 
 def module_vermagic(data, what):
