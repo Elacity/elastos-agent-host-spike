@@ -30,13 +30,13 @@ Written 21 Oct 2026. Spike-only code: `exec_vm.rs` and its use in `concurrent_la
      - Once init holds the port, nothing else can bind it.
   2. Run the command as an unprivileged user (uid and gid 65534), with no supplementary groups, no capabilities
      (the bounding and ambient sets too) and `no_new_privs`. Each step is checked before the program runs.
-     - It cannot bind a reserved port, cannot reach init's socket (`/proc/1/fd` is root's), and cannot signal PID 1.
+     - It cannot bind a reserved port, cannot reach the supervisor's socket (its `/proc/<pid>/fd` is root's), and
+       cannot signal root's processes.
      - The listening socket is close-on-exec, so the command never holds it.
   3. When the command ends (a command killed by a signal is 128 + the signal number), kill every process still
      running as 65534. Only then listen on the port, so no command process exists while a connection can be made.
      Accept the host's connection (peer CID 2; defence in depth, see below), write the code as decimal ASCII plus
-     `\n` (for example `0\n` or
-     `101\n`), and wait for the host to close.
+     `\n` (for example `0\n` or `101\n`), and wait for the host to close.
   4. Console output (`hvc0`) stays as it is, as log only.
 - **Host (the launcher):**
   - After `start`, connect to the guest's port 1022 with `VzProvider::vsock_connect`, retrying until the deadline,
