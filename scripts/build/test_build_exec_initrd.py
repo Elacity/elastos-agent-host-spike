@@ -306,6 +306,7 @@ class BuildExecInitrd(unittest.TestCase):
             elf(entry=0),
             elf(segments=[PT_DYNAMIC]),
             elf()[:100],
+            elf()[:-4],  # the PT_LOAD runs past the end
             elf(e_type=ET_REL),
             elf(e_type=4),
         ]:
