@@ -892,6 +892,7 @@ mod marketplace;
 mod model;
 #[cfg(target_os = "macos")]
 mod model_installed_fixture;
+mod photos;
 mod recovery;
 #[cfg(unix)]
 mod remote_engine;
