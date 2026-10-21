@@ -86,7 +86,10 @@ refill makes the busy guest end by fuel instead of by its deadline, which the fa
    - So the driver and the grace timer must sit outside `run_concurrent`.
 3. **Instantiation cost differs by build machine.**
    - Instantiating the same guest source used 1 unit of fuel here and more than 10,000 on the Mac.
-   - The guest bytes differ: the photo component is 102,719 B on the Mac and 102,707 B here.
+   - The guest bytes differ: the photo component is 102,719 B on the Mac and 102,707 B here, and every core
+     module differs by 12 to 132 B (see [Measurements](#measurements)).
+   - So a guest "named by hash" needs one pinned build environment, or the same source gives a different hash
+     on each machine.
    - A budget shared by start-up and running passed here and failed there (found by Cursor's Mac run).
    - So start-up has its own fuel budget, and a trap during start-up is a named ending, never a bare error.
 4. **There is no cancel that the guest sees.** To cancel, the host stops driving the `run` call and drops the
@@ -94,7 +97,7 @@ refill makes the busy guest end by fuel instead of by its deadline, which the fa
 5. **Async host imports must take the store.** An `async func` import gets `&Accessor<T, Self>` in a
    `HostWithStore<T>` trait, even when it only touches the guest's own state.
 6. **Compiled code is worth caching.**
-   - A warm start (load compiled code, then instantiate) took 0.14 to 0.31 ms.
+   - A warm start (load compiled code, then instantiate) took 0.08 to 0.31 ms.
    - A cold start (compile, then instantiate) took 44 to 140 ms in the container and 21 to 70 ms on the Mac.
    - Loading compiled code trusts its input, so such a cache must be one that only the Runtime writes.
 
@@ -136,23 +139,24 @@ Two machines, each with a release build of the host and the median of 9 runs:
 - **container:** this Linux container, 4 vCPUs (Intel Xeon);
 - **Mac:** Cursor's Mac run of `bfafc3ed`.
 
-A dash means that number was not reported for that machine.
-
 Sizes:
 
-| Guest | Core module (container) | Component (container) | Component (Mac) | Compiled code (container) |
-|---|---|---|---|---|
-| photo | 97,700 B | 102,707 B | 102,719 B | 405,096 B |
-| resident | 44,305 B | 46,679 B | — | 202,632 B |
-| busy | 28,664 B | 29,942 B | — | 132,008 B |
+| Guest | Core module (container) | Core module (Mac) | Component (container) | Component (Mac) | Compiled code (container) | Compiled code (Mac) |
+|---|---|---|---|---|---|---|
+| photo | 97,700 B | 97,712 B | 102,707 B | 102,719 B | 405,096 B | 388,552 B |
+| resident | 44,305 B | 44,437 B | 46,679 B | 46,811 B | 202,632 B | 231,320 B |
+| busy | 28,664 B | 28,780 B | 29,942 B | 30,058 B | 132,008 B | 160,696 B |
+
+The guests are built from the same source and the same `Cargo.lock`, yet every core module differs between
+the two machines, by 12 to 132 B. Compiled code is native code for each machine, so it is expected to differ.
 
 Start-up times:
 
 | Guest | Cold start (container) | Cold start (Mac) | Warm start (container) | Warm start (Mac) | Instantiate only (container) | Instantiate only (Mac) |
 |---|---|---|---|---|---|---|
 | photo | 141.6 ms | 69.52 ms | 0.31 ms | 0.14 ms | 0.03 ms | 0.03 ms |
-| resident | 69.3 ms | 34.07 ms | 0.19 ms | — | 0.03 ms | 0.03 ms |
-| busy | 44.2 ms | 21.32 ms | 0.16 ms | — | 0.03 ms | 0.03 ms |
+| resident | 69.3 ms | 34.07 ms | 0.19 ms | 0.11 ms | 0.03 ms | 0.03 ms |
+| busy | 44.2 ms | 21.32 ms | 0.16 ms | 0.08 ms | 0.03 ms | 0.03 ms |
 
 The Mac compiles about twice as fast. On both machines, warm start is hundreds of times faster than cold start.
 
