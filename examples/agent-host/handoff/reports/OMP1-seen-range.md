@@ -162,5 +162,82 @@ Questions:    1. NOOP_EDIT_LIMIT = 2 (the third identical no-op is refused, as i
                  own capsule? Its request shape is edit_request above.
 ```
 
-**What is next:** stop for review. After that, omp idea 2 (child limits; budget = model requests and wall time,
-whichever runs out first, recorded) as you set.
+## Fix 1, after the Codex review of 4a431ff (21 Oct)
+
+Codex: FAIL, with three findings, all reproduced. The 16-file cap and the host grants held; 118 tests and clippy
+passed.
+
+```text
+Commits:      9179183 (code and tests), 469aa0d (test: an older version's lines; falsifier OS05 had survived)
+              this section is the next commit
+Changed:      examples/agent-host/src/lib.rs - guest only; no journal format change, no import change
+Finding 1:    Seen ranges mixed revisions. Repro: legacy v0; v1 at rev-a showing line 1; legacy v0 again; v1 at
+                rev-b showing line 2. Line 1 could then be edited with if_revision rev-b.
+              Now:
+                - only the newest run of reads at one version and one revision counts as seen (current_reads); a
+                  read at another revision, or with none, ends the run, so it clears what was seen before it;
+                - a version is bound forever to the revision, or to no revision, it was first read at
+                  (version_bound_elsewhere): observe_read and observe refuse a version reused with another one;
+                - an edit is checked only against the lines of the current run, so every touched line was seen at
+                  the exact revision it sends;
+                - a written change takes a version number never used for that file (next_version).
+Finding 2:    Path aliases bypassed the no-op limit and the duplicate check. Repro: two no-ops on
+                Documents/notes.txt, a third via Documents//notes.txt; three slash spellings in one change.
+              Now:
+                - a path that is not canonical is refused by observe, observe_read, propose_edit and
+                  propose_change ("path not canonical"). Canonical: after the scheme, no empty, ".", ".." or
+                  trailing-"." segment, so "//", "/./", "/../", a trailing "/" and a trailing "." are refused. This
+                  is the segment rule of the Runtime's Agents check;
+                - the no-op counter and the duplicate check use the case-folded path (to_uppercase().to_lowercase(),
+                  as the Agents check), so NOTES.txt and notes.txt count as one file.
+Finding 3:    Refusals wrote no record. Now every propose_edit and propose_change refusal writes exactly one record,
+                "refused\n<reason>\n<what>", where <what> is the path or "edit <i>: <path>". A path that is not
+                canonical is not written into the record.
+              "Counted per window like the other refusals": the guest has no windowed refusal counter to match, so
+                each refusal writes one record and none are merged. Say if a window was meant.
+Failing first: the three tests below were added before the fix and failed on 4a431ff's code:
+                seen_lines_never_mix_revisions -> panicked at the propose_change with rev-b on line 1 (accepted)
+                path_aliases_are_refused_and_case_counts_as_one_file -> panicked: the "//" alias was accepted
+                each_refusal_writes_exactly_one_record -> "change size": left 0, right 1
+Changed tests: four older tests asserted that a refused proposal leaves the journal byte-identical. They now assert
+                it is identical apart from its refusal records, and count them. The run() self-test is changed the
+                same way, and now also checks an alias and a second revision for one version.
+Tests run:    (cd examples/agent-host && ./verify.sh) -> fmt, "124 passed" (118 + 6), clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "2 passed"
+New tests:    seen_lines_never_mix_revisions (Codex repro 1, plus a new revision clears what was seen, plus a legacy
+                read at a bound version is refused)
+              path_aliases_are_refused_and_case_counts_as_one_file (Codex repro 2: six alias spellings; NOTES.txt as
+                the third no-op; three spellings in one change; a case variant twice in one change)
+              each_refusal_writes_exactly_one_record (size, unread target, stale revision, unseen range, no
+                revision, alias; and propose_edit's refusals)
+              a_stored_journal_that_mixes_revisions_still_does_not_mix_seen_lines (decode does not check binding)
+              a_written_change_takes_a_version_never_used
+              an_older_version_line_is_not_seen_at_the_newer_version
+Falsifiers:   OV01 a version may change revision        -> seen_lines_never_mix_revisions FAILED
+              OV02 the current reads ignore the revision -> a_stored_journal_that_mixes_revisions_... FAILED
+              OV03 a write takes the number after the current read -> a_written_change_takes_a_version_never_used FAILED
+              OS05 seen lines ignore the version         -> an_older_version_line_is_not_seen_at_the_newer_version
+                FAILED (it survived first, because every caller passes the current version; 469aa0d pins the
+                helper's contract)
+              OS06 the current reads span versions       -> 4 tests FAILED
+              OC01 any path spelling is accepted         -> path_aliases_..., each_refusal_... FAILED
+              OC02 case counts as another file           -> path_aliases_... FAILED
+              OX01 a refusal writes no record            -> 4 tests FAILED
+              OX02 a change refusal writes no record     -> 2 tests FAILED
+              The 17 earlier falsifiers still fail on this head. OS01 no longer applies, because its target was
+                rewritten; OS05 and OS06 cover it. Each restored; tree clean.
+Guest hash:   d926df46d9000c72f7af496a11728d82bd925becb4e6b22acb19f1d7f6f3b3cd on three builds (verify.sh,
+              run-local.sh, run-e2e.sh). wasm_sections.py: file 497980 bytes; /1/10 353148 0bf09292ba7e537a.
+Import list:  unchanged. Against the spike/agent-host build, the core import section (/1/2) and every top-level
+              component section are byte-identical.
+Principles:   10 one canonical rule for paths (the Agents segment rule), and one revision per version; 11 fail
+                closed: a version reused with another revision, an alias, and a mixed stored journal all refuse;
+                every refusal leaves a record.
+DeepSeek:     none.
+Not proven:   - A refusal record is a Person node with a label, like the existing spill, todo and goal records. A
+                person's message that starts with the same label reads the same way; this matters for audit, not
+                for authority.
+              - Windows' trailing-space aliases are still not handled (as in S3).
+```
+
+**What is next:** Cursor verifies on the Mac, then Codex re-reviews. Building idea 2 still waits.
