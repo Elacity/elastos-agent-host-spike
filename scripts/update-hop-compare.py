@@ -2792,6 +2792,15 @@ def cli_state(manifest, home_path):
                           for key, paths in manifest["preserve"].items()}}
 
 
+def cli_refusal_state(manifest, case, home_path):
+    """The unknown-kind refusal must also leave the installed release support (providers, capsule files) untouched."""
+    state = cli_state(manifest, home_path)
+    if case == CLI_INSTALLER_CASE:
+        state["support"] = {relative: binding for relative, binding in (files(home_path / CLI_DATA) or {}).items()
+                            if relative.startswith(CLI_RELEASE_SUPPORT)}
+    return state
+
+
 def cli_refusal(case, command, stdout, stderr, unchanged):
     boundary = {"tampered-binary": "SHA-256", "wrong-platform": "platform", "wrong-version": "version",
                 CLI_INSTALLER_CASE: "installer"}.get(case, "sign")
@@ -3537,7 +3546,7 @@ def cli_run(config, output, local_rehearsal=None):
                 sources = cli_json(sources_path)
                 next(s for s in sources["sources"] if s["name"] == sources["default_source"])["gateways"].append(CLI_INSTALL_GATEWAY)
                 sources_path.write_text(json.dumps(sources, indent=2) + "\n")
-            original = cli_state(manifest, target)
+            original = cli_refusal_state(manifest, case, target)
             phase(case)
             if case.startswith("wrong-signer-"):
                 check_label = "m2-check-" + case
@@ -3547,7 +3556,7 @@ def cli_run(config, output, local_rehearsal=None):
                 need(check_refusal["status"] == "passed", "Carrier check refusal boundary differs")
             label = "m2-" + case
             reply = command(target, ["update"], label)
-            refusal = cli_refusal(case, reply, processes.text(label), processes.text(label, "stderr"), cli_state(manifest, target) == original)
+            refusal = cli_refusal(case, reply, processes.text(label), processes.text(label, "stderr"), cli_refusal_state(manifest, case, target) == original)
             result["paths"]["m2-discovery"]["checks"][case] = refusal
             need(refusal["status"] == "passed", "plain update refusal boundary differs")
         for entry in result["paths"].values():
