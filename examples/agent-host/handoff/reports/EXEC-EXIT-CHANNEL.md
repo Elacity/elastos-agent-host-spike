@@ -55,4 +55,130 @@ Checklist:    no item moves.
 Questions:    none.
 ```
 
-**What is next:** Codex reviews this PR. The image change and the signed runs are on the Mac.
+## Update: the exec image recipe, after Cursor's review (21 Oct)
+
+Cursor found the gap: the image recipe was only on Sasha's Mac. There, the command ran as root, no vsock modules
+were loaded, and BusyBox cannot hold a vsock socket. The image is now in the repo.
+
+```text
+Commits:      2a25174 supervisor, init, initramfs builder, Mac fixture test
+              690b6e4 supervisor tests wait a bounded time (falsifier SV07 hung the test instead of failing it)
+              this section is the next commit
+Changed:      examples/exec-image/supervisor/ (Cargo.toml, Cargo.lock, build-linux.sh, src/main.rs, tests/supervisor.rs)
+              examples/exec-image/init
+              scripts/build/build-exec-initrd.py, scripts/build/test_build_exec_initrd.py
+              elastos/crates/elastos-vz/tests/concurrent_launch.rs - the fixture test also boots probe-bind,
+                probe-report and kill-self
+              examples/agent-host/handoff/EXEC-EXIT-CHANNEL.md - the image section, and the order: bind, run, reap,
+                then listen
+Supervisor:   as root:
+                - bind vsock 1022, and check that a second bind gets EADDRINUSE;
+                - fork the command: setsid; stdout and stderr on the console (opened before the drop); stdin
+                  /dev/null; ambient set cleared; bounding set dropped; setgroups([]); setresgid and setresuid
+                  65534; no_new_privs; capset to zero; then every one of these checked (ids, groups,
+                  no_new_privs, capget, bounding and ambient); any miss is code 126 before the program runs;
+                  exec failure is 127;
+                - wait; a signal is 128 + its number;
+                - kill everything still running as 65534 (kill(-1) from a 65534 helper; orphans come back to the
+                  supervisor as child subreaper; /proc is checked for live 65534 processes);
+                - only then listen, accept peer cid 2, write "<code>\n", and wait for the host to close.
+Init:         - modules in Cursor's order (a built-in one is skipped at build time), then wait for /dev/hvc0;
+              - elastos.exec= from /proc/cmdline: true, false, test-pass, test-fail, test-edited (vm-smoke
+                --exact ... --nocapture), note ("project note <notes.txt>"), files ("project file <name>");
+                anything else is "init: command refused" with code 1;
+              - fixtures: fake-exit, probe-bind, probe-report, kill-self;
+              - no console exit line; poweroff -f at the end.
+Builder:      newc cpio, uid/gid 0, mtime 0, /tmp 1777, /root 0700, /dev/console and /dev/null nodes, padded to 512;
+              the same inputs give the same bytes. Inputs: --busybox --modules-dir --vm-smoke --supervisor --project
+              --output [--init] [--kernel-release 6.1.0-50-arm64].
+              Refused: a binary that is not a static aarch64 ELF; a module that is missing (and not built in), in
+                a second place, zstd or gzip packed, or built for another release; a project file that is
+                missing; an init that prints an exit line (other than the fake-exit fixture).
+              It prints the demo digests: a1097f0d... and project-edited 8256365b... (both checked here against the
+                vm-smoke formula).
+Tests run:    (cd examples/exec-image/supervisor && cargo test --offline) -> "7 passed" (as root here; real vsock
+                for the port rules; the report on a Unix socket open to everyone, because vsock loopback does not
+                connect in this container)
+              (cd examples/exec-image/supervisor && cargo clippy --offline --all-targets -- -D warnings) -> clean
+              RUSTFLAGS="-C linker=<sysroot>/lib/rustlib/<host>/bin/gcc-ld/ld.lld" cargo build --locked --release
+                --target aarch64-unknown-linux-musl -> "ELF 64-bit LSB executable, ARM aarch64, statically linked",
+                443 KB
+              python3 -m unittest scripts/build/test_build_exec_initrd.py -> "Ran 8 tests ... OK"
+              sh -n examples/exec-image/init -> ok
+              (cd elastos && cargo test -p elastos-vz --test concurrent_launch) -> "5 passed" (skip on Linux); clippy
+                clean
+Supervisor tests (native, root):
+              a_command_runs_unprivileged_and_its_code_is_reported (Uid/Gid 65534 x4, Groups empty, CapInh, CapPrm,
+                CapEff, CapBnd and CapAmb all 0, NoNewPrivs 1; report 7)
+              a_command_killed_by_a_signal_is_not_reported_as_zero (137)
+              the_command_cannot_bind_the_exit_port (EACCES; the port is held, a second bind is EADDRINUSE)
+              a_forged_report_never_reaches_the_host (report 3; no forged write lands; no process of the command is
+                left running)
+              no_report_is_served_before_the_command_ends
+              a_program_that_cannot_run_reports_127
+              nothing_runs_unless_the_exit_port_is_held (the command never runs; no report)
+Falsifiers:   SV01 the bounding set is kept (drop and check)  -> a_command_runs_unprivileged_... FAILED
+              SV02 the command stays root                     -> same FAILED
+              SV03 no_new_privs is not set (set and check)     -> same FAILED
+              SV04 a killed command reports 0                  -> a_command_killed_by_a_signal_... FAILED
+              SV05 the report does not wait for the command    -> 6 tests FAILED
+              SV06 processes left by the command keep running  -> a_forged_report_never_reaches_the_host FAILED
+              SV07 the exit port is never bound                -> 7 tests FAILED (after 690b6e4, without hanging)
+              BI01 /tmp is not sticky                          -> test_the_image_has_every_piece_owned_by_root FAILED
+              BI02 modules load in reverse order               -> test_modules_load_in_the_given_order_... FAILED
+              BI03 vermagic is not checked                     -> test_wrong_inputs_stop_the_build FAILED
+              BI04 a dynamic ELF is accepted                   -> test_wrong_inputs_stop_the_build FAILED
+              BI05 entries are not owned by root               -> test_the_image_has_every_piece_owned_by_root FAILED
+              BI06 an init that prints an exit line is accepted -> test_an_init_that_prints_an_exit_line_is_refused
+                FAILED
+              each restored; tree clean
+Not run here: the image itself, and the vsock handshake to the host, the peer CID check, and the fixtures in a
+              real VM. They need the Mac (below).
+```
+
+### Build and run on the Mac
+
+From the repo root, on the #27 branch.
+
+```sh
+IMG=~/code/elastos-exec-image          # where the exec image files live
+DEB=$IMG/linux-image-6.1.0-50-arm64_6.1.176-1_arm64.deb   # sha256 914f75b5...0f06
+BUSYBOX=~/.local/share/elastos/cross/aarch64/bin/busybox  # the static aarch64 BusyBox used for rootfs.ext4
+
+# 1. Kernel modules from the Debian package (the same one vmlinux-debian came from).
+shasum -a 256 "$DEB"
+mkdir -p "$IMG/deb" && (cd "$IMG/deb" && ar x "$DEB" && tar -xf data.tar.*)
+MODULES="$IMG/deb/lib/modules/6.1.0-50-arm64"
+
+# 2. The two static aarch64 programs.
+rustup target add aarch64-unknown-linux-musl
+examples/vm-smoke/build-linux.sh
+VM_SMOKE=$(ls -t examples/vm-smoke/target/aarch64-unknown-linux-musl/release/deps/vm_smoke-* | grep -v '\.d$' | head -1)
+SUPERVISOR=$(examples/exec-image/supervisor/build-linux.sh | tail -1)
+file "$BUSYBOX" "$VM_SMOKE" "$SUPERVISOR"   # all: ELF 64-bit ARM aarch64, statically linked
+
+# 3. The initramfs.
+python3 scripts/build/build-exec-initrd.py \
+  --busybox "$BUSYBOX" --modules-dir "$MODULES" --vm-smoke "$VM_SMOKE" \
+  --supervisor "$SUPERVISOR" --project examples/vm-smoke/project \
+  --output "$IMG/initrd-exec"
+# It prints the module list and "project demo a1097f0d..." / "project-edited demo 8256365b...".
+
+# 4. The signed VZ tests.
+(cd elastos && cargo test -p elastos-vz --test concurrent_launch --no-run 2>&1 | tee /tmp/vz-build.txt)
+TEST_BIN=$(sed -n 's/.*Executable tests\/concurrent_launch.rs (\(.*\))/\1/p' /tmp/vz-build.txt)
+scripts/dev/sign-elastos-vz/sign.sh "elastos/$TEST_BIN"
+ELASTOS_EXEC_KERNEL="$IMG/vmlinux-debian" ELASTOS_EXEC_ROOTFS="$IMG/rootfs.ext4" \
+ELASTOS_EXEC_INITRD="$IMG/initrd-exec" ELASTOS_EXEC_FAKE_EXIT=1 \
+  "elastos/$TEST_BIN" --exact exec_smoke_image_prints_hello a_forged_exit_line_cannot_pass \
+  --nocapture --test-threads=1
+```
+
+**Mac falsifiers (Cursor)**, each must make a test fail, then revert:
+- put the console stop back in `boot_exec_command` -> `a_forged_exit_line_cannot_pass`;
+- read the console when the report is missing (`exec_result`) -> the killed-VM half;
+- in `init`, run the commands as root: replace `/sbin/exec-supervisor run --` with a direct run that writes the
+  code itself -> `probe-bind`;
+- drop the peer CID check in `serve_vsock` -> `probe-report` (if the guest can reach its own port).
+
+**What is next:** Cursor builds the image and runs the signed tests on the Mac. Codex then reviews #27 as a whole.
