@@ -6,6 +6,7 @@ import vm from "node:vm";
 
 const source = readFileSync(new URL("../capsules/system/browser/system.js", import.meta.url), "utf8");
 const controller = source.slice(source.indexOf("function configureAiProvider() {"), source.indexOf("function configurePasskeyAccess() {"));
+const keyCheckOutcomes = source.slice(source.indexOf("const HOSTED_KEY_CHECK_PENDING ="), source.indexOf("function showError("));
 
 function fixture(connections = [], guest = false, staged = [], status = {}) {
   const nodes = new Map();
@@ -26,14 +27,17 @@ function fixture(connections = [], guest = false, staged = [], status = {}) {
   let stagedConnections = staged.slice();
   let rejectActivation = true;
   let consentPending = false;
+  const stateNode = element();
   const context = vm.createContext({
     crypto: { randomUUID },
-    document: { querySelector: node, querySelectorAll: () => [], createElement: element },
+    document: {
+      querySelector: node, createElement: element,
+      querySelectorAll: selector => selector === '[data-field="ai-provider-state"]' ? [stateNode] : [],
+    },
     hasShellAccess: () => true,
     readText: value => typeof value === "string" ? value.trim() : "",
     setTextFields: (field, message) => { if (field === "ai-provider-state") messages.push(message); },
     shellHeaders: extra => extra || {}, publicSystemError: (_, fallback) => fallback,
-    hostedProviderValidationError: () => "This Home could not check the key. Try again.",
     openCapsuleTarget: () => {},
     fetchJson: async (_url, init = {}) => {
       if (init.method === "DELETE" && _url.endsWith("/staged")) {
@@ -59,8 +63,8 @@ function fixture(connections = [], guest = false, staged = [], status = {}) {
       return { connections: [] };
     },
   });
-  vm.runInContext(`${controller}\nconfigureAiProvider();`, context);
-  return { node, saved, messages, attempts, discarded,
+  vm.runInContext(`${keyCheckOutcomes}\n${controller}\nconfigureAiProvider();`, context);
+  return { node, saved, messages, attempts, discarded, stateNode,
     activate: () => { rejectActivation = false; }, pending: () => { consentPending = true; } };
 }
 
@@ -86,6 +90,37 @@ test("saved hosted connections keep management controls while Inbox owns access"
   assert.equal(f.node("#ai-provider-egress-note").hidden, true);
   assert.equal(f.node("#ai-provider-egress-note").textContent, "");
   assert.equal(f.attempts.length, 0);
+});
+
+test("saved hosted card labels only states that need attention", async () => {
+  const card = (id, fields) => ({ id: `model:hosted-${id.repeat(32)}`, name: id, provider: "openrouter",
+    processor_label: "OpenRouter", selected_model: "fixture/model", connected: true, operation: "text.generate", ...fields });
+  const f = fixture([
+    card("a", { egress_approval_state: "ended", egress_state: "consent_required" }),
+    card("b", { egress_state: "paused" }),
+    card("c", { egress_state: "ready", approval_state: "approved", share_enabled: true }),
+  ]);
+  await new Promise(setImmediate);
+  const labels = f.node("#ai-provider-instances").children
+    .map(node => node.children[0].children.map(child => child.textContent));
+  assert.deepEqual(labels, [["Hosted approval ended"], ["External HTTPS paused"], []]);
+});
+
+test("Inbox approval prompts are neutral; real failures are errors", async () => {
+  const f = fixture();
+  f.pending();
+  f.node("#ai-provider-add").handlers.click();
+  await f.node("#ai-provider-validate").handlers.click();
+  assert.equal(f.messages.at(-1), "Approve this connection in Inbox, then check the key again.");
+  assert.equal(f.stateNode.dataset.tone, "");
+  await f.node("#ai-provider-save").handlers.click();
+  assert.equal(f.messages.at(-1), "Approve this connection in Inbox, then select Save again.");
+  assert.equal(f.stateNode.dataset.tone, "");
+  const g = fixture();
+  g.node("#ai-provider-add").handlers.click();
+  await g.node("#ai-provider-validate").handlers.click();
+  assert.equal(g.messages.at(-1), "This Home could not check the key. Try again.");
+  assert.equal(g.stateNode.dataset.tone, "error");
 });
 
 test("guest setup does not keep an entered key or offer an unusable Add form", async () => {
@@ -125,12 +160,8 @@ test("hosted Save keeps one identity and entered key across activation failure a
 });
 
 test("hosted key check names each known Runtime outcome and hides unknown detail", () => {
-  const functions = source.slice(
-    source.indexOf("const HOSTED_KEY_CHECK_OUTCOMES = ["),
-    source.indexOf("function showError("),
-  );
   const context = vm.createContext({ readText: value => typeof value === "string" ? value.trim() : "" });
-  vm.runInContext(functions, context);
+  vm.runInContext(keyCheckOutcomes, context);
   const message = detail => vm.runInContext(
     `hostedProviderValidationError(new Error(${JSON.stringify(detail)}))`, context,
   );

@@ -280,12 +280,39 @@ fn normalize_model(provider: crate::api::HostedAiProvider, value: &str) -> anyho
     Ok(trimmed.to_string())
 }
 
+/// Only the provider's auth rejection means the key is invalid; any other
+/// unusable answer is an unavailable provider, not a verdict on the key.
+#[cfg(any(test, target_os = "macos"))]
+fn openrouter_models_response(
+    status: reqwest::StatusCode,
+    bytes: &[u8],
+) -> anyhow::Result<Vec<DiscoveredModel>> {
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(invalid_key(crate::api::HostedAiProvider::OpenRouter));
+    }
+    if !status.is_success() {
+        return Err(anyhow::anyhow!("OpenRouter validation unavailable"));
+    }
+    parse_openrouter_models_body(bytes)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn venice_access_response(status: reqwest::StatusCode, bytes: &[u8]) -> anyhow::Result<bool> {
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(invalid_key(crate::api::HostedAiProvider::Venice));
+    }
+    if !status.is_success() {
+        return Err(anyhow::anyhow!("Venice validation unavailable"));
+    }
+    parse_venice_rate_limits_body(bytes)
+}
+
 #[cfg(any(test, target_os = "macos"))]
 fn parse_openrouter_models_body(bytes: &[u8]) -> anyhow::Result<Vec<DiscoveredModel>> {
-    let payload: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|_| ai_provider_request_error("invalid OpenRouter key"))?;
+    let unavailable = || anyhow::anyhow!("OpenRouter validation unavailable");
+    let payload: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| unavailable())?;
     let Some(data) = payload.get("data").and_then(serde_json::Value::as_array) else {
-        return Err(ai_provider_request_error("invalid OpenRouter key"));
+        return Err(unavailable());
     };
     let mut models = Vec::new();
     for entry in data {
@@ -333,20 +360,20 @@ fn parse_openrouter_models_body(bytes: &[u8]) -> anyhow::Result<Vec<DiscoveredMo
 #[cfg(any(test, target_os = "macos"))]
 fn parse_venice_rate_limits_body(bytes: &[u8]) -> anyhow::Result<bool> {
     let payload: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|_| ai_provider_request_error("invalid Venice key"))?;
-    Ok(payload
+        .map_err(|_| anyhow::anyhow!("Venice validation unavailable"))?;
+    payload
         .get("data")
         .and_then(|data| data.get("accessPermitted"))
         .and_then(serde_json::Value::as_bool)
-        == Some(true))
+        .ok_or_else(|| anyhow::anyhow!("Venice validation unavailable"))
 }
 
 #[cfg(any(test, target_os = "macos"))]
 fn parse_venice_models_body(bytes: &[u8]) -> anyhow::Result<Vec<DiscoveredModel>> {
-    let payload: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|_| ai_provider_request_error("invalid Venice key"))?;
+    let unavailable = || anyhow::anyhow!("Venice validation unavailable");
+    let payload: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| unavailable())?;
     let Some(data) = payload.get("data").and_then(serde_json::Value::as_array) else {
-        return Err(ai_provider_request_error("invalid Venice key"));
+        return Err(unavailable());
     };
     let mut models = Vec::new();
     for entry in data {
@@ -424,13 +451,7 @@ async fn fetch_openrouter_models(
         )
         .await
         .map_err(hosted_transport_error)?;
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(ai_provider_request_error("invalid OpenRouter key"));
-        }
-        if !status.is_success() {
-            return Err(anyhow::anyhow!("OpenRouter validation unavailable"));
-        }
-        parse_openrouter_models_body(&bytes)
+        openrouter_models_response(status, &bytes)
     }
     #[cfg(all(not(test), not(target_os = "macos")))]
     {
@@ -471,13 +492,7 @@ async fn fetch_venice_access(
         )
         .await
         .map_err(hosted_transport_error)?;
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(ai_provider_request_error("invalid Venice key"));
-        }
-        if !status.is_success() {
-            return Err(anyhow::anyhow!("Venice validation unavailable"));
-        }
-        parse_venice_rate_limits_body(&bytes)
+        venice_access_response(status, &bytes)
     }
     #[cfg(all(not(test), not(target_os = "macos")))]
     {
@@ -1197,6 +1212,45 @@ mod parse_tests {
             !super::parse_venice_rate_limits_body(br#"{"data":{"accessPermitted":false}}"#)
                 .unwrap()
         );
+    }
+
+    fn request_message(err: &anyhow::Error) -> String {
+        super::ai_provider_request_message(err)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| err.to_string())
+    }
+
+    #[test]
+    fn openrouter_key_check_rejects_key_only_on_auth_status() {
+        use reqwest::StatusCode;
+        for status in [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN] {
+            let err = super::openrouter_models_response(status, b"").unwrap_err();
+            assert_eq!(request_message(&err), "invalid OpenRouter key");
+        }
+        for body in [&b"not json"[..], br#"{"error":"busy"}"#, br#"{"data":{}}"#] {
+            let err = super::openrouter_models_response(StatusCode::OK, body).unwrap_err();
+            assert_eq!(request_message(&err), "OpenRouter validation unavailable");
+        }
+    }
+
+    #[test]
+    fn venice_key_check_rejects_key_only_on_auth_status_or_denied_access() {
+        use reqwest::StatusCode;
+        let err = super::venice_access_response(StatusCode::UNAUTHORIZED, b"").unwrap_err();
+        assert_eq!(request_message(&err), "invalid Venice key");
+        assert!(!super::venice_access_response(
+            StatusCode::OK,
+            br#"{"data":{"accessPermitted":false}}"#
+        )
+        .unwrap());
+        for body in [&b"not json"[..], br#"{"error":"busy"}"#, br#"{"data":{}}"#] {
+            let err = super::venice_access_response(StatusCode::OK, body).unwrap_err();
+            assert_eq!(request_message(&err), "Venice validation unavailable");
+        }
+        for body in [&b"not json"[..], br#"{"data":{}}"#] {
+            let err = super::parse_venice_models_body(body).unwrap_err();
+            assert_eq!(request_message(&err), "Venice validation unavailable");
+        }
     }
 
     #[test]

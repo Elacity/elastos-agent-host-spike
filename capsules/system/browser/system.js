@@ -1255,7 +1255,8 @@ function configureAiProvider() {
       });
       fillModels(Array.isArray(result.models) ? result.models : [], modelSelect.value);
     } catch (error) {
-      showState(hostedProviderValidationError(error), "error");
+      const message = hostedProviderValidationError(error);
+      showState(message, message === HOSTED_KEY_CHECK_PENDING ? "" : "error");
     } finally {
       await refreshStatus().catch(() => {});
       setBusy(false);
@@ -1291,7 +1292,7 @@ function configureAiProvider() {
       showState(activationPending
         ? "This model is saved. Activation is waiting for current model work to finish. Select Save to try again."
         : consentPending ? "Approve this connection in Inbox, then select Save again."
-        : publicSystemError(error, "This Home could not save that hosted model."), "error");
+        : publicSystemError(error, "This Home could not save that hosted model."), consentPending ? "" : "error");
     } finally {
       setBusy(false);
     }
@@ -4344,9 +4345,10 @@ function publicSystemError(value, fallback) {
   return message;
 }
 
+const HOSTED_KEY_CHECK_PENDING = "Approve this connection in Inbox, then check the key again.";
 const HOSTED_KEY_CHECK_OUTCOMES = [
   // Runtime copy: api/gateway_home_system_ai_provider.rs and gateway.rs system_error_response.
-  [/Approve this hosted connection in Inbox/, "Approve this connection in Inbox, then check the key again."],
+  [/Approve this hosted connection in Inbox/, HOSTED_KEY_CHECK_PENDING],
   [/The hosted connection request was denied\./, "This connection was denied in Inbox. Try again later."],
   [/Hosted access was denied or ended\./, "This connection was denied or ended. Review Inbox."],
   [/Hosted HTTPS was ended on this Home\./, "Hosted access was ended. Check the key again to ask in Inbox."],
