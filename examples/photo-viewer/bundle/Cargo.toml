@@ -1,0 +1,29 @@
+[package]
+name = "capsule-bundle"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# Spike-only offline tool (P4b): closure listing and CID, detached publisher
+# claim, provenance records, trust policy, and admission into a read-only
+# store staged by CID. No Runtime change.
+
+[dependencies]
+caseless = "0.2"
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+# The Runtime's canonical did:key codec, so there is one.
+elastos-identity = { path = "../../../elastos/crates/elastos-identity" }
+hex = "0.4"
+rand = "0.8"
+semver = "1.0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+# Keep this manual example outside the main ElastOS Cargo workspace.
+[workspace]
