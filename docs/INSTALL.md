@@ -189,7 +189,7 @@ Refresh-only is not sufficient for package/dependency changes: rebuild the targe
 `scripts/browser-vm-artifact-preflight.sh`, including the complete
 PipeWire/WirePlumber/GStreamer dependency set, before installation.
 
-## Set up Home on a board without a screen or passkey
+## Set up Home on a board without a passkey
 
 Home is created with a passkey, and the board needs none of its own. From a Mac
 or Windows computer, open an SSH tunnel to the board and keep it open:
@@ -202,6 +202,15 @@ Open `http://localhost:8090/home/` on that computer and create the passkey there
 (Touch ID or Windows Hello), or on a phone or security key. The passkey belongs
 to this Home at `localhost`, so sign in later through a tunnel the same way;
 using the same tunnel and address, `http://localhost:8090/home/`, is simplest.
+
+To use Home in the board's own browser, add a security key (USB) to your
+account. It must be a FIDO2 key with a PIN or fingerprint. On the computer,
+sign in through the tunnel, open System, choose Accounts and select Add passkey
+(admins only). Confirm with your current passkey, then create the new passkey
+on the security key. Then plug the key into the board, open
+`http://localhost:8090/home/` in the board's browser and select Use passkey.
+Use `localhost` there too: the key does not work at `127.0.0.1` or at the
+board's network address.
 
 ## How updates reach your Home
 
