@@ -2177,6 +2177,9 @@ class CliFixtureTests(unittest.TestCase):
         self.assertEqual(reads, [release, "/ipfs/Qmbinary", "/ipfs/Qmbinary"])
 
     def test_check_result_requires_the_system_updates_refusals_no_new_provider_warnings_and_undo(self):
+        installer_status = ("ElastOS 0.8.0-alpha.10 needs the install command once; this Home cannot apply it itself. "
+                            "Your current version is unchanged. Run this once: curl -fsSL 'https://publisher.invalid/install.sh' | bash")
+
         def result(pinned="0.8.0-alpha.8"):
             refusals = {case: {"status": "passed"} for case in observer.CLI_REFUSALS}
             return {"schema": "elastos.update-hop.result/v1", "status": "passed",
@@ -2185,14 +2188,17 @@ class CliFixtureTests(unittest.TestCase):
                     "paths": {"m1-install": {"checks": {**refusals, "initial-home": {
                         "system": {"provider_warnings": {"new": []},
                                    "published_system": {"phase": "updated", "from": pinned, "to": "0.8.0-alpha.9"},
+                                   "installer_required": {"phase": "failed", "home_kept": True, "support_unchanged": True},
                                    "stages": {"refused": {"current_version": "0.8.0-alpha.9"},
+                                              "installer-offer": {"current_version": "0.8.0-alpha.9", "changes": "Fixture unknown-kind"},
+                                              "installer-required": {"current_version": "0.8.0-alpha.9", "status": installer_status},
                                               "next-updated": {"current_version": "0.8.0-alpha.10"}}},
                         "undo": {"status": "passed", "version": pinned,
                                  "refused_plain_update": {"exit": 1}, "rollback": {"exit": 0}}}}},
                               "m2-discovery": {"checks": {**json.loads(json.dumps(refusals)), observer.CLI_INSTALLER_CASE: {"status": "passed"}}}}}
         verdict = observer.cli_check_result(result())
         self.assertEqual((verdict["from"], verdict["to"], verdict["next"]), ("0.8.0-alpha.8", "0.8.0-alpha.9", "0.8.0-alpha.10"))
-        self.assertEqual(verdict["cli_installer_required"], observer.CLI_INSTALLER_CASE)
+        self.assertEqual((verdict["cli_installer_required"], verdict["system_installer_required"]), (observer.CLI_INSTALLER_CASE,) * 2)
         # From 0.8.0-alpha.7 on, a published System installs changed support (#246), by version
         # precedence rather than text; an older pin cannot pass the journey at all.
         for pinned, installs in (("0.8.0-alpha.7", True), ("0.8.0-alpha.10", True), ("0.8.0", True),
@@ -2228,7 +2234,18 @@ class CliFixtureTests(unittest.TestCase):
                   "next release not applied": lambda value: home(value)["system"]["stages"]["next-updated"].update(current_version="0.8.0-alpha.9"),
                   "CLI refusal failed": lambda value: value["paths"]["m2-discovery"]["checks"]["wrong-platform"].update(status="failed"),
                   "install command case failed": lambda value: value["paths"]["m2-discovery"]["checks"][observer.CLI_INSTALLER_CASE].update(status="failed"),
-                  "install command case missing": lambda value: value["paths"]["m2-discovery"]["checks"].pop(observer.CLI_INSTALLER_CASE)}
+                  "install command case missing": lambda value: value["paths"]["m2-discovery"]["checks"].pop(observer.CLI_INSTALLER_CASE),
+                  "System install command offer missing": lambda value: home(value)["system"]["stages"].pop("installer-offer"),
+                  "System install command stage missing": lambda value: home(value)["system"]["stages"].pop("installer-required"),
+                  "System install command evidence missing": lambda value: home(value)["system"].pop("installer_required"),
+                  "System shows no install command": lambda value: home(value)["system"]["stages"]["installer-required"].update(
+                      status="The update could not be completed. Your current version is unchanged. Select Update again."),
+                  "System says not valid": lambda value: home(value)["system"]["stages"]["installer-required"].update(
+                      status="This update was refused because the publisher's signed release is not valid for this Home. " + installer_status),
+                  "System applied the unknown kind": lambda value: home(value)["system"]["stages"]["installer-required"].update(current_version="0.8.0-alpha.10"),
+                  "controller did not fail": lambda value: home(value)["system"]["installer_required"].update(phase="updated"),
+                  "Home restarted": lambda value: home(value)["system"]["installer_required"].update(home_kept=False),
+                  "support changed": lambda value: home(value)["system"]["installer_required"].update(support_unchanged=False)}
         for name, fault in faults.items():
             with self.subTest(fault=name), self.assertRaises(ValueError):
                 value = result()
