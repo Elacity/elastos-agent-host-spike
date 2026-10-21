@@ -573,6 +573,20 @@ pub(super) fn inbox_history(data_dir: &Path) -> anyhow::Result<Vec<HostedRouteSu
         .collect()
 }
 
+/// Ids of decisions that still carry authority; grants of any other decision are dead.
+pub(super) fn approved_ids(data_dir: &Path) -> anyhow::Result<std::collections::HashSet<String>> {
+    let file = read(data_dir)?;
+    let now = now_ms()?;
+    Ok(file
+        .decisions
+        .into_iter()
+        .filter(|decision| {
+            decision.status == DecisionStatus::Approved && decision.expires_at_ms > now
+        })
+        .map(|decision| decision.id)
+        .collect())
+}
+
 pub(super) fn active(
     data_dir: &Path,
     scope: &EgressScope,

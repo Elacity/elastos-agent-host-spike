@@ -476,6 +476,11 @@ async fn handle(
         };
         return deny_access(&mut stream, state).await;
     }
+    let _grant = RequestGrant {
+        data_dir,
+        run_id: &request.run_id,
+        request_id: &request.request_id,
+    };
     if create_grant_after_decision(
         data_dir,
         &request.offer_id,
@@ -982,8 +987,10 @@ fn create_grant_after_decision(
         .unwrap_or_else(|error| error.into_inner());
     let mut file = grant_file(data_dir)?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
-    file.grants
-        .retain(|grant| grant.active && grant.expires_at_ms > now);
+    let approved = model_provider_egress_decision::approved_ids(data_dir)?;
+    file.grants.retain(|grant| {
+        grant.active && grant.expires_at_ms > now && approved.contains(&grant.decision_id)
+    });
     if file.grants.iter().any(|grant| {
         grant.active
             && grant.decision_id == decision.id
@@ -1014,6 +1021,36 @@ fn create_grant_after_decision(
         active: true,
     });
     write_hosted_egress_grants(data_dir, &serde_json::to_vec(&file)?)
+}
+
+/// Drops the grant bound to one hosted request once that request is over.
+fn release_request_grant(data_dir: &Path, run_id: &str, request_id: &str) -> anyhow::Result<()> {
+    let _guard = EGRESS_GRANTS
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut file = grant_file(data_dir)?;
+    let before = file.grants.len();
+    file.grants.retain(|grant| {
+        grant.run_id.as_deref() != Some(run_id) || grant.request_id.as_deref() != Some(request_id)
+    });
+    if file.grants.len() == before {
+        return Ok(());
+    }
+    write_hosted_egress_grants(data_dir, &serde_json::to_vec(&file)?)
+}
+
+/// Releases a request's grant on every exit path, including cancellation.
+struct RequestGrant<'a> {
+    data_dir: &'a Path,
+    run_id: &'a str,
+    request_id: &'a str,
+}
+
+impl Drop for RequestGrant<'_> {
+    fn drop(&mut self) {
+        let _ = release_request_grant(self.data_dir, self.run_id, self.request_id);
+    }
 }
 
 fn current_grant_for(
@@ -3243,6 +3280,233 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_str(captured.split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body["messages"], messages);
+        sink_task.abort();
+        bridge.shutdown().await.unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn grant_count(data_dir: &Path) -> usize {
+        grant_file(data_dir).unwrap().grants.len()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hosted_request_grants_end_with_their_request_and_never_fill_up() {
+        use elastos_model_contract::{
+            model_input_hash, model_run_id, RuntimeCreateBinding, RUNTIME_CREATE_BINDING_SCHEMA,
+        };
+        use elastos_runtime::provider::bridge::{
+            ProviderConfig, ProviderRequest, ProviderResponse,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let proof = admin_proof(dir.path());
+        let sink = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = sink.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}/openrouter/api/v1/chat/completions");
+        let offer_id = "model:hosted-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let input = json!({"schema":elastos_model_contract::TEXT_INPUT_V1_SCHEMA,"prompt":"hello"});
+        let body = json!({"model":"fixture/model","stream":true,"max_tokens":32,
+            "messages":[{"role":"user","content":"hello"}]});
+        super::super::model_provider_config::seed_model_provider_operator_offers_for_test(
+            dir.path(),
+            vec![json!({
+                "id":offer_id,"title":"Fixture","operation":"text.generate",
+                "input_modalities":["text/plain"],"output_modalities":["text/plain"],"enabled":true,
+                "policy":{"inline_output_bytes_limit":128},
+                "adapter":{
+                    "kind":"open_ai_compatible_text",
+                    "api_url":"https://openrouter.ai/api/v1/chat/completions",
+                    "api_key":"fixture-secret","model":"fixture/model",
+                    "hosted":{
+                        "backend_provider_label":"OpenRouter","selection_mode":"pinned",
+                        "privacy_policy_ref":"fixture:privacy:v1","terms_ref":"fixture:terms:v1",
+                        "upstream_routing_fallback_assertion":"operator_asserted_disabled"
+                    }
+                }
+            })],
+        )
+        .unwrap();
+        write_private(
+            &dir.path()
+                .join("providers/model-provider/validate-fixtures.json"),
+            json!({
+                "openrouter_models_url":format!("http://127.0.0.1:{port}/models"),
+                "venice_rate_limits_url":format!("http://127.0.0.1:{port}/limits"),
+                "venice_models_url":format!("http://127.0.0.1:{port}/venice-models"),
+                "openrouter_chat_url":url,
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let seed_run = format!("run:sha256:{}", "b".repeat(64));
+        let template = EffectRequest {
+            offer_id: offer_id.into(),
+            effect: "text".into(),
+            run_id: seed_run.clone(),
+            request_id: "seed-request".into(),
+            job_id: None,
+            method: reqwest::Method::POST,
+            body: serde_json::to_vec(&body).unwrap(),
+        };
+        let destination = resolve_effect(dir.path(), &template).unwrap();
+        let first_decision = approve_fixture(
+            dir.path(),
+            offer_id,
+            "text",
+            "POST",
+            &destination,
+            &proof,
+            Some((&seed_run, "seed-request")),
+        );
+        assert_eq!(grant_count(dir.path()), 1);
+
+        let base = dir.path().canonicalize().unwrap();
+        let source = base.join("hosted-effect-probe.c");
+        fs::write(
+            &source,
+            include_str!("../../tests/fixtures/hosted_effect_probe.c"),
+        )
+        .unwrap();
+        let script = base.join("hosted-effect-probe");
+        assert!(std::process::Command::new("/usr/bin/clang")
+            .args(["-O2", "-Wall", "-Wextra", "-o"])
+            .arg(&script)
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success());
+        let config = ProviderConfig {
+            base_path: base.to_string_lossy().into_owned(),
+            extra: json!({"offers":[], "journal_dir":base.join("providers/model-provider/journal")}),
+            ..Default::default()
+        };
+        let (bridge, _, _, confined_config, hosted_listener) =
+            ProviderBridge::spawn_confined_model(&script, config)
+                .await
+                .unwrap();
+        let bridge = Arc::new(bridge);
+        start(hosted_listener, bridge.clone(), dir.path().to_path_buf()).unwrap();
+        let sink_task = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = sink.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut bytes = Vec::new();
+                    loop {
+                        let mut chunk = [0u8; 1024];
+                        let count = socket.read(&mut chunk).await.unwrap_or(0);
+                        if count == 0 {
+                            return;
+                        }
+                        bytes.extend_from_slice(&chunk[..count]);
+                        if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&bytes[..end]);
+                            let length: usize = headers
+                                .lines()
+                                .find_map(|line| {
+                                    line.to_ascii_lowercase()
+                                        .strip_prefix("content-length: ")
+                                        .and_then(|v| v.parse().ok())
+                                })
+                                .unwrap_or(0);
+                            if bytes.len() >= end + 4 + length {
+                                break;
+                            }
+                        }
+                    }
+                    let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await;
+                });
+            }
+        });
+        let hosted_socket = confined_config.extra["runtime_hosted_socket"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let data_dir = dir.path().to_path_buf();
+        let run_once = |index: usize| {
+            let bridge = bridge.clone();
+            let hosted_socket = hosted_socket.clone();
+            let input = input.clone();
+            let body = body.clone();
+            let data_dir = data_dir.clone();
+            async move {
+                let request_id = format!("grant-request-{index}");
+                let binding = RuntimeCreateBinding {
+                    schema: RUNTIME_CREATE_BINDING_SCHEMA.into(),
+                    principal_id: "principal:fixture".into(),
+                    session_id: "session:fixture".into(),
+                    capsule_id: "assistant".into(),
+                    grant_id: "grant:fixture".into(),
+                    request_id: request_id.clone(),
+                    offer_id: offer_id.into(),
+                    operation: "text.generate".into(),
+                    input_hash: model_input_hash(&input).unwrap(),
+                };
+                let run_id = model_run_id(&binding);
+                bridge
+                    .send_raw(&json!({"op":"runs_create","offer_id":offer_id,
+                    "operation":"text.generate","input":input,"runtime_binding":binding}))
+                    .await
+                    .unwrap();
+                let response = bridge
+                    .request(ProviderRequest::Exists {
+                        path: format!(
+                            "{hosted_socket}|{offer_id}|{run_id}|{request_id}|{}",
+                            hex::encode(serde_json::to_vec(&body).unwrap())
+                        ),
+                        token: String::new(),
+                    })
+                    .await
+                    .unwrap();
+                let ProviderResponse::Ok { data: Some(data) } = response else {
+                    panic!("missing hosted response for request {index}")
+                };
+                assert_eq!(
+                    data["http_status"], "HTTP/1.1 200 OK",
+                    "hosted request {index}"
+                );
+                for _ in 0..100 {
+                    let file = grant_file(&data_dir).unwrap();
+                    if !file
+                        .grants
+                        .iter()
+                        .any(|grant| grant.request_id.as_deref() == Some(request_id.as_str()))
+                    {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                panic!("finished hosted request {index} left its grant behind");
+            }
+        };
+
+        for index in 0..MAX_GRANTS + 1 {
+            run_once(index).await;
+        }
+        assert_eq!(grant_count(dir.path()), 1, "only the seed grant remains");
+
+        model_provider_egress_decision::end_decision(dir.path(), &first_decision, &proof).unwrap();
+        // An ended request blocks a new one for the same route until it lapses;
+        // age it out so the owner can approve again.
+        let decisions = dir
+            .path()
+            .join("providers/model-provider/egress-decisions.json");
+        let mut file: serde_json::Value =
+            serde_json::from_slice(&fs::read(&decisions).unwrap()).unwrap();
+        for decision in file["decisions"].as_array_mut().unwrap() {
+            decision["expires_at_ms"] = json!(1);
+        }
+        fs::remove_file(&decisions).unwrap();
+        write_private(&decisions, file.to_string().as_bytes());
+        let scope = egress_scope(offer_id, "text", "POST", &destination).unwrap();
+        let second = model_provider_egress_decision::request(dir.path(), &scope, None).unwrap();
+        model_provider_egress_decision::approve(dir.path(), &second, &proof).unwrap();
+        run_once(MAX_GRANTS + 1).await;
+        assert_eq!(
+            grant_count(dir.path()),
+            0,
+            "grants of the ended approval are pruned"
+        );
         sink_task.abort();
         bridge.shutdown().await.unwrap();
     }
