@@ -92,7 +92,8 @@ CASES = [
         "fuel is not refilled at each tick",
         "host/src/run.rs",
         [("        context.set_fuel(fuel)?;\n", "")],
-        [("lifecycle", "a_busy_guest_that_yields_each_slice_can_still_be_cancelled")],
+        [("lifecycle", "a_busy_guest_that_yields_each_slice_can_still_be_cancelled"),
+         ("fairness", "a_busy_guest_does_not_starve_a_second_guest")],
     ),
     (
         "a running guest does not yield by fuel",
