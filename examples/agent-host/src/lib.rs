@@ -14181,4 +14181,23 @@ mod tests {
         let row = current_observation(&journal.events, NOTES).unwrap();
         assert_eq!((row.version, row.revision.as_deref()), (4, Some("rev-new")));
     }
+
+    /// Only the current version's lines count: lines of an older version are
+    /// never seen at a newer one, with or without revisions.
+    #[test]
+    fn an_older_version_line_is_not_seen_at_the_newer_version() {
+        let mut journal = empty_journal();
+        assert!(observe(&mut journal, NOTES, 1, "alpha\nbeta\n"));
+        assert!(observe(&mut journal, NOTES, 2, "gamma\n"));
+        assert_eq!(
+            propose_edit(&mut journal, NOTES, "beta", "b", Some(2)),
+            Err("not unique")
+        );
+        assert_eq!(seen_lines(&journal.events, NOTES, 1), None);
+        assert_eq!(seen_runs(&journal.events, NOTES, 1), None);
+        assert_eq!(
+            seen_runs(&journal.events, NOTES, 2),
+            Some(vec![(1, "gamma\n".to_string())])
+        );
+    }
 }
