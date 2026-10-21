@@ -953,9 +953,9 @@ assert(
 
 {
   // Every Inbox request that waits for an answer raises Home's notification
-  // once, when it first appears, not only wallet approvals. Requests other
-  // people start carry text they chose, so their toast shows fixed text and
-  // Inbox shows the details.
+  // once, when it first appears, not only wallet approvals. The toast shows
+  // fixed words for the kind, never the request's own text, which apps,
+  // pages and other people choose parts of; Inbox shows the details.
   const toast = elementForSelector("#home-notification-toast");
   const title = elementForSelector("#home-notification-title");
   const body = elementForSelector("#home-notification-body");
@@ -967,30 +967,26 @@ assert(
   const withEntries = (entries) => ({ notifications: { entries }, targets });
   const fixedBody = "A request waits for your answer in Inbox.";
   const kinds = [
-    ["hosted_route_decision", "external-http-request:model-egress-1", "model-egress-approve:model-egress-1"],
-    ["capability_request", "capability-request:1", "capability-approve-request:1"],
-    ["inspect_action_request", "inspect-action-request:1", "inspect-approve-request:1"],
-    ["external_http_request", "external-http-request:price-1", "wallet-price-http-approve:price-1"],
+    ["hosted_route_decision", "external-http-request:model-egress-1", "model-egress-approve:model-egress-1", "Hosted model access request"],
+    ["capability_request", "capability-request:1", "capability-approve-request:1", "Capability request"],
+    ["inspect_action_request", "inspect-action-request:1", "inspect-approve-request:1", "Runtime action request"],
+    ["external_http_request", "external-http-request:price-1", "wallet-price-http-approve:price-1", "Internet access request"],
     ["contact_request", "contact-request:1", "contact-accept-request:1", "Contact request"],
     ["room_access_request", "room-access-request:1", "room-approve-request:1", "Room access request"],
     ["service_access_request", "service-access-request:1", "service-approve-request:1", "Service access request"],
-    ["community_presence_request", "community-presence-request:1", "community-presence-always:1"],
-    ["wallet_approval_request", "wallet-approval-request:1", "wallet-approve-request:1"],
+    ["community_presence_request", "community-presence-request:1", "community-presence-always:1", "Community presence request"],
+    ["wallet_approval_request", "wallet-approval-request:1", "wallet-approve-request:1", "Wallet approval request"],
   ];
   const before = withEntries([]);
   for (const [kind, id, action, fixedTitle] of kinds) {
     toast.hidden = true;
     title.textContent = "";
     body.textContent = "";
-    const entry = request(kind, id, action);
-    const after = withEntries([entry]);
+    const after = withEntries([request(kind, id, action)]);
     shellSurface.maybeShowInboxRequestToast(before, after);
-    const expected = fixedTitle
-      ? { title: fixedTitle, body: fixedBody }
-      : { title: entry.title, body: entry.body };
-    assert(toast.hidden === false && title.textContent === expected.title && body.textContent === expected.body,
-      `Home did not raise the expected notification for a new ${kind}`,
-      { kind, hidden: toast.hidden, title: title.textContent, body: body.textContent, expected });
+    assert(toast.hidden === false && title.textContent === fixedTitle && body.textContent === fixedBody,
+      `Home did not raise its fixed notification for a new ${kind}`,
+      { kind, hidden: toast.hidden, title: title.textContent, body: body.textContent, fixedTitle });
     toast.hidden = true;
     shellSurface.maybeShowInboxRequestToast(after, after);
     assert(toast.hidden === true, `Home raised its notification again for the same ${kind}`, { kind });

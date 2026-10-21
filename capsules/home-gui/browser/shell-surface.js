@@ -2576,39 +2576,23 @@ export function renderInboxBadge(summary) {
   );
 }
 
-/* The Inbox requests that wait for the person's answer. Each one raises the
-   toast once, when it first appears; answering removes it from the summary. */
-const INBOX_REQUEST_KINDS = new Set([
-  "wallet_approval_request",
-  "capability_request",
-  "inspect_action_request",
-  "external_http_request",
-  "hosted_route_decision",
-  "contact_request",
-  "room_access_request",
-  "service_access_request",
-  "community_presence_request",
-]);
-
-/* Requests other people start carry text they chose (their display name),
-   so the toast shows fixed words and Inbox shows the details. */
-const OTHER_PERSON_REQUEST_TITLES = new Map([
+/* The Inbox requests that wait for the person's answer, each with its fixed
+   toast title. Each one raises the toast once, when it first appears;
+   answering removes it from the summary. The toast never shows the request's
+   own title or body, since apps, pages and other people choose parts of that
+   text; Inbox shows the details. */
+const INBOX_REQUEST_TOAST_TITLES = new Map([
+  ["wallet_approval_request", "Wallet approval request"],
+  ["capability_request", "Capability request"],
+  ["inspect_action_request", "Runtime action request"],
+  ["external_http_request", "Internet access request"],
+  ["hosted_route_decision", "Hosted model access request"],
   ["contact_request", "Contact request"],
   ["room_access_request", "Room access request"],
   ["service_access_request", "Service access request"],
+  ["community_presence_request", "Community presence request"],
 ]);
-const INBOX_REQUEST_FIXED_BODY = "A request waits for your answer in Inbox.";
-
-function homeNotificationToastCopy(entry) {
-  const fixedTitle = OTHER_PERSON_REQUEST_TITLES.get(entry.kind);
-  if (fixedTitle) {
-    return { title: fixedTitle, body: INBOX_REQUEST_FIXED_BODY };
-  }
-  return {
-    title: entry.title || "Inbox request",
-    body: entry.body || INBOX_REQUEST_FIXED_BODY,
-  };
-}
+const INBOX_REQUEST_TOAST_BODY = "A request waits for your answer in Inbox.";
 
 export function maybeShowInboxRequestToast(previousSummary, summary) {
   if (!previousSummary || !targetById(summary, "inbox")) {
@@ -2630,7 +2614,7 @@ function inboxRequestEntries(summary) {
   const entries = Array.isArray(summary?.notifications?.entries)
     ? summary.notifications.entries
     : [];
-  return entries.filter((entry) => INBOX_REQUEST_KINDS.has(entry?.kind)
+  return entries.filter((entry) => INBOX_REQUEST_TOAST_TITLES.has(entry?.kind)
     && entry?.read !== true
     && typeof entry?.action_ref?.action_id === "string");
 }
@@ -2656,9 +2640,8 @@ function showHomeNotificationToast(entry) {
   }
   bindHomeNotificationToast();
   lastHomeNotificationToastId = inboxRequestKey(entry);
-  const copy = homeNotificationToastCopy(entry);
-  homeNotificationTitle.textContent = copy.title;
-  homeNotificationBody.textContent = copy.body;
+  homeNotificationTitle.textContent = INBOX_REQUEST_TOAST_TITLES.get(entry.kind);
+  homeNotificationBody.textContent = INBOX_REQUEST_TOAST_BODY;
   homeNotificationAction.hidden = false;
   homeNotificationAction.textContent = "Review";
   setOverlayOpen(homeNotificationToast, true);
