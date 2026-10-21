@@ -140,3 +140,19 @@ F17 scaffold with no text                         -> same FAILED
 1. Sasha's answer on the launch grant channel and the read grant (PR #9, questions 1 and 2).
 2. The GPT-family review of PR #8, PR #9, and this PR.
 3. If this PR passes, the guard sweep's gap list is closed except for the four unreachable refusals above.
+
+## Update: spike/agent-host merged in (21 Oct)
+
+Merge `c87c972` of spike/agent-host at `0ee4f24` (S3: #8, #9, #19, #20). One conflict, in handoff/LOG.md: both sides
+kept, ordered by date and then by the time each line was committed. `examples/agent-host/src/lib.rs` merged without
+conflict.
+
+```text
+Tests run:    export RUST_TEST_THREADS=2
+              ./examples/agent-host/verify.sh -> "121 passed" (108 on spike/agent-host + this PR's 13), clippy clean, OK
+              ./examples/agent-host/run-local.sh -> "1 passed"
+              (cd elastos && cargo test -p elastos-compute --lib -- --include-ignored) -> "21 passed"
+              (cd elastos && cargo clippy -p elastos-compute --all-targets -- -D warnings) -> clean
+Guest hash:   70a95319c4996f6a7607f4ad02380c19d861d0d5107d0a286e8d6f334b1d52a3, the same as spike/agent-host: this PR
+              adds tests only, and tests are not in the wasm32 build.
+```
