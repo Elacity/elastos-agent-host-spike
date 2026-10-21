@@ -117,8 +117,12 @@ try {
         else if (url.pathname === "/api/capsules/interfaces") body = {interfaces:[]};
         else if (url.pathname === "/api/provider/chain/networks") body = {status:'ok', data:{networks:[]}};
         else if (url.pathname === "/api/apps/system/ai-provider") body = {connections:[]};
-        else if (url.pathname === "/api/apps/system/community") body = {configured:false, joined:false};
-        else if (url.pathname === "/api/apps/system/community/presence") body = {joined:false};
+        // An unconfigured Home: gateway_home_system.rs system_community_membership_summary
+        // and gateway_collaboration_presence.rs community_presence_response.
+        else if (url.pathname === "/api/apps/system/community") body = {schema:'elastos.community-membership/v1',
+          configured:false, joined:false, detail:'Community is not configured on this Home.'};
+        else if (url.pathname === "/api/apps/system/community/presence") body = {schema:'elastos.community-presence/v1',
+          configured:false, joined:false, community_presence:null};
         else throw Error(`unexpected fixture API: ${url.pathname}`);
         return route.fulfill({ headers, json:body });
       }
