@@ -7430,6 +7430,295 @@ export!(AgentHost);
 mod tests {
     use super::*;
 
+    // Sweep gaps (reports/guard-sweep.md): the child and grant checks.
+
+    #[test]
+    fn a_child_grant_needs_a_child_step() {
+        let mut journal = two_turns();
+        let read = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
+        assert!(!authorize_child(&mut journal, read, Some("child-grant")));
+        assert_eq!(step_state(&journal, read), Some(StepState::Prepared));
+        assert!(journal.steps.iter().all(|step| step.grant.is_none()));
+        assert!(!authorize_child(&mut journal, 99, Some("child-grant")));
+    }
+
+    #[test]
+    fn only_an_earlier_run_holds_a_later_run() {
+        let project = "localhost://Users/self/Projects/demo";
+        let mut journal = two_turns();
+        let run = propose_run(&mut journal, project, &[]).unwrap();
+        assert!(authorize(&mut journal, run, Some("run-grant")));
+        assert!(dispatch(&mut journal, run));
+        let read = propose_read(&mut journal, project);
+        assert!(authorize(&mut journal, read, Some("read-grant")));
+        assert!(dispatch(&mut journal, read));
+        let again = propose_run(&mut journal, project, &[]).unwrap();
+        assert!(authorize(&mut journal, again, Some("run-grant-2")));
+        assert!(!dispatch(&mut journal, again));
+    }
+
+    #[test]
+    fn an_empty_grant_string_cannot_ask_for_a_write() {
+        let note = "localhost://Users/self/Projects/demo/notes.txt";
+        let mut journal = two_turns();
+        assert!(observe(&mut journal, note, 1, "hello"));
+        let edit = propose_edit(&mut journal, note, "hello", "hi", Some(1)).unwrap();
+        journal.steps[edit as usize - 1].grant = Some("write-grant".to_string());
+        assert!(provider_write_may_be_asked(&journal, edit, 1));
+        journal.steps[edit as usize - 1].grant = Some(String::new());
+        assert!(!provider_write_may_be_asked(&journal, edit, 1));
+    }
+
+    #[test]
+    fn an_edit_at_the_last_version_number_is_denied_and_not_recorded() {
+        let note = "localhost://Users/self/Projects/demo/notes.txt";
+        let mut journal = two_turns();
+        assert!(observe(&mut journal, note, u64::MAX, "hello"));
+        let edit = propose_edit(&mut journal, note, "hello", "hi", Some(u64::MAX)).unwrap();
+        assert!(authorize(&mut journal, edit, Some("write-grant")));
+        assert!(dispatch(&mut journal, edit));
+        let events = journal.events.len();
+        assert!(!note_provider_wrote(&mut journal, edit));
+        assert_eq!(step_state(&journal, edit), Some(StepState::Denied));
+        assert_eq!(journal.events.len(), events);
+        assert_eq!(
+            current_observed_text(&journal.events, note).as_deref(),
+            Some("hello")
+        );
+    }
+
+    // Sweep gaps: the S2 decoder's tag and length refusals, with every link recomputed.
+
+    #[test]
+    fn a_relinked_journal_with_an_unknown_tag_or_spare_bytes_is_refused() {
+        let mut journal = two_turns();
+        let turn = open_turn(&mut journal);
+        open_step(&mut journal, turn).unwrap();
+        let bytes = encode_journal(&journal, &[0; 32]).unwrap();
+        let (header, records) = journal_records(&bytes);
+        assert_eq!(relinked(header.clone(), &records), bytes);
+        let at = |tag: u8| records.iter().position(|(t, _)| *t == tag).unwrap();
+        let (node, step, turn) = (at(1), at(3), at(4));
+        // Node payload: role at 0, source at 1. Step payload: state at 8, kind at 9.
+        for (record, offset) in [(node, 0), (node, 1), (step, 8), (step, 9)] {
+            for value in [0u8, 99] {
+                let mut bad = records.clone();
+                bad[record].1[offset] = value;
+                assert_eq!(
+                    decode_journal(&relinked(header.clone(), &bad)).unwrap_err(),
+                    "record",
+                    "record {record} offset {offset} value {value}"
+                );
+            }
+        }
+        for record in [node, step, turn] {
+            let mut spare = records.clone();
+            spare[record].1.push(0);
+            assert_eq!(
+                decode_journal(&relinked(header.clone(), &spare)).unwrap_err(),
+                "record",
+                "record {record}"
+            );
+        }
+    }
+
+    // Sweep gaps: the journal fold rules.
+
+    /// A journal whose first line is a person's, not the system head.
+    fn headless() -> Journal {
+        let mut journal = empty_journal();
+        admit_user(&mut journal, "hello");
+        journal
+    }
+
+    #[test]
+    fn records_skills_and_snapshots_need_the_system_head_first() {
+        let mut journal = headless();
+        let before = journal.clone();
+        assert!(!record_visible(
+            &mut journal,
+            VisibleRecord::Goal,
+            "ship it"
+        ));
+        assert!(!admit_skill(&mut journal, "Prefer the Runtime grant."));
+        assert!(!admit_snapshot(
+            &mut journal,
+            "localhost://Users/self/Projects/demo",
+            "2026-10-20T01:00:00Z",
+            ""
+        ));
+        assert_eq!(journal, before);
+        assert_eq!(shadowed_summary_input(&journal), None);
+    }
+
+    #[test]
+    fn a_spill_pointer_on_a_headless_journal_records_no_result() {
+        let notes = "localhost://Users/self/Projects/demo/notes.txt";
+        let mut journal = headless();
+        assert!(observe(&mut journal, notes, 1, "hello from the project"));
+        let id = propose_run(
+            &mut journal,
+            "localhost://Users/self/Projects/demo",
+            &["note".to_string()],
+        )
+        .unwrap();
+        assert!(authorize(&mut journal, id, Some("fixture-grant")));
+        assert!(dispatch(&mut journal, id));
+        let before = journal.clone();
+        assert!(!spill_pointer(&mut journal, id, notes));
+        assert_eq!(journal, before);
+    }
+
+    #[test]
+    fn only_a_person_spill_line_points_at_a_version() {
+        let notes = "localhost://Users/self/Projects/demo/notes.txt";
+        let mut journal = two_turns();
+        assert!(observe(&mut journal, notes, 1, "hello from the project"));
+        assert!(admit_skill(&mut journal, &format!("spill\n{notes}\n1")));
+        assert_eq!(text_at_spill(&journal.events, notes), None);
+        assert!(record_visible(
+            &mut journal,
+            VisibleRecord::SpillPointer,
+            &format!("{notes}\n1")
+        ));
+        assert_eq!(
+            text_at_spill(&journal.events, notes).as_deref(),
+            Some("hello from the project")
+        );
+    }
+
+    #[test]
+    fn a_compaction_that_is_not_open_is_neither_committed_nor_rolled_back() {
+        let mut journal = two_turns();
+        journal.compact_pending = Some(vec![journal.events[0].clone()]);
+        journal.compact_backup = Some((Vec::new(), 7));
+        let before = journal.clone();
+        assert!(!commit_compact(&mut journal));
+        assert_eq!(journal, before);
+        assert!(!note_crash_during_compact(&mut journal));
+        assert_eq!(journal, before);
+    }
+
+    #[test]
+    fn only_a_well_formed_observation_counts_as_a_read() {
+        let notes = "localhost://Users/self/Projects/demo/notes.txt";
+        let mut journal = two_turns();
+        admit_user(
+            &mut journal,
+            &observation_record(notes, 1, "typed by a person"),
+        );
+        assert_eq!(current_observation(&journal.events, notes), None);
+        assert_eq!(
+            propose_edit(&mut journal, notes, "typed", "said", Some(1)),
+            Err("not observed")
+        );
+
+        let record = observation_record("", 1, "no resource");
+        journal.events.push(SurfaceNode {
+            role: Role::User,
+            text: record,
+            source: NodeSource::Observation,
+        });
+        assert_eq!(current_observation(&journal.events, ""), None);
+
+        let forged = observation_record(notes, 2, "the text that was read")
+            .replace("the text that was read", "other text");
+        journal.events.push(SurfaceNode {
+            role: Role::User,
+            text: forged,
+            source: NodeSource::Observation,
+        });
+        assert_eq!(current_observation(&journal.events, notes), None);
+        let full = observation_record(notes, 4, "short");
+        let short_hash = format!("4 {} {notes}\nshort", &full[2..64]);
+        journal.events.push(SurfaceNode {
+            role: Role::User,
+            text: short_hash,
+            source: NodeSource::Observation,
+        });
+        assert_eq!(current_observation(&journal.events, notes), None);
+        assert!(observe(&mut journal, notes, 3, "real"));
+        assert_eq!(
+            current_observation(&journal.events, notes).unwrap().version,
+            3
+        );
+    }
+
+    #[test]
+    fn a_step_on_an_unknown_turn_adds_nothing() {
+        let mut journal = two_turns();
+        let before = journal.clone();
+        assert_eq!(open_step(&mut journal, 99), None);
+        assert_eq!(journal, before);
+    }
+
+    #[test]
+    fn project_files_and_quoted_lines_refuse_odd_names() {
+        let project = "localhost://Users/self/Projects/demo";
+        let mut journal = two_turns();
+        assert!(observe(
+            &mut journal,
+            &format!("{project}/a/b"),
+            1,
+            "nested"
+        ));
+        assert!(!quoted_files_match(
+            &journal.events,
+            project,
+            "project file a/b"
+        ));
+        assert!(observe(&mut journal, &format!("{project}/"), 1, "x"));
+        assert_eq!(observed_project_files(&journal.events, project), None);
+
+        let notes = format!("{project}/notes.txt");
+        let mut noted = two_turns();
+        assert!(observe(&mut noted, &notes, 1, "/tmp/secret"));
+        assert!(!quoted_note_matches(
+            &noted.events,
+            project,
+            "project note /tmp/secret"
+        ));
+        assert!(observe(&mut noted, &notes, 2, ""));
+        assert!(!quoted_note_matches(
+            &noted.events,
+            project,
+            "project note "
+        ));
+        assert!(observe(&mut noted, &notes, 3, "hello"));
+        assert!(quoted_note_matches(
+            &noted.events,
+            project,
+            "project note hello"
+        ));
+    }
+
+    #[test]
+    fn a_scaffold_needs_an_init_project_and_text() {
+        let mut journal = empty_journal();
+        let project = propose_init(&mut journal, "self", "demo").unwrap();
+        let read = propose_read(&mut journal, "localhost://Users/self/Projects/demo");
+        let file = "localhost://Users/self/Projects/demo/index.html";
+        assert!(observe(&mut journal, file, 1, ""));
+        assert_eq!(
+            propose_scaffold(&mut journal, read, "index.html", "<h1>demo</h1>", Some(1)),
+            Err("no project")
+        );
+        assert_eq!(
+            propose_scaffold(&mut journal, project, "index.html", "", Some(1)),
+            Err("empty")
+        );
+        let steps = journal.steps.len();
+        assert!(propose_scaffold(
+            &mut journal,
+            project,
+            "index.html",
+            "<h1>demo</h1>",
+            Some(1)
+        )
+        .is_ok());
+        assert_eq!(journal.steps.len(), steps + 1);
+    }
+
     #[test]
     fn open_turn_returns_a_turn_id_and_leaves_the_epoch() {
         let mut journal = empty_journal();

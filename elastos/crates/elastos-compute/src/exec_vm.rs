@@ -786,4 +786,156 @@ mod tests {
             Err("host path")
         );
     }
+
+    /// Counts launches. It answers with a clean exit, so a launch that should
+    /// not have happened would look like a success.
+    struct CountingLauncher {
+        launches: usize,
+    }
+
+    impl ExecLauncher for CountingLauncher {
+        fn launch(
+            &mut self,
+            _adapter: ExecAdapter,
+            _rootfs: &Path,
+            _command: ExecCommand,
+        ) -> Result<String, String> {
+            self.launches += 1;
+            Ok("must not run\nelastos-exec-exit 0".into())
+        }
+    }
+
+    #[test]
+    fn begin_exec_obeys_every_refused_decision_before_the_launcher() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let image = ext4_image(&dir);
+        let absent = dir.path().join("rootfs-missing").join("rootfs.ext4");
+        let mut launcher = CountingLauncher { launches: 0 };
+
+        let mut cancelled = ready(&image, Some("grant-1"), ExecHost::Macos);
+        cancelled.cancelled = true;
+        let mut host_workspace = ready(&image, Some("grant-1"), ExecHost::Macos);
+        host_workspace.workspace = "/tmp/demo";
+        let mut host_argv = ready(&image, Some("grant-1"), ExecHost::Macos);
+        host_argv.argv = &["vm-smoke", "../tests::project_is_ready"];
+        let mut missing = ready(&image, Some("grant-1"), ExecHost::Macos);
+        missing.rootfs = &absent;
+        for (request, reason) in [
+            (ready(&image, None, ExecHost::Macos), "missing grant"),
+            (ready(&image, Some(""), ExecHost::Linux), "missing grant"),
+            (cancelled, "cancelled"),
+            (host_workspace, "host path"),
+            (host_argv, "host path"),
+            (missing, "rootfs missing"),
+            (
+                ready(&image, Some("grant-1"), ExecHost::Other),
+                "unsupported host",
+            ),
+        ] {
+            assert_eq!(decide_exec(&request), ExecDecision::Refuse(reason));
+            assert_eq!(begin_exec(&request, &mut launcher), Err(reason));
+        }
+        assert_eq!(launcher.launches, 0);
+
+        assert!(begin_exec(
+            &ready(&image, Some("grant-1"), ExecHost::Linux),
+            &mut launcher
+        )
+        .is_ok());
+        assert_eq!(launcher.launches, 1);
+    }
+
+    #[test]
+    fn a_project_workspace_must_be_a_users_project() {
+        let files = [("index.html", "<h1>demo</h1>")];
+        assert!(admit_project_files("localhost://Users/self/Projects/demo", &files).is_ok());
+        for workspace in [
+            "localhost://Shared/Projects/demo",
+            "localhost://UsersAI/self/Projects/demo",
+            "localhost://Users/self/demo",
+            "localhost://Users/self/Documents/demo",
+            "localhost://Users//Projects/demo",
+            "localhost://Users/self/Projects/",
+            "localhost://Users/a/b/Projects/demo",
+            "localhost://Users/self/Projects/demo/src",
+            "localhost://Users/self/Projects/my demo",
+            "localhost://Users/../Projects/demo",
+        ] {
+            assert_eq!(
+                admit_project_files(workspace, &files),
+                Err("host path"),
+                "{workspace}"
+            );
+        }
+        assert_eq!(
+            admit_project_files("localhost://Users/self/Projects/demo", &[]),
+            Err("host path")
+        );
+        for path in [
+            "",
+            "src//main.rs",
+            "./index.html",
+            "src/../index.html",
+            "my file",
+        ] {
+            assert_eq!(
+                admit_project_files("localhost://Users/self/Projects/demo", &[(path, "text")]),
+                Err("host path"),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_boot_image_needs_a_whole_kernel_a_readable_ext4_rootfs_and_a_known_host() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let kernel = elf_kernel_file(&dir);
+        let exec_disk = ext4_image(&dir);
+        assert_eq!(
+            admit_boot_image(ExecHost::Other, &kernel, &exec_disk),
+            Err("unsupported host")
+        );
+
+        let short_kernel = dir.path().join("short-vmlinux");
+        std::fs::write(&short_kernel, [0x7f, b'E', b'L', b'F']).expect("short kernel");
+        assert_eq!(
+            admit_boot_image(ExecHost::Linux, &short_kernel, &exec_disk),
+            Err("kernel missing")
+        );
+
+        let plain = dir.path().join("plain").join("rootfs.ext4");
+        std::fs::create_dir_all(plain.parent().unwrap()).expect("plain dir");
+        std::fs::write(&plain, vec![0_u8; EXT4_MAGIC_OFFSET + 2]).expect("plain disk");
+        let short = dir.path().join("short").join("rootfs.ext4");
+        std::fs::create_dir_all(short.parent().unwrap()).expect("short dir");
+        std::fs::write(&short, vec![0_u8; 16]).expect("short disk");
+        let unreadable = dir.path().join("absent").join("rootfs.ext4");
+        for rootfs in [&plain, &short, &unreadable] {
+            assert_eq!(
+                admit_boot_image(ExecHost::Linux, &kernel, rootfs),
+                Err("rootfs not bootable"),
+                "{rootfs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_edit_needs_old_text_that_occurs_exactly_once() {
+        let edit = |current: &str, old: &str| {
+            perform_edit(
+                Some("grant-1"),
+                "localhost://Users/self/Projects/demo/style.css",
+                1,
+                1,
+                current,
+                old,
+                "h1{}",
+            )
+        };
+        assert_eq!(edit("body{}", "body{}"), Ok("h1{}".to_string()));
+        assert_eq!(edit("body{}", ""), Err("not unique"));
+        assert_eq!(edit("", ""), Err("not unique"));
+        assert_eq!(edit("body{} body{}", "body{}"), Err("not unique"));
+        assert_eq!(edit("body{}", "p{}"), Err("not unique"));
+    }
 }
