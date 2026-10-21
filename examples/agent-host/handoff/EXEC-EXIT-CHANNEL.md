@@ -1,0 +1,85 @@
+# Exec exit code from a channel the command cannot write (design note)
+
+Written 21 Oct 2026. Spike-only code: `exec_vm.rs` and its use in `concurrent_launch.rs` came in with spike commit
+`bb64eee`; neither is in Elacity develop (`3beb816`). Rules from Sasha, 21 Oct.
+
+## The problem
+
+`elastos-compute/src/exec_vm.rs` (`parse_exec_console`) takes the exit code from any console line that starts with
+`elastos-exec-exit `. The command's own stdout and stderr go to the same console.
+- A command that prints `elastos-exec-exit 0`, then dies or is killed before init prints the real line, is
+  reported as exit 0.
+- Two different codes are refused, but a single forged one is accepted.
+- The VM test harness (`elastos-vz/tests/concurrent_launch.rs`, `boot_exec_command`) stops the VM at the first such
+  console line. So an early forged line also ends the run before the real result exists.
+
+## Rules
+
+1. The exit code comes **only** from a channel the command cannot write to. The console is log, and nothing is ever
+   parsed out of it. No nonce in console text: the command could read it.
+2. No report on that channel means failure, reason `exit marker missing`. Never fall back to the console.
+3. The harness waits for, and stops on, that channel only.
+
+## The channel: a reserved vsock port held by init
+
+- **Guest (init in the exec image), in this order:**
+  1. As root, before the command starts, bind and listen on vsock port `EXEC_EXIT_PORT = 1022`.
+     - Linux reserves vsock ports below 1024 for a process with `CAP_NET_BIND_SERVICE` (`af_vsock.c`,
+       `LAST_RESERVED_PORT`).
+     - Once init holds the port, nothing else can bind it.
+  2. Run the command as an unprivileged user (uid and gid 65534), with no capabilities and `no_new_privs`.
+     - It cannot bind a reserved port, cannot reach init's socket (`/proc/1/fd` is root's), and cannot signal PID 1.
+     - The listening socket is close-on-exec, so the command never holds it.
+  3. When the command ends, accept one connection on the port and write the code as decimal ASCII plus `\n`
+     (for example `0\n` or `101\n`). Then close it.
+  4. Console output (`hvc0`) stays as it is, as log only.
+- **Host (the launcher):**
+  - After `start`, connect to the guest's port 1022 with `VzProvider::vsock_connect`, retrying until the deadline,
+    because init may not be listening yet.
+  - Read at most 16 bytes to end of stream, then stop the VM.
+  - The launcher returns the console and these bytes separately (`ExecRun { console, exit_report }`).
+- **Why the command cannot fake it:**
+  - The host dials the guest, so the command cannot pose as the host.
+  - The only socket that can accept that dial is init's, on a port the command can neither bind nor reach.
+  - A command that kills the VM or init produces no report, and that is a failure.
+
+## Host-side code in this PR (`exec_vm.rs`)
+
+- `EXEC_EXIT_PORT = 1022`.
+- `ExecLauncher::launch` returns `ExecRun { console: String, exit_report: Option<Vec<u8>> }`.
+- `parse_exit_report`:
+  - `None` gives `exit marker missing`;
+  - anything but a canonical decimal `i32` followed by exactly one `\n` gives `exit marker malformed`.
+- `exec_result(run)`:
+  - takes the code from `parse_exit_report`;
+  - the log is the console's non-empty lines, cut to the budget, with host paths refused as before;
+  - it never reads a code from the console.
+- `parse_exec_console` and `EXEC_EXIT_MARK` are removed.
+- Harness (`boot_exec_command`): connects to port 1022 until the report arrives or 45 s pass; never looks at
+  console lines to decide anything; stops the VM; builds `ExecRun`.
+
+## Tests and falsifiers
+
+**Cloud (`cargo test -p elastos-compute --lib exec_vm`).**
+
+| Test | Falsifier |
+| --- | --- |
+| `a_forged_console_line_with_the_vm_killed_fails` (console has `elastos-exec-exit 0`, no report) gives `exit marker missing` | read the code from the console when the report is missing |
+| `an_early_forged_line_does_not_end_or_decide_the_run` (console has a forged `0` early, more output after it, report `1\n`) gives exit 1 and keeps the later lines | stop the log at the first marker-looking line, or prefer the console code |
+| `the_exit_report_is_exact` (`0\n`, `101\n` accepted; `""`, `0`, `0\n\n`, ` 0\n`, `+0\n`, `00\n`, `0x1\n`, `1\nx` refused) | trim or loosely parse the report |
+
+**Mac (signed VZ test, needs the image change below).**
+
+| Test | Falsifier |
+| --- | --- |
+| `exec_smoke_image_prints_hello` passes with the report channel | stop on a console line |
+| `a_fake_exit_line_does_not_end_the_run`: image command `fake-exit` prints `elastos-exec-exit 0`, sleeps, then exits 1; the run reports 1 and the log holds the line after the fake | stop on the console line |
+| `a_killed_vm_after_a_fake_line_fails`: stop the VM right after the fake line appears; the result is `exit marker missing` | fall back to the console |
+
+## Not in this PR
+
+- **The exec image.** Its init lives in the image built on Sasha's Mac (`initrd-debian`), not in this repo. It must
+  bind port 1022, drop to uid 65534 for the command, and write the report. A `fake-exit` image-only command is needed
+  for the two Mac falsifiers; it is not admitted by `admit_exec_argv`. Until the image changes, the signed test
+  reports `exit marker missing` (fail closed).
+- **crosvm on Linux.** The same port on the crosvm vsock device. Untested here: no KVM in the cloud.
