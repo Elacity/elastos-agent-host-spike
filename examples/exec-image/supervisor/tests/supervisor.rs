@@ -90,9 +90,24 @@ fn read_report(socket: &Path, within: Duration) -> Option<String> {
     None
 }
 
+/// The supervisor's exit code, waiting at most `within`; a supervisor still
+/// running then is killed and gives `None`, so a test fails instead of hanging.
+fn wait_within(child: &mut Child, within: Duration) -> Option<i32> {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status.code();
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    None
+}
+
 fn finish(mut run: Run) -> (Option<String>, String, Option<i32>) {
     let report = read_report(&run.socket, Duration::from_secs(30));
-    let status = run.child.wait().unwrap().code();
+    let status = wait_within(&mut run.child, Duration::from_secs(30));
     let console = std::fs::read_to_string(&run.console).unwrap();
     (report, console, status)
 }
@@ -232,7 +247,10 @@ fn no_report_is_served_before_the_command_ends() {
         read_report(&run.socket, Duration::from_secs(30)).as_deref(),
         Some("0\n")
     );
-    assert_eq!(run.child.wait().unwrap().code(), Some(0));
+    assert_eq!(
+        wait_within(&mut run.child, Duration::from_secs(30)),
+        Some(0)
+    );
 }
 
 #[test]
@@ -272,7 +290,10 @@ fn nothing_runs_unless_the_exit_port_is_held() {
         1007,
         &["/bin/sh", "-c", &format!("touch {}", marker.display())],
     );
-    assert_eq!(run.child.wait().unwrap().code(), Some(1));
+    assert_eq!(
+        wait_within(&mut run.child, Duration::from_secs(10)),
+        Some(1)
+    );
     assert!(!marker.exists(), "the command ran without the exit port");
     assert_eq!(read_report(&run.socket, Duration::from_millis(300)), None);
     assert!(std::fs::read_to_string(&run.console)
