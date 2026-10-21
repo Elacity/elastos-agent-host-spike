@@ -156,12 +156,12 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - Isolation status: the first stage of the isolation plan (#173) is done, except that the seed does not yet run under its own account (#174, in 0.8.1). Web pages and shared files open in a separate sandbox, and sandboxed apps need valid tokens to reach private data. Home checks allowed hosts and rejects requests whose Origin header names another website. Releases are signed with a new key kept off the public server.
 - Isolation status, not done yet (planned for 0.8.1): Home can still get every app's permissions, providers run as normal programs with your account's rights (only the model provider is partly limited), and approvals are not yet shown on a screen that only the Runtime controls (S1 and S2 of #173). Importing a Recovery Kit does not yet ask for your passkey again (#403), and on Linux with KVM the Browser network helper is installed with sudo without a hash check (#406).
 - Only the host and admins see the Runtime audit log in System (#404) and can use the web Terminal, which is off by default. A demoted admin's terminal closes (#405). A hand-run `elastos serve` has the shell apply its policy file, and the shell allows nothing without a valid one.
-- Security updates for the TLS library, the WebAssembly runtime and the ZIP library (RUSTSEC-2026-0346 to 0349, 0363, 0367 to 0369, #380, #417). Library refuses archive entries with a Windows drive, root or network name on every platform. Carrier refuses QUIC datagrams, which it does not use.
+- Security updates for the TLS library, the WebAssembly runtime and the ZIP library (RUSTSEC-2026-0346 to 0349, 0363, 0367 to 0369, 0379 to 0383, #380, #417). Library refuses archive entries with a Windows drive, root or network name on every platform. Carrier refuses QUIC datagrams, which it does not use.
 
 ### Added
 
 - An admin can add another passkey, such as a second device or a security key, in System → Accounts → Add passkey, after confirming with a current one. Make admin and Make guest change every passkey of that account. When sign-in fails, the lock screen says why and what to do next (#338).
-- Home has a touch layout for screens 640 px wide or less: a Dock and pages of apps, one app at a time full screen, swipe down on its title bar to switch apps, and long-press menus. Desktop and tablet keep the desktop shell. Opening your Home from a phone needs an HTTPS address, which 0.8.0 does not set up yet (#116, #92).
+- Home has a touch layout for screens 640 px wide or less: a Dock and pages of apps, one app at a time full screen, swipe down on its title bar to switch apps, and long-press menus. Desktop and tablet keep the desktop shell. Opening Home from a phone needs an HTTPS address, which 0.8.0 does not set up yet (#116, #92).
 
 ### Changed
 
