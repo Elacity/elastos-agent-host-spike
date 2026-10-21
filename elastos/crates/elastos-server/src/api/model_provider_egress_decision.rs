@@ -574,6 +574,7 @@ pub(super) fn inbox_history(data_dir: &Path) -> anyhow::Result<Vec<HostedRouteSu
 }
 
 /// Ids of decisions that still carry authority; grants of any other decision are dead.
+#[cfg(target_os = "macos")]
 pub(super) fn approved_ids(data_dir: &Path) -> anyhow::Result<std::collections::HashSet<String>> {
     let file = read(data_dir)?;
     let now = now_ms()?;
