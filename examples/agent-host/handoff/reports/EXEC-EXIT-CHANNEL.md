@@ -300,5 +300,49 @@ Mac:          the initrd changes (new supervisor). Rebuilt and rerun by Cursor a
               Debian modules and static binaries build as before (see "Rerun after the Codex fixes" above).
 ```
 
-**What is next:** Codex re-reviews #27 (the Mac rerun at 7b9a14a19 passed). The format 2 code still waits for Codex
-to pass #24.
+## Codex review at a679e5d3: FAIL, one finding, fixed
+
+```text
+Commits:      aec9d37 (the fix and its tests), e7259bc (one more case, after falsifier BI11 survived)
+              this section is the next commit
+Finding:      The program check accepted a PIE that needs a shared library: a linker-made AArch64 ET_DYN with
+              valid PT_LOADs, no PT_INTERP and DT_NEEDED libmissing.so was packed.
+Reproduced:   clang --target=aarch64-linux-gnu -fPIE -pie -nostdlib -fuse-ld=lld -Wl,--no-dynamic-linker
+              -L. -lmissing -> "ELF 64-bit LSB pie executable, ARM aarch64", NEEDED [libmissing.so], 2.7 KB;
+              static_aarch64_elf accepted it.
+Fix:          PT_DYNAMIC is parsed. At most one; it must lie inside a PT_LOAD (so inside the file); its 16-byte
+              entries are read up to DT_NULL, and a table with no DT_NULL is refused; DT_NEEDED, DT_RPATH and
+              DT_RUNPATH are refused. The same rule holds for ET_EXEC. ET_DYN is accepted only as a true
+              static-pie.
+Tests:        test_a_pie_that_needs_a_library_is_refused (Codex's probe, built by clang and lld when present;
+                they are here, so it ran; the same program without the library must still build)
+              test_a_program_with_external_dependencies_is_refused (DT_NEEDED, DT_RPATH, DT_RUNPATH, each for
+                ET_DYN and ET_EXEC)
+              test_a_dynamic_table_must_be_whole_and_loaded (no DT_NULL; cut inside the table; not inside a
+                PT_LOAD; two PT_DYNAMIC)
+              test_a_static_pie_program_is_accepted now carries a real dynamic table (DT_RELA, DT_NULL)
+              the program test gains a PT_NOTE-only case (no PT_LOAD and no PT_DYNAMIC)
+Failing first: before the fix: "Ran 19 tests ... FAILED (failures=3)": the three new tests.
+Real files:   the real exec-supervisor (aarch64 musl, ET_EXEC) is accepted; the clang static PIE (ET_DYN, no
+              NEEDED) is accepted; Codex's probe is refused: "needs a shared library (dynamic tag 1)".
+Tests run:    python3 -m unittest scripts/build/test_build_exec_initrd.py -> "Ran 19 tests ... OK" (none skipped)
+Falsifiers:   BI18 DT_NEEDED is not refused               -> the probe test and the dependencies test FAILED
+              BI19 DT_RPATH and DT_RUNPATH are not refused -> test_a_program_with_external_dependencies_... FAILED
+              BI20 the table need not be in a PT_LOAD      -> test_a_dynamic_table_must_be_whole_and_loaded FAILED
+              BI21 the table needs no DT_NULL              -> test_a_dynamic_table_must_be_whole_and_loaded FAILED
+              BI22 two tables are accepted                 -> test_a_dynamic_table_must_be_whole_and_loaded FAILED
+              BI23 PT_DYNAMIC is not read at all           -> 3 tests FAILED
+              BI11 (no PT_LOAD needed) SURVIVED after the fix: its fixture had only a PT_DYNAMIC, which the new
+                check also refuses. e7259bc adds a PT_NOTE-only case; BI11 then FAILED.
+              BI01-BI17 rerun: each FAILED; each restored; tree clean.
+              The fix dropped one redundant bound (the table past the end of the file): inside a PT_LOAD is
+              already inside the file.
+Guest hash:   unchanged (no guest change). The supervisor is unchanged, so the initrd should be the same
+              2613f622...212d if the inputs are.
+Principles:   12: "static" now means no external dependency, as the docs say.
+DeepSeek:     none.
+Mac:          rerun the builder on the real inputs (the supervisor and vm-smoke must still pass), then the
+              signed tests.
+```
+
+**What is next:** Sasha reruns the Mac build and proof, then Codex re-reviews #27. #24 is being fixed in parallel.

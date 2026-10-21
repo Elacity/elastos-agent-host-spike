@@ -102,6 +102,9 @@ Written 21 Oct 2026. Spike-only code: `exec_vm.rs` and its use in `concurrent_la
   - It parses each input as ELF; nothing is a substring search (Codex, review of 4b79c71ab).
     - A program: ELFCLASS64, little-endian, `EM_AARCH64`, `ET_EXEC` or `ET_DYN` (static-pie), an entry point,
       whole program headers, at least one `PT_LOAD` inside the file, and no `PT_INTERP`.
+    - No external dependency (Codex, review of a679e5d3): a `PT_DYNAMIC`, if there is one, must be the only one,
+      lie inside a `PT_LOAD`, end with `DT_NULL`, and hold no `DT_NEEDED`, `DT_RPATH` or `DT_RUNPATH`. So
+      `ET_DYN` passes only as a true static-pie.
     - A module: `ET_REL`, `EM_AARCH64`, section headers inside the file, exactly one `.modinfo` section found by
       name through the section headers, and exactly one `vermagic=` entry in it, naming this kernel.
   - A module that is built in is skipped, and `.ko.xz` is unpacked.
