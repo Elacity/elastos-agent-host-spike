@@ -891,6 +891,22 @@ function configureAiProvider() {
   const selectedProvider = () => (providerSelect.value === "venice" ? "venice" : "openrouter");
   let editingId = "";
   let latestStatus = null;
+  // Inbox decisions change hosted access while System is open; Home reports them as
+  // `inbox.changed`. Refresh then and when System is shown again, but never under the
+  // person's open form or while one of this page's own requests is in flight.
+  let hostedRequests = 0;
+  let statusReads = 0;
+  let liveRefreshWanted = false;
+  let liveRefreshTimer = 0;
+  const hostedFetch = async (url, init) => {
+    hostedRequests += 1;
+    try {
+      return await fetchJson(url, init);
+    } finally {
+      hostedRequests -= 1;
+      if (!hostedRequests && liveRefreshWanted) scheduleLiveRefresh();
+    }
+  };
   const updateValidationEnd = () => {
     const state = latestStatus?.validation_egress_approval_state?.[selectedProvider()];
     validationEndButton.hidden = state !== "pending" && state !== "approved";
@@ -962,6 +978,7 @@ function configureAiProvider() {
     fillModels([], "");
     updateValidationEnd();
     setBusy(false);
+    if (liveRefreshWanted) scheduleLiveRefresh();
   };
   const showForm = (instance) => {
     formNode.hidden = false;
@@ -982,14 +999,19 @@ function configureAiProvider() {
     keyInput.focus();
     setBusy(false);
   };
+  // Rebuilding the list keeps the disclosures the person opened and the control they focused.
+  const controlKey = (node) => [node.closest(".ai-provider-instance")?.dataset.offerId, node.tagName, node.textContent].join("\n");
   const renderInstances = (status) => {
     const connections = status && Array.isArray(status.connections) ? status.connections : [];
+    const opened = new Set([...instancesNode.querySelectorAll("details[open]")].map((node) => node.parentElement?.dataset.offerId));
+    const focused = instancesNode.contains(document.activeElement) ? controlKey(document.activeElement) : "";
     instancesNode.replaceChildren();
     for (const connection of connections) {
       if (!connection || connection.connected !== true) continue;
       if (connection.operation === "decision.evaluate") continue;
       const card = document.createElement("div");
       card.className = "ai-provider-instance";
+      card.dataset.offerId = connection.id;
       const title = document.createElement("p");
       title.className = "pc2-card-label";
       title.textContent = readText(connection.name) || "Hosted model";
@@ -1026,7 +1048,7 @@ function configureAiProvider() {
         setBusy(true);
         showState("", "");
         try {
-          latestStatus = await fetchJson("/api/apps/system/ai-provider", {
+          latestStatus = await hostedFetch("/api/apps/system/ai-provider", {
             method: "DELETE",
             headers: shellHeaders({ "content-type": "application/json" }),
             body: JSON.stringify({ id: connection.id }),
@@ -1049,6 +1071,7 @@ function configureAiProvider() {
       if (state.textContent) title.append(state);
       const more = document.createElement("details");
       more.className = "ai-provider-details";
+      more.open = opened.has(connection.id);
       const summary = document.createElement("summary");
       summary.textContent = "Details and access";
       const secondary = document.createElement("div");
@@ -1063,7 +1086,7 @@ function configureAiProvider() {
           if (!hasShellAccess()) return;
           endApproval.disabled = true;
           try {
-            await fetchJson("/api/apps/system/approval-lens/revoke", {
+            await hostedFetch("/api/apps/system/approval-lens/revoke", {
               method: "POST", headers: shellHeaders({ "content-type": "application/json" }),
               body: JSON.stringify({ id: connection.id }),
             });
@@ -1086,6 +1109,7 @@ function configureAiProvider() {
       if (!staged || !/^model:hosted-[0-9a-f]{32}$/i.test(staged.id || "")) continue;
       const card = document.createElement("div");
       card.className = "ai-provider-instance";
+      card.dataset.offerId = staged.id;
       const detail = document.createElement("p");
       detail.className = "pc2-card-sublabel";
       detail.textContent = `${staged.provider} · ${staged.has_saved_model ? "Staged key change" : "Key check needed"}`;
@@ -1106,7 +1130,7 @@ function configureAiProvider() {
         discard.disabled = true;
         showState("Finishing any current key check, then removing the staged key.", "");
         try {
-          await fetchJson("/api/apps/system/ai-provider/staged", {
+          await hostedFetch("/api/apps/system/ai-provider/staged", {
             method: "DELETE", headers: shellHeaders({ "content-type": "application/json" }),
             body: JSON.stringify({ id: staged.id }),
           });
@@ -1120,12 +1144,16 @@ function configureAiProvider() {
       card.append(detail, resume, discard);
       instancesNode.append(card);
     }
+    if (focused) {
+      [...instancesNode.querySelectorAll("button, summary")].find((node) => controlKey(node) === focused)?.focus({ preventScroll: true });
+    }
   };
   const lensModel = document.querySelector("#approval-lens-model");
   const lensStatus = document.querySelector("#approval-lens-status");
   const lensSelect = document.querySelector("#approval-lens-select");
   const lensEdit = document.querySelector("#approval-lens-edit");
   const lensDisconnect = document.querySelector("#approval-lens-disconnect");
+  let lensChoice = ""; // an evaluator picked here and not yet saved
   const lensEnd = document.createElement("button");
   lensEnd.className = "pc2-btn pc2-btn-secondary";
   lensEnd.type = "button";
@@ -1146,7 +1174,8 @@ function configureAiProvider() {
       option.textContent = `${connection.name} · ${connection.processor_label} · ${connection.selected_model}`;
       lensModel.append(option);
     }
-    if (current) lensModel.value = current.id;
+    if (!decisions.some((connection) => connection.id === lensChoice)) lensChoice = "";
+    if (lensChoice || current) lensModel.value = lensChoice || current.id;
     lensStatus.textContent = current && status.hosted_external_https === "paused"
       ? `${current.name} selected · external HTTPS paused`
       : current ? `Using ${current.name} · ${current.processor_label}`
@@ -1155,13 +1184,16 @@ function configureAiProvider() {
     lensModel.disabled = lensSelect.disabled = lensEdit.disabled = lensDisconnect.disabled = !decisions.length;
     updateLensEnd();
   };
-  lensModel.addEventListener("change", updateLensEnd);
+  lensModel.addEventListener("change", () => {
+    lensChoice = lensModel.value;
+    updateLensEnd();
+  });
   lensEnd.addEventListener("click", async () => {
     const connection = (latestStatus?.connections || []).find(c => c.id === lensModel.value && c.operation === "decision.evaluate");
     if (!connection || !hasShellAccess()) return;
     lensEnd.disabled = true;
     try {
-      await fetchJson("/api/apps/system/approval-lens/revoke", {
+      await hostedFetch("/api/apps/system/approval-lens/revoke", {
         method: "POST", headers: shellHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ id: connection.id }),
       });
@@ -1182,7 +1214,7 @@ function configureAiProvider() {
     if (!connection || !hasShellAccess()) return;
     lensDisconnect.disabled = true;
     try {
-      await fetchJson("/api/apps/system/ai-provider", {
+      await hostedFetch("/api/apps/system/ai-provider", {
         method: "DELETE", headers: shellHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ id: connection.id }),
       });
@@ -1197,26 +1229,54 @@ function configureAiProvider() {
   lensSelect.addEventListener("click", async () => {
     lensSelect.disabled = true;
     try {
-      await fetchJson("/api/apps/system/approval-lens", { method: "POST", headers: shellHeaders({ "content-type": "application/json" }), body: JSON.stringify({ id: lensModel.value }) });
+      await hostedFetch("/api/apps/system/approval-lens", { method: "POST", headers: shellHeaders({ "content-type": "application/json" }), body: JSON.stringify({ id: lensModel.value }) });
+      lensChoice = "";
       await refreshStatus();
     } catch (error) { lensStatus.textContent = publicSystemError(error, "Evaluator selection could not be saved."); }
     finally { lensSelect.disabled = false; }
   });
-  const refreshStatus = async () => {
-    latestStatus = await fetchJson("/api/apps/system/ai-provider", { headers: shellHeaders() });
+  const applyStatus = (status) => {
+    latestStatus = status;
     const egressNote = document.querySelector("#ai-provider-egress-note");
     egressNote.hidden = latestStatus.hosted_external_https !== "paused";
     egressNote.textContent = egressNote.hidden ? "" : "External HTTPS is paused on this Home.";
     renderInstances(latestStatus);
     renderLens(latestStatus);
     updateValidationEnd();
+  };
+  const readStatus = () => {
+    statusReads += 1;
+    return hostedFetch("/api/apps/system/ai-provider", { headers: shellHeaders() });
+  };
+  const refreshStatus = async () => {
+    applyStatus(await readStatus());
     return latestStatus;
+  };
+  const liveRefreshBlocked = () => document.hidden || hostedRequests > 0 || !formNode.hidden;
+  const runLiveRefresh = async () => {
+    liveRefreshTimer = 0;
+    if (!liveRefreshWanted || !latestStatus || liveRefreshBlocked()) return;
+    liveRefreshWanted = false;
+    const read = statusReads + 1;
+    const status = await readStatus().catch(() => null);
+    // A read the page started since then is newer; it renders instead.
+    if (!status || read !== statusReads) return;
+    if (liveRefreshBlocked()) {
+      scheduleLiveRefresh();
+      return;
+    }
+    applyStatus(status);
+    setBusy(false);
+  };
+  const scheduleLiveRefresh = () => {
+    liveRefreshWanted = true;
+    if (!liveRefreshTimer) liveRefreshTimer = window.setTimeout(runLiveRefresh, 250);
   };
   validationEndButton.addEventListener("click", async () => {
     if (!hasShellAccess()) return;
     setBusy(true);
     try {
-      await fetchJson("/api/apps/system/approval-lens/revoke", {
+      await hostedFetch("/api/apps/system/approval-lens/revoke", {
         method: "POST", headers: shellHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ id: `validation:${selectedProvider()}` }),
       });
@@ -1248,7 +1308,7 @@ function configureAiProvider() {
     try {
       // Validation and Save use the same Runtime connection identity.
       if (!editingId) editingId = `model:hosted-${crypto.randomUUID().replaceAll("-", "")}`;
-      const result = await fetchJson("/api/apps/system/ai-provider/validate", {
+      const result = await hostedFetch("/api/apps/system/ai-provider/validate", {
         method: "POST",
         headers: shellHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ provider: selectedProvider(), api_key: keyInput.value, id: editingId }),
@@ -1277,7 +1337,7 @@ function configureAiProvider() {
         api_key: keyInput.value,
         model: modelSelect.value,
       };
-      latestStatus = await fetchJson("/api/apps/system/ai-provider", {
+      latestStatus = await hostedFetch("/api/apps/system/ai-provider", {
         method: "POST",
         headers: shellHeaders({ "content-type": "application/json" }),
         body: JSON.stringify(body),
@@ -1295,6 +1355,14 @@ function configureAiProvider() {
         : publicSystemError(error, "This Home could not save that hosted model."), consentPending ? "" : "error");
     } finally {
       setBusy(false);
+    }
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) scheduleLiveRefresh();
+  });
+  window.addEventListener("message", (event) => {
+    if (homeRuntimeEventsFrom(event)?.some((item) => item?.scope === "inbox" || item?.kind === "inbox.changed")) {
+      scheduleLiveRefresh();
     }
   });
   hideForm();
@@ -3993,13 +4061,18 @@ function configureRuntimeUpdate() {
     if (!document.hidden) scheduleRuntimeUpdateRefresh(0);
   });
   window.addEventListener("message", (event) => {
-    if (event.source !== window.top || event.origin !== homeParentOrigin
-      || event.data?.type !== "elastos:runtime-events"
-      || event.data?.schema !== "elastos.home.runtime-events/v1"
-      || !Array.isArray(event.data.events)) return;
-    scheduleRuntimeUpdateRefresh(0);
+    if (homeRuntimeEventsFrom(event)) scheduleRuntimeUpdateRefresh(0);
   });
   scheduleRuntimeUpdateRefresh();
+}
+
+// Events Home forwards from its Runtime event stream; null for any other message.
+function homeRuntimeEventsFrom(event) {
+  const message = event.data;
+  return event.source === window.top && event.origin === homeParentOrigin
+    && message?.type === "elastos:runtime-events"
+    && message?.schema === "elastos.home.runtime-events/v1"
+    && Array.isArray(message.events) ? message.events : null;
 }
 
 function renderRuntimeUpdate(update) {

@@ -7,12 +7,14 @@ import vm from "node:vm";
 const source = readFileSync(new URL("../capsules/system/browser/system.js", import.meta.url), "utf8");
 const controller = source.slice(source.indexOf("function configureAiProvider() {"), source.indexOf("function configurePasskeyAccess() {"));
 const keyCheckOutcomes = source.slice(source.indexOf("const HOSTED_KEY_CHECK_PENDING ="), source.indexOf("function showError("));
+const homeRuntimeEvents = source.match(/^function homeRuntimeEventsFrom\([\s\S]*?^}$/m)?.[0] ?? "";
+const HOME_ORIGIN = "https://home.example";
 
 function fixture(connections = [], guest = false, staged = [], status = {}) {
   const nodes = new Map();
   const element = () => ({
     value: "", hidden: false, disabled: false, dataset: {}, selectedOptions: [], children: [], handlers: {},
-    focus() {},
+    focus() {}, contains() { return false; },
     addEventListener(event, callback) { this.handlers[event] = callback; },
     append(...items) { this.children.push(...items); },
     after() {},
@@ -23,16 +25,24 @@ function fixture(connections = [], guest = false, staged = [], status = {}) {
     if (!nodes.has(selector)) nodes.set(selector, element());
     return nodes.get(selector);
   };
-  const saved = new Map(), messages = [], attempts = [], discarded = [];
+  const saved = new Map(), messages = [], attempts = [], discarded = [], reads = [], revoked = [];
+  const timers = new Map(), listeners = new Map(), top = {};
+  let timerId = 0, gate = null;
   let stagedConnections = staged.slice();
   let rejectActivation = true;
   let consentPending = false;
   const stateNode = element();
+  const document = {
+    hidden: false, querySelector: node, createElement: element,
+    querySelectorAll: selector => selector === '[data-field="ai-provider-state"]' ? [stateNode] : [],
+    addEventListener: (type, handler) => listeners.set(`document:${type}`, handler),
+  };
   const context = vm.createContext({
-    crypto: { randomUUID },
-    document: {
-      querySelector: node, createElement: element,
-      querySelectorAll: selector => selector === '[data-field="ai-provider-state"]' ? [stateNode] : [],
+    crypto: { randomUUID }, document, homeParentOrigin: HOME_ORIGIN,
+    window: {
+      top,
+      addEventListener: (type, handler) => listeners.set(type, handler),
+      setTimeout: handler => { timers.set(++timerId, handler); return timerId; },
     },
     hasShellAccess: () => true,
     readText: value => typeof value === "string" ? value.trim() : "",
@@ -40,6 +50,11 @@ function fixture(connections = [], guest = false, staged = [], status = {}) {
     shellHeaders: extra => extra || {}, publicSystemError: (_, fallback) => fallback,
     openCapsuleTarget: () => {},
     fetchJson: async (_url, init = {}) => {
+      if (init.method && gate) await gate.promise;
+      if (_url.endsWith("/approval-lens/revoke")) {
+        revoked.push(JSON.parse(init.body).id);
+        return { approval: "ended" };
+      }
       if (init.method === "DELETE" && _url.endsWith("/staged")) {
         const { id } = JSON.parse(init.body);
         discarded.push(id);
@@ -47,6 +62,7 @@ function fixture(connections = [], guest = false, staged = [], status = {}) {
         return { discarded: true };
       }
       if (init.method !== "POST") {
+        reads.push(_url);
         if (guest) throw new Error("request failed: 403 admin passkey required");
         return { ...status, connections, staged_connections: stagedConnections };
       }
@@ -63,8 +79,22 @@ function fixture(connections = [], guest = false, staged = [], status = {}) {
       return { connections: [] };
     },
   });
-  vm.runInContext(`${keyCheckOutcomes}\n${controller}\nconfigureAiProvider();`, context);
-  return { node, saved, messages, attempts, discarded, stateNode,
+  vm.runInContext(`${keyCheckOutcomes}\n${homeRuntimeEvents}\n${controller}\nconfigureAiProvider();`, context);
+  const runTimers = async () => {
+    for (const [id, handler] of [...timers]) {
+      timers.delete(id);
+      await handler();
+    }
+    await new Promise(setImmediate);
+  };
+  const hold = () => {
+    let release;
+    gate = { promise: new Promise(resolve => { release = resolve; }) };
+    return () => { gate = null; release(); };
+  };
+  return { node, saved, messages, attempts, discarded, stateNode, reads, revoked, document, top, runTimers, hold,
+    message: event => listeners.get("message")(event),
+    shown: () => listeners.get("document:visibilitychange")(),
     activate: () => { rejectActivation = false; }, pending: () => { consentPending = true; } };
 }
 
@@ -268,6 +298,88 @@ test("Edit uses the existing identity with a blank key and marks the key field a
   assert.equal(f.attempts[0].model, "openai/gpt-4o-mini");
 });
 
+const veniceCard = () => ({ id: `model:hosted-${"c".repeat(32)}`, name: "Venice", provider: "venice",
+  processor_label: "Venice", selected_model: "venice/model", connected: true, operation: "text.generate",
+  egress_state: "consent_required", egress_approval_state: "none" });
+const APPROVED = { egress_approval_state: "approved", egress_state: "ready" };
+const ENDED = { egress_approval_state: "none", egress_state: "consent_required" };
+const homeEvents = (...events) => ({ type: "elastos:runtime-events", schema: "elastos.home.runtime-events/v1", events });
+const INBOX_CHANGED = homeEvents({ scope: "home", kind: "home.summary.changed" }, { scope: "inbox", kind: "inbox.changed" });
+// Card children: title, detail, actions, "Details and access" (summary, access controls).
+const accessControls = f => f.node("#ai-provider-instances").children[0].children[3].children[1].children;
+const accessLabels = f => accessControls(f).map(node => node.textContent);
+
+test("an Inbox decision reaches open System through Home's inbox event or System being shown again", async () => {
+  const venice = veniceCard();
+  const f = fixture([venice]);
+  await new Promise(setImmediate);
+  assert.deepEqual(accessLabels(f), ["Share as service", "Disconnect"]);
+  const reads = f.reads.length;
+  Object.assign(venice, APPROVED); // The person approves the new request in Inbox.
+  f.message({ source: f.top, origin: "https://foreign.example", data: INBOX_CHANGED });
+  f.message({ source: {}, origin: HOME_ORIGIN, data: INBOX_CHANGED });
+  f.message({ source: f.top, origin: HOME_ORIGIN, data: { ...INBOX_CHANGED, schema: "elastos.other/v1" } });
+  f.message({ source: f.top, origin: HOME_ORIGIN,
+    data: homeEvents({ scope: "chat-room", kind: "chat-room.changed" }, { scope: "people", kind: "people.changed" }) });
+  await f.runTimers();
+  assert.equal(f.reads.length, reads, "foreign, framed-sibling, malformed and unrelated messages do not read");
+  assert.deepEqual(accessLabels(f), ["Share as service", "Disconnect"]);
+  f.message({ source: f.top, origin: HOME_ORIGIN, data: INBOX_CHANGED });
+  f.message({ source: f.top, origin: HOME_ORIGIN, data: homeEvents({ scope: "inbox", kind: "inbox.changed" }) });
+  await f.runTimers();
+  assert.equal(f.reads.length, reads + 1, "a burst of Inbox events shares one read");
+  assert.deepEqual(accessLabels(f), ["Share as service", "End hosted approval", "Disconnect"]);
+  Object.assign(venice, ENDED); // Ended in another window while System was hidden.
+  f.document.hidden = true;
+  f.shown();
+  f.message({ source: f.top, origin: HOME_ORIGIN, data: INBOX_CHANGED });
+  await f.runTimers();
+  assert.equal(f.reads.length, reads + 1, "a hidden System does not read");
+  f.document.hidden = false;
+  f.shown();
+  await f.runTimers();
+  assert.equal(f.reads.length, reads + 2);
+  assert.deepEqual(accessLabels(f), ["Share as service", "Disconnect"]);
+});
+
+test("a live refresh waits for the person's open form and for the page's own request", async () => {
+  const venice = veniceCard();
+  const f = fixture([venice]);
+  await new Promise(setImmediate);
+  const reads = f.reads.length;
+  f.node("#ai-provider-add").handlers.click();
+  f.node("#ai-provider-name").value = "Typed name";
+  f.node("#ai-provider-key").value = "typed-key";
+  Object.assign(venice, APPROVED);
+  f.message({ source: f.top, origin: HOME_ORIGIN, data: INBOX_CHANGED });
+  f.shown();
+  await f.runTimers();
+  assert.equal(f.reads.length, reads, "nothing is read or rebuilt under the open form");
+  assert.equal(f.node("#ai-provider-form").hidden, false);
+  assert.equal(f.node("#ai-provider-name").value, "Typed name");
+  assert.equal(f.node("#ai-provider-key").value, "typed-key");
+  f.node("#ai-provider-cancel").handlers.click();
+  await f.runTimers();
+  assert.equal(f.reads.length, reads + 1, "closing the form catches up once");
+  assert.deepEqual(accessLabels(f), ["Share as service", "End hosted approval", "Disconnect"]);
+
+  const card = f.node("#ai-provider-instances").children[0];
+  const end = accessControls(f).find(node => node.textContent === "End hosted approval");
+  const release = f.hold();
+  const ending = end.handlers.click();
+  Object.assign(venice, ENDED);
+  f.message({ source: f.top, origin: HOME_ORIGIN, data: INBOX_CHANGED });
+  await f.runTimers();
+  assert.equal(f.reads.length, reads + 1, "no read while End is in flight");
+  assert.equal(f.node("#ai-provider-instances").children[0], card, "the card End acts on is not rebuilt");
+  assert.equal(end.disabled, true);
+  release();
+  await ending;
+  await f.runTimers();
+  assert.deepEqual(f.revoked, [venice.id]);
+  assert.equal(f.reads.length, reads + 3, "End reads once, then the held Inbox event reads once");
+  assert.deepEqual(accessLabels(f), ["Share as service", "Disconnect"]);
+});
 
 test("hosted handoff replaces the previous selection with the exact requested offer", () => {
   const entry = readFileSync(new URL("../capsules/assistant/browser/home-agent.js", import.meta.url), "utf8");

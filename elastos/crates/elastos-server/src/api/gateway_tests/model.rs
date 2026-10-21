@@ -1928,6 +1928,78 @@ async fn owner_inbox_retains_hosted_route_history_and_ends_exact_decision() {
     assert_eq!(summary["notifications"]["attention_count"], 261);
 }
 
+async fn home_inbox_changed(app: &Router, home_token: &str, cursor: &mut String) -> bool {
+    let request = test_browser_request("localhost:61180", "http://localhost:61180")
+        .uri(format!("/api/apps/home/events?wait_ms=0&cursor={cursor}"))
+        .header("x-elastos-home-token", home_token)
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = status_json(app.clone().oneshot(request).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    *cursor = body["cursor"].as_str().unwrap().to_string();
+    body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["kind"] == "inbox.changed" && event["scope"] == "inbox")
+}
+
+#[tokio::test]
+async fn hosted_decisions_reach_only_the_owner_home_events_as_inbox_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::api::seed_model_provider_operator_offers_for_test(dir.path(), vec![]).unwrap();
+    let owner = passkey_authority_with_name(dir.path(), Some("admin"));
+    let guest = passkey_authority_with_name_role(
+        dir.path(),
+        Some("guest"),
+        crate::auth::RuntimePrincipalRole::Guest,
+    );
+    let app = gateway_router(test_state(dir.path()));
+    let inbox_token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
+    let (mut owner_cursor, mut guest_cursor) = (String::new(), String::new());
+    home_inbox_changed(&app, &owner.home_token, &mut owner_cursor).await;
+    home_inbox_changed(&app, &guest.home_token, &mut guest_cursor).await;
+    let scope = crate::api::model_provider_egress_decision::EgressScope {
+        offer_id: "validation:venice".into(),
+        effect: "validate_models".into(),
+        method: "GET".into(),
+        url: "http://127.0.0.1:9998/models".into(),
+        origin: "http://127.0.0.1:9998".into(),
+        recipient: "127.0.0.1".into(),
+        payer: "this Home".into(),
+        provider: "Venice".into(),
+        purpose: "Load hosted model choices".into(),
+        configuration_id: "b".repeat(64),
+    };
+    let id = crate::api::model_provider_egress_decision::request(
+        dir.path(),
+        &scope,
+        Some(&owner.proof_binding_id),
+    )
+    .unwrap();
+    assert!(home_inbox_changed(&app, &owner.home_token, &mut owner_cursor).await);
+    for action in [
+        format!("model-egress-approve:{id}"),
+        format!("model-egress-end:{id}"),
+    ] {
+        let (status, body) = status_json(
+            app.clone()
+                .oneshot(inbox_action_request(inbox_token.clone(), &action))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            home_inbox_changed(&app, &owner.home_token, &mut owner_cursor).await,
+            "{action} did not reach the owner's open apps"
+        );
+    }
+    assert!(!home_inbox_changed(&app, &owner.home_token, &mut owner_cursor).await);
+    // Owner decisions stay private: a guest's Home sees no change.
+    assert!(!home_inbox_changed(&app, &guest.home_token, &mut guest_cursor).await);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn owner_inbox_end_keeps_competing_decision_from_cancelling_without_commit() {

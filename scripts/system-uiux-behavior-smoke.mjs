@@ -277,6 +277,8 @@ async function main() {
   let heldRecoveryStatus = null;
   let heldChainNetworks = null;
   let heldCapsuleCatalog = null;
+  let hostedStatus = null;
+  let hostedReads = 0;
   summaryAppearance = appearanceRecord();
   let appearanceInFlight = 0;
   let maxAppearanceInFlight = 0;
@@ -426,6 +428,16 @@ async function main() {
         } finally {
           appearanceInFlight -= 1;
         }
+        return;
+      }
+      if (url.pathname === "/api/apps/system/ai-provider" && hostedStatus) {
+        hostedReads += 1;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          headers: CORS_HEADERS,
+          body: JSON.stringify(hostedStatus),
+        });
         return;
       }
       const inert = inertSystemApiResponse(url.pathname);
@@ -851,6 +863,61 @@ async function main() {
       "System did not show saved hosted connections as paused",
       hostedPause,
     );
+
+    // An Inbox decision reaches the open System: Home forwards the Runtime's
+    // inbox event, or System is shown again. The open disclosure and focus stay.
+    const veniceStatus = (fields) => ({
+      hosted_external_https: "consent_required",
+      connections: [{
+        id: "model:hosted-22222222222222222222222222222222", name: "VeniceQwen3.8F", provider: "venice",
+        processor_label: "Venice", selected_model: "qwen-3-8-flash", operation: "text.generate",
+        connected: true, ...fields,
+      }],
+    });
+    const postHomeEvents = (events) => page.evaluate((list) => {
+      document.getElementById("system-frame").contentWindow.postMessage(
+        { type: "elastos:runtime-events", schema: "elastos.home.runtime-events/v1", events: list }, "*");
+    }, events);
+    const inboxChanged = [{ scope: "home", kind: "home.summary.changed" }, { scope: "inbox", kind: "inbox.changed" }];
+    const veniceAccess = () => frame.evaluate(() => {
+      const card = [...document.querySelectorAll("#ai-provider-instances .ai-provider-instance")]
+        .find((node) => node.textContent.includes("VeniceQwen3.8F"));
+      const details = card?.querySelector("details");
+      return {
+        state: card?.querySelector(".ai-provider-state")?.textContent?.trim() ?? "",
+        open: details?.open ?? null,
+        controls: [...(details?.querySelectorAll("button") ?? [])].map((node) => node.textContent),
+        focused: card?.contains(document.activeElement) ? document.activeElement.textContent : "",
+      };
+    });
+    hostedStatus = veniceStatus({ egress_state: "consent_required", egress_approval_state: "none" });
+    await postHomeEvents(inboxChanged);
+    await frame.waitForFunction(() => document.querySelector("#ai-provider-instances .ai-provider-state")
+      ?.textContent?.trim() === "Needs Inbox review");
+    await frame.click("#ai-provider-instances .ai-provider-instance summary");
+    hostedStatus = veniceStatus({ egress_state: "ready", egress_approval_state: "approved" });
+    const readsBeforeUnrelated = hostedReads;
+    await postHomeEvents([{ scope: "chat-room", kind: "chat-room.changed" }, { scope: "people", kind: "people.changed" }]);
+    await page.waitForTimeout(750);
+    const afterUnrelated = await veniceAccess();
+    assert(
+      hostedReads === readsBeforeUnrelated && !afterUnrelated.controls.includes("End hosted approval"),
+      "System re-read hosted access for an unrelated Home event",
+      { hostedReads, readsBeforeUnrelated, afterUnrelated },
+    );
+    await postHomeEvents(inboxChanged);
+    await frame.waitForFunction(() => [...document.querySelectorAll("#ai-provider-instances details button")]
+      .some((node) => node.textContent === "End hosted approval"));
+    const afterApproval = await veniceAccess();
+    assert(
+      afterApproval.open === true && afterApproval.focused === "Details and access" && afterApproval.state === "",
+      "System lost the open disclosure or focus when Inbox approval refreshed the card",
+      afterApproval,
+    );
+    hostedStatus = veniceStatus({ egress_state: "consent_required", egress_approval_state: "none" });
+    await frame.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await frame.waitForFunction(() => ![...document.querySelectorAll("#ai-provider-instances details button")]
+      .some((node) => node.textContent === "End hosted approval"));
 
     assert(
       appearancePlans.length === 0,

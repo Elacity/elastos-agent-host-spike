@@ -5619,6 +5619,15 @@ async fn home_realtime_snapshot(
     if contact_authority_unavailable {
         notification_signature.push("contact-authority-unavailable".to_string());
     }
+    // Hosted access decisions are owner Inbox items (gateway_inbox::inbox_summary);
+    // a change reaches Inbox and System as `inbox.changed`.
+    #[cfg(unix)]
+    if ensure_admin_context(&state.data_dir, context).is_ok() {
+        match crate::api::model_provider_egress_decision::realtime_signature(&state.data_dir) {
+            Ok(hosted) => notification_signature.extend(hosted),
+            Err(_) => notification_signature.push("hosted-routes-unavailable".to_string()),
+        }
+    }
     let browser_sessions = super::gateway_browser::browser_gateway_session_status(
         &state.data_dir,
         &context.principal_id,

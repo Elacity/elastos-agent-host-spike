@@ -573,6 +573,24 @@ pub(super) fn inbox_history(data_dir: &Path) -> anyhow::Result<Vec<HostedRouteSu
         .collect()
 }
 
+/// Current decisions as Home events compare them: a request, decision, End or
+/// expiry changes what Inbox and System show for hosted access.
+pub(super) fn realtime_signature(data_dir: &Path) -> anyhow::Result<Vec<String>> {
+    let now = now_ms()?;
+    Ok(read(data_dir)?
+        .decisions
+        .iter()
+        .map(|decision| {
+            format!(
+                "hosted-route:{}:{:?}:{}",
+                decision.id,
+                decision.status,
+                decision.expires_at_ms <= now
+            )
+        })
+        .collect())
+}
+
 /// Ids of decisions that still carry authority; grants of any other decision are dead.
 #[cfg(target_os = "macos")]
 pub(super) fn approved_ids(data_dir: &Path) -> anyhow::Result<std::collections::HashSet<String>> {
