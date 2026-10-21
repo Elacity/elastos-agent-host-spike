@@ -2,13 +2,14 @@
 //! The provider names an offer and effect; Runtime selects the destination,
 //! checks current owner authority, and adds the stored credential.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use elastos_runtime::provider::ProviderBridge;
@@ -476,11 +477,7 @@ async fn handle(
         };
         return deny_access(&mut stream, state).await;
     }
-    let _grant = RequestGrant {
-        data_dir,
-        run_id: &request.run_id,
-        request_id: &request.request_id,
-    };
+    let _grant = RequestGrant::hold(data_dir, &request, &destination);
     if create_grant_after_decision(
         data_dir,
         &request.offer_id,
@@ -495,35 +492,59 @@ async fn handle(
     {
         return deny(&mut stream).await;
     }
-    let result = {
-        let mut monitor = tokio::time::interval(Duration::from_millis(250));
-        let outbound = forward(&mut stream, data_dir, &request, &destination, || {
+    let result = drive_forward(
+        forward(&mut stream, data_dir, &request, &destination, || {
             bridge.confined_model_run_matches(
                 &request.offer_id,
                 &request.run_id,
                 &request.request_id,
             )
-        });
-        tokio::pin!(outbound);
-        loop {
-            tokio::select! {
-                result = &mut outbound => break result,
-                _ = monitor.tick() => {
-                    // `forward` re-checks the grant itself so an ended reply
-                    // can be reported in-band before the stream closes.
-                    if bridge.confined_model_identity().map(|(pid, _)| pid) != Some(provider_pid)
-                        || !bridge.confined_model_run_matches(&request.offer_id, &request.run_id, &request.request_id)
-                    {
-                        break Err(io::Error::new(io::ErrorKind::PermissionDenied, "hosted authority ended"));
-                    }
-                }
-            }
-        }
-    };
+        }),
+        || {
+            bridge.confined_model_identity().map(|(pid, _)| pid) == Some(provider_pid)
+                && bridge.confined_model_run_matches(
+                    &request.offer_id,
+                    &request.run_id,
+                    &request.request_id,
+                )
+        },
+        || current_grant(data_dir, &request, &destination).is_ok(),
+    )
+    .await;
     if result.is_err() {
         let _ = stream.shutdown().await;
     }
     result
+}
+
+/// Runs one admitted hosted request until it finishes or loses authority.
+/// When the grant ends, `forward` gets a short grace to write the End line
+/// itself; then it is dropped with the upstream response and any pending
+/// write, even when the provider has stopped reading. A cut chunk gets no
+/// End line appended.
+async fn drive_forward(
+    outbound: impl Future<Output = io::Result<()>>,
+    run_still_ours: impl Fn() -> bool,
+    still_granted: impl Fn() -> bool,
+) -> io::Result<()> {
+    tokio::pin!(outbound);
+    let mut monitor = tokio::time::interval(AUTHORITY_CHECK_INTERVAL);
+    loop {
+        tokio::select! {
+            result = &mut outbound => return result,
+            _ = monitor.tick() => {
+                if !run_still_ours() {
+                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, "hosted authority ended"));
+                }
+                if !still_granted() {
+                    return match tokio::time::timeout(ENDED_REQUEST_GRACE, outbound.as_mut()).await {
+                        Ok(result) => result,
+                        Err(_) => Err(io::Error::new(io::ErrorKind::PermissionDenied, "hosted access ended")),
+                    };
+                }
+            }
+        }
+    }
 }
 
 async fn read_request(stream: &mut UnixStream) -> io::Result<EffectRequest> {
@@ -1024,33 +1045,84 @@ fn create_grant_after_decision(
     write_hosted_egress_grants(data_dir, &serde_json::to_vec(&file)?)
 }
 
-/// Drops the grant bound to one hosted request once that request is over.
-fn release_request_grant(data_dir: &Path, run_id: &str, request_id: &str) -> anyhow::Result<()> {
+/// One hosted request's use of its run-bound grant. Requests that share the
+/// same grant (same route, run and request) count up; the grant is removed
+/// when the last of them finishes.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct RequestGrantKey {
+    data_dir: PathBuf,
+    offer_id: String,
+    effect: String,
+    method: String,
+    url: String,
+    run_id: String,
+    request_id: String,
+}
+
+static REQUEST_GRANT_USERS: LazyLock<Mutex<HashMap<RequestGrantKey, usize>>> =
+    LazyLock::new(Default::default);
+
+fn release_request_grant(key: &RequestGrantKey) -> anyhow::Result<()> {
     let _guard = EGRESS_GRANTS
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let mut file = grant_file(data_dir)?;
+    let mut file = grant_file(&key.data_dir)?;
     let before = file.grants.len();
     file.grants.retain(|grant| {
-        grant.run_id.as_deref() != Some(run_id) || grant.request_id.as_deref() != Some(request_id)
+        !(grant.offer_id == key.offer_id
+            && grant.effect == key.effect
+            && grant.method == key.method
+            && grant.url == key.url
+            && grant.run_id.as_deref() == Some(key.run_id.as_str())
+            && grant.request_id.as_deref() == Some(key.request_id.as_str()))
     });
     if file.grants.len() == before {
         return Ok(());
     }
-    write_hosted_egress_grants(data_dir, &serde_json::to_vec(&file)?)
+    write_hosted_egress_grants(&key.data_dir, &serde_json::to_vec(&file)?)
 }
 
 /// Releases a request's grant on every exit path, including cancellation.
-struct RequestGrant<'a> {
-    data_dir: &'a Path,
-    run_id: &'a str,
-    request_id: &'a str,
+struct RequestGrant {
+    key: RequestGrantKey,
 }
 
-impl Drop for RequestGrant<'_> {
+impl RequestGrant {
+    fn hold(data_dir: &Path, request: &EffectRequest, destination: &Destination) -> Self {
+        let key = RequestGrantKey {
+            data_dir: data_dir.to_path_buf(),
+            offer_id: request.offer_id.clone(),
+            effect: request.effect.clone(),
+            method: request.method.as_str().to_string(),
+            url: destination.grant_url.clone(),
+            run_id: request.run_id.clone(),
+            request_id: request.request_id.clone(),
+        };
+        *REQUEST_GRANT_USERS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .entry(key.clone())
+            .or_default() += 1;
+        Self { key }
+    }
+}
+
+impl Drop for RequestGrant {
     fn drop(&mut self) {
-        let _ = release_request_grant(self.data_dir, self.run_id, self.request_id);
+        // Held across the file write so a request starting now waits and
+        // then creates its grant afresh.
+        let mut users = REQUEST_GRANT_USERS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(count) = users.get_mut(&self.key) else {
+            return;
+        };
+        *count -= 1;
+        if *count == 0 {
+            users.remove(&self.key);
+            let _ = release_request_grant(&self.key);
+        }
     }
 }
 
@@ -1549,6 +1621,10 @@ async fn forward(
 
 /// How often an admitted hosted request re-checks its authority.
 const AUTHORITY_CHECK_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How long a request whose access ended may take to write the End line
+/// before Runtime drops it, even when the provider has stopped reading.
+const ENDED_REQUEST_GRACE: Duration = Duration::from_secs(1);
 
 /// The line a streamed hosted reply ends with when its access ended mid-reply.
 const HOSTED_ACCESS_ENDED_LINE: &[u8] = b": elastos-hosted-access ended\n\n";
@@ -3011,6 +3087,108 @@ mod tests {
         assert!(body.contains("data: [DONE]"));
         assert!(body.ends_with("\r\n0\r\n\r\n"), "one clean end: {body:?}");
         assert_eq!(body.matches("0\r\n\r\n").count(), 1, "{body:?}");
+    }
+
+    #[tokio::test]
+    async fn end_drops_a_reply_whose_provider_stopped_reading() {
+        let StreamedReplyFixture {
+            dir,
+            proof,
+            sink,
+            request,
+            destination,
+            decision,
+        } = streamed_reply_fixture().await;
+        let (streaming_tx, streaming_rx) = tokio::sync::oneshot::channel();
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+        let sink_task = tokio::spawn(async move {
+            let (mut socket, _) = sink.accept().await.unwrap();
+            read_upstream_request(&mut socket).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let line = format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{}\"}}}}]}}\n\n",
+                "x".repeat(16 * 1024)
+            );
+            let mut streaming_tx = Some(streaming_tx);
+            loop {
+                // Upstream keeps streaming until Runtime drops the response.
+                match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    socket.write_all(line.as_bytes()),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {
+                        if let Some(streaming_tx) = streaming_tx.take() {
+                            streaming_tx.send(()).unwrap();
+                        }
+                    }
+                    Ok(Err(_)) => break,
+                    Err(_) => panic!("upstream write stayed blocked: Runtime kept the response"),
+                }
+            }
+            closed_tx.send(std::time::Instant::now()).unwrap();
+        });
+        // The provider side is never read.
+        let (mut broker_side, _provider_side) = UnixStream::pair().unwrap();
+        let guard = RequestGrant::hold(dir.path(), &request, &destination);
+        create_grant_after_decision(
+            dir.path(),
+            &request.offer_id,
+            &request.effect,
+            request.method.as_str(),
+            &destination,
+            None,
+            Some((&request.run_id, &request.request_id)),
+        )
+        .unwrap();
+        let data_dir = dir.path().to_path_buf();
+        let ender = tokio::spawn(async move {
+            streaming_rx.await.unwrap();
+            // Let the downstream socket fill so `forward` blocks in a write.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            model_provider_egress_decision::end_decision(&data_dir, &decision, &proof).unwrap();
+            std::time::Instant::now()
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            drive_forward(
+                forward(&mut broker_side, dir.path(), &request, &destination, || {
+                    true
+                }),
+                || true,
+                || current_grant(dir.path(), &request, &destination).is_ok(),
+            ),
+        )
+        .await
+        .expect("End stops a request whose provider stopped reading");
+        let returned = std::time::Instant::now();
+        assert!(result.is_err());
+        let ended = ender.await.unwrap();
+        assert!(
+            returned.duration_since(ended)
+                <= ENDED_REQUEST_GRACE + AUTHORITY_CHECK_INTERVAL + Duration::from_millis(250),
+            "returned {:?} after End",
+            returned.duration_since(ended)
+        );
+        drop(guard);
+        let closed = tokio::time::timeout(Duration::from_secs(2), closed_rx)
+            .await
+            .expect("upstream sees the connection close")
+            .unwrap();
+        assert!(closed.duration_since(ended) < Duration::from_secs(3));
+        assert!(
+            !grant_file(dir.path())
+                .unwrap()
+                .grants
+                .iter()
+                .any(|grant| { grant.request_id.as_deref() == Some(request.request_id.as_str()) }),
+            "the request grant is gone"
+        );
+        sink_task.await.unwrap();
     }
 
     #[tokio::test]
