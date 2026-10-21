@@ -35,6 +35,10 @@ Written 21 Oct 2026. Spike-only code: `exec_vm.rs` and its use in `concurrent_la
      - The listening socket is close-on-exec, so the command never holds it.
   3. When the command ends (a command killed by a signal is 128 + the signal number), kill every process still
      running as 65534. Only then listen on the port, so no command process exists while a connection can be made.
+     - Cleanup is confirmed through `/proc`: no live 65534 process may be left. It tries 5 rounds.
+     - If it cannot confirm that, it does not listen and does not report. The console says
+       `exec-supervisor: cleanup failed; no report`, and the host fails with `exit marker missing`. The command's
+       code is never reported after a failed cleanup (Codex, review of 4b79c71ab).
      Accept the host's connection (peer CID 2; defence in depth, see below), write the code as decimal ASCII plus
      `\n` (for example `0\n` or `101\n`), and wait for the host to close.
   4. Console output (`hvc0`) stays as it is, as log only.
@@ -95,8 +99,12 @@ Written 21 Oct 2026. Spike-only code: `exec_vm.rs` and its use in `concurrent_la
 - `scripts/build/build-exec-initrd.py`: a newc cpio initramfs.
   - Uid 0 for every entry; `/tmp` mode 1777; the same inputs give the same bytes.
   - Every input is a path argument.
-  - It checks that the binaries are static aarch64 ELFs, and each module's vermagic. A module that is built in is
-    skipped, and `.ko.xz` is unpacked.
+  - It parses each input as ELF; nothing is a substring search (Codex, review of 4b79c71ab).
+    - A program: ELFCLASS64, little-endian, `EM_AARCH64`, `ET_EXEC` or `ET_DYN` (static-pie), an entry point,
+      whole program headers, at least one `PT_LOAD` inside the file, and no `PT_INTERP`.
+    - A module: `ET_REL`, `EM_AARCH64`, section headers inside the file, exactly one `.modinfo` section found by
+      name through the section headers, and exactly one `vermagic=` entry in it, naming this kernel.
+  - A module that is built in is skipped, and `.ko.xz` is unpacked.
 - **In-image falsifiers**, run as the command:
   - `probe-bind` must get `EACCES` on port 1022;
   - `probe-report` tries to write a forged `0` and leaves a process behind that keeps trying, then exits 3, so the

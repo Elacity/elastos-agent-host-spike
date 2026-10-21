@@ -212,7 +212,84 @@ The check stays as a second line. It covers a future image that loads a loopback
 listens earlier. Its falsifier is recorded as surviving on hardware by design. The order bind, run, reap, then
 listen is the primary guard, and three falsifiers pin it:
 - SV05: the report does not wait for the command;
-- SV06: processes left by the command keep running;
+- SV10 (was SV06; its code line changed): processes left by the command keep running;
+- SV08 and SV09 (below): a cleanup that cannot be confirmed still reports;
 - the Mac `probe-report` run, which leaves a process behind that keeps trying.
 
-**What is next:** Codex reviews #27 as a whole. The format 2 code still waits for Codex to pass #24.
+## Codex review at 4b79c71ab: FAIL, two findings, both fixed
+
+```text
+Commits:      7be5df194dfa97e62fb6e9fc72c66c546726ff84 (both fixes and their tests)
+              419fa15cdd4168b4b21dc09ce379aac736a1e4ea (one more builder case, after falsifier BI16 survived)
+              this section is the next commit
+Finding 1:    A cleanup that could not be confirmed still let the supervisor listen and report the command's code.
+Fix 1:        kill_everything_unprivileged() returns whether /proc shows no live 65534 process, after at most 5
+              rounds. If not: console "exec-supervisor: cleanup failed; no report", no listen, no report, exit 1.
+              The host then fails with "exit marker missing".
+Test 1:       a_process_that_survives_cleanup_means_no_report: a 65534 process (setpriv) outside the
+              supervisor's PID namespace (unshare --pid --fork) survives every kill(-1); /proc still shows it.
+              The command exits 0; the report must be None, the console must hold the line, and the supervisor's
+              status must not be 0.
+Failing first: before the fix: "left: Some("0\n") right: None" (a report of 0 was served).
+Finding 2:    The builder took any file with an AArch64 machine field and no PT_INTERP as a program, and any file
+              holding "vermagic=<release> " as a module. Codex's probes: a bare ET_REL header as the supervisor; a
+              module for another machine; a text file holding the vermagic string.
+Fix 2:        ELF parsing, no substring search.
+              Programs: ELFCLASS64, little-endian, version 1, EM_AARCH64 (183), ET_EXEC or ET_DYN (static-pie),
+                e_entry not 0, whole program headers (56 bytes each, inside the file), at least one PT_LOAD whose
+                bytes lie inside the file, no PT_INTERP.
+              Modules: the same header checks, ET_REL, section headers inside the file (64 bytes each, shstrndx
+                in range), every section inside the file (except NOBITS), the name table a STRTAB, exactly one
+                section named ".modinfo", exactly one "vermagic=" entry in it (ASCII); its first word must be the
+                kernel release.
+Tests 2:      Codex's probes: test_a_bare_relocatable_header_is_not_a_program,
+                test_a_module_for_another_architecture_is_refused, test_a_text_file_with_the_vermagic_is_not_a_module
+              more: test_a_vermagic_outside_modinfo_does_not_count, test_a_module_must_be_relocatable,
+                test_a_module_with_section_headers_past_its_end_is_refused,
+                test_a_program_needs_an_entry_a_loadable_segment_and_whole_headers (entry 0; only PT_DYNAMIC;
+                cut inside the program headers; cut inside the PT_LOAD; ET_REL; type 4),
+                test_a_static_pie_program_is_accepted (ET_DYN with PT_LOAD and PT_DYNAMIC builds)
+              The test fixtures are now real ELF: programs with program headers, modules as ET_REL with
+                .modinfo, .data and .shstrtab section headers.
+Failing first: before the fix: "Ran 16 tests ... FAILED (failures=7)": the 7 refusal tests built.
+Real files:   the real exec-supervisor, cross-built here for aarch64-unknown-linux-musl (ET_EXEC, static), is
+              accepted; a clang --target=aarch64-linux-gnu object with a .modinfo section gives its vermagic;
+              the same object for x86-64 is refused (machine 62); /bin/ls (x86-64) is refused. The real Debian
+              modules were not read here (the deb is on the Mac).
+Tests run:    (cd examples/exec-image/supervisor && cargo test --offline) -> "8 passed" (root, real vsock)
+              (cd examples/exec-image/supervisor && cargo clippy --offline --all-targets -- -D warnings) -> clean;
+                cargo fmt --check -> clean
+              python3 -m unittest scripts/build/test_build_exec_initrd.py -> "Ran 16 tests ... OK"
+Falsifiers:   SV08 a failed cleanup still reports (drop the return)  -> a_process_that_survives_cleanup_... FAILED
+              SV09 cleanup is trusted without checking /proc          -> a_process_that_survives_cleanup_... FAILED
+              SV10 cleanup is skipped (replaces SV06)                 -> a_forged_report_never_reaches_the_host and
+                                                                         a_process_that_survives_cleanup_... FAILED
+              BI03 the release is not compared                        -> test_wrong_inputs_stop_the_build FAILED
+              BI07 the vermagic substring search is back              -> 6 tests FAILED (Codex's 2 module probes,
+                                                                         and 4 more)
+              BI08 the machine is not checked                         -> test_a_module_for_another_architecture_...
+                                                                         and test_wrong_inputs_stop_the_build FAILED
+              BI09 a module need not be relocatable                   -> test_a_module_must_be_relocatable FAILED
+              BI10 a program of any type is accepted                  -> test_a_program_needs_... FAILED
+              BI11 a program needs no PT_LOAD                         -> test_a_program_needs_... FAILED
+              BI12 section headers past the end are not checked       -> test_a_module_with_section_headers_... ERROR
+                                                                         (the parse then crashes on struct.error)
+              BI13 a program needs no entry point                     -> test_a_program_needs_... FAILED
+              BI14 vermagic is read from the whole file, not .modinfo -> test_a_vermagic_outside_modinfo_... FAILED
+              BI15 static-pie is refused                              -> test_a_static_pie_program_is_accepted FAILED
+              BI16 a PT_LOAD past the file is accepted                -> SURVIVED first; after 419fa15 the
+                                                                         cut-inside-the-PT_LOAD case FAILED
+              BI17 program headers past the file are not checked      -> test_a_program_needs_... ERROR
+              SV01-SV05, SV07, BI01, BI02, BI04-BI06 rerun: each still FAILED; each restored; tree clean
+              Codex's bare-header probe is caught by the type check (BI10), and by the entry and PT_LOAD checks.
+Guest hash:   unchanged (no guest change).
+Principles:   11: a cleanup that is not confirmed is a failure, never a report. 12: the builder checks what it
+              says it checks.
+DeepSeek:     none.
+Mac:          the initrd changes (new supervisor). Rebuild with the same commands above, then rerun the signed tests
+              and the Mac falsifiers. The builder now refuses a malformed module or binary that it took before; a
+              real Debian module or a real static binary should build as before.
+```
+
+**What is next:** Sasha rebuilds the image and reruns the Mac VM proof, then Codex re-reviews #27. The format 2 code
+still waits for Codex to pass #24.
