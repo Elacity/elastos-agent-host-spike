@@ -164,13 +164,14 @@ python3 scripts/build/build-exec-initrd.py \
   --output "$IMG/initrd-exec"
 # It prints the module list and "project demo a1097f0d..." / "project-edited demo 8256365b...".
 
-# 4. The signed VZ tests.
-(cd elastos && cargo test -p elastos-vz --test concurrent_launch --no-run 2>&1 | tee /tmp/vz-build.txt)
+# 4. The signed VZ tests (from elastos/, so a relative or an absolute test path both work).
+cd elastos
+cargo test -p elastos-vz --test concurrent_launch --no-run 2>&1 | tee /tmp/vz-build.txt
 TEST_BIN=$(sed -n 's/.*Executable tests\/concurrent_launch.rs (\(.*\))/\1/p' /tmp/vz-build.txt)
-scripts/dev/sign-elastos-vz/sign.sh "elastos/$TEST_BIN"
+../scripts/dev/sign-elastos-vz/sign.sh "$TEST_BIN"
 ELASTOS_EXEC_KERNEL="$IMG/vmlinux-debian" ELASTOS_EXEC_ROOTFS="$IMG/rootfs.ext4" \
 ELASTOS_EXEC_INITRD="$IMG/initrd-exec" ELASTOS_EXEC_FAKE_EXIT=1 \
-  "elastos/$TEST_BIN" --exact exec_smoke_image_prints_hello a_forged_exit_line_cannot_pass \
+  "$TEST_BIN" --exact exec_smoke_image_prints_hello a_forged_exit_line_cannot_pass \
   --nocapture --test-threads=1
 ```
 
