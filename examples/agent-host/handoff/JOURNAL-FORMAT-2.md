@@ -10,6 +10,10 @@ Written 21 Oct 2026. **Design only.** The code comes in its own draft PR, branch
 - **Every record has a typed kind** (message, spill, todo, goal, refused, budget, ...). A kind is never parsed from
   text, so a person's message can never read as a record.
 - **Falsifier required:** a message that starts with each label stays a message.
+- **Model-visible text (approved addition, 21 Oct):** one rendering table, in one place, with golden tests per kind.
+  It changes only together with a format number bump, because it is in the cached prefix.
+- **A format 1 task (approved addition, 21 Oct):** the person sees the reason
+  `journal format 1 not supported; start a new task` in the UI, not a task that never resolves.
 - One refusal record per refusal (as in PR #24). Budgets bound the volume.
 
 ## Why: format 1 reads kinds out of text
@@ -75,6 +79,7 @@ Decode refuses any other pairing.
 - **Rendering is one way.** `derive` turns a record into model text. No function turns text back into a kind: every
   reader matches on the kind byte (`is_durable_visible`, `text_at_spill`, the refusal count, compaction, the observation
   readers).
+- The last column of the table is a proposal; the rule for it is in "Model-visible text" below.
 - `model_bytes` and `replay` (the cache bytes) also carry the kind, so the round trip stays exact.
 
 **Step payload:** format 1's fields, then `depth u8 | budget (u8 flag + requests u32 + seconds u64) |
@@ -89,7 +94,7 @@ requests_used u32 | stop u8`.
 
 | Input | Error |
 | --- | --- |
-| format 1 | `journal format 1 not supported; start a new task` |
+| format 1 | `journal format 1 not supported; start a new task` (and the outcome `FormatNotSupported`) |
 | a format other than 1 or 2 | `format version` |
 | an unknown kind tag, or a kind with the wrong role | `record` |
 | an observation whose text does not match its hash, a window whose text does not have `count` whole lines, a cut without a window, or a window without a revision | `record` |
@@ -98,10 +103,37 @@ requests_used u32 | stop u8`.
 
 The old refusals (size, truncation, magic, chain, order, bools, UTF-8, trailing bytes) stay as they are.
 
-**Resume.** `resume_journal` decodes the stored object.
-- A format 1 object gives the reason above, and the task stays unknown for a person, as for any journal that does
-  not decode.
-- No new append is sent, and the person starts a new task.
+## Model-visible text: one table, golden tests, changed only with the format
+
+- **One place.** A single function, `render_record(kind, fields) -> String`, holds the whole table, and a constant
+  lists every kind with its exact rendering. `derive`, `model_bytes` and the summary input all call it; nothing else
+  builds model text for a record.
+- **Golden tests.** `each_kind_renders_byte_for_byte` keeps one fixed example per kind with its expected bytes, as a
+  byte string in the test. Each record kind's rendered text is pinned exactly, including separators, spaces and the
+  trailing newline.
+- **Changed only with the format number.**
+  - The table carries the format number it belongs to: `RENDERING_FORMAT = 2`, equal to `JOURNAL_FORMAT`.
+  - A test fails if the golden bytes change while `JOURNAL_FORMAT` stays the same. It hashes the whole golden table
+    and pins that hash next to the format number.
+  - So a rendering change cannot ship without a format bump. A bump means stored journals of the old format are
+    refused with their reason, which keeps the cached prefix of every live task stable.
+- **Not decided:** the exact text per kind. The table above is the proposal. Once the code PR fixes it, it is
+  frozen for format 2.
+
+## A format 1 task: the person sees why
+
+- **Every path that loads a stored journal** (resume, reread, opening a task) decodes it. A format 1 object returns a
+  typed outcome, `ResumeOutcome::FormatNotSupported` (and the same on the reread path).
+  - It is not `Unknown`, so the task does not wait for a person to resolve an append.
+  - It carries the exact text `journal format 1 not supported; start a new task`.
+- **The guest's run** returns that text as its refusal (`BusError::Invalid`, the same channel as the guest's other
+  refusals). The host gets it as the run's error.
+  - Home shows that text on the task. It renders only; it decides nothing (PRINCIPLES 16).
+  - No append is sent, and the old object is not touched.
+- **To check when building:**
+  - whether Home already shows a capsule's run refusal text on the task;
+  - if it does not, the code PR names the Home change needed, and the person-visible part is proven only once Home
+    shows it (Cursor on the Mac).
 
 ## Tests and falsifiers (for the code PR)
 
@@ -110,6 +142,9 @@ The old refusals (size, truncation, magic, chain, order, bools, UTF-8, trailing 
 | `a_message_starting_with_each_label_stays_a_message`: for every label (`todo`, `plan-entered`, `plan-exit-asked`, `goal`, `spill`, `inbox`, `refused`, and the rendered forms like `goal: `), a person's message is kind message after admit, after round trip, after compaction (summarized, not kept) and for `text_at_spill` (no pointer) | read the kind from a text prefix again |
 | `every_kind_round_trips` (each kind with its fields) | drop one field on encode |
 | `a_format_1_journal_is_refused_with_its_reason` | accept format 1 |
+| `a_format_1_task_shows_its_reason`: resume and reread give `FormatNotSupported`, the run returns the exact text, nothing is written | return `Unknown`, or a generic error |
+| `each_kind_renders_byte_for_byte` (golden bytes per kind) | change one rendering |
+| `the_rendering_changes_only_with_the_format_number` (pinned hash of the golden table next to `JOURNAL_FORMAT`) | change a rendering and leave the format at 2 |
 | `an_unknown_kind_is_refused` and `a_kind_with_the_wrong_role_is_refused` | map unknown to message; skip the pair check |
 | `an_observation_with_a_wrong_hash_or_window_is_refused` | trust the fields |
 | `idea_2_fields_must_be_empty_until_built` | accept a value |
@@ -130,5 +165,5 @@ The old refusals (size, truncation, magic, chain, order, bools, UTF-8, trailing 
 
 ## Not decided
 
-- The exact rendered text for each record kind in the model view. The table above is a proposal. It must stay stable,
-  because it is in the cached prefix.
+- The exact rendered text for each record kind (see "Model-visible text").
+- Whether Home needs a change to show a run's refusal text on the task (see "A format 1 task").
