@@ -11565,6 +11565,57 @@ async fn test_system_ai_provider_guest_get_forbidden() {
 }
 
 #[tokio::test]
+async fn test_system_ai_provider_requires_a_passkey_bound_admin_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let passkey_admin = passkey_authority_with_name(dir.path(), Some("owner"));
+    let now = crate::auth::now_ts();
+    let binding = ProofBinding {
+        kind: elastos_runtime::auth::ProofBindingKind::DidKey,
+        subject: "did:key:z6MkpasskeylessAdminFixture".to_string(),
+        chain_id: None,
+        verified_at: now,
+        passkey: None,
+    };
+    let principal = crate::auth::upsert_principal_for_binding_as_role_named(
+        dir.path(),
+        binding,
+        "principal:passkeyless-admin".to_string(),
+        crate::auth::RuntimePrincipalRole::Admin,
+        Some("wallet admin"),
+        now,
+    )
+    .unwrap();
+    assert!(crate::auth::is_admin(&principal));
+    let grant = AuthSessionGrantV1 {
+        schema: AuthSessionGrantV1::SCHEMA.to_string(),
+        grant_id: format!("grant:{}", uuid_like_token()),
+        session_id: format!("auth:{}", uuid_like_token()),
+        principal_id: principal.principal_id.clone(),
+        proof_binding_id: principal.proof_binding_id.clone(),
+        issued_at: now,
+        expires_at: now + 60 * 60,
+        apps: vec![SYSTEM_CAPSULE_ID.to_string()],
+    };
+    crate::auth::store_session_grant(dir.path(), grant.clone()).unwrap();
+    let token =
+        issue_home_launch_token_for_auth_grant(dir.path(), SYSTEM_CAPSULE_ID, &grant).unwrap();
+
+    let (status, _) =
+        ai_provider_raw(&app, "GET", "/api/apps/system/ai-provider", &token, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = ai_provider_raw(
+        &app,
+        "GET",
+        "/api/apps/system/ai-provider",
+        &passkey_admin.system_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn test_system_ai_provider_invalid_key_leaves_that_provider_absent() {
     for (provider, api_key, invalid_text, install) in [
         (
