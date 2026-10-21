@@ -72,7 +72,7 @@ Every line reference below is at branch `claude/overnight-1`, checked by reading
 ### 1f. Size limits on the path
 
 - A Runtime resource frame is at most 1 MiB (`resource_bridge.rs:32`), checked on the envelope line.
-- The S2 journal cap is 256 KiB, which is about 342 KiB in base64, so it fits.
+- The S2 journal cap is now 192 KiB (20 Oct). Bytes cross the bridge as a JSON number array, up to four characters per byte, so the worst case is about 768 KiB, inside the frame. The earlier 256 KiB worst case (about 1 MiB) did not fit. See USERSAI-JOURNAL.md.
 - Wasmtime: 128 MiB memory and 100 M fuel (`component.rs:28-29`).
 
 ## 2. Proposed design (smallest diff)
@@ -99,13 +99,20 @@ Every line reference below is at branch `claude/overnight-1`, checked by reading
    - The resource must be rooted (`rooted_localhost_uri`) and free of `..`. The guest already refuses host paths with `host_path`.
 4. **Runtime storage.**
    - A `journal_append` operation in the in-Runtime protected-storage branch. It does not go to the localhost provider.
-   - It decodes base64 and refuses more than 256 KiB.
+   - (Superseded 20 Oct: bytes come as the existing JSON number array; the guest cap is 192 KiB; the 1 MiB frame is the Runtime-side limit.)
    - It calls the S2 `decode_journal` logic, or a Runtime copy of it, so it never stores bytes it cannot read back.
    - It writes with `write_principal_root_object_if_revision`, widened to accept the agent's `UsersAI` root: `Absent` for the first append, `Revision(seen)` after that.
    - A conflict returns a typed `journal_revision_conflict` mapped to `Invalid`, not `Internal`.
    - The response returns the new revision.
    - The attached Runtime (`elastos run`) keeps refusing it with `principal_context_required`.
 5. **Resume.** Read back the object. If its head hash equals the guest's last head, the append settled. If it equals the parent, the append did not happen; propose again with a new step. If it is anything else, the state is `settlement_unknown` until a person decides.
+
+**Update (20 Oct): option B chosen.** The guest imports `capabilities` and asks for exactly two grants, write and read, on its own journal; the manifest declares only `.AppData/Agents/agent-host/*`. The two gaps below are closed by that. See `S3-GRANT-CHANNEL.md`.
+
+**Guest side done (20 Oct, branch `claude/s3-guest-journal`).** The guest imports `providers` (no `capabilities`), writes the journal through the bridge rules from PR #8, holds the launch grant in memory, and resumes by head hash. See `reports/S3-guest-journal.md` and the guest section of `USERSAI-JOURNAL.md`. Two gaps found while building it:
+
+- **No channel for the launch grant.** The WIT world has no launch argument, `lifecycle.run` takes nothing, and the guest does not import `capabilities`. So the Runtime has no way today to hand the guest the grant id. The wasm build uses an empty id, which means no grant, so it sends nothing. The Wasmtime test checks that no bridge line is sent.
+- **Resume needs a read grant.** A capability token covers one resource and one action, so the write grant cannot read the journal back.
 
 ## 3. Tests (from HANDOFF S3, plus where to model each)
 
@@ -124,7 +131,7 @@ Every line reference below is at branch `claude/overnight-1`, checked by reading
 | A replayed old version: an old revision as `if_revision`, or an old encoding | compare-and-swap under the lock; `prev_head` mismatch | `journal_revision_conflict`, nothing written |
 | A grant for a different resource or action (for example a read token, or another task's journal) | `capability_manager.validate` on the scoped resource and the write action | `capability_denied` |
 | A crash between the write and the result | guest `note_crash` after dispatch | `SettlementUnknown`, no second dispatch; resume uses the head hash |
-| An oversized append: more than 256 KiB decoded, or more than 1 MiB frame | guest `encode_journal`; Runtime decode; `MAX_RESOURCE_FRAME_BYTES` | refused, nothing written |
+| An oversized append: more than 192 KiB encoded, or more than 1 MiB frame | guest `encode_journal`; Runtime decode; `MAX_RESOURCE_FRAME_BYTES` | refused, nothing written |
 | A host path or `..` in the resource | guest `host_path`; Runtime `rooted_localhost_uri` | refused, no step, no provider call |
 | Bytes that are re-linked but malformed | Runtime decode (S2 canonical checks) | refused, nothing written |
 | An attached Runtime trying to write | `resource_bridge.rs:1075-1083` | `principal_context_required` |

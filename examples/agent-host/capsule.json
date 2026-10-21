@@ -2,7 +2,7 @@
   "schema": "elastos.capsule/v1",
   "name": "agent-host",
   "version": "0.1.0",
-  "description": "Journal fold in an elastos.component/v1 guest. A read without a grant is denied. Cancel before dispatch does not run. Snapshots and skills append after the head. A checkpoint is copied before a step. No tool body and no Home icon.",
+  "description": "Journal fold in an elastos.component/v1 guest. It asks for exactly two grants, write and read, on its own task journal under Users/self/.AppData/Agents/agent-host/, and writes that journal only with them. No tool body and no Home icon.",
   "author": "local-development",
   "role": "app",
   "type": "wasm",
@@ -12,6 +12,9 @@
   "execution": "component",
   "projections": ["facts"],
   "entrypoint": "agent-host.component.wasm",
+  "capabilities": [
+    "localhost://Users/self/.AppData/Agents/agent-host/*"
+  ],
   "resources": {
     "memory_mb": 16,
     "cpu_shares": 10,

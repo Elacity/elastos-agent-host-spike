@@ -408,17 +408,19 @@ async fn authorize_and_dispatch_resource_invoke(
         );
     }
 
+    if let Some(refusal) = agents_area_dispatch_refusal(&dispatch) {
+        return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
+    }
+
     if let Some(response) = protected_principal_root_resource_response(
         bridge_ctx,
         &dispatch.operation,
         &dispatch.request,
     ) {
-        let outcome =
-            if response.get("type").and_then(|value| value.as_str()) == Some("resource_result") {
-                "ok"
-            } else {
-                "error"
-            };
+        let outcome = match response.get("type").and_then(|value| value.as_str()) {
+            Some("resource_result") => invoke_outcome(&response["result"]),
+            _ => "error",
+        };
         return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, outcome, response);
     }
 
@@ -431,7 +433,7 @@ async fn authorize_and_dispatch_resource_invoke(
             bridge_ctx,
             &audit_id,
             &dispatch,
-            "ok",
+            invoke_outcome(&result),
             serde_json::json!({
                 "type": "resource_result",
                 "result": result,
@@ -482,8 +484,27 @@ fn protected_principal_root_resource_response(
         ));
     };
 
+    // The dispatch already ran this rule; it runs again here so this storage
+    // path never depends on the caller's order of checks.
+    if let Some(refusal) = agent_path_refusal(&rooted, operation) {
+        return Some(refusal);
+    }
+    let agent_path = crate::provider_resource::in_agents_area(&rooted);
+    let agent_journal = operation == "write" && agent_path;
     match crate::auth::load_principal_root_protection(data_dir, principal_id, &localhost_root) {
         Ok(Some(_)) => {}
+        Ok(None) if agent_path => {
+            return Some(resource_error_response(
+                "principal_root_protection_required",
+                "Agent journals under .AppData/Agents/ require principal-root protection",
+            ));
+        }
+        Ok(None) if operation == "write" && !matches!(write_precondition(request), Ok(None)) => {
+            return Some(resource_error_response(
+                "principal_root_protection_required",
+                "create_only and if_revision need principal-root protection",
+            ));
+        }
         Ok(None) => return None,
         Err(err) => {
             return Some(resource_error_response(
@@ -512,6 +533,8 @@ fn protected_principal_root_resource_response(
                 Ok(bytes) => bytes,
                 Err(err) => return Some(provider_error_result("read_failed", &err.to_string())),
             };
+            let revision =
+                crate::auth::principal_root_object_revision(principal_id, &rooted, &bytes);
             let bytes = apply_read_window(
                 bytes,
                 request.get("offset").and_then(|value| value.as_u64()),
@@ -520,6 +543,7 @@ fn protected_principal_root_resource_response(
             Some(provider_ok_result(serde_json::json!({
                 "content": bytes,
                 "size": bytes.len(),
+                "revision": revision,
             })))
         }
         "write" => {
@@ -531,6 +555,28 @@ fn protected_principal_root_resource_response(
                 .get("append")
                 .and_then(|value| value.as_bool())
                 .unwrap_or(false);
+            let precondition = match write_precondition(request) {
+                Ok(precondition) => precondition,
+                Err(message) => return Some(resource_error_response("invalid_content", &message)),
+            };
+            if agent_journal && append {
+                return Some(resource_error_response(
+                    "append_not_allowed",
+                    "append is read-then-write; Agent journals are written whole with a revision precondition",
+                ));
+            }
+            if append && precondition.is_some() {
+                return Some(resource_error_response(
+                    "invalid_content",
+                    "append does not take create_only or if_revision",
+                ));
+            }
+            if agent_journal && precondition.is_none() {
+                return Some(resource_error_response(
+                    "revision_required",
+                    "Agent journal writes need create_only or if_revision",
+                ));
+            }
             let bytes = if append && path.is_file() {
                 match crate::auth::read_principal_root_object(
                     data_dir,
@@ -550,21 +596,107 @@ fn protected_principal_root_resource_response(
             } else {
                 content.clone()
             };
-            match crate::auth::write_principal_root_object(
-                data_dir,
-                principal_id,
-                &localhost_root,
-                &rooted,
-                &path,
-                &bytes,
-            ) {
+            let written = match &precondition {
+                Some(precondition) => crate::auth::write_principal_root_object_if_revision(
+                    data_dir,
+                    principal_id,
+                    &localhost_root,
+                    &rooted,
+                    &path,
+                    &bytes,
+                    match precondition {
+                        WritePrecondition::Absent => {
+                            crate::auth::PrincipalRootObjectPrecondition::Absent
+                        }
+                        WritePrecondition::Revision(revision) => {
+                            crate::auth::PrincipalRootObjectPrecondition::Revision(revision)
+                        }
+                    },
+                ),
+                None => crate::auth::write_principal_root_object(
+                    data_dir,
+                    principal_id,
+                    &localhost_root,
+                    &rooted,
+                    &path,
+                    &bytes,
+                ),
+            };
+            match written {
                 Ok(()) => Some(provider_ok_result(serde_json::json!({
                     "bytes_written": content.len(),
+                    "revision": crate::auth::principal_root_object_revision(
+                        principal_id,
+                        &rooted,
+                        &bytes,
+                    ),
                 }))),
+                Err(err) if err.is::<crate::auth::PrincipalRootObjectWriteConflict>() => {
+                    Some(provider_error_result("revision_conflict", &err.to_string()))
+                }
                 Err(err) => Some(provider_error_result("write_failed", &err.to_string())),
             }
         }
         _ => None,
+    }
+}
+
+/// The one Agents rule (`provider_resource::agents_area_refusal`) in the
+/// bridge's error shape.
+fn agent_path_refusal(rooted: &str, operation: &str) -> Option<serde_json::Value> {
+    crate::provider_resource::agents_area_refusal(rooted, operation)
+        .map(|(code, message)| resource_error_response(code, message))
+}
+
+/// The Agents rule for a localhost invoke, on the scoped path the provider would use.
+fn agents_area_dispatch_refusal(dispatch: &ResourceInvokeDispatch) -> Option<serde_json::Value> {
+    if dispatch.scheme != "localhost" {
+        return None;
+    }
+    let rooted = rooted_localhost_uri(dispatch.request.get("path")?.as_str()?)?;
+    agent_path_refusal(&rooted, &dispatch.operation)
+}
+
+/// The Agents rule for a capability request, on the scoped resource: inside the
+/// area only read and write may be asked for, so anything else is refused at
+/// once instead of waiting for the shell.
+fn agents_area_capability_refusal(resource: &str, action: &str) -> Option<serde_json::Value> {
+    agent_path_refusal(&rooted_localhost_uri(resource)?, action)
+}
+
+/// What a completed invoke is audited as: a result whose status is not ok is
+/// an error, and a revision conflict is a conflict.
+fn invoke_outcome(result: &serde_json::Value) -> &'static str {
+    match result.get("status").and_then(|value| value.as_str()) {
+        None | Some("ok") => "ok",
+        Some(_) if result["code"] == "revision_conflict" => "conflict",
+        Some(_) => "error",
+    }
+}
+
+/// The optional precondition of a protected write: `create_only` for a new
+/// object, or `if_revision` naming the revision the caller last read.
+enum WritePrecondition {
+    Absent,
+    Revision(String),
+}
+
+fn write_precondition(request: &serde_json::Value) -> Result<Option<WritePrecondition>, String> {
+    let create_only = match request.get("create_only") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(_) => return Err("create_only must be a boolean".to_string()),
+    };
+    let if_revision = match request.get("if_revision") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value)) if !value.is_empty() => Some(value.clone()),
+        Some(_) => return Err("if_revision must be a non-empty string".to_string()),
+    };
+    match (create_only, if_revision) {
+        (true, Some(_)) => Err("create_only and if_revision cannot both be set".to_string()),
+        (true, None) => Ok(Some(WritePrecondition::Absent)),
+        (false, Some(revision)) => Ok(Some(WritePrecondition::Revision(revision))),
+        (false, None) => Ok(None),
     }
 }
 
@@ -804,6 +936,12 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                         }
                     };
                 let resource = scoped_resource.as_str();
+                if let Some(refusal) = agents_area_capability_refusal(resource, action_str) {
+                    return Ok(serde_json::json!({
+                        "id": id,
+                        "response": refusal,
+                    }));
+                }
                 let action = match parse_action(action_str) {
                     Some(a) => a,
                     None => {
@@ -1030,7 +1168,7 @@ pub async fn handle_remote_request_with_audit_dir(
             "attached component bridge requires a local runtime API URL; rejecting remote transport: {}",
             e
         )
-    })?;
+    });
 
     let envelope: serde_json::Value =
         serde_json::from_str(line.trim()).context("Invalid JSON from guest")?;
@@ -1038,6 +1176,14 @@ pub async fn handle_remote_request_with_audit_dir(
     let id = envelope["id"].as_u64().unwrap_or(0);
     let request = &envelope["request"];
     let request_type = request["type"].as_str().unwrap_or("");
+    // A resource_invoke checks the URL after its "requested" record, so a bad
+    // URL still leaves a "completed / error" record. Every other request is
+    // refused here, as before.
+    let api_base = if request_type == "resource_invoke" {
+        api_base
+    } else {
+        Ok(api_base?)
+    };
     let client = reqwest::Client::new();
 
     let response = match request_type {
@@ -1056,49 +1202,68 @@ pub async fn handle_remote_request_with_audit_dir(
                 }
             };
             let cap_token = request["token"].as_str().unwrap_or("");
-            if !manifest_allows_resource(manifest_capabilities, &dispatch.resource, principal_id) {
-                return Ok(serde_json::json!({
-                    "id": id,
-                    "response": manifest_denied_response(&dispatch.resource),
-                }));
-            }
-            if cap_token.is_empty() {
-                return Ok(serde_json::json!({
-                    "id": id,
-                    "response": resource_error_response(
-                        "missing_token",
-                        "resource_invoke requires a capability token",
-                    ),
-                }));
-            }
-
-            if principal_root_read_write_uri(&dispatch.operation, &dispatch.request).is_some() {
-                return Ok(serde_json::json!({
-                    "id": id,
-                    "response": resource_error_response(
-                        "principal_context_required",
-                        "principal-root storage requires an in-runtime protected storage bridge",
-                    ),
-                }));
-            }
-
+            // Audit as local dispatch does: "requested" once the request
+            // parses, then one "completed" record for every way out, refusals
+            // included.
             let audit_id = format!(
                 "component-invoke:{}",
                 elastos_runtime::capability::pending::RequestId::new()
             );
-            if let Some(data_dir) = audit_data_dir {
-                record_component_invoke_event(
-                    data_dir,
-                    ComponentInvokeAudit {
-                        capsule_id,
-                        principal_id,
-                        audit_id: &audit_id,
-                        phase: "requested",
-                        resource: &dispatch.resource,
-                        operation: &dispatch.operation,
-                        outcome: "pending",
-                    },
-                )?;
+            let audit = |phase: &str, outcome: &str| -> Result<()> {
+                match audit_data_dir {
+                    Some(data_dir) => record_component_invoke_event(
+                        data_dir,
+                        ComponentInvokeAudit {
+                            capsule_id,
+                            principal_id,
+                            audit_id: &audit_id,
+                            phase,
+                            resource: &dispatch.resource,
+                            operation: &dispatch.operation,
+                            outcome,
+                        },
+                    ),
+                    None => Ok(()),
+                }
+            };
+            audit("requested", "pending")?;
+            let api_base = match api_base {
+                Ok(api_base) => api_base,
+                Err(err) => {
+                    audit("completed", "error")?;
+                    return Err(err);
+                }
+            };
+            let refusal = if !manifest_allows_resource(
+                manifest_capabilities,
+                &dispatch.resource,
+                principal_id,
+            ) {
+                Some(manifest_denied_response(&dispatch.resource))
+            } else if cap_token.is_empty() {
+                Some(resource_error_response(
+                    "missing_token",
+                    "resource_invoke requires a capability token",
+                ))
+            } else if let Some(refusal) = agents_area_dispatch_refusal(&dispatch) {
+                Some(refusal)
+            } else if principal_root_read_write_uri(&dispatch.operation, &dispatch.request)
+                .is_some()
+            {
+                Some(resource_error_response(
+                    "principal_context_required",
+                    "principal-root storage requires an in-runtime protected storage bridge",
+                ))
+            } else {
+                None
+            };
+            if let Some(mut refusal) = refusal {
+                audit("completed", "denied")?;
+                refusal["audit"] = serde_json::Value::String(audit_id.clone());
+                return Ok(serde_json::json!({
+                    "id": id,
+                    "response": refusal,
+                }));
             }
 
             tracing::debug!(
@@ -1108,11 +1273,18 @@ pub async fn handle_remote_request_with_audit_dir(
                 !cap_token.is_empty()
             );
 
+            let url = match api_base.join(&format!(
+                "/api/provider/{}/{}",
+                dispatch.scheme, dispatch.operation
+            )) {
+                Ok(url) => url,
+                Err(err) => {
+                    audit("completed", "error")?;
+                    return Err(err);
+                }
+            };
             let req = client
-                .post(api_base.join(&format!(
-                    "/api/provider/{}/{}",
-                    dispatch.scheme, dispatch.operation
-                ))?)
+                .post(url)
                 .header("Authorization", format!("Bearer {}", client_token))
                 .header("X-Elastos-Capsule-Id", capsule_id)
                 .header("X-Capability-Token", cap_token)
@@ -1121,45 +1293,42 @@ pub async fn handle_remote_request_with_audit_dir(
             let resp = match req.send().await {
                 Ok(resp) => resp,
                 Err(err) => {
-                    if let Some(data_dir) = audit_data_dir {
-                        record_component_invoke_event(
-                            data_dir,
-                            ComponentInvokeAudit {
-                                capsule_id,
-                                principal_id,
-                                audit_id: &audit_id,
-                                phase: "completed",
-                                resource: &dispatch.resource,
-                                operation: &dispatch.operation,
-                                outcome: "error",
-                            },
-                        )?;
-                    }
+                    audit("completed", "error")?;
                     return Err(err.into());
                 }
             };
             let status = resp.status();
-            let body: serde_json::Value = resp.json().await?;
+            // A reply that is not JSON (a plain-text 403, a cut-off body) is
+            // an error outcome, and still gets its "completed" record.
+            let body: serde_json::Value = match resp
+                .bytes()
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|bytes| serde_json::from_slice(&bytes).map_err(anyhow::Error::from))
+            {
+                Ok(body) => body,
+                Err(err) => {
+                    audit("completed", "error")?;
+                    return Err(err.context(format!(
+                        "provider reply for {}/{} was not JSON (HTTP {status})",
+                        dispatch.scheme, dispatch.operation
+                    )));
+                }
+            };
             tracing::debug!(
                 "[remote-resource-bridge] {}/{} -> {}",
                 dispatch.scheme,
                 dispatch.operation,
                 status
             );
-            if let Some(data_dir) = audit_data_dir {
-                record_component_invoke_event(
-                    data_dir,
-                    ComponentInvokeAudit {
-                        capsule_id,
-                        principal_id,
-                        audit_id: &audit_id,
-                        phase: "completed",
-                        resource: &dispatch.resource,
-                        operation: &dispatch.operation,
-                        outcome: if status.is_success() { "ok" } else { "error" },
-                    },
-                )?;
-            }
+            audit(
+                "completed",
+                if status.is_success() {
+                    invoke_outcome(&body)
+                } else {
+                    "error"
+                },
+            )?;
             serde_json::json!({
                 "type": "resource_result",
                 "result": body,
@@ -1167,6 +1336,7 @@ pub async fn handle_remote_request_with_audit_dir(
             })
         }
         "request_capability" => {
+            let api_base = api_base?;
             let resource = request["resource"].as_str().unwrap_or("");
             let action_str = request["action"].as_str().unwrap_or("execute");
             let reason = request["reason"].as_str().unwrap_or("");
@@ -1185,6 +1355,12 @@ pub async fn handle_remote_request_with_audit_dir(
                 }
             };
             let resource = scoped_resource.as_str();
+            if let Some(refusal) = agents_area_capability_refusal(resource, action_str) {
+                return Ok(serde_json::json!({
+                    "id": id,
+                    "response": refusal,
+                }));
+            }
             if is_wallet_resource(resource) {
                 let action = match parse_action(action_str) {
                     Some(action) => action,
@@ -2138,6 +2314,1422 @@ mod tests {
             serde_json::from_value(read_response["response"]["result"]["data"]["content"].clone())
                 .unwrap();
         assert_eq!(content, b"secret-chat-state");
+    }
+
+    // S3 (spike): the Agent Host task journal lives under the launching
+    // person's root at .AppData/Agents/<agent-id>/tasks/<task-id>/journal.
+    const JOURNAL_SELF_URI: &str =
+        "localhost://Users/self/.AppData/Agents/demo-agent/tasks/task-1/journal";
+
+    fn journal_context(principal_id: &str) -> (tempfile::TempDir, BridgeContext, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let protection =
+            crate::auth::store_test_principal_root_protection(temp.path(), principal_id);
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(principal_id.to_string());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        ctx.manifest_capabilities = vec![format!(
+            "{}/.AppData/Agents/demo-agent/*",
+            protection.localhost_root
+        )];
+        let object_uri = format!(
+            "{}/.AppData/Agents/demo-agent/tasks/task-1/journal",
+            protection.localhost_root
+        );
+        (temp, ctx, object_uri)
+    }
+
+    fn journal_write_line(
+        id: u64,
+        uri: &str,
+        token: Option<String>,
+        content: &[u8],
+        precondition: serde_json::Value,
+    ) -> String {
+        let mut body = serde_json::json!({ "content": content.to_vec(), "append": false });
+        if let Some(extra) = precondition.as_object() {
+            for (key, value) in extra {
+                body[key] = value.clone();
+            }
+        }
+        let mut request = serde_json::json!({
+            "type": "resource_invoke",
+            "uri": uri,
+            "operation": "write",
+            "body": body,
+        });
+        if let Some(token) = token {
+            request["token"] = token.into();
+        }
+        serde_json::json!({ "id": id, "request": request }).to_string()
+    }
+
+    fn journal_path(temp: &tempfile::TempDir, object_uri: &str) -> std::path::PathBuf {
+        rooted_localhost_fs_path(temp.path(), object_uri).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_journal_write_without_a_grant_never_reaches_storage() {
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let line = journal_write_line(
+            41,
+            JOURNAL_SELF_URI,
+            None,
+            b"journal v1",
+            serde_json::json!({}),
+        );
+        let response = handle_request(&line, &Some(ctx)).await.unwrap();
+        assert_eq!(response["response"]["type"], "error");
+        assert_eq!(response["response"]["code"], "missing_token");
+        assert!(!journal_path(&temp, &object_uri).exists());
+    }
+
+    #[tokio::test]
+    async fn a_read_grant_or_another_tasks_grant_cannot_write_the_journal() {
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let other_task = object_uri.replace("/tasks/task-1/", "/tasks/task-2/");
+        for (resource, action) in [
+            (object_uri.as_str(), Action::Read),
+            (other_task.as_str(), Action::Write),
+        ] {
+            let token = bridge_token(&ctx, resource, action);
+            let line = journal_write_line(
+                42,
+                JOURNAL_SELF_URI,
+                Some(token),
+                b"journal v1",
+                serde_json::json!({}),
+            );
+            let response = handle_request(&line, &Some(ctx.clone())).await.unwrap();
+            assert_eq!(
+                response["response"]["code"], "capability_denied",
+                "{resource}"
+            );
+            assert!(!journal_path(&temp, &object_uri).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn another_principals_journal_is_refused_before_the_grant_check() {
+        let (temp, ctx, _object_uri) = journal_context("person:local:journal-owner");
+        let foreign_root = crate::auth::principal_localhost_root("person:local:someone-else");
+        let foreign = format!("{foreign_root}/.AppData/Agents/demo-agent/tasks/task-1/journal");
+        let token = bridge_token(&ctx, &foreign, Action::Write);
+        let line = journal_write_line(
+            43,
+            &foreign,
+            Some(token),
+            b"journal v1",
+            serde_json::json!({}),
+        );
+        let response = handle_request(&line, &Some(ctx)).await.unwrap();
+        assert_eq!(response["response"]["code"], "invalid_resource_invoke");
+        assert_eq!(
+            response["response"]["message"],
+            "localhost://Users roots must use Users/self or the active principal root"
+        );
+        assert!(!journal_path(&temp, &foreign).exists());
+    }
+
+    #[tokio::test]
+    async fn a_granted_journal_write_is_stored_encrypted_under_the_launching_person() {
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let token = bridge_token(&ctx, &object_uri, Action::Write);
+        let line = journal_write_line(
+            44,
+            JOURNAL_SELF_URI,
+            Some(token),
+            b"EAHJ journal v1",
+            serde_json::json!({ "create_only": true }),
+        );
+        let response = handle_request(&line, &Some(ctx)).await.unwrap();
+        assert_eq!(response["response"]["result"]["status"], "ok");
+        let stored = std::fs::read_to_string(journal_path(&temp, &object_uri)).unwrap();
+        assert!(stored.contains("elastos.principal-root.object/v1"));
+        assert!(!stored.contains("EAHJ journal v1"));
+    }
+
+    #[tokio::test]
+    async fn an_oversized_journal_write_is_refused_by_the_frame_cap() {
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let token = bridge_token(&ctx, &object_uri, Action::Write);
+        let line = journal_write_line(
+            45,
+            JOURNAL_SELF_URI,
+            Some(token),
+            &vec![b'x'; MAX_RESOURCE_FRAME_BYTES],
+            serde_json::json!({}),
+        );
+        let response = handle_request(&line, &Some(ctx)).await.unwrap();
+        assert_eq!(response["response"]["code"], "request_too_large");
+        assert!(!journal_path(&temp, &object_uri).exists());
+    }
+
+    /// The protected write accepts `create_only` and `if_revision`, writes
+    /// through write_principal_root_object_if_revision, and returns the new revision.
+    #[tokio::test]
+    async fn a_stale_journal_revision_is_refused_and_the_stored_journal_is_kept() {
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let write = |id: u64, content: &[u8], precondition: serde_json::Value| {
+            let token = bridge_token(&ctx, &object_uri, Action::Write);
+            let line = journal_write_line(id, JOURNAL_SELF_URI, Some(token), content, precondition);
+            let ctx = Some(ctx.clone());
+            async move { handle_request(&line, &ctx).await.unwrap() }
+        };
+        let first = write(
+            51,
+            b"journal v1",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(first["response"]["result"]["status"], "ok");
+        let v1 = first["response"]["result"]["data"]["revision"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let again = write(
+            52,
+            b"journal v1 again",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(again["response"]["result"]["code"], "revision_conflict");
+        let second = write(53, b"journal v2", serde_json::json!({ "if_revision": v1 })).await;
+        assert_eq!(second["response"]["result"]["status"], "ok");
+        let stale = write(
+            54,
+            b"journal v1 replayed",
+            serde_json::json!({ "if_revision": v1 }),
+        )
+        .await;
+        assert_eq!(stale["response"]["result"]["code"], "revision_conflict");
+        let path = journal_path(&temp, &object_uri);
+        let principal_id = "person:local:journal-owner";
+        let root = crate::auth::principal_localhost_root(principal_id);
+        assert_eq!(
+            crate::auth::read_principal_root_object(
+                temp.path(),
+                principal_id,
+                &root,
+                &object_uri,
+                &path
+            )
+            .unwrap(),
+            b"journal v2"
+        );
+    }
+
+    /// A write under .AppData/Agents/ must carry create_only or if_revision, so a
+    /// journal is never overwritten blind.
+    #[tokio::test]
+    async fn an_unconditional_journal_write_is_refused() {
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let token = bridge_token(&ctx, &object_uri, Action::Write);
+        let line = journal_write_line(
+            55,
+            JOURNAL_SELF_URI,
+            Some(token),
+            b"blind",
+            serde_json::json!({}),
+        );
+        let response = handle_request(&line, &Some(ctx)).await.unwrap();
+        assert_eq!(response["response"]["code"], "revision_required");
+        assert!(!journal_path(&temp, &object_uri).exists());
+    }
+
+    fn journal_read_line(id: u64, uri: &str, token: String) -> String {
+        serde_json::json!({
+            "id": id,
+            "request": {
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "read",
+                "token": token,
+                "body": {},
+            }
+        })
+        .to_string()
+    }
+
+    async fn journal_write(
+        ctx: &BridgeContext,
+        object_uri: &str,
+        uri: &str,
+        content: &[u8],
+        precondition: serde_json::Value,
+    ) -> serde_json::Value {
+        let token = bridge_token(ctx, object_uri, Action::Write);
+        let line = journal_write_line(60, uri, Some(token), content, precondition);
+        handle_request(&line, &Some(ctx.clone())).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_append_to_a_journal_is_refused() {
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let first = journal_write(
+            &ctx,
+            &object_uri,
+            JOURNAL_SELF_URI,
+            b"journal v1",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        let v1 = first["response"]["result"]["data"]["revision"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for precondition in [
+            serde_json::json!({ "append": true }),
+            serde_json::json!({ "append": true, "if_revision": v1 }),
+        ] {
+            let response =
+                journal_write(&ctx, &object_uri, JOURNAL_SELF_URI, b" more", precondition).await;
+            assert_eq!(response["response"]["code"], "append_not_allowed");
+        }
+        let root = crate::auth::principal_localhost_root("person:local:journal-owner");
+        let path = journal_path(&temp, &object_uri);
+        assert_eq!(
+            crate::auth::read_principal_root_object(
+                temp.path(),
+                "person:local:journal-owner",
+                &root,
+                &object_uri,
+                &path
+            )
+            .unwrap(),
+            b"journal v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_journal_on_a_root_without_protection_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:unprotected";
+        let root = crate::auth::principal_localhost_root(principal_id);
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(principal_id.to_string());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        let provider = Arc::new(CapturingProvider::default());
+        ctx.provider_registry.register(provider.clone()).await;
+        let object_uri = format!("{root}/.AppData/Agents/demo-agent/tasks/task-1/journal");
+        for precondition in [
+            serde_json::json!({ "create_only": true }),
+            serde_json::json!({}),
+        ] {
+            let response = journal_write(
+                &ctx,
+                &object_uri,
+                JOURNAL_SELF_URI,
+                b"journal v1",
+                precondition,
+            )
+            .await;
+            assert_eq!(
+                response["response"]["code"],
+                "principal_root_protection_required"
+            );
+        }
+        assert!(provider.requests().await.is_empty());
+        assert!(!journal_path(&temp, &object_uri).exists());
+        // Outside .AppData/Agents/ an unprotected root still goes to the provider, as before.
+        let other = format!("{root}/Documents/note.txt");
+        let token = bridge_token(&ctx, &other, Action::Write);
+        let line = journal_write_line(
+            61,
+            "localhost://Users/self/Documents/note.txt",
+            Some(token),
+            b"hello",
+            serde_json::json!({}),
+        );
+        handle_request(&line, &Some(ctx)).await.unwrap();
+        assert_eq!(provider.requests().await.len(), 1);
+    }
+
+    /// Paths that reach the journal file but are not its canonical URI. The file
+    /// path and token matching drop empty and `.` segments.
+    const ODD_JOURNAL_URIS: [&str; 4] = [
+        "localhost://Users/self//.AppData/Agents/demo-agent/tasks/task-1/journal",
+        "localhost://Users/self/./.AppData/Agents/demo-agent/tasks/task-1/journal",
+        "localhost://Users/self/.AppData/Agents/demo-agent//tasks/task-1/journal",
+        "localhost://Users/self/.AppData/./Agents/demo-agent/tasks/task-1/journal",
+    ];
+
+    #[tokio::test]
+    async fn a_journal_path_with_empty_or_dot_segments_is_refused() {
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let first = journal_write(
+            &ctx,
+            &object_uri,
+            JOURNAL_SELF_URI,
+            b"journal v1",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        let v1 = first["response"]["result"]["data"]["revision"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let stored = std::fs::read(journal_path(&temp, &object_uri)).unwrap();
+        for uri in ODD_JOURNAL_URIS {
+            for precondition in [
+                serde_json::json!({}),
+                serde_json::json!({ "if_revision": v1 }),
+                serde_json::json!({ "create_only": true }),
+            ] {
+                let response =
+                    journal_write(&ctx, &object_uri, uri, b"{}", precondition.clone()).await;
+                assert_eq!(
+                    response["response"]["code"], "invalid_localhost_path",
+                    "{uri} {precondition}"
+                );
+            }
+            let token = bridge_token(&ctx, &object_uri, Action::Read);
+            let read = handle_request(&journal_read_line(62, uri, token), &Some(ctx.clone()))
+                .await
+                .unwrap();
+            assert_eq!(read["response"]["code"], "invalid_localhost_path", "{uri}");
+        }
+        assert_eq!(
+            std::fs::read(journal_path(&temp, &object_uri)).unwrap(),
+            stored
+        );
+        let token = bridge_token(&ctx, &object_uri, Action::Read);
+        let read = handle_request(
+            &journal_read_line(63, JOURNAL_SELF_URI, token),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read["response"]["result"]["data"]["content"],
+            serde_json::json!(b"journal v1".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn an_odd_journal_path_on_a_root_without_protection_never_reaches_the_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:unprotected";
+        let root = crate::auth::principal_localhost_root(principal_id);
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(principal_id.to_string());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        let provider = Arc::new(CapturingProvider::default());
+        ctx.provider_registry.register(provider.clone()).await;
+        let object_uri = format!("{root}/.AppData/Agents/demo-agent/tasks/task-1/journal");
+        for uri in ODD_JOURNAL_URIS {
+            let response =
+                journal_write(&ctx, &object_uri, uri, b"{}", serde_json::json!({})).await;
+            assert_eq!(
+                response["response"]["code"], "invalid_localhost_path",
+                "{uri}"
+            );
+        }
+        let token = bridge_token(&ctx, &object_uri, Action::Read);
+        let read = handle_request(
+            &journal_read_line(64, JOURNAL_SELF_URI, token),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read["response"]["code"],
+            "principal_root_protection_required"
+        );
+        assert!(provider.requests().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_precondition_on_a_root_without_protection_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:unprotected";
+        let root = crate::auth::principal_localhost_root(principal_id);
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(principal_id.to_string());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        let provider = Arc::new(CapturingProvider::default());
+        ctx.provider_registry.register(provider.clone()).await;
+        let other = format!("{root}/Documents/note.txt");
+        for precondition in [
+            serde_json::json!({ "create_only": true }),
+            serde_json::json!({ "if_revision": "\"rev\"" }),
+            serde_json::json!({ "create_only": "yes" }),
+        ] {
+            let response = journal_write(
+                &ctx,
+                &other,
+                "localhost://Users/self/Documents/note.txt",
+                b"hello",
+                precondition.clone(),
+            )
+            .await;
+            assert_eq!(
+                response["response"]["code"], "principal_root_protection_required",
+                "{precondition}"
+            );
+        }
+        assert!(provider.requests().await.is_empty());
+    }
+
+    /// Spellings that a case-insensitive, Unicode-folding filesystem (APFS)
+    /// would resolve to the journal, or that break the segment rule. Linux ext4
+    /// keeps them apart, so the rule is tested on the strings themselves.
+    const MISSPELLED_JOURNAL_PATHS: [&str; 7] = [
+        ".AppData/Agent\u{17f}/demo-agent/tasks/task-1/journal",
+        ".AppData/AGENTS/demo-agent/tasks/task-1/journal",
+        ".appdata/agents/demo-agent/tasks/task-1/journal",
+        ".APPDATA/Agents/demo-agent/tasks/task-1/journal",
+        ".AppData/Agents/Demo-Agent/tasks/task-1/journal",
+        ".AppData/Agents/demo-agent/Tasks/task-1/journal",
+        ".AppData/Agents/demo-agent/tasks/-task/journal",
+    ];
+
+    #[test]
+    fn the_agents_area_folds_unicode_case_and_allows_one_spelling() {
+        let root = crate::auth::principal_localhost_root("person:local:journal-owner");
+        let exact = format!("{root}/.AppData/Agents/demo-agent/tasks/task-1/journal");
+        assert_eq!(agent_path_refusal(&exact, "read"), None);
+        assert_eq!(agent_path_refusal(&exact, "write"), None);
+        for rest in MISSPELLED_JOURNAL_PATHS.iter().copied().chain([
+            "/.AppData/Agents/demo-agent/tasks/task-1/journal",
+            "./.AppData/Agents/demo-agent/tasks/task-1/journal",
+            ".AppData//Agents/demo-agent/tasks/task-1/journal",
+            ".AppData/Agents/demo-agent/./tasks/task-1/journal",
+            ".AppData/Agents/demo-agent/../other/journal",
+            ".AppData/Agents/demo agent/tasks/task-1/journal",
+            ".AppData/Agents/dem\u{f6}-agent/tasks/task-1/journal",
+            ".AppData/Agents/demo-agent/tasks/task-1/journal.",
+            ".AppData/Agents/demo-agent./tasks/task-1/journal",
+            ".AppData/Agents/demo-agent/tasks/task-1/journal...",
+            ".AppData/Agents/demo-agent/tasks/task-1/journal ",
+            ".AppData/Agents/demo-agent/tasks/task-1/journal\t",
+            ".AppData/Agents/demo-agent/tasks/task-1/journal\n",
+            ".AppData/Agents/demo-agent/tasks/task-1/journal/",
+            ".AppData/Agents \t",
+            ".AppDat\u{212a}/Agents/x",
+        ]) {
+            let rooted = format!("{root}/{rest}");
+            if rest.starts_with(".AppDat\u{212a}") {
+                // The Kelvin sign folds to "k", not "a": not the Agents area.
+                assert!(!crate::provider_resource::in_agents_area(&rooted), "{rest}");
+                continue;
+            }
+            assert!(crate::provider_resource::in_agents_area(&rooted), "{rest}");
+            for operation in ["read", "write"] {
+                assert_eq!(
+                    agent_path_refusal(&rooted, operation).unwrap()["code"],
+                    "invalid_localhost_path",
+                    "{rest} {operation}"
+                );
+            }
+        }
+        for rest in [
+            ".AppData/Agentsx/demo-agent",
+            ".AppData/LocalHost/Chat/state.json",
+            "Documents/Agents/journal",
+            ".AppData",
+        ] {
+            let rooted = format!("{root}/{rest}");
+            assert!(!crate::provider_resource::in_agents_area(&rooted), "{rest}");
+            assert_eq!(agent_path_refusal(&rooted, "delete"), None, "{rest}");
+        }
+        let bare = format!("{root}/.AppData/Agents");
+        assert_eq!(agent_path_refusal(&bare, "read"), None);
+        assert_eq!(
+            agent_path_refusal(&bare, "write").unwrap()["code"],
+            "invalid_localhost_path"
+        );
+        let other_root = crate::auth::principal_localhost_root("person:local:someone-else");
+        assert!(crate::provider_resource::in_agents_area(&format!(
+            "{other_root}/.AppData/Agents/x"
+        )));
+        assert!(crate::provider_resource::in_agents_area(
+            "localhost://Users/self/.AppData/Agents/x"
+        ));
+    }
+
+    /// The alias path is absent (Linux ext4 keeps the names apart), or it is the
+    /// journal itself (APFS folds case and Unicode): the same device and inode.
+    fn absent_or_same_file(alias: &std::path::Path, journal: &std::path::Path) -> bool {
+        let Ok(alias) = std::fs::metadata(alias) else {
+            return true;
+        };
+        let journal = std::fs::metadata(journal).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            alias.dev() == journal.dev() && alias.ino() == journal.ino()
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (alias, journal);
+            false
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absent_or_same_file_tells_the_journal_from_a_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = temp.path().join("journal");
+        std::fs::write(&journal, b"journal v1").unwrap();
+        let link = temp.path().join("link");
+        std::fs::hard_link(&journal, &link).unwrap();
+        let copy = temp.path().join("copy");
+        std::fs::write(&copy, b"journal v1").unwrap();
+        assert!(absent_or_same_file(&temp.path().join("missing"), &journal));
+        assert!(absent_or_same_file(&link, &journal));
+        assert!(!absent_or_same_file(&copy, &journal));
+    }
+
+    #[tokio::test]
+    async fn a_folded_or_misspelled_agents_path_is_refused_before_storage() {
+        let (temp, mut ctx, object_uri) = journal_context("person:local:journal-owner");
+        let root = crate::auth::principal_localhost_root("person:local:journal-owner");
+        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        let first = journal_write(
+            &ctx,
+            &format!("{root}/*"),
+            JOURNAL_SELF_URI,
+            b"journal v1",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(first["response"]["result"]["status"], "ok", "{first}");
+        let stored = std::fs::read(journal_path(&temp, &object_uri)).unwrap();
+        for rest in MISSPELLED_JOURNAL_PATHS {
+            let uri = format!("localhost://Users/self/{rest}");
+            for precondition in [
+                serde_json::json!({}),
+                serde_json::json!({ "create_only": true }),
+            ] {
+                let response = journal_write(
+                    &ctx,
+                    &format!("{root}/*"),
+                    &uri,
+                    b"{}",
+                    precondition.clone(),
+                )
+                .await;
+                assert_eq!(
+                    response["response"]["code"], "invalid_localhost_path",
+                    "{rest} {precondition}"
+                );
+            }
+            let token = bridge_token(&ctx, &format!("{root}/*"), Action::Read);
+            let read = handle_request(&journal_read_line(65, &uri, token), &Some(ctx.clone()))
+                .await
+                .unwrap();
+            assert_eq!(read["response"]["code"], "invalid_localhost_path", "{rest}");
+            assert!(
+                absent_or_same_file(
+                    &journal_path(&temp, &format!("{root}/{rest}")),
+                    &journal_path(&temp, &object_uri)
+                ),
+                "{rest}"
+            );
+            assert_eq!(
+                std::fs::read(journal_path(&temp, &object_uri)).unwrap(),
+                stored,
+                "{rest}"
+            );
+        }
+        assert_eq!(
+            std::fs::read(journal_path(&temp, &object_uri)).unwrap(),
+            stored
+        );
+    }
+
+    #[tokio::test]
+    async fn only_read_and_write_are_allowed_under_agents() {
+        let (temp, mut ctx, object_uri) = journal_context("person:local:journal-owner");
+        let root = crate::auth::principal_localhost_root("person:local:journal-owner");
+        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        let provider = Arc::new(CapturingProvider::default());
+        ctx.provider_registry.register(provider.clone()).await;
+        journal_write(
+            &ctx,
+            &object_uri,
+            JOURNAL_SELF_URI,
+            b"journal v1",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        let stored = std::fs::read(journal_path(&temp, &object_uri)).unwrap();
+        for (operation, action, uri) in [
+            ("delete", Action::Delete, JOURNAL_SELF_URI),
+            ("mkdir", Action::Write, JOURNAL_SELF_URI),
+            (
+                "list",
+                Action::Read,
+                "localhost://Users/self/.AppData/Agents/demo-agent",
+            ),
+            ("stat", Action::Read, JOURNAL_SELF_URI),
+            ("exists", Action::Read, JOURNAL_SELF_URI),
+            (
+                "delete",
+                Action::Delete,
+                "localhost://Users/self/.appdata/AGENTS/demo-agent",
+            ),
+        ] {
+            let token = bridge_token(&ctx, &format!("{root}/*"), action);
+            let line = serde_json::json!({
+                "id": 66,
+                "request": {
+                    "type": "resource_invoke",
+                    "uri": uri,
+                    "operation": operation,
+                    "token": token,
+                    "body": {},
+                }
+            })
+            .to_string();
+            let response = handle_request(&line, &Some(ctx.clone())).await.unwrap();
+            assert_eq!(
+                response["response"]["code"], "operation_not_allowed",
+                "{operation} {uri}"
+            );
+        }
+        assert!(provider.requests().await.is_empty());
+        assert_eq!(
+            std::fs::read(journal_path(&temp, &object_uri)).unwrap(),
+            stored
+        );
+        // Outside the Agents area a delete still goes to the provider, as before.
+        let token = bridge_token(&ctx, &format!("{root}/*"), Action::Delete);
+        let line = serde_json::json!({
+            "id": 67,
+            "request": {
+                "type": "resource_invoke",
+                "uri": "localhost://Users/self/Documents/old.txt",
+                "operation": "delete",
+                "token": token,
+                "body": {},
+            }
+        })
+        .to_string();
+        handle_request(&line, &Some(ctx.clone())).await.unwrap();
+        assert_eq!(provider.requests().await.len(), 1);
+    }
+
+    /// The attached bridge (`elastos run` against a running Runtime) talks to
+    /// `/api/provider/:scheme/:op` over HTTP. The Agents rule runs before any
+    /// HTTP call: the API URL here has nothing listening, so a request that got
+    /// past the rule would fail to connect instead of returning a refusal.
+    #[tokio::test]
+    async fn the_attached_bridge_applies_the_agents_rule_before_http() {
+        let manifest = ["localhost://Users/self/*".to_string()];
+        let journal = "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal";
+        let folder = "localhost://Users/self/.AppData/Agents/agent-host";
+        for (id, operation, uri, refused) in [
+            (71, "delete", journal, "operation_not_allowed"),
+            (72, "mkdir", journal, "operation_not_allowed"),
+            (73, "list", folder, "operation_not_allowed"),
+            (74, "stat", journal, "operation_not_allowed"),
+            (75, "exists", journal, "operation_not_allowed"),
+            (
+                76,
+                "delete",
+                "localhost://Users/self/.appdata/AGENTS/agent-host",
+                "operation_not_allowed",
+            ),
+            (
+                77,
+                "write",
+                "localhost://Users/self/.AppData/Agent\u{17f}/agent-host/tasks/demo/journal",
+                "invalid_localhost_path",
+            ),
+            (
+                78,
+                "read",
+                "localhost://Users/self//.AppData/Agents/agent-host/tasks/demo/journal",
+                "invalid_localhost_path",
+            ),
+        ] {
+            let line = serde_json::json!({
+                "id": id,
+                "request": {
+                    "type": "resource_invoke",
+                    "uri": uri,
+                    "operation": operation,
+                    "token": "tok",
+                    "body": {},
+                }
+            })
+            .to_string();
+            let response = handle_remote_request(
+                &line,
+                "http://127.0.0.1:12345",
+                "client-token",
+                "test-capsule",
+                &manifest,
+                Some("person:local:journal-owner"),
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{operation} {uri} reached HTTP: {err}"));
+            assert_eq!(response["response"]["code"], refused, "{operation} {uri}");
+        }
+    }
+
+    fn remote_invoke_audit(data_dir: &Path) -> Vec<(String, String, String, String)> {
+        crate::auth::load_auth_state(data_dir)
+            .unwrap()
+            .audit
+            .into_iter()
+            .filter(|event| event.event_type.starts_with("component.invoke."))
+            .map(|event| {
+                (
+                    event.event_type,
+                    event.result,
+                    event.challenge_id.unwrap_or_default(),
+                    event.reason,
+                )
+            })
+            .collect()
+    }
+
+    fn remote_invoke_line(id: u64, operation: &str, uri: &str, token: &str) -> String {
+        serde_json::json!({
+            "id": id,
+            "request": {
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": operation,
+                "token": token,
+                "body": {},
+            }
+        })
+        .to_string()
+    }
+
+    /// Every refusal on the attached bridge leaves a "requested" and a
+    /// "completed / denied" record with the same id, as local dispatch does,
+    /// and the response names that id. Nothing listens on the API URL, so a
+    /// request that got past a refusal would fail to connect.
+    #[tokio::test]
+    async fn attached_bridge_refusals_are_audited() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = ["localhost://Users/self/*".to_string()];
+        let journal = "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal";
+        for (id, operation, uri, token, refused) in [
+            (91, "delete", journal, "tok", "operation_not_allowed"),
+            (
+                92,
+                "write",
+                &format!("{journal}."),
+                "tok",
+                "invalid_localhost_path",
+            ),
+            (93, "read", journal, "", "missing_token"),
+            (
+                94,
+                "read",
+                "localhost://MyWebSite/index.html",
+                "tok",
+                "manifest_capability_denied",
+            ),
+            (
+                95,
+                "read",
+                "localhost://Users/self/Documents/note",
+                "tok",
+                "principal_context_required",
+            ),
+        ] {
+            let before = remote_invoke_audit(temp.path()).len();
+            let response = handle_remote_request_with_audit_dir(
+                &remote_invoke_line(id, operation, uri, token),
+                "http://127.0.0.1:12345",
+                "client-token",
+                "test-capsule",
+                &manifest,
+                Some("person:local:journal-owner"),
+                Some(temp.path()),
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{operation} {uri} reached HTTP: {err}"));
+            assert_eq!(response["response"]["code"], refused, "{operation} {uri}");
+            let events = remote_invoke_audit(temp.path());
+            let new = &events[before..];
+            assert_eq!(new.len(), 2, "{operation} {uri}: {new:?}");
+            assert_eq!(
+                (new[0].0.as_str(), new[0].1.as_str()),
+                ("component.invoke.requested", "pending")
+            );
+            assert_eq!(
+                (new[1].0.as_str(), new[1].1.as_str()),
+                ("component.invoke.completed", "denied"),
+                "{operation} {uri}"
+            );
+            assert_eq!(new[0].2, new[1].2);
+            assert_eq!(response["response"]["audit"], new[1].2.as_str());
+        }
+    }
+
+    /// A bad API URL is found after the "requested" record and leaves a
+    /// "completed / error" record; other request types still fail at once.
+    #[tokio::test]
+    async fn a_bad_api_url_is_audited_as_an_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let result = handle_remote_request_with_audit_dir(
+            &remote_invoke_line(97, "read", "localhost://MyWebSite/index.html", "tok"),
+            "http://example.com:8080",
+            "client-token",
+            "test-capsule",
+            &["localhost://MyWebSite/*".to_string()],
+            Some("person:local:journal-owner"),
+            Some(temp.path()),
+        )
+        .await;
+        let err = result.expect_err("a remote API URL is refused");
+        assert!(
+            format!("{err:#}").contains("local runtime API URL"),
+            "{err:#}"
+        );
+        let events = remote_invoke_audit(temp.path());
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(
+            (events[0].0.as_str(), events[0].1.as_str()),
+            ("component.invoke.requested", "pending")
+        );
+        assert_eq!(
+            (events[1].0.as_str(), events[1].1.as_str()),
+            ("component.invoke.completed", "error")
+        );
+        assert_eq!(events[0].2, events[1].2);
+        let ping = handle_remote_request_with_audit_dir(
+            r#"{"id":98,"request":{"type":"ping"}}"#,
+            "http://example.com:8080",
+            "client-token",
+            "test-capsule",
+            &[],
+            None,
+            Some(temp.path()),
+        )
+        .await;
+        assert!(ping.is_err(), "a bad API URL still refuses every request");
+        assert_eq!(remote_invoke_audit(temp.path()).len(), 2);
+    }
+
+    /// A provider reply that is not JSON (here a plain-text 403) is an error
+    /// for the guest and still leaves a "completed / error" record.
+    #[tokio::test]
+    async fn a_non_json_provider_reply_is_audited_as_an_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 16 * 1024];
+            let _ = socket.read(&mut buffer).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 403 Forbidden\r\ncontent-type: text/plain\r\ncontent-length: 9\r\nconnection: close\r\n\r\nforbidden",
+                )
+                .await
+                .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let result = handle_remote_request_with_audit_dir(
+            &remote_invoke_line(96, "read", "localhost://MyWebSite/index.html", "tok"),
+            &api_url,
+            "client-token",
+            "test-capsule",
+            &["localhost://MyWebSite/*".to_string()],
+            Some("person:local:journal-owner"),
+            Some(temp.path()),
+        )
+        .await;
+        server.await.unwrap();
+        let err = result.expect_err("a plain-text reply is not a result");
+        assert!(format!("{err:#}").contains("not JSON"), "{err:#}");
+        let events = remote_invoke_audit(temp.path());
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(
+            (events[0].0.as_str(), events[0].1.as_str()),
+            ("component.invoke.requested", "pending")
+        );
+        assert_eq!(
+            (events[1].0.as_str(), events[1].1.as_str()),
+            ("component.invoke.completed", "error")
+        );
+        assert_eq!(events[0].2, events[1].2);
+    }
+
+    /// Inside the Agents area only read and write may be asked for. Anything
+    /// else is refused at once, on both handlers, without a pending request.
+    #[tokio::test]
+    async fn a_forbidden_agents_capability_request_is_refused_at_once() {
+        let (_temp, mut ctx, _) = journal_context("person:local:journal-owner");
+        let root = crate::auth::principal_localhost_root("person:local:journal-owner");
+        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        let started = std::time::Instant::now();
+        for (id, action, resource) in [
+            (
+                79,
+                "delete",
+                "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal",
+            ),
+            (
+                80,
+                "execute",
+                "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal",
+            ),
+            (
+                81,
+                "admin",
+                "localhost://Users/self/.AppData/Agents/agent-host",
+            ),
+            (
+                82,
+                "delete",
+                "localhost://Users/self/.appdata/agents/agent-host",
+            ),
+        ] {
+            let line = serde_json::json!({
+                "id": id,
+                "request": {
+                    "type": "request_capability",
+                    "resource": resource,
+                    "action": action,
+                    "reason": "test",
+                }
+            })
+            .to_string();
+            let local = handle_request(&line, &Some(ctx.clone())).await.unwrap();
+            assert_eq!(
+                local["response"]["code"], "operation_not_allowed",
+                "{action} {resource}"
+            );
+            let remote = handle_remote_request(
+                &line,
+                "http://127.0.0.1:12345",
+                "client-token",
+                "test-capsule",
+                &["localhost://Users/self/*".to_string()],
+                Some("person:local:journal-owner"),
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{action} {resource} reached HTTP: {err}"));
+            assert_eq!(
+                remote["response"]["code"], "operation_not_allowed",
+                "{action} {resource}"
+            );
+        }
+        // The shell is never asked: no pending request, and no 30 s wait.
+        assert!(ctx.pending_store.list_pending().await.is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        // A misspelled read or write request is refused too.
+        let line = serde_json::json!({
+            "id": 83,
+            "request": {
+                "type": "request_capability",
+                "resource": "localhost://Users/self/.AppData/Agents/Demo-Agent/tasks/demo/journal",
+                "action": "write",
+                "reason": "test",
+            }
+        })
+        .to_string();
+        let local = handle_request(&line, &Some(ctx.clone())).await.unwrap();
+        assert_eq!(local["response"]["code"], "invalid_localhost_path");
+    }
+
+    #[tokio::test]
+    async fn a_missing_journal_read_is_audited_as_an_error() {
+        let (_temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let token = bridge_token(&ctx, &object_uri, Action::Read);
+        let read = handle_request(
+            &journal_read_line(84, JOURNAL_SELF_URI, token),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(read["response"]["type"], "resource_result");
+        assert_eq!(read["response"]["result"]["status"], "error");
+        let outcomes: Vec<String> = ctx
+            .pending_store
+            .audit_log()
+            .recent_events(100)
+            .iter()
+            .filter_map(|event| match event {
+                elastos_runtime::primitives::audit::AuditEvent::Custom {
+                    event_type,
+                    details,
+                } if event_type == "component.invoke.completed" => {
+                    details["outcome"].as_str().map(str::to_string)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outcomes, vec!["error".to_string()]);
+    }
+
+    /// A localhost provider that answers every request with a failed result.
+    struct FailingProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for FailingProvider {
+        async fn handle(
+            &self,
+            _request: ResourceRequest,
+        ) -> Result<ResourceResponse, ProviderError> {
+            Err(ProviderError::Provider("raw only".to_string()))
+        }
+
+        fn schemes(&self) -> Vec<&'static str> {
+            vec!["localhost"]
+        }
+
+        fn name(&self) -> &'static str {
+            "failing-localhost"
+        }
+
+        async fn send_raw(
+            &self,
+            _request: &serde_json::Value,
+        ) -> std::result::Result<serde_json::Value, ProviderError> {
+            Ok(serde_json::json!({ "status": "error", "code": "read_failed" }))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_provider_result_is_audited_as_an_error() {
+        let mut ctx = bridge_context();
+        ctx.manifest_capabilities =
+            vec!["localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string()];
+        ctx.provider_registry
+            .register(Arc::new(FailingProvider))
+            .await;
+        let resource = "localhost://Local/SharedByLocalUsersAndBots/Home/a.md";
+        let token = bridge_token(&ctx, resource, Action::Read);
+        let line = serde_json::json!({
+            "id": 85,
+            "request": {
+                "type": "resource_invoke",
+                "uri": resource,
+                "operation": "read",
+                "token": token,
+                "body": {},
+            }
+        })
+        .to_string();
+        let response = handle_request(&line, &Some(ctx.clone())).await.unwrap();
+        assert_eq!(response["response"]["result"]["status"], "error");
+        let outcomes: Vec<String> = ctx
+            .pending_store
+            .audit_log()
+            .recent_events(100)
+            .iter()
+            .filter_map(|event| match event {
+                elastos_runtime::primitives::audit::AuditEvent::Custom {
+                    event_type,
+                    details,
+                } if event_type == "component.invoke.completed" => {
+                    details["outcome"].as_str().map(str::to_string)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outcomes, vec!["error".to_string()]);
+    }
+
+    /// The Agent Host as shipped: its own manifest, and only the two grants it
+    /// asks for. Neither can delete `.AppData`, the person's root, or the journal.
+    #[tokio::test]
+    async fn the_agent_host_manifest_and_grants_cannot_delete_appdata_or_the_root() {
+        let manifest: elastos_common::CapsuleManifest =
+            serde_json::from_str(include_str!("../../../../examples/agent-host/capsule.json"))
+                .unwrap();
+        assert_eq!(
+            manifest.resource_authority_bounds(),
+            vec!["localhost://Users/self/.AppData/Agents/agent-host/*".to_string()]
+        );
+        let (temp, mut ctx, _) = journal_context("person:local:journal-owner");
+        ctx.manifest_capabilities = manifest.resource_authority_bounds();
+        let provider = Arc::new(CapturingProvider::default());
+        ctx.provider_registry.register(provider.clone()).await;
+        let root = crate::auth::principal_localhost_root("person:local:journal-owner");
+        let journal = format!("{root}/.AppData/Agents/agent-host/tasks/demo/journal");
+        let journal_self = "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal";
+        let first = journal_write(
+            &ctx,
+            &journal,
+            journal_self,
+            b"journal v1",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(first["response"]["result"]["status"], "ok", "{first}");
+        let grants = [
+            bridge_token(&ctx, &journal, Action::Write),
+            bridge_token(&ctx, &journal, Action::Read),
+        ];
+        for (uri, refused) in [
+            (
+                "localhost://Users/self/.AppData",
+                "manifest_capability_denied",
+            ),
+            ("localhost://Users/self", "manifest_capability_denied"),
+            (
+                "localhost://Users/self/.AppData/Agents",
+                "manifest_capability_denied",
+            ),
+            (journal_self, "capability_denied"),
+        ] {
+            for grant in &grants {
+                let line = serde_json::json!({
+                    "id": 68,
+                    "request": {
+                        "type": "resource_invoke",
+                        "uri": uri,
+                        "operation": "delete",
+                        "token": grant,
+                        "body": {},
+                    }
+                })
+                .to_string();
+                let response = handle_request(&line, &Some(ctx.clone())).await.unwrap();
+                assert_eq!(response["response"]["code"], refused, "delete {uri}");
+            }
+            // Asking for a delete grant is refused at once, with no approval:
+            // by the Agents rule inside the area, by the manifest bound outside it.
+            let ask = serde_json::json!({
+                "id": 69,
+                "request": {
+                    "type": "request_capability",
+                    "resource": uri,
+                    "action": "delete",
+                    "reason": "test",
+                }
+            })
+            .to_string();
+            let asked = handle_request(&ask, &Some(ctx.clone())).await.unwrap();
+            let expected = if uri.contains("/.AppData/Agents") {
+                "operation_not_allowed"
+            } else {
+                "manifest_capability_denied"
+            };
+            assert_eq!(asked["response"]["code"], expected, "{uri}");
+        }
+        // No request can obtain a delete grant in the area any more. Even a
+        // Delete token minted directly is refused by the Agents rule when used.
+        let delete = bridge_token(&ctx, &journal, Action::Delete);
+        let line = serde_json::json!({
+            "id": 70,
+            "request": {
+                "type": "resource_invoke",
+                "uri": journal_self,
+                "operation": "delete",
+                "token": delete,
+                "body": {},
+            }
+        })
+        .to_string();
+        let response = handle_request(&line, &Some(ctx.clone())).await.unwrap();
+        assert_eq!(response["response"]["code"], "operation_not_allowed");
+        assert!(provider.requests().await.is_empty());
+        assert!(journal_path(&temp, &journal).is_file());
+        assert!(temp.path().join("Users").is_dir());
+    }
+
+    #[tokio::test]
+    async fn a_revision_conflict_is_audited_as_a_conflict() {
+        let (_temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let outcomes = |ctx: &BridgeContext| -> Vec<String> {
+            ctx.pending_store
+                .audit_log()
+                .recent_events(100)
+                .iter()
+                .filter_map(|event| match event {
+                    elastos_runtime::primitives::audit::AuditEvent::Custom {
+                        event_type,
+                        details,
+                    } if event_type == "component.invoke.completed" => {
+                        details["outcome"].as_str().map(str::to_string)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let first = journal_write(
+            &ctx,
+            &object_uri,
+            JOURNAL_SELF_URI,
+            b"journal v1",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(first["response"]["result"]["status"], "ok");
+        assert_eq!(outcomes(&ctx), vec!["ok".to_string()]);
+        let stale = journal_write(
+            &ctx,
+            &object_uri,
+            JOURNAL_SELF_URI,
+            b"journal v2",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(stale["response"]["result"]["code"], "revision_conflict");
+        assert_eq!(
+            outcomes(&ctx),
+            // Newest first.
+            vec!["conflict".to_string(), "ok".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn preconditions_are_optional_outside_agents_and_honoured_when_sent() {
+        let (_temp, mut ctx, _object_uri) = journal_context("person:local:journal-owner");
+        let root = crate::auth::principal_localhost_root("person:local:journal-owner");
+        let state = format!("{root}/.AppData/LocalHost/Chat/state.json");
+        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        let uri = "localhost://Users/self/.AppData/LocalHost/Chat/state.json";
+        let blind = journal_write(&ctx, &state, uri, b"one", serde_json::json!({})).await;
+        assert_eq!(blind["response"]["result"]["status"], "ok");
+        let rev_one = blind["response"]["result"]["data"]["revision"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let again = journal_write(&ctx, &state, uri, b"two", serde_json::json!({})).await;
+        assert_eq!(again["response"]["result"]["status"], "ok");
+        let exists = journal_write(
+            &ctx,
+            &state,
+            uri,
+            b"x",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(exists["response"]["result"]["code"], "revision_conflict");
+        let stale = journal_write(
+            &ctx,
+            &state,
+            uri,
+            b"x",
+            serde_json::json!({ "if_revision": rev_one }),
+        )
+        .await;
+        assert_eq!(stale["response"]["result"]["code"], "revision_conflict");
+        let rev_two = crate::auth::principal_root_object_revision(
+            "person:local:journal-owner",
+            &state,
+            b"two",
+        );
+        let current = journal_write(
+            &ctx,
+            &state,
+            uri,
+            b"three",
+            serde_json::json!({ "if_revision": rev_two }),
+        )
+        .await;
+        assert_eq!(current["response"]["result"]["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_precondition_is_refused_before_storage() {
+        let (temp, mut ctx, _object_uri) = journal_context("person:local:journal-owner");
+        let root = crate::auth::principal_localhost_root("person:local:journal-owner");
+        let state = format!("{root}/.AppData/LocalHost/Chat/state.json");
+        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        let uri = "localhost://Users/self/.AppData/LocalHost/Chat/state.json";
+        for precondition in [
+            serde_json::json!({ "create_only": true, "if_revision": "\"abc\"" }),
+            serde_json::json!({ "create_only": "yes" }),
+            serde_json::json!({ "if_revision": 7 }),
+            serde_json::json!({ "if_revision": "" }),
+            serde_json::json!({ "append": true, "if_revision": "\"abc\"" }),
+            serde_json::json!({ "append": true, "create_only": true }),
+        ] {
+            let response = journal_write(&ctx, &state, uri, b"x", precondition.clone()).await;
+            assert_eq!(
+                response["response"]["code"], "invalid_content",
+                "{precondition}"
+            );
+            assert!(!journal_path(&temp, &state).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_read_returns_the_revision_the_next_write_needs() {
+        let (_temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let first = journal_write(
+            &ctx,
+            &object_uri,
+            JOURNAL_SELF_URI,
+            b"journal v1",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        let written = first["response"]["result"]["data"]["revision"].clone();
+        assert!(
+            written.as_str().is_some_and(|rev| rev.len() == 66),
+            "{written}"
+        );
+        let token = bridge_token(&ctx, &object_uri, Action::Read);
+        let read = handle_request(
+            &journal_read_line(62, JOURNAL_SELF_URI, token),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(read["response"]["result"]["data"]["revision"], written);
+        let next = journal_write(
+            &ctx,
+            &object_uri,
+            JOURNAL_SELF_URI,
+            b"journal v2",
+            serde_json::json!({ "if_revision": written }),
+        )
+        .await;
+        assert_eq!(next["response"]["result"]["status"], "ok");
+    }
+
+    /// Bytes cross the bridge as a JSON number array: up to four characters per
+    /// byte ("255,"). The guest journal cap (USERSAI-JOURNAL.md) must fit inside
+    /// MAX_RESOURCE_FRAME_BYTES even when every byte is 0xFF.
+    const JOURNAL_CAP_BYTES: usize = 192 * 1024;
+
+    #[tokio::test]
+    async fn a_worst_case_journal_at_the_cap_fits_through_the_bridge() {
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let full = vec![0xFF_u8; JOURNAL_CAP_BYTES];
+        let response = journal_write(
+            &ctx,
+            &object_uri,
+            JOURNAL_SELF_URI,
+            &full,
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(response["response"]["result"]["status"], "ok");
+        let root = crate::auth::principal_localhost_root("person:local:journal-owner");
+        assert_eq!(
+            crate::auth::read_principal_root_object(
+                temp.path(),
+                "person:local:journal-owner",
+                &root,
+                &object_uri,
+                &journal_path(&temp, &object_uri),
+            )
+            .unwrap(),
+            full
+        );
+        // The earlier 256 KiB cap does not fit: the frame is refused before storage.
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let response = journal_write(
+            &ctx,
+            &object_uri,
+            JOURNAL_SELF_URI,
+            &vec![0xFF_u8; 256 * 1024],
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(response["response"]["code"], "request_too_large");
+        assert!(!journal_path(&temp, &object_uri).exists());
     }
 
     #[tokio::test]
