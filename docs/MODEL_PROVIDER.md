@@ -342,9 +342,9 @@ reports it. The UI never shows the secret.
 
 Runtime validates the credential separately from a consented paid test.
 Validate requires Runtime-owned HTTPS authority to the pinned public host.
-Validation needs the same exact owner Inbox decision as every other hosted
-connection, including saved operator connections. The Home can also use an
-owner-scoped
+Validation needs the same exact owner Inbox approval as every other hosted
+request, including saved operator connections; End stops its sends. The Home
+can also use an owner-scoped
 `providers/model-provider/validate-fixtures.json`. That file, when present,
 may bind validate HTTP only to `http://127.0.0.1` with an explicit port.
 Save stays private and publishes no service offer. A later Share action uses
