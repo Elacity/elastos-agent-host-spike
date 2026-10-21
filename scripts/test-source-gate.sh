@@ -20,6 +20,7 @@ product_ui() {
   node scripts/check-chat-ui-artifacts.mjs check
   node scripts/home-shell-regression-smoke.mjs
   node scripts/home-shell-bridge-smoke.mjs
+  node scripts/home-shell-recovery-smoke.mjs
   node scripts/home-agent-shell-smoke.mjs
   node scripts/people-discovery-smoke.mjs
   node scripts/home-clipboard-source-gate.mjs
