@@ -7473,8 +7473,10 @@ mod tests {
     fn an_edit_at_the_last_version_number_is_denied_and_not_recorded() {
         let note = "localhost://Users/self/Projects/demo/notes.txt";
         let mut journal = two_turns();
-        assert!(observe(&mut journal, note, u64::MAX, "hello"));
-        let edit = propose_edit(&mut journal, note, "hello", "hi", Some(u64::MAX)).unwrap();
+        // u64::MAX is never a version, so u64::MAX - 1 is the last one.
+        assert!(!observe(&mut journal, note, u64::MAX, "hello"));
+        assert!(observe(&mut journal, note, u64::MAX - 1, "hello"));
+        let edit = propose_edit(&mut journal, note, "hello", "hi", Some(u64::MAX - 1)).unwrap();
         assert!(authorize(&mut journal, edit, Some("write-grant")));
         assert!(dispatch(&mut journal, edit));
         let events = journal.events.len();
@@ -7667,7 +7669,15 @@ mod tests {
             project,
             "project file a/b"
         ));
-        assert!(observe(&mut journal, &format!("{project}/"), 1, "x"));
+        // A trailing "/" is not a canonical path: observe refuses it. A row
+        // with that name, as a stored journal could hold it, still makes the
+        // project's file list unknown.
+        assert!(!observe(&mut journal, &format!("{project}/"), 1, "x"));
+        journal.events.push(SurfaceNode {
+            role: Role::User,
+            text: observation_record(&format!("{project}/"), 1, "x"),
+            source: NodeSource::Observation,
+        });
         assert_eq!(observed_project_files(&journal.events, project), None);
 
         let notes = format!("{project}/notes.txt");
