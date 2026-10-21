@@ -198,6 +198,16 @@ Falsifiers:   the supervisor skips the privilege drop         -> caught (concurr
               all reverted; a clean rerun passes 2 of 2.
 ```
 
+### Rerun after the Codex fixes (Cursor, 21 Oct, at 7b9a14a19): PASS
+
+```text
+Build:        the new ELF parser accepted the real inputs: the Debian 6.1.0-50 modules, BusyBox, vm-smoke and
+              exec-supervisor. initrd-exec sha256 2613f622...212d (new: the supervisor changed). Project digests
+              unchanged (a1097f0d... and 8256365b...).
+Signed tests: exec_smoke_image_prints_hello and a_forged_exit_line_cannot_pass -> 2 of 2 pass.
+              probe-bind gets EACCES; the probe-report forgery ends with code 3.
+```
+
 ### Peer CID check: defence in depth
 
 `serve_vsock` accepts a report connection only from CID 2 (the host). On the Mac, removing that check fails no test.
@@ -286,10 +296,9 @@ Guest hash:   unchanged (no guest change).
 Principles:   11: a cleanup that is not confirmed is a failure, never a report. 12: the builder checks what it
               says it checks.
 DeepSeek:     none.
-Mac:          the initrd changes (new supervisor). Rebuild with the same commands above, then rerun the signed tests
-              and the Mac falsifiers. The builder now refuses a malformed module or binary that it took before; a
-              real Debian module or a real static binary should build as before.
+Mac:          the initrd changes (new supervisor). Rebuilt and rerun by Cursor at 7b9a14a19: PASS, and the real
+              Debian modules and static binaries build as before (see "Rerun after the Codex fixes" above).
 ```
 
-**What is next:** Sasha rebuilds the image and reruns the Mac VM proof, then Codex re-reviews #27. The format 2 code
-still waits for Codex to pass #24.
+**What is next:** Codex re-reviews #27 (the Mac rerun at 7b9a14a19 passed). The format 2 code still waits for Codex
+to pass #24.
