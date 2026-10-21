@@ -757,6 +757,14 @@ fn viewer_storage_target(
         ),
         _ => anyhow::bail!("invalid viewer storage scope"),
     };
+    // Agent journals live under .AppData/Agents/ and are written only through
+    // the Runtime bridge, with its revision rule. Viewer storage may not reach
+    // them, whatever the manifest declares.
+    if crate::provider_resource::in_agents_area(&root_uri)
+        || crate::provider_resource::in_agents_area(&object_uri)
+    {
+        anyhow::bail!("viewer storage does not support .AppData/Agents/ (agent journals)");
+    }
     let principal_id = context.principal_id;
     let localhost_root = crate::auth::principal_localhost_root(&principal_id);
     Ok(ViewerStorageTarget {
@@ -784,7 +792,13 @@ fn viewer_storage_root_uri(
             .and_then(|capsule| capsule.storage.into_iter().next())
             .ok_or_else(|| anyhow::anyhow!("viewer content capsule has no storage grant"))?
     };
-    let root_uri = principal_scoped_storage_uri(&storage, context);
+    // One canonical string for every check and for the filesystem path: the
+    // path resolver trims surrounding whitespace and slashes, so a check on
+    // the raw grant could see "Agents " and resolve "Agents".
+    let root_uri = elastos_common::localhost::rooted_localhost_uri(&principal_scoped_storage_uri(
+        &storage, context,
+    ))
+    .ok_or_else(|| anyhow::anyhow!("invalid viewer storage root"))?;
     let localhost_root = crate::auth::principal_localhost_root(&context.principal_id);
     if root_uri != localhost_root
         && !root_uri
