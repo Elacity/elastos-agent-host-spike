@@ -922,12 +922,14 @@ function configureAiProvider() {
     saveButton.disabled = busy || !hasShellAccess();
     cancelButton.disabled = busy;
     cancelButton.textContent = latestStatus?.staged_connections?.some((entry) => entry.id === editingId)
-      ? "Close; keep staged key" : "Cancel";
+      ? "Close" : "Cancel";
     instancesNode.querySelectorAll("button").forEach((button) => {
       button.disabled = busy || !hasShellAccess() || button.dataset.egressPaused === "true";
     });
   };
+  let stateTone = "";
   const showState = (message, tone) => {
+    stateTone = message ? tone || "" : "";
     setTextFields("ai-provider-state", message);
     for (const node of document.querySelectorAll('[data-field="ai-provider-state"]')) {
       node.hidden = !message;
@@ -1265,7 +1267,10 @@ function configureAiProvider() {
       scheduleLiveRefresh();
       return;
     }
+    const cardsChanged = JSON.stringify(status) !== JSON.stringify(latestStatus);
     applyStatus(status);
+    // An earlier action's success no longer describes cards a decision elsewhere changed.
+    if (cardsChanged && stateTone === "success") showState("", "");
     setBusy(false);
   };
   const scheduleLiveRefresh = () => {
@@ -1317,6 +1322,16 @@ function configureAiProvider() {
     } catch (error) {
       const message = hostedProviderValidationError(error);
       showState(message, message === HOSTED_KEY_CHECK_PENDING ? "" : "error");
+      // Runtime staged the key before the provider refused it; remove it the way Discard
+      // does and start the next check as a new connection. A saved connection keeps its
+      // key and approval.
+      if (message === HOSTED_KEY_REJECTED && !latestStatus?.connections?.some((entry) => entry.id === editingId)) {
+        await hostedFetch("/api/apps/system/ai-provider/staged", {
+          method: "DELETE", headers: shellHeaders({ "content-type": "application/json" }),
+          body: JSON.stringify({ id: editingId }),
+        }).catch(() => {});
+        editingId = "";
+      }
     } finally {
       await refreshStatus().catch(() => {});
       setBusy(false);
@@ -4419,6 +4434,7 @@ function publicSystemError(value, fallback) {
 }
 
 const HOSTED_KEY_CHECK_PENDING = "Approve this connection in Inbox, then check the key again.";
+const HOSTED_KEY_REJECTED = "The provider rejected this key.";
 const HOSTED_KEY_CHECK_OUTCOMES = [
   // Runtime copy: api/gateway_home_system_ai_provider.rs and gateway.rs system_error_response.
   [/Approve this hosted connection in Inbox/, HOSTED_KEY_CHECK_PENDING],
@@ -4428,7 +4444,7 @@ const HOSTED_KEY_CHECK_OUTCOMES = [
   [/Runtime blocked this hosted route\./, "This Home blocked the route to the host."],
   [/Hosted HTTPS could not reach the host\./, "Could not reach the host. Check the network and try again."],
   [/Hosted external HTTPS is paused/, "External HTTPS is paused on this Home."],
-  [/^request failed: 400 invalid (OpenRouter|Venice) key$/i, "The provider rejected this key."],
+  [/^request failed: 400 invalid (OpenRouter|Venice) key$/i, HOSTED_KEY_REJECTED],
   [/^request failed: 500 (OpenRouter|Venice) validation unavailable$/i, "The provider sent an unexpected response. Try again later."],
   [/^request failed: 403 (admin passkey required|proof-bound passkey session required|.*fresh passkey|.*passkey step-up)/i, "Sign in with the Home admin passkey to check keys."],
 ];

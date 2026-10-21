@@ -30,7 +30,7 @@ function fixture(connections = [], guest = false, staged = [], status = {}) {
   let timerId = 0, gate = null;
   let stagedConnections = staged.slice();
   let rejectActivation = true;
-  let consentPending = false;
+  let consentPending = false, rejectKey = false;
   const stateNode = element();
   const document = {
     hidden: false, querySelector: node, createElement: element,
@@ -64,10 +64,16 @@ function fixture(connections = [], guest = false, staged = [], status = {}) {
       if (init.method !== "POST") {
         reads.push(_url);
         if (guest) throw new Error("request failed: 403 admin passkey required");
-        return { ...status, connections, staged_connections: stagedConnections };
+        // Each read is a fresh reply, as over HTTP.
+        return structuredClone({ ...status, connections, staged_connections: stagedConnections });
       }
       const body = JSON.parse(init.body);
       attempts.push(body);
+      if (rejectKey && _url.endsWith("/validate")) {
+        // Runtime stages the key before the provider answers (system_ai_provider_validate).
+        stagedConnections.push({ id: body.id, provider: body.provider, has_saved_model: false });
+        throw new Error("request failed: 400 invalid OpenRouter key");
+      }
       if (consentPending) {
         if (!stagedConnections.some(entry => entry.id === body.id)) {
           stagedConnections.push({ id: body.id, provider: body.provider, has_saved_model: false });
@@ -95,7 +101,8 @@ function fixture(connections = [], guest = false, staged = [], status = {}) {
   return { node, saved, messages, attempts, discarded, stateNode, reads, revoked, document, top, runTimers, hold,
     message: event => listeners.get("message")(event),
     shown: () => listeners.get("document:visibilitychange")(),
-    activate: () => { rejectActivation = false; }, pending: () => { consentPending = true; } };
+    activate: () => { rejectActivation = false; }, pending: () => { consentPending = true; },
+    rejectKey: () => { rejectKey = true; } };
 }
 
 test("saved hosted connections keep management controls while Inbox owns access", async () => {
@@ -258,7 +265,7 @@ test("staged key survives reload and Close; Discard clears only the staged setup
   await new Promise(setImmediate);
   const card = f.node("#ai-provider-instances").children[0];
   card.children[1].handlers.click();
-  assert.equal(f.node("#ai-provider-cancel").textContent, "Close; keep staged key");
+  assert.equal(f.node("#ai-provider-cancel").textContent, "Close");
   f.node("#ai-provider-cancel").handlers.click();
   assert.equal(f.discarded.length, 0);
   assert.equal(f.node("#ai-provider-instances").children.length, 1);
@@ -379,6 +386,61 @@ test("a live refresh waits for the person's open form and for the page's own req
   assert.deepEqual(f.revoked, [venice.id]);
   assert.equal(f.reads.length, reads + 3, "End reads once, then the held Inbox event reads once");
   assert.deepEqual(accessLabels(f), ["Share as service", "Disconnect"]);
+});
+
+test("a key the provider rejects is not kept staged; a check waiting for Inbox keeps its key behind Close", async () => {
+  const f = fixture();
+  f.rejectKey();
+  f.node("#ai-provider-add").handlers.click();
+  f.node("#ai-provider-key").value = "test";
+  await f.node("#ai-provider-validate").handlers.click();
+  assert.equal(f.messages.at(-1), "The provider rejected this key.");
+  assert.equal(f.stateNode.dataset.tone, "error");
+  assert.deepEqual(f.discarded, [f.attempts[0].id], "the rejected key is discarded through the staged-key path");
+  assert.equal(f.node("#ai-provider-form").hidden, false, "the form stays open for another key");
+  assert.equal(f.node("#ai-provider-cancel").textContent, "Cancel");
+  assert.equal(f.node("#ai-provider-kind").disabled, false, "the next key check starts a new connection");
+  await f.node("#ai-provider-validate").handlers.click();
+  assert.notEqual(f.attempts[1].id, f.attempts[0].id);
+
+  const g = fixture();
+  g.pending();
+  g.node("#ai-provider-add").handlers.click();
+  await g.node("#ai-provider-validate").handlers.click();
+  assert.equal(g.messages.at(-1), "Approve this connection in Inbox, then check the key again.");
+  assert.deepEqual(g.discarded, []);
+  assert.equal(g.node("#ai-provider-cancel").textContent, "Close");
+});
+
+test("a live refresh that changes the cards clears an earlier success line; a neutral line stays", async () => {
+  const venice = veniceCard();
+  const stagedId = `model:hosted-${"d".repeat(32)}`;
+  const f = fixture([venice], false, [{ id: stagedId, provider: "openrouter", has_saved_model: false }]);
+  await new Promise(setImmediate);
+  const stagedCard = f.node("#ai-provider-instances").children[1];
+  await stagedCard.children[2].handlers.click();
+  assert.equal(f.messages.at(-1), "Staged key removed.");
+  f.message({ source: f.top, origin: HOME_ORIGIN, data: INBOX_CHANGED });
+  await f.runTimers();
+  assert.equal(f.messages.at(-1), "Staged key removed.", "an unchanged card list keeps the line");
+  Object.assign(venice, APPROVED);
+  f.message({ source: f.top, origin: HOME_ORIGIN, data: INBOX_CHANGED });
+  await f.runTimers();
+  assert.deepEqual(accessLabels(f), ["Share as service", "End hosted approval", "Disconnect"]);
+  assert.equal(f.messages.at(-1), "", "the success line no longer describes the cards");
+
+  const other = { ...veniceCard(), ...APPROVED };
+  const g = fixture([other]);
+  await new Promise(setImmediate);
+  await accessControls(g).find(node => node.textContent === "End hosted approval").handlers.click();
+  const ended = "Hosted approval ended. A later request needs Inbox review again.";
+  assert.equal(g.messages.at(-1), ended);
+  Object.assign(other, ENDED, { egress_approval_state: "pending" });
+  g.message({ source: g.top, origin: HOME_ORIGIN, data: INBOX_CHANGED });
+  await g.runTimers();
+  assert.equal(g.reads.length, 3, "the Inbox request changed the card");
+  assert.deepEqual(accessLabels(g), ["Share as service", "End hosted approval", "Disconnect"]);
+  assert.equal(g.messages.at(-1), ended, "a neutral line stays");
 });
 
 test("hosted handoff replaces the previous selection with the exact requested offer", () => {

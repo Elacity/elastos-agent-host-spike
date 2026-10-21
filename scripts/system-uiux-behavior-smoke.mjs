@@ -279,6 +279,7 @@ async function main() {
   let heldCapsuleCatalog = null;
   let hostedStatus = null;
   let hostedReads = 0;
+  const discardedStaged = [];
   summaryAppearance = appearanceRecord();
   let appearanceInFlight = 0;
   let maxAppearanceInFlight = 0;
@@ -428,6 +429,20 @@ async function main() {
         } finally {
           appearanceInFlight -= 1;
         }
+        return;
+      }
+      if (url.pathname === "/api/apps/system/ai-provider/validate" && hostedStatus) {
+        // Runtime stages the key before the provider refuses it.
+        const { id } = request.postDataJSON();
+        hostedStatus = { ...hostedStatus, staged_connections: [{ id, provider: "OpenRouter", has_saved_model: false }] };
+        await route.fulfill({ status: 400, contentType: "text/plain", headers: CORS_HEADERS, body: "invalid OpenRouter key" });
+        return;
+      }
+      if (url.pathname === "/api/apps/system/ai-provider/staged" && request.method() === "DELETE") {
+        const { id } = request.postDataJSON();
+        discardedStaged.push(id);
+        hostedStatus = { ...hostedStatus, staged_connections: hostedStatus.staged_connections.filter((entry) => entry.id !== id) };
+        await route.fulfill({ status: 200, contentType: "application/json", headers: CORS_HEADERS, body: "{\"discarded\":true}" });
         return;
       }
       if (url.pathname === "/api/apps/system/ai-provider" && hostedStatus) {
@@ -918,6 +933,56 @@ async function main() {
     await frame.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
     await frame.waitForFunction(() => ![...document.querySelectorAll("#ai-provider-instances details button")]
       .some((node) => node.textContent === "End hosted approval"));
+
+    // The Add form keeps typed input while an Inbox decision arrives; closing it catches up.
+    hostedStatus = veniceStatus({ egress_state: "ready", egress_approval_state: "approved" });
+    const readsBeforeForm = hostedReads;
+    await frame.click("#ai-provider-add");
+    await frame.fill("#ai-provider-name", "Typed name");
+    await postHomeEvents(inboxChanged);
+    await page.waitForTimeout(750);
+    const underForm = await frame.evaluate(() => ({
+      open: !document.querySelector("#ai-provider-form").hidden,
+      name: document.querySelector("#ai-provider-name").value,
+    }));
+    assert(
+      underForm.open && underForm.name === "Typed name" && hostedReads === readsBeforeForm,
+      "System disturbed the open Add form for an Inbox decision",
+      { underForm, hostedReads, readsBeforeForm },
+    );
+    await frame.click("#ai-provider-cancel");
+    await frame.waitForFunction(() => [...document.querySelectorAll("#ai-provider-instances details button")]
+      .some((node) => node.textContent === "End hosted approval"));
+
+    // A key the provider rejects is not left staged; the form stays open with Cancel.
+    await frame.click("#ai-provider-add");
+    await frame.fill("#ai-provider-key", "test");
+    await frame.click("#ai-provider-validate");
+    await frame.waitForFunction(() => {
+      const cancel = document.querySelector("#ai-provider-cancel");
+      return document.querySelector('[data-field="ai-provider-state"]')?.textContent === "The provider rejected this key."
+        && cancel.textContent === "Cancel" && !cancel.disabled;
+    });
+    assert(
+      discardedStaged.length === 1 && hostedStatus.staged_connections.length === 0
+        && await frame.evaluate(() => !document.querySelector("#ai-provider-form").hidden),
+      "System kept a rejected key staged or closed the form",
+      { discardedStaged, staged: hostedStatus.staged_connections },
+    );
+    await frame.click("#ai-provider-cancel");
+
+    // A success line from an earlier action clears when a decision elsewhere changes the cards.
+    const stagedId = "model:hosted-33333333333333333333333333333333";
+    hostedStatus = { ...veniceStatus({ egress_state: "consent_required", egress_approval_state: "none" }),
+      staged_connections: [{ id: stagedId, provider: "OpenRouter", has_saved_model: false }] };
+    await postHomeEvents(inboxChanged);
+    await frame.click("#ai-provider-instances .ai-provider-instance >> text=Discard staged key");
+    await frame.waitForFunction(() => document.querySelector('[data-field="ai-provider-state"]')?.textContent === "Staged key removed.");
+    hostedStatus = { ...veniceStatus({ egress_state: "ready", egress_approval_state: "approved" }), staged_connections: [] };
+    await postHomeEvents(inboxChanged);
+    await frame.waitForFunction(() => [...document.querySelectorAll("#ai-provider-instances details button")]
+      .some((node) => node.textContent === "End hosted approval")
+      && document.querySelector('[data-field="ai-provider-state"]')?.textContent === "");
 
     assert(
       appearancePlans.length === 0,
