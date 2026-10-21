@@ -41,7 +41,8 @@ in `examples/photo-viewer/surface/`, and the one Runtime-side file touched is th
 - **Images** come from `blob:` URLs, typed from the playlist, and are released when replaced. A slow answer
   for an earlier photo never replaces a later choice.
 - **Controls:** previous, pause and next buttons; the left and right arrows and space.
-- **Not sent:** Home chrome messages (`home:app-ready`, menus). Photos needs none to show.
+- **Not sent:** Home chrome messages (`home:app-ready`, menus), by decision (review answer 2 below). The page
+  never calls `postMessage`.
 
 ## What the browser path depends on, and where it is pinned
 
@@ -127,17 +128,23 @@ Not falsified separately, and said plainly:
 
 ## Roadmap milestone
 
-2.5 (first app, photo viewer): the core (P1–P2), the seam (#18), and now the surface. Not yet: installing
-`image-viewer` into a real Home (a `components.json` entry, setup and release work), and the Phase 2 binding
-of the run output.
+2.5 (first app, photo viewer): the core (P1–P2), the seam (#18), and now the surface. Installing
+`image-viewer` into a real Home stays out of the spike (review answer 1 below). The Phase 2 binding of the
+run output is not built.
 
-## Questions for the review
+## Review answers (Sasha, relaying the Cursor review; Codex PASS at `d7e4dd02`)
 
-1. Installing `image-viewer` for a real Home run needs a `components.json` entry. Should that be the next
-   slice, or stay out of the spike?
-2. Should the page send `home:app-ready` so Home can show its chrome (title, close), at the cost of one
-   message to Home? It sends none now.
+1. **Installing `image-viewer` into a real Home stays out of the spike.** A `components.json` entry is
+   release setup work, and this is freeze week. The real install path is Phase 2: the signed bundle
+   (roadmap 2.2), then the photo viewer on Bus v2 (2.5). No slice for it.
+2. **The page does not send `home:app-ready`, and stays silent.** Home draws the title bar and close button
+   itself. In `capsules/home/browser/home-shell-host.js`, `home:app-ready` only resets per-document state
+   (the link prompt, the picker, the clipboard) and sends a navigation hint for five named apps.
+   - The page never sent it, so nothing was removed.
+   - It is already tested: `the page has no way to hold or reach anything else` in
+     `surface/photos.test.mjs` fails if `postMessage` appears in `photos.js` or `main.js`.
+   - In the Chromium smoke the page sends Home nothing.
 
 ## Next slice
 
-None until the review.
+None. The photo track has 7 of 7 slices built. Nothing new starts without Sasha.
