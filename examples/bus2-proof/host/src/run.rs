@@ -2,10 +2,13 @@
 //!
 //! The host asks a guest to stop in one way: it closes the events stream.
 //! If the guest has not returned within the grace period, the host cancels
-//! the call (it stops driving it and drops the store). A guest that keeps
-//! executing is ended by the epoch deadline. Every run records one `Ending`.
+//! the call (it stops driving it and drops the store); that holds during
+//! start-up too. A guest that keeps executing, while starting up or running,
+//! is ended by the epoch deadline. Every run records one `Ending`.
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -24,16 +27,18 @@ pub struct Limits {
     /// starts just before `lifecycle.run`, so it measures the run, not how
     /// much start-up code the guest compiled to.
     pub instantiate_fuel: u64,
-    /// The longest a run may last, in epoch ticks (the `Ticker`'s period).
+    /// The longest a run may last, start-up included, in epoch ticks (the
+    /// `Ticker`'s period).
     pub max_ticks: u64,
     /// Fuel a guest may use between two epoch ticks. The epoch callback
     /// refills the store to this amount at every tick; using more than this
     /// before the next tick ends the run (`fuel-exhausted`).
     pub fuel_per_tick: u64,
-    /// A running guest yields to the executor after every `fuel_slice` units
-    /// of fuel, and takes its next slice from what is left of `fuel_per_tick`.
+    /// A guest, starting up or running, yields to the executor after every
+    /// `fuel_slice` units of fuel, and takes its next slice from what is left
+    /// of its budget (`instantiate_fuel`, then `fuel_per_tick`).
     pub fuel_slice: u64,
-    /// Whether a running guest also yields to the executor at every tick.
+    /// Whether a guest also yields to the executor at every tick.
     pub yield_each_tick: bool,
 }
 
@@ -62,6 +67,9 @@ pub enum Ending {
     /// Had not returned when the grace period after the close ran out; the
     /// host cancelled the call.
     CancelledAfterGrace,
+    /// Was still starting up when the grace period after the close ran out;
+    /// the host cancelled the start-up, and `lifecycle.run` was never called.
+    CancelledDuringStartUp,
     /// Was still executing at the epoch deadline.
     EpochDeadline,
     /// Used up its fuel inside one slice.
@@ -77,6 +85,7 @@ impl Ending {
             Ending::Returned => "returned",
             Ending::ReturnedError(_) => "returned-error",
             Ending::CancelledAfterGrace => "cancelled-after-grace",
+            Ending::CancelledDuringStartUp => "cancelled-during-start-up",
             Ending::EpochDeadline => "epoch-deadline",
             Ending::FuelExhausted => "fuel-exhausted",
             Ending::Trapped(_) => "trapped",
@@ -150,9 +159,10 @@ fn ending_of_trap(error: wasmtime::Error) -> Ending {
     Ending::Trapped(format!("{error:#}"))
 }
 
-/// Runs `lifecycle.run` with a fresh events stream, while `drive` sends
-/// events. When `drive` returns, the events are closed and the grace period
-/// starts. The `Ticker` must be running on `engine`.
+/// Instantiates the guest, then runs `lifecycle.run` with a fresh events
+/// stream, while `drive` sends events. When `drive` returns, the events are
+/// closed and the grace period starts, whether the guest is still starting
+/// up or already running. The `Ticker` must be running on `engine`.
 pub async fn run_resident(
     engine: &Engine,
     component: &Component,
@@ -163,68 +173,73 @@ pub async fn run_resident(
     let linker = linker(engine)?;
     let mut store = Store::new(engine, state);
 
-    // Start-up, on its own budget. A trap here is a run ending like any other.
-    store.set_fuel(limits.instantiate_fuel)?;
-    store.set_epoch_deadline(limits.max_ticks);
-    let world = match ProductCapsuleV2::instantiate_async(&mut store, component, &linker).await {
-        Ok(world) => world,
-        Err(error) => {
-            return Ok(Outcome {
-                ending: ending_of_trap(error),
-                started: false,
-                state: store.into_data(),
-            })
-        }
-    };
-
-    // The run's budget. Fuel set from the epoch callback does not reach code
-    // that is already running (Wasmtime 48 keeps the running count in the
-    // compiled code), so a slice ends by fuel: the guest yields, and takes its
-    // next slice from the store's reserve, which the epoch callback refills.
+    // Slicing and yield are on from the start, so start-up code is as fair to
+    // other guests as a running guest is. Fuel set from the epoch callback
+    // does not reach code that is already running (Wasmtime 48 keeps the
+    // running count in the compiled code), so a slice ends by fuel: the guest
+    // yields, and takes its next slice from the store's reserve. The epoch
+    // deadline covers start-up and the run together.
     store.fuel_async_yield_interval(Some(limits.fuel_slice))?;
-    store.set_fuel(limits.fuel_per_tick)?;
     store.set_epoch_deadline(1);
     let (max_ticks, fuel, yield_each_tick) = (
         limits.max_ticks,
         limits.fuel_per_tick,
         limits.yield_each_tick,
     );
+    let running = Arc::new(AtomicBool::new(false));
+    let refill = running.clone();
     let mut ticks = 0u64;
     store.epoch_deadline_callback(move |mut context| {
         ticks += 1;
         if ticks > max_ticks {
             return Err(wasmtime::Error::new(DeadlineReached));
         }
-        context.set_fuel(fuel)?;
+        // Start-up has its own budget and is not refilled; the run's
+        // reserve is refilled at every tick.
+        if refill.load(Ordering::Relaxed) {
+            context.set_fuel(fuel)?;
+        }
         Ok(if yield_each_tick {
             UpdateDeadline::Yield(1)
         } else {
             UpdateDeadline::Continue(1)
         })
     });
+    // Start-up, on its own budget. A trap here is a run ending like any other.
+    store.set_fuel(limits.instantiate_fuel)?;
 
     let (sender, receiver) = unbounded_channel();
-    let events = StreamReader::new(&mut store, EventFeed(receiver))?;
     let grace = limits.grace;
 
-    // The driver and the grace timer sit outside `run_concurrent`: while a
-    // guest always has work ready, Wasmtime 48 does not poll the host closure
-    // inside `run_concurrent`, so a timer there would never fire.
+    // Start-up and the run are one job, driven in the same `select` as the
+    // driver and the grace timer, so a stop during start-up is seen too. The
+    // driver and the grace timer sit outside `run_concurrent`: while a guest
+    // always has work ready, Wasmtime 48 does not poll the host closure inside
+    // `run_concurrent`, so a timer there would never fire.
     let ending = {
-        let run = store.run_concurrent(async move |accessor| {
-            world
-                .elastos_bus_lifecycle()
-                .call_run(accessor, events)
-                .await
-        });
-        tokio::pin!(run);
+        let job = async {
+            let world = ProductCapsuleV2::instantiate_async(&mut store, component, &linker).await?;
+            // The run's budget, refilled at every tick from here on.
+            store.set_fuel(limits.fuel_per_tick)?;
+            running.store(true, Ordering::Relaxed);
+            let events = StreamReader::new(&mut store, EventFeed(receiver))?;
+            store
+                .run_concurrent(async move |accessor| {
+                    world
+                        .elastos_bus_lifecycle()
+                        .call_run(accessor, events)
+                        .await
+                })
+                .await?
+        };
+        tokio::pin!(job);
         let drive = drive(Events(sender));
         tokio::pin!(drive);
         let mut closed = false;
         loop {
             tokio::select! {
-                ran = &mut run => {
-                    break match ran.and_then(|returned| returned) {
+                ran = &mut job => {
+                    break match ran {
                         Ok(Ok(())) if closed => Ending::Stopped,
                         Ok(Ok(())) => Ending::Returned,
                         Ok(Err(error)) => Ending::ReturnedError(error),
@@ -236,17 +251,21 @@ pub async fn run_resident(
                     closed = true;
                 }
                 () = tokio::time::sleep(grace), if closed => {
-                    // Cancel: stop driving the call. It is dropped below.
-                    break Ending::CancelledAfterGrace;
+                    // Cancel: stop driving the job. It is dropped below.
+                    break if running.load(Ordering::Relaxed) {
+                        Ending::CancelledAfterGrace
+                    } else {
+                        Ending::CancelledDuringStartUp
+                    };
                 }
             }
         }
     };
-    // A cancelled call leaves work in the store; the store is dropped here
-    // and only its data is kept.
+    // A cancelled job leaves work in the store; the store is dropped here and
+    // only its data is kept.
     Ok(Outcome {
         ending,
-        started: true,
+        started: running.load(Ordering::Relaxed),
         state: store.into_data(),
     })
 }

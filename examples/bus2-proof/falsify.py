@@ -15,7 +15,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent
-GUESTS = ["-p", "bus2-photo-guest", "-p", "bus2-resident-guest", "-p", "bus2-busy-guest"]
+GUESTS = ["-p", "bus2-photo-guest", "-p", "bus2-resident-guest", "-p", "bus2-busy-guest", "-p", "bus2-start-loop-guest"]
 
 # (name, file, [(old, new)], [(test target, test name)])
 CASES = [
@@ -91,7 +91,7 @@ CASES = [
     (
         "fuel is not refilled at each tick",
         "host/src/run.rs",
-        [("        context.set_fuel(fuel)?;\n", "")],
+        [("            context.set_fuel(fuel)?;\n", "")],
         [("lifecycle", "a_busy_guest_that_yields_each_slice_can_still_be_cancelled"),
          ("fairness", "a_busy_guest_does_not_starve_a_second_guest")],
     ),
@@ -122,13 +122,9 @@ CASES = [
     (
         "a trap during instantiation is returned as a bare error",
         "host/src/run.rs",
-        [("""        Err(error) => {
-            return Ok(Outcome {
-                ending: ending_of_trap(error),
-                started: false,
-                state: store.into_data(),
-            })
-        }""", """        Err(error) => return Err(error),""")],
+        [("                        Err(error) => ending_of_trap(error),\n",
+          "                        Err(error) if !running.load(Ordering::Relaxed) => return Err(error),\n"
+          "                        Err(error) => ending_of_trap(error),\n")],
         [("lifecycle", "a_trap_during_instantiation_is_a_named_ending")],
     ),
     (
@@ -136,6 +132,34 @@ CASES = [
         "host/src/run.rs",
         [("    store.set_fuel(limits.instantiate_fuel)?;", "    store.set_fuel(limits.fuel_per_tick)?;")],
         [("lifecycle", "start_up_has_its_own_fuel_budget")],
+    ),
+    (
+        "start-up runs before slicing and yield are on",
+        "host/src/run.rs",
+        [("    store.fuel_async_yield_interval(Some(limits.fuel_slice))?;\n", ""),
+         ("            store.set_fuel(limits.fuel_per_tick)?;\n",
+          "            store.set_fuel(limits.fuel_per_tick)?;\n"
+          "            store.fuel_async_yield_interval(Some(limits.fuel_slice))?;\n"),
+         ("        Ok(if yield_each_tick {", "        Ok(if yield_each_tick && refill.load(Ordering::Relaxed) {")],
+        [("fairness", "a_guest_stuck_in_start_up_does_not_delay_a_second_guest")],
+    ),
+    (
+        "the grace timer does not run during start-up",
+        "host/src/run.rs",
+        [("() = tokio::time::sleep(grace), if closed => {", "() = tokio::time::sleep(grace), if closed && running.load(Ordering::Relaxed) => {")],
+        [("lifecycle", "a_stop_during_start_up_ends_the_run_within_the_grace_period")],
+    ),
+    (
+        "a cancel during start-up is recorded as cancelled-after-grace",
+        "host/src/run.rs",
+        [("                        Ending::CancelledDuringStartUp\n", "                        Ending::CancelledAfterGrace\n")],
+        [("lifecycle", "a_stop_during_start_up_ends_the_run_within_the_grace_period")],
+    ),
+    (
+        "start-up is refilled at each tick",
+        "host/src/run.rs",
+        [("        if refill.load(Ordering::Relaxed) {\n", "        if true {\n")],
+        [("lifecycle", "start_up_that_never_ends_uses_up_its_own_budget")],
     ),
     # Proof 2: streaming a read with a cap.
     (

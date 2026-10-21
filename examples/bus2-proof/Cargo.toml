@@ -2,7 +2,7 @@
 # CI and release lists. See handoff/BUS2-PROOF-DESIGN.md.
 [workspace]
 resolver = "2"
-members = ["host", "guests/photo", "guests/resident", "guests/busy"]
+members = ["host", "guests/photo", "guests/resident", "guests/busy", "guests/start-loop"]
 
 [workspace.package]
 edition = "2021"

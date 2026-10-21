@@ -213,3 +213,49 @@ fn stop_requested_adds_nothing_the_close_cannot_do() {
     let (lingering, _) = run("bus2_resident_guest", limits, events, Duration::ZERO);
     assert_eq!(lingering.ending.reason(), "cancelled-after-grace");
 }
+
+#[test]
+fn a_stop_during_start_up_ends_the_run_within_the_grace_period() {
+    // Start-up that does not end on its own: its fuel budget is out of reach
+    // and the epoch deadline is 10 s away, so only the stop can end it sooner.
+    let grace = Duration::from_millis(200);
+    let hold = Duration::from_millis(50);
+    let limits = Limits {
+        grace,
+        instantiate_fuel: 1 << 50,
+        max_ticks: 1000,
+        ..Limits::default()
+    };
+    let (outcome, took) = run(
+        "bus2_start_loop_guest",
+        limits,
+        vec![Event::Message(b"never read".to_vec())],
+        hold,
+    );
+    println!("stop during start-up: ended after {took:?}");
+    assert!(!outcome.started);
+    assert_eq!(outcome.ending.reason(), "cancelled-during-start-up");
+    assert!(took >= hold + grace, "{took:?}");
+    assert!(took < hold + grace + Duration::from_millis(500), "{took:?}");
+}
+
+#[test]
+fn start_up_that_never_ends_uses_up_its_own_budget() {
+    // Slicing during start-up does not refill it: start-up that never ends is
+    // ended by its own fuel budget, long before the epoch deadline. The budget
+    // lasts many ticks (about 0.1 s here), so a refill at a tick would show.
+    let limits = Limits {
+        instantiate_fuel: 2_000_000_000,
+        ..Limits::default()
+    };
+    let (outcome, took) = run(
+        "bus2_start_loop_guest",
+        limits,
+        vec![],
+        Duration::from_secs(10),
+    );
+    println!("start-up that never ends: ended after {took:?}");
+    assert!(!outcome.started);
+    assert_eq!(outcome.ending, Ending::FuelExhausted);
+    assert!(took < Duration::from_secs(2), "{took:?}");
+}

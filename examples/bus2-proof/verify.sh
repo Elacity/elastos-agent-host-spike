@@ -10,12 +10,12 @@ rustc --version
 cargo --version
 
 echo "== guests (wasm32-unknown-unknown, release)"
-cargo build --locked --release --target wasm32-unknown-unknown -p bus2-photo-guest -p bus2-resident-guest -p bus2-busy-guest
+cargo build --locked --release --target wasm32-unknown-unknown -p bus2-photo-guest -p bus2-resident-guest -p bus2-busy-guest -p bus2-start-loop-guest
 
 echo "== fmt and clippy"
 cargo fmt --all -- --check
 cargo clippy --locked -p bus2-host --all-targets -- -D warnings
-cargo clippy --locked --release --target wasm32-unknown-unknown -p bus2-photo-guest -p bus2-resident-guest -p bus2-busy-guest -- -D warnings
+cargo clippy --locked --release --target wasm32-unknown-unknown -p bus2-photo-guest -p bus2-resident-guest -p bus2-busy-guest -p bus2-start-loop-guest -- -D warnings
 
 echo "== tests"
 cargo test --locked --no-fail-fast -p bus2-host

@@ -3,11 +3,11 @@
 What this is:
 - a test of the **draft** Bus v2 interface (`wit/bus2.wit`, "DRAFT sketch for review, not a frozen ABI")
   from the guest side;
-- three small guests, built for `wasm32-unknown-unknown`, run in a stub host inside this folder's tests;
+- four small guests, built for `wasm32-unknown-unknown`, run in a stub host inside this folder's tests;
 - not a second Bus, and not the Runtime. Nothing outside `examples/bus2-proof` changed.
 
 How to check it:
-- `./verify.sh` builds the guests, runs fmt and clippy, all 38 tests and all 42 falsifiers (each falsifier
+- `./verify.sh` builds the guests, runs fmt and clippy, all 41 tests and all 46 falsifiers (each falsifier
   breaks one check and requires its test to fail);
 - `cargo run --locked --release -p bus2-host --example measure` prints the measurements below.
 
@@ -20,7 +20,13 @@ How to check it:
   The changes I recommend are in [For Anders](#for-anders).
 - **Wasmtime 48 needed three workarounds**, all in the host and none in the guest: fuel slices instead of a
   fuel top-up, the stop logic outside `run_concurrent`, and a separate start-up fuel budget.
-- **Sizes are small; compiling is the cost.** The photo guest is about 100 KB as a component. Compiling it
+- **Start-up runs guest code, and is under the same controls as the run.** Codex found that instantiation ran
+  before fuel slicing and yield were on, and before the stop driver was polled. A guest whose start-up loops
+  could hold up every other guest until its start-up trapped, and could not be stopped. Now start-up is sliced
+  and yields like a running guest, on its own fuel budget. It is driven in the same `select` as the stop
+  driver and the grace timer, so a stop during start-up ends the run as `cancelled-during-start-up`.
+- **Sizes are small; compiling is the cost.** These are measurements on two machines, not guarantees. The photo
+  guest is about 100 KB as a component. Compiling it
   takes about 140 ms in this container and about 70 ms on the Mac. Loading already-compiled code takes about
   0.3 ms here and 0.14 ms on the Mac.
 
@@ -28,15 +34,27 @@ How to check it:
 
 | Proof | Tests | Falsifiers |
 |---|---|---|
-| 1. Resident guest: stop by close, grace cancel, epoch backstop, named endings | 10 (`tests/lifecycle.rs`) | 11 |
+| 1. Resident guest: stop by close, grace cancel, epoch backstop, named endings, during start-up too | 12 (`tests/lifecycle.rs`) | 14 |
 | 2. `providers.invoke` streams the photo in chunks under a cap; refused, never truncated | 7 (`tests/streaming.rs`) | 8 |
 | 3. `ui.present` draws one declarative frame; images by granted handle; no script | 6 (`tests/ui.rs`) | 7 |
 | 4. Credential checked against the key pinned in the manifest; the guest only refuses; no frame before the check | 7 (`tests/credentials.rs`) | 8 |
 | 5. Admission refuses imports outside `elastos:bus/*@2.0.0`, and v1 and v2 mixed | 7 (`tests/admission.rs`) | 7 |
-| 6. Fuel slices plus async yield: a busy guest does not starve a second guest | 1 (`tests/fairness.rs`) | 1, and 1 shared with proof 1 |
+| 6. Fuel slices plus async yield: a busy guest, running or still starting up, does not starve a second guest | 2 (`tests/fairness.rs`) | 2, and 1 shared with proof 1 |
 
 Endings the host records, each by name: `stopped`, `returned`, `returned-error`, `cancelled-after-grace`,
-`epoch-deadline`, `fuel-exhausted`, `trapped`. An ending also says whether the guest got past start-up.
+`cancelled-during-start-up`, `epoch-deadline`, `fuel-exhausted`, `trapped`. An ending also says whether the
+guest got past start-up.
+
+Start-up (proofs 1 and 6):
+- start-up is instantiation, and it runs guest code: a core start function, which `wit-component` makes from
+  an exported `_initialize`. The `start-loop` guest's `_initialize` never ends;
+- from before instantiation, a guest yields after every fuel slice and at every epoch tick, as when it runs;
+- start-up has its own fuel budget, which is not refilled. The run's budget starts just before
+  `lifecycle.run`, and is refilled at every tick;
+- one epoch deadline covers start-up and the run together;
+- start-up and the run are one job, in the same `select` as the stop driver and the grace timer. The grace
+  period starts at the close, whether the guest is still starting up or already running. A guest still in
+  start-up when it runs out is ended as `cancelled-during-start-up`, and `lifecycle.run` is never called.
 
 The read path (proof 2):
 - the guest asks for a grant on exactly the photo's URI;
@@ -70,6 +88,21 @@ Each way of yielding is enough on its own for fairness:
 The falsifier removes both kinds of yield, and then the photo guest waits for the busy one to end. Removing the
 refill makes the busy guest end by fuel instead of by its deadline, which the fairness test also catches.
 
+The fairness claim covers start-up too. Measured in this container:
+- a guest stuck in start-up and the photo guest share one engine and one executor. The photo guest was due to
+  start at 50 ms;
+- the photo guest finished at about 53 ms, so about 3 ms after it was due. It takes about 2 ms alone, so it
+  was held up by about 1 ms, less than one 10 ms tick. The test allows it to be up to 100 ms late;
+- the stuck guest stayed in start-up until its epoch deadline at about 1.02 s, and never got past start-up;
+- before the fix, the photo guest could not start until the stuck guest's start-up trapped, at about 1.06 s.
+  The falsifier puts that order back (slicing and yield turned on only after instantiation), and the test
+  fails.
+
+A stop during start-up: the drive closed the events after 50 ms with a 200 ms grace period, and the run ended
+as `cancelled-during-start-up` after about 255 ms. Before the fix it ran on for 10 s, until the epoch
+deadline. Start-up that never ends, with a budget that lasts about 0.1 s, is ended by its own fuel
+(`fuel-exhausted`), so the slicing does not refill it.
+
 ## For Anders
 
 ### Wasmtime 48 behaviours found
@@ -96,7 +129,15 @@ refill makes the busy guest end by fuel instead of by its deadline, which the fa
    store. The guest gets no signal and no reason. The host records the reason in its ending, which is enough.
 5. **Async host imports must take the store.** An `async func` import gets `&Accessor<T, Self>` in a
    `HostWithStore<T>` trait, even when it only touches the guest's own state.
-6. **Compiled code is worth caching.**
+6. **Instantiation runs guest code, outside the run's controls unless the host puts it inside them.**
+   - A core start function (from an exported `_initialize`) runs inside `instantiate_async`, before
+     `lifecycle.run` can be called.
+   - If slicing and yield are turned on only after instantiation, and instantiation is awaited before the stop
+     logic starts, such a guest holds up every other guest, and a stop cannot reach it.
+   - Turning `fuel_async_yield_interval` and the epoch yield on before instantiation does work in Wasmtime 48:
+     start-up then yields like a running guest.
+   - Found by Codex's review.
+7. **Compiled code is worth caching.**
    - A warm start (load compiled code, then instantiate) took 0.08 to 0.31 ms.
    - A cold start (compile, then instantiate) took 44 to 140 ms in the container and 21 to 70 ms on the Mac.
    - Loading compiled code trusts its input, so such a cache must be one that only the Runtime writes.
@@ -135,7 +176,8 @@ refill makes the busy guest end by fuel instead of by its deadline, which the fa
 
 ## Measurements
 
-Two machines, each with a release build of the host and the median of 9 runs:
+These are measurements on two machines, not guarantees. Other machines, loads and builds will give other
+numbers. Two machines, each with a release build of the host and the median of 9 runs:
 - **container:** this Linux container, 4 vCPUs (Intel Xeon);
 - **Mac:** Cursor's Mac run of `bfafc3ed`.
 
@@ -166,7 +208,8 @@ The Mac compiles about twice as fast. On both machines, warm start is hundreds o
 - **Compiled code:** Wasmtime's native code for the component (`Component::serialize`).
 - **Cold start:** compile the component (`Component::new`), then instantiate it.
 - **Warm start:** load the compiled code (`Component::deserialize`), then instantiate it.
-- **Instantiate only:** the component already loaded.
+- **Instantiate only:** the component already loaded. The measurement tool instantiates through Wasmtime
+  directly, without the run's slicing and yield.
 
 The design note asked for cold start "to the first event read". Instantiating takes about 0.03 ms, so cold
 start is almost all compile time. A whole job is measured as well: the photo guest, already compiled, is
