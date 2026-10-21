@@ -47,6 +47,7 @@ import {
   scheduleAgentWorkspacePersist,
   getHomeGuiLaunchToken,
   homeOrigin,
+  bindHomeCopy,
 } from "./harness-host.js";
 import { createHomeMessageGate } from "./home-agent-gate.js";
 
@@ -201,17 +202,17 @@ homeClipboard.start();
 
 /* A copy Home would refuse for its size is refused here, by name, before Home
    is asked to confirm it. */
-function copyThroughHome(text) {
+bindHomeCopy((text) => {
   if (new TextEncoder().encode(text).byteLength > MAX_HOME_CLIPBOARD_TEXT_UTF8_BYTES) {
     const error = new Error("Text is too long for the Home clipboard.");
     error.code = "too_large";
     return Promise.reject(error);
   }
   return homeClipboard.writeText(text, { purpose: "message.text" });
-}
+});
 
 bindAgentShelf();
-bindAgentHarness({ copyText: copyThroughHome });
+bindAgentHarness();
 
 const taskbar = taskbarEl();
 if (taskbar && typeof ResizeObserver === "function") {

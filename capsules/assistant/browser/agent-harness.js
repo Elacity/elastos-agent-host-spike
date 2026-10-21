@@ -18,6 +18,7 @@ import {
   postToHome,
   openModelsFromAgent,
   openAiProviderSettingsFromAgent,
+  copyFromButton,
 } from "./harness-host.js";
 import {
   agentStageId,
@@ -1290,73 +1291,11 @@ function renderDesktopAttachOptions(menu) {
   }
 }
 
-/* Copy is Home's to perform (see home-agent.js); the entry hands the harness
-   that one function. Without it, Copy says the clipboard is unavailable. */
-let copyText = null;
-const COPY_STATUS_MS = 2400;
-const COPY_FAILURE_TEXT = {
-  too_large: "Too long to copy.",
-  cancelled: "Copy cancelled.",
-  denied: "Copy not allowed.",
-  busy: "Home is showing another request.",
-  timeout: "Copy timed out.",
-  unavailable: "Clipboard unavailable.",
-  retired: "Copy stopped.",
-};
-const copyStatusTimers = new WeakMap();
-
-/* The result shows beside the button that asked: "Copied", or why not. */
-function showCopyStatus(button, text, ok) {
-  const bar = button.parentElement;
-  if (!bar) {
-    return;
-  }
-  let status = bar.querySelector(":scope > .agent-copy-status");
-  if (!status) {
-    status = document.createElement("span");
-    status.className = "agent-copy-status";
-    status.setAttribute("role", "status");
-    bar.append(status);
-  }
-  status.textContent = text;
-  status.dataset.tone = ok ? "ok" : "error";
-  button.dataset.copied = ok ? "true" : "false";
-  clearTimeout(copyStatusTimers.get(bar));
-  copyStatusTimers.set(bar, setTimeout(() => {
-    status.remove();
-    delete button.dataset.copied;
-  }, COPY_STATUS_MS));
-}
-
-async function copyFromButton(button, text) {
-  if (button.dataset.copyPending === "1") {
-    return;
-  }
-  if (!text) {
-    showCopyStatus(button, "Nothing to copy.", false);
-    return;
-  }
-  if (!copyText) {
-    showCopyStatus(button, COPY_FAILURE_TEXT.unavailable, false);
-    return;
-  }
-  button.dataset.copyPending = "1";
-  try {
-    await copyText(text);
-    showCopyStatus(button, "Copied", true);
-  } catch (error) {
-    showCopyStatus(button, COPY_FAILURE_TEXT[error?.code] || "Copy failed.", false);
-  } finally {
-    delete button.dataset.copyPending;
-  }
-}
-
-export function bindAgentHarness({ copyText: homeCopyText = null } = {}) {
+export function bindAgentHarness() {
   if (bound) {
     return;
   }
   bound = true;
-  copyText = homeCopyText;
   bindShelfAttachHost({
     renderDesktopAttachOptions,
     persistComposer: persistAgentWorkspaceSoon,

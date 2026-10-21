@@ -6,7 +6,7 @@
 import { registerEscapeHandler } from "./shell-popovers.js";
 import { sendToAgentHarness, stopAgentHarnessStream, abortAgentStreamNow } from "./agent-send.js";
 import { DICTATION_HYPOTHESIS_CAP } from "./agent-context.js";
-import { desktopStageId, setActiveStage } from "./harness-host.js";
+import { copyFromButton, desktopStageId, setActiveStage } from "./harness-host.js";
 import { selectedLiveOffer } from "./agent-live.js";
 
 let bound = false;
@@ -575,6 +575,10 @@ function pasteEditorEl() {
     }
   });
   el.querySelector("[data-paste-close]").addEventListener("click", () => closePasteEditor());
+  const copyButton = el.querySelector("[data-paste-copy]");
+  copyButton.addEventListener("click", () => {
+    void copyFromButton(copyButton, el.querySelector("[data-paste-body]").value);
+  });
   el.querySelector("[data-paste-save]").addEventListener("click", () => savePasteEditor());
   return el;
 }

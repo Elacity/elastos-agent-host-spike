@@ -17,10 +17,11 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 - Apps keeps its title clear of Home window controls in narrow windows. Phone
   detail controls have full touch targets, and Tab skips closed detail content.
-- In Assistant, Copy on a message or a code block now copies. Before, it did
+- In Assistant, Copy now copies: on a message (also while a reply is still
+  arriving), on a code block and in the pasted-text editor. Before, it did
   nothing. Home asks you to confirm, then copies the text you sent, the reply as
-  Markdown, or the code. If the copy does not happen, the message says why, for
-  example when you cancel or the text is too long.
+  Markdown, the code or the pasted text. If the copy does not happen, Assistant
+  says why, for example when you cancel or the text is too long.
 - In Documents on the Desktop, a web link in a document or a published revision opens after Home shows the address and you choose Open; before, it did nothing, or replaced the Documents window so it could not be closed (#436). Links to a place in the same document still scroll there. Other links (relative paths, `elastos://` and `localhost://`) show as plain text in Documents on the Desktop.
 
 ### Developer detail

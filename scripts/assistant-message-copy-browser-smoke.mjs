@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-// Copy on an Assistant message reaches the device clipboard through Home.
+// Copy in the Assistant reaches the device clipboard through Home.
 // The real Assistant capsule runs opaque-sandboxed inside an opaque Home GUI
 // frame, as installed; the top document runs the real Home Clipboard host and
 // prompt. Copy on a sent message writes the typed text, Copy on a reply writes
-// its Markdown source, Copy on a code block writes the code, and a cancelled or
-// oversized copy says so in the row instead of doing nothing.
+// its Markdown source (while it streams, the source received so far; once a
+// stream ends without a confirmed outcome, the partial reply kept), Copy on a
+// code block writes the code, and Copy in the pasted-text editor writes the
+// pasted text. A cancelled or oversized copy says so instead of doing nothing.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
@@ -14,7 +16,10 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "./system-uiux-fixture.mjs";
 
 const root = resolve(fileURLToPath(new URL("../", import.meta.url)));
+const schema = "elastos.assistant.workspace/v2";
 const homeToken = "assistant-copy-fixture";
+const textOffer = { id: "offer:text-fixture", title: "Text fixture", operation: "text.generate",
+  input_modalities: ["text/plain"], output_modalities: ["text/plain"] };
 const typed = "Why is the sky blue?  Keep <it> short & exact.";
 const reply = [
   "**Rayleigh scattering**: shorter wavelengths scatter more.",
@@ -25,25 +30,36 @@ const reply = [
   "",
   "- blue scatters ~5.5× more than red",
 ].join("\n");
-const oversized = `${"x".repeat(65_537)}`;
-const workspace = {
-  schema: "elastos.assistant.workspace/v2",
-  revision: 1,
-  document: {
-    v: 1, activeSessionId: "copy-room", sessionMode: "chat", liveOfferId: "", selectedModelCid: null,
-    composerDraft: { text: "", parts: [] }, projects: [], usageTurns: [],
-    sessions: [{
-      id: "copy-room", title: "Copy room", mode: "chat", composerDraft: { text: "", parts: [] },
-      messages: [
-        { role: "user", text: typed, modelText: typed },
-        { role: "agent", text: reply },
-        { role: "user", text: "And a long one?", modelText: "And a long one?" },
-        { role: "agent", text: oversized },
-      ],
-    }],
-  },
-};
+const oversized = "x".repeat(65_537);
+const streamed = ["**Streaming** reply, ", "first part."];
+const pasted = `Pasted notes ${"π and ✓ ".repeat(1500)}END`;
 
+const workspace = (session) => ({
+  v: 1, activeSessionId: session.id, sessionMode: "chat", liveOfferId: textOffer.id, selectedModelCid: null,
+  composerDraft: { text: "", parts: [] }, projects: [], usageTurns: [],
+  sessions: [{ title: "Copy room", mode: "chat", composerDraft: { text: "", parts: [] }, ...session }],
+});
+const savedRoom = workspace({
+  id: "copy-room",
+  messages: [
+    { role: "user", text: typed, modelText: typed },
+    { role: "agent", text: reply },
+    { role: "user", text: "And a long one?", modelText: "And a long one?" },
+    { role: "agent", text: oversized },
+  ],
+});
+// A turn still running when the room opens: the Assistant resumes it and
+// streams the reply from the run's events.
+const streamingRoom = workspace({
+  id: "stream-room",
+  messages: [{ role: "user", text: "Stream me something", modelText: "Stream me something" }],
+  lastTurn: { turnId: "turn-stream", providerRunId: "run-stream", createRequestId: "request-stream",
+    state: "streaming", startedAt: Date.now() - 1000 },
+});
+
+// `run` is open (text so far, no outcome) or unknown (the run ends with its
+// outcome unknown, so the Assistant keeps the partial reply).
+const fixture = { stored: null, run: "open" };
 const errors = [];
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, "http://fixture");
@@ -87,7 +103,7 @@ const server = createServer(async (req, res) => {
           });
           const app = { targetId: "assistant", homeToken: ${JSON.stringify(homeToken)}, origin: "null",
             parentOrigin: location.origin, source: null, clipboardState: createHomeClipboardFrameState() };
-          window.__home = { written, bound: () => Boolean(app.source) };
+          window.__home = { written };
           addEventListener("message", event => {
             const data = event.data;
             if (!data || typeof data !== "object" || data.homeToken !== app.homeToken || event.origin !== app.origin) return;
@@ -114,12 +130,31 @@ const server = createServer(async (req, res) => {
     }
     if (url.pathname.startsWith("/api/")) {
       assert.equal(req.headers["x-elastos-home-token"], homeToken);
-      for await (const _chunk of req);
-      if (url.pathname === "/api/apps/assistant/workspace-v2" && req.method === "GET") { json(workspace); return; }
-      if (url.pathname === "/api/apps/assistant/workspace-v2") { json({ error: "fixture is read-only" }, 409); return; }
-      if (url.pathname === "/api/provider/model/offers_list") { json({ offers: [] }); return; }
+      const chunks = []; for await (const chunk of req) chunks.push(chunk);
+      const body = Buffer.concat(chunks).toString("utf8");
+      const input = body ? JSON.parse(body) : null;
+      if (url.pathname === "/api/apps/assistant/workspace-v2") {
+        if (req.method === "GET") { json(fixture.stored); return; }
+        assert.equal(req.method, "PUT");
+        if (input.if_revision !== fixture.stored.revision) { json({ error: "workspace revision conflict" }, 409); return; }
+        fixture.stored = { schema, revision: fixture.stored.revision + 1, document: input.document };
+        json(fixture.stored); return;
+      }
+      if (url.pathname === "/api/provider/model/offers_list") { json({ offers: [textOffer] }); return; }
       if (url.pathname === "/api/capsules/catalog") {
         json({ schema: "elastos.capsules.catalog/v1", model_catalog_state: "verified", capsules: [] }); return;
+      }
+      if (url.pathname === "/api/provider/model/runs_get") { json({ run_id: input.run_id }); return; }
+      if (url.pathname === "/api/provider/model/runs_events") {
+        assert.equal(input.run_id, "run-stream");
+        const after = Number(input.after_sequence) || 0;
+        const events = [
+          { sequence: 1, kind: "text_delta", data: { text: streamed[0] } },
+          { sequence: 2, kind: "text_delta", data: { text: streamed[1] } },
+          ...(fixture.run === "unknown" ? [{ sequence: 3, kind: "settlement_unknown", data: {} }] : []),
+        ].filter(event => event.sequence > after);
+        json({ events, next_cursor: Math.max(after, ...events.map(event => event.sequence)), has_more: false });
+        return;
       }
       throw new Error(`Unexpected API operation: ${req.method} ${url.pathname}`);
     }
@@ -134,7 +169,7 @@ const server = createServer(async (req, res) => {
   } catch (error) { errors.push(String(error)); json({ error: "fixture failure" }, 500); }
 });
 
-let browser, stage = "launch";
+let browser, page, stage = "launch";
 const pageErrors = [];
 try {
   server.listen(0, "127.0.0.1"); await once(server, "listening");
@@ -142,57 +177,93 @@ try {
   browser = await chromium.launch({ headless: true, ...(process.env.BRAVE_BIN ? { executablePath: process.env.BRAVE_BIN } : {}) });
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin });
-  const page = await context.newPage();
-  page.on("pageerror", error => pageErrors.push(`${stage}: ${error}`));
-  await page.goto(`${origin}/`);
-  const frame = page.frameLocator("#gui").frameLocator("iframe");
-  const rows = frame.locator(".agent-msg");
-  await rows.nth(3).waitFor({ state: "attached" });
-  const promptRoot = page.locator("#home-clipboard-prompt");
+  const open = async (document) => {
+    fixture.stored = { schema, revision: 1, document: structuredClone(document) };
+    await page?.close();
+    page = await context.newPage();
+    page.on("pageerror", error => pageErrors.push(`${stage}: ${error}`));
+    await page.goto(`${origin}/`);
+    return page.frameLocator("#gui").frameLocator("iframe");
+  };
   const clipboard = () => page.evaluate(() => navigator.clipboard.readText());
-  const status = row => row.locator(".agent-copy-status");
+  const resetClipboard = text => page.evaluate(value => navigator.clipboard.writeText(value), text);
+  const promptRoot = () => page.locator("#home-clipboard-prompt");
+  const status = button => button.locator("xpath=following-sibling::*[contains(@class,'agent-copy-status')]");
 
-  async function copyThroughHome(row, button, expected, label) {
+  async function copyThroughHome(button, expected, label, hover = null) {
     stage = label;
-    await page.evaluate(() => navigator.clipboard.writeText("clipboard before copy"));
-    await row.hover();
+    await resetClipboard("clipboard before copy");
+    await hover?.hover();
     await button.click();
-    await promptRoot.waitFor({ state: "visible", timeout: 3000 }).catch(() => {
-      throw new Error(`${label}: Copy did not ask Home to write the clipboard`);
+    await promptRoot().waitFor({ state: "visible", timeout: 3000 }).catch(async () => {
+      const said = await status(button).textContent({ timeout: 500 }).catch(() => "");
+      throw new Error(`${label}: Copy did not ask Home to write the clipboard${said ? ` (it said "${said}")` : ""}`);
     });
     await page.locator("#home-clipboard-allow").click();
-    await status(row).filter({ hasText: "Copied" }).waitFor({ timeout: 3000 });
+    await status(button).filter({ hasText: "Copied" }).waitFor({ timeout: 3000 });
     assert.equal(await clipboard(), expected, `${label}: the clipboard holds the exact text`);
   }
 
+  stage = "saved conversation";
+  let frame = await open(savedRoom);
+  let rows = frame.locator(".agent-msg");
+  await rows.nth(3).waitFor({ state: "attached" });
   const sent = rows.nth(0), received = rows.nth(1);
   assert.equal(await sent.getAttribute("data-role"), "user");
   assert.equal(await received.getAttribute("data-role"), "agent");
-  await copyThroughHome(sent, sent.locator("[data-copy-message]"), typed, "sent message");
-  await copyThroughHome(received, received.locator("[data-copy-message]"), reply, "received message");
-  await copyThroughHome(received, received.locator(".agent-md-copy"), "const answer = 42;", "code block");
+  await copyThroughHome(sent.locator("[data-copy-message]"), typed, "sent message", sent);
+  await copyThroughHome(received.locator("[data-copy-message]"), reply, "received message", received);
+  await copyThroughHome(received.locator(".agent-md-copy"), "const answer = 42;", "code block", received);
 
   stage = "cancelled copy";
-  await page.evaluate(() => navigator.clipboard.writeText("clipboard before cancel"));
+  await resetClipboard("clipboard before cancel");
   await sent.hover();
   await sent.locator("[data-copy-message]").click();
-  await promptRoot.waitFor({ state: "visible", timeout: 3000 });
+  await promptRoot().waitFor({ state: "visible", timeout: 3000 });
   await page.locator("#home-clipboard-cancel").click();
-  await status(sent).filter({ hasText: "Copy cancelled." }).waitFor({ timeout: 3000 });
+  await status(sent.locator("[data-copy-message]")).filter({ hasText: "Copy cancelled." }).waitFor({ timeout: 3000 });
   assert.equal(await clipboard(), "clipboard before cancel", "a cancelled copy leaves the clipboard alone");
 
   stage = "oversized copy";
   const long = rows.nth(3);
   await long.hover();
   await long.locator("[data-copy-message]").click();
-  await status(long).filter({ hasText: "Too long to copy." }).waitFor({ timeout: 3000 });
-  assert.equal(await promptRoot.isVisible(), false, "an oversized copy is refused before Home is asked");
+  await status(long.locator("[data-copy-message]")).filter({ hasText: "Too long to copy." }).waitFor({ timeout: 3000 });
+  assert.equal(await promptRoot().isVisible(), false, "an oversized copy is refused before Home is asked");
+
+  stage = "pasted-text editor";
+  await frame.locator("#agent-composer-input").evaluate((input, text) => {
+    const data = new DataTransfer();
+    data.setData("text/plain", text);
+    input.focus();
+    input.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+  }, pasted);
+  // Headless Brave delivers no pointer events to the chip at the composer's
+  // position in this nested fixture, so the editor is opened by a DOM click;
+  // what is under test is its Copy, which is clicked for real below.
+  await frame.locator("[data-attach-open]").evaluate(chip => chip.click());
+  await copyThroughHome(frame.locator("[data-paste-copy]"), pasted, "pasted-text editor");
+  assert.deepEqual(await page.evaluate(() => window.__home.written), [typed, reply, "const answer = 42;", pasted],
+    "Home wrote only what was confirmed");
+
+  stage = "streaming reply";
+  fixture.run = "open";
+  frame = await open(streamingRoom);
+  const live = frame.locator(".agent-msg-agent.is-streaming");
+  await live.filter({ hasText: "first part." }).waitFor({ timeout: 10000 });
+  await copyThroughHome(live.locator("[data-copy-message]"), streamed.join(""), "streaming reply", live);
+
+  stage = "partial reply kept after the stream ends";
+  fixture.run = "unknown";
+  const kept = frame.locator(".agent-msg-agent").last();
+  await frame.locator(".agent-msg-agent.is-streaming").waitFor({ state: "detached", timeout: 10000 });
+  await copyThroughHome(kept.locator("[data-copy-message]"), streamed.join(""), "partial reply", kept);
 
   const written = await page.evaluate(() => window.__home.written);
-  assert.deepEqual(written, [typed, reply, "const answer = 42;"], "Home wrote only what was confirmed");
+  assert.deepEqual(written, [streamed.join(""), streamed.join("")], "Home wrote only what was confirmed");
   assert.deepEqual(errors, []);
   assert.deepEqual(pageErrors, []);
-  console.log("PASS Assistant Copy: sent text, reply Markdown and code reach the clipboard through Home; cancelled and oversized copies say so");
+  console.log("PASS Assistant Copy: sent text, reply Markdown (also mid-stream and a kept partial), code and pasted text reach the clipboard through Home; cancelled and oversized copies say so");
 } catch (error) {
   console.error(`Assistant message copy smoke failed at ${stage}`);
   console.error(JSON.stringify({ errors, pageErrors }, null, 1));

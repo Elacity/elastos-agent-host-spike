@@ -1289,15 +1289,21 @@ function settleStreamedReply(row, session) {
   }
 }
 
-/** What a message's Copy writes: a reply's Markdown source, or the text a sent
-    message shows (what the person typed; attachment chips are not text). */
+/** What a message's Copy writes: a reply's Markdown source (while it streams,
+    the source received so far), or the text a sent message shows (what the
+    person typed; attachment chips are not text). A reply whose source was never
+    recorded copies what it shows. */
 export function messageCopyText(row) {
   const body = row?.querySelector(":scope > .agent-msg-body");
   if (!body) {
     return "";
   }
   if (row.dataset.role === "agent") {
-    return String(body.dataset.mdSource ?? body.textContent ?? "");
+    const live = getLiveTurnCanonical();
+    if (row.classList.contains("is-streaming") && row.dataset.streamGeneration === String(live.generation)) {
+      return String(live.answer || "");
+    }
+    return String(body.dataset.mdSource || body.textContent || "");
   }
   return body.querySelector(".agent-msg-user-text")?.textContent || "";
 }
@@ -2238,6 +2244,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       return;
     }
     answerRow.dataset.streamPhase = state.phase;
+    answerRow.dataset.streamGeneration = String(generation);
     answerBody.textContent = "";
     delete answerBody.dataset.mdPainted;
     frozenEl = document.createElement("div");
@@ -2660,6 +2667,9 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       const partial = materializeCanonical();
       commitAgentReply(session, partial.answer, partial.reasoning, { partial: true, turn: result.turnManifest });
       answerRow?.classList.remove("is-streaming");
+      if (answerBody) {
+        answerBody.dataset.mdSource = partial.answer;
+      }
       settleStreamedReply(answerRow, session);
       if (result.stopRequested && result.settlementUnknown) {
         /* Local engines cannot confirm a stop; the turn keeps its unknown state. */
@@ -2688,6 +2698,9 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       const reasoning = String(partial.reasoning || "").trim();
       commitAgentReply(session, answer, reasoning, { turn: result.turnManifest });
       answerRow?.classList.remove("is-streaming");
+      if (answerBody) {
+        answerBody.dataset.mdSource = answer;
+      }
       if (!answer) {
         progressEl?.remove();
         answerRow?.remove();
@@ -2774,6 +2787,9 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       answerBody = answerRow?.querySelector(".agent-msg-body") || null;
     }
     answerRow?.classList.remove("is-streaming");
+    if (answerBody) {
+      answerBody.dataset.mdSource = answer;
+    }
     const answerBodyRef = answerBody;
     const answerTextRef = answer;
     const finalize = ({ abandonRich = false } = {}) => {

@@ -277,3 +277,66 @@ export function postToHome(message) {
     window.parent.postMessage(message, "*");
   }
 }
+
+/* ---- copy ------------------------------------------------------------------ */
+
+/* Copy is Home's to perform: home-agent.js binds the one function that asks
+   Home to write. Unbound, Copy says the clipboard is unavailable. */
+let homeCopy = null;
+const COPY_STATUS_MS = 2400;
+const COPY_FAILURE_TEXT = {
+  too_large: "Too long to copy.",
+  cancelled: "Copy cancelled.",
+  denied: "Copy not allowed.",
+  busy: "Home is showing another request.",
+  timeout: "Copy timed out.",
+  unavailable: "Clipboard unavailable.",
+  retired: "Copy stopped.",
+};
+const copyStatusTimers = new WeakMap();
+
+export function bindHomeCopy(copy) {
+  homeCopy = copy;
+}
+
+/* The result shows right after the button that asked: "Copied", or why not. */
+function showCopyStatus(button, text, ok) {
+  let status = button.nextElementSibling;
+  if (!status?.classList.contains("agent-copy-status")) {
+    status = document.createElement("span");
+    status.className = "agent-copy-status";
+    status.setAttribute("role", "status");
+    button.after(status);
+  }
+  status.textContent = text;
+  status.dataset.tone = ok ? "ok" : "error";
+  button.dataset.copied = ok ? "true" : "false";
+  clearTimeout(copyStatusTimers.get(button));
+  copyStatusTimers.set(button, setTimeout(() => {
+    status.remove();
+    delete button.dataset.copied;
+  }, COPY_STATUS_MS));
+}
+
+export async function copyFromButton(button, text) {
+  if (button.dataset.copyPending === "1") {
+    return;
+  }
+  if (!text) {
+    showCopyStatus(button, "Nothing to copy.", false);
+    return;
+  }
+  if (!homeCopy) {
+    showCopyStatus(button, COPY_FAILURE_TEXT.unavailable, false);
+    return;
+  }
+  button.dataset.copyPending = "1";
+  try {
+    await homeCopy(text);
+    showCopyStatus(button, "Copied", true);
+  } catch (error) {
+    showCopyStatus(button, COPY_FAILURE_TEXT[error?.code] || "Copy failed.", false);
+  } finally {
+    delete button.dataset.copyPending;
+  }
+}
