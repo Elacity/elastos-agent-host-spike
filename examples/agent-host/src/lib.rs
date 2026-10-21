@@ -1507,13 +1507,20 @@ fn canonical_resource(resource: &str) -> bool {
         })
 }
 
-/// The key that counts one file once, whatever its case: stricter than the
-/// file system, which is safe for a limit. Every path that reaches here has
-/// passed `path_refusal` (live, or when a stored journal loads), so it is
-/// NFC, and the key is the NFC path, case-folded.
+/// The key that counts one file once, whatever its case and normal form:
+/// stricter than the file system, which is safe for a limit. It follows
+/// Unicode's canonical caseless match: NFD, then fold case, then NFD again,
+/// because folding case can change the normal form (U+0390 and U+03AA
+/// U+0301 are one name). The fold is lowercase, uppercase, lowercase, so
+/// capital sharp s (U+1E9E), small sharp s and "ss" are one name too. Every
+/// key is NFD and is its own key. The no-op count, both duplicate checks and
+/// the check on load all use this one key.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn path_key(resource: &str) -> String {
-    resource.to_uppercase().to_lowercase()
+    use unicode_normalization::UnicodeNormalization;
+    let decomposed: String = resource.nfd().collect();
+    let folded = decomposed.to_lowercase().to_uppercase().to_lowercase();
+    folded.nfd().collect()
 }
 
 /// A version of a file is bound forever to the revision (or to no revision)
@@ -15326,5 +15333,133 @@ mod tests {
             }
         }
         assert!(count >= Refusal::ALL.len());
+    }
+
+    // Codex review of #24 at 3d1ef56: the key must be normalized after the
+    // case step.
+
+    const IOTA_DIALYTIKA_TONOS: &str = "localhost://Users/self/Documents/\u{390}.txt";
+    const CAPITAL_IOTA_DIALYTIKA_ACUTE: &str =
+        "localhost://Users/self/Documents/\u{3aa}\u{301}.txt";
+
+    #[test]
+    fn spellings_equal_without_case_and_normal_form_share_one_key() {
+        for (a, b) in [
+            // Codex's pair.
+            ("\u{390}", "\u{3aa}\u{301}"),
+            ("\u{1f0}", "J\u{30c}"),
+            // The first NFD matters: U+0345 sorts after U+0308 only when
+            // decomposed.
+            ("\u{1f80}\u{308}", "\u{1f00}\u{308}\u{3b9}"),
+            // Capital sharp s folds to "ss", like small sharp s.
+            ("\u{1e9e}", "\u{df}"),
+            ("\u{1e9e}", "ss"),
+            ("caf\u{e9}", "CAF\u{c9}"),
+        ] {
+            assert!(unicode_normalization::is_nfc(a) && unicode_normalization::is_nfc(b));
+            assert_eq!(path_key(a), path_key(b), "{a:?} {b:?}");
+        }
+        assert_ne!(path_key("caf\u{e9}"), path_key("cafe"));
+        assert_eq!(path_key("\u{7b14}\u{8bb0}"), "\u{7b14}\u{8bb0}");
+    }
+
+    /// Every key is NFD, a key is its own key, and canonically equivalent
+    /// strings share one key. Swept over Latin, Greek, Cyrillic and more,
+    /// alone and with combining marks.
+    #[test]
+    fn every_key_is_normalized_and_its_own_key() {
+        use unicode_normalization::UnicodeNormalization;
+        let marks = [
+            '\u{301}', '\u{308}', '\u{345}', '\u{307}', '\u{30c}', '\u{342}', '\u{313}', '\u{3b9}',
+        ];
+        let mut inputs: Vec<String> = (0x20_u32..0x3000)
+            .chain(0x1e00..0x2000)
+            .filter_map(char::from_u32)
+            .map(String::from)
+            .collect();
+        for base in (0x41_u32..0x250)
+            .chain(0x370..0x400)
+            .chain(0x1e00..0x2000)
+            .filter_map(char::from_u32)
+        {
+            for first in marks {
+                inputs.push(format!("{base}{first}"));
+                for second in marks {
+                    inputs.push(format!("{base}{first}{second}"));
+                }
+            }
+        }
+        for input in &inputs {
+            let key = path_key(input);
+            assert!(unicode_normalization::is_nfd(&key), "{input:?}");
+            assert_eq!(path_key(&key), key, "{input:?}");
+            let nfd: String = input.nfd().collect();
+            let nfc: String = input.nfc().collect();
+            assert_eq!(path_key(&nfd), key, "{input:?}");
+            assert_eq!(path_key(&nfc), key, "{input:?}");
+        }
+    }
+
+    /// Codex's reproduction: the two spellings are one file for the no-op
+    /// count, a change, a stored journal, and a bound request.
+    #[test]
+    fn codex_greek_spellings_are_one_file_everywhere() {
+        let (a, b) = (IOTA_DIALYTIKA_TONOS, CAPITAL_IOTA_DIALYTIKA_ACUTE);
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            a,
+            1,
+            "rev-a",
+            None,
+            false,
+            "alpha beta\n"
+        ));
+        assert!(observe_read(
+            &mut journal,
+            b,
+            1,
+            "rev-b",
+            None,
+            false,
+            "alpha beta\n"
+        ));
+        for _ in 0..NOOP_EDIT_LIMIT {
+            assert!(propose_edit(&mut journal, a, "alpha", "alpha", Some(1)).is_ok());
+        }
+        assert_eq!(
+            propose_edit(&mut journal, b, "alpha", "alpha", Some(1)),
+            Err("repeated no-op edit")
+        );
+        assert_eq!(
+            propose_change(
+                &mut journal,
+                &[spec(a, "rev-a", "beta", "1"), spec(b, "rev-b", "beta", "2")]
+            ),
+            Err((1, "one file twice in one change"))
+        );
+        // A stored change with both spellings does not load.
+        let mut stored = empty_journal();
+        let first = legacy_edit(&mut stored, a, None);
+        legacy_edit(&mut stored, b, Some(first));
+        let bytes = encode_journal(&stored, &[0; 32]).unwrap();
+        assert_eq!(
+            decode_journal(&bytes).map(|_| ()),
+            Err("one file twice in one change")
+        );
+        // A change built any other way is refused when it binds.
+        let mut bound = empty_journal();
+        assert!(observe_read(
+            &mut bound, a, 1, "rev-a", None, false, "alpha\n"
+        ));
+        assert!(observe_read(
+            &mut bound, b, 1, "rev-b", None, false, "alpha\n"
+        ));
+        let first = dispatched_edit(&mut bound, a, "alpha", None);
+        dispatched_edit(&mut bound, b, "alpha", Some(first));
+        assert_eq!(
+            edit_request(&mut bound, first),
+            Err("one file twice in one change")
+        );
     }
 }
