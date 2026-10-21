@@ -1,0 +1,40 @@
+// DRAFT sketch for review, not a frozen ABI.
+//
+// Copied unchanged from the Bus v2 draft for the guest-side proof in
+// examples/bus2-proof. Nothing in the Runtime uses it. Proposed changes go in
+// handoff/BUS2-PROOF-REPORT.md, not here.
+
+package elastos:bus@2.0.0;
+
+interface types {
+  type resource-uri = string;
+  type grant-id = string;
+  type request-id = string;
+  variant bus-error { denied(string), not-found(string), invalid(string), unavailable(string), timeout(string), conflict(string), internal(string) }
+  record grant { id: grant-id, %resource: resource-uri, actions: list<string>, expires-at-ms: option<u64> }
+  record invoke-request { %resource: resource-uri, operation: string, grant: option<grant-id>, params: list<u8> }
+  record invoke-status { status: string, audit: option<request-id> }
+  variant event { stop-requested, user-input(list<u8>), message(list<u8>), grant-revoked(grant-id) }
+  record credential { kind: string, signer: string, subject-sha256: string, body: list<u8> }
+}
+interface capabilities {
+  use types.{grant, bus-error};
+  request: async func(%resource: string, actions: list<string>, reason: string) -> result<grant, bus-error>;
+}
+interface providers {
+  use types.{invoke-request, invoke-status, bus-error};
+  invoke: async func(request: invoke-request, body: option<stream<u8>>)
+    -> result<tuple<invoke-status, stream<u8>, future<result<_, bus-error>>>, bus-error>;
+}
+interface clock { now-ms: func() -> u64; sleep-until-ms: async func(deadline: u64); }
+interface random { fill: func(len: u32) -> list<u8>; }
+interface ui { use types.{bus-error}; present: async func(media-type: string, document: list<u8>) -> result<_, bus-error>; }
+interface credentials { use types.{credential}; presented: func() -> list<credential>; }
+interface runtime { record runtime-info { abi: string, runtime-version: string, capsule-cid: option<string> } info: func() -> runtime-info; }
+interface identity { record identity-context { principal: option<string>, capsule: string, session: string, device: option<string> } context: func() -> identity-context; }
+interface lifecycle { use types.{event, bus-error}; run: async func(events: stream<event>) -> result<_, bus-error>; }
+world product-capsule-v2 {
+  import runtime; import identity; import capabilities; import providers;
+  import clock; import random; import ui; import credentials;
+  export lifecycle;
+}
