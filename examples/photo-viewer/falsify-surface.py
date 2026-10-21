@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""Break each rule of the Photos surface page, see its test fail, restore it.
+
+Usage: python3 -I falsify-surface.py [--check]
+
+Each falsifier replaces exact text in surface/browser/photos.js (it must occur
+once), runs the named node tests, and requires them to FAIL. The file is
+restored from its saved bytes afterwards, also on error or Ctrl-C. --check
+only confirms every anchor occurs once.
+"""
+import pathlib
+import subprocess
+import sys
+
+SURFACE = pathlib.Path(__file__).resolve().parent / "surface"
+PAGE = SURFACE / "browser" / "photos.js"
+TESTS = SURFACE / "photos.test.mjs"
+
+# (name, exact old text, new text, tests that must fail)
+CASES = [
+    (
+        "a position that is not a whole number is asked for",
+        "if (!isPosition(order) || seen.has(order)) {",
+        "if (seen.has(order)) {",
+        ["it never requests a path"],
+    ),
+    (
+        "a skipped message is shown as markup",
+        "line.textContent = skip.order === null",
+        "line.innerHTML = skip.order === null",
+        ["it shows skipped items as text", "the page has no way to hold or reach anything else"],
+    ),
+    (
+        "a skipped message is not cut short",
+        "return text.length > MAX_MESSAGE_CHARS ?",
+        "return false && text.length > MAX_MESSAGE_CHARS ?",
+        ["it shows skipped items as text"],
+    ),
+    (
+        "requests carry cookies",
+        'credentials: "omit",',
+        'credentials: "include",',
+        ["it makes no request other than the two routes"],
+    ),
+    (
+        "requests are made without a launch token",
+        "  if (!token) {\n",
+        "  if (false) {\n",
+        ["without a launch token it asks for nothing"],
+    ),
+    (
+        "a type the core does not allow is shown",
+        "if (!IMAGE_TYPES.includes(item.mime)) {",
+        "if (false) {",
+        ["a playlist that is not one is refused"],
+    ),
+    (
+        "the playlist schema is not checked",
+        'if (!value || typeof value !== "object" || value.schema !== PLAYLIST_SCHEMA) {',
+        'if (!value || typeof value !== "object") {',
+        ["a playlist that is not one is refused"],
+    ),
+    (
+        "a playlist of any length is taken",
+        "if (items.length > MAX_ITEMS) {",
+        "if (false) {",
+        ["a playlist that is not one is refused"],
+    ),
+    (
+        "a duration outside the core's bounds is kept",
+        "durationMs: Math.min(MAX_DURATION_MS, Math.max(MIN_DURATION_MS, duration)),",
+        "durationMs: duration,",
+        ["each photo shows for its duration"],
+    ),
+    (
+        "pause does not stop the slideshow",
+        "if (state.playing && slide && state.slides.length > 1) {",
+        "if (slide && state.slides.length > 1) {",
+        ["each photo shows for its duration"],
+    ),
+    (
+        "a slow earlier answer replaces a later choice",
+        "      if (ticket !== state.shown) return; // a later choice won\n",
+        "",
+        ["a slow answer for an earlier choice does not replace a later one"],
+    ),
+    (
+        "old photo URLs are never released",
+        "      if (state.url) env.URL.revokeObjectURL(state.url);\n",
+        "",
+        ["it renders only playlist items"],
+    ),
+    (
+        "an unreadable refusal shows no text",
+        "shortText(reason || null,",
+        "shortText(reason,",
+        ["a refusal is shown as its text"],
+    ),
+]
+
+
+def tests_fail(names):
+    for name in names:
+        result = subprocess.run(
+            ["node", "--test", f"--test-name-pattern={name}", str(TESTS)],
+            capture_output=True,
+            text=True,
+        )
+        if "# tests 0" in result.stdout:
+            raise SystemExit(f"no test matches {name!r}")
+        if result.returncode == 0:
+            return False
+    return True
+
+
+def main():
+    check_only = "--check" in sys.argv[1:]
+    saved = PAGE.read_bytes()
+    text = saved.decode()
+    missed = []
+    for name, old, new, tests in CASES:
+        if text.count(old) != 1:
+            raise SystemExit(f"{name}: expected the text once in photos.js, found {text.count(old)}")
+        if check_only:
+            continue
+        try:
+            PAGE.write_text(text.replace(old, new))
+            caught = tests_fail(tests)
+        finally:
+            PAGE.write_bytes(saved)
+        print(f"{'caught' if caught else 'MISSED'}: {name} -> {', '.join(tests)}", flush=True)
+        if not caught:
+            missed.append(name)
+    if check_only:
+        print(f"all {len(CASES)} anchors found once")
+        return
+    if missed:
+        raise SystemExit(f"{len(missed)} falsifier(s) not caught: {missed}")
+    print(f"all {len(CASES)} surface falsifiers caught")
+
+
+if __name__ == "__main__":
+    main()
