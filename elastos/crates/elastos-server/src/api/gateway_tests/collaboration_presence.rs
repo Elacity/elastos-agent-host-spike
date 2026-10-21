@@ -801,6 +801,8 @@ async fn only_the_persons_inbox_or_system_answer_mints_a_presence_grant() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(grants(), 0);
 
+    let mut home_cursor = String::new();
+    home_inbox_changed(&app, &authority.home_token, &mut home_cursor).await;
     // Chat files the request; it mints nothing.
     let asked = app
         .clone()
@@ -818,6 +820,14 @@ async fn only_the_persons_inbox_or_system_answer_mints_a_presence_grant() {
         "requested"
     );
     assert_eq!(grants(), 0);
+    // The request reaches Home promptly and counts in its badge.
+    assert!(home_inbox_changed(&app, &authority.home_token, &mut home_cursor).await);
+    let home = home_summary_notifications(&app, &authority.home_token).await;
+    assert_eq!(
+        home_entries_of_kind(&home, "community_presence_request").len(),
+        1,
+        "{home}"
+    );
 
     let summary = app
         .clone()
@@ -861,6 +871,8 @@ async fn only_the_persons_inbox_or_system_answer_mints_a_presence_grant() {
         .unwrap();
     assert_eq!(answered.status(), StatusCode::OK);
     assert_eq!(grants(), 1);
+    let home = home_summary_notifications(&app, &authority.home_token).await;
+    assert!(home_entries_of_kind(&home, "community_presence_request").is_empty());
     // The answered card is closed.
     let again = inbox_action(
         &inbox_token,

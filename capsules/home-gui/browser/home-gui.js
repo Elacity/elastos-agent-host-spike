@@ -45,7 +45,7 @@ import {
   hideDesktopContextMenu,
   hideLauncher,
   moveLauncherSelection,
-  maybeShowWalletApprovalToast,
+  maybeShowInboxRequestToast,
   openDesktopContextMenu,
   openSelectedDesktopEntry,
   openSelectedLauncherTarget,
@@ -795,7 +795,7 @@ export function syncHomeGuiChrome(previous, summary) {
   syncIdentity(summary);
   renderInboxBadge(summary);
   syncWalletRailAvailability(summary);
-  maybeShowWalletApprovalToast(previous, summary);
+  maybeShowInboxRequestToast(previous, summary);
   recordNotifications(summary);
   syncSetupSheet(previous, summary);
   syncControlCentre(summary);

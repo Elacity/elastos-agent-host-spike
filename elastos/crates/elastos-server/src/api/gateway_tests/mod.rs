@@ -71,6 +71,53 @@ fn test_browser_request(host: &'static str, origin: &'static str) -> axum::http:
     }
 }
 
+/// Reads Home events once from `cursor` and reports whether Inbox changed.
+async fn home_inbox_changed(app: &Router, home_token: &str, cursor: &mut String) -> bool {
+    let request = test_browser_request("localhost:61180", "http://localhost:61180")
+        .uri(format!("/api/apps/home/events?wait_ms=0&cursor={cursor}"))
+        .header("x-elastos-home-token", home_token)
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    *cursor = body["cursor"].as_str().unwrap().to_string();
+    body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["kind"] == "inbox.changed" && event["scope"] == "inbox")
+}
+
+/// The notifications Home's badge counts and its notification reads.
+async fn home_summary_notifications(app: &Router, home_token: &str) -> Value {
+    let request = test_browser_request("localhost:61180", "http://localhost:61180")
+        .uri("/api/apps/home/summary")
+        .header("x-elastos-home-token", home_token)
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice::<Value>(&bytes).unwrap()["notifications"].clone()
+}
+
+/// Home notification entries of `kind`.
+fn home_entries_of_kind(notifications: &Value, kind: &str) -> Vec<Value> {
+    notifications["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["kind"] == kind)
+        .cloned()
+        .collect()
+}
+
 fn test_launch_token_from_route(route: &str) -> String {
     let route = url::Url::parse("http://localhost")
         .unwrap()

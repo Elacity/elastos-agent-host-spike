@@ -131,7 +131,6 @@ struct HomeRealtimeSnapshot {
     profile_readiness: ProfileReadinessSummary,
     notification_signature: Vec<String>,
     wallet_request_signature: Vec<String>,
-    capability_request_count: usize,
     desktop_signature: Vec<String>,
     room_signature: String,
     people_signature: Vec<String>,
@@ -484,15 +483,17 @@ pub(super) async fn home_summary(
     };
     if let (Some(context), Some(authority)) = (context.as_ref(), wallet_authority.as_ref()) {
         let wallet_approvals = system_wallet_approvals_summary(&state, authority, false).await;
-        append_wallet_approval_notifications(
-            &mut notifications,
+        append_inbox_requests(
+            &state,
+            context,
             wallet_approvals.approval_requests,
-        );
-        if let Ok(capability_requests) = runtime_capability_pending_requests(&state.data_dir).await
-        {
-            append_runtime_capability_notifications(&mut notifications, capability_requests);
+            &mut notifications,
+        )
+        .await;
+        #[cfg(unix)]
+        if let Ok(routes) = owner_hosted_routes(&state.data_dir, context) {
+            append_hosted_route_notifications(&mut notifications, &routes);
         }
-        append_home_service_access_notifications(&state.data_dir, context, &mut notifications);
     }
     let targets = home_targets_from_catalog(&capsule_catalog);
     let capsule_interfaces = capsule_interface_registry_summary_with_bindings_from_catalog(
@@ -5598,13 +5599,13 @@ async fn home_realtime_snapshot(
         })
         .collect::<Vec<_>>();
     wallet_request_signature.sort();
-    append_wallet_approval_notifications(&mut notifications, wallet_approvals.approval_requests);
-    let capability_requests = runtime_capability_pending_requests(&state.data_dir)
-        .await
-        .unwrap_or_default();
-    let capability_request_count = capability_requests.len();
-    append_runtime_capability_notifications(&mut notifications, capability_requests);
-    append_home_service_access_notifications(&state.data_dir, context, &mut notifications);
+    append_inbox_requests(
+        state,
+        context,
+        wallet_approvals.approval_requests,
+        &mut notifications,
+    )
+    .await;
     let mut notification_signature = notifications
         .entries
         .iter()
@@ -5619,8 +5620,8 @@ async fn home_realtime_snapshot(
     if contact_authority_unavailable {
         notification_signature.push("contact-authority-unavailable".to_string());
     }
-    // Hosted access decisions are owner Inbox items (gateway_inbox::inbox_summary);
-    // a change reaches Inbox and System as `inbox.changed`.
+    // Hosted access decisions are owner Inbox items (gateway_inbox::owner_hosted_routes);
+    // a request, decision, End or expiry reaches Inbox and System as `inbox.changed`.
     #[cfg(unix)]
     if ensure_admin_context(&state.data_dir, context).is_ok() {
         match crate::api::model_provider_egress_decision::realtime_signature(&state.data_dir) {
@@ -5661,7 +5662,6 @@ async fn home_realtime_snapshot(
         .readiness,
         notification_signature,
         wallet_request_signature,
-        capability_request_count,
         desktop_signature,
         room_signature,
         people_signature,
@@ -5723,7 +5723,6 @@ fn home_realtime_cursor_parts(snapshot: &HomeRealtimeSnapshot) -> HomeRealtimeCu
         inbox: stable_cursor_hash(&(
             &snapshot.notification_signature,
             &snapshot.wallet_request_signature,
-            snapshot.capability_request_count,
         )),
         wallet: stable_cursor_hash(&snapshot.wallet_request_signature),
         browser: stable_cursor_hash(&browser_sessions_cursor_value(&snapshot.browser_sessions)),
@@ -8589,7 +8588,6 @@ mod home_realtime_tests {
             profile_readiness: ProfileReadinessSummary::setup_required(),
             notification_signature: Vec::new(),
             wallet_request_signature: Vec::new(),
-            capability_request_count: 0,
             desktop_signature: Vec::new(),
             room_signature: String::new(),
             people_signature: Vec::new(),
@@ -8630,7 +8628,6 @@ mod home_realtime_tests {
             profile_readiness: ProfileReadinessSummary::setup_required(),
             notification_signature: Vec::new(),
             wallet_request_signature: Vec::new(),
-            capability_request_count: 0,
             desktop_signature: Vec::new(),
             room_signature: String::new(),
             people_signature: vec!["contact:alice:Alice".to_string()],
@@ -8674,7 +8671,6 @@ mod home_realtime_tests {
             profile_readiness: ProfileReadinessSummary::ready(),
             notification_signature: Vec::new(),
             wallet_request_signature: Vec::new(),
-            capability_request_count: 0,
             desktop_signature: Vec::new(),
             room_signature: String::new(),
             people_signature: Vec::new(),
@@ -8705,7 +8701,6 @@ mod home_realtime_tests {
             profile_readiness: ProfileReadinessSummary::setup_required(),
             notification_signature: Vec::new(),
             wallet_request_signature: Vec::new(),
-            capability_request_count: 0,
             desktop_signature: Vec::new(),
             room_signature: String::new(),
             people_signature: Vec::new(),
@@ -8938,7 +8933,6 @@ mod home_events_pacing_tests {
             profile_readiness: ProfileReadinessSummary::setup_required(),
             notification_signature: Vec::new(),
             wallet_request_signature: Vec::new(),
-            capability_request_count: 0,
             desktop_signature: Vec::new(),
             room_signature: String::new(),
             people_signature: Vec::new(),

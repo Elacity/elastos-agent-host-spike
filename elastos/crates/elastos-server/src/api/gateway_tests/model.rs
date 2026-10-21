@@ -1928,24 +1928,9 @@ async fn owner_inbox_retains_hosted_route_history_and_ends_exact_decision() {
     assert_eq!(summary["notifications"]["attention_count"], 261);
 }
 
-async fn home_inbox_changed(app: &Router, home_token: &str, cursor: &mut String) -> bool {
-    let request = test_browser_request("localhost:61180", "http://localhost:61180")
-        .uri(format!("/api/apps/home/events?wait_ms=0&cursor={cursor}"))
-        .header("x-elastos-home-token", home_token)
-        .body(Body::empty())
-        .unwrap();
-    let (status, body) = status_json(app.clone().oneshot(request).await.unwrap()).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    *cursor = body["cursor"].as_str().unwrap().to_string();
-    body["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|event| event["kind"] == "inbox.changed" && event["scope"] == "inbox")
-}
-
+#[cfg(unix)]
 #[tokio::test]
-async fn hosted_decisions_reach_only_the_owner_home_events_as_inbox_changes() {
+async fn hosted_decisions_reach_only_the_owner_home_badge_and_events() {
     let dir = tempfile::tempdir().unwrap();
     crate::api::seed_model_provider_operator_offers_for_test(dir.path(), vec![]).unwrap();
     let owner = passkey_authority_with_name(dir.path(), Some("admin"));
@@ -1978,6 +1963,20 @@ async fn hosted_decisions_reach_only_the_owner_home_events_as_inbox_changes() {
     )
     .unwrap();
     assert!(home_inbox_changed(&app, &owner.home_token, &mut owner_cursor).await);
+    // The pending request is one owner Inbox item in Home's badge and notification.
+    let owner_home = home_summary_notifications(&app, &owner.home_token).await;
+    let cards = home_entries_of_kind(&owner_home, "hosted_route_decision");
+    assert_eq!(cards.len(), 1, "{owner_home}");
+    assert_eq!(
+        cards[0]["action_ref"]["action_id"],
+        format!("model-egress-approve:{id}")
+    );
+    assert_eq!(cards[0]["severity"], "attention");
+    assert_eq!(cards[0]["read"], false);
+    assert_eq!(owner_home["attention_count"], 1, "{owner_home}");
+    let guest_home = home_summary_notifications(&app, &guest.home_token).await;
+    assert!(home_entries_of_kind(&guest_home, "hosted_route_decision").is_empty());
+    assert_eq!(guest_home["attention_count"], 0, "{guest_home}");
     for action in [
         format!("model-egress-approve:{id}"),
         format!("model-egress-end:{id}"),
@@ -1996,6 +1995,10 @@ async fn hosted_decisions_reach_only_the_owner_home_events_as_inbox_changes() {
         );
     }
     assert!(!home_inbox_changed(&app, &owner.home_token, &mut owner_cursor).await);
+    // A decided request no longer asks for the owner's attention.
+    let owner_home = home_summary_notifications(&app, &owner.home_token).await;
+    assert!(home_entries_of_kind(&owner_home, "hosted_route_decision").is_empty());
+    assert_eq!(owner_home["attention_count"], 0, "{owner_home}");
     // Owner decisions stay private: a guest's Home sees no change.
     assert!(!home_inbox_changed(&app, &guest.home_token, &mut guest_cursor).await);
 }

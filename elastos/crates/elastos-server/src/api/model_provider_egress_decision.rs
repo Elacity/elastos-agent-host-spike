@@ -95,19 +95,19 @@ enum DecisionStatus {
 
 #[derive(Serialize)]
 pub(super) struct HostedRouteSummary {
-    id: String,
+    pub(super) id: String,
     connection: bool,
-    provider: String,
+    pub(super) provider: String,
     offer_id: String,
     method: String,
-    origin: String,
+    pub(super) origin: String,
     path: String,
     url_sha256: String,
     recipient: String,
     payer: String,
     purpose: String,
     status: &'static str,
-    requested_at: u64,
+    pub(super) requested_at: u64,
     decided_at: Option<u64>,
     ended_at: Option<u64>,
     expires_at: u64,

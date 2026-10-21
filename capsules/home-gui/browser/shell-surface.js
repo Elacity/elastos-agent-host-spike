@@ -2576,14 +2576,28 @@ export function renderInboxBadge(summary) {
   );
 }
 
-export function maybeShowWalletApprovalToast(previousSummary, summary) {
+/* The Inbox requests that wait for the person's answer. Each one raises the
+   toast once, when it first appears; answering removes it from the summary. */
+const INBOX_REQUEST_KINDS = new Set([
+  "wallet_approval_request",
+  "capability_request",
+  "inspect_action_request",
+  "external_http_request",
+  "hosted_route_decision",
+  "contact_request",
+  "room_access_request",
+  "service_access_request",
+  "community_presence_request",
+]);
+
+export function maybeShowInboxRequestToast(previousSummary, summary) {
   if (!previousSummary || !targetById(summary, "inbox")) {
     return;
   }
-  const previousIds = new Set(walletApprovalEntries(previousSummary).map(walletApprovalKey));
-  const entry = walletApprovalEntries(summary)
+  const previousIds = new Set(inboxRequestEntries(previousSummary).map(inboxRequestKey));
+  const entry = inboxRequestEntries(summary)
     .find((item) => {
-      const key = walletApprovalKey(item);
+      const key = inboxRequestKey(item);
       return key && key !== lastHomeNotificationToastId && !previousIds.has(key);
     });
   if (!entry) {
@@ -2592,19 +2606,16 @@ export function maybeShowWalletApprovalToast(previousSummary, summary) {
   showHomeNotificationToast(entry);
 }
 
-function walletApprovalEntries(summary) {
+function inboxRequestEntries(summary) {
   const entries = Array.isArray(summary?.notifications?.entries)
     ? summary.notifications.entries
     : [];
-  return entries.filter((entry) => {
-    const actionId = entry?.action_ref?.action_id;
-    return entry?.kind === "wallet_approval_request"
-      && typeof actionId === "string"
-      && actionId.startsWith("wallet-approve-request:");
-  });
+  return entries.filter((entry) => INBOX_REQUEST_KINDS.has(entry?.kind)
+    && entry?.read !== true
+    && typeof entry?.action_ref?.action_id === "string");
 }
 
-function walletApprovalKey(entry) {
+function inboxRequestKey(entry) {
   return String(entry?.id || entry?.action_ref?.action_id || "");
 }
 
@@ -2620,13 +2631,13 @@ function showHomeNotificationToast(entry) {
   }
   // Focus mutes toasts only — Inbox/Wallet rails and badges keep working.
   if (focusModeEnabled()) {
-    lastHomeNotificationToastId = walletApprovalKey(entry);
+    lastHomeNotificationToastId = inboxRequestKey(entry);
     return;
   }
   bindHomeNotificationToast();
-  lastHomeNotificationToastId = walletApprovalKey(entry);
-  homeNotificationTitle.textContent = entry.title || "Wallet approval request";
-  homeNotificationBody.textContent = entry.body || "An app requests wallet approval.";
+  lastHomeNotificationToastId = inboxRequestKey(entry);
+  homeNotificationTitle.textContent = entry.title || "Inbox request";
+  homeNotificationBody.textContent = entry.body || "A request waits for your answer in Inbox.";
   homeNotificationAction.hidden = false;
   homeNotificationAction.textContent = "Review";
   setOverlayOpen(homeNotificationToast, true);
