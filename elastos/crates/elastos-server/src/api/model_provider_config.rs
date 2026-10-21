@@ -57,6 +57,7 @@ impl LoopbackHttpUrl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HostedValidateFixtures {
     pub openrouter_models_url: LoopbackHttpUrl,
+    pub openrouter_key_url: Option<LoopbackHttpUrl>,
     pub venice_rate_limits_url: LoopbackHttpUrl,
     pub venice_models_url: LoopbackHttpUrl,
     pub openrouter_chat_url: Option<LoopbackHttpUrl>,
@@ -68,6 +69,8 @@ pub(crate) struct HostedValidateFixtures {
 #[serde(deny_unknown_fields)]
 struct ValidateFixturesFile {
     openrouter_models_url: String,
+    #[serde(default)]
+    openrouter_key_url: Option<String>,
     venice_rate_limits_url: String,
     venice_models_url: String,
     #[serde(default)]
@@ -335,6 +338,7 @@ fn load_hosted_validate_fixtures_unlocked(
         .map_err(|_| anyhow::anyhow!("model-provider validate fixtures are invalid"))?;
     Ok(Some(HostedValidateFixtures {
         openrouter_models_url: parse_loopback_http_url(&file.openrouter_models_url)?,
+        openrouter_key_url: optional_loopback_http_url(file.openrouter_key_url.as_deref())?,
         venice_rate_limits_url: parse_loopback_http_url(&file.venice_rate_limits_url)?,
         venice_models_url: parse_loopback_http_url(&file.venice_models_url)?,
         openrouter_chat_url: optional_loopback_http_url(file.openrouter_chat_url.as_deref())?,

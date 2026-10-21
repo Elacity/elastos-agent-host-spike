@@ -31,6 +31,7 @@ use super::model_provider_egress_decision::{self, ActiveDecision, ConnectionScop
 #[derive(Clone, Copy)]
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) enum ValidationEndpoint {
+    OpenRouterKey,
     OpenRouterModels,
     VeniceAccess,
     VeniceModels,
@@ -39,6 +40,9 @@ pub(crate) enum ValidationEndpoint {
 impl ValidationEndpoint {
     fn grant_binding(self) -> (&'static str, &'static str) {
         match self {
+            // Same effect as Venice's key check: the connection policy already
+            // names validate_access, so approved connections stay approved.
+            Self::OpenRouterKey => ("validation:openrouter", "validate_access"),
             Self::OpenRouterModels => ("validation:openrouter", "validate_models"),
             Self::VeniceAccess => ("validation:venice", "validate_access"),
             Self::VeniceModels => ("validation:venice", "validate_models"),
@@ -47,7 +51,7 @@ impl ValidationEndpoint {
 
     fn provider(self) -> &'static str {
         match self {
-            Self::OpenRouterModels => "OpenRouter",
+            Self::OpenRouterKey | Self::OpenRouterModels => "OpenRouter",
             Self::VeniceAccess | Self::VeniceModels => "Venice",
         }
     }
@@ -62,6 +66,7 @@ const MAX_JOB_BINDINGS: usize = 4096;
 const MAX_GRANTS: usize = 1024;
 const MAX_JOB_BINDINGS_BYTES: usize = 4 * 1024 * 1024;
 const JOB_BINDING_LIFETIME_MS: u64 = 2 * 60 * 60 * 1000;
+const OPENROUTER_KEY_URL: &str = "https://openrouter.ai/api/v1/key";
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models?output_modalities=all";
 const OPENROUTER_CHAT_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_DECISIONS_URL: &str = "https://openrouter.ai/api/alpha/decisions";
@@ -218,6 +223,14 @@ async fn fetch_validation_inner(
     }
     let fixtures = load_hosted_validate_fixtures(data_dir)?;
     let raw = match endpoint {
+        ValidationEndpoint::OpenRouterKey => match fixtures.as_ref() {
+            Some(value) => value
+                .openrouter_key_url
+                .as_ref()
+                .map(|url| url.as_str())
+                .ok_or_else(|| anyhow::anyhow!("hosted validation destination unavailable"))?,
+            None => OPENROUTER_KEY_URL,
+        },
         ValidationEndpoint::OpenRouterModels => fixtures
             .as_ref()
             .map(|value| value.openrouter_models_url.as_str())
@@ -1752,7 +1765,8 @@ fn public_destination_allowed(url: &Url, grant_url: &str) -> bool {
     url.as_str() == grant_url
         && matches!(
             grant_url,
-            OPENROUTER_MODELS_URL
+            OPENROUTER_KEY_URL
+                | OPENROUTER_MODELS_URL
                 | OPENROUTER_CHAT_URL
                 | OPENROUTER_DECISIONS_URL
                 | VENICE_ACCESS_URL
@@ -1766,6 +1780,7 @@ fn public_validation_destination_allowed(
     destination: &Destination,
 ) -> bool {
     let expected = match endpoint {
+        ValidationEndpoint::OpenRouterKey => OPENROUTER_KEY_URL,
         ValidationEndpoint::OpenRouterModels => OPENROUTER_MODELS_URL,
         ValidationEndpoint::VeniceAccess => VENICE_ACCESS_URL,
         ValidationEndpoint::VeniceModels => VENICE_MODELS_URL,
@@ -1801,6 +1816,7 @@ fn fixture_destination_allowed(
     Ok(fixtures.as_ref().is_some_and(|fixtures| {
         [
             Some(fixtures.openrouter_models_url.as_str()),
+            fixtures.openrouter_key_url.as_ref().map(|url| url.as_str()),
             Some(fixtures.venice_rate_limits_url.as_str()),
             Some(fixtures.venice_models_url.as_str()),
             fixtures
@@ -4370,6 +4386,71 @@ mod tests {
             &request("text"),
             &custom_ca
         ));
+    }
+
+    #[test]
+    fn openrouter_validation_reaches_only_key_and_model_list() {
+        let destination = |raw: &str| Destination {
+            url: Url::parse(raw).unwrap(),
+            grant_url: raw.into(),
+            credential: Some("private-key".into()),
+            job_backend_id: None,
+            provider: "OpenRouter".into(),
+            configuration_id: "configuration".into(),
+            fixture_ca_pem: None,
+        };
+        let candidates = [
+            OPENROUTER_KEY_URL,
+            OPENROUTER_MODELS_URL,
+            OPENROUTER_CHAT_URL,
+            OPENROUTER_DECISIONS_URL,
+            VENICE_ACCESS_URL,
+            VENICE_MODELS_URL,
+            VENICE_CHAT_URL,
+            "https://openrouter.ai/api/v1/keys",
+            "https://openrouter.ai/api/v1/credits",
+            "https://openrouter.ai/api/v1/key?extra=1",
+            "https://openrouter.ai/api/v1/key/",
+            "http://openrouter.ai/api/v1/key",
+            "https://openrouter.ai:443/api/v1/key",
+            "https://user@openrouter.ai/api/v1/key",
+            "https://openrouter.ai.evil.invalid/api/v1/key",
+        ];
+        for (endpoint, allowed) in [
+            (ValidationEndpoint::OpenRouterKey, OPENROUTER_KEY_URL),
+            (ValidationEndpoint::OpenRouterModels, OPENROUTER_MODELS_URL),
+        ] {
+            for raw in candidates {
+                assert_eq!(
+                    public_validation_destination_allowed(endpoint, &destination(raw)),
+                    raw == allowed,
+                    "{raw}"
+                );
+            }
+        }
+        assert_eq!(
+            ValidationEndpoint::OpenRouterKey.grant_binding(),
+            ("validation:openrouter", "validate_access")
+        );
+        let mut custom_ca = destination(OPENROUTER_KEY_URL);
+        custom_ca.fixture_ca_pem = Some("private CA".into());
+        assert!(!public_validation_destination_allowed(
+            ValidationEndpoint::OpenRouterKey,
+            &custom_ca
+        ));
+        // The key route is a validation route only, never a capsule effect.
+        for effect in ["text", "decisions", "validate_access"] {
+            assert!(!public_effect_route_allowed(
+                effect,
+                "GET",
+                &destination(OPENROUTER_KEY_URL)
+            ));
+            assert!(!public_effect_route_allowed(
+                effect,
+                "POST",
+                &destination(OPENROUTER_KEY_URL)
+            ));
+        }
     }
 
     #[test]

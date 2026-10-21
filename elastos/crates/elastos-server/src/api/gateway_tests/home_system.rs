@@ -11680,6 +11680,48 @@ async fn test_system_ai_provider_invalid_key_leaves_that_provider_absent() {
     }
 }
 
+/// OpenRouter serves its model list to any caller, so a rejected key must be
+/// caught by the key endpoint before the list is loaded.
+#[tokio::test]
+async fn test_system_ai_provider_openrouter_key_rejected_by_provider_is_not_saved() {
+    for status in [
+        reqwest::StatusCode::UNAUTHORIZED,
+        reqwest::StatusCode::FORBIDDEN,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let app = gateway_router(test_state(dir.path()));
+        let authority = passkey_authority(dir.path());
+        install_valid_hosted_doubles();
+        install_openrouter_key_response(status, br#"{"error":{"code":401}}"#);
+        let (code, body) = ai_provider_raw(
+            &app,
+            "POST",
+            "/api/apps/system/ai-provider/validate",
+            &authority.system_token,
+            Some(json!({"provider": "openrouter", "api_key": "sk-or-fixture-rejected"})),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{status} {body}");
+        assert_eq!(body, "invalid OpenRouter key");
+        let (code, body) = ai_provider_raw(
+            &app,
+            "POST",
+            "/api/apps/system/ai-provider",
+            &authority.system_token,
+            Some(json!({
+                "provider": "openrouter",
+                "api_key": "sk-or-fixture-rejected",
+                "model": "fixture/model"
+            })),
+        )
+        .await;
+        clear_hosted_ai_validate_doubles();
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{status} {body}");
+        assert_eq!(body, "invalid OpenRouter key");
+        assert!(!ai_provider_config_path(dir.path()).exists());
+    }
+}
+
 #[tokio::test]
 async fn test_system_ai_provider_admin_save_replace_disconnect_keeps_peer() {
     let dir = tempfile::tempdir().unwrap();

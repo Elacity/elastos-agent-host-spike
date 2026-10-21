@@ -172,6 +172,7 @@ struct AiProviderValidateResponse {
 #[cfg(test)]
 thread_local! {
     static OPENROUTER_MODELS_DOUBLE: RefCell<Option<OpenRouterModelsDouble>> = const { RefCell::new(None) };
+    static OPENROUTER_KEY_DOUBLE: RefCell<Option<(reqwest::StatusCode, Vec<u8>)>> = const { RefCell::new(None) };
     static VENICE_AUTH_DOUBLE: RefCell<Option<VeniceAuthDouble>> = const { RefCell::new(None) };
     static VENICE_MODELS_DOUBLE: RefCell<Option<Vec<DiscoveredModel>>> = const { RefCell::new(None) };
 }
@@ -198,6 +199,13 @@ pub(crate) fn install_openrouter_models_double(double: OpenRouterModelsDouble) {
     OPENROUTER_MODELS_DOUBLE.with(|slot| *slot.borrow_mut() = Some(double));
 }
 
+/// Answer the OpenRouter key endpoint with this upstream status and body.
+/// Without it the key endpoint accepts the key.
+#[cfg(test)]
+pub(crate) fn install_openrouter_key_response(status: reqwest::StatusCode, body: &[u8]) {
+    OPENROUTER_KEY_DOUBLE.with(|slot| *slot.borrow_mut() = Some((status, body.to_vec())));
+}
+
 #[cfg(test)]
 pub(crate) fn install_venice_validate_double(
     auth: VeniceAuthDouble,
@@ -221,6 +229,7 @@ pub(crate) fn install_venice_validate_double(
 #[cfg(test)]
 pub(crate) fn clear_hosted_ai_validate_doubles() {
     OPENROUTER_MODELS_DOUBLE.with(|slot| *slot.borrow_mut() = None);
+    OPENROUTER_KEY_DOUBLE.with(|slot| *slot.borrow_mut() = None);
     VENICE_AUTH_DOUBLE.with(|slot| *slot.borrow_mut() = None);
     VENICE_MODELS_DOUBLE.with(|slot| *slot.borrow_mut() = None);
 }
@@ -278,6 +287,25 @@ fn normalize_model(provider: crate::api::HostedAiProvider, value: &str) -> anyho
         return Err(invalid_model(provider));
     }
     Ok(trimmed.to_string())
+}
+
+/// The model list is public, so only the key endpoint, which requires the key,
+/// can tell whether OpenRouter accepts it.
+#[cfg(any(test, target_os = "macos"))]
+fn openrouter_key_response(status: reqwest::StatusCode, bytes: &[u8]) -> anyhow::Result<()> {
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(invalid_key(crate::api::HostedAiProvider::OpenRouter));
+    }
+    let unavailable = || anyhow::anyhow!("OpenRouter validation unavailable");
+    if !status.is_success() {
+        return Err(unavailable());
+    }
+    let payload: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| unavailable())?;
+    payload
+        .get("data")
+        .filter(|data| data.is_object())
+        .map(|_| ())
+        .ok_or_else(unavailable)
 }
 
 /// Only the provider's auth rejection means the key is invalid; any other
@@ -398,6 +426,40 @@ fn parse_venice_models_body(bytes: &[u8]) -> anyhow::Result<Vec<DiscoveredModel>
         });
     }
     Ok(models)
+}
+
+async fn check_openrouter_key(
+    data_dir: &std::path::Path,
+    api_key: &str,
+    owner_proof_binding_id: &str,
+    connection_id: &str,
+) -> anyhow::Result<()> {
+    #[cfg(test)]
+    {
+        let _ = (data_dir, api_key, owner_proof_binding_id, connection_id);
+        match OPENROUTER_KEY_DOUBLE.with(|slot| slot.borrow().clone()) {
+            Some((status, body)) => openrouter_key_response(status, &body),
+            None => Ok(()),
+        }
+    }
+    #[cfg(all(not(test), target_os = "macos"))]
+    {
+        let (status, bytes) = crate::api::model_provider_egress::fetch_validation_for_connection(
+            data_dir,
+            crate::api::model_provider_egress::ValidationEndpoint::OpenRouterKey,
+            api_key,
+            owner_proof_binding_id,
+            connection_id,
+        )
+        .await
+        .map_err(hosted_transport_error)?;
+        openrouter_key_response(status, &bytes)
+    }
+    #[cfg(all(not(test), not(target_os = "macos")))]
+    {
+        let _ = (data_dir, api_key, owner_proof_binding_id, connection_id);
+        Err(ai_provider_request_error(HOSTED_EXTERNAL_HTTPS_PAUSED))
+    }
 }
 
 async fn fetch_openrouter_models(
@@ -551,6 +613,7 @@ async fn validate_hosted_key(
     let api_key = normalize_secret(provider, api_key)?;
     match provider {
         crate::api::HostedAiProvider::OpenRouter => {
+            check_openrouter_key(data_dir, &api_key, owner_proof_binding_id, connection_id).await?;
             fetch_openrouter_models(data_dir, &api_key, owner_proof_binding_id, connection_id).await
         }
         crate::api::HostedAiProvider::Venice => {
@@ -1229,6 +1292,31 @@ mod parse_tests {
         }
         for body in [&b"not json"[..], br#"{"error":"busy"}"#, br#"{"data":{}}"#] {
             let err = super::openrouter_models_response(StatusCode::OK, body).unwrap_err();
+            assert_eq!(request_message(&err), "OpenRouter validation unavailable");
+        }
+    }
+
+    #[test]
+    fn openrouter_key_endpoint_maps_auth_and_body() {
+        use reqwest::StatusCode;
+        super::openrouter_key_response(
+            StatusCode::OK,
+            br#"{"data":{"label":"sk-or-v1-fix...ure"}}"#,
+        )
+        .unwrap();
+        for status in [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN] {
+            let err = super::openrouter_key_response(status, br#"{"data":{}}"#).unwrap_err();
+            assert_eq!(request_message(&err), "invalid OpenRouter key");
+        }
+        for (status, body) in [
+            (StatusCode::OK, &b"not json"[..]),
+            (StatusCode::OK, br#"{"error":"busy"}"#),
+            (StatusCode::OK, br#"{"data":[]}"#),
+            (StatusCode::OK, br#"{"data":null}"#),
+            (StatusCode::TOO_MANY_REQUESTS, br#"{"data":{}}"#),
+            (StatusCode::INTERNAL_SERVER_ERROR, b""),
+        ] {
+            let err = super::openrouter_key_response(status, body).unwrap_err();
             assert_eq!(request_message(&err), "OpenRouter validation unavailable");
         }
     }
