@@ -999,3 +999,169 @@ fn a_full_pin_table_refuses_a_new_launch_and_keeps_live_pins() {
     pins.pin("d", "sha-1", later).unwrap();
     assert_eq!(pins.len(), 1);
 }
+
+// ---- The real surface (examples/photo-viewer/surface) ----
+
+/// Installs examples/photo-viewer/surface as the image-viewer capsule.
+fn install_photos_surface(data_dir: &std::path::Path) -> std::path::PathBuf {
+    let surface = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../examples/photo-viewer/surface");
+    let installed = data_dir.join("capsules").join(PHOTOS_VIEWER);
+    if installed.exists() {
+        std::fs::remove_dir_all(&installed).unwrap();
+    }
+    for relative in [
+        "capsule.json",
+        "browser/index.html",
+        "browser/main.js",
+        "browser/photos.js",
+        "browser/photos.css",
+    ] {
+        let to = installed.join(relative);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(surface.join(relative), &to).unwrap();
+    }
+    surface
+}
+
+#[tokio::test]
+async fn runtime_serves_the_real_photos_surface_in_its_sandbox() {
+    let photos = photos().await;
+    let surface = install_photos_surface(photos.dir.path());
+    assert!(crate::api::browser_capsules::is_viewer_capsule(
+        photos.dir.path(),
+        PHOTOS_VIEWER
+    ));
+    for (path, file, mime) in [
+        ("/apps/image-viewer/", "browser/index.html", "text/html"),
+        (
+            "/apps/image-viewer/main.js",
+            "browser/main.js",
+            "javascript",
+        ),
+        (
+            "/apps/image-viewer/photos.js",
+            "browser/photos.js",
+            "javascript",
+        ),
+        (
+            "/apps/image-viewer/photos.css",
+            "browser/photos.css",
+            "text/css",
+        ),
+    ] {
+        let response = photos
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .header(HOST, "localhost:61180")
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let content_type = response.headers()[CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(content_type.contains(mime), "{path}: {content_type}");
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        // The frame is an opaque origin: its module scripts load by CORS.
+        assert_eq!(
+            response.headers()["access-control-allow-origin"],
+            "null",
+            "{path}"
+        );
+        assert_eq!(
+            response.headers()["cross-origin-embedder-policy"],
+            "require-corp",
+            "{path}"
+        );
+        // A no-cors subresource (the stylesheet) needs this under COEP.
+        assert_eq!(
+            response.headers()["cross-origin-resource-policy"],
+            "cross-origin",
+            "{path}"
+        );
+        if path.ends_with('/') {
+            let csp = response.headers()["content-security-policy"]
+                .to_str()
+                .unwrap()
+                .to_string();
+            assert!(csp.contains("sandbox allow-scripts"), "{csp}");
+            assert!(!csp.contains("allow-same-origin"), "{csp}");
+            // Runtime's app policy (browser_capsules.rs): scripts only from
+            // the page's own origin, never inline or eval'd.
+            let script_src = csp
+                .split(';')
+                .map(str::trim)
+                .find(|directive| directive.starts_with("script-src "))
+                .unwrap();
+            assert_eq!(script_src, "script-src 'self' 'wasm-unsafe-eval'", "{csp}");
+            assert!(
+                csp.contains("connect-src http://localhost:61180 ws://localhost:61180"),
+                "{csp}"
+            );
+            assert!(csp.contains("object-src 'none'"), "{csp}");
+        }
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            &body[..],
+            &std::fs::read(surface.join(file)).unwrap()[..],
+            "{path}"
+        );
+    }
+
+    // The page's GET carries the launch-token header from origin null, so the
+    // browser asks first; the front door answers for the Photos routes.
+    for path in [PLAYLIST_ROUTE.to_string(), item_route("0")] {
+        let preflight = photos
+            .app
+            .clone()
+            .oneshot(
+                test_browser_request("localhost:61180", "null")
+                    .method("OPTIONS")
+                    .uri(&path)
+                    .header("access-control-request-method", "GET")
+                    .header("access-control-request-headers", "x-elastos-home-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(preflight.status(), StatusCode::NO_CONTENT, "{path}");
+        assert_eq!(preflight.headers()["access-control-allow-origin"], "null");
+        assert!(preflight.headers()["access-control-allow-headers"]
+            .to_str()
+            .unwrap()
+            .contains("x-elastos-home-token"));
+    }
+
+    // Installed as the real surface, the seam serves its launch as before,
+    // readable by the opaque frame.
+    let token = photos.token(PHOTOS_PLAYLIST_URI);
+    let response = photos
+        .app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .uri(PLAYLIST_ROUTE)
+                .header("x-elastos-home-token", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["access-control-allow-origin"], "null");
+    let (status, _) = photos.get(PLAYLIST_ROUTE, Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = photos.get(&item_route("0"), Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, PNG_A);
+}
