@@ -11,16 +11,23 @@ wit_bindgen::generate!({ path: "../../wit", world: "product-capsule-v2" });
 include!(concat!(env!("OUT_DIR"), "/manifest.rs"));
 
 use elastos::bus::types::{BusError, Event, InvokeRequest};
-use elastos::bus::{capabilities, providers};
+use elastos::bus::{capabilities, providers, ui};
 use wit_bindgen::StreamResult;
 
 /// Bytes the guest asks for per read of the stream.
 const READ_BUFFER: usize = 64 * 1024;
+const MEDIA_TYPE: &str = "application/vnd.elastos.ui+json;v=0";
 
 struct Photo;
 
+/// A photo read whole, and the grant it was read with.
+struct Read {
+    grant: String,
+    bytes: Vec<u8>,
+}
+
 /// The whole object, or a refusal. Nothing partial is ever returned.
-async fn read_photo(uri: &str) -> Result<Vec<u8>, BusError> {
+async fn read_photo(uri: &str) -> Result<Read, BusError> {
     let grant = capabilities::request(
         uri.to_string(),
         vec!["read".to_string()],
@@ -30,7 +37,7 @@ async fn read_photo(uri: &str) -> Result<Vec<u8>, BusError> {
     let request = InvokeRequest {
         resource: uri.to_string(),
         operation: "read".to_string(),
-        grant: Some(grant.id),
+        grant: Some(grant.id.clone()),
         params: format!(r#"{{"max_bytes":{MAX_PHOTO_BYTES}}}"#).into_bytes(),
     };
     let (_status, mut stream, trailer) = providers::invoke(request, None).await?;
@@ -53,7 +60,26 @@ async fn read_photo(uri: &str) -> Result<Vec<u8>, BusError> {
     }
     // Only the trailing future says whether these bytes are the object.
     trailer.await?;
-    Ok(bytes)
+    Ok(Read {
+        grant: grant.id,
+        bytes,
+    })
+}
+
+/// One frame: the photo, by its grant (never its bytes or URI), and a line
+/// of text.
+async fn draw(read: &Read) -> Result<(), BusError> {
+    if read.grant.contains(['"', '\\']) {
+        return Err(BusError::Invalid(
+            "a grant id the guest cannot quote".to_string(),
+        ));
+    }
+    let document = format!(
+        r#"{{"frame":[{{"image":{{"grant":"{}"}}}},{{"text":"{} bytes"}}]}}"#,
+        read.grant,
+        read.bytes.len()
+    );
+    ui::present(MEDIA_TYPE.to_string(), document.into_bytes()).await
 }
 
 impl exports::elastos::bus::lifecycle::Guest for Photo {
@@ -62,7 +88,8 @@ impl exports::elastos::bus::lifecycle::Guest for Photo {
             if let Event::Message(uri) = event {
                 let uri = String::from_utf8(uri)
                     .map_err(|_| BusError::Invalid("a photo URI is UTF-8".to_string()))?;
-                let _photo = read_photo(&uri).await?;
+                let read = read_photo(&uri).await?;
+                draw(&read).await?;
             }
         }
         Ok(())

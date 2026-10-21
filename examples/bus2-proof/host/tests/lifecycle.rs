@@ -4,7 +4,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use bus2_host::{run_resident, BusError, Ending, Event, HostState, Limits, Outcome, Ticker};
+use bus2_host::{run_resident, BusError, Ending, Event, HostState, Limits, Node, Outcome, Ticker};
 use wasmtime::component::Component;
 
 const TICK: Duration = Duration::from_millis(10);
@@ -45,7 +45,10 @@ fn texts(outcome: &Outcome) -> Vec<String> {
         .state
         .frames
         .iter()
-        .map(|frame| String::from_utf8(frame.clone()).unwrap())
+        .map(|frame| match frame.nodes.as_slice() {
+            [Node::Text(text)] => text.clone(),
+            other => panic!("expected one text node, got {other:?}"),
+        })
         .collect()
 }
 
@@ -63,13 +66,7 @@ fn a_resident_guest_handles_events_and_stops_when_they_close() {
     );
     assert_eq!(outcome.ending, Ending::Stopped);
     assert_eq!(outcome.ending.reason(), "stopped");
-    assert_eq!(
-        texts(&outcome),
-        [
-            r#"{"frame":[{"text":"event 1: 2 bytes"}]}"#,
-            r#"{"frame":[{"text":"event 2: 3 bytes"}]}"#
-        ]
-    );
+    assert_eq!(texts(&outcome), ["event 1: 2 bytes", "event 2: 3 bytes"]);
 }
 
 #[test]
@@ -195,10 +192,7 @@ fn stop_requested_adds_nothing_the_close_cannot_do() {
         Duration::from_millis(200),
     );
     assert_eq!(with_request.ending.reason(), "stopped");
-    assert_eq!(
-        texts(&with_request),
-        [r#"{"frame":[{"text":"event 1: 5 bytes"}]}"#]
-    );
+    assert_eq!(texts(&with_request), ["event 1: 5 bytes"]);
 
     // The close alone stops it the same way.
     let (without, _) = run(

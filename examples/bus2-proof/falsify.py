@@ -187,6 +187,49 @@ CASES = [
         [("        if bytes.len() + chunk.len() > MAX_PHOTO_BYTES {", "        if false && bytes.len() + chunk.len() > MAX_PHOTO_BYTES {")],
         [("streaming", "a_guest_refuses_more_bytes_than_it_asked_for_even_if_they_arrive")],
     ),
+    # Proof 3: ui.present.
+    (
+        "a document may carry unknown keys",
+        "host/src/ui.rs",
+        [("#[serde(deny_unknown_fields)]\nstruct Document {", "struct Document {")],
+        [("ui", "a_document_that_is_not_the_one_format_is_refused")],
+    ),
+    (
+        "an image may be named by a URI",
+        "host/src/ui.rs",
+        [('["html", "src", "url", "uri", "href", "bytes", "data"]', '["html", "src", "url", "href", "bytes", "data"]')],
+        [("ui", "an_image_by_uri_or_bytes_is_refused")],
+    ),
+    (
+        "scripts and handlers are not named as such",
+        "host/src/ui.rs",
+        [('    if lower == "script" || lower.starts_with("on") {', '    if false {')],
+        [("ui", "a_document_with_script_or_handlers_is_refused")],
+    ),
+    (
+        "an image may use any grant",
+        "host/src/ui.rs",
+        [("                    .find(|grant| grant.id == id)", "                    .find(|_| true)")],
+        [("ui", "an_image_needs_a_held_unrevoked_read_grant_on_an_image")],
+    ),
+    (
+        "a revoked grant still draws",
+        "host/src/ui.rs",
+        [("                if state.revoked.contains(&id) {", "                if false && state.revoked.contains(&id) {")],
+        [("ui", "an_image_needs_a_held_unrevoked_read_grant_on_an_image")],
+    ),
+    (
+        "an image grant may point at any object",
+        "host/src/ui.rs",
+        [("                if !is_image(&object.bytes) {", "                if false && !is_image(&object.bytes) {")],
+        [("ui", "an_image_needs_a_held_unrevoked_read_grant_on_an_image")],
+    ),
+    (
+        "any media type is taken",
+        "host/src/ui.rs",
+        [("    if media_type != UI_MEDIA_TYPE {", "    if false && media_type != UI_MEDIA_TYPE {")],
+        [("ui", "a_document_that_is_not_the_one_format_is_refused")],
+    ),
 ]
 
 

@@ -8,7 +8,7 @@ use wasmtime::component::{Accessor, FutureReader, HasSelf, StreamReader};
 use crate::elastos::bus::{
     capabilities, clock, credentials, identity, providers, random, runtime, types, ui,
 };
-use crate::{objects, BusError, Credential, Grant, HostState, UI_MEDIA_TYPE};
+use crate::{objects, BusError, Credential, Grant, HostState};
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -139,12 +139,11 @@ impl ui::HostWithStore<HostState> for HasSelf<HostState> {
         media_type: String,
         document: Vec<u8>,
     ) -> Result<(), BusError> {
-        if media_type != UI_MEDIA_TYPE {
-            return Err(BusError::Invalid(format!(
-                "media type {media_type:?}; expected {UI_MEDIA_TYPE}"
-            )));
-        }
-        accessor.with(|mut access| access.get().frames.push(document));
-        Ok(())
+        accessor.with(|mut access| {
+            let state = access.get();
+            let frame = crate::ui::check_document(state, &media_type, &document)?;
+            state.frames.push(frame);
+            Ok(())
+        })
     }
 }

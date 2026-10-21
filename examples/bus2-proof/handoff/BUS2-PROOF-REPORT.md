@@ -63,6 +63,18 @@ recommendations come in step 7.
    `grant`. The host must check that they match (it does, and a falsifier pins that check). A grant id alone
    would name the resource already.
 6. **`body: option<stream<u8>>` on a read** is unused, and must be refused if present.
+7. **`ui.present` takes opaque bytes and a media-type string.**
+   - To know which grants a frame uses, the host must parse the document.
+   - To keep it declarative, the host must also scan it for keys that would make it more than a description
+     (`script`, `on*`, `html`, `src`, `uri`).
+   - The host here does both, with a strict typed parse and duplicate keys refused.
+   - Every host would need the same parser and the same blocklist, and a blocklist is the weak form of
+     "no script".
+   - A typed document in WIT (`variant node { text(string), image(grant-id) }`) would make script, URIs and
+     bytes impossible to express, rather than refused.
+8. **A frame on screen can name a grant that is later revoked.** The draft has `event.grant-revoked`, but
+   nothing says what happens to a frame already drawn with that grant. The stub refuses a new frame that
+   names a revoked grant. Whether the host must also clear the old frame is unstated.
 
 ## Proofs done
 
@@ -71,6 +83,7 @@ recommendations come in step 7.
 | 5. Admission-like import check | 7 (`tests/admission.rs`) | 7 |
 | 1. Resident guest, stop by close, named endings | 10 (`tests/lifecycle.rs`) | 11 |
 | 2. Streaming read under a cap, refused not truncated | 7 (`tests/streaming.rs`) | 8 |
+| 3. `ui.present` draws one declarative frame, images by grant | 6 (`tests/ui.rs`) | 7 |
 
 The read path:
 - the guest asks for a grant on exactly the photo's URI;

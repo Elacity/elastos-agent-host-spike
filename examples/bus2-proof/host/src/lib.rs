@@ -20,6 +20,7 @@ pub mod admission;
 mod imports;
 pub mod objects;
 pub mod run;
+pub mod ui;
 
 wasmtime::component::bindgen!({
     path: "../wit",
@@ -30,6 +31,7 @@ wasmtime::component::bindgen!({
 pub use elastos::bus::types::{BusError, Credential, Event, Grant};
 pub use objects::{ReadRecord, StubObject, HOST_MAX_READ_BYTES, READ_CHUNK};
 pub use run::{run_resident, Ending, Events, Limits, Outcome};
+pub use ui::{Frame, Node};
 
 /// The one media type `ui.present` takes in this proof.
 pub const UI_MEDIA_TYPE: &str = "application/vnd.elastos.ui+json;v=0";
@@ -40,6 +42,8 @@ pub struct HostState {
     pub policy: Vec<(String, Vec<String>)>,
     /// Grants issued to this guest.
     pub grants: Vec<Grant>,
+    /// Grant ids the host has revoked.
+    pub revoked: Vec<String>,
     /// Object URI to object, standing in for the Library.
     pub objects: BTreeMap<String, StubObject>,
     /// The host's own cap on one read.
@@ -52,7 +56,7 @@ pub struct HostState {
     /// What `credentials.presented` returns.
     pub credentials: Vec<Credential>,
     /// Every frame drawn by `ui.present`, in order; the last is on screen.
-    pub frames: Vec<Vec<u8>>,
+    pub frames: Vec<Frame>,
     next_id: u64,
 }
 
@@ -61,6 +65,7 @@ impl Default for HostState {
         HostState {
             policy: Vec::new(),
             grants: Vec::new(),
+            revoked: Vec::new(),
             objects: BTreeMap::new(),
             max_read_bytes: HOST_MAX_READ_BYTES,
             ignore_guest_cap: false,

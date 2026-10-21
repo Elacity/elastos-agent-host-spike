@@ -25,8 +25,13 @@ fn photo_state(object: StubObject) -> HostState {
     state
 }
 
+/// `len` bytes that start like a PNG, so the host will draw them.
 fn bytes(len: usize) -> Vec<u8> {
-    (0..len).map(|at| (at % 251) as u8).collect()
+    let mut bytes: Vec<u8> = (0..len).map(|at| (at % 251) as u8).collect();
+    let png = b"\x89PNG\r\n\x1a\n";
+    let head = png.len().min(len);
+    bytes[..head].copy_from_slice(&png[..head]);
+    bytes
 }
 
 fn show(state: HostState) -> Outcome {
