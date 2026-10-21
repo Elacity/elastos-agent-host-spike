@@ -105,8 +105,12 @@ pub(super) async fn append_inbox_requests(
         notifications.entries.push(card);
     }
     append_wallet_approval_notifications(notifications, wallet_approvals);
-    if let Ok(capability_requests) = runtime_capability_pending_requests(&state.data_dir).await {
-        append_runtime_capability_notifications(notifications, capability_requests);
+    // Runtime capability requests are the admin's to answer.
+    if ensure_admin_context(&state.data_dir, context).is_ok() {
+        if let Ok(capability_requests) = runtime_capability_pending_requests(&state.data_dir).await
+        {
+            append_runtime_capability_notifications(notifications, capability_requests);
+        }
     }
     if let Ok(inspect_requests) =
         pending_inspect_action_requests(&state.data_dir, &context.principal_id)
@@ -309,6 +313,13 @@ pub(super) async fn inbox_action(
         if state.collaboration_chat_product_port.is_some() {
             return super::gateway_room::configured_legacy_room_control_unsupported_response();
         }
+        if let Err(error) = ensure_admin_context(&state.data_dir, &context) {
+            return inbox_error_response(error);
+        }
+    }
+    if action.action_id.starts_with("capability-approve-request:")
+        || action.action_id.starts_with("capability-deny-request:")
+    {
         if let Err(error) = ensure_admin_context(&state.data_dir, &context) {
             return inbox_error_response(error);
         }
