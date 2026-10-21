@@ -1,0 +1,13 @@
+# Reviewed cargo-audit exceptions. The CI job `cargo-audit` runs from elastos/ and reads this file
+# for every tracked Cargo.lock. Each entry says why it does not apply and what removes it.
+[advisories]
+ignore = [
+  # Reviewed 2026-10-20. webpki-roots 0.26.11 (via ureq 2.12.1 in elastos and the
+  # availability, content-block-graph, exit and ipfs provider capsules) has no 0.26.x patch:
+  # it is a shim whose only item is `pub use parent::TLS_SERVER_ROOTS` from webpki-roots 1,
+  # which every lock now pins to the patched 1.0.10 (emSign ECC Root CA - G3 removed), and
+  # path checks run in rustls-webpki 0.103.16, which rejects the distrusted intermediates.
+  # Remove when ureq 2 leaves these locks (ureq 3 depends on webpki-roots 1 directly);
+  # re-review by 2026-11-20 at the latest.
+  "RUSTSEC-2026-0381",
+]
