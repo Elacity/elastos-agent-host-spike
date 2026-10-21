@@ -509,9 +509,10 @@ async fn handle(
             tokio::select! {
                 result = &mut outbound => break result,
                 _ = monitor.tick() => {
+                    // `forward` re-checks the grant itself so an ended reply
+                    // can be reported in-band before the stream closes.
                     if bridge.confined_model_identity().map(|(pid, _)| pid) != Some(provider_pid)
                         || !bridge.confined_model_run_matches(&request.offer_id, &request.run_id, &request.request_id)
-                        || current_grant(data_dir, &request, &destination).is_err()
                     {
                         break Err(io::Error::new(io::ErrorKind::PermissionDenied, "hosted authority ended"));
                     }
@@ -1420,10 +1421,22 @@ async fn forward(
         drop(admission);
         return deny(stream).await;
     }
-    let sent = tokio::select! {
-        biased;
-        _ = ended.changed() => None,
-        result = outbound.send() => Some(result),
+    let sent = {
+        let send = outbound.send();
+        tokio::pin!(send);
+        let mut check = tokio::time::interval(AUTHORITY_CHECK_INTERVAL);
+        loop {
+            tokio::select! {
+                biased;
+                _ = ended.changed() => break None,
+                result = &mut send => break Some(result),
+                _ = check.tick() => {
+                    if !run_authorized() || current_grant(data_dir, request, destination).is_err() {
+                        break None;
+                    }
+                }
+            }
+        }
     };
     drop(admission);
     let mut response = match sent {
@@ -1482,32 +1495,73 @@ async fn forward(
         return Ok(());
     }
     write_response_head(stream, status, &content_type).await?;
+    // A streamed reply is forwarded in whole lines, so when hosted access ends
+    // mid-reply Runtime can say so in-band on a line of its own before closing.
+    let event_stream = content_type.starts_with("text/event-stream");
+    let mut held = Vec::new();
     let mut total = 0usize;
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut tick = tokio::time::interval(AUTHORITY_CHECK_INTERVAL);
     loop {
         let chunk = tokio::select! {
             _ = tick.tick() => {
-                if current_grant(data_dir, request, destination).is_err() { return Err(io::Error::new(io::ErrorKind::PermissionDenied, "hosted grant ended")); }
+                if current_grant(data_dir, request, destination).is_err() {
+                    return end_stream_for_lost_access(stream, event_stream).await;
+                }
                 continue;
             }
             chunk = response.chunk() => chunk.map_err(io::Error::other)?,
         };
         let Some(chunk) = chunk else { break };
         total = total.saturating_add(chunk.len());
-        if total > MAX_BODY || current_grant(data_dir, request, destination).is_err() {
+        if total > MAX_BODY {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "hosted stream ended",
             ));
         }
-        stream
-            .write_all(format!("{:X}\r\n", chunk.len()).as_bytes())
-            .await?;
-        stream.write_all(&chunk).await?;
-        stream.write_all(b"\r\n").await?;
+        if current_grant(data_dir, request, destination).is_err() {
+            return end_stream_for_lost_access(stream, event_stream).await;
+        }
+        let ready = if event_stream {
+            held.extend_from_slice(&chunk);
+            match held.iter().rposition(|byte| *byte == b'\n') {
+                Some(end) => held.drain(..=end).collect::<Vec<u8>>(),
+                None => continue,
+            }
+        } else {
+            chunk.to_vec()
+        };
+        write_chunk(stream, &ready).await?;
+    }
+    if !held.is_empty() {
+        write_chunk(stream, &held).await?;
     }
     stream.write_all(b"0\r\n\r\n").await?;
     Ok(())
+}
+
+/// How often an admitted hosted request re-checks its authority.
+const AUTHORITY_CHECK_INTERVAL: Duration = Duration::from_millis(250);
+
+/// The line a streamed hosted reply ends with when its access ended mid-reply.
+const HOSTED_ACCESS_ENDED_LINE: &[u8] = b": elastos-hosted-access ended\n\n";
+
+async fn write_chunk(stream: &mut UnixStream, bytes: &[u8]) -> io::Result<()> {
+    stream
+        .write_all(format!("{:X}\r\n", bytes.len()).as_bytes())
+        .await?;
+    stream.write_all(bytes).await?;
+    stream.write_all(b"\r\n").await
+}
+
+async fn end_stream_for_lost_access(stream: &mut UnixStream, event_stream: bool) -> io::Result<()> {
+    if event_stream {
+        write_chunk(stream, HOSTED_ACCESS_ENDED_LINE).await?;
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "hosted access ended",
+    ))
 }
 
 async fn write_job_replay(stream: &mut UnixStream, job_id: &str) -> io::Result<()> {
@@ -2795,6 +2849,120 @@ mod tests {
         seed("https://jobs.example/cancel", "account-b");
         let changed_account = resolve_effect(dir.path(), &request).unwrap();
         assert_ne!(create.job_backend_id, changed_account.job_backend_id);
+    }
+
+    #[tokio::test]
+    async fn end_during_a_streamed_reply_is_reported_on_its_own_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let proof = admin_proof(dir.path());
+        let sink = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = sink.local_addr().unwrap().port();
+        let path = format!("http://127.0.0.1:{port}/openrouter/api/v1/chat/completions");
+        let offer_id = "model:hosted-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        super::super::model_provider_config::seed_model_provider_operator_offers_for_test(
+            dir.path(),
+            vec![json!({
+                "id":offer_id,"title":"Fixture","operation":"text.generate",
+                "input_modalities":["text/plain"],"output_modalities":["text/plain"],"enabled":true,
+                "policy":{"inline_output_bytes_limit":128},
+                "adapter":{
+                    "kind":"open_ai_compatible_text",
+                    "api_url":"https://openrouter.ai/api/v1/chat/completions",
+                    "api_key":"fixture-secret","model":"fixture/model",
+                    "hosted":{
+                        "backend_provider_label":"OpenRouter","selection_mode":"pinned",
+                        "privacy_policy_ref":"fixture:privacy:v1","terms_ref":"fixture:terms:v1",
+                        "upstream_routing_fallback_assertion":"operator_asserted_disabled"
+                    }
+                }
+            })],
+        )
+        .unwrap();
+        write_private(
+            &dir.path()
+                .join("providers/model-provider/validate-fixtures.json"),
+            json!({
+                "openrouter_models_url":format!("http://127.0.0.1:{port}/models"),
+                "venice_rate_limits_url":format!("http://127.0.0.1:{port}/limits"),
+                "venice_models_url":format!("http://127.0.0.1:{port}/venice-models"),
+                "openrouter_chat_url":path,
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let request = EffectRequest {
+            offer_id: offer_id.into(),
+            effect: "text".into(),
+            run_id: format!("run:sha256:{}", "0".repeat(64)),
+            request_id: "fixture-request".into(),
+            job_id: None,
+            method: reqwest::Method::POST,
+            body: br#"{"model":"fixture/model","stream":true,"messages":[],"max_tokens":32}"#
+                .to_vec(),
+        };
+        let destination = resolve_effect(dir.path(), &request).unwrap();
+        let decision = approve_fixture(
+            dir.path(),
+            offer_id,
+            "text",
+            "POST",
+            &destination,
+            &proof,
+            Some((&request.run_id, &request.request_id)),
+        );
+        let (streaming_tx, streaming_rx) = tokio::sync::oneshot::channel();
+        let sink_task = tokio::spawn(async move {
+            let (mut socket, _) = sink.accept().await.unwrap();
+            let mut bytes = vec![0u8; 4096];
+            let _ = socket.read(&mut bytes).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            socket
+                .write_all(
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\"Once\"}}]}\n\ndata: {\"partial",
+                )
+                .await
+                .unwrap();
+            socket.flush().await.unwrap();
+            streaming_tx.send(()).unwrap();
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            drop(socket);
+        });
+        let (mut broker_side, mut provider_side) = UnixStream::pair().unwrap();
+        let data_dir = dir.path().to_path_buf();
+        let ender = tokio::spawn(async move {
+            streaming_rx.await.unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            model_provider_egress_decision::end_decision(&data_dir, &decision, &proof).unwrap();
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            forward(&mut broker_side, dir.path(), &request, &destination, || {
+                true
+            }),
+        )
+        .await
+        .expect("End stops the streamed reply");
+        assert!(result.is_err());
+        ender.await.unwrap();
+        drop(broker_side);
+        let mut response = Vec::new();
+        provider_side.read_to_end(&mut response).await.unwrap();
+        let response = String::from_utf8_lossy(&response);
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        let body = response.split_once("\r\n\r\n").unwrap().1;
+        assert!(body.contains("\"content\":\"Once\""));
+        assert!(
+            !body.contains("partial"),
+            "a partial line is never forwarded"
+        );
+        assert!(
+            body.contains("\n: elastos-hosted-access ended\n\n"),
+            "End is reported on its own line: {body:?}"
+        );
+        sink_task.abort();
     }
 
     #[tokio::test]

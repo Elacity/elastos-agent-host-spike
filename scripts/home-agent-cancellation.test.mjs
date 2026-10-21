@@ -1104,6 +1104,31 @@ test("saved model_busy lastTurn shows Busy after restore", () => {
   assert.doesNotMatch(status.textContent, /Model run failed/);
 });
 
+test("a reply cut off by End says so live and after restore", () => {
+  const message = "Hosted access ended during this reply. Approve the new request in Inbox to use it again.";
+  assert.equal(controller.formatStreamError({
+    code: "hosted_access_ended_during_reply",
+    message,
+  }), message);
+  const { ctx, status } = streamControllerFixture();
+  ctx.sessions[0] = recoverStalePersistedTurn({
+    id: "one",
+    title: "ended",
+    group: "Today",
+    messages: [{ role: "user", text: "Tell me a story", modelText: "Tell me a story" }],
+    lastTurn: {
+      state: "failed",
+      error: "hosted_access_ended_during_reply",
+      providerRunId: "run-ended",
+      completedAt: 1,
+    },
+  });
+  status.textContent = "";
+  controller.renderActiveSession();
+  assert.equal(status.textContent, message);
+  assert.doesNotMatch(status.textContent, /Model run failed/);
+});
+
 function renderedAgentText(stream) {
   const row = (stream.children || []).find((child) => child.dataset?.role === "agent");
   if (!row) return "";

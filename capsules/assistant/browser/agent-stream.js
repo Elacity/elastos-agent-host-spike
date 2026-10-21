@@ -517,6 +517,9 @@ export function formatStreamError(err) {
   if (code === "approval_denied") {
     return "This hosted connection was denied in Inbox. Your prompt is saved here; choose another model to send it.";
   }
+  if (code === "hosted_access_ended_during_reply") {
+    return "Hosted access ended during this reply. Approve the new request in Inbox to use it again.";
+  }
   if (code === "aborted") {
     return "Run status unavailable.";
   }

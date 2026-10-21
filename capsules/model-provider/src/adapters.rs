@@ -2068,6 +2068,21 @@ async fn run_local_text_worker_with_timing(
             if current_line.ends_with(b"\r") {
                 current_line.pop();
             }
+            if runtime_socket.is_some() && current_line == HOSTED_ACCESS_ENDED_LINE {
+                // Keep the text that already arrived, then say why the reply stopped.
+                if !stream_state.delta_buffer.is_empty() {
+                    flush_local_text_delta(
+                        &task.offer,
+                        &task.run_id,
+                        task.generation,
+                        &task.updates,
+                        &mut stream_state.delta_buffer,
+                        timing,
+                    )
+                    .await?;
+                }
+                return Err(hosted_access_ended_during_reply_fault());
+            }
             if current_line.is_empty() {
                 if event_data.is_empty() {
                     continue;
@@ -2890,6 +2905,20 @@ fn map_backend_http_status(status: reqwest::StatusCode) -> AdapterFault {
         429 => AdapterFault::rate_limited("model backend rate limited the request", detail),
         400 | 413 | 422 => AdapterFault::context("model backend rejected the request", detail),
         _ => AdapterFault::backend_failed("model backend failed", detail),
+    }
+}
+
+/// Runtime's in-band line when hosted access ends while a reply streams.
+const HOSTED_ACCESS_ENDED_LINE: &[u8] = b": elastos-hosted-access ended";
+
+fn hosted_access_ended_during_reply_fault() -> AdapterFault {
+    AdapterFault {
+        error: RunError {
+            class: ErrorClass::AccessRefused,
+            code: "hosted_access_ended_during_reply".to_string(),
+            message: "Hosted access ended during this reply. Approve the new request in Inbox to use it again.".to_string(),
+        },
+        detail: None,
     }
 }
 
@@ -4934,6 +4963,91 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn hosted_reply_cut_off_by_end_keeps_its_text_and_says_access_ended() {
+        use std::os::unix::net::UnixListener;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "elastos-hosted-ended-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            let mut body = sse_body(
+                &[r#"{"choices":[{"delta":{"content":"Once upon"}}]}"#],
+                false,
+            );
+            body.extend_from_slice(b": elastos-hosted-access ended\n\n");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:X}\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+            stream.write_all(b"\r\n").unwrap();
+            // Runtime closes without a terminating chunk, as on End.
+        });
+        let (update_tx, mut update_rx) = mpsc::channel(1);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let socket = path.to_string_lossy().into_owned();
+        let (fault, delivered) = runtime.block_on(async move {
+            let worker = tokio::spawn(async move {
+                let mut task = LocalTextWorkerTask {
+                    request_id: "fixture-request".into(),
+                    hosted_socket: Some(socket),
+                    run_id: "run-hosted-ended".into(),
+                    generation: 1,
+                    backend: LocalTextBackend::OpenAiCompatible {
+                        api_url: "https://example.invalid/chat".into(),
+                        api_key: None,
+                        model: "fixture-model".into(),
+                    },
+                    offer: openai_offer("https://example.invalid/chat"),
+                    deadline_ms: now_ms().saturating_add(30_000),
+                    messages: vec![json!({"role": "user", "content": "hello"})],
+                    cancel_rx,
+                    updates: update_tx,
+                };
+                run_local_text_worker_inner(&mut task).await
+            });
+            let mut delivered = String::new();
+            while let Some(update) = update_rx.recv().await {
+                match update {
+                    WorkerUpdate::Apply {
+                        result: ReconcileResult::StillRunning { events, .. },
+                        acknowledge,
+                        ..
+                    } => {
+                        for event in events {
+                            delivered.push_str(event.data["text"].as_str().unwrap_or_default());
+                        }
+                        acknowledge.send(WorkerApplyAck::Applied).unwrap();
+                    }
+                    other => panic!("unexpected streaming update: {other:?}"),
+                }
+            }
+            (worker.await.unwrap().unwrap_err(), delivered)
+        });
+        server.join().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(delivered, "Once upon");
+        assert_eq!(fault.error.code, "hosted_access_ended_during_reply");
+        assert_eq!(fault.error.class, ErrorClass::AccessRefused);
+        assert_eq!(
+            fault.error.message,
+            "Hosted access ended during this reply. Approve the new request in Inbox to use it again."
+        );
     }
 
     #[test]
