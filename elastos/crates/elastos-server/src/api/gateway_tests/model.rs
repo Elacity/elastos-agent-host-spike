@@ -2819,7 +2819,7 @@ async fn named_jev_instance_advises_hosted_http_inbox_without_auto_approve() {
     assert!(body_text.contains("Connection: Venice"));
     assert!(body_text.contains("Prompt recipient: Venice"));
     assert!(body_text.contains("Payer: this Home"));
-    assert!(body_text.contains("until you end approval in System > Models"));
+    assert!(body_text.contains("Runtime still asks for its own approval in Inbox"));
     assert!(body_text.contains("This pending prompt stays in Assistant"));
     assert!(body_text.contains("Jev advice: approve · risk: low · reported confidence: 80%"));
     assert!(body_text.contains("Advice reason: Runtime rubric:"));

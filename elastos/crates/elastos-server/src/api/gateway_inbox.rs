@@ -558,7 +558,10 @@ async fn dispatch_inbox_action(
         ensure_admin_context(data_dir, context)?;
         crate::jev_approval_lens::record_human_decision(data_dir, request_id, "approve")?;
         let _ = crate::notifications::mark_acted_for_action(data_dir, None, action_id);
-        return Ok("Approved this hosted connection. Send again from Assistant.".to_string());
+        return Ok(
+            "Recorded your approval. Runtime still asks in Inbox before anything is sent."
+                .to_string(),
+        );
     }
     if let Some(request_id) =
         action_id.strip_prefix(crate::jev_approval_lens::HOSTED_HTTP_DENY_PREFIX)
