@@ -1190,12 +1190,21 @@ fn sha256(message: &[u8]) -> [u8; 32] {
 
 /// One recorded read. Older versions stay in the log. The last row for a
 /// resource is the current one.
+///
+/// A read may also carry the Runtime revision it read (`revision`) and the
+/// part of the file it showed (`window`: first line and number of whole
+/// lines). A read with a window shows only those lines; `cut` means the text
+/// ends in a partial line, which is not part of the window. A read with no
+/// window showed the whole file.
 #[cfg(any(test, target_arch = "wasm32"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Observation {
     resource: String,
     version: u64,
     text_hash: [u8; 32],
+    revision: Option<String>,
+    window: Option<(u64, u64)>,
+    cut: bool,
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -1205,13 +1214,57 @@ fn observation_record(resource: &str, version: u64, text: &str) -> String {
     format!("{version} {hex} {resource}\n{text}")
 }
 
+/// The record of a read that names its Runtime revision and, for a part of a
+/// file, its window.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn bound_observation_record(
+    resource: &str,
+    version: u64,
+    revision: &str,
+    window: Option<(u64, u64)>,
+    cut: bool,
+    text: &str,
+) -> String {
+    let hash = sha256(text.as_bytes());
+    let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
+    let mut head = format!("{version} {hex} {resource} revision={revision}");
+    if let Some((first, count)) = window {
+        head.push_str(&format!(" lines={first}+{count}"));
+        if cut {
+            head.push_str(" cut");
+        }
+    }
+    format!("{head}\n{text}")
+}
+
+/// The whole lines of a shown text: all of it, or, when the last line was
+/// cut, everything up to and including the last line break.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn whole_lines(text: &str, cut: bool) -> &str {
+    if !cut {
+        return text;
+    }
+    text.rfind('\n').map_or("", |at| &text[..=at])
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn line_count(text: &str) -> u64 {
+    u64::try_from(text.split_inclusive('\n').count()).unwrap_or(u64::MAX)
+}
+
+/// A revision is one token: not empty, no whitespace, no '='.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn revision_ok(revision: &str) -> bool {
+    !revision.is_empty() && !revision.contains('=') && !revision.chars().any(char::is_whitespace)
+}
+
 #[cfg(any(test, target_arch = "wasm32"))]
 fn read_observation(node: &SurfaceNode) -> Option<Observation> {
     if node.source != NodeSource::Observation {
         return None;
     }
     let (head, text) = node.text.split_once('\n')?;
-    let mut parts = head.splitn(3, ' ');
+    let mut parts = head.split(' ');
     let version = parts.next()?.parse().ok()?;
     let hex = parts.next()?;
     let resource = parts.next()?;
@@ -1225,10 +1278,43 @@ fn read_observation(node: &SurfaceNode) -> Option<Observation> {
     if text_hash != sha256(text.as_bytes()) {
         return None;
     }
+    // An unknown or repeated word makes the row unreadable: fail closed.
+    let (mut revision, mut window, mut cut) = (None, None, false);
+    for word in parts {
+        if let Some(value) = word.strip_prefix("revision=") {
+            if revision.is_some() || !revision_ok(value) {
+                return None;
+            }
+            revision = Some(value.to_string());
+        } else if let Some(value) = word.strip_prefix("lines=") {
+            let (first, count) = value.split_once('+')?;
+            let (first, count): (u64, u64) = (first.parse().ok()?, count.parse().ok()?);
+            if window.is_some() || first == 0 {
+                return None;
+            }
+            window = Some((first, count));
+        } else if word == "cut" && !cut {
+            cut = true;
+        } else {
+            return None;
+        }
+    }
+    if window.is_some() && revision.is_none() || cut && window.is_none() {
+        return None;
+    }
+    if let Some((_, count)) = window {
+        let whole = whole_lines(text, cut);
+        if line_count(whole) != count || cut && whole.len() == text.len() {
+            return None;
+        }
+    }
     Some(Observation {
         resource: resource.to_string(),
         version,
         text_hash,
+        revision,
+        window,
+        cut,
     })
 }
 
@@ -1240,6 +1326,8 @@ fn current_observation(events: &[SurfaceNode], resource: &str) -> Option<Observa
         .find_map(|node| read_observation(node).filter(|row| row.resource == resource))
 }
 
+/// The whole text of a file as last read. When the last read showed only a
+/// window, the whole text is not known, and this returns nothing.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn current_observed_text(events: &[SurfaceNode], resource: &str) -> Option<String> {
     events.iter().rev().find_map(|node| {
@@ -1247,12 +1335,18 @@ fn current_observed_text(events: &[SurfaceNode], resource: &str) -> Option<Strin
         if row.resource != resource {
             return None;
         }
-        node.text.split_once('\n').map(|(_, text)| text.to_string())
-    })
+        Some(
+            row.window
+                .is_none()
+                .then(|| node.text.split_once('\n').map(|(_, text)| text.to_string()))
+                .flatten(),
+        )
+    })?
 }
 
-/// Every version this file has been shown, lowest number first. A later read
-/// of the same version keeps that version's text. A blank name or a host path
+/// Every version this file has been shown whole, lowest number first. A
+/// later read of the same version keeps that version's text. A windowed read
+/// is not a whole version and is left out. A blank name or a host path
 /// returns nothing. This list is not a grant and does not change the file.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn version_list(events: &[SurfaceNode], resource: &str) -> Vec<(u64, String)> {
@@ -1264,7 +1358,7 @@ fn version_list(events: &[SurfaceNode], resource: &str) -> Vec<(u64, String)> {
         let Some(row) = read_observation(node) else {
             continue;
         };
-        if row.resource != resource {
+        if row.resource != resource || row.window.is_some() {
             continue;
         }
         let Some((_, text)) = node.text.split_once('\n') else {
@@ -1301,6 +1395,192 @@ fn observe(journal: &mut Journal, resource: &str, version: u64, text: &str) -> b
     journal.events.push(SurfaceNode {
         role: Role::User,
         text: observation_record(resource, version, text),
+        source: NodeSource::Observation,
+    });
+    journal.epoch == epoch
+}
+
+/// Every whole line one version of a file has shown, by line number (from 1).
+/// Nothing when the version was never read.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn seen_lines(
+    events: &[SurfaceNode],
+    resource: &str,
+    version: u64,
+) -> Option<std::collections::BTreeMap<u64, String>> {
+    let mut lines = std::collections::BTreeMap::new();
+    let mut read = false;
+    for node in events {
+        let Some(row) = read_observation(node) else {
+            continue;
+        };
+        if row.resource != resource || row.version != version {
+            continue;
+        }
+        read = true;
+        let text = node.text.split_once('\n')?.1;
+        let first = row.window.map_or(1, |(first, _)| first);
+        put_lines(&mut lines, first, whole_lines(text, row.cut));
+    }
+    read.then_some(lines)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn put_lines(lines: &mut std::collections::BTreeMap<u64, String>, first: u64, text: &str) {
+    let mut at = first;
+    for line in text.split_inclusive('\n') {
+        lines.insert(at, line.to_string());
+        at = at.saturating_add(1);
+    }
+}
+
+/// The lines one version of a file has shown, as runs of consecutive whole
+/// lines: (first line, text). A whole read is one run from line 1. Lines
+/// never shown are in no run. Nothing when the version was never read.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn seen_runs(events: &[SurfaceNode], resource: &str, version: u64) -> Option<Vec<(u64, String)>> {
+    let mut runs: Vec<(u64, u64, String)> = Vec::new();
+    for (at, line) in seen_lines(events, resource, version)? {
+        match runs.last_mut() {
+            Some((_, last, text)) if *last + 1 == at => {
+                *last = at;
+                text.push_str(&line);
+            }
+            _ => runs.push((at, at, line)),
+        }
+    }
+    Some(
+        runs.into_iter()
+            .map(|(first, _, text)| (first, text))
+            .collect(),
+    )
+}
+
+/// Where `old` is in what one version of a file has shown: the one run that
+/// holds it exactly once, and no other run holding it. A read that showed
+/// only a window covers only that window.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn find_in_seen(
+    events: &[SurfaceNode],
+    resource: &str,
+    version: u64,
+    old: &str,
+) -> Result<(u64, String), &'static str> {
+    let runs = seen_runs(events, resource, version).ok_or("not observed")?;
+    let whole = events.iter().any(|node| {
+        read_observation(node).is_some_and(|row| {
+            row.resource == resource && row.version == version && row.window.is_none()
+        })
+    });
+    let mut found = None;
+    let mut count = 0;
+    for (first, text) in runs {
+        let here = text.matches(old).count();
+        count += here;
+        if here == 1 {
+            found = Some((first, text));
+        }
+    }
+    match (count, found) {
+        (1, Some(run)) => Ok(run),
+        (0, _) if !whole => Err("outside the read window"),
+        _ => Err("not unique"),
+    }
+}
+
+/// The edit must keep a window a window: when only part of the file was
+/// read, the run must still end where it ended, at a line break, or the
+/// edited line would join a line nobody has seen. Host paths in the text are
+/// refused, as for a single write.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn edit_keeps_its_window(run: &str, whole: bool, old: &str, new: &str) -> Result<(), &'static str> {
+    if host_path(old) || host_path(new) {
+        return Err("host path");
+    }
+    if !whole && run.ends_with('\n') && !run.replacen(old, new, 1).ends_with('\n') {
+        return Err("edit removes the window's last line break");
+    }
+    Ok(())
+}
+
+/// Append a read that names the Runtime revision it read. `window` is the
+/// first line shown, or nothing for the whole file; `cut` means the text ends
+/// in a partial line. A window with no whole line, an unknown revision word,
+/// a version older than the current one, or a second read of the current
+/// version that names another revision or disagrees on a line adds nothing.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn observe_read(
+    journal: &mut Journal,
+    resource: &str,
+    version: u64,
+    revision: &str,
+    window: Option<u64>,
+    cut: bool,
+    text: &str,
+) -> bool {
+    if resource.is_empty()
+        || resource.chars().any(char::is_whitespace)
+        || host_path(resource)
+        || !revision_ok(revision)
+    {
+        return false;
+    }
+    let window = match window {
+        None if cut => return false,
+        None => None,
+        Some(first) => {
+            let count = line_count(whole_lines(text, cut));
+            if first == 0 || count == 0 || cut && whole_lines(text, cut).len() == text.len() {
+                return false;
+            }
+            Some((first, count))
+        }
+    };
+    if let Some(row) = current_observation(&journal.events, resource) {
+        if version < row.version {
+            return false;
+        }
+        if version == row.version {
+            if row.revision.as_deref() != Some(revision) {
+                return false;
+            }
+            // The same version may be read again in parts; every line it
+            // shows again must be the line it showed before.
+            let Some(before) = seen_lines(&journal.events, resource, version) else {
+                return false;
+            };
+            let mut shown = std::collections::BTreeMap::new();
+            put_lines(
+                &mut shown,
+                window.map_or(1, |(first, _)| first),
+                whole_lines(text, cut),
+            );
+            if shown
+                .iter()
+                .any(|(at, line)| before.get(at).is_some_and(|seen| seen != line))
+            {
+                return false;
+            }
+            // A whole read fixes the number of lines; no read of the same
+            // version may show a line past it.
+            let whole_count = |lines: &std::collections::BTreeMap<u64, String>| {
+                u64::try_from(lines.len()).unwrap_or(u64::MAX)
+            };
+            let last = |lines: &std::collections::BTreeMap<u64, String>| {
+                lines.keys().next_back().copied().unwrap_or(0)
+            };
+            if events_show_whole(&journal.events, resource, version)
+                && last(&shown) > whole_count(&before)
+                || window.is_none() && last(&before) > whole_count(&shown)
+            {
+                return false;
+            }
+        }
+    }
+    let epoch = journal.epoch;
+    journal.events.push(SurfaceNode {
+        role: Role::User,
+        text: bound_observation_record(resource, version, revision, window, cut, text),
         source: NodeSource::Observation,
     });
     journal.epoch == epoch
@@ -1366,6 +1646,7 @@ fn earlier_write_is_open(journal: &Journal, step_id: u64) -> bool {
     }
     journal.steps.iter().any(|earlier| {
         earlier.id < step.id
+            && earlier.effect_id != step.effect_id
             && is_write(earlier.kind)
             && !earlier.has_result
             && matches!(
@@ -1432,8 +1713,33 @@ fn propose_read(journal: &mut Journal, resource: &str) -> u64 {
     id
 }
 
+/// How many times the same edit that changes nothing may be proposed for one
+/// file. The next one is refused, so a model cannot loop on it.
+#[cfg(any(test, target_arch = "wasm32"))]
+const NOOP_EDIT_LIMIT: usize = 2;
+
+/// The same no-op edit (old equal to new) has already been proposed for this
+/// file `NOOP_EDIT_LIMIT` times.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn noop_edit_repeated(journal: &Journal, resource: &str, old: &str, new: &str) -> bool {
+    old == new
+        && journal
+            .steps
+            .iter()
+            .filter(|step| {
+                step.kind == ProposalKind::Edit
+                    && step.resource == resource
+                    && step.old == old
+                    && step.new == new
+            })
+            .count()
+            >= NOOP_EDIT_LIMIT
+}
+
 /// Record an edit proposal. An unread target, a stale version, empty old
-/// text, or old text that does not occur once creates no step. This does not write.
+/// text, old text that is not exactly once in what that version has shown
+/// (a read that showed a window covers only that window), or a no-op edit
+/// repeated past the limit creates no step. This does not write.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn propose_edit(
     journal: &mut Journal,
@@ -1451,11 +1757,9 @@ fn propose_edit(
     if old.is_empty() {
         return Err("empty");
     }
-    let Some(text) = current_observed_text(&journal.events, resource) else {
-        return Err("not observed");
-    };
-    if text.matches(old).count() != 1 {
-        return Err("not unique");
+    find_in_seen(&journal.events, resource, row.version, old)?;
+    if noop_edit_repeated(journal, resource, old, new) {
+        return Err("repeated no-op edit");
     }
     let id = propose_step(journal);
     let step = journal
@@ -1469,6 +1773,280 @@ fn propose_edit(
     step.new = new.to_string();
     step.seen_version = Some(row.version);
     Ok(id)
+}
+
+/// One file's part of a change: the revision the edit was made against, the
+/// text it replaces, and the new text.
+#[cfg(any(test, target_arch = "wasm32"))]
+struct EditSpec<'a> {
+    resource: &'a str,
+    revision: &'a str,
+    old: &'a str,
+    new: &'a str,
+}
+
+/// The most files one change may touch.
+#[cfg(any(test, target_arch = "wasm32"))]
+const CHANGE_FILES_LIMIT: usize = 16;
+
+/// Record a change of one or more files, written all or none. Every file is
+/// checked before any step is made: it must be read, the read must carry the
+/// Runtime revision, the edit must name that same revision, and its old text
+/// must be exactly once in what that revision has shown. A file named twice,
+/// or any miss, creates no step at all and names the edit and the reason.
+/// The steps share one effect id, the first step's id. This does not write.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn propose_change(
+    journal: &mut Journal,
+    edits: &[EditSpec<'_>],
+) -> Result<Vec<u64>, (usize, &'static str)> {
+    if edits.is_empty() || edits.len() > CHANGE_FILES_LIMIT {
+        return Err((0, "change size"));
+    }
+    let mut versions = Vec::with_capacity(edits.len());
+    for (index, edit) in edits.iter().enumerate() {
+        if edits[..index]
+            .iter()
+            .any(|earlier| earlier.resource == edit.resource)
+        {
+            return Err((index, "one file twice in one change"));
+        }
+        let Some(row) = current_observation(&journal.events, edit.resource) else {
+            return Err((index, "not observed"));
+        };
+        let Some(read) = row.revision.as_deref() else {
+            return Err((index, "no revision"));
+        };
+        if edit.revision != read {
+            return Err((index, "stale revision"));
+        }
+        if edit.old.is_empty() {
+            return Err((index, "empty"));
+        }
+        let (_, run) = find_in_seen(&journal.events, edit.resource, row.version, edit.old)
+            .map_err(|reason| (index, reason))?;
+        let whole = events_show_whole(&journal.events, edit.resource, row.version);
+        edit_keeps_its_window(&run, whole, edit.old, edit.new).map_err(|reason| (index, reason))?;
+        if noop_edit_repeated(journal, edit.resource, edit.old, edit.new) {
+            return Err((index, "repeated no-op edit"));
+        }
+        versions.push(row.version);
+    }
+    let mut ids = Vec::with_capacity(edits.len());
+    for (edit, version) in edits.iter().zip(versions) {
+        let id = propose_step(journal);
+        let effect_id = ids.first().copied().unwrap_or(id);
+        let step = journal
+            .steps
+            .iter_mut()
+            .find(|step| step.id == id)
+            .expect("just pushed");
+        step.kind = ProposalKind::Edit;
+        step.resource = edit.resource.to_string();
+        step.old = edit.old.to_string();
+        step.new = edit.new.to_string();
+        step.seen_version = Some(version);
+        step.effect_id = effect_id;
+        ids.push(id);
+    }
+    Ok(ids)
+}
+
+/// One file of a change, checked against the journal now: the revision it
+/// was read at and the run of shown lines that holds its old text.
+#[cfg(any(test, target_arch = "wasm32"))]
+struct BoundEdit {
+    step_id: u64,
+    resource: String,
+    revision: String,
+    version: u64,
+    whole: bool,
+    first_line: u64,
+    run: String,
+    old: String,
+    new: String,
+}
+
+/// Check every file of one change, before anything is sent or recorded.
+/// Each step must be a dispatched edit with a grant and no result; no write
+/// outside this change may still be open; the file's current read must be
+/// the version the edit was made against, carry a revision, and still show
+/// the old text exactly once. One miss refuses the whole change.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn bind_change(journal: &Journal, effect_id: u64) -> Result<Vec<BoundEdit>, &'static str> {
+    let steps: Vec<&Step> = journal
+        .steps
+        .iter()
+        .filter(|step| step.kind == ProposalKind::Edit && step.effect_id == effect_id)
+        .collect();
+    if steps.is_empty() {
+        return Err("no change");
+    }
+    let mut bound = Vec::with_capacity(steps.len());
+    for step in steps {
+        if step.state != StepState::Dispatched
+            || step.grant.as_deref().is_none_or(str::is_empty)
+            || step.has_result
+        {
+            return Err("not dispatched");
+        }
+        if earlier_write_is_open(journal, step.id) {
+            return Err("an earlier write is open");
+        }
+        let Some(row) = current_observation(&journal.events, &step.resource) else {
+            return Err("not observed");
+        };
+        if step.seen_version != Some(row.version) {
+            return Err("stale");
+        }
+        let Some(revision) = row.revision.clone() else {
+            return Err("no revision");
+        };
+        if step.old.is_empty() {
+            return Err("empty");
+        }
+        let (first_line, run) =
+            find_in_seen(&journal.events, &step.resource, row.version, &step.old)?;
+        let whole = seen_runs(&journal.events, &step.resource, row.version)
+            .is_some_and(|runs| runs.len() == 1)
+            && first_line == 1
+            && events_show_whole(&journal.events, &step.resource, row.version);
+        edit_keeps_its_window(&run, whole, &step.old, &step.new)?;
+        bound.push(BoundEdit {
+            step_id: step.id,
+            resource: step.resource.clone(),
+            revision,
+            version: row.version,
+            whole,
+            first_line,
+            run,
+            old: step.old.clone(),
+            new: step.new.clone(),
+        });
+    }
+    Ok(bound)
+}
+
+/// Some read of this version showed the whole file.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn events_show_whole(events: &[SurfaceNode], resource: &str, version: u64) -> bool {
+    events.iter().any(|node| {
+        read_observation(node).is_some_and(|row| {
+            row.resource == resource && row.version == version && row.window.is_none()
+        })
+    })
+}
+
+/// The one provider request for a change: every file, each with the Runtime
+/// revision it was read at (`if_revision`), the lines it may touch, and the
+/// text to replace there. The provider applies all files or none. A change
+/// that does not bind sends nothing.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn edit_request(journal: &Journal, effect_id: u64) -> Result<Vec<u8>, &'static str> {
+    let bound = bind_change(journal, effect_id)?;
+    let files: Vec<serde_json::Value> = bound
+        .iter()
+        .map(|edit| {
+            serde_json::json!({
+                "path": edit.resource,
+                "if_revision": edit.revision,
+                "first_line": edit.first_line,
+                "line_count": line_count(&edit.run),
+                "old": edit.old,
+                "new": edit.new,
+            })
+        })
+        .collect();
+    serde_json::to_vec(&serde_json::json!({ "op": "edit", "all_or_none": true, "files": files }))
+        .map_err(|_| "encode")
+}
+
+/// Record that the provider wrote a whole change. `written` names each file
+/// of the change once, with the revision the provider gave its new text.
+/// Every file is checked first; one miss records nothing for any file and
+/// denies every step of the change. Each file then gets a new read: the
+/// whole new text when the old version was read whole, otherwise only the
+/// edited lines. This does not write a file.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn note_change_wrote(
+    journal: &mut Journal,
+    effect_id: u64,
+    written: &[(&str, &str)],
+) -> Result<(), &'static str> {
+    let deny = |journal: &mut Journal| {
+        for step in journal.steps.iter_mut() {
+            if step.kind == ProposalKind::Edit
+                && step.effect_id == effect_id
+                && step.state == StepState::Dispatched
+                && !step.has_result
+            {
+                step.state = StepState::Denied;
+            }
+        }
+    };
+    let bound = match bind_change(journal, effect_id) {
+        Ok(bound) => bound,
+        Err(reason) => {
+            if reason != "no change" {
+                deny(journal);
+            }
+            return Err(reason);
+        }
+    };
+    let mut revisions = Vec::with_capacity(bound.len());
+    for edit in &bound {
+        let named: Vec<&str> = written
+            .iter()
+            .filter(|(resource, _)| *resource == edit.resource)
+            .map(|(_, revision)| *revision)
+            .collect();
+        match named.as_slice() {
+            [revision] if revision_ok(revision) => revisions.push(*revision),
+            _ => {
+                deny(journal);
+                return Err("written files do not match the change");
+            }
+        }
+    }
+    if written.len() != bound.len() {
+        deny(journal);
+        return Err("written files do not match the change");
+    }
+    for (edit, revision) in bound.iter().zip(revisions) {
+        let new_run = edit.run.replacen(&edit.old, &edit.new, 1);
+        let version = edit.version.saturating_add(1);
+        let record = if edit.whole {
+            bound_observation_record(&edit.resource, version, revision, None, false, &new_run)
+        } else {
+            let count = line_count(&new_run);
+            bound_observation_record(
+                &edit.resource,
+                version,
+                revision,
+                Some((edit.first_line, count)),
+                false,
+                &new_run,
+            )
+        };
+        journal.events.push(SurfaceNode {
+            role: Role::User,
+            text: record,
+            source: NodeSource::Observation,
+        });
+        journal.events.push(SurfaceNode {
+            role: Role::ToolResult,
+            text: new_run,
+            source: NodeSource::InHistory,
+        });
+        if let Some(step) = journal
+            .steps
+            .iter_mut()
+            .find(|step| step.id == edit.step_id)
+        {
+            step.has_result = true;
+        }
+    }
+    Ok(())
 }
 
 /// Whether Runtime may be asked to write. A missing grant or a version that
@@ -1513,6 +2091,14 @@ fn note_provider_wrote(journal: &mut Journal, step_id: u64) -> bool {
         return false;
     };
     let step = &journal.steps[index];
+    // A step of a change of several files is written only with its change.
+    if journal
+        .steps
+        .iter()
+        .any(|other| other.id != step.id && other.effect_id == step.effect_id)
+    {
+        return false;
+    }
     if step.kind != ProposalKind::Edit
         || step.state != StepState::Dispatched
         || step.grant.as_deref().is_none_or(|grant| grant.is_empty())
@@ -1588,11 +2174,13 @@ fn propose_run(
 #[cfg(any(test, target_arch = "wasm32"))]
 const RUN_LOG_BUDGET: usize = 4_000;
 
-/// Current text of each file under a project. A host path produces nothing.
+/// Current text of each file under a project. A host path produces nothing,
+/// and so does a file whose last read showed only a window: its whole text
+/// is not known.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn observed_project_files(events: &[SurfaceNode], project: &str) -> Option<Vec<(String, String)>> {
     let prefix = format!("{project}/");
-    let mut files: Vec<(String, String)> = Vec::new();
+    let mut files: Vec<(String, Option<String>)> = Vec::new();
     for node in events {
         let Some(row) = read_observation(node) else {
             continue;
@@ -1603,7 +2191,10 @@ fn observed_project_files(events: &[SurfaceNode], project: &str) -> Option<Vec<(
         if relative.is_empty() || relative.starts_with('/') || host_path(relative) {
             return None;
         }
-        let text = node.text.split_once('\n')?.1.to_string();
+        let text = match row.window {
+            Some(_) => None,
+            None => Some(node.text.split_once('\n')?.1.to_string()),
+        };
         if let Some(existing) = files.iter_mut().find(|(path, _)| path == relative) {
             existing.1 = text;
         } else {
@@ -1611,10 +2202,12 @@ fn observed_project_files(events: &[SurfaceNode], project: &str) -> Option<Vec<(
         }
     }
     if files.is_empty() {
-        None
-    } else {
-        Some(files)
+        return None;
     }
+    files
+        .into_iter()
+        .map(|(path, text)| text.map(|text| (path, text)))
+        .collect()
 }
 
 /// The log may name a project digest only when it is the digest of the
@@ -1886,7 +2479,7 @@ fn is_write(kind: ProposalKind) -> bool {
 fn observed_text_at(events: &[SurfaceNode], resource: &str, version: u64) -> Option<String> {
     events.iter().rev().find_map(|node| {
         let row = read_observation(node)?;
-        if row.resource != resource || row.version != version {
+        if row.resource != resource || row.version != version || row.window.is_some() {
             return None;
         }
         node.text.split_once('\n').map(|(_, text)| text.to_string())
@@ -3362,6 +3955,96 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         {
             return Err(elastos::bus::types::BusError::Invalid(
                 "a provider write changed the journal".to_string(),
+            ));
+        }
+        // Seen range and edit binding: an edit touches only lines that were
+        // shown, names the revision it read, and a change of two files is
+        // written all or none.
+        let mut bound = empty_journal();
+        let notes = "localhost://Users/self/Documents/notes.txt";
+        let style = "localhost://Users/self/Documents/style.css";
+        if !observe_read(&mut bound, notes, 1, "rn-1", Some(2), true, "beta\ngam")
+            || !observe_read(&mut bound, style, 1, "rs-1", None, false, "body{}\n")
+            || propose_change(
+                &mut bound,
+                &[EditSpec {
+                    resource: notes,
+                    revision: "rn-1",
+                    old: "gam",
+                    new: "g",
+                }],
+            ) != Err((0, "outside the read window"))
+            || propose_change(
+                &mut bound,
+                &[EditSpec {
+                    resource: style,
+                    revision: "rs-0",
+                    old: "body",
+                    new: "h1",
+                }],
+            ) != Err((0, "stale revision"))
+            || !bound.steps.is_empty()
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "an unread or stale edit was accepted".to_string(),
+            ));
+        }
+        let change = propose_change(
+            &mut bound,
+            &[
+                EditSpec {
+                    resource: notes,
+                    revision: "rn-1",
+                    old: "beta",
+                    new: "two",
+                },
+                EditSpec {
+                    resource: style,
+                    revision: "rs-1",
+                    old: "body",
+                    new: "h1",
+                },
+            ],
+        )
+        .map_err(|_| {
+            elastos::bus::types::BusError::Invalid("the change was refused".to_string())
+        })?;
+        for id in &change {
+            if !authorize(&mut bound, *id, Some("fixture-grant")) || !dispatch(&mut bound, *id) {
+                return Err(elastos::bus::types::BusError::Invalid(
+                    "the change was not dispatched".to_string(),
+                ));
+            }
+        }
+        let request = edit_request(&bound, change[0])
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        let revisions = request
+            .as_ref()
+            .and_then(|body| body["files"].as_array())
+            .map(|files| {
+                files
+                    .iter()
+                    .map(|file| file["if_revision"].as_str().unwrap_or_default().to_string())
+                    .collect::<Vec<_>>()
+            });
+        if revisions != Some(vec!["rn-1".to_string(), "rs-1".to_string()])
+            || note_change_wrote(&mut bound, change[0], &[(notes, "rn-2")]).is_ok()
+            || bound.events.len() != 2
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "a change was sent without its revisions or written in part".to_string(),
+            ));
+        }
+        let mut noop = empty_journal();
+        if !observe_read(&mut noop, notes, 1, "rn-1", None, false, "alpha\n")
+            || (0..NOOP_EDIT_LIMIT)
+                .any(|_| propose_edit(&mut noop, notes, "alpha", "alpha", Some(1)).is_err())
+            || propose_edit(&mut noop, notes, "alpha", "alpha", Some(1))
+                != Err("repeated no-op edit")
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "a repeated no-op edit was accepted".to_string(),
             ));
         }
         let project = "localhost://Users/self/Projects/demo";
@@ -6729,6 +7412,9 @@ mod tests {
                 resource: resource.to_string(),
                 version: 1,
                 text_hash: sha256(b"one line"),
+                revision: None,
+                window: None,
+                cut: false,
             }
         );
         assert!(observe(&mut journal, resource, 2, "two lines"));
@@ -12383,5 +13069,624 @@ mod tests {
             );
         }
         assert!(runtime.calls.is_empty());
+    }
+
+    // omp idea 1: seen range and edit binding.
+
+    const NOTES: &str = "localhost://Users/self/Documents/notes.txt";
+    const STYLE: &str = "localhost://Users/self/Documents/style.css";
+
+    fn spec<'a>(resource: &'a str, revision: &'a str, old: &'a str, new: &'a str) -> EditSpec<'a> {
+        EditSpec {
+            resource,
+            revision,
+            old,
+            new,
+        }
+    }
+
+    fn granted(journal: &mut Journal, ids: &[u64]) {
+        for id in ids {
+            assert!(authorize(journal, *id, Some("fixture-grant")));
+        }
+        for id in ids {
+            assert!(dispatch(journal, *id), "dispatch {id}");
+        }
+    }
+
+    #[test]
+    fn an_edit_outside_the_read_window_creates_no_step() {
+        let mut journal = empty_journal();
+        assert!(observe(
+            &mut journal,
+            NOTES,
+            1,
+            "alpha\nbeta\ngamma\ndelta\n"
+        ));
+        // Version 2 is shown only from line 3. "alpha" was seen in version 1,
+        // not in version 2.
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            2,
+            "rev-2",
+            Some(3),
+            false,
+            "gamma\ndelta\n"
+        ));
+        assert_eq!(
+            propose_edit(&mut journal, NOTES, "alpha", "one", Some(2)),
+            Err("outside the read window")
+        );
+        assert_eq!(
+            propose_change(&mut journal, &[spec(NOTES, "rev-2", "alpha", "one")]),
+            Err((0, "outside the read window"))
+        );
+        // Two parts of version 3 with line 2 never shown: an edit across the
+        // gap is outside what was read.
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            3,
+            "rev-3",
+            Some(1),
+            false,
+            "alpha\n"
+        ));
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            3,
+            "rev-3",
+            Some(3),
+            false,
+            "gamma\n"
+        ));
+        assert_eq!(
+            propose_change(&mut journal, &[spec(NOTES, "rev-3", "alpha\nbeta", "x")]),
+            Err((0, "outside the read window"))
+        );
+        assert_eq!(
+            propose_change(&mut journal, &[spec(NOTES, "rev-3", "alpha\ngamma", "x")]),
+            Err((0, "outside the read window"))
+        );
+        // A cut read: the partial last line is shown but not seen.
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            4,
+            "rev-4",
+            Some(1),
+            true,
+            "alpha\nbet"
+        ));
+        assert_eq!(
+            propose_change(&mut journal, &[spec(NOTES, "rev-4", "bet", "x")]),
+            Err((0, "outside the read window"))
+        );
+        assert!(journal.steps.is_empty(), "no refusal made a step");
+        // Inside the window the edit is a step, bound to the version it read.
+        let ids = propose_change(&mut journal, &[spec(NOTES, "rev-4", "alpha", "one")]).unwrap();
+        let step = journal.steps.iter().find(|step| step.id == ids[0]).unwrap();
+        assert_eq!(step.seen_version, Some(4));
+        assert_eq!(step.effect_id, ids[0]);
+    }
+
+    #[test]
+    fn an_edit_names_the_revision_it_read() {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rev-1",
+            None,
+            false,
+            "alpha beta\n"
+        ));
+        assert!(observe(&mut journal, STYLE, 1, "body{}\n"));
+        assert_eq!(
+            propose_change(&mut journal, &[spec(NOTES, "rev-0", "alpha", "one")]),
+            Err((0, "stale revision"))
+        );
+        assert_eq!(
+            propose_change(&mut journal, &[spec(STYLE, "rev-1", "body", "h1")]),
+            Err((0, "no revision"))
+        );
+        assert!(journal.steps.is_empty());
+        let ids = propose_change(&mut journal, &[spec(NOTES, "rev-1", "alpha", "one")]).unwrap();
+        assert_eq!(edit_request(&journal, ids[0]), Err("not dispatched"));
+        granted(&mut journal, &ids);
+        let body: serde_json::Value =
+            serde_json::from_slice(&edit_request(&journal, ids[0]).unwrap()).unwrap();
+        assert_eq!(body["op"], "edit");
+        assert_eq!(body["all_or_none"], true);
+        assert_eq!(body["files"].as_array().unwrap().len(), 1);
+        let file = &body["files"][0];
+        assert_eq!(file["path"], NOTES);
+        assert_eq!(file["if_revision"], "rev-1");
+        assert_eq!(file["first_line"], 1);
+        assert_eq!(file["line_count"], 1);
+        assert_eq!(file["old"], "alpha");
+        assert_eq!(file["new"], "one");
+        // An edit made on a read with no revision has nothing to send.
+        let mut unbound = empty_journal();
+        assert!(observe(&mut unbound, STYLE, 1, "body{}\n"));
+        let legacy = propose_edit(&mut unbound, STYLE, "body", "h1", Some(1)).unwrap();
+        granted(&mut unbound, &[legacy]);
+        assert_eq!(edit_request(&unbound, legacy), Err("no revision"));
+        // A newer read arrives before the write: the change is stale, sends
+        // nothing, and records nothing.
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            2,
+            "rev-2",
+            None,
+            false,
+            "alpha gamma\n"
+        ));
+        assert_eq!(edit_request(&journal, ids[0]), Err("stale"));
+        let events = journal.events.clone();
+        assert_eq!(
+            note_change_wrote(&mut journal, ids[0], &[(NOTES, "rev-3")]),
+            Err("stale")
+        );
+        assert_eq!(journal.events, events);
+        assert_eq!(step_state(&journal, ids[0]), Some(StepState::Denied));
+    }
+
+    #[test]
+    fn a_repeated_no_op_edit_is_refused() {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rev-1",
+            None,
+            false,
+            "alpha beta\n"
+        ));
+        for _ in 0..NOOP_EDIT_LIMIT {
+            assert!(propose_edit(&mut journal, NOTES, "alpha", "alpha", Some(1)).is_ok());
+        }
+        let steps = journal.steps.len();
+        assert_eq!(
+            propose_edit(&mut journal, NOTES, "alpha", "alpha", Some(1)),
+            Err("repeated no-op edit")
+        );
+        assert_eq!(
+            propose_change(&mut journal, &[spec(NOTES, "rev-1", "alpha", "alpha")]),
+            Err((0, "repeated no-op edit"))
+        );
+        assert_eq!(journal.steps.len(), steps);
+        // A real edit, and a different no-op, are still allowed.
+        assert!(propose_edit(&mut journal, NOTES, "alpha", "one", Some(1)).is_ok());
+        assert!(propose_edit(&mut journal, NOTES, "beta", "beta", Some(1)).is_ok());
+    }
+
+    #[test]
+    fn a_two_file_change_writes_both_or_neither() {
+        let start = || {
+            let mut journal = empty_journal();
+            assert!(observe_read(
+                &mut journal,
+                NOTES,
+                1,
+                "rn-1",
+                None,
+                false,
+                "alpha\n"
+            ));
+            assert!(observe_read(
+                &mut journal,
+                STYLE,
+                1,
+                "rs-1",
+                None,
+                false,
+                "body{}\n"
+            ));
+            let ids = propose_change(
+                &mut journal,
+                &[
+                    spec(NOTES, "rn-1", "alpha", "one"),
+                    spec(STYLE, "rs-1", "body", "h1"),
+                ],
+            )
+            .unwrap();
+            let effects: Vec<u64> = ids
+                .iter()
+                .map(|id| {
+                    journal
+                        .steps
+                        .iter()
+                        .find(|step| step.id == *id)
+                        .unwrap()
+                        .effect_id
+                })
+                .collect();
+            assert_eq!(effects, vec![ids[0], ids[0]], "one change, one effect");
+            granted(&mut journal, &ids);
+            (journal, ids)
+        };
+
+        // Both written.
+        let (mut journal, ids) = start();
+        let body: serde_json::Value =
+            serde_json::from_slice(&edit_request(&journal, ids[0]).unwrap()).unwrap();
+        assert_eq!(body["files"].as_array().unwrap().len(), 2);
+        assert_eq!(body["files"][1]["if_revision"], "rs-1");
+        assert_eq!(
+            note_change_wrote(&mut journal, ids[0], &[(NOTES, "rn-2"), (STYLE, "rs-2")]),
+            Ok(())
+        );
+        for (resource, revision, text) in [(NOTES, "rn-2", "one\n"), (STYLE, "rs-2", "h1{}\n")] {
+            let row = current_observation(&journal.events, resource).unwrap();
+            assert_eq!((row.version, row.revision.as_deref()), (2, Some(revision)));
+            assert_eq!(
+                current_observed_text(&journal.events, resource).unwrap(),
+                text
+            );
+        }
+        assert!(ids.iter().all(|id| journal
+            .steps
+            .iter()
+            .find(|step| step.id == *id)
+            .unwrap()
+            .has_result));
+
+        // The second file was read again before the write: neither is written.
+        let (mut journal, ids) = start();
+        assert!(observe_read(
+            &mut journal,
+            STYLE,
+            2,
+            "rs-2",
+            None,
+            false,
+            "p{}\n"
+        ));
+        let events = journal.events.clone();
+        assert_eq!(
+            note_change_wrote(&mut journal, ids[0], &[(NOTES, "rn-2"), (STYLE, "rs-3")]),
+            Err("stale")
+        );
+        assert_eq!(journal.events, events, "the first file was not recorded");
+        assert_eq!(
+            current_observation(&journal.events, NOTES).unwrap().version,
+            1
+        );
+        for id in &ids {
+            assert_eq!(step_state(&journal, *id), Some(StepState::Denied));
+        }
+
+        // The provider names only one file: neither is recorded.
+        let (mut journal, ids) = start();
+        let events = journal.events.clone();
+        assert_eq!(
+            note_change_wrote(&mut journal, ids[0], &[(NOTES, "rn-2")]),
+            Err("written files do not match the change")
+        );
+        assert_eq!(journal.events, events);
+
+        // One file of the change cannot be written alone.
+        let (mut journal, ids) = start();
+        let events = journal.events.clone();
+        assert!(!note_provider_wrote(&mut journal, ids[0]));
+        assert!(!note_provider_wrote(&mut journal, ids[1]));
+        assert_eq!(journal.events, events);
+    }
+
+    #[test]
+    fn a_change_that_fails_on_any_file_stages_nothing() {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rn-1",
+            None,
+            false,
+            "alpha\n"
+        ));
+        assert!(observe_read(
+            &mut journal,
+            STYLE,
+            1,
+            "rs-1",
+            Some(5),
+            false,
+            "body{}\n"
+        ));
+        let before = journal.clone();
+        for (edits, refused) in [
+            (
+                vec![
+                    spec(NOTES, "rn-1", "alpha", "one"),
+                    spec(STYLE, "rs-1", "p", "h1"),
+                ],
+                (1, "outside the read window"),
+            ),
+            (
+                vec![
+                    spec(NOTES, "rn-1", "alpha", "one"),
+                    spec(NOTES, "rn-1", "alpha", "two"),
+                ],
+                (1, "one file twice in one change"),
+            ),
+            (
+                vec![
+                    spec(NOTES, "rn-1", "alpha", "one"),
+                    spec(STYLE, "rs-0", "body", "h1"),
+                ],
+                (1, "stale revision"),
+            ),
+            (
+                vec![
+                    spec(NOTES, "rn-1", "alpha", "one"),
+                    spec("localhost://Users/self/x", "r", "a", "b"),
+                ],
+                (1, "not observed"),
+            ),
+            (vec![], (0, "change size")),
+        ] {
+            assert_eq!(propose_change(&mut journal, &edits), Err(refused));
+            assert_eq!(journal, before, "{refused:?}");
+        }
+        let many: Vec<String> = (0..=CHANGE_FILES_LIMIT)
+            .map(|index| format!("localhost://Users/self/f{index}"))
+            .collect();
+        let edits: Vec<EditSpec<'_>> = many.iter().map(|path| spec(path, "r", "a", "b")).collect();
+        assert_eq!(
+            propose_change(&mut journal, &edits),
+            Err((0, "change size"))
+        );
+        assert_eq!(journal, before);
+    }
+
+    #[test]
+    fn a_windowed_change_records_only_the_edited_lines() {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rev-1",
+            Some(10),
+            false,
+            "ten\neleven\n"
+        ));
+        let ids =
+            propose_change(&mut journal, &[spec(NOTES, "rev-1", "eleven", "11\n11b")]).unwrap();
+        granted(&mut journal, &ids);
+        let body: serde_json::Value =
+            serde_json::from_slice(&edit_request(&journal, ids[0]).unwrap()).unwrap();
+        assert_eq!(body["files"][0]["first_line"], 10);
+        assert_eq!(body["files"][0]["line_count"], 2);
+        assert_eq!(
+            note_change_wrote(&mut journal, ids[0], &[(NOTES, "rev-2")]),
+            Ok(())
+        );
+        let row = current_observation(&journal.events, NOTES).unwrap();
+        assert_eq!((row.version, row.window), (2, Some((10, 3))));
+        assert_eq!(
+            seen_runs(&journal.events, NOTES, 2).unwrap(),
+            vec![(10, "ten\n11\n11b\n".to_string())]
+        );
+        assert_eq!(current_observed_text(&journal.events, NOTES), None);
+        // An edit may not remove the window's last line break: the edited
+        // line would join line 13, which nobody has seen.
+        assert_eq!(
+            propose_change(&mut journal, &[spec(NOTES, "rev-2", "11b\n", "x")]),
+            Err((0, "edit removes the window's last line break"))
+        );
+        assert_eq!(
+            propose_change(&mut journal, &[spec(NOTES, "rev-2", "11b", "/etc/passwd")]),
+            Err((0, "host path"))
+        );
+        // The same edit on a whole read is fine: the end of the file is seen.
+        let mut whole = empty_journal();
+        assert!(observe_read(
+            &mut whole, NOTES, 1, "rev-1", None, false, "a\nb\n"
+        ));
+        assert!(propose_change(&mut whole, &[spec(NOTES, "rev-1", "b\n", "b")]).is_ok());
+    }
+
+    #[test]
+    fn a_window_is_not_a_whole_file() {
+        let mut journal = empty_journal();
+        assert!(observe(&mut journal, NOTES, 1, "alpha\n"));
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            2,
+            "rev-2",
+            Some(4),
+            false,
+            "delta\n"
+        ));
+        assert_eq!(current_observed_text(&journal.events, NOTES), None);
+        assert_eq!(observed_text_at(&journal.events, NOTES, 2), None);
+        assert_eq!(
+            version_list(&journal.events, NOTES),
+            vec![(1, "alpha\n".to_string())]
+        );
+        assert_eq!(propose_restore(&mut journal, NOTES, 2), Err("unknown"));
+        // An edit on the window may be proposed, but only a change can write it.
+        let id = propose_edit(&mut journal, NOTES, "delta", "four", Some(2)).unwrap();
+        granted(&mut journal, &[id]);
+        assert!(!note_provider_wrote(&mut journal, id));
+        assert_eq!(
+            current_observation(&journal.events, NOTES).unwrap().version,
+            2
+        );
+        // A project with a file last read in part has no tree text to quote.
+        let project = "localhost://Users/self/Projects/demo";
+        let mut tree = empty_journal();
+        assert!(observe(&mut tree, &format!("{project}/a.txt"), 1, "a\n"));
+        assert!(observed_project_files(&tree.events, project).is_some());
+        assert!(observe_read(
+            &mut tree,
+            &format!("{project}/b.txt"),
+            1,
+            "r",
+            Some(2),
+            false,
+            "b\n"
+        ));
+        assert_eq!(observed_project_files(&tree.events, project), None);
+    }
+
+    #[test]
+    fn reads_of_one_version_must_agree() {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            2,
+            "rev-2",
+            Some(1),
+            false,
+            "a\nb\n"
+        ));
+        // Another part of the same version, same revision: kept.
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            2,
+            "rev-2",
+            Some(2),
+            false,
+            "b\nc\n"
+        ));
+        let before = journal.clone();
+        for (version, revision, window, cut, text) in [
+            (2, "rev-x", Some(3), false, "c\n"), // another revision for this version
+            (2, "rev-2", Some(2), false, "B\n"), // a line that disagrees
+            (1, "rev-1", None, false, "a\n"),    // an older version
+            (3, "rev-3", Some(1), false, ""),    // no whole line
+            (3, "rev-3", Some(1), true, "partial"), // only a partial line
+            (3, "rev-3", Some(0), false, "a\n"), // line 0
+            (3, "rev-3", None, true, "a\nb"),    // cut needs a window
+            (3, "two words", None, false, "a\n"), // a revision is one word
+            (3, "", None, false, "a\n"),         // and is not empty
+        ] {
+            assert!(
+                !observe_read(&mut journal, NOTES, version, revision, window, cut, text),
+                "{version} {revision:?} {window:?} {cut} {text:?}"
+            );
+            assert_eq!(journal, before);
+        }
+        // A whole read fixes the line count: a part past it is refused, and a
+        // whole read shorter than the parts already shown is refused.
+        assert!(!observe_read(
+            &mut journal,
+            NOTES,
+            2,
+            "rev-2",
+            None,
+            false,
+            "a\nb\n"
+        ));
+        let mut whole = empty_journal();
+        assert!(observe_read(
+            &mut whole, NOTES, 1, "rev-1", None, false, "a\nb\n"
+        ));
+        assert!(!observe_read(
+            &mut whole,
+            NOTES,
+            1,
+            "rev-1",
+            Some(3),
+            false,
+            "c\n"
+        ));
+        assert!(observe_read(
+            &mut whole,
+            NOTES,
+            1,
+            "rev-1",
+            Some(2),
+            false,
+            "b\n"
+        ));
+    }
+
+    #[test]
+    fn an_observation_row_with_an_unknown_word_is_not_a_read() {
+        let row = |head: &str, text: &str| {
+            let hash = sha256(text.as_bytes());
+            let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
+            SurfaceNode {
+                role: Role::User,
+                text: format!("1 {hex} {NOTES}{head}\n{text}"),
+                source: NodeSource::Observation,
+            }
+        };
+        assert!(read_observation(&row("", "a\n")).is_some());
+        assert!(read_observation(&row(" revision=r", "a\n")).is_some());
+        assert!(read_observation(&row(" revision=r lines=2+1", "a\n")).is_some());
+        assert!(read_observation(&row(" revision=r lines=2+1 cut", "a\nb")).is_some());
+        for (head, text) in [
+            (" extra", "a\n"),
+            (" revision=r revision=r", "a\n"),
+            (" revision=", "a\n"),
+            (" lines=2+1", "a\n"),
+            (" revision=r lines=0+1", "a\n"),
+            (" revision=r lines=2+2", "a\n"),
+            (" revision=r lines=2+1 cut", "a\n"),
+            (" revision=r cut", "a\nb"),
+            (" revision=r lines=2", "a\n"),
+            (" revision=r lines=2+1 lines=2+1", "a\n"),
+        ] {
+            assert_eq!(read_observation(&row(head, text)), None, "{head:?}");
+        }
+    }
+
+    #[test]
+    fn a_bound_change_survives_the_journal_round_trip() {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rn-1",
+            Some(3),
+            true,
+            "c\nd\npart"
+        ));
+        assert!(observe_read(
+            &mut journal,
+            STYLE,
+            1,
+            "rs-1",
+            None,
+            false,
+            "body{}\n"
+        ));
+        let ids = propose_change(
+            &mut journal,
+            &[
+                spec(NOTES, "rn-1", "d", "D"),
+                spec(STYLE, "rs-1", "body", "h1"),
+            ],
+        )
+        .unwrap();
+        let bytes = encode_journal(&journal, &[0; 32]).unwrap();
+        let (decoded, _, _) = decode_journal(&bytes).unwrap();
+        assert_eq!(decoded, without_grants(&journal));
+        assert_eq!(
+            current_observation(&decoded.events, NOTES).unwrap().window,
+            Some((3, 2))
+        );
+        let effects: Vec<u64> = decoded
+            .steps
+            .iter()
+            .filter(|step| ids.contains(&step.id))
+            .map(|step| step.effect_id)
+            .collect();
+        assert_eq!(effects, vec![ids[0], ids[0]]);
     }
 }
