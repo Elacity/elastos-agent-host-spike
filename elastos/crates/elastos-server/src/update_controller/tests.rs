@@ -1256,7 +1256,11 @@ async fn ready_home_cleanup(backup: &str, role: &str) -> ReadyHomeCleanup {
     );
     let backup = fixture.data.join(backup);
     if let Some(parent) = backup.parent().filter(|parent| !parent.exists()) {
-        fs::DirBuilder::new().mode(0o700).create(parent).unwrap();
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
+            .unwrap();
     }
     crate::auth::migrate_principal_root_objects_offline(&fixture.data, &plan_path, &backup)
         .unwrap();
@@ -1389,52 +1393,59 @@ async fn migration_cleanup_requires_a_fresh_installed_home_proof() {
     assert_eq!(home_requests.load(Ordering::SeqCst), 2);
 }
 
+fn plaintext_backups(directory: &Path) -> usize {
+    fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .map(|entry| {
+            if entry.file_type().unwrap().is_dir() {
+                plaintext_backups(&entry.path())
+            } else {
+                usize::from(
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with(".plaintext.backup"),
+                )
+            }
+        })
+        .sum()
+}
+
+/// Model an older release: plaintext payload, a receipt binding its hash and
+/// no cleanup record. Returns the rewritten receipt.
+fn model_legacy_plaintext_backup(home: &ReadyHomeCleanup) -> Value {
+    let receipt_path = home.backup.join("receipt.json");
+    let mut receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    let plaintext_sha256 = receipt["objects"][0]["plaintext_sha256"].clone();
+    receipt["objects"][0]["backup_sha256"] = plaintext_sha256;
+    fs::remove_file(&receipt_path).unwrap();
+    home.fixture
+        .file(&receipt_path, &serde_json::to_vec(&receipt).unwrap(), 0o600);
+    let legacy = PathBuf::from(
+        home.payload
+            .to_string_lossy()
+            .replace(".encrypted.backup", ".plaintext.backup"),
+    );
+    fs::remove_file(&home.payload).unwrap();
+    home.fixture.file(&legacy, b"private legacy save", 0o600);
+    let records = crate::auth::auth_state_path(&home.fixture.data)
+        .unwrap()
+        .with_file_name("principal-root-migration-cleanup");
+    for record in fs::read_dir(&records).unwrap() {
+        fs::remove_file(record.unwrap().path()).unwrap();
+    }
+    receipt
+}
+
 #[tokio::test]
 async fn local_and_public_home_starts_remove_legacy_plaintext_backups() {
     use std::sync::atomic::Ordering;
-    fn plaintext_backups(directory: &Path) -> usize {
-        fs::read_dir(directory)
-            .unwrap()
-            .map(|entry| entry.unwrap())
-            .map(|entry| {
-                if entry.file_type().unwrap().is_dir() {
-                    plaintext_backups(&entry.path())
-                } else {
-                    usize::from(
-                        entry
-                            .file_name()
-                            .to_string_lossy()
-                            .ends_with(".plaintext.backup"),
-                    )
-                }
-            })
-            .sum()
-    }
     for role in ["gateway", "gateway-public"] {
         let home = ready_home_cleanup("backups/principal-root-migration-legacy", role).await;
         let data = home.fixture.data.clone();
-        // Model an older release: plaintext payload, a receipt binding its hash
-        // and no cleanup record.
         let receipt_path = home.backup.join("receipt.json");
-        let mut receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
-        let plaintext_sha256 = receipt["objects"][0]["plaintext_sha256"].clone();
-        receipt["objects"][0]["backup_sha256"] = plaintext_sha256;
-        fs::remove_file(&receipt_path).unwrap();
-        home.fixture
-            .file(&receipt_path, &serde_json::to_vec(&receipt).unwrap(), 0o600);
-        let legacy = PathBuf::from(
-            home.payload
-                .to_string_lossy()
-                .replace(".encrypted.backup", ".plaintext.backup"),
-        );
-        fs::remove_file(&home.payload).unwrap();
-        home.fixture.file(&legacy, b"private legacy save", 0o600);
-        let records = crate::auth::auth_state_path(&data)
-            .unwrap()
-            .with_file_name("principal-root-migration-cleanup");
-        for record in fs::read_dir(&records).unwrap() {
-            fs::remove_file(record.unwrap().path()).unwrap();
-        }
+        model_legacy_plaintext_backup(&home);
         home.accepted.store(true, Ordering::SeqCst);
         tokio::time::timeout(
             Duration::from_secs(30),
@@ -1447,6 +1458,81 @@ async fn local_and_public_home_starts_remove_legacy_plaintext_backups() {
         home.stop().await;
         assert_eq!(plaintext_left, 0, "{role}");
         assert!(receipt_retained, "{role}");
+    }
+}
+
+/// The 0.7.x offline upgrade wrote `upgrade-receipt.json` beside one
+/// `root-NNN` migration directory per principal root, and wrote that receipt
+/// only after every root committed.
+#[tokio::test]
+async fn home_start_removes_legacy_upgrade_plaintext_only_after_its_committed_receipt() {
+    use std::sync::atomic::Ordering;
+    #[derive(Clone)]
+    struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    for committed in [true, false] {
+        let home =
+            ready_home_cleanup("backups/principal-root-upgrade-legacy/root-000", "gateway").await;
+        let data = home.fixture.data.clone();
+        let upgrade = home.backup.parent().unwrap().to_path_buf();
+        let root_receipt_path = home.backup.join("receipt.json");
+        let upgrade_receipt_path = upgrade.join("upgrade-receipt.json");
+        let root_receipt = model_legacy_plaintext_backup(&home);
+        if committed {
+            home.fixture.file(
+                &upgrade_receipt_path,
+                &serde_json::to_vec_pretty(&json!({
+                    "schema":"elastos.principal-root.upgrade-receipt/v1", "status":"migrated",
+                    "root_count":1, "object_count":1, "roots":[root_receipt]
+                }))
+                .unwrap(),
+                0o600,
+            );
+        }
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer({
+                let log = log.clone();
+                move || LogWriter(log.clone())
+            })
+            .finish();
+        let logging = tracing::subscriber::set_default(subscriber);
+        home.accepted.store(true, Ordering::SeqCst);
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            finalize_principal_root_backups_after_start(data.clone()),
+        )
+        .await
+        .unwrap();
+        drop(logging);
+        let plaintext_left = plaintext_backups(&data.join("backups"));
+        let root_receipt_retained = root_receipt_path.is_file();
+        let upgrade_receipt_retained = upgrade_receipt_path.is_file();
+        let output = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        home.stop().await;
+        assert!(root_receipt_retained, "committed={committed}");
+        assert_eq!(upgrade_receipt_retained, committed);
+        if committed {
+            assert_eq!(plaintext_left, 0);
+            assert!(!output.contains("Migration backup retained"), "{output}");
+        } else {
+            assert_eq!(plaintext_left, 1);
+            assert!(output.contains("Migration backup retained"), "{output}");
+            assert!(
+                output.contains("legacy upgrade has no committed receipt"),
+                "{output}"
+            );
+        }
     }
 }
 
