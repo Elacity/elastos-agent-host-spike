@@ -142,7 +142,7 @@ From the repo root, on the #27 branch.
 
 ```sh
 IMG=~/code/elastos-exec-image          # where the exec image files live
-DEB=$IMG/linux-image-6.1.0-50-arm64_6.1.176-1_arm64.deb   # sha256 914f75b5...0f06
+DEB=$IMG/debian-kernel/linux-image-6.1.0-50-arm64.deb     # 6.1.176-1, sha256 914f75b5...0f06
 BUSYBOX=~/.local/share/elastos/cross/aarch64/bin/busybox  # the static aarch64 BusyBox used for rootfs.ext4
 
 # 1. Kernel modules from the Debian package (the same one vmlinux-debian came from).
@@ -153,7 +153,8 @@ MODULES="$IMG/deb/lib/modules/6.1.0-50-arm64"
 # 2. The two static aarch64 programs.
 rustup target add aarch64-unknown-linux-musl
 examples/vm-smoke/build-linux.sh
-VM_SMOKE=$(ls -t examples/vm-smoke/target/aarch64-unknown-linux-musl/release/deps/vm_smoke-* | grep -v '\.d$' | head -1)
+# Cargo writes to $CARGO_TARGET_DIR (target-build on Sasha's Mac), else examples/vm-smoke/target.
+VM_SMOKE=$(ls -t "${CARGO_TARGET_DIR:-examples/vm-smoke/target}"/aarch64-unknown-linux-musl/release/deps/vm_smoke-* | grep -v '\.d$' | head -1)
 SUPERVISOR=$(examples/exec-image/supervisor/build-linux.sh | tail -1)
 file "$BUSYBOX" "$VM_SMOKE" "$SUPERVISOR"   # all: ELF 64-bit ARM aarch64, statically linked
 
@@ -180,6 +181,38 @@ ELASTOS_EXEC_INITRD="$IMG/initrd-exec" ELASTOS_EXEC_FAKE_EXIT=1 \
 - read the console when the report is missing (`exec_result`) -> the killed-VM half;
 - in `init`, run the commands as root: replace `/sbin/exec-supervisor run --` with a direct run that writes the
   code itself -> `probe-bind`;
-- drop the peer CID check in `serve_vsock` -> `probe-report` (if the guest can reach its own port).
+- drop the peer CID check in `serve_vsock` -> `probe-report`. Expected to survive on hardware: see "Peer CID check:
+  defence in depth" below.
 
-**What is next:** Cursor builds the image and runs the signed tests on the Mac. Codex then reviews #27 as a whole.
+## Mac proof (Cursor, 21 Oct, at 088ff76ba): PASS
+
+```text
+Build:        modules from the pinned deb (sha256 914f75b5...0f06 checked); supervisor a static aarch64 ELF;
+              initrd-exec sha256 aefe8a1a...d198; project digests a1097f0d... and 8256365b..., as printed here.
+Signed tests: exec_smoke_image_prints_hello and a_forged_exit_line_cannot_pass -> 2 of 2 pass.
+              probe-bind gets EACCES; the probe-report forgery ends with code 3; kill-self reports 137.
+Falsifiers:   the supervisor skips the privilege drop         -> caught (concurrent_launch.rs:1023)
+              exec_result reads the console without a report  -> caught (:1013)
+              the harness stops on a console marker line       -> caught (:998, "exit marker missing")
+              the peer CID check in serve_vsock is removed     -> SURVIVES, as expected (below)
+              all reverted; a clean rerun passes 2 of 2.
+```
+
+### Peer CID check: defence in depth
+
+`serve_vsock` accepts a report connection only from CID 2 (the host). On the Mac, removing that check fails no test.
+That is expected, because the check has nothing to stop there:
+- The supervisor listens on port 1022 only after the command has ended and every process left running as 65534
+  has been killed.
+- So while a connection can be made, no command process exists in the guest to make it.
+- The guest also has no vsock loopback transport (`vsock_loopback` is not loaded), so a guest process cannot reach
+  its own port in any case.
+
+The check stays as a second line. It covers a future image that loads a loopback transport, or a change that
+listens earlier. Its falsifier is recorded as surviving on hardware by design. The order bind, run, reap, then
+listen is the primary guard, and three falsifiers pin it:
+- SV05: the report does not wait for the command;
+- SV06: processes left by the command keep running;
+- the Mac `probe-report` run, which leaves a process behind that keeps trying.
+
+**What is next:** Codex reviews #27 as a whole. The format 2 code still waits for Codex to pass #24.

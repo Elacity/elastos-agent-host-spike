@@ -34,7 +34,8 @@ Written 21 Oct 2026. Spike-only code: `exec_vm.rs` and its use in `concurrent_la
      - The listening socket is close-on-exec, so the command never holds it.
   3. When the command ends (a command killed by a signal is 128 + the signal number), kill every process still
      running as 65534. Only then listen on the port, so no command process exists while a connection can be made.
-     Accept the host's connection (peer CID 2), write the code as decimal ASCII plus `\n` (for example `0\n` or
+     Accept the host's connection (peer CID 2; defence in depth, see below), write the code as decimal ASCII plus
+     `\n` (for example `0\n` or
      `101\n`), and wait for the host to close.
   4. Console output (`hvc0`) stays as it is, as log only.
 - **Host (the launcher):**
@@ -101,6 +102,13 @@ Written 21 Oct 2026. Spike-only code: `exec_vm.rs` and its use in `concurrent_la
   - `probe-report` tries to write a forged `0` and leaves a process behind that keeps trying, then exits 3, so the
     report must be 3;
   - `kill-self` must report 137.
+
+## Peer CID check: defence in depth
+
+- The primary guard is the order: bind, run, reap, then listen. While a report connection can be made, no command
+  process exists. The image also loads no vsock loopback transport.
+- The peer CID check (only CID 2, the host) is a second line, for a future image or change that weakens either.
+- On the Mac its falsifier survives, by design (Cursor, 21 Oct).
 
 ## Not in this PR
 
