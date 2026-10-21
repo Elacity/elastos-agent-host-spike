@@ -21,6 +21,7 @@ fn photo_state(object: StubObject) -> HostState {
     state
         .policy
         .push((PHOTO.to_string(), vec!["read".to_string()]));
+    state.credentials.push(common::licence(&object.bytes));
     state.objects.insert(PHOTO.to_string(), object);
     state
 }

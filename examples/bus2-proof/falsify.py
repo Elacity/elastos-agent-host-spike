@@ -230,6 +230,56 @@ CASES = [
         [("    if media_type != UI_MEDIA_TYPE {", "    if false && media_type != UI_MEDIA_TYPE {")],
         [("ui", "a_document_that_is_not_the_one_format_is_refused")],
     ),
+    # Proof 4: credentials.
+    (
+        "the guest skips the signature check",
+        "guests/photo/src/lib.rs",
+        [("    key.verify_strict(\n        signed_message(CREDENTIAL_KIND, &subject).as_bytes(),\n        &signature,\n    )\n",
+          "    let _ = (&key, &signature);\n    Ok::<(), ed25519_dalek::SignatureError>(())\n")],
+        [("credentials", "another_signer_or_another_key_is_refused")],
+    ),
+    (
+        "the guest does not check the signer",
+        "guests/photo/src/lib.rs",
+        [("    if credential.signer != PINNED_SIGNER {", "    if false && credential.signer != PINNED_SIGNER {")],
+        [("credentials", "another_signer_or_another_key_is_refused")],
+    ),
+    (
+        "the guest does not match the SHA-256 to the bytes it read",
+        "guests/photo/src/lib.rs",
+        [("    if credential.subject_sha256 != subject {", "    if false && credential.subject_sha256 != subject {")],
+        [("credentials", "a_credential_for_other_bytes_is_refused")],
+    ),
+    (
+        "the signed message leaves out the kind",
+        "guests/photo/src/lib.rs",
+        [('    format!("{CREDENTIAL_TAG}\\n{kind}\\n{subject_sha256}")', '    let _ = kind;\n    format!("{CREDENTIAL_TAG}\\n{subject_sha256}")')],
+        [("credentials", "a_pinned_key_signature_over_the_same_hash_without_this_tag_and_kind_is_refused")],
+    ),
+    (
+        "the signed message is the bare hash",
+        "guests/photo/src/lib.rs",
+        [('    format!("{CREDENTIAL_TAG}\\n{kind}\\n{subject_sha256}")', '    let _ = kind;\n    subject_sha256.to_string()')],
+        [("credentials", "a_pinned_key_signature_over_the_same_hash_without_this_tag_and_kind_is_refused")],
+    ),
+    (
+        "a frame is drawn before the credential check",
+        "guests/photo/src/lib.rs",
+        [("                check_credential(&read.bytes)?;\n                draw(&read).await?;", "                draw(&read).await?;\n                check_credential(&read.bytes)?;")],
+        [("credentials", "another_signer_or_another_key_is_refused")],
+    ),
+    (
+        "more than one credential of the kind is taken",
+        "guests/photo/src/lib.rs",
+        [("    if candidates.next().is_some() {", "    if false && candidates.next().is_some() {")],
+        [("credentials", "no_credential_or_another_kind_is_refused")],
+    ),
+    (
+        "the host grants on a credential",
+        "host/src/objects.rs",
+        [("    if !allowed || actions.is_empty() {", "    if !(allowed || !state.credentials.is_empty()) || actions.is_empty() {")],
+        [("credentials", "a_good_credential_grants_nothing")],
+    ),
 ]
 
 

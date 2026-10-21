@@ -5,5 +5,10 @@
   "note": "A manifest for the Bus v2 proof only, not the ElastOS capsule schema. Compiled into the guest by build.rs.",
   "photo": {
     "max_bytes": 1048576
+  },
+  "credential": {
+    "kind": "elastos.bus2-proof.licence/v1",
+    "signer": "did:key:z6MkoJQGyiFajdmdvoaFYk6g6FotMRiqSJHbssfFhFR2J7n4",
+    "note": "The test publisher's key (seed: SHA-256 of a fixed test label); not a real key."
   }
 }

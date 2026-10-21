@@ -72,7 +72,27 @@ recommendations come in step 7.
      "no script".
    - A typed document in WIT (`variant node { text(string), image(grant-id) }`) would make script, URIs and
      bytes impossible to express, rather than refused.
-8. **A frame on screen can name a grant that is later revoked.** The draft has `event.grant-revoked`, but
+8. **`credential.signer` carries no trust** (review change 3).
+   - The guest verifies with the key pinned in its manifest, never with a key the credential names.
+   - It compares `signer` with the pinned did:key only as a label. A credential with the right signer string
+     and a signature by another key is refused, and so is one with another signer string and a signature by
+     the pinned key.
+   - **Recommendation:** make `signer` a key id that picks one of the keys pinned in the manifest, so a
+     manifest can pin the current key and the next one and a publisher can rotate without a guest trusting
+     anything new. If only one key may ever be pinned, drop the field instead.
+9. **The signed message is not part of the interface.**
+   - The guest checks `"elastos:bus2-proof:credential:v1\n" + kind + "\n" + subject-sha256`
+     (review change 1).
+   - That format is an agreement between this guest and its publisher. The draft names `body: list<u8>`
+     and says nothing about what it signs.
+   - Every guest would invent its own message, and a signature made for one purpose could be offered for
+     another. Tests show that a signature by the pinned key over the same hash, with another kind, another
+     tag or no kind, is refused.
+   - **Recommendation:** define the signed message (domain tag, kind, subject) and the signature scheme in
+     the interface, and type `body` as that signature.
+10. **`subject-sha256: string`** leaves the encoding open (hex, which case). 32 bytes (`list<u8>`, or a
+    fixed-size type) would leave nothing to agree on.
+11. **A frame on screen can name a grant that is later revoked.** The draft has `event.grant-revoked`, but
    nothing says what happens to a frame already drawn with that grant. The stub refuses a new frame that
    names a revoked grant. Whether the host must also clear the old frame is unstated.
 
@@ -84,6 +104,7 @@ recommendations come in step 7.
 | 1. Resident guest, stop by close, named endings | 10 (`tests/lifecycle.rs`) | 11 |
 | 2. Streaming read under a cap, refused not truncated | 7 (`tests/streaming.rs`) | 8 |
 | 3. `ui.present` draws one declarative frame, images by grant | 6 (`tests/ui.rs`) | 7 |
+| 4. Credential pinned in the guest's manifest; refuse only; no frame before the check | 7 (`tests/credentials.rs`) | 8 |
 
 The read path:
 - the guest asks for a grant on exactly the photo's URI;

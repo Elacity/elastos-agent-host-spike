@@ -5,18 +5,24 @@
 //! uses the bytes only once the read's trailing future says `ok`. It asks for
 //! at most its manifest's `photo.max_bytes`, and refuses more than that even
 //! if more arrives.
+//!
+//! Before it draws anything, it needs a credential from its pinned publisher
+//! for exactly the bytes it read. It can only refuse; it never grants.
 
 wit_bindgen::generate!({ path: "../../wit", world: "product-capsule-v2" });
 
 include!(concat!(env!("OUT_DIR"), "/manifest.rs"));
 
 use elastos::bus::types::{BusError, Event, InvokeRequest};
-use elastos::bus::{capabilities, providers, ui};
+use elastos::bus::{capabilities, credentials, providers, ui};
+use sha2::{Digest, Sha256};
 use wit_bindgen::StreamResult;
 
 /// Bytes the guest asks for per read of the stream.
 const READ_BUFFER: usize = 64 * 1024;
 const MEDIA_TYPE: &str = "application/vnd.elastos.ui+json;v=0";
+/// The domain tag at the start of every signed credential message.
+const CREDENTIAL_TAG: &str = "elastos:bus2-proof:credential:v1";
 
 struct Photo;
 
@@ -66,6 +72,56 @@ async fn read_photo(uri: &str) -> Result<Read, BusError> {
     })
 }
 
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The message a credential's body signs: the domain tag, the kind and the
+/// subject's SHA-256 (hex), one per line.
+fn signed_message(kind: &str, subject_sha256: &str) -> String {
+    format!("{CREDENTIAL_TAG}\n{kind}\n{subject_sha256}")
+}
+
+/// Needs a credential of the pinned kind, from the pinned publisher, signed
+/// by the pinned key (whatever `signer` says), for exactly these bytes.
+fn check_credential(bytes: &[u8]) -> Result<(), BusError> {
+    let subject = hex(&Sha256::digest(bytes));
+    let presented = credentials::presented();
+    let mut candidates = presented
+        .iter()
+        .filter(|credential| credential.kind == CREDENTIAL_KIND);
+    let Some(credential) = candidates.next() else {
+        return Err(BusError::Denied(format!(
+            "no {CREDENTIAL_KIND} credential was presented"
+        )));
+    };
+    if candidates.next().is_some() {
+        return Err(BusError::Denied(format!(
+            "more than one {CREDENTIAL_KIND} credential was presented"
+        )));
+    }
+    if credential.signer != PINNED_SIGNER {
+        return Err(BusError::Denied(format!(
+            "the credential's signer {} is not the pinned publisher",
+            credential.signer
+        )));
+    }
+    if credential.subject_sha256 != subject {
+        return Err(BusError::Denied(
+            "the credential is for other bytes than were read".to_string(),
+        ));
+    }
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&PINNED_KEY)
+        .map_err(|_| BusError::Internal("the pinned key is not a key".to_string()))?;
+    let signature = ed25519_dalek::Signature::from_slice(&credential.body)
+        .map_err(|_| BusError::Denied("the credential's body is not a signature".to_string()))?;
+    key.verify_strict(
+        signed_message(CREDENTIAL_KIND, &subject).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| BusError::Denied("the credential is not signed by the pinned key".to_string()))
+}
+
 /// One frame: the photo, by its grant (never its bytes or URI), and a line
 /// of text.
 async fn draw(read: &Read) -> Result<(), BusError> {
@@ -89,6 +145,8 @@ impl exports::elastos::bus::lifecycle::Guest for Photo {
                 let uri = String::from_utf8(uri)
                     .map_err(|_| BusError::Invalid("a photo URI is UTF-8".to_string()))?;
                 let read = read_photo(&uri).await?;
+                // After the read, before any frame.
+                check_credential(&read.bytes)?;
                 draw(&read).await?;
             }
         }

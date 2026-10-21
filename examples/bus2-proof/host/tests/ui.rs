@@ -33,6 +33,8 @@ fn state() -> HostState {
     state
         .objects
         .insert(NOTES.to_string(), StubObject::new(b"just text".to_vec()));
+    // Both photos are the same bytes, so one licence covers both.
+    state.credentials.push(common::licence(PNG));
     state
 }
 

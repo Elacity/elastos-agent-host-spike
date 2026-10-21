@@ -11,7 +11,10 @@ publish.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
+ed25519-dalek = { version = "2.2", default-features = false }
+sha2 = { version = "0.10", default-features = false }
 wit-bindgen = { version = "=0.60.0", default-features = false, features = ["macros", "async", "realloc"] }
 
 [build-dependencies]
+bs58 = "0.5"
 serde_json = "1"
