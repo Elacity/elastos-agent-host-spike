@@ -280,6 +280,14 @@ CASES = [
         [("    if !allowed || actions.is_empty() {", "    if !(allowed || !state.credentials.is_empty()) || actions.is_empty() {")],
         [("credentials", "a_good_credential_grants_nothing")],
     ),
+    # Proof 6: fairness.
+    (
+        "a running guest never yields (no fuel slices, no epoch yield)",
+        "host/src/run.rs",
+        [("    store.fuel_async_yield_interval(Some(limits.fuel_slice))?;\n", ""),
+         ("            UpdateDeadline::Yield(1)\n", "            UpdateDeadline::Continue(1)\n")],
+        [("fairness", "a_busy_guest_does_not_starve_a_second_guest")],
+    ),
 ]
 
 

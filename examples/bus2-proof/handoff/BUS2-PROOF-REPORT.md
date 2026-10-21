@@ -1,6 +1,6 @@
 # Bus v2 guest-side proof: report (in progress)
 
-Written as each step lands. Steps 1 to 3 are in; the measurements, the remaining proofs and the final
+Written as each step lands. Steps 1 to 6 are in; the measurements and the final
 recommendations come in step 7.
 
 ## Findings so far
@@ -105,6 +105,7 @@ recommendations come in step 7.
 | 2. Streaming read under a cap, refused not truncated | 7 (`tests/streaming.rs`) | 8 |
 | 3. `ui.present` draws one declarative frame, images by grant | 6 (`tests/ui.rs`) | 7 |
 | 4. Credential pinned in the guest's manifest; refuse only; no frame before the check | 7 (`tests/credentials.rs`) | 8 |
+| 6. Fuel slices plus async yield: a busy guest does not starve a second guest | 1 (`tests/fairness.rs`) | 1 |
 
 The read path:
 - the guest asks for a grant on exactly the photo's URI;
@@ -112,6 +113,19 @@ The read path:
 - `read` checks the grant: it is held, it is for this resource, and it allows `read`;
 - the cap is the smaller of the guest's (from its manifest, sent in `params`) and the host's own;
 - the object is streamed in 64 KiB chunks.
+
+Fairness (proof 6), measured in this container:
+- a busy guest (a loop that never awaits) and the photo guest share one engine and one single-threaded
+  executor;
+- the photo guest started 50 ms after the busy one, read its photo, checked the credential, drew its frame and
+  stopped about 55 ms after the start;
+- the busy guest ran on, on refilled fuel slices, until its epoch deadline at about 1.02 s.
+
+Each way of yielding is enough on its own for fairness:
+- with only the epoch yield, the photo guest still finished in about 68 ms. But the busy guest ran out of fuel
+  at about 0.4 s, because the epoch callback's refill does not reach running code (Wasmtime finding 3);
+- with only the fuel slices, the photo guest finished in about 55 ms.
+The falsifier removes both, and then the photo guest waits for the busy one to end.
 
 Endings recorded: `stopped`, `returned`, `returned-error`, `cancelled-after-grace`, `epoch-deadline`,
 `fuel-exhausted`, `trapped`.
