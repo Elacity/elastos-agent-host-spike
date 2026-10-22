@@ -35,14 +35,27 @@ not opened.
 
 ## Rong's four layers
 
-The layers as `examples/capsule-kit/PATTERNS.md` reads them, and how this app meets each one.
+The layers as `examples/capsule-kit/PATTERNS.md` gives them after Rong's answer (22 Oct 2026), and how this
+app meets each one.
 
 | Layer | How the archive viewer meets it |
 |---|---|
-| **Own RTOS** | All archive parsing runs inside a fuel-metered component. Today the Runtime parses archives in its own process (`elastos-server/src/library.rs`, `zip` and `tar` crates); this app moves that work into the sandbox, which is the reason the roadmap gives for this app ("archive parsing is a classic attack surface"). On Bus v1 the run has the fixed 100,000,000 fuel, and the worst archive within the caps must use at most 80% of it. On Bus v2 the guest runs under fuel slices and the epoch deadline. There is no file system, clock or socket for the parser to reach. |
+| **Own RTOS** | All archive parsing runs inside a fuel-metered component. Today the Runtime parses archives in its own process (`elastos-server/src/library.rs`, `zip` and `tar` crates); this app moves that work into the sandbox, which is the reason the roadmap gives for this app ("archive parsing is a classic attack surface"). On Bus v1 the run has the fixed 100,000,000 fuel, and the worst archive within the caps must use at most 80% of it. On Bus v2 the guest runs under fuel slices and the epoch deadline. There is no file system, clock or socket for the parser to reach. Rong's POSIX-compatible WASM inside the capsule (Wasmer as a proof of concept) is an open engine question; this app stays on Wasmtime. |
 | **Trap down** | Every byte of the archive comes through `providers.invoke` with a grant for that one archive object, asked for with one action (`read`). The only write is the app's own view object, under its own grant and storage prefix. There is no extract operation: the capsule has no grant on Documents or Library to write to, and asks for none. A content failure skips one entry; an authority failure stops the run with a `bus-error` that names the resource. |
 | **Component Model** | The core imports only `elastos:bus` (`types`, `runtime`, `capabilities`, `providers`), and admission checks it. The archive crates were built for `wasm32-unknown-unknown` and checked to add no import at all ([Crates](#crates)). |
-| **Double-checking** | The core trusts no part of the archive. The end record, the central directory, each local header and the bytes that come out of the decompressor are each checked against the others: sizes, offsets, names, methods and CRC. A declared size is shown as declared, never used to size a buffer or to skip a check. The page checks the view's schema; Runtime checks every grant. The launch context check (pattern 7) is still a gap: the core cannot yet check which archive it was opened on. |
+| **Double-checking** | The core trusts no part of the archive. The end record, the central directory, each local header and the bytes that come out of the decompressor are each checked against the others: sizes, offsets, names, methods and CRC. A declared size is shown as declared, never used to size a buffer or to skip a check. The page checks the view's schema; Runtime checks every grant. The entitlement token check (pattern 7) is not needed: this is a free first-party viewer (below). |
+
+### Capability and entitlement
+
+Rong separates two checks (PATTERNS, "Two checks"). For this app:
+
+| Check | Here |
+|---|---|
+| **Capability** (what the capsule may touch here) | All of it: the read grant on the one archive, the write grant on its own view object, the page's launch token. The local ElastOS Runtime gives and checks each one. Still missing on the capability side: the launch binding, so the core cannot yet check which archive it was opened on (M6). |
+| **Entitlement** (whether this user may use it) | None needed: the archive viewer is a free first-party viewer. If a vendor ever sold one, it would take pattern 7: a token from the user's wallet, signed by the vendor, a marketplace or a dKMS (never by the local ElastOS), checked by the Capsule Runtime inside the capsule against issuer keys sealed in its bundle. |
+
+The bundle and the build follow the clean design house: the pinned container build and publisher signing
+(PATTERNS 3 and 4).
 
 ## What it does and does not do
 
@@ -262,7 +275,7 @@ not carried over.
 | M3 | The image header checks (photo `image.rs`: PNG, JPEG, WebP, dimension caps) as a kit item | image previews on Bus v2 need the same checks, on bytes from the decompressor instead of the object | shared crate; moving them is part of the one-time photo hash change |
 | M4 | Hostile-archive fixtures: a builder for ZIPs that lie (wrong counts, overlapping ranges, local and directory names that differ) | none of the kit's fixtures are archives, and real tools refuse to write these | test support in this app, then the kit if a second format needs it |
 | M5 | A way to present bytes the guest produced as an image on Bus v2 | `ui.present` takes images by granted handle only | the draft Bus v2 WIT (Anders) |
-| M6 | The launch binding: which archive was opened, in the signed launch context, and the generic viewer route | the core reads a fixed request object today; the page has only the stand-in server | Runtime and Home (kit "missing" 1, 2 and 6; pattern 7) |
+| M6 | The launch binding: which archive was opened, in the signed launch context, and the generic viewer route | the core reads a fixed request object today; the page has only the stand-in server | Runtime and Home (kit "missing" 1, 2 and 6); a capability check, not pattern 7 |
 | M7 | Deleting the native listing and preview routes for `archive-manager`, and making extraction a Runtime operation the person approves | "Move" means the old version goes in the same change | the real move PR after 0.8.0 ([ready-PR note](#ready-pr-note-the-old-routes)) |
 
 ## Falsifier plan

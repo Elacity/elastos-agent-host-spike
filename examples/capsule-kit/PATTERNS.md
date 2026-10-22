@@ -13,35 +13,77 @@ marked **(review)** come from Codex's review of that viewer (#29): each is a rul
 
 ## The four layers
 
-Rong's four layers are the frame for every pattern. My reading of each, in one line (to be checked with
-Rong):
+Rong's four layers are the frame for every pattern. Rong answered on 22 Oct 2026; this section follows that
+answer.
 
 | Layer | What it means for a capsule |
 |---|---|
-| **Own RTOS** | The Runtime is the capsule's whole world. It runs the code, meters it (fuel, epoch, slices) and stops it. There is no host OS, file, socket, clock or environment under it to reach. |
+| **Own RTOS** | The capsule has its own runtime inside it: a Capsule Runtime that ElastOS provides, which runs the capsule's code and carries its own checks (pattern 7). Today that is the Wasmtime component the ElastOS Runtime runs and meters (fuel, epoch, slices), with no host OS, file, socket, clock or environment under it. Rong also named POSIX-compatible WASM inside the capsule as its RTOS, with Wasmer as a proof of concept: an **open engine question**, see below. |
 | **Trap down** | Every act with authority leaves the capsule as a call down into the Runtime (`capabilities.request`, `providers.invoke`, `ui.present`, a routed read), and the Runtime decides. The capsule holds no authority of its own. |
 | **Component Model** | The boundary is typed: the capsule imports only the WIT interfaces it declares, and admission checks the imports. Nothing else can be linked. |
-| **Double-checking** | Neither side trusts the other's word. The Runtime checks every grant and token; the capsule checks every byte, answer and input it is given; a bundle is re-hashed at every load. |
+| **Double-checking** | Neither side trusts the other's word. The Runtime checks every grant; the capsule checks every byte, answer and input it is given, and checks its own entitlement token (pattern 7); a bundle is re-hashed at every load. |
 
-Each pattern against the layers: **yes** it carries that layer, **part** it carries some of it, **-** not
-its job.
+### Two checks: capability and entitlement
 
-| Pattern | Own RTOS | Trap down | Component Model | Double-checking |
-|---|---|---|---|---|
-| 1. Grant-only reads | yes: fixed fuel, no WASI | yes: every read is a granted `providers.invoke` | yes: `elastos:bus` imports only, checked at admission | yes: header, text, size and strict input checks |
-| 2. Render-only page | part: Home's sandbox and CSP, not the Runtime's meter | yes: one read route, by launch token | - (a web projection, not a component) | yes: the page checks the schema; Runtime checks the token |
-| 3. Signed bundle | - | part: Runtime admits by CID and policy | part: the manifest names the ABI and the WIT hash | yes: CID, signature and policy, re-hashed at every load |
-| 4. Reproducible build | - | - | - | yes: two machines, one hash |
-| 5. Mutation tests | - | - | - | yes: every test is checked by a falsifier |
-| 6. Bus v2 slices and stop | yes: fuel slices, epoch, stop by close | yes: streamed `providers.invoke`, `ui.present` | yes: `elastos:bus/*@2.0.0` only | yes: credential checked against the pinned key |
-| 7. Launch context re-check (**gap**) | - | - | - | **no**: see below |
+They answer different questions, and are made by different parties:
 
-**Pattern 7 is a gap: the capsule re-checks its launch context's signature and hash.** Today a capsule takes
-its launch as given. On Bus v1 the Component ABI has no input, so no launch context reaches the core at all;
-the page gets only its token. Double-checking needs the capsule to receive the signed launch context (what it
-was opened on, by whom, the output it is bound to), check the signature against a key it pins, and check the
-hash of each object it is given against the hash in the context. It needs a Runtime change, so it is listed,
-not built (KIT-REPORT, "What was missing", 1 and 6).
+| Check | Question | Who decides | Proof |
+|---|---|---|---|
+| **Capability** | What may this capsule touch here? | The local ElastOS Runtime, by the grants it gives (`capabilities.request`) and the launch token it binds | The Runtime's grant and token checks |
+| **Entitlement** | May this user use this capsule? | An issuer the capsule trusts (its vendor, a marketplace, or a dKMS), by a token it signs | The capsule's own check of that token (pattern 7) |
+
+The local ElastOS is never an issuer of entitlement: a vendor cannot trust a machine it does not control, so
+a token the local ElastOS signed would prove nothing to the vendor. The local ElastOS only carries the token.
+
+### The clean design house
+
+Rong's "clean design house" is what this spike already has: the pinned container build (pattern 4) and
+publisher signing (pattern 3). Anyone can rebuild the capsule from its source and get the same bytes, and the
+publisher's DID signs the CID of those bytes.
+
+### Each pattern against the layers
+
+**yes** it carries that layer, **part** it carries some of it, **-** not its job. The last column says which
+of the two checks the pattern serves.
+
+| Pattern | Own RTOS | Trap down | Component Model | Double-checking | Check |
+|---|---|---|---|---|---|
+| 1. Grant-only reads | yes: fixed fuel, no WASI | yes: every read is a granted `providers.invoke` | yes: `elastos:bus` imports only, checked at admission | yes: header, text, size and strict input checks | capability |
+| 2. Render-only page | part: Home's sandbox and CSP, not the Runtime's meter | yes: one read route, by launch token | - (a web projection, not a component) | yes: the page checks the schema; Runtime checks the token | capability (the launch token is the Runtime's) |
+| 3. Signed bundle | - | part: Runtime admits by CID and policy | part: the manifest names the ABI and the WIT hash | yes: CID, signature and policy, re-hashed at every load | capability (admission); it also seals the issuer keys entitlement needs |
+| 4. Reproducible build | - | - | - | yes: two machines, one hash | neither: the clean design house |
+| 5. Mutation tests | - | - | - | yes: every test is checked by a falsifier | neither: how every check is proven |
+| 6. Bus v2 slices and stop | yes: fuel slices, epoch, stop by close | yes: streamed `providers.invoke`, `ui.present` | yes: `elastos:bus/*@2.0.0` only | yes: credential checked against the pinned key | capability; its credential check is a first form of entitlement |
+| 7. Entitlement token check (**gap**) | yes: done by the Capsule Runtime inside the capsule | - (the capsule decides, nothing traps down) | - | yes: the capsule's own check | entitlement |
+
+### Pattern 7 is a gap: the capsule checks its own entitlement token
+
+What Rong described:
+- the token is in the user's wallet, outside the capsule;
+- it is signed by an issuer the capsule trusts: the vendor, a marketplace or a dKMS. Never by the local ElastOS;
+- the local ElastOS only carries the token to the capsule;
+- the capsule checks it with a Capsule Runtime that ElastOS provides inside the capsule, against the issuer
+  keys sealed in its own signed, hash-named bundle (pattern 3), so the keys cannot be swapped without changing
+  the bundle's CID and breaking the publisher's signature.
+
+**The capsule must** (when built):
+- [ ] carry the issuer keys it trusts in its bundle, so they are part of its CID;
+- [ ] take the token only as data the local ElastOS hands over, never as a decision the local ElastOS made;
+- [ ] check the token's signature against those sealed keys, and that it names this capsule (by CID or name)
+      and this user, and is within its validity;
+- [ ] refuse to run for a user without a valid token, with a reason, before doing any work for them;
+- [ ] keep this check apart from capabilities: a valid token grants nothing on this machine, and a grant is
+      not an entitlement.
+
+Not built: there is no Capsule Runtime inside a capsule yet, no wallet hand-over of a token, and no issuer.
+The Bus v2 proof's credential check (pattern 6, a key pinned in the guest's manifest) is the nearest piece. The
+viewers in this spike are free first-party apps, so they need no entitlement today.
+
+### Open engine question
+
+Rong said POSIX-compatible WASM runs inside the capsule as its RTOS, with Wasmer as a proof of concept. This
+spike does not change engines: it stays on Wasmtime (36 in the Runtime, 48 in the Bus v2 proof). Whether the
+Capsule Runtime is a POSIX-compatible WASM layer, and on which engine, is open, and is for Rong and Anders.
 
 The seven patterns:
 
@@ -51,7 +93,7 @@ The seven patterns:
 4. [Reproducible build](#4-reproducible-build)
 5. [Mutation tests](#5-mutation-tests)
 6. [Bus v2 slices and stop](#6-bus-v2-slices-and-stop)
-7. Launch context re-check: a gap, [above](#the-four-layers)
+7. Entitlement token check: a gap, [above](#pattern-7-is-a-gap-the-capsule-checks-its-own-entitlement-token)
 
 ## The shape of an app
 
