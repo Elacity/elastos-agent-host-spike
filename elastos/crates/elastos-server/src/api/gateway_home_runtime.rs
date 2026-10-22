@@ -863,7 +863,7 @@ fn app_shell_title(name: &str) -> String {
         DOCUMENTS_CAPSULE_ID => "Documents".to_string(),
         CHAT_ROOM_CAPSULE_ID => "Chat".to_string(),
         LIBRARY_CAPSULE_ID => "Library".to_string(),
-        MARKETPLACE_CAPSULE_ID => "Marketplace".to_string(),
+        MARKETPLACE_CAPSULE_ID => "Apps".to_string(),
         PEOPLE_CAPSULE_ID => "People".to_string(),
         INBOX_CAPSULE_ID => "Inbox".to_string(),
         SERVICES_CAPSULE_ID => "Services".to_string(),

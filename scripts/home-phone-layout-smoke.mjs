@@ -53,7 +53,7 @@ const principalId = "did:elastos:fixture-phone-layout";
 const FIRST_PARTY_APPS = [
   ["library", "Library", "Browse files and folders"],
   ["documents", "Documents", "Write and publish markdown"],
-  ["marketplace", "Marketplace", "Find and install apps"],
+  ["marketplace", "Apps", "Find and install apps"],
   ["system", "System", "Runtime, updates and devices"],
   ["people", "People", "Contacts and trusted peers"],
   ["services", "Services", "Offers this Home can use"],

@@ -1674,7 +1674,7 @@ export function stopAgentStream({ keepPartial = true, drainQueue = false, cancel
 
 export const NO_MODEL_STATUS = "Get a model to start. Models run on this Home.";
 export const NO_MODEL_OFFER_STATUS =
-  "No model on this Home yet. Open Apps (Marketplace) → Models to get one.";
+  "No model on this Home yet. Open Apps → Models to get one.";
 export const STOPPED_STATUS = "Stopped.";
 
 export function canSubmitNewTurn() {

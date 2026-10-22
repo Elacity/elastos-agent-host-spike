@@ -48,7 +48,8 @@ export function bindSetupSheet() {
   document.querySelector("#setup-sheet-later")?.addEventListener("click", () => hideSetupSheet());
   recoveryButton?.addEventListener("click", () => openRecoveryAct());
   for (const step of goalSteps) {
-    step.querySelector("button")?.addEventListener("click", () => openGoal(step.dataset.setupGoal));
+    step.querySelector("button")?.addEventListener("click",
+      () => openGoal(step.dataset.setupGoal, step.dataset.setupSettings));
   }
   setHomeSetupNotificationHandler(() => {
     dismissedThisSession = false;
@@ -240,11 +241,12 @@ function renderSetupSheet(summary) {
   }
 }
 
-function openGoal(targetId) {
+function openGoal(targetId, settings) {
   if (!targetById(shellState.currentSummary, targetId)) return;
   // The sheet collapses to its card; clicking the card brings it back. Only Close or Later dismiss it.
   yieldSetupSheet();
-  openTarget(targetId);
+  if (settings) openTarget(targetId, { query: { settings } });
+  else openTarget(targetId);
 }
 
 async function openRecoveryAct() {

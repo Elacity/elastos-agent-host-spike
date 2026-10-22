@@ -17,9 +17,17 @@ receives only the components in that manifest. Source and installed artifacts
 have separate identities. [Install/update acceptance](https://github.com/Elacity/elastos-runtime/issues/89)
 owns publication-parity evidence. The normal Home path does not need a separate `elastos serve` process.
 
-The current default Home exposes System, People, Services, Wallet, Documents,
-Library, Marketplace, Archive, and Inbox. On Apple Silicon Macs it also
-exposes Browser; Linux Homes do not show Browser in 0.8.0.
+The current default Home exposes Assistant, Chat (Community), System, People,
+Services, Wallet, Documents, Library, Apps, Archive, and Inbox. On Apple Silicon
+Macs it also exposes Browser; Linux Homes do not show Browser in 0.8.0.
+
+Welcome to Home lists the first steps in order: create your Profile and save
+the Recovery Kit, join Community in Chat, get a model and ask the Assistant,
+open a website in Browser (Apple Silicon Macs), then check Updates in System →
+About.
+
+Home runs while its terminal is open. To open Home again after you close it,
+run `elastos home --browser`.
 
 Only one live host may own an ElastOS data home at a time. Do not run
 `elastos` and `elastos serve` against the same home at the same time. The

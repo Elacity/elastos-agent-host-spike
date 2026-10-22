@@ -72,8 +72,9 @@ curl -fsSL https://elastos.elacitylabs.com/install.sh | bash -s -- --install-onl
 setting to own setup, launch, and cleanup; older installers ignore it and already
 stop after bootstrap.
 
-The current default Home exposes System, People, Services, Browser, Wallet,
-Documents, Library, Marketplace, Archive, and Inbox. People is installed as a
+The current default Home exposes Assistant, Chat (Community), System, People,
+Services, Wallet, Documents, Library, Apps, Archive, and Inbox. On Apple Silicon
+Macs it also exposes Browser; Linux Homes do not show Browser in 0.8.0. People is installed as a
 separate app capsule; Home presents it but does not own its state or authority.
 
 Native Windows is not an accepted install target today. The current product
@@ -141,16 +142,14 @@ contract.
 Runtime profile from a trusted release. It is not the product contract for a
 Home content catalog.
 
-Downloadable games, GGUF models, and similar data should be published as signed
-content capsules identified by the CID of their complete bundle. Home `Get`
-will request a typed Runtime operation that verifies, fetches, pins, and admits
-that exact capsule through the content and availability providers. A service
-offer is needed only for a running provider capability, not for the content
-package itself.
+Models already use Home `Get`. Open Apps → Models and choose Get: Runtime
+checks the model against its signed catalog entry, downloads it and keeps it on
+this device. Then open it in Assistant. Retry and Stop work on the same
+row, and an interrupted download resumes by itself a few times first.
 
-Until that Get contract is implemented and verified, raw `url` entries and
-setup-only model downloads remain operator provisioning details. They must not
-be projected as remotely installable Home catalog items. See
+Getting other apps, games and data this way is not available yet. Until it is,
+raw `url` entries and setup-only downloads remain operator provisioning
+details, not Home catalog items. See
 [Content capsule distribution](CONTENT_CAPSULE_DISTRIBUTION.md).
 
 ## Jetson
