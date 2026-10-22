@@ -66,8 +66,8 @@ Not run here: Mac checks (Cursor): verify.sh, run-local.sh, run-e2e.sh and the g
   - The exact canonical NFC path is used where the code decides which file: reads, versions, seen ranges, spill
     lookup, the project, grants.
   - The one new path comparison, spill lookup, is exact. A stored spill pointer follows the path rule on load.
-- **One difference from the design note.** History allows the system role, because `admit_system(.., true)` writes a
-  later system line as history. The note listed only assistant and tool result.
+- **One addition to the design note.** A later system line (`admit_system(.., true)`) is its own kind, 19, written
+  only by the host. History allows only an assistant line or a tool result (Sasha, 22 Oct; see the update below).
 
 ## Tests (new: 15)
 
@@ -167,7 +167,8 @@ Principles:   3 and 16: a person's words never become a record, and a record nev
                 guessed or migrated.
               12: one rendering table, pinned with the format number.
 DeepSeek:     none.
-Not proven:   - Home does not show the refusal today (checked read only, 22 Oct):
+Not proven:   - Home does not show the refusal today. Sasha, 22 Oct: this is a Home-wide gap (every capsule's launch
+                reason is dropped). It goes after 0.8.0 with the capsule kit, not in this PR. Checked read only:
                   - The agent host is not launched from Home ("No Home icon", run only by the scripts and the
                     ignored tests).
                   - For an ordinary Home launch, the run error reaches POST /api/capsules as the 400 body, and the
@@ -175,15 +176,49 @@ Not proven:   - Home does not show the refusal today (checked read only, 22 Oct)
                   - shell-windows.js then shows generic copy ("The app did not start…") with the detail empty, and
                     only logs it to the console (capsules/home-gui/browser/shell-windows.js:1511-1524, :1641-1648).
                   - The Assistant face is the one view that shows error.message.
-                  - So the person-visible part needs a Home change. It is out of this PR (no Home changes). It is
-                    proven only once Home shows it on the Mac.
+                  - So the person-visible part needs that Home change. It is proven only once Home shows it on the Mac.
               - The gateway's Runtime client has a 5 s timeout (gateway_home_runtime.rs:526). A run that waits on
                 grant prompts may time out before the guest's text comes back; not tested here.
               - The rendering texts are frozen by this PR; the design note left them open.
 Checklist:    no item moves.
-Questions:    1. History allows the system role (a later system line). Fine, or should a later system line get
-                 its own kind (a format change, so now is the time)?
-              2. Home: the refusal needs a Home change (show launch_detail on the task). Which PR, and after 0.8.0?
+Questions:    none (both answered by Sasha on 22 Oct; see the update below).
+```
+
+## Update after the Mac check of 23c56874 (22 Oct)
+
+Cursor: verify 161, run-local 1, run-e2e 3/3, tree clean; Mac guest hash 25d8cd27 (Linux differs, as known). Sasha's
+answers to the two questions:
+
+```text
+Commits:      503dc11 (the system line kind and its test), 659bd0b (USERSAI-JOURNAL.md); this update is the next commit
+Change:       a later system line (admit_system with in_history) is kind 19, "system line", role system, written only
+              by the host. History allows only an assistant line or a tool result. 17 and 18 stay kept for idea 2.
+              Its rendering is its text; the golden table pins it ("Reply in one short paragraph."), and the pinned
+              rendering hash moves with it while format 2 is still open:
+              93e50ef9b12235326ff9cf3f910b227021d80f1a97a0ae9b731cfbb9494e9da8.
+New test:     only_the_host_writes_a_later_system_line
+                - admit_system(.., true) writes a system line;
+                - a person's, the model's and a tool's text never becomes one: admit_user, admit_assistant,
+                  admit_tool_result and record_tool_result, with "system\n...", "system: ...", the head's own
+                  words and a system line's words; in the log and after a round trip;
+                - decode refuses a system line with any other role, and history with the system role.
+Changed tests: the golden table has 17 kinds (tags 1-16 and 19); the wrong-role count is 50; the unknown-kind
+              tests use tag 20 where they used 19.
+Home:         recorded under "Not proven" as a Home-wide gap, after 0.8.0 with the capsule kit.
+Tests run:    ./examples/agent-host/verify.sh -> fmt, "162 passed" (161 + 1), clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Falsifiers:   JF33 history may carry the system role again      -> wrong_role, only_the_host_... FAILED
+              JF34 a later system line is written as history     -> 51 tests FAILED
+              JF35 a system line may carry any role              -> wrong_role, only_the_host_... FAILED
+              JF36 a person's text can become a system line      -> only_the_host_writes_a_later_system_line FAILED
+                   ("system\n..." in admit_user)
+              JF37 the system line renders differently, format stays 2
+                                                                 -> golden bytes, pinned hash, only_the_host_... FAILED
+              JF01-JF32 rerun: each still FAILED. Each restored; tree clean. Survivors: none (OZ01 by design, #24).
+Guest hash:   b3fd14e2d95eec5fbdee65e0456600a7557b5a328378dce6dc855a15df0bf774 on two clean builds and verify.sh.
+              wasm_sections.py: file 636514 bytes.
+Import list:  unchanged: the core import section (/1/2, 149 bytes, 5ee6b40d46f6a045) and every top-level component
+              section are byte-identical to the #24 build.
 ```
 
 **What is next:** Cursor verifies on the Mac, then Codex reviews. OMP idea 2 (child limits) starts after format 2
