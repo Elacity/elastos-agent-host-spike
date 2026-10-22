@@ -1189,7 +1189,8 @@ fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
 /// decoded, reread, resumed, answered in the inbox, or opened as a child
 /// host. Every path calls this one function, so none skips a rule. A child's
 /// limits come only from the journal that holds it (the parent's journal):
-/// - its parent exists and comes before it;
+/// - its parent exists (that it comes first is checked for every step on
+///   load);
 /// - a child below a stopped child has stopped too;
 /// - its resource sits strictly under its parent's;
 /// - its depth is within `CHILD_DEPTH_LIMIT`;
@@ -1200,11 +1201,7 @@ fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
 #[cfg(any(test, target_arch = "wasm32"))]
 fn child_rules(journal: &Journal, step: &Step) -> Result<(), &'static str> {
     let find = |id: u64| journal.steps.iter().find(|step| step.id == id);
-    let parent = step
-        .parent_id
-        .filter(|parent| *parent < step.id)
-        .and_then(find)
-        .ok_or("record")?;
+    let parent = step.parent_id.and_then(find).ok_or("record")?;
     if step.stop.is_none()
         && child_chain(journal, step.parent_id)
             .iter()
@@ -3774,19 +3771,20 @@ fn propose_child(
     if parent.resource.is_empty() || !narrower_resource(&parent.resource, resource) {
         return Err("not a subset");
     }
-    let chain = child_chain(journal, Some(parent_id));
-    if chain_stopped(journal, &chain) {
+    // A child parent goes through the one live child check; any parent is
+    // refused once the task is cancelled.
+    if parent.kind == ProposalKind::Child {
+        match usable_child(journal, parent_id) {
+            Ok(_) => {}
+            Err("stopped" | "cancelled") => return Err("parent stopped"),
+            Err(reason) => return Err(reason),
+        }
+    } else if journal.cancelled_from.is_some() {
         return Err("parent stopped");
     }
+    let chain = child_chain(journal, Some(parent_id));
     if depth_under(journal, Some(parent_id)) > usize::from(CHILD_DEPTH_LIMIT) {
         return Err("depth limit");
-    }
-    if journal
-        .steps
-        .iter()
-        .any(|step| step.id == parent_id && step.kind == ProposalKind::Child)
-    {
-        usable_child(journal, parent_id)?;
     }
     let Some(budget) = budget.filter(|budget| budget.requests > 0 && budget.seconds > 0) else {
         return Err("no budget");
@@ -18649,6 +18647,23 @@ mod tests {
             Some("grandchild-grant"),
             in_a
         ));
+        // A child granted through the inbox is granted its whole resource,
+        // and hands that scope on.
+        let other = propose_child(&mut journal, run, DEMO_DOC, Some(budget(2, 60))).unwrap();
+        assert!(apply_inbox(
+            &mut journal,
+            other,
+            InboxAnswer::AllowOnce,
+            Some("other-grant")
+        ));
+        let doc_part = "localhost://Users/self/Projects/demo/doc/part";
+        let below = propose_child(&mut journal, other, doc_part, Some(budget(1, 10))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            below,
+            Some("below-grant"),
+            doc_part
+        ));
     }
 
     /// Finding 5: the records are counted per child, not in total.
@@ -18734,6 +18749,11 @@ mod tests {
         assert_eq!(
             propose_child(&mut legacy, old_child.id, grand, Some(budget(1, 10))),
             Err(TASK_BUDGET_REASON)
+        );
+        assert_eq!(
+            propose_child(&mut legacy, old_child.id, grand, None),
+            Err(TASK_BUDGET_REASON),
+            "the parent is refused first"
         );
     }
 
