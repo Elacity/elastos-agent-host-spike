@@ -128,7 +128,7 @@ trailer  head [32]
 | kind | tag | role | fields | model-visible text (`render_record`) |
 | --- | --- | --- | --- | --- |
 | head | 1 | system | text | text |
-| history | 2 | system (a later system line), assistant, or tool result | text | text |
+| history | 2 | assistant or tool result | text | text |
 | message | 3 | user | text | text |
 | snapshot | 4 | user | text | text |
 | skill | 5 | user | text | text |
@@ -143,10 +143,11 @@ trailer  head [32]
 | spill | 14 | user | resource, version u64 | `spill: <resource> version <n>` |
 | inbox answer | 15 | user | answer u8 (1 allow-once, 2 allow-session, 3 standing, 4 deny) | `inbox: <answer name>` |
 | refused | 16 | user | reason, what | `refused: <reason> (<what>)` |
+| system line | 19 | system | text | text |
 
 - Tags 17 (child budget) and 18 (child stop) are kept for OMP idea 2 and refused until it is built.
-- History allows a system role because `admit_system(.., in_history = true)` writes a later system line; the design note
-  listed only assistant and tool result.
+- **System line (19).** A later system line (`admit_system(.., in_history = true)`) is its own kind, written only by the
+  host (Sasha, 22 Oct). No person's, model's or tool's text becomes it, and history no longer allows the system role.
 - An observation's fields must fit its text: the hash, a revision that is one token, a cut only with a window, a window
   only with a revision, a window from line 1 or later with exactly `count` whole lines. A read at version `u64::MAX`
   decodes but is not a read (that is never a version number).
