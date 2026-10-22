@@ -1,0 +1,3496 @@
+{
+ "about": "Agent host falsifiers: each entry breaks one check (exact text, replaced once), and every named test must then FAIL. Run with falsify.py. expect: caught (all named tests fail), compile_error (the mutation must not build), survives (known survivor, by design). Files are relative to examples/agent-host. command: host (cargo test of the guest) or e2e (run-e2e.sh: the guest in a test Runtime).",
+ "retired": {
+  "CL02": "a child host's depth is its child's; CF10 covers it",
+  "CL23": "chain_stopped no longer looks at a cancelled task; the code is gone",
+  "CL25": "ask_model's second stopped check is gone; usable_child refuses (CL79)",
+  "JF07": "re-targeted as JF07b",
+  "JF14": "the 'idea 2 fields must be empty' rule is what idea 2 replaced; CL43-CL75 cover the new rules",
+  "JF15": "same as JF14",
+  "OS01": "retired in #24 (fix 1)",
+  "OP01": "retired in #24",
+  "OY06": "re-targeted as OY06c (stored_rules_ok)"
+ },
+ "falsifiers": [
+  {
+   "id": "CF01",
+   "title": "reread and resume skip the child rules (the 206da0d bug)",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    stored_rules_ok(&stored).map_err(Some)?;",
+     "new": "    stored_paths_ok(&stored).map_err(Some)?;"
+    }
+   ],
+   "tests": [
+    "tests::a_reread_or_resume_refuses_a_journal_that_breaks_a_child_rule"
+   ]
+  },
+  {
+   "id": "CF02",
+   "title": "decode skips the child rules",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    stored_paths_ok(journal)?;\n    stored_children_ok(journal)\n}",
+     "new": "    stored_paths_ok(journal)\n}"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop",
+    "tests::a_reread_or_resume_refuses_a_journal_that_breaks_a_child_rule",
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::each_child_has_exactly_its_own_records",
+    "tests::idea_2_fields_follow_their_rules"
+   ]
+  },
+  {
+   "id": "CF03",
+   "title": "the inbox skips the child grant check",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if !child_grant_ok(journal, id, grant, &resource) {\n            return false;\n        }\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::a_child_grant_is_narrower_and_does_not_inherit_the_parent_grant",
+    "tests::a_child_grant_scope_bounds_its_children",
+    "tests::a_child_that_breaks_a_rule_is_refused_on_every_live_path",
+    "tests::an_inbox_answer_grants_only_a_usable_child_under_a_granted_parent"
+   ]
+  },
+  {
+   "id": "CF04",
+   "title": "an inbox grant keeps no scope",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if granted && child_scope.is_some() {",
+     "new": "    if false && child_scope.is_some() {"
+    }
+   ],
+   "tests": [
+    "tests::a_child_grant_scope_bounds_its_children"
+   ]
+  },
+  {
+   "id": "CF05",
+   "title": "authorize_child keeps the child's whole resource as scope",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        step.grant_scope = Some(grant_resource.to_string());",
+     "new": "        step.grant_scope = Some(step.resource.clone());"
+    }
+   ],
+   "tests": [
+    "tests::a_child_grant_scope_bounds_its_children"
+   ]
+  },
+  {
+   "id": "CF06",
+   "title": "a child's scope is its resource, not its grant",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        step.grant_scope.as_deref()\n    } else {",
+     "new": "        Some(&step.resource)\n    } else {"
+    }
+   ],
+   "tests": [
+    "tests::a_child_grant_scope_bounds_its_children"
+   ]
+  },
+  {
+   "id": "CF07",
+   "title": "a grant need not sit in the parent's scope",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    granted_scope(parent).is_some_and(|scope| resource_covers(scope, grant_resource))\n",
+     "new": "    granted_scope(parent).is_some()\n"
+    }
+   ],
+   "tests": [
+    "tests::a_child_grant_scope_bounds_its_children"
+   ]
+  },
+  {
+   "id": "CF08",
+   "title": "open_child_host skips usable_child",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let child = usable_child(parent, child_id)?;",
+     "new": "    let child = parent.steps.iter().find(|step| step.id == child_id).ok_or(\"not a child\")?;"
+    }
+   ],
+   "tests": [
+    "tests::a_cancelled_task_says_cancelled_on_every_live_path",
+    "tests::a_child_grant_is_narrower_and_does_not_inherit_the_parent_grant",
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop",
+    "tests::a_child_must_sit_strictly_under_its_parent",
+    "tests::a_child_that_breaks_a_rule_is_refused_on_every_live_path"
+   ]
+  },
+  {
+   "id": "CF09",
+   "title": "open_child_host skips the resource check",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if path_refusal(resource).is_some() || !resource_covers(&child.resource, resource) {\n        return Err(\"not a subset\");",
+     "new": "    if false {\n        return Err(\"not a subset\");"
+    }
+   ],
+   "tests": [
+    "tests::a_child_grant_is_narrower_and_does_not_inherit_the_parent_grant"
+   ]
+  },
+  {
+   "id": "CF10",
+   "title": "a child host is one level deeper than its child",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let depth = depth_under(parent, child.parent_id);",
+     "new": "    let depth = depth_under(parent, Some(child_id));"
+    }
+   ],
+   "tests": [
+    "tests::a_child_at_the_depth_limit_cannot_propose_a_child",
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop",
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::every_format_2_field_round_trips"
+   ]
+  },
+  {
+   "id": "CF11",
+   "title": "a child host may record a task budget",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if journal.depth > 0\n        || journal.task_budget.is_some()",
+     "new": "    if journal.task_budget.is_some()"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop"
+   ]
+  },
+  {
+   "id": "CF12",
+   "title": "a child host may ask a model itself",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if journal.depth > 0 {\n        return Err(\"child host\");\n    }\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop"
+   ]
+  },
+  {
+   "id": "CF13",
+   "title": "a stored child host may hold a budget",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        && (journal.task_budget.is_some()\n            || journal",
+     "new": "        && (false\n            || journal"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop"
+   ]
+  },
+  {
+   "id": "CF14",
+   "title": "a stored child host may hold a model call",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            || journal\n                .steps\n                .iter()\n                .any(|step| step.kind == ProposalKind::Hosted))",
+     "new": "            || false)"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop"
+   ]
+  },
+  {
+   "id": "CF15",
+   "title": "the task is checked before the children",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    // Top-most first, so the widest used-up child is the one that stops. The",
+     "new": "    if task_requests_used(journal) >= task.requests {\n        return Err(\"requests\");\n    }\n    // Top-most first, so the widest used-up child is the one that stops. The"
+    }
+   ],
+   "tests": [
+    "tests::the_task_and_a_child_running_out_together_stops_the_child"
+   ]
+  },
+  {
+   "id": "CF16",
+   "title": "a cancelled task accepts a child under a run",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    } else if journal.cancelled_from.is_some() {\n        return Err(\"parent stopped\");",
+     "new": "    } else if false {\n        return Err(\"parent stopped\");"
+    }
+   ],
+   "tests": [
+    "tests::no_model_call_anywhere_in_a_cancelled_tree"
+   ]
+  },
+  {
+   "id": "CF17",
+   "title": "a legacy parent's refusal is dropped",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            Err(reason) => return Err(reason),\n        }\n    } else if",
+     "new": "            Err(_) => {}\n        }\n    } else if"
+    }
+   ],
+   "tests": [
+    "tests::a_child_that_breaks_a_rule_is_refused_on_every_live_path",
+    "tests::a_missing_budget_is_refused_with_the_task_budget_reason"
+   ]
+  },
+  {
+   "id": "CF18",
+   "title": "usable_child ignores a cancelled task",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if journal.cancelled_from.is_some() {\n        return Err(\"cancelled\");\n    }\n    if chain_stopped(journal, &child_chain(journal, Some(id))) {",
+     "new": "    if chain_stopped(journal, &child_chain(journal, Some(id))) {"
+    }
+   ],
+   "tests": [
+    "tests::a_cancelled_task_says_cancelled_on_every_live_path"
+   ]
+  },
+  {
+   "id": "CF19",
+   "title": "usable_child skips child_rules",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        .ok_or(\"not a child\")?;\n    child_rules(journal, step)?;",
+     "new": "        .ok_or(\"not a child\")?;"
+    }
+   ],
+   "tests": [
+    "tests::a_child_that_breaks_a_rule_is_refused_on_every_live_path"
+   ]
+  },
+  {
+   "id": "CF20",
+   "title": "a missing task budget says no budget again",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let Some(task) = journal.task_budget else {\n        return Err(TASK_BUDGET_REASON);",
+     "new": "    let Some(task) = journal.task_budget else {\n        return Err(\"no budget\");"
+    }
+   ],
+   "tests": [
+    "tests::a_journal_written_before_idea_2_still_loads",
+    "tests::a_missing_budget_is_refused_with_the_task_budget_reason",
+    "tests::the_guest_never_sets_the_top_task_budget"
+   ]
+  },
+  {
+   "id": "CF21",
+   "title": "a missing owner budget says parent has no budget again",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let Some(left) = remaining_budget(journal, chain.first().copied()) else {\n        return Err(TASK_BUDGET_REASON);",
+     "new": "    let Some(left) = remaining_budget(journal, chain.first().copied()) else {\n        return Err(\"parent has no budget\");"
+    }
+   ],
+   "tests": [
+    "tests::a_missing_budget_is_refused_with_the_task_budget_reason",
+    "tests::the_guest_never_sets_the_top_task_budget"
+   ]
+  },
+  {
+   "id": "CL01",
+   "title": "propose_child allows one level deeper",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if depth_under(journal, Some(parent_id)) > usize::from(CHILD_DEPTH_LIMIT) {",
+     "new": "    if depth_under(journal, Some(parent_id)) > usize::from(CHILD_DEPTH_LIMIT) + 1 {"
+    }
+   ],
+   "tests": [
+    "tests::a_child_at_the_depth_limit_cannot_propose_a_child"
+   ]
+  },
+  {
+   "id": "CL03",
+   "title": "a child with no budget gets one",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let Some(budget) = budget.filter(|budget| budget.requests > 0 && budget.seconds > 0) else {",
+     "new": "    let Some(budget) = budget.or(Some(Budget { requests: 1, seconds: 1 })) else {"
+    }
+   ],
+   "tests": [
+    "tests::a_child_without_a_budget_is_refused"
+   ]
+  },
+  {
+   "id": "CL04",
+   "title": "a child budget of zero requests is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "budget.filter(|budget| budget.requests > 0 && budget.seconds > 0) else {",
+     "new": "budget.filter(|budget| budget.seconds > 0) else {"
+    }
+   ],
+   "tests": [
+    "tests::a_child_without_a_budget_is_refused"
+   ]
+  },
+  {
+   "id": "CL05",
+   "title": "a child budget of zero seconds is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "budget.filter(|budget| budget.requests > 0 && budget.seconds > 0) else {",
+     "new": "budget.filter(|budget| budget.requests > 0) else {"
+    }
+   ],
+   "tests": [
+    "tests::a_child_without_a_budget_is_refused"
+   ]
+  },
+  {
+   "id": "CL06",
+   "title": "a parent with no budget gives unlimited",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let Some(left) = remaining_budget(journal, chain.first().copied()) else {\n        return Err(TASK_BUDGET_REASON);\n    };",
+     "new": "    let left = remaining_budget(journal, chain.first().copied()).unwrap_or(Budget { requests: u32::MAX, seconds: u64::MAX });"
+    }
+   ],
+   "tests": [
+    "tests::a_missing_budget_is_refused_with_the_task_budget_reason",
+    "tests::the_guest_never_sets_the_top_task_budget"
+   ]
+  },
+  {
+   "id": "CL07",
+   "title": "the requests over the parent are not checked",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if budget.requests > left.requests || budget.seconds > left.seconds {",
+     "new": "    if budget.seconds > left.seconds {"
+    }
+   ],
+   "tests": [
+    "tests::a_child_budget_larger_than_the_parent_remaining_is_refused",
+    "tests::a_grandchild_budget_is_a_subset_of_its_parent_child"
+   ]
+  },
+  {
+   "id": "CL08",
+   "title": "the seconds over the parent are not checked",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if budget.requests > left.requests || budget.seconds > left.seconds {",
+     "new": "    if budget.requests > left.requests {"
+    }
+   ],
+   "tests": [
+    "tests::a_child_budget_larger_than_the_parent_remaining_is_refused",
+    "tests::a_grandchild_budget_is_a_subset_of_its_parent_child"
+   ]
+  },
+  {
+   "id": "CL09",
+   "title": "remaining ignores what was used",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        requests: budget.requests.saturating_sub(used),",
+     "new": "        requests: budget.requests,"
+    }
+   ],
+   "tests": [
+    "tests::a_child_budget_larger_than_the_parent_remaining_is_refused"
+   ]
+  },
+  {
+   "id": "CL10",
+   "title": "a grandchild is measured against the task, not its parent",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let Some(left) = remaining_budget(journal, chain.first().copied()) else {",
+     "new": "    let Some(left) = remaining_budget(journal, None) else {"
+    }
+   ],
+   "tests": [
+    "tests::a_grandchild_budget_is_a_subset_of_its_parent_child"
+   ]
+  },
+  {
+   "id": "CL11",
+   "title": "a child under a stopped parent is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            Err(\"stopped\" | \"cancelled\") => return Err(\"parent stopped\"),",
+     "new": "            Err(\"stopped\" | \"cancelled\") => {}"
+    }
+   ],
+   "tests": [
+    "tests::a_cancelled_task_says_cancelled_on_every_live_path",
+    "tests::a_stopped_child_stops_its_children"
+   ]
+  },
+  {
+   "id": "CL12",
+   "title": "the task budget can be set twice",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if journal.depth > 0\n        || journal.task_budget.is_some()\n        || granted.requests == 0",
+     "new": "    if journal.depth > 0\n        || granted.requests == 0"
+    }
+   ],
+   "tests": [
+    "tests::the_guest_never_sets_the_top_task_budget"
+   ]
+  },
+  {
+   "id": "CL13",
+   "title": "a zero task budget is recorded",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        || journal.task_budget.is_some()\n        || granted.requests == 0\n        || granted.seconds == 0\n    {",
+     "new": "        || journal.task_budget.is_some()\n    {"
+    }
+   ],
+   "tests": [
+    "tests::the_guest_never_sets_the_top_task_budget"
+   ]
+  },
+  {
+   "id": "CL14",
+   "title": "local model calls are not counted for children",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    for child in &chain {\n        if let Some(step) = journal.steps.iter_mut().find(|step| step.id == *child) {",
+     "new": "    for child in chain.iter().filter(|_| !model.contains(\"AppData\")) {\n        if let Some(step) = journal.steps.iter_mut().find(|step| step.id == *child) {"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::every_format_2_field_round_trips",
+    "tests::hosted_and_local_model_calls_share_one_counter",
+    "tests::the_task_and_a_child_running_out_together_stops_the_child",
+    "tests::the_widest_used_up_child_stops_with_requests"
+   ]
+  },
+  {
+   "id": "CL15",
+   "title": "the task counter counts hosted models only",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        .filter(|step| step.kind == ProposalKind::Hosted)\n        .count();\n    u32::try_from(calls).unwrap_or(u32::MAX)",
+     "new": "        .filter(|step| step.kind == ProposalKind::Hosted && !step.resource.contains(\"AppData\"))\n        .count();\n    u32::try_from(calls).unwrap_or(u32::MAX)"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::hosted_and_local_model_calls_share_one_counter"
+   ]
+  },
+  {
+   "id": "CL16",
+   "title": "the task allows one call past its budget",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if task_requests_used(journal) >= task.requests {",
+     "new": "    if task_requests_used(journal) > task.requests {"
+    }
+   ],
+   "tests": [
+    "tests::hosted_and_local_model_calls_share_one_counter"
+   ]
+  },
+  {
+   "id": "CL17",
+   "title": "a child allows one call past its budget",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if used >= budget.requests {",
+     "new": "        if used > budget.requests {"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop",
+    "tests::a_child_over_its_request_budget_stops_with_requests",
+    "tests::a_stopped_child_stops_its_children",
+    "tests::hosted_and_local_model_calls_share_one_counter",
+    "tests::the_first_stop_reason_is_kept",
+    "tests::the_task_and_a_child_running_out_together_stops_the_child",
+    "tests::the_widest_used_up_child_stops_with_requests"
+   ]
+  },
+  {
+   "id": "CL18",
+   "title": "the nearest used-up child stops, not the top-most",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    for id in chain.iter().rev() {",
+     "new": "    for id in chain.iter() {"
+    }
+   ],
+   "tests": [
+    "tests::a_child_below_a_stopped_child_gets_nothing",
+    "tests::the_widest_used_up_child_stops_with_requests"
+   ]
+  },
+  {
+   "id": "CL19",
+   "title": "a used-up child is refused but not stopped",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            stop_child(journal, *id, StopReason::Requests);\n            return Err(\"requests\");",
+     "new": "            return Err(\"requests\");"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop",
+    "tests::a_child_over_its_request_budget_stops_with_requests",
+    "tests::a_stopped_child_stops_its_children",
+    "tests::the_first_stop_reason_is_kept",
+    "tests::the_task_and_a_child_running_out_together_stops_the_child",
+    "tests::the_widest_used_up_child_stops_with_requests"
+   ]
+  },
+  {
+   "id": "CL20",
+   "title": "a chain child with no budget may call",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if step.budget.is_none() {\n        return Err(TASK_BUDGET_REASON);\n    }\n    if journal.cancelled_from.is_some() {",
+     "new": "    if journal.cancelled_from.is_some() {"
+    },
+    {
+     "file": "src/lib.rs",
+     "old": "            .budget\n            .ok_or(TASK_BUDGET_REASON)?;",
+     "new": "            .budget\n            .unwrap_or(Budget { requests: u32::MAX, seconds: 0 });"
+    }
+   ],
+   "tests": [
+    "tests::a_missing_budget_is_refused_with_the_task_budget_reason",
+    "tests::a_model_call_is_asked_only_for_a_budgeted_child",
+    "tests::an_inbox_answer_grants_only_a_usable_child_under_a_granted_parent",
+    "tests::an_unbudgeted_child_or_a_non_child_gets_no_child_grant"
+   ]
+  },
+  {
+   "id": "CL21",
+   "title": "a task with no budget may call",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let Some(task) = journal.task_budget else {\n        return Err(TASK_BUDGET_REASON);\n    };",
+     "new": "    let task = journal.task_budget.unwrap_or(Budget { requests: u32::MAX, seconds: 0 });"
+    }
+   ],
+   "tests": [
+    "tests::a_journal_written_before_idea_2_still_loads",
+    "tests::a_missing_budget_is_refused_with_the_task_budget_reason",
+    "tests::the_guest_never_sets_the_top_task_budget"
+   ]
+  },
+  {
+   "id": "CL22",
+   "title": "ask_model ignores a cancelled task (own check)",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let chain = child_chain(journal, under);\n    if journal.cancelled_from.is_some() {\n        return Err(\"cancelled\");\n    }\n",
+     "new": "    let chain = child_chain(journal, under);\n"
+    }
+   ],
+   "tests": [
+    "tests::a_cancelled_tree_stays_cancelled_after_resume",
+    "tests::no_model_call_anywhere_in_a_cancelled_tree"
+   ]
+  },
+  {
+   "id": "CL24",
+   "title": "chain_stopped ignores a stopped child",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            .any(|step| step.id == *id && step.stop.is_some())\n    })\n}",
+     "new": "            .any(|step| step.id == *id && false)\n    })\n}"
+    }
+   ],
+   "tests": [
+    "tests::a_child_below_a_stopped_child_gets_nothing",
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop",
+    "tests::a_child_over_its_request_budget_stops_with_requests",
+    "tests::a_stopped_child_stops_its_children",
+    "tests::a_time_refusal_stops_the_child_with_time",
+    "tests::cancelling_a_parent_stops_started_children_at_their_next_model_call",
+    "tests::no_model_call_anywhere_in_a_cancelled_tree"
+   ]
+  },
+  {
+   "id": "CL26",
+   "title": "ask_model accepts a step that is not a child",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            .any(|step| step.id == id && step.kind == ProposalKind::Child)\n        {\n            return Err(\"not a child\");",
+     "new": "            .any(|step| step.id == id)\n        {\n            return Err(\"not a child\");"
+    }
+   ],
+   "tests": [
+    "tests::a_model_call_is_asked_only_for_a_budgeted_child"
+   ]
+  },
+  {
+   "id": "CL27",
+   "title": "a call is not counted on the chain",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            step.requests_used = step.requests_used.saturating_add(1);",
+     "new": "            step.requests_used = step.requests_used.saturating_add(0);"
+    }
+   ],
+   "tests": [
+    "tests::a_cancelled_tree_stays_cancelled_after_resume",
+    "tests::a_child_budget_larger_than_the_parent_remaining_is_refused",
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop",
+    "tests::a_child_over_its_request_budget_stops_with_requests",
+    "tests::a_stopped_child_stops_its_children",
+    "tests::cancelling_a_parent_stops_started_children_at_their_next_model_call",
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::every_format_2_field_round_trips",
+    "tests::hosted_and_local_model_calls_share_one_counter",
+    "tests::no_model_call_anywhere_in_a_cancelled_tree",
+    "tests::the_first_stop_reason_is_kept",
+    "tests::the_task_and_a_child_running_out_together_stops_the_child",
+    "tests::the_widest_used_up_child_stops_with_requests"
+   ]
+  },
+  {
+   "id": "CL28",
+   "title": "a call forgets which child asked",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    step.parent_id = under;\n    for child in &chain {",
+     "new": "    step.parent_id = None;\n    for child in &chain {"
+    }
+   ],
+   "tests": [
+    "tests::a_cancelled_tree_stays_cancelled_after_resume",
+    "tests::a_child_budget_larger_than_the_parent_remaining_is_refused",
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop",
+    "tests::a_child_over_its_request_budget_stops_with_requests",
+    "tests::a_stopped_child_stops_its_children",
+    "tests::cancelling_a_parent_stops_started_children_at_their_next_model_call",
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::every_format_2_field_round_trips",
+    "tests::hosted_and_local_model_calls_share_one_counter",
+    "tests::no_model_call_anywhere_in_a_cancelled_tree",
+    "tests::the_first_stop_reason_is_kept",
+    "tests::the_task_and_a_child_running_out_together_stops_the_child",
+    "tests::the_widest_used_up_child_stops_with_requests"
+   ]
+  },
+  {
+   "id": "CL29",
+   "title": "a stop does not reach the children",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let first = stop_one(journal, id, reason);\n    for below in descendants(journal, id) {\n        stop_one(journal, below, StopReason::Cancelled);\n    }",
+     "new": "    let first = stop_one(journal, id, reason);"
+    }
+   ],
+   "tests": [
+    "tests::a_stopped_child_stops_its_children",
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::no_model_call_anywhere_in_a_cancelled_tree",
+    "tests::the_task_and_a_child_running_out_together_stops_the_child",
+    "tests::the_widest_used_up_child_stops_with_requests"
+   ]
+  },
+  {
+   "id": "CL30",
+   "title": "the children take the parent's reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    for below in descendants(journal, id) {\n        stop_one(journal, below, StopReason::Cancelled);\n    }\n    first",
+     "new": "    for below in descendants(journal, id) {\n        stop_one(journal, below, reason);\n    }\n    first"
+    }
+   ],
+   "tests": [
+    "tests::a_stopped_child_stops_its_children",
+    "tests::the_task_and_a_child_running_out_together_stops_the_child",
+    "tests::the_widest_used_up_child_stops_with_requests"
+   ]
+  },
+  {
+   "id": "CL31",
+   "title": "a later reason replaces the first",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if step.kind != ProposalKind::Child || step.stop.is_some() {\n        return false;\n    }\n    step.stop = Some(reason);",
+     "new": "    if step.kind != ProposalKind::Child {\n        return false;\n    }\n    step.stop = Some(reason);"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::every_format_2_field_round_trips",
+    "tests::the_first_stop_reason_is_kept"
+   ]
+  },
+  {
+   "id": "CL32",
+   "title": "the stop record carries the wrong count",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let requests_used = step.requests_used;\n    journal.events.push(SurfaceNode {",
+     "new": "    let requests_used = step.requests_used.saturating_add(1);\n    journal.events.push(SurfaceNode {"
+    }
+   ],
+   "tests": [
+    "tests::a_cancelled_tree_stays_cancelled_after_resume",
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop",
+    "tests::a_child_over_its_request_budget_stops_with_requests",
+    "tests::a_stopped_child_stops_its_children",
+    "tests::a_time_refusal_stops_the_child_with_time",
+    "tests::cancelling_a_parent_stops_started_children_at_their_next_model_call",
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::each_child_has_exactly_its_own_records",
+    "tests::every_format_2_field_round_trips",
+    "tests::no_model_call_anywhere_in_a_cancelled_tree",
+    "tests::the_first_stop_reason_is_kept",
+    "tests::the_task_and_a_child_running_out_together_stops_the_child"
+   ]
+  },
+  {
+   "id": "CL33",
+   "title": "a stop leaves a prepared step prepared",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if step.state == StepState::Prepared {\n        step.state = StepState::Cancelled;\n    }\n    if step.kind != ProposalKind::Child",
+     "new": "    if step.kind != ProposalKind::Child"
+    }
+   ],
+   "tests": [
+    "tests::a_stopped_child_stops_its_children",
+    "tests::no_model_call_anywhere_in_a_cancelled_tree"
+   ]
+  },
+  {
+   "id": "CL34",
+   "title": "descendants finds nothing",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                if parent == id {\n                    return true;\n                }",
+     "new": "                if parent == id {\n                    return false;\n                }"
+    }
+   ],
+   "tests": [
+    "tests::a_stopped_child_stops_its_children",
+    "tests::cancelling_a_parent_stops_started_children_at_their_next_model_call",
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::no_model_call_anywhere_in_a_cancelled_tree",
+    "tests::the_task_and_a_child_running_out_together_stops_the_child",
+    "tests::the_widest_used_up_child_stops_with_requests"
+   ]
+  },
+  {
+   "id": "CL35",
+   "title": "a time refusal records requests",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        && stop_child(journal, child, StopReason::Time)",
+     "new": "        && stop_child(journal, child, StopReason::Requests)"
+    }
+   ],
+   "tests": [
+    "tests::a_time_refusal_stops_the_child_with_time",
+    "tests::an_unknown_step_stop_reason_is_refused",
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::every_format_2_field_round_trips",
+    "tests::the_first_stop_reason_is_kept"
+   ]
+  },
+  {
+   "id": "CL36",
+   "title": "a time refusal acts on any step",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        .any(|step| step.id == child && step.kind == ProposalKind::Child)\n        && stop_child",
+     "new": "        .any(|step| step.id == child)\n        && stop_child"
+    }
+   ],
+   "tests": [
+    "tests::a_time_refusal_stops_the_child_with_time"
+   ]
+  },
+  {
+   "id": "CL37",
+   "title": "cancel_tree on a child does not stop it",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        return stop_child(journal, id, StopReason::Cancelled);\n    }\n    let cancelled = cancel(journal, id);",
+     "new": "        return cancel(journal, id);\n    }\n    let cancelled = cancel(journal, id);"
+    }
+   ],
+   "tests": [
+    "tests::no_model_call_anywhere_in_a_cancelled_tree"
+   ]
+  },
+  {
+   "id": "CL38",
+   "title": "cancel_tree on a run leaves its children",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    for below in descendants(journal, id) {\n        stopped |= stop_one(journal, below, StopReason::Cancelled);",
+     "new": "    for below in Vec::<u64>::new() {\n        stopped |= stop_one(journal, below, StopReason::Cancelled);"
+    }
+   ],
+   "tests": [
+    "tests::cancelling_a_parent_stops_started_children_at_their_next_model_call"
+   ]
+  },
+  {
+   "id": "CL39",
+   "title": "cancel_task does not record the cancel",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    journal.cancelled_from = Some(ids.iter().copied().max().unwrap_or(0));",
+     "new": "    let _ = &ids;"
+    }
+   ],
+   "tests": [
+    "tests::a_cancelled_task_says_cancelled_on_every_live_path",
+    "tests::a_cancelled_tree_stays_cancelled_after_resume",
+    "tests::every_format_2_field_round_trips",
+    "tests::no_model_call_anywhere_in_a_cancelled_tree"
+   ]
+  },
+  {
+   "id": "CL40",
+   "title": "cancel_task records the first step, not the last",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    journal.cancelled_from = Some(ids.iter().copied().max().unwrap_or(0));",
+     "new": "    journal.cancelled_from = Some(ids.iter().copied().min().unwrap_or(0));"
+    }
+   ],
+   "tests": [
+    "tests::a_cancelled_tree_stays_cancelled_after_resume",
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::every_format_2_field_round_trips"
+   ]
+  },
+  {
+   "id": "CL41",
+   "title": "cancel_task leaves the children running",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    for id in ids {\n        stop_one(journal, id, StopReason::Cancelled);\n    }\n    true",
+     "new": "    let _ = ids;\n    true"
+    }
+   ],
+   "tests": [
+    "tests::a_cancelled_tree_stays_cancelled_after_resume",
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::every_format_2_field_round_trips",
+    "tests::no_model_call_anywhere_in_a_cancelled_tree"
+   ]
+  },
+  {
+   "id": "CL42",
+   "title": "cancel_task can cancel twice",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if journal.cancelled_from.is_some() {\n        return false;\n    }\n    let ids",
+     "new": "    let ids"
+    }
+   ],
+   "tests": [
+    "tests::no_model_call_anywhere_in_a_cancelled_tree"
+   ]
+  },
+  {
+   "id": "CL43",
+   "title": "the cancel point is not written",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    put_opt(&mut out, journal.cancelled_from);",
+     "new": "    put_opt(&mut out, None);"
+    }
+   ],
+   "tests": [
+    "tests::a_cancelled_tree_stays_cancelled_after_resume",
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::every_format_2_field_round_trips"
+   ]
+  },
+  {
+   "id": "CL44",
+   "title": "the task budget is not written",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    put_budget(&mut out, journal.task_budget);",
+     "new": "    put_budget(&mut out, None);"
+    }
+   ],
+   "tests": [
+    "tests::a_cancelled_tree_stays_cancelled_after_resume",
+    "tests::a_child_grant_is_a_subset_of_its_parent",
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop",
+    "tests::a_grant_is_never_stored",
+    "tests::a_journal_round_trips_through_format_one",
+    "tests::a_reread_or_resume_refuses_a_journal_that_breaks_a_child_rule",
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::decoding_keeps_the_replay_bytes",
+    "tests::each_child_has_exactly_its_own_records",
+    "tests::every_format_2_field_round_trips",
+    "tests::node_zero_and_the_epoch_survive_a_round_trip",
+    "tests::the_task_and_a_child_running_out_together_stops_the_child"
+   ]
+  },
+  {
+   "id": "CL45",
+   "title": "a step budget is not written",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    put_budget(&mut out, step.budget);",
+     "new": "    put_budget(&mut out, None);"
+    }
+   ],
+   "tests": [
+    "tests::a_cancelled_tree_stays_cancelled_after_resume",
+    "tests::a_child_grant_is_a_subset_of_its_parent",
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop",
+    "tests::a_grant_is_never_stored",
+    "tests::a_journal_round_trips_through_format_one",
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::decoding_keeps_the_replay_bytes",
+    "tests::each_child_has_exactly_its_own_records",
+    "tests::every_format_2_field_round_trips",
+    "tests::node_zero_and_the_epoch_survive_a_round_trip",
+    "tests::the_task_and_a_child_running_out_together_stops_the_child"
+   ]
+  },
+  {
+   "id": "CL46",
+   "title": "the journal depth is not written",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    out.push(journal.depth);",
+     "new": "    out.push(0);"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop",
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::every_format_2_field_round_trips"
+   ]
+  },
+  {
+   "id": "CL47",
+   "title": "a budget with the flag off and values is read as none",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            (false, _, _) => Err(\"record\"),",
+     "new": "            (false, _, _) => Ok(None),"
+    }
+   ],
+   "tests": [
+    "tests::idea_2_fields_follow_their_rules"
+   ]
+  },
+  {
+   "id": "CL48",
+   "title": "a non-zero step depth byte is read",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if reader.byte().map_err(fail)? != 0 {\n        return Err(\"record\");\n    }\n    let budget = reader.budget()",
+     "new": "    let _ = reader.byte().map_err(fail)?;\n    let budget = reader.budget()"
+    }
+   ],
+   "tests": [
+    "tests::idea_2_fields_follow_their_rules"
+   ]
+  },
+  {
+   "id": "CL49",
+   "title": "an unknown step stop tag is read as cancelled",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        tag => Some(StopReason::from_tag(tag).ok_or(\"record\")?),",
+     "new": "        tag => Some(StopReason::from_tag(tag).unwrap_or(StopReason::Cancelled)),"
+    }
+   ],
+   "tests": [
+    "tests::an_unknown_step_stop_reason_is_refused"
+   ]
+  },
+  {
+   "id": "CL50",
+   "title": "an unknown child-stop reason is read as cancelled",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            reason: StopReason::from_tag(reader.byte().map_err(fail)?).ok_or(\"record\")?,",
+     "new": "            reason: StopReason::from_tag(reader.byte().map_err(fail)?).unwrap_or(StopReason::Cancelled),"
+    }
+   ],
+   "tests": [
+    "tests::an_unknown_kind_is_refused"
+   ]
+  },
+  {
+   "id": "CL51",
+   "title": "stored: the header depth is not checked",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if journal.depth > CHILD_DEPTH_LIMIT {\n        return Err(\"depth limit\");",
+     "new": "    if false {\n        return Err(\"depth limit\");"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::idea_2_fields_follow_their_rules"
+   ]
+  },
+  {
+   "id": "CL52",
+   "title": "stored: a parent after its child is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                .filter(|_| parent_id < step.id)\n                .ok_or(\"record\")?;",
+     "new": "                .filter(|_| true)\n                .ok_or(\"record\")?;"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL53",
+   "title": "stored: a call under a non-child is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                ProposalKind::Hosted => parent.kind == ProposalKind::Child,",
+     "new": "                ProposalKind::Hosted => true,"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL54",
+   "title": "stored: any step may have a parent",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                _ => false,\n            };\n            if !allowed {",
+     "new": "                _ => true,\n            };\n            if !allowed {"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL55",
+   "title": "stored: a non-child may carry a budget",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            if step.budget.is_some() || step.requests_used != 0 || step.stop.is_some() {",
+     "new": "            if step.requests_used != 0 || step.stop.is_some() {"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL56",
+   "title": "stored: a non-child may carry a count",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            if step.budget.is_some() || step.requests_used != 0 || step.stop.is_some() {",
+     "new": "            if step.budget.is_some() || step.stop.is_some() {"
+    }
+   ],
+   "tests": [
+    "tests::idea_2_fields_follow_their_rules"
+   ]
+  },
+  {
+   "id": "CL57",
+   "title": "stored: a non-child may carry a stop",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            if step.budget.is_some() || step.requests_used != 0 || step.stop.is_some() {",
+     "new": "            if step.budget.is_some() || step.requests_used != 0 {"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL58",
+   "title": "stored: a wider child resource is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if !narrower_resource(&parent.resource, &step.resource) {\n        return Err(\"not a subset\");",
+     "new": "    if false {\n        return Err(\"not a subset\");"
+    }
+   ],
+   "tests": [
+    "tests::a_reread_or_resume_refuses_a_journal_that_breaks_a_child_rule",
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL59",
+   "title": "stored: one level deeper is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if depth_under(journal, step.parent_id) > usize::from(CHILD_DEPTH_LIMIT) {",
+     "new": "    if depth_under(journal, step.parent_id) > usize::from(CHILD_DEPTH_LIMIT) + 1 {"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL60",
+   "title": "stored: the child count is not matched to its calls",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if u32::try_from(calls).ok() != Some(step.requests_used) {",
+     "new": "    if false {"
+    }
+   ],
+   "tests": [
+    "tests::a_child_that_breaks_a_rule_is_refused_on_every_live_path",
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL61",
+   "title": "stored: a zero child budget is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            if budget.requests == 0\n                || budget.seconds == 0\n                || step.requests_used",
+     "new": "            if false\n                || step.requests_used"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL62",
+   "title": "stored: a child over its own budget is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                || step.requests_used > budget.requests\n",
+     "new": "\n"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL63",
+   "title": "stored: a child asking more requests than its owner is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                    budget.requests > above.requests || budget.seconds > above.seconds",
+     "new": "                    budget.seconds > above.seconds"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL64",
+   "title": "stored: a child asking more seconds than its owner is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                    budget.requests > above.requests || budget.seconds > above.seconds",
+     "new": "                    budget.requests > above.requests"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL65",
+   "title": "stored: a top child is not measured against the task",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                None => journal.task_budget,\n            };",
+     "new": "                None => Some(Budget { requests: u32::MAX, seconds: u64::MAX }),\n            };"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL66",
+   "title": "stored: an unbudgeted child may count calls",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        None if step.requests_used != 0 => return Err(\"record\"),",
+     "new": "        None if false => return Err(\"record\"),"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL67",
+   "title": "stored: the task may be over its budget",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if task.requests == 0 || task.seconds == 0 || task_requests_used(journal) > task.requests {",
+     "new": "        if task.requests == 0 || task.seconds == 0 {"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL68",
+   "title": "stored: a zero task budget is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if task.requests == 0 || task.seconds == 0 || task_requests_used(journal) > task.requests {",
+     "new": "        if task_requests_used(journal) > task.requests {"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL69",
+   "title": "stored: a child-budget record need not match",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                if find(*child).is_none_or(|step| step.budget != Some(*budget)) {",
+     "new": "                if false {"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL70",
+   "title": "stored: a child-stop record's reason need not match",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                    step.stop != Some(*reason) || step.requests_used != *requests_used",
+     "new": "                    step.requests_used != *requests_used"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL71",
+   "title": "stored: a child-stop record's count need not match",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                    step.stop != Some(*reason) || step.requests_used != *requests_used",
+     "new": "                    step.stop != Some(*reason)"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL72",
+   "title": "stored: the child-budget records are not counted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if budgets != usize::from(step.budget.is_some())\n            || stops",
+     "new": "        if false\n            || stops"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::each_child_has_exactly_its_own_records"
+   ]
+  },
+  {
+   "id": "CL73",
+   "title": "stored: the child-stop records are not counted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            || stops != usize::from(step.stop.is_some())\n        {",
+     "new": "            || false\n        {"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::each_child_has_exactly_its_own_records"
+   ]
+  },
+  {
+   "id": "CL74",
+   "title": "stored: a cancelled task may hold a running child",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            step.kind == ProposalKind::Child && step.stop.is_none()\n                ||",
+     "new": "            false\n                ||"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL75",
+   "title": "stored: a cancelled task may gain steps after the cancel",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "&& step.id > last",
+     "new": "&& false"
+    }
+   ],
+   "tests": [
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL76",
+   "title": "authorize_child grants a child with no budget",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if step.budget.is_none() {\n        return Err(TASK_BUDGET_REASON);\n    }\n    if journal.cancelled_from.is_some() {",
+     "new": "    if journal.cancelled_from.is_some() {"
+    }
+   ],
+   "tests": [
+    "tests::a_missing_budget_is_refused_with_the_task_budget_reason",
+    "tests::an_inbox_answer_grants_only_a_usable_child_under_a_granted_parent",
+    "tests::an_unbudgeted_child_or_a_non_child_gets_no_child_grant"
+   ]
+  },
+  {
+   "id": "CL77",
+   "title": "authorize_child skips the path check",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if path_refusal(grant_resource).is_some() || !resource_covers(&child.resource, grant_resource) {",
+     "new": "    if !resource_covers(&child.resource, grant_resource) {"
+    }
+   ],
+   "tests": [
+    "tests::a_child_grant_is_a_subset_of_its_parent"
+   ]
+  },
+  {
+   "id": "CL78",
+   "title": "authorize_child skips the resource subset",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if path_refusal(grant_resource).is_some() || !resource_covers(&child.resource, grant_resource) {",
+     "new": "    if path_refusal(grant_resource).is_some() {"
+    }
+   ],
+   "tests": [
+    "tests::a_child_grant_is_a_subset_of_its_parent"
+   ]
+  },
+  {
+   "id": "CL79",
+   "title": "authorize_child grants a stopped child",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if chain_stopped(journal, &child_chain(journal, Some(id))) {\n        return Err(\"stopped\");",
+     "new": "    if false && chain_stopped(journal, &child_chain(journal, Some(id))) {\n        return Err(\"stopped\");"
+    }
+   ],
+   "tests": [
+    "tests::a_child_below_a_stopped_child_gets_nothing",
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop",
+    "tests::a_child_over_its_request_budget_stops_with_requests",
+    "tests::a_stopped_child_stops_its_children",
+    "tests::a_time_refusal_stops_the_child_with_time",
+    "tests::cancelling_a_parent_stops_started_children_at_their_next_model_call",
+    "tests::no_model_call_anywhere_in_a_cancelled_tree"
+   ]
+  },
+  {
+   "id": "CL80",
+   "title": "authorize_child does not need a parent grant",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    step.grant.as_deref().filter(|grant| !grant.is_empty())?;\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::a_child_grant_is_a_subset_of_its_parent",
+    "tests::an_inbox_answer_grants_only_a_usable_child_under_a_granted_parent"
+   ]
+  },
+  {
+   "id": "CL81",
+   "title": "authorize_child accepts the parent's own grant",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        && parent.grant.as_deref() != Some(grant)",
+     "new": "        && true"
+    }
+   ],
+   "tests": [
+    "tests::a_child_grant_is_a_subset_of_its_parent",
+    "tests::a_child_grant_is_narrower_and_does_not_inherit_the_parent_grant"
+   ]
+  },
+  {
+   "id": "CL82",
+   "title": "authorize_child grants a step that is not a child",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        .find(|step| step.id == id && step.kind == ProposalKind::Child)\n        .ok_or(\"not a child\")?;",
+     "new": "        .find(|step| step.id == id)\n        .ok_or(\"not a child\")?;"
+    }
+   ],
+   "tests": [
+    "tests::a_child_grant_is_narrower_and_does_not_inherit_the_parent_grant",
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop"
+   ]
+  },
+  {
+   "id": "CL83",
+   "title": "a child host does not record its depth",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    host.depth = u8::try_from(depth).map_err(|_| \"depth limit\")?;",
+     "new": "    host.depth = 0;\n    let _ = depth;"
+    }
+   ],
+   "tests": [
+    "tests::a_child_at_the_depth_limit_cannot_propose_a_child",
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop",
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::every_format_2_field_round_trips"
+   ]
+  },
+  {
+   "id": "CL84",
+   "title": "a long child result is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        || result.len() > CHILD_RESULT_CAP\n",
+     "new": "\n"
+    }
+   ],
+   "tests": [
+    "tests::a_long_inline_child_result_is_refused"
+   ]
+  },
+  {
+   "id": "CL85",
+   "title": "a stopped child's result is not marked partial",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            admit_tool_result(parent, &format!(\"partial ({}): {result}\", reason.name()))",
+     "new": "            { let _ = reason; admit_tool_result(parent, result) }"
+    }
+   ],
+   "tests": [
+    "tests::cancelling_a_parent_stops_started_children_at_their_next_model_call"
+   ]
+  },
+  {
+   "id": "CL86",
+   "title": "a child result is recorded for a step that is not a child",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        .find(|step| step.id == child_id && step.kind == ProposalKind::Child)\n        .map(|step| step.stop)",
+     "new": "        .find(|step| step.id == child_id)\n        .map(|step| step.stop)"
+    }
+   ],
+   "tests": [
+    "tests::a_long_inline_child_result_is_refused"
+   ]
+  },
+  {
+   "id": "CL87",
+   "title": "the depth limit is 3",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "const CHILD_DEPTH_LIMIT: u8 = 2;",
+     "new": "const CHILD_DEPTH_LIMIT: u8 = 3;"
+    }
+   ],
+   "tests": [
+    "tests::a_child_at_the_depth_limit_cannot_propose_a_child",
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "CL88",
+   "title": "the child result cap is doubled",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "const CHILD_RESULT_CAP: usize = 4_000;",
+     "new": "const CHILD_RESULT_CAP: usize = 8_000;"
+    }
+   ],
+   "tests": [
+    "tests::a_long_inline_child_result_is_refused"
+   ]
+  },
+  {
+   "id": "CL89",
+   "title": "the child stop renders differently, format stays 2",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            \"child {child} stopped: {} ({requests_used} requests used)\",",
+     "new": "            \"child {child} stopped: {} ({requests_used} used)\","
+    }
+   ],
+   "tests": [
+    "tests::a_child_over_its_request_budget_stops_with_requests",
+    "tests::each_kind_renders_byte_for_byte",
+    "tests::the_child_records_render_byte_for_byte_and_are_pinned"
+   ]
+  },
+  {
+   "id": "CL90",
+   "title": "the child budget renders differently, format stays 2",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            \"child {child} budget: {} requests, {} s\",",
+     "new": "            \"child {child} budget: {} requests, {} seconds\","
+    }
+   ],
+   "tests": [
+    "tests::each_kind_renders_byte_for_byte",
+    "tests::the_child_records_render_byte_for_byte_and_are_pinned"
+   ]
+  },
+  {
+   "id": "CL91",
+   "title": "propose_child does not write the budget record",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        source: NodeSource::ChildBudget { child: id, budget },\n    });\n    Ok(id)",
+     "new": "        source: NodeSource::Todo,\n    });\n    Ok(id)"
+    }
+   ],
+   "tests": [
+    "tests::a_cancelled_tree_stays_cancelled_after_resume",
+    "tests::a_child_budget_larger_than_the_parent_remaining_is_refused",
+    "tests::a_child_grant_is_a_subset_of_its_parent",
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop",
+    "tests::a_grant_is_never_stored",
+    "tests::a_journal_round_trips_through_format_one",
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::decoding_keeps_the_replay_bytes",
+    "tests::each_child_has_exactly_its_own_records",
+    "tests::every_format_2_field_round_trips",
+    "tests::node_zero_and_the_epoch_survive_a_round_trip",
+    "tests::the_task_and_a_child_running_out_together_stops_the_child"
+   ]
+  },
+  {
+   "id": "CL92",
+   "title": "stored: a child below a stopped child may run",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if step.stop.is_none()\n        && child_chain(journal, step.parent_id)",
+     "new": "    if false\n        && child_chain(journal, step.parent_id)"
+    }
+   ],
+   "tests": [
+    "tests::a_reread_or_resume_refuses_a_journal_that_breaks_a_child_rule",
+    "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "TB01",
+   "title": "the task budget reason loses what to do",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "const TASK_BUDGET_REASON: &str = \"the task budget was not recorded; start a new task\";",
+     "new": "const TASK_BUDGET_REASON: &str = \"the task budget was not recorded\";"
+    }
+   ],
+   "tests": [
+    "tests::the_guest_never_sets_the_top_task_budget"
+   ]
+  },
+  {
+   "id": "JF01",
+   "title": "any role fits any kind",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        _ => role == Role::User,\n    }\n}",
+     "new": "        _ => true || role == Role::User,\n    }\n}"
+    }
+   ],
+   "tests": [
+    "tests::a_kind_with_the_wrong_role_is_refused"
+   ]
+  },
+  {
+   "id": "JF02",
+   "title": "decode skips the role check",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if !role_fits(&source, role) {",
+     "new": "    if false {"
+    }
+   ],
+   "tests": [
+    "tests::a_kind_with_the_wrong_role_is_refused",
+    "tests::only_the_host_writes_a_later_system_line"
+   ]
+  },
+  {
+   "id": "JF03",
+   "title": "encode skips the role and text check",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if !role_fits(&node.source, node.role) || !kind_has_text(&node.source) && !node.text.is_empty()\n    {",
+     "new": "    if false\n    {"
+    }
+   ],
+   "tests": [
+    "tests::a_kind_with_the_wrong_role_is_refused",
+    "tests::a_kind_without_text_must_have_none"
+   ]
+  },
+  {
+   "id": "JF04",
+   "title": "every kind may carry text",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "fn kind_has_text(source: &NodeSource) -> bool {\n    !matches!(",
+     "new": "fn kind_has_text(source: &NodeSource) -> bool {\n    true || !matches!("
+    }
+   ],
+   "tests": [
+    "tests::a_kind_without_text_must_have_none"
+   ]
+  },
+  {
+   "id": "JF05",
+   "title": "one rendering changes",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        NodeSource::Goal => format!(\"goal: {}\", node.text),",
+     "new": "        NodeSource::Goal => format!(\"goal - {}\", node.text),"
+    }
+   ],
+   "tests": [
+    "tests::each_kind_renders_byte_for_byte",
+    "tests::the_cache_bytes_refuse_a_rendering_that_does_not_match",
+    "tests::the_rendering_changes_only_with_the_format_number"
+   ]
+  },
+  {
+   "id": "JF06",
+   "title": "a rendering and its golden bytes change, format stays 2",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        NodeSource::Goal => format!(\"goal: {}\", node.text),",
+     "new": "        NodeSource::Goal => format!(\"goal - {}\", node.text),"
+    },
+    {
+     "file": "src/lib.rs",
+     "old": "                b\"goal: finish the note\",",
+     "new": "                b\"goal - finish the note\","
+    }
+   ],
+   "tests": [
+    "tests::the_cache_bytes_refuse_a_rendering_that_does_not_match",
+    "tests::the_rendering_changes_only_with_the_format_number"
+   ]
+  },
+  {
+   "id": "JF07b",
+   "title": "an unknown kind decodes as a message (after idea 2)",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            requests_used: reader.u32().map_err(fail)?,\n        },\n        _ => return Err(\"record\"),",
+     "new": "            requests_used: reader.u32().map_err(fail)?,\n        },\n        _ => NodeSource::Message,"
+    }
+   ],
+   "tests": [
+    "tests::an_unknown_kind_is_refused"
+   ]
+  },
+  {
+   "id": "JF08",
+   "title": "format 1 is not recognised",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if start[4..6] == 1_u16.to_le_bytes() {\n        return Err(FORMAT_1_REASON);\n    }\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::a_format_1_journal_is_refused_with_its_reason",
+    "tests::a_format_1_task_shows_its_reason"
+   ]
+  },
+  {
+   "id": "JF09",
+   "title": "format 1 gets a generic error",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        return Err(FORMAT_1_REASON);\n    }\n    if start[4..6] != JOURNAL_FORMAT",
+     "new": "        return Err(\"format version\");\n    }\n    if start[4..6] != JOURNAL_FORMAT"
+    }
+   ],
+   "tests": [
+    "tests::a_format_1_journal_is_refused_with_its_reason",
+    "tests::a_format_1_task_shows_its_reason"
+   ]
+  },
+  {
+   "id": "JF10",
+   "title": "resume says Unknown for format 1",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        Err(Some(FORMAT_1_REASON)) => return ResumeOutcome::FormatNotSupported(FORMAT_1_REASON),\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::a_format_1_task_shows_its_reason"
+   ]
+  },
+  {
+   "id": "JF11",
+   "title": "the stored read hides the format 1 reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "decode_bytes(&content).map_err(|reason| (reason == FORMAT_1_REASON).then_some(reason))?;",
+     "new": "decode_bytes(&content).map_err(|_| None)?;"
+    }
+   ],
+   "tests": [
+    "tests::a_format_1_task_shows_its_reason"
+   ]
+  },
+  {
+   "id": "JF12",
+   "title": "the run ignores a format 1 journal (e2e)",
+   "command": "e2e",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                    return Err(elastos::bus::types::BusError::Invalid(reason.to_string()));",
+     "new": "                    let _ = reason;"
+    }
+   ],
+   "tests": [
+    "runtime::tests::the_agent_host_refuses_a_format_1_journal_with_its_reason"
+   ]
+  },
+  {
+   "id": "JF13",
+   "title": "stored_task_refusal never refuses",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        Err(FORMAT_1_REASON) => Some(FORMAT_1_REASON),\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::a_format_1_task_shows_its_reason"
+   ]
+  },
+  {
+   "id": "JF16",
+   "title": "a read's hash is not checked",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        || row.text_hash != sha256(text.as_bytes())\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::an_observation_with_a_wrong_hash_or_window_is_refused",
+    "tests::only_a_well_formed_observation_counts_as_a_read"
+   ]
+  },
+  {
+   "id": "JF17",
+   "title": "a read's window count is not checked",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        first != 0 && line_count(whole) == count && !(row.cut && whole.len() == text.len())",
+     "new": "        first != 0 && !(row.cut && whole.len() == text.len())"
+    }
+   ],
+   "tests": [
+    "tests::an_observation_whose_fields_do_not_fit_is_not_a_read",
+    "tests::an_observation_with_a_wrong_hash_or_window_is_refused"
+   ]
+  },
+  {
+   "id": "JF18",
+   "title": "a cut needs no window",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        || row.cut && row.window.is_none()\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::an_observation_whose_fields_do_not_fit_is_not_a_read",
+    "tests::an_observation_with_a_wrong_hash_or_window_is_refused",
+    "tests::only_a_well_formed_observation_counts_as_a_read"
+   ]
+  },
+  {
+   "id": "JF19",
+   "title": "a window needs no revision",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        || row.window.is_some() && row.revision.is_none()\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::an_observation_whose_fields_do_not_fit_is_not_a_read",
+    "tests::an_observation_with_a_wrong_hash_or_window_is_refused"
+   ]
+  },
+  {
+   "id": "JF20",
+   "title": "a revision need not be one token",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            .is_some_and(|revision| !revision_ok(revision))",
+     "new": "            .is_some_and(|revision| revision.is_empty())"
+    }
+   ],
+   "tests": [
+    "tests::an_observation_whose_fields_do_not_fit_is_not_a_read",
+    "tests::an_observation_with_a_wrong_hash_or_window_is_refused"
+   ]
+  },
+  {
+   "id": "JF21",
+   "title": "a window may start at line 0",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        first != 0 && line_count(whole) == count",
+     "new": "        line_count(whole) == count"
+    }
+   ],
+   "tests": [
+    "tests::an_observation_whose_fields_do_not_fit_is_not_a_read",
+    "tests::an_observation_with_a_wrong_hash_or_window_is_refused"
+   ]
+  },
+  {
+   "id": "JF22",
+   "title": "a read may have no resource",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if row.resource.is_empty()\n        || row.text_hash",
+     "new": "    if row.text_hash"
+    }
+   ],
+   "tests": [
+    "tests::an_observation_whose_fields_do_not_fit_is_not_a_read",
+    "tests::only_a_well_formed_observation_counts_as_a_read"
+   ]
+  },
+  {
+   "id": "JF23",
+   "title": "empty read fields may hold values",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            if !has_revision && !revision.is_empty() || !has_window && (first, count) != (0, 0) {",
+     "new": "            if false {"
+    }
+   ],
+   "tests": [
+    "tests::an_observation_with_a_wrong_hash_or_window_is_refused"
+   ]
+  },
+  {
+   "id": "JF24",
+   "title": "an unknown inbox answer decodes",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            4 => Some(InboxAnswer::Deny),\n            _ => None,",
+     "new": "            4 => Some(InboxAnswer::Deny),\n            _ => Some(InboxAnswer::Deny),"
+    }
+   ],
+   "tests": [
+    "tests::an_unknown_inbox_answer_is_refused"
+   ]
+  },
+  {
+   "id": "JF25",
+   "title": "a kind is read from a text prefix again",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "fn admit_user(journal: &mut Journal, text: &str) {\n    if text.is_empty() {\n        return;\n    }\n    journal.events.push(SurfaceNode {\n        role: Role::User,\n        text: text.to_string(),\n        source: NodeSource::Message,\n    });",
+     "new": "fn admit_user(journal: &mut Journal, text: &str) {\n    if text.is_empty() {\n        return;\n    }\n    if let Some(goal) = text.strip_prefix(\"goal\\n\") {\n        journal.events.push(SurfaceNode { role: Role::User, text: goal.to_string(), source: NodeSource::Goal });\n        return;\n    }\n    journal.events.push(SurfaceNode {\n        role: Role::User,\n        text: text.to_string(),\n        source: NodeSource::Message,\n    });"
+    }
+   ],
+   "tests": [
+    "tests::a_message_starting_with_each_label_stays_a_message"
+   ]
+  },
+  {
+   "id": "JF26",
+   "title": "replay trusts the rendered text",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if render_record(&node) != rendered {",
+     "new": "        if false {"
+    }
+   ],
+   "tests": [
+    "tests::the_cache_bytes_refuse_a_rendering_that_does_not_match"
+   ]
+  },
+  {
+   "id": "JF27",
+   "title": "encode drops a spill's version",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            put_str(&mut out, resource)?;\n            out.extend_from_slice(&version.to_le_bytes());\n        }",
+     "new": "            put_str(&mut out, resource)?;\n            let _ = version;\n        }"
+    }
+   ],
+   "tests": [
+    "tests::a_goal_survives_shortening_and_does_not_grant",
+    "tests::a_spill_pointer_keeps_the_file_text",
+    "tests::a_stored_spill_pointer_follows_the_path_rule",
+    "tests::every_kind_round_trips"
+   ]
+  },
+  {
+   "id": "JF28",
+   "title": "a stored spill pointer skips the path rule",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        NodeSource::Spill { resource, .. } => Some(resource.clone()),\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::a_stored_spill_pointer_follows_the_path_rule"
+   ]
+  },
+  {
+   "id": "JF29",
+   "title": "spill lookup folds case (which file uses path_key)",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if resource != object_resource {",
+     "new": "        if path_key(resource) != path_key(object_resource) {"
+    }
+   ],
+   "tests": [
+    "tests::two_files_that_differ_only_in_case_stay_two_files"
+   ]
+  },
+  {
+   "id": "JF30",
+   "title": "a read's file is matched by path_key",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        .find_map(|node| read_observation(node).filter(|row| row.resource == resource))",
+     "new": "        .find_map(|node| read_observation(node).filter(|row| path_key(&row.resource) == path_key(resource)))"
+    }
+   ],
+   "tests": [
+    "tests::a_path_must_be_nfc_and_non_ascii_names_still_work",
+    "tests::codex_greek_spellings_are_one_file_everywhere",
+    "tests::every_refusal_writes_exactly_one_record",
+    "tests::path_aliases_are_refused_and_case_counts_as_one_file",
+    "tests::two_files_that_differ_only_in_case_stay_two_files"
+   ]
+  },
+  {
+   "id": "JF31",
+   "title": "the cache bytes carry no rendered text",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        put_str(&mut out, &render_record(event))?;",
+     "new": "        put_str(&mut out, \"\")?;"
+    }
+   ],
+   "tests": [
+    "tests::a_child_grant_is_narrower_and_does_not_inherit_the_parent_grant",
+    "tests::a_crash_after_dispatch_does_not_apply_the_note",
+    "tests::a_crash_after_the_result_does_not_erase_it",
+    "tests::a_goal_survives_shortening_and_does_not_grant",
+    "tests::a_granted_edit_becomes_the_current_text_and_does_not_write_a_host_file",
+    "tests::a_hosted_proposal_has_no_secret_and_a_missing_grant_is_denied",
+    "tests::a_later_note_read_uses_the_rewritten_sentence",
+    "tests::a_message_starting_with_each_label_stays_a_message",
+    "tests::a_model_sentence_shortens_the_log_and_replays",
+    "tests::a_recorded_journal_replays_to_the_same_bytes",
+    "tests::a_retyped_note_changes_the_digest",
+    "tests::a_skill_replays_with_its_source",
+    "tests::a_snapshot_replays_with_its_source",
+    "tests::a_spill_pointer_keeps_the_file_text",
+    "tests::a_tool_result_enters_the_view_and_a_step_without_one_stays_in_the_log",
+    "tests::an_edit_requires_the_old_text_once_and_replay_keeps_the_observation",
+    "tests::an_empty_assistant_stays_in_the_log_and_drops_out_of_the_view",
+    "tests::assistant_and_tool_result_tags_replay_together",
+    "tests::compaction_keeps_the_current_note",
+    "tests::compaction_keeps_the_workspace_snapshot",
+    "tests::compaction_replays_the_same_head",
+    "tests::compaction_summary_is_a_user_checkpoint",
+    "tests::decoding_keeps_the_replay_bytes",
+    "tests::every_format_2_field_round_trips",
+    "tests::every_kind_round_trips",
+    "tests::the_cache_bytes_refuse_a_rendering_that_does_not_match",
+    "tests::the_same_command_waits_until_the_first_has_a_result"
+   ]
+  },
+  {
+   "id": "JF32",
+   "title": "the guest writes a format other than 2 (e2e S3 test)",
+   "command": "e2e",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "const JOURNAL_FORMAT: u16 = 2;",
+     "new": "const JOURNAL_FORMAT: u16 = 3;"
+    }
+   ],
+   "tests": [
+    "runtime::tests::the_agent_host_writes_and_reads_its_journal_through_the_real_bridge"
+   ]
+  },
+  {
+   "id": "JF33",
+   "title": "history may carry the system role again",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        NodeSource::InHistory => matches!(role, Role::Assistant | Role::ToolResult),",
+     "new": "        NodeSource::InHistory => matches!(role, Role::System | Role::Assistant | Role::ToolResult),"
+    }
+   ],
+   "tests": [
+    "tests::a_kind_with_the_wrong_role_is_refused",
+    "tests::only_the_host_writes_a_later_system_line"
+   ]
+  },
+  {
+   "id": "JF34",
+   "title": "a later system line is written as history",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            role: Role::System,\n            text: text.to_string(),\n            source: NodeSource::SystemLine,",
+     "new": "            role: Role::System,\n            text: text.to_string(),\n            source: NodeSource::InHistory,"
+    }
+   ],
+   "tests": [
+    "tests::a_cancelled_tree_stays_cancelled_after_resume",
+    "tests::a_child_grant_is_a_subset_of_its_parent",
+    "tests::a_child_grant_is_narrower_and_does_not_inherit_the_parent_grant",
+    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop",
+    "tests::a_crash_after_a_checkpoint_keeps_the_settlement_words",
+    "tests::a_crash_between_append_and_result_is_settlement_unknown_and_not_retried",
+    "tests::a_format_1_journal_is_refused_with_its_reason",
+    "tests::a_format_1_task_shows_its_reason",
+    "tests::a_grant_is_never_stored",
+    "tests::a_head_rewrite_and_a_step_change_different_records",
+    "tests::a_hosted_proposal_has_no_secret_and_a_missing_grant_is_denied",
+    "tests::a_journal_grant_is_held_in_memory_only",
+    "tests::a_journal_over_the_cap_is_refused",
+    "tests::a_journal_round_trips_through_format_one",
+    "tests::a_lost_first_append_with_nothing_stored_stays_unknown",
+    "tests::a_message_starting_with_each_label_stays_a_message",
+    "tests::a_model_sentence_shortens_the_log_and_replays",
+    "tests::a_read_proposal_does_not_change_model_bytes",
+    "tests::a_recorded_journal_replays_to_the_same_bytes",
+    "tests::a_refused_append_is_closed_and_not_sent_again",
+    "tests::a_relinked_but_malformed_journal_is_refused",
+    "tests::a_relinked_journal_with_an_unknown_tag_or_spare_bytes_is_refused",
+    "tests::a_reread_of_a_legacy_journal_with_a_path_alias_is_refused",
+    "tests::a_reread_or_resume_refuses_a_journal_that_breaks_a_child_rule",
+    "tests::a_reread_waits_while_an_append_is_unknown",
+    "tests::a_skill_replays_with_its_source",
+    "tests::a_snapshot_replays_with_its_source",
+    "tests::a_stale_journal_revision_is_refused_and_nothing_is_written",
+    "tests::a_stored_spill_pointer_follows_the_path_rule",
+    "tests::a_tool_result_enters_the_view_and_a_step_without_one_stays_in_the_log",
+    "tests::a_wrong_format_version_is_refused",
+    "tests::after_a_conflict_appends_wait_for_a_reread",
+    "tests::an_empty_assistant_stays_in_the_log_and_drops_out_of_the_view",
+    "tests::assistant_and_tool_result_tags_replay_together",
+    "tests::cancel_after_a_checkpoint_does_not_dispatch",
+    "tests::cancel_leaves_the_epoch_and_model_bytes",
+    "tests::child_limits_are_checked_again_after_reload",
+    "tests::compaction_replays_the_same_head",
+    "tests::decoding_keeps_the_replay_bytes",
+    "tests::dispatch_without_a_grant_is_denied_even_without_authorize",
+    "tests::each_child_has_exactly_its_own_records",
+    "tests::every_flipped_byte_is_refused",
+    "tests::every_format_2_field_round_trips",
+    "tests::every_truncation_is_refused",
+    "tests::idea_2_fields_follow_their_rules",
+    "tests::no_journal_step_keeps_the_journal_grant",
+    "tests::node_zero_and_the_epoch_survive_a_round_trip",
+    "tests::only_an_ok_reply_with_a_revision_counts_as_written",
+    "tests::only_the_host_writes_a_later_system_line",
+    "tests::resume_on_another_head_stays_unknown_and_holds_appends",
+    "tests::resume_on_the_parent_head_lets_the_append_be_proposed_again",
+    "tests::resume_reads_back_the_same_bytes",
+    "tests::resume_without_a_read_grant_sends_nothing",
+    "tests::the_cap_holds_at_the_last_byte",
+    "tests::the_first_append_creates_the_journal_and_the_next_names_its_revision",
+    "tests::the_guest_asks_for_exactly_two_grants_on_its_own_journal",
+    "tests::the_previous_head_links_two_versions",
+    "tests::the_task_and_a_child_running_out_together_stops_the_child",
+    "tests::two_steps_in_one_turn_share_the_epoch_and_derive_omits_the_markers"
+   ]
+  },
+  {
+   "id": "JF35",
+   "title": "a system line may carry any role",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        NodeSource::Head | NodeSource::SystemLine => role == Role::System,",
+     "new": "        NodeSource::Head => role == Role::System,\n        NodeSource::SystemLine => true,"
+    }
+   ],
+   "tests": [
+    "tests::a_kind_with_the_wrong_role_is_refused",
+    "tests::only_the_host_writes_a_later_system_line"
+   ]
+  },
+  {
+   "id": "JF36",
+   "title": "a person's text can become a system line",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "fn admit_user(journal: &mut Journal, text: &str) {\n    if text.is_empty() {\n        return;\n    }\n    journal.events.push(SurfaceNode {\n        role: Role::User,\n        text: text.to_string(),\n        source: NodeSource::Message,\n    });",
+     "new": "fn admit_user(journal: &mut Journal, text: &str) {\n    if text.is_empty() {\n        return;\n    }\n    if let Some(line) = text.strip_prefix(\"system\\n\") {\n        journal.events.push(SurfaceNode { role: Role::System, text: line.to_string(), source: NodeSource::SystemLine });\n        return;\n    }\n    journal.events.push(SurfaceNode {\n        role: Role::User,\n        text: text.to_string(),\n        source: NodeSource::Message,\n    });"
+    }
+   ],
+   "tests": [
+    "tests::only_the_host_writes_a_later_system_line"
+   ]
+  },
+  {
+   "id": "JF37",
+   "title": "the system line renders differently, format stays 2",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        | NodeSource::SystemLine\n        | NodeSource::Message",
+     "new": "        | NodeSource::Message"
+    },
+    {
+     "file": "src/lib.rs",
+     "old": "        NodeSource::Todo => format!(",
+     "new": "        NodeSource::SystemLine => format!(\"system: {}\", node.text),\n        NodeSource::Todo => format!("
+    }
+   ],
+   "tests": [
+    "tests::each_kind_renders_byte_for_byte",
+    "tests::only_the_host_writes_a_later_system_line",
+    "tests::the_rendering_changes_only_with_the_format_number"
+   ]
+  },
+  {
+   "id": "OA01",
+   "title": "the first file is staged before the second is checked",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        versions.push(row.version);\n",
+     "new": "        versions.push(row.version);\n        let staged = propose_step(journal);\n        journal.steps.iter_mut().find(|step| step.id == staged).expect(\"pushed\").kind = ProposalKind::Edit;\n"
+    }
+   ],
+   "tests": [
+    "tests::a_change_that_fails_on_any_file_stages_nothing",
+    "tests::a_queued_edit_never_takes_a_newer_revision",
+    "tests::a_refused_request_or_result_writes_one_record",
+    "tests::a_two_file_change_writes_both_or_neither",
+    "tests::a_windowed_change_records_only_the_edited_lines",
+    "tests::a_written_change_takes_a_version_never_used",
+    "tests::an_edit_names_the_revision_it_read",
+    "tests::every_refusal_writes_exactly_one_record",
+    "tests::path_aliases_are_refused_and_case_counts_as_one_file"
+   ]
+  },
+  {
+   "id": "OA02",
+   "title": "the first file is written before the second is checked",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if step.seen_version != Some(row.version) {\n            return Err(Refusal::Stale);\n        }",
+     "new": "        if step.seen_version != Some(row.version) {\n            continue;\n        }"
+    }
+   ],
+   "tests": [
+    "tests::a_two_file_change_writes_both_or_neither",
+    "tests::an_edit_names_the_revision_it_read",
+    "tests::every_refusal_writes_exactly_one_record"
+   ]
+  },
+  {
+   "id": "OA03",
+   "title": "the written list is not checked",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            [revision] if revision_ok(revision) => revisions.push(*revision),\n            _ => {\n                deny(journal);\n                return Err(Refusal::WrittenMismatch);\n            }",
+     "new": "            _ => revisions.push(named.first().copied().unwrap_or(\"unnamed\")),"
+    }
+   ],
+   "tests": [
+    "tests::a_refused_request_or_result_writes_one_record",
+    "tests::a_two_file_change_writes_both_or_neither",
+    "tests::every_refusal_writes_exactly_one_record"
+   ]
+  },
+  {
+   "id": "OA04",
+   "title": "one file of a change is written alone",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": ".any(|other| other.id != step.id && other.effect_id == step.effect_id)",
+     "new": ".any(|_| false)"
+    }
+   ],
+   "tests": [
+    "tests::a_two_file_change_writes_both_or_neither"
+   ]
+  },
+  {
+   "id": "OA05",
+   "title": "a change waits on itself",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            && earlier.effect_id != step.effect_id\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::a_two_file_change_writes_both_or_neither"
+   ]
+  },
+  {
+   "id": "OA06",
+   "title": "the written count is not checked",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if written.len() != bound.len() {\n",
+     "new": "    if false {\n"
+    }
+   ],
+   "tests": [
+    "tests::a_two_file_change_writes_both_or_neither"
+   ]
+  },
+  {
+   "id": "OC01",
+   "title": "any path spelling is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            !segment.is_empty() && segment != \".\" && segment != \"..\" && !segment.ends_with('.')",
+     "new": "            true"
+    }
+   ],
+   "tests": [
+    "tests::a_legacy_journal_with_a_path_alias_is_refused_on_load",
+    "tests::a_reread_of_a_legacy_journal_with_a_path_alias_is_refused",
+    "tests::a_stored_spill_pointer_follows_the_path_rule",
+    "tests::each_refusal_writes_exactly_one_record",
+    "tests::every_refusal_writes_exactly_one_record",
+    "tests::path_aliases_are_refused_and_case_counts_as_one_file",
+    "tests::project_files_and_quoted_lines_refuse_odd_names"
+   ]
+  },
+  {
+   "id": "OC02",
+   "title": "case counts as another file",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let folded = decomposed.to_lowercase().to_uppercase().to_lowercase();",
+     "new": "    let folded = decomposed;"
+    }
+   ],
+   "tests": [
+    "tests::a_legacy_journal_with_a_path_alias_is_refused_on_load",
+    "tests::a_path_must_be_nfc_and_non_ascii_names_still_work",
+    "tests::codex_greek_spellings_are_one_file_everywhere",
+    "tests::every_refusal_writes_exactly_one_record",
+    "tests::path_aliases_are_refused_and_case_counts_as_one_file",
+    "tests::spellings_equal_without_case_and_normal_form_share_one_key",
+    "tests::two_files_that_differ_only_in_case_stay_two_files"
+   ]
+  },
+  {
+   "id": "ON01",
+   "title": "the no-op count is infinite",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": ">= NOOP_EDIT_LIMIT",
+     "new": ">= usize::MAX"
+    }
+   ],
+   "tests": [
+    "tests::a_path_must_be_nfc_and_non_ascii_names_still_work",
+    "tests::a_repeated_no_op_edit_is_refused",
+    "tests::codex_greek_spellings_are_one_file_everywhere",
+    "tests::every_refusal_writes_exactly_one_record",
+    "tests::path_aliases_are_refused_and_case_counts_as_one_file"
+   ]
+  },
+  {
+   "id": "OR01",
+   "title": "the change revision is not compared",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if edit.revision != read {",
+     "new": "        if false && edit.revision != read {"
+    }
+   ],
+   "tests": [
+    "tests::a_change_that_fails_on_any_file_stages_nothing",
+    "tests::an_edit_names_the_revision_it_read",
+    "tests::each_refusal_writes_exactly_one_record",
+    "tests::every_refusal_writes_exactly_one_record"
+   ]
+  },
+  {
+   "id": "OR02",
+   "title": "the request drops if_revision",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                \"if_revision\": edit.revision,\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::a_two_file_change_writes_both_or_neither",
+    "tests::an_edit_names_the_revision_it_read"
+   ]
+  },
+  {
+   "id": "OR03",
+   "title": "a read without revision binds",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let Some(revision) = row.revision.clone() else {\n            return Err(Refusal::NoRevision);\n        };",
+     "new": "        let revision = row.revision.clone().unwrap_or_default();"
+    }
+   ],
+   "tests": [
+    "tests::an_edit_names_the_revision_it_read",
+    "tests::every_refusal_writes_exactly_one_record"
+   ]
+  },
+  {
+   "id": "OR04",
+   "title": "a stale file still binds",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if step.seen_version != Some(row.version) {\n            return Err(Refusal::Stale);",
+     "new": "        if false {\n            return Err(Refusal::Stale);"
+    }
+   ],
+   "tests": [
+    "tests::a_two_file_change_writes_both_or_neither",
+    "tests::an_edit_names_the_revision_it_read",
+    "tests::every_refusal_writes_exactly_one_record"
+   ]
+  },
+  {
+   "id": "OS02",
+   "title": "a cut line counts as seen",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "put_lines(&mut lines, first, whole_lines(text, row.cut));",
+     "new": "put_lines(&mut lines, first, text);"
+    }
+   ],
+   "tests": [
+    "tests::an_edit_outside_the_read_window_creates_no_step"
+   ]
+  },
+  {
+   "id": "OS03",
+   "title": "runs join across a gap",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "Some((_, last, text)) if *last + 1 == at => {",
+     "new": "Some((_, last, text)) if *last < at => {"
+    }
+   ],
+   "tests": [
+    "tests::an_edit_outside_the_read_window_creates_no_step"
+   ]
+  },
+  {
+   "id": "OS04",
+   "title": "an edit may remove the window line break",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if !whole && run.ends_with('\\n') && !run.replacen(old, new, 1).ends_with('\\n') {",
+     "new": "    if false && run.ends_with('\\n') && !run.replacen(old, new, 1).ends_with('\\n') {"
+    }
+   ],
+   "tests": [
+    "tests::a_windowed_change_records_only_the_edited_lines",
+    "tests::every_refusal_writes_exactly_one_record"
+   ]
+  },
+  {
+   "id": "OS05",
+   "title": "seen lines ignore the version",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if rows.first().is_none_or(|(row, _)| row.version != version) {",
+     "new": "    if rows.is_empty() {"
+    }
+   ],
+   "tests": [
+    "tests::an_older_version_line_is_not_seen_at_the_newer_version"
+   ]
+  },
+  {
+   "id": "OS06",
+   "title": "the current reads span versions",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            if row.version != first.version || row.revision != first.revision {",
+     "new": "            if row.revision != first.revision {"
+    }
+   ],
+   "tests": [
+    "tests::a_later_note_read_uses_the_rewritten_sentence",
+    "tests::a_version_that_moved_after_the_proposal_is_not_written",
+    "tests::an_older_version_line_is_not_seen_at_the_newer_version",
+    "tests::an_unread_or_stale_edit_creates_no_step"
+   ]
+  },
+  {
+   "id": "OV01",
+   "title": "a version may change revision",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            row.resource == resource\n                && row.version == version\n                && row.revision.as_deref() != revision",
+     "new": "            false && row.resource == resource\n                && row.version == version\n                && row.revision.as_deref() != revision"
+    }
+   ],
+   "tests": [
+    "tests::seen_lines_never_mix_revisions"
+   ]
+  },
+  {
+   "id": "OV02",
+   "title": "the current reads ignore the revision",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            if row.version != first.version || row.revision != first.revision {",
+     "new": "            if row.version != first.version {"
+    }
+   ],
+   "tests": [
+    "tests::a_stored_journal_that_mixes_revisions_still_does_not_mix_seen_lines"
+   ]
+  },
+  {
+   "id": "OV03",
+   "title": "a write reuses the next number after the current read",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        .max();\n",
+     "new": "        .last();\n"
+    }
+   ],
+   "tests": [
+    "tests::a_written_change_takes_a_version_never_used"
+   ]
+  },
+  {
+   "id": "OW01",
+   "title": "a window counts as the whole text",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        Some(row.window.is_none().then(|| node.text.clone()))",
+     "new": "        Some(true.then(|| node.text.clone()))"
+    }
+   ],
+   "tests": [
+    "tests::a_window_is_not_a_whole_file",
+    "tests::a_windowed_change_records_only_the_edited_lines"
+   ]
+  },
+  {
+   "id": "OW02",
+   "title": "a window counts as a whole version",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "row.version != version || row.window.is_some() {",
+     "new": "row.version != version {"
+    }
+   ],
+   "tests": [
+    "tests::a_window_is_not_a_whole_file"
+   ]
+  },
+  {
+   "id": "OX01",
+   "title": "a refusal writes no record",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "fn record_refusal(journal: &mut Journal, refusal: Refusal, what: &str) {\n",
+     "new": "fn record_refusal(journal: &mut Journal, refusal: Refusal, what: &str) {\n    return;\n"
+    }
+   ],
+   "tests": [
+    "tests::a_change_that_fails_on_any_file_stages_nothing",
+    "tests::a_path_must_be_nfc_and_non_ascii_names_still_work",
+    "tests::a_queued_edit_never_takes_a_newer_revision",
+    "tests::a_refused_request_or_result_writes_one_record",
+    "tests::a_two_file_change_writes_both_or_neither",
+    "tests::an_edit_names_the_revision_it_read",
+    "tests::an_edit_requires_the_old_text_once_and_replay_keeps_the_observation",
+    "tests::an_unread_or_stale_edit_creates_no_step",
+    "tests::each_refusal_writes_exactly_one_record",
+    "tests::every_refusal_writes_exactly_one_record"
+   ]
+  },
+  {
+   "id": "OX02",
+   "title": "a change refusal writes no record",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        record_refusal(journal, refusal, &what);\n",
+     "new": "        let _ = what;\n"
+    }
+   ],
+   "tests": [
+    "tests::a_change_that_fails_on_any_file_stages_nothing",
+    "tests::a_path_must_be_nfc_and_non_ascii_names_still_work",
+    "tests::each_refusal_writes_exactly_one_record",
+    "tests::every_refusal_writes_exactly_one_record"
+   ]
+  },
+  {
+   "id": "OY01",
+   "title": "next_version saturates at u64::MAX",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        Some(version) => version.checked_add(1).filter(|next| *next != u64::MAX),",
+     "new": "        Some(version) => Some(version.saturating_add(1)),"
+    }
+   ],
+   "tests": [
+    "tests::a_queued_edit_never_takes_a_newer_revision",
+    "tests::every_refusal_writes_exactly_one_record"
+   ]
+  },
+  {
+   "id": "OY02",
+   "title": "a stored row at u64::MAX is a read",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    (row.version != u64::MAX && observation_fits(row, &node.text)).then(|| row.clone())",
+     "new": "    observation_fits(row, &node.text).then(|| row.clone())"
+    }
+   ],
+   "tests": [
+    "tests::a_queued_edit_never_takes_a_newer_revision"
+   ]
+  },
+  {
+   "id": "OY03",
+   "title": "observe accepts u64::MAX",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        || version == u64::MAX\n        || version_bound_elsewhere(&journal.events, resource, version, None)",
+     "new": "        || version_bound_elsewhere(&journal.events, resource, version, None)"
+    }
+   ],
+   "tests": [
+    "tests::a_queued_edit_never_takes_a_newer_revision",
+    "tests::an_edit_at_the_last_version_number_is_denied_and_not_recorded"
+   ]
+  },
+  {
+   "id": "OY04",
+   "title": "observe_read accepts u64::MAX",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        || version == u64::MAX\n        || !revision_ok(revision)",
+     "new": "        || !revision_ok(revision)"
+    }
+   ],
+   "tests": [
+    "tests::a_queued_edit_never_takes_a_newer_revision"
+   ]
+  },
+  {
+   "id": "OY05",
+   "title": "no version left falls back to a sentinel",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let Some(version) = next_version(&journal.events, &edit.resource) else {\n            deny(journal);\n            return Err(Refusal::NoVersionLeft);\n        };",
+     "new": "        let version = next_version(&journal.events, &edit.resource).unwrap_or(u64::MAX);"
+    }
+   ],
+   "tests": [
+    "tests::a_queued_edit_never_takes_a_newer_revision",
+    "tests::every_refusal_writes_exactly_one_record"
+   ]
+  },
+  {
+   "id": "OY06c",
+   "title": "a stored journal loads without the path rule (stored_rules_ok)",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    stored_paths_ok(journal)?;\n    stored_children_ok(journal)\n}",
+     "new": "    stored_children_ok(journal)\n}"
+    }
+   ],
+   "tests": [
+    "tests::a_legacy_journal_with_a_path_alias_is_refused_on_load",
+    "tests::a_reread_of_a_legacy_journal_with_a_path_alias_is_refused",
+    "tests::a_stored_spill_pointer_follows_the_path_rule",
+    "tests::codex_greek_spellings_are_one_file_everywhere"
+   ]
+  },
+  {
+   "id": "OY07",
+   "title": "the compaction backup and pending nodes are not checked on load",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        .chain(journal.compact_backup.iter().flat_map(|(nodes, _)| nodes))\n        .chain(journal.compact_pending.iter().flatten());",
+     "new": ";"
+    }
+   ],
+   "tests": [
+    "tests::a_legacy_journal_with_a_path_alias_is_refused_on_load"
+   ]
+  },
+  {
+   "id": "OY08",
+   "title": "stored step paths are not checked on load",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    for resource in reads.chain(steps) {",
+     "new": "    let _ = steps;\n    for resource in reads {"
+    }
+   ],
+   "tests": [
+    "tests::a_legacy_journal_with_a_path_alias_is_refused_on_load",
+    "tests::a_reread_of_a_legacy_journal_with_a_path_alias_is_refused"
+   ]
+  },
+  {
+   "id": "OY09",
+   "title": "a stored change may name one file twice",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            return Err(Refusal::OneFileTwice.reason());\n        }\n    }\n    Ok(())",
+     "new": "            continue;\n        }\n    }\n    Ok(())"
+    }
+   ],
+   "tests": [
+    "tests::a_legacy_journal_with_a_path_alias_is_refused_on_load",
+    "tests::codex_greek_spellings_are_one_file_everywhere"
+   ]
+  },
+  {
+   "id": "OY10",
+   "title": "a resume hides the path reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        Err(Some(reason)) => return ResumeOutcome::Refused(reason),",
+     "new": "        Err(Some(_)) => return ResumeOutcome::Unknown,"
+    }
+   ],
+   "tests": [
+    "tests::a_reread_of_a_legacy_journal_with_a_path_alias_is_refused",
+    "tests::a_reread_or_resume_refuses_a_journal_that_breaks_a_child_rule"
+   ]
+  },
+  {
+   "id": "OY11",
+   "title": "bind skips the path rule",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if let Some(refusal) = path_refusal(&step.resource) {\n            return Err(refusal);\n        }\n        if bound",
+     "new": "        if bound"
+    }
+   ],
+   "tests": [
+    "tests::every_refusal_writes_exactly_one_record"
+   ]
+  },
+  {
+   "id": "OY12",
+   "title": "bind lets one change name a file twice",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            return Err(Refusal::OneFileTwice);\n        }\n        if earlier_write_is_open",
+     "new": "        }\n        if earlier_write_is_open"
+    }
+   ],
+   "tests": [
+    "tests::codex_greek_spellings_are_one_file_everywhere",
+    "tests::every_refusal_writes_exactly_one_record"
+   ]
+  },
+  {
+   "id": "OY13",
+   "title": "NFC is not checked",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    } else if !unicode_normalization::is_nfc(resource) {",
+     "new": "    } else if false {"
+    }
+   ],
+   "tests": [
+    "tests::a_child_grant_is_a_subset_of_its_parent",
+    "tests::a_legacy_journal_with_a_path_alias_is_refused_on_load",
+    "tests::a_path_must_be_nfc_and_non_ascii_names_still_work",
+    "tests::a_stored_spill_pointer_follows_the_path_rule",
+    "tests::every_refusal_writes_exactly_one_record"
+   ]
+  },
+  {
+   "id": "OY14",
+   "title": "a refusal record names the NFD path",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        Some(Refusal::PathNotNfc) => \"(a path that is not NFC)\".to_string(),",
+     "new": "        Some(Refusal::PathNotNfc) => resource.to_string(),"
+    }
+   ],
+   "tests": [
+    "tests::a_path_must_be_nfc_and_non_ascii_names_still_work"
+   ]
+  },
+  {
+   "id": "OY15",
+   "title": "edit_request writes no record",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    result.map(|bound| request_body(&bound)).map_err(|refusal| {\n        record_refusal(journal, refusal, &format!(\"change {effect_id}\"));",
+     "new": "    result.map(|bound| request_body(&bound)).map_err(|refusal| {"
+    }
+   ],
+   "tests": [
+    "tests::a_refused_request_or_result_writes_one_record",
+    "tests::every_refusal_writes_exactly_one_record"
+   ]
+  },
+  {
+   "id": "OY16",
+   "title": "note_change_wrote writes no record",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let result = note_change_wrote_checked(journal, effect_id, written);\n    result.map_err(|refusal| {\n        record_refusal(journal, refusal, &format!(\"change {effect_id}\"));",
+     "new": "    let result = note_change_wrote_checked(journal, effect_id, written);\n    result.map_err(|refusal| {"
+    }
+   ],
+   "tests": [
+    "tests::a_queued_edit_never_takes_a_newer_revision",
+    "tests::a_refused_request_or_result_writes_one_record",
+    "tests::a_two_file_change_writes_both_or_neither",
+    "tests::an_edit_names_the_revision_it_read",
+    "tests::every_refusal_writes_exactly_one_record"
+   ]
+  },
+  {
+   "id": "OY17",
+   "title": "note_change_wrote writes two records",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let result = note_change_wrote_checked(journal, effect_id, written);\n    result.map_err(|refusal| {\n        record_refusal(journal, refusal, &format!(\"change {effect_id}\"));",
+     "new": "    let result = note_change_wrote_checked(journal, effect_id, written);\n    result.map_err(|refusal| {\n        record_refusal(journal, refusal, &format!(\"change {effect_id}\"));\n        record_refusal(journal, refusal, &format!(\"change {effect_id}\"));"
+    }
+   ],
+   "tests": [
+    "tests::a_queued_edit_never_takes_a_newer_revision",
+    "tests::a_refused_request_or_result_writes_one_record",
+    "tests::a_two_file_change_writes_both_or_neither",
+    "tests::an_edit_names_the_revision_it_read",
+    "tests::every_refusal_writes_exactly_one_record"
+   ]
+  },
+  {
+   "id": "OY18",
+   "title": "propose_edit writes no record",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        record_refusal(journal, refusal, &refused_path(resource));\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::a_path_must_be_nfc_and_non_ascii_names_still_work",
+    "tests::an_edit_requires_the_old_text_once_and_replay_keeps_the_observation",
+    "tests::an_unread_or_stale_edit_creates_no_step",
+    "tests::each_refusal_writes_exactly_one_record",
+    "tests::every_refusal_writes_exactly_one_record"
+   ]
+  },
+  {
+   "id": "OY19",
+   "title": "a new refusal reason with no trigger",
+   "command": "host",
+   "expect": "compile_error",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    NoVersionLeft => \"no version number left\",\n",
+     "new": "    NoVersionLeft => \"no version number left\",\n    Extra => \"extra\",\n"
+    }
+   ],
+   "tests": []
+  },
+  {
+   "id": "OZ01",
+   "title": "the key is not normalized after the case step",
+   "command": "host",
+   "expect": "survives",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    folded.nfd().collect()\n",
+     "new": "    folded\n"
+    }
+   ],
+   "tests": []
+  },
+  {
+   "id": "OZ02",
+   "title": "the key skips the first NFD",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let decomposed: String = resource.nfd().collect();\n",
+     "new": "    let decomposed = resource.to_string();\n"
+    }
+   ],
+   "tests": [
+    "tests::every_key_is_normalized_and_its_own_key",
+    "tests::spellings_equal_without_case_and_normal_form_share_one_key"
+   ]
+  },
+  {
+   "id": "OZ03",
+   "title": "the case step is uppercase then lowercase",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let folded = decomposed.to_lowercase().to_uppercase().to_lowercase();\n",
+     "new": "    let folded = decomposed.to_uppercase().to_lowercase();\n"
+    }
+   ],
+   "tests": [
+    "tests::every_key_is_normalized_and_its_own_key",
+    "tests::spellings_equal_without_case_and_normal_form_share_one_key"
+   ]
+  },
+  {
+   "id": "OZ04",
+   "title": "the key is the old one (no normalization)",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let decomposed: String = resource.nfd().collect();\n    let folded = decomposed.to_lowercase().to_uppercase().to_lowercase();\n    folded.nfd().collect()\n",
+     "new": "    resource.to_uppercase().to_lowercase()\n"
+    }
+   ],
+   "tests": [
+    "tests::codex_greek_spellings_are_one_file_everywhere",
+    "tests::every_key_is_normalized_and_its_own_key",
+    "tests::spellings_equal_without_case_and_normal_form_share_one_key"
+   ]
+  }
+ ]
+}
