@@ -119,7 +119,10 @@ trailer  head [32]
 
 - `cancelled_from`, `task_budget` and `depth` are OMP idea 2's (since 22 Oct, OMP2-DESIGN.md). `cancelled_from` is
   the last step id when the task was cancelled; `task_budget` is the budget the Runtime granted, recorded as data;
-  `depth` is a child host journal's depth (0 for a top task). Zero still means none, no budget, depth 0.
+  `depth` is a child host journal's depth (0 for a top task). Zero still means none, no budget, depth 0. A child
+  host never holds a task budget or a model call: its calls are counted in the parent's journal.
+- **One load check.** Decode, reread and resume all apply the same stored rules (`stored_rules_ok`: the path rule
+  and the child rules), so no load path accepts what another refuses.
 - **Step payload:** format 1's fields, then `depth u8 | budget (u8 flag + requests u32 + seconds u64) | requests_used u32
   | stop u8`. The depth byte is always 0 (depth is derived from the `parent_id` chain). The budget is a Child step's;
   `requests_used` counts the model calls in its subtree; stop is 0 none, 1 requests, 2 time, 3 cancelled. Steps that
@@ -197,7 +200,7 @@ grants). A spill pointer's resource follows the path rule on load, like a read's
 | a child past the depth limit (header or chain) | `depth limit` |
 | a child resource not strictly under its parent's | `not a subset` |
 | a child budget of zero, below its count, or larger than its owner's (or the task's) | `over the parent's budget` |
-| a parent that is missing or later than its child; a parent on a step other than a child or a call under a child; a budget, count or stop on a step that is not a child; a count that is not the calls below it; a zero task budget or more calls than it; child records that do not match the steps one for one; a child below a stopped child that has not stopped; a cancelled task with a running child or a later child or call | `record` |
+| a parent that is missing or later than its child; a parent on a step other than a child or a call under a child; a budget, count or stop on a step that is not a child; a count that is not the calls below it; a zero task budget or more calls than it; child records that do not match the steps one for one, counted per child; a child host journal (depth above 0) holding a task budget or a model call; a child below a stopped child that has not stopped; a cancelled task with a running child or a later child or call | `record` |
 
 ## Not in S2
 

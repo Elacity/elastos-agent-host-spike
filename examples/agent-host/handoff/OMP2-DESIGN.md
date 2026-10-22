@@ -29,13 +29,36 @@ Source: OMP.md section 3 and reports/OMP-AUDIT.md row 2 (omp at `2220e58`):
 
 ## What was built
 
+### One set of checks on every path (after the Codex review of 206da0d)
+
+Codex found paths that skipped checks: reread and resume, inbox answers, and child host journals. Now there is one
+function per kind of check, and every path calls it. A child's limits come only from the journal that holds the
+child step (the parent's journal), never from a child host's own journal.
+- `child_rules`: what every child keeps (parent, stopped subtree, resource, depth, count, budget). The stored loop
+  (`stored_children_ok`) calls it for every child.
+- `stored_rules_ok` (paths and children) is the one load check: decode, reread and resume all call it.
+- `usable_child`: `child_rules`, plus a budget (`TASK_BUDGET_REASON` for a child from before idea 2), not stopped,
+  task not cancelled. It is used by `propose_child` (for a child parent), `ask_model` (every child in the chain),
+  `child_grant_ok` and `open_child_host`.
+- `child_grant_ok`: the one check for giving a child a grant, used by `authorize_child` and by an inbox answer.
+
 ### Depth (R1)
 
 - Depth is derived, not stored per step: a step's depth is the number of Child steps up its `parent_id` chain
-  (`child_chain`), plus the journal's own `depth`. A child host journal stores `depth` in its header (its parent's
-  depth plus one, `open_child_host`). The step's depth byte stays 0.
-- `propose_child` and `open_child_host` refuse anything past `CHILD_DEPTH_LIMIT` with "depth limit", and no step or
-  journal is made. A child at the limit cannot propose a child.
+  (`child_chain`), plus the journal's own `depth`. A child host journal stores `depth` in its header (the depth of
+  its child step). The step's depth byte stays 0.
+- `propose_child` refuses anything past `CHILD_DEPTH_LIMIT` with "depth limit", and no step is made. A child at the
+  limit cannot propose a child, and neither can a child host at the limit.
+
+### Child hosts
+
+- `open_child_host(parent, child, resource)` opens a second journal for one child step. The child must be usable in
+  the parent's journal, and `resource` must sit in the child's resource (exact path). The host gets the system head
+  and one run step, and nothing else from the parent.
+- A child host never holds a budget and never asks a model itself. `record_task_budget` refuses in it, `ask_model`
+  refuses with "child host", and a stored host with a budget or a model call is refused on load ("record"). Its
+  model calls are `ask_model(parent, Some(child), ..)`, so they count only in the parent's journal: a one-request
+  child allows one request, also after reload.
 
 ### Budget (R2)
 
@@ -62,9 +85,11 @@ Source: OMP.md section 3 and reports/OMP-AUDIT.md row 2 (omp at `2220e58`):
 
 - `ask_model(journal, under, model)`: every model call, hosted or local, is one `Hosted` step, so there is one
   counter. `under` is the child the call is asked for (stored as the step's `parent_id`), or none for the top task.
-- It refuses before anything is asked: "host path", "not a child", "cancelled", "stopped", "no budget" (no task
-  budget, or a chain child without one), "requests" (the task, or a child in the chain, has used its requests).
-- When a child in the chain is used up, the top-most such child stops with `requests`, and its subtree with it.
+- It refuses before anything is asked: "host path", "child host", "not a child", "cancelled", "stopped",
+  `TASK_BUDGET_REASON` (no task budget, or a chain child from before idea 2 with none), "requests" (a child in the
+  chain, or the task, has used its requests).
+- The children are checked before the task. When a child in the chain is used up, the top-most such child stops with
+  `requests`, and its subtree with it, even when the task runs out at the same call.
 - An accepted call counts once against every child in its chain and once against the task.
 
 ### Stop and time (R3)
@@ -95,16 +120,20 @@ Source: OMP.md section 3 and reports/OMP-AUDIT.md row 2 (omp at `2220e58`):
 
 ### Grants (subset)
 
-- `authorize_child(journal, child, grant, grant_resource)` gives a child its own grant only when:
-  - the step is a Child with a budget, and neither it nor anything above it has stopped;
+- `authorize_child(journal, child, grant, grant_resource)` and an inbox answer for a child both go through
+  `child_grant_ok`. A grant is given only when:
+  - the child is usable (`usable_child`: a budget, nothing stopped, task not cancelled);
   - `grant_resource` passes `path_refusal` and is the child's resource or under it (exact canonical path: a
     different case spelling or `//` is refused, never treated as the same file);
+  - it sits in what the parent itself was granted: a child parent's granted scope, or another parent's resource;
   - the parent holds a non-empty grant, and the child's grant is not the parent's.
+- The granted scope is kept with the grant, in memory: `grant_resource` for `authorize_child`, the child's whole
+  resource for an inbox answer. A child granted only `src/a` cannot hand `src/b` to a grandchild.
 - Grants are never stored, so after a reload the parent and every child are granted again through the same checks.
 
 ### Checked again after reload (`stored_children_ok`)
 
-`decode_journal` refuses a journal where:
+`stored_rules_ok` refuses, on decode, reread and resume, a journal where:
 - the header depth is past the limit;
 - a step names a parent that does not exist or comes after it, or a step other than a Child or a call under a Child
   has a parent;
@@ -115,7 +144,9 @@ Source: OMP.md section 3 and reports/OMP-AUDIT.md row 2 (omp at `2220e58`):
 - a Child's budget is zero, below its count, or larger (requests or seconds) than its owner's budget, or the task's
   ("over the parent's budget"); a Child without a budget has a count;
 - the task budget is zero, or fewer than the calls made;
-- the child-budget and child-stop records do not match the steps one for one;
+- a child does not have exactly its own child-budget record (one if it has a budget) and child-stop record (one if
+  it stopped), counted per child, not in total;
+- a child host journal (depth above 0) holds a budget or a model call;
 - the task is cancelled but a Child has not stopped, or a Child or call came after the cancel point.
 
 ### Path rule
