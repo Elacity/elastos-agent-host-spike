@@ -1,0 +1,6 @@
+# This folder only: Wasmtime 48.0.7 needs Rust 1.95.0.
+[toolchain]
+channel = "1.95.0"
+targets = ["wasm32-unknown-unknown"]
+components = ["rustfmt", "clippy"]
+profile = "minimal"

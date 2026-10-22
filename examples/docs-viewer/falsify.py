@@ -250,6 +250,61 @@ BUNDLE = [
     ),
 ]
 
+# The Bus v2 reader (bus2/), in the Bus v2 proof's stub host.
+BUS2 = [
+    (
+        "the reader does not count what arrives",
+        "bus2/guests/docs/src/lib.rs",
+        "        if bytes.len() + chunk.len() > MAX_DOCUMENT_BYTES {",
+        "        if false && bytes.len() + chunk.len() > MAX_DOCUMENT_BYTES {",
+        ["the_reader_refuses_more_bytes_than_it_asked_for_even_if_they_arrive"],
+    ),
+    (
+        "the reader uses the bytes before the trailing future",
+        "bus2/guests/docs/src/lib.rs",
+        "    match trailer.await {",
+        "    let _ = trailer;\n    match Ok::<(), BusError>(()) {",
+        ["nothing_partial_is_shown_when_a_read_fails_at_the_end"],
+    ),
+    (
+        "a refused grant is shown as a frame instead of ending the run",
+        "bus2/guests/docs/src/lib.rs",
+        "    let bytes = match read_document(uri).await? {",
+        "    let bytes = match read_document(uri).await.unwrap_or_else(|e| Err(reason(&e))) {",
+        ["a_refused_grant_ends_the_run_with_its_reason"],
+    ),
+    (
+        "a frame is not cut to what a frame holds",
+        "bus2/guests/docs/src/lib.rs",
+        "        if nodes.len() == MAX_NODES - 1 || size + node_size + RESERVE > MAX_FRAME_BYTES {",
+        "        if false {",
+        ["a_long_document_is_cut_to_one_frame_and_the_frame_says_so"],
+    ),
+    (
+        "text in a frame is not escaped",
+        "bus2/guests/docs/src/lib.rs",
+        "        docs_model::write_str(&mut out, node);",
+        r'        out.extend_from_slice(format!("\"{node}\"").as_bytes());',
+        ["markup_in_a_document_is_text_in_the_frame"],
+    ),
+    (
+        "the reader keeps running after its events close",
+        "bus2/guests/docs/src/lib.rs",
+        "        Ok(())\n    }\n}\n\nexport!(Reader);",
+        "        loop {\n            core::hint::black_box(0u8);\n        }\n    }\n}\n\nexport!(Reader);",
+        ["a_resident_reader_shows_each_document_it_is_sent_and_stops_when_its_events_close"],
+    ),
+    (
+        "the reader reads a name that is not a document",
+        "bus2/guests/docs/src/lib.rs",
+        "    let Some(kind) = Kind::from_name(uri) else {",
+        "    let Some(kind) = Kind::from_name(uri).or(Some(Kind::Text)) else {",
+        ["a_document_not_shown_gets_a_frame_that_says_so_and_the_reader_goes_on"],
+    ),
+]
+
+BUS2_GUESTS = ["-p", "docs-bus2-guest", "-p", "docs-bus2-busy-guest"]
+
 # The string write the "pages written as a string" mutant calls; it exists
 # only while that mutant is in place.
 WRITE_STRING = '''
@@ -319,6 +374,31 @@ def bundle_tests_fail(tests):
     return True
 
 
+def build_bus2_guests():
+    # From bus2/, so rustup picks its toolchain (Rust 1.95.0).
+    return run(
+        ["cargo", "build", "--locked", "--release", "--target", "wasm32-unknown-unknown", *BUS2_GUESTS],
+        HERE / "bus2",
+    )
+
+
+def bus2_tests_fail(tests):
+    build = build_bus2_guests()
+    if build.returncode != 0:
+        print(build.stderr[-2000:])
+        raise SystemExit("a Bus v2 falsifier does not compile")
+    for name in tests:
+        result = run(
+            ["cargo", "test", "--locked", "-p", "docs-bus2-host-test", "--test", "docs", "--", "--exact", name],
+            HERE / "bus2",
+        )
+        if "1 passed" not in result.stdout and "1 failed" not in result.stdout:
+            raise SystemExit(f"no Bus v2 test {name}\n{result.stdout[-1500:]}{result.stderr[-1500:]}")
+        if result.returncode == 0:
+            return False
+    return True
+
+
 def check(cases):
     for name, relative, old, _new, _tests in cases:
         text = (HERE / relative).read_text()
@@ -355,11 +435,18 @@ def main():
     check(GUEST)
     check(RUNTIME)
     check(BUNDLE)
+    check(BUS2)
     if "--check" in args:
-        print(f"all {len(GUEST) + len(RUNTIME) + len(BUNDLE)} anchors found once")
+        print(f"all {len(GUEST) + len(RUNTIME) + len(BUNDLE) + len(BUS2)} anchors found once")
         return
     missed = falsify(GUEST, guest_tests_fail, parts)
     missed += falsify(BUNDLE, bundle_tests_fail, parts)
+    try:
+        missed += falsify(BUS2, bus2_tests_fail, parts)
+    finally:
+        # Leave the unmutated guests in place.
+        if build_bus2_guests().returncode != 0:
+            raise SystemExit("restoring the Bus v2 guest build failed")
     if "--runtime" in args:
         try:
             missed += falsify(RUNTIME, runtime_tests_fail, parts)

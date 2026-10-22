@@ -62,6 +62,26 @@ cargo test --locked --manifest-path "${VIEWER_DIR}/bundle-test/Cargo.toml" -- --
 node --test "${VIEWER_DIR}/surface/reader.test.mjs"
 node "${VIEWER_DIR}/surface/reader-browser-smoke.mjs"
 
+# Bus v2: the resident reader in the Bus v2 proof's stub host. Run from bus2/
+# so rustup picks its toolchain (Rust 1.95.0). The guests are deleted first
+# and checked after, so a stale or missing guest is never tested.
+(
+    cd "${VIEWER_DIR}/bus2"
+    guest_dir=target/wasm32-unknown-unknown/release
+    for guest in docs_bus2_guest docs_bus2_busy_guest; do rm -f "${guest_dir}/${guest}.wasm"; done
+    cargo build --locked --release --target wasm32-unknown-unknown -p docs-bus2-guest -p docs-bus2-busy-guest
+    for guest in docs_bus2_guest docs_bus2_busy_guest; do
+        if [ ! -f "${guest_dir}/${guest}.wasm" ]; then
+            echo "verify: FAILED: the build did not produce ${guest_dir}/${guest}.wasm" >&2
+            exit 1
+        fi
+    done
+    cargo fmt --all -- --check
+    cargo clippy --locked -p docs-bus2-host-test --all-targets -- -D warnings
+    cargo clippy --locked --release --target wasm32-unknown-unknown -p docs-bus2-guest -p docs-bus2-busy-guest -- -D warnings
+    cargo test --locked -p docs-bus2-host-test -- --nocapture
+)
+
 # Every refusal and every page rule: break it, see its test fail, restore it.
 python3 -I "${VIEWER_DIR}/falsify.py" --runtime
 python3 -I "${VIEWER_DIR}/falsify-surface.py"

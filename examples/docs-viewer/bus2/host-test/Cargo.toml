@@ -1,0 +1,13 @@
+[package]
+name = "docs-bus2-host-test"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Tests only: the documents guest in the Bus v2 proof's stub host. Not the Runtime.
+
+[dev-dependencies]
+bus2-host = { path = "../../../bus2-proof/host" }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+wasmtime = { version = "=48.0.7", default-features = false, features = ["anyhow", "async", "component-model", "component-model-async", "cranelift", "runtime"] }
