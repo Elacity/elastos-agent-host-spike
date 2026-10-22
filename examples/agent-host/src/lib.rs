@@ -3911,13 +3911,78 @@ fn open_child_host(
     Ok(host)
 }
 
-/// Give the child host its own grant. The parent's grant is refused.
+/// What a child host may touch, read again from the parent's current
+/// journal on every host action, never kept from when the host was opened:
+/// the child must be usable there (`usable_child`: not stopped, task not
+/// cancelled, a budget), the host must be at the child's depth, and the
+/// child must hold a grant; the scope is what the parent granted that child
+/// (`granted_scope`).
 #[cfg(any(test, target_arch = "wasm32"))]
-fn grant_child_host(child: &mut Journal, parent_grant: Option<&str>, grant: Option<&str>) -> bool {
-    if grant.is_none() || grant == Some("") || grant == parent_grant {
+fn host_scope<'a>(
+    parent: &'a Journal,
+    child_id: u64,
+    host: &Journal,
+) -> Result<&'a str, &'static str> {
+    let child = usable_child(parent, child_id)?;
+    if usize::from(host.depth) != depth_under(parent, child.parent_id) {
+        return Err("not this child's host");
+    }
+    granted_scope(child).ok_or("not granted")
+}
+
+/// The one check for a child host's step (a grant, an inbox answer, a
+/// dispatch): `host_scope`, and the step's resource passes the path rule and
+/// sits in that scope (exact canonical paths). A grant, when one is given, is
+/// not the parent step's grant (an empty or missing grant denies the step, as
+/// `authorize` does).
+#[cfg(any(test, target_arch = "wasm32"))]
+fn host_step_ok(
+    parent: &Journal,
+    child_id: u64,
+    host: &Journal,
+    step_id: u64,
+    grant: Option<&str>,
+) -> bool {
+    let Ok(scope) = host_scope(parent, child_id, host) else {
+        return false;
+    };
+    let Some(step) = host.steps.iter().find(|step| step.id == step_id) else {
+        return false;
+    };
+    if path_refusal(&step.resource).is_some() || !resource_covers(scope, &step.resource) {
         return false;
     }
-    let Some(id) = child
+    let parent_grant = parent
+        .steps
+        .iter()
+        .find(|step| step.id == child_id)
+        .and_then(|child| child.parent_id)
+        .and_then(|id| parent.steps.iter().find(|step| step.id == id))
+        .and_then(|step| step.grant.as_deref());
+    grant.is_none_or(|grant| Some(grant) != parent_grant)
+}
+
+/// Grant one step of a child host, through `host_step_ok`.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn authorize_in_host(
+    parent: &Journal,
+    child_id: u64,
+    host: &mut Journal,
+    step_id: u64,
+    grant: Option<&str>,
+) -> bool {
+    host_step_ok(parent, child_id, host, step_id, grant) && authorize_step(host, step_id, grant)
+}
+
+/// Give the child host's run step its own grant, through `authorize_in_host`.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn grant_child_host(
+    parent: &Journal,
+    child_id: u64,
+    host: &mut Journal,
+    grant: Option<&str>,
+) -> bool {
+    let Some(id) = host
         .steps
         .iter()
         .find(|step| {
@@ -3929,7 +3994,32 @@ fn grant_child_host(child: &mut Journal, parent_grant: Option<&str>, grant: Opti
     else {
         return false;
     };
-    authorize(child, id, grant)
+    authorize_in_host(parent, child_id, host, id, grant)
+}
+
+/// Answer a child host's step in the inbox. A deny needs no check; any other
+/// answer goes through `host_step_ok`.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn host_inbox(
+    parent: &Journal,
+    child_id: u64,
+    host: &mut Journal,
+    step_id: u64,
+    answer: InboxAnswer,
+    grant: Option<&str>,
+) -> bool {
+    if answer != InboxAnswer::Deny && !host_step_ok(parent, child_id, host, step_id, grant) {
+        return false;
+    }
+    apply_inbox_step(host, step_id, answer, grant)
+}
+
+/// Dispatch a granted step of a child host. The parent's journal is read
+/// again here: a child stopped, or a task cancelled, since the grant
+/// dispatches nothing.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn dispatch_in_host(parent: &Journal, child_id: u64, host: &mut Journal, step_id: u64) -> bool {
+    host_step_ok(parent, child_id, host, step_id, None) && dispatch_step(host, step_id)
 }
 
 /// The parent stores one result line for a child step. The child's log is
@@ -3976,8 +4066,14 @@ fn record_child_result(parent: &mut Journal, child_id: u64, child: &Journal, res
 }
 
 /// A missing grant denies the step. A grant id is recorded and does not run it.
+/// A child host's steps are granted only through `authorize_in_host`.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn authorize(journal: &mut Journal, id: u64, grant: Option<&str>) -> bool {
+    journal.depth == 0 && authorize_step(journal, id, grant)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn authorize_step(journal: &mut Journal, id: u64, grant: Option<&str>) -> bool {
     let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) else {
         return false;
     };
@@ -4044,8 +4140,19 @@ impl InboxAnswer {
     }
 }
 
+/// A child host's steps are answered only through `host_inbox`.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn apply_inbox(journal: &mut Journal, id: u64, answer: InboxAnswer, grant: Option<&str>) -> bool {
+    journal.depth == 0 && apply_inbox_step(journal, id, answer, grant)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn apply_inbox_step(
+    journal: &mut Journal,
+    id: u64,
+    answer: InboxAnswer,
+    grant: Option<&str>,
+) -> bool {
     let name = answer.name();
     let grant = match answer {
         InboxAnswer::Deny => None,
@@ -4092,7 +4199,7 @@ fn apply_inbox(journal: &mut Journal, id: u64, answer: InboxAnswer, grant: Optio
             source: NodeSource::Inbox(answer),
         });
     }
-    let granted = authorize(journal, id, grant);
+    let granted = authorize_step(journal, id, grant);
     if granted && child_scope.is_some() {
         if let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) {
             step.grant_scope = child_scope;
@@ -4136,8 +4243,14 @@ fn same_run_is_open(journal: &Journal, id: u64) -> bool {
     })
 }
 
+/// A child host's steps are dispatched only through `dispatch_in_host`.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn dispatch(journal: &mut Journal, id: u64) -> bool {
+    journal.depth == 0 && dispatch_step(journal, id)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn dispatch_step(journal: &mut Journal, id: u64) -> bool {
     if earlier_write_is_open(journal, id) || same_run_is_open(journal, id) {
         return false;
     }
@@ -5638,19 +5751,17 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 |_| elastos::bus::types::BusError::Invalid("a child host was refused".to_string()),
             )?;
         let family_before = family.events.len();
+        let host_run = child_host.steps.first().map_or(0, |step| step.id);
         if open_child_host(&family, child, "localhost://Users/self/Projects/other").is_ok()
             || open_child_host(&family, parent, "localhost://Users/self/Projects/demo/src").is_ok()
             || child_host.events.len() != 1
             || child_host.events[0].text != SYSTEM_HEAD
             || child_host.steps.len() != 1
             || child_host.steps[0].grant.is_some()
-            || grant_child_host(
-                &mut child_host,
-                Some("fixture-grant"),
-                Some("fixture-grant"),
-            )
+            || grant_child_host(&family, child, &mut child_host, Some("fixture-grant"))
             || child_host.steps[0].grant.is_some()
-            || !grant_child_host(&mut child_host, Some("fixture-grant"), Some("child-grant"))
+            || authorize(&mut child_host, host_run, Some("child-grant"))
+            || !grant_child_host(&family, child, &mut child_host, Some("child-grant"))
             || child_host.steps[0].grant.as_deref() != Some("child-grant")
             || record_child_result(&mut family, child, &child_host, "fixture-grant")
             || !record_child_result(&mut family, child, &child_host, "child result ok")
@@ -5663,6 +5774,20 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         {
             return Err(elastos::bus::types::BusError::Invalid(
                 "a child host shared the parent log".to_string(),
+            ));
+        }
+        let outside = propose_read(&mut child_host, "localhost://Users/self/Projects/demo/doc");
+        if host_inbox(
+            &family,
+            child,
+            &mut child_host,
+            outside,
+            InboxAnswer::AllowOnce,
+            Some("read-grant"),
+        ) || !dispatch_in_host(&family, child, &mut child_host, host_run)
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "a child host went past its child's grant".to_string(),
             ));
         }
         let spent = |journal: &Journal, id: u64| {
@@ -9689,14 +9814,16 @@ mod tests {
         assert_ne!(child_host.events.as_ptr(), journal.events.as_ptr());
         assert!(child_host.steps.iter().all(|step| step.grant.is_none()));
         assert!(!grant_child_host(
+            &journal,
+            child,
             &mut child_host,
-            Some("fixture-grant"),
             Some("fixture-grant")
         ));
         assert!(child_host.steps.iter().all(|step| step.grant.is_none()));
         assert!(grant_child_host(
+            &journal,
+            child,
             &mut child_host,
-            Some("fixture-grant"),
             Some("child-grant")
         ));
         let parent_events = journal.events.len();
@@ -17518,7 +17645,6 @@ mod tests {
         let mut deep = open_child_host(&journal, grandchild, DEMO_SRC_LIB).unwrap();
         assert_eq!(deep.depth, 2);
         let inner = deep.steps[0].id;
-        assert!(authorize(&mut deep, inner, Some("child-grant")));
         assert_eq!(
             propose_child(&mut deep, inner, deeper, Some(budget(1, 10))),
             Err("depth limit")
@@ -18802,6 +18928,200 @@ mod tests {
             Some("child-grant")
         ));
         assert_eq!(journal, before);
+    }
+
+    // Codex at fe40437: two holes in child hosts (each test failed there,
+    // written against that API).
+
+    /// Hole 1: a child host kept open after its child stops gets nothing:
+    /// every host action reads the parent's current journal again.
+    #[test]
+    fn a_child_host_gets_nothing_once_its_child_stops() {
+        for stop in ["time", "parent", "cancel"] {
+            let (mut parent, run) = task(budget(8, 600));
+            let above = propose_child(&mut parent, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+            assert!(authorize_child(
+                &mut parent,
+                above,
+                Some("above-grant"),
+                DEMO_SRC
+            ));
+            let child =
+                propose_child(&mut parent, above, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+            assert!(authorize_child(
+                &mut parent,
+                child,
+                Some("child-grant"),
+                DEMO_SRC_LIB
+            ));
+            let mut host = open_child_host(&parent, child, DEMO_SRC_LIB).unwrap();
+            let granted = propose_read(&mut host, DEMO_SRC_LIB);
+            assert!(authorize_in_host(
+                &parent,
+                child,
+                &mut host,
+                granted,
+                Some("read-grant")
+            ));
+            let asked = propose_read(&mut host, DEMO_SRC_LIB);
+            match stop {
+                "time" => assert!(note_time_refusal(&mut parent, child)),
+                "parent" => assert!(note_time_refusal(&mut parent, above)),
+                _ => assert!(cancel_task(&mut parent)),
+            }
+            let before = host.clone();
+            assert!(
+                !grant_child_host(&parent, child, &mut host, Some("host-grant")),
+                "{stop}"
+            );
+            assert!(!authorize_in_host(
+                &parent,
+                child,
+                &mut host,
+                asked,
+                Some("read-grant")
+            ));
+            assert!(!host_inbox(
+                &parent,
+                child,
+                &mut host,
+                asked,
+                InboxAnswer::AllowOnce,
+                Some("read-grant")
+            ));
+            assert!(
+                !dispatch_in_host(&parent, child, &mut host, granted),
+                "{stop}"
+            );
+            assert_eq!(host, before, "{stop}");
+            // A person's deny is still recorded.
+            assert!(!host_inbox(
+                &parent,
+                child,
+                &mut host,
+                asked,
+                InboxAnswer::Deny,
+                None
+            ));
+            assert_eq!(step_of(&host, asked).inbox, "deny", "{stop}");
+            assert_eq!(step_of(&host, asked).state, StepState::Denied, "{stop}");
+        }
+    }
+
+    /// Hole 2: a host touches only what the parent granted its child. Every
+    /// step it grants, answers or dispatches sits in the child's granted
+    /// scope, not only in the child's resource.
+    #[test]
+    fn a_child_host_touches_only_what_its_child_was_granted() {
+        let (mut parent, run) = task(budget(8, 600));
+        let child = propose_child(&mut parent, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let only_a = "localhost://Users/self/Projects/demo/src/a";
+        let in_a = "localhost://Users/self/Projects/demo/src/a/x";
+        let in_b = "localhost://Users/self/Projects/demo/src/b";
+        let mut host = open_child_host(&parent, child, DEMO_SRC).unwrap();
+        // Not granted yet: the host can do nothing.
+        let early = propose_read(&mut host, in_a);
+        assert!(!authorize_in_host(
+            &parent,
+            child,
+            &mut host,
+            early,
+            Some("read-grant")
+        ));
+        assert!(authorize_child(
+            &mut parent,
+            child,
+            Some("child-grant"),
+            only_a
+        ));
+        assert!(!grant_child_host(
+            &parent,
+            child,
+            &mut host,
+            Some("host-grant")
+        ));
+        let outside = propose_read(&mut host, in_b);
+        assert!(!authorize_in_host(
+            &parent,
+            child,
+            &mut host,
+            outside,
+            Some("read-grant")
+        ));
+        assert!(!host_inbox(
+            &parent,
+            child,
+            &mut host,
+            outside,
+            InboxAnswer::Standing,
+            Some("read-grant")
+        ));
+        assert_eq!(step_of(&host, outside).grant, None);
+        // A spelling that leaves the scope through ".." is refused by the path
+        // rule, not only by the prefix.
+        let dotted = propose_read(&mut host, "localhost://Users/self/Projects/demo/src/a/../b");
+        assert!(!authorize_in_host(
+            &parent,
+            child,
+            &mut host,
+            dotted,
+            Some("read-grant")
+        ));
+        // The plain functions refuse a host's steps outright.
+        assert!(!authorize(&mut host, outside, Some("read-grant")));
+        assert!(!apply_inbox(
+            &mut host,
+            outside,
+            InboxAnswer::AllowOnce,
+            Some("read-grant")
+        ));
+        // Inside the granted scope: granted and dispatched; the parent's own
+        // grant is refused; the plain dispatch still refuses a granted step.
+        let inside = propose_read(&mut host, in_a);
+        assert!(!authorize_in_host(
+            &parent,
+            child,
+            &mut host,
+            inside,
+            Some("fixture-grant")
+        ));
+        assert!(authorize_in_host(
+            &parent,
+            child,
+            &mut host,
+            inside,
+            Some("read-grant")
+        ));
+        assert!(!dispatch(&mut host, inside));
+        assert!(dispatch_in_host(&parent, child, &mut host, inside));
+        let answered = propose_read(&mut host, in_a);
+        assert!(host_inbox(
+            &parent,
+            child,
+            &mut host,
+            answered,
+            InboxAnswer::AllowOnce,
+            Some("read-grant")
+        ));
+        // A host opened for another child, or at another depth, is not this
+        // child's host.
+        let other = propose_child(&mut parent, run, DEMO_DOC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut parent,
+            other,
+            Some("other-grant"),
+            DEMO_DOC
+        ));
+        let mut wrong = host.clone();
+        wrong.depth = 2;
+        let step = propose_read(&mut wrong, in_a);
+        assert!(!authorize_in_host(
+            &parent,
+            child,
+            &mut wrong,
+            step,
+            Some("read-grant")
+        ));
     }
 
     /// A step's stop byte is 0 or a known reason (CL49).
