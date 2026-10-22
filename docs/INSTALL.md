@@ -310,9 +310,22 @@ key if you need to recover across that first update.
 
 ### Recover an interrupted update
 
-If Runtime reports an interrupted command-line update, run `elastos update`
-again before starting Home. Runtime owns the saved transaction and verifies its
-files before recovery. Keep the installation files and data in place.
+On 0.8.0 and its test release 0.8.0-alpha.25, an update that stops partway
+keeps Home closed until it is recovered. Keep the installation files and data
+in place, and stay connected to the network Home updates over.
+
+1. Run `elastos home --browser`. It finishes recovery of a System update. If it
+   says to run `elastos update` again, the update was started with
+   `elastos update`: run `elastos update`, then `elastos home --browser`. Use
+   this order also when System and a Home start name different commands; each
+   command names the other when the recovery is not its own.
+2. After a failed `elastos update`, the next `elastos update` or Home start
+   repairs this release's apps and providers from the publisher's seed. Without
+   a connection to it, Home may not start until the connection is back.
+3. Two cases are not repaired this way: an `elastos update` that stopped while
+   it was finishing, and a System update that stopped while it was replacing an
+   app. The command then stops with the same message every time. Follow
+   [If recovery keeps failing](#if-recovery-keeps-failing).
 
 A Home with an installed update controller keeps its controller Runtime and
 private receipt in the data directory. The controller of the version that runs
@@ -344,10 +357,33 @@ message and run the retained controller:
 ```
 
 If it reports that the previous Home start was already attempted, the previous
-release is already back in place. Stop every `elastos` process of this Home and
-move these files out of the way. Several have the same name, so make a folder
-of your own with the subfolders `bin`, `data` and `installation`, and move each
-file into the subfolder named below (keep them; do not delete them):
+release is already back in place. Follow
+[If recovery keeps failing](#if-recovery-keeps-failing).
+
+The receipt keeps Home paths, locale, desktop opener settings and Runtime launch
+bindings. It also retains the configured Wallet price API key, which Wallet reads
+from the environment. Other provider and Browser settings stay in their installed
+private configuration files. Keep the receipt's owner-only permissions and
+share only a safe error summary.
+
+Home reuses a verified controller when its signed Runtime already matches.
+If a new controller cannot fit, ordinary Home can open with Home update controls
+unavailable.
+Free disk space before updating. An interrupted update or uncertain controller
+ownership keeps its recovery step.
+
+Operators can install one known signed release head with
+`elastos update --head-cid CID`.
+
+#### If recovery keeps failing
+
+Use these steps when the command a message names stops with the same message
+every time. They keep your data and identity. Stop every `elastos` process of
+this Home and move these files out of the way. The data directory is listed
+under [Installed files](#installed-files). Several files have the same name, so
+make a folder of your own with the subfolders `bin`, `data` and `installation`,
+and move each file into the subfolder named below (keep them; do not delete
+them):
 
 - `bin`: from next to the installed `elastos` binary,
   `.elastos.update-journal.json`, `.elastos.update-stage` and
@@ -367,21 +403,6 @@ finds the data directory from `HOME` and `XDG_DATA_HOME` (it ignores
 `ELASTOS_RECOVERY_DATA`). It installs the current release and runs
 `elastos setup`, and keeps that data directory and its identity. Start Home
 with `elastos home --browser`.
-
-The receipt keeps Home paths, locale, desktop opener settings and Runtime launch
-bindings. It also retains the configured Wallet price API key, which Wallet reads
-from the environment. Other provider and Browser settings stay in their installed
-private configuration files. Keep the receipt's owner-only permissions and
-share only a safe error summary.
-
-Home reuses a verified controller when its signed Runtime already matches.
-If a new controller cannot fit, ordinary Home can open with Home update controls
-unavailable.
-Free disk space before updating. An interrupted update or uncertain controller
-ownership keeps its recovery step.
-
-Operators can install one known signed release head with
-`elastos update --head-cid CID`.
 
 ## Compare and change the release signer
 
