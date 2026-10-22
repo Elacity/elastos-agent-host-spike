@@ -375,4 +375,46 @@ Guest hash:   d05d64ddd6cb0d8563cc22d044e988dbc5b3c7c23b78492dc00199da5aae75dd o
 Import list:  unchanged (the core import section /1/2, 149 bytes, 5ee6b40d46f6a045, is byte-identical to #30).
 ```
 
-**What is next:** the Mac check and Codex on #31. Sasha closes #25 when #31 merges.
+## Update: an independent review of 10a31e2 (22 Oct)
+
+Sasha: no cross-family reviewer is available now, so continue. I ran an independent review by a fresh agent in its
+own worktree, given only the code, the design note and the rules (not my conclusions). It is the same AI family
+(Claude), so it does not replace Codex; the record is reviews/31-10a31e2.md.
+
+```text
+Verdict:      FAIL, 10 findings. Each probe test reproduced here before any fix ("0 passed; 10 failed").
+Fixes:        63c54fc
+  R1  the plain authorize granted a child, even the parent's grant -> a child is granted only through
+      authorize_child or an inbox answer
+  R2  a denied child kept asking the model, making children, acting in its host -> usable_child needs every child
+      in the chain prepared or dispatched ("denied"; cancelled or crashed: "stopped")
+  R3  the plain cancel left a child running with no stop -> a child is cancelled as a stop (record and subtree)
+  R4  a host kept a scope after the scope above changed -> a child is granted once; scope_still_granted checks every
+      step above (a run denied after granting takes the scope away) for host actions and new child grants
+  R5  a child below a model call under a stopped child -> only a run or a child is a parent ("not a parent")
+  R6, R7  child records written during an open compaction were dropped at commit and at a crash restore, so the task
+      no longer loaded -> carried over
+  R8  a prepared step put back where a stop or a cancel had reached loaded -> refused on load
+  R9  a journal from before idea 2 with children three deep stopped loading -> the depth limit holds for budgeted
+      children; older ones load and can do nothing (format 2 promise kept)
+  R10 a host was not bound to its child -> host_of, in memory only (no format change); a reloaded host belongs to
+      no child
+Tests:        nine (R6 and R7 share one), each run on 10a31e2's code: "0 passed; 1 failed" for every one.
+Changed:      a_spill_pointer_keeps_the_file_text granted a child through the plain authorize (R1's path); it uses
+              authorize_child now. The reload test's depth case gives the over-deep child a budget.
+Falsifiers:   RV01-RV17 added, each caught by its test when recorded.
+              The full pass at 864c62f: 211 caught, OY19 does not build, OZ01 by design; 8 entries no longer
+              matched their moved lines (CF07, CF18, CL59, CL79, HC01, HC04, HC05, HC12) and were re-targeted with
+              the same intent; 4 survived because the new rules also covered their old cases (CL24, CL37, CL73,
+              CL74). 52442a6: CL24 and CL79 name the tests with a started child; CL37 gets a new test,
+              cancelling_a_started_child_stops_it; CL73 and CL74 get reload cases on a child with nothing below it.
+Tests run:    ./examples/agent-host/verify.sh -> "208 passed", clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Full run:     python3 -I examples/agent-host/falsify.py at 52442a6: "223 CAUGHT, 1 CAUGHT (does not build), 1 SURVIVED
+                (expected, by design) of 225", exit 0 (CF 21, CL 89, TB 1, HC 14, RV 17, JF 35, O* 48).
+Guest hash:   3e25a62cb23a74a94243e73adacff5542636448b85241db9eb31cbf4d2cf2d2a on verify.sh and a clean rebuild.
+              wasm_sections.py: file 658799 bytes; /1/10 393728 a739263005d0d442; /1/11 176695 2dcb984f836276f1.
+Import list:  unchanged (the core import section /1/2, 149 bytes, 5ee6b40d46f6a045, is byte-identical to #30).
+```
+
+**What is next:** the Mac check and Codex on #31 when they are available. Sasha closes #25 when #31 merges.
