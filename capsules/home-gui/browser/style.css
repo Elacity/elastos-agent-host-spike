@@ -1521,6 +1521,12 @@ img {
   flex-direction: column;
   gap: 14px;
   width: min(92vw, 420px);
+  /* A short screen scrolls the card: the page itself does not scroll. */
+  max-height: calc(100vh - 48px);
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   padding: 28px 24px 22px;
   border-radius: 20px;
   background: var(--menu-fill, var(--panel-strong));
