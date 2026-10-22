@@ -1473,7 +1473,8 @@ fn gateway_provider_error_tuple(scheme: &str, err: anyhow::Error) -> (StatusCode
         StatusCode::SERVICE_UNAVAILABLE
     } else if text.contains("not found") {
         StatusCode::NOT_FOUND
-    } else if text.contains("invalid")
+    } else if err.is::<crate::library::LibraryArchiveTooLarge>()
+        || text.contains("invalid")
         || text.contains("empty")
         || text.contains("must not")
         || text.contains("missing")

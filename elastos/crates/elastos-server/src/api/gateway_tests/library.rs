@@ -6652,6 +6652,93 @@ async fn lazy_protection_bounds_size_and_class() {
     assert!(head.iter().all(|byte| *byte == 0), "17 MiB file unchanged");
 }
 
+/// Download and Compress refuse before reading content above their archive
+/// budgets (#481). Sparse files keep the fixture free; a refused archive
+/// never reads them, and an admitted one stops at their unencrypted bytes.
+#[tokio::test]
+async fn archive_creation_refuses_above_its_budget_before_reading() {
+    const COMPRESS_REFUSAL: &str =
+        "Too large to compress at once (limit 100 MB). Choose fewer or smaller items.";
+    const DOWNLOAD_REFUSAL: &str = "Too large to download at once (limit 1 GB, and no file \
+                                    over 100 MB). Choose fewer or smaller items.";
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &authority);
+    let root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let sparse = |uri: &str, stored_mib: u64| {
+        let path = rooted_localhost_fs_path(dir.path(), uri).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(stored_mib * 1024 * 1024)
+            .unwrap();
+    };
+    let compress = |body: serde_json::Value| {
+        let app = app.clone();
+        let token = token.clone();
+        async move {
+            let (_, compressed) = post_library(app, &token, "compress_archive", body).await;
+            assert_eq!(compressed["status"], "error", "{compressed}");
+            compressed["message"].as_str().unwrap().to_string()
+        }
+    };
+    let download = |uris: Vec<String>, archive: Option<&'static str>| {
+        let app = app.clone();
+        let token = token.clone();
+        async move {
+            let (status, _, body) =
+                get_library_download_many_with_archive(app, &token, &uris, archive).await;
+            (status, String::from_utf8_lossy(&body).to_string())
+        }
+    };
+    // A file counts 3/4 of its stored size. One of 136 MiB stored holds
+    // 102 MiB: over Compress's 100 MB and over one download entry.
+    let trip = format!("{root}/Videos/Trip");
+    sparse(&format!("{trip}/a.mp4"), 136);
+    // Eleven of 128 MiB stored hold 96 MiB each: 1056 MiB in all.
+    let many_folder = format!("{root}/Videos/Many");
+    let many: Vec<String> = (0..11)
+        .map(|i| format!("{many_folder}/{i:02}.mp4"))
+        .collect();
+    for uri in &many {
+        sparse(uri, 128);
+    }
+
+    for body in [
+        json!({ "uri": trip }),
+        json!({ "uri": many_folder }),
+        json!({ "uris": [many[0], many[1]] }),
+    ] {
+        assert!(compress(body).await.contains(COMPRESS_REFUSAL));
+    }
+    for uris in [vec![trip.clone()], vec![many_folder.clone()], many.clone()] {
+        for archive in [None, Some("zip")] {
+            let (status, body) = download(uris.clone(), archive).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body, DOWNLOAD_REFUSAL);
+        }
+    }
+    for (folder, count) in [(&trip, 1), (&many_folder, 11)] {
+        let path = rooted_localhost_fs_path(dir.path(), folder).unwrap();
+        assert_eq!(
+            std::fs::read_dir(path).unwrap().count(),
+            count,
+            "no archive written"
+        );
+    }
+
+    // Within budget the archive is attempted: 96 MiB to compress, 960 MiB
+    // to download. It then stops at the first unencrypted sparse file.
+    assert!(!compress(json!({ "uri": many[0] }))
+        .await
+        .contains("Too large"));
+    let (status, body) = download(many[..10].to_vec(), Some("zip")).await;
+    assert_ne!(status, StatusCode::OK);
+    assert!(!body.contains("Too large"), "{body}");
+}
+
 #[tokio::test]
 async fn test_library_provider_publish_fails_closed_without_content_provider() {
     let dir = tempfile::tempdir().unwrap();

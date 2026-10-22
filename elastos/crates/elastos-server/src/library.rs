@@ -3864,6 +3864,12 @@ fn compress_library_archive(
         }
         let (parent_uri, targets) =
             library_selection_archive_targets(data_dir, principal_id, uris)?;
+        ensure_library_archive_budget(
+            data_dir,
+            principal_id,
+            &targets,
+            LibraryArchiveBudget::Compress,
+        )?;
         let bytes = archive_library_selection_zip(data_dir, principal_id, &targets)?;
         let filename = library_selection_archive_filename(&parent_uri, LibraryArchiveFormat::Zip);
         let archive_uri = unique_child_uri(data_dir, principal_id, &parent_uri, &filename)?;
@@ -3954,12 +3960,104 @@ fn archive_library_directory(
     if is_runtime_private_uri(&target.localhost_root, &target.uri) {
         bail!("runtime-private Library folders cannot be downloaded");
     }
+    ensure_library_archive_budget(
+        data_dir,
+        principal_id,
+        std::slice::from_ref(target),
+        LibraryArchiveBudget::Download,
+    )?;
     match archive_format {
         LibraryArchiveFormat::TarGz => {
             archive_library_directory_tar_gz(data_dir, principal_id, target)
         }
         LibraryArchiveFormat::Zip => archive_library_directory_zip(data_dir, principal_id, target),
     }
+}
+
+/// What one archive Library builds in memory may hold (#481). A download
+/// holds no more than Home extracts from one archive; Compress, which holds
+/// several copies at once, no more than one upload, so its result is never
+/// larger than an upload.
+#[derive(Debug, Clone, Copy)]
+enum LibraryArchiveBudget {
+    Download,
+    Compress,
+}
+
+impl LibraryArchiveBudget {
+    fn admits(self, total: u64, largest: u64) -> bool {
+        match self {
+            Self::Download => {
+                total <= MAX_ARCHIVE_EXPANDED_BYTES && largest <= MAX_ARCHIVE_ENTRY_BYTES
+            }
+            Self::Compress => total <= MAX_ARCHIVE_ENTRY_BYTES,
+        }
+    }
+}
+
+/// A download or Compress refused before any content was read.
+#[derive(Debug)]
+pub(crate) struct LibraryArchiveTooLarge(LibraryArchiveBudget);
+
+impl std::fmt::Display for LibraryArchiveTooLarge {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            LibraryArchiveBudget::Download => write!(
+                formatter,
+                "Too large to download at once (limit {} GB, and no file over {} MB). \
+                 Choose fewer or smaller items.",
+                MAX_ARCHIVE_EXPANDED_BYTES >> 30,
+                MAX_ARCHIVE_ENTRY_BYTES >> 20
+            ),
+            LibraryArchiveBudget::Compress => write!(
+                formatter,
+                "Too large to compress at once (limit {} MB). Choose fewer or smaller items.",
+                MAX_ARCHIVE_ENTRY_BYTES >> 20
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LibraryArchiveTooLarge {}
+
+/// Walks the targets' metadata only. A file counts three quarters of its
+/// stored size, the content a base64 envelope of that size holds.
+fn ensure_library_archive_budget(
+    data_dir: &Path,
+    principal_id: &str,
+    targets: &[LibraryTarget],
+    budget: LibraryArchiveBudget,
+) -> anyhow::Result<()> {
+    let (mut total, mut largest) = (0u64, 0u64);
+    for target in targets {
+        add_library_archive_source_bytes(data_dir, principal_id, target, &mut total, &mut largest)?;
+    }
+    if !budget.admits(total, largest) {
+        return Err(LibraryArchiveTooLarge(budget).into());
+    }
+    Ok(())
+}
+
+fn add_library_archive_source_bytes(
+    data_dir: &Path,
+    principal_id: &str,
+    target: &LibraryTarget,
+    total: &mut u64,
+    largest: &mut u64,
+) -> anyhow::Result<()> {
+    let metadata = fs::metadata(&target.path)?;
+    if !metadata.is_dir() {
+        let content = metadata.len() / 4 * 3;
+        *total = total.saturating_add(content);
+        *largest = (*largest).max(content);
+        return Ok(());
+    }
+    for entry in fs::read_dir(&target.path)? {
+        let name = entry?.file_name().to_string_lossy().to_string();
+        let child = library_target(data_dir, principal_id, &format!("{}/{}", target.uri, name))?;
+        add_library_archive_source_bytes(data_dir, principal_id, &child, total, largest)?;
+    }
+    Ok(())
 }
 
 fn archive_library_directory_tar_gz(
@@ -4008,6 +4106,12 @@ fn archive_library_selection(
     archive_format: LibraryArchiveFormat,
 ) -> anyhow::Result<(String, Vec<u8>)> {
     let (parent_uri, targets) = library_selection_archive_targets(data_dir, principal_id, uris)?;
+    ensure_library_archive_budget(
+        data_dir,
+        principal_id,
+        &targets,
+        LibraryArchiveBudget::Download,
+    )?;
     let bytes = match archive_format {
         LibraryArchiveFormat::TarGz => {
             archive_library_selection_tar_gz(data_dir, principal_id, &targets)?
@@ -4148,6 +4252,12 @@ fn archive_library_single_zip(
     if !target.path.is_file() && !target.path.is_dir() {
         bail!("library compress_archive target must be a file or directory");
     }
+    ensure_library_archive_budget(
+        data_dir,
+        principal_id,
+        std::slice::from_ref(target),
+        LibraryArchiveBudget::Compress,
+    )?;
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     let name = target
         .uri
