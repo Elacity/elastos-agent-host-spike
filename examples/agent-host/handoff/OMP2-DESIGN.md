@@ -70,6 +70,20 @@ child step (the parent's journal), never from a child host's own journal.
 
   The plain `authorize`, `apply_inbox` and `dispatch` refuse a host's steps, so there is no second path. A person's
   deny is still recorded.
+- A host is bound to the child it was opened for (`host_of`, held in memory only, so no format change); a sibling's
+  scope does not fit it, and a reloaded host belongs to no child until it is opened again.
+
+### After an independent review of 10a31e2
+
+- A child is granted only through `authorize_child` or an inbox answer, once. The plain `authorize` refuses a child.
+- A granted scope stands only while every step above still grants it (`scope_still_granted`): a run denied after
+  its children were granted takes the scope from them, their children and their hosts.
+- `usable_child` needs every child in the chain prepared or dispatched: a denied one refuses with "denied", a
+  cancelled or crashed one with "stopped". The plain `cancel` on a child is a stop (record and subtree).
+- Only a run or a child is a parent ("not a parent"): no child below a model call.
+- Child-budget and child-stop records written while a compaction is open are carried into the committed log and into
+  a crash restore, so a compaction never leaves a task that does not load.
+- On load, no step may still be prepared below a stopped child or at or before the cancel point.
 
 ### Budget (R2)
 
@@ -149,7 +163,8 @@ child step (the parent's journal), never from a child host's own journal.
 - a step names a parent that does not exist or comes after it, or a step other than a Child or a call under a Child
   has a parent;
 - a step that is not a Child has a budget, a count or a stop;
-- a Child's resource is not strictly under its parent's ("not a subset"), or it is past the depth limit;
+- a Child's resource is not strictly under its parent's ("not a subset"), or a budgeted Child is past the depth limit
+  (children from before idea 2 had no limit, and with no budget they can do nothing now);
 - a Child's count is not the number of calls in its subtree;
 - a Child below a stopped Child has not stopped;
 - a Child's budget is zero, below its count, or larger (requests or seconds) than its owner's budget, or the task's
@@ -158,6 +173,7 @@ child step (the parent's journal), never from a child host's own journal.
 - a child does not have exactly its own child-budget record (one if it has a budget) and child-stop record (one if
   it stopped), counted per child, not in total;
 - a child host journal (depth above 0) holds a budget or a model call;
+- a step is still prepared below a stopped Child, or at or before the cancel point;
 - the task is cancelled but a Child has not stopped, or a Child or call came after the cancel point.
 
 ### Path rule
