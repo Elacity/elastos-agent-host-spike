@@ -79,7 +79,7 @@ function fakeTarget(extra = {}) {
   };
 }
 
-function surface({ datachannel = true, releaseDirectly = false } = {}) {
+function surface({ datachannel = true } = {}) {
   globalThis.document = fakeTarget({ visibilityState: "visible" });
   globalThis.window = fakeTarget({ setTimeout, clearTimeout });
   const inputs = [];
@@ -109,9 +109,8 @@ function surface({ datachannel = true, releaseDirectly = false } = {}) {
     readHostClipboardText: async () => "",
     remoteVideo,
     renderPanel,
-    releaseDragButton: async (event, onDirect) => {
-      if (releaseDirectly) onDirect();
-      inputs.push(releaseDirectly ? { ...event, direct: true } : event);
+    releaseDragButton: (event) => {
+      inputs.push(event);
     },
     sendBrowserInput: async (event, options = {}) => {
       if (options.isStale) staleChecks.push(options.isStale);
@@ -218,17 +217,13 @@ test("a drag leaving the video clamps to its edge", () => {
   ]);
 });
 
-test("moves are stale only after the release bypassed the queue", () => {
-  const queued = surface();
-  queued.mouse("pointerdown", 100, 100);
-  queued.mouse("pointermove", 120, 100);
-  queued.mouse("pointerup", 130, 100);
-  assert.ok(queued.staleChecks.length > 0 && queued.staleChecks.every((isStale) => !isStale()));
-  const direct = surface({ releaseDirectly: true });
-  direct.mouse("pointerdown", 100, 100);
-  direct.mouse("pointermove", 120, 100);
-  direct.mouse("pointerup", 130, 100);
-  assert.ok(direct.staleChecks.length > 0 && direct.staleChecks.every((isStale) => isStale()));
+test("queued moves of an ended drag are stale", () => {
+  const h = surface();
+  h.mouse("pointerdown", 100, 100);
+  h.mouse("pointermove", 120, 100);
+  assert.ok(h.staleChecks.length > 0 && h.staleChecks.every((isStale) => !isStale()));
+  h.mouse("pointerup", 130, 100);
+  assert.ok(h.staleChecks.every((isStale) => isStale()));
 });
 
 test("Runtime-route input falls back to today's click without drag messages", () => {

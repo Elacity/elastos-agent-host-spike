@@ -44,7 +44,7 @@ bindBrowserInputSurface({
   getCurrentPage: () => page, getCurrentView: () => view, keyboardCapture: null,
   pasteHostClipboardIntoRemote: async () => {}, readHostClipboardText: async () => "",
   remoteVideo: document.getElementById("video"), renderPanel: document.getElementById("panel"),
-  releaseDragButton: (event) => sendBrowserInput(event),
+  releaseDragButton: (event) => window.channel.push(...selkiesMessagesForInput(event, view)),
   sendBrowserInput, showStatus: () => {}, streamsPointerDrag: () => true, unlockRemoteAudioFromGesture: () => {},
 });
 window.ready = true;

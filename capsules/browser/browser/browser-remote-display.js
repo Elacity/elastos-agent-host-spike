@@ -40,6 +40,7 @@ export function createBrowserRemoteDisplay({
   let viewerOwnerActive = () => false;
   let audioPeerConnection = null;
   let inputChannel = null;
+  let inputDrainedAt = 0;
   let mediaStream = null;
   let trackReady = false;
   let connectTimer = 0;
@@ -537,6 +538,14 @@ export function createBrowserRemoteDisplay({
     inputChannel.addEventListener("message", handleRemoteInputChannelMessage);
     inputChannel.addEventListener("close", teardownBoundInputChannel);
     inputChannel.addEventListener("error", teardownBoundInputChannel);
+    // Timestamp when queued input actually leaves the browser, so dependent
+    // Runtime input settles from the observed drain rather than the send.
+    inputChannel.bufferedAmountLowThreshold = 0;
+    inputChannel.addEventListener("bufferedamountlow", () => {
+      if (inputChannel === boundInputChannel) {
+        inputDrainedAt = Date.now();
+      }
+    });
     if (inputChannel.readyState === "open") {
       emitMediaDiagnostic("viewer_input_channel_open", "input");
       return;
@@ -1375,6 +1384,10 @@ export function createBrowserRemoteDisplay({
     return Number(inputChannel?.bufferedAmount || 0);
   }
 
+  function lastInputDrainAt() {
+    return inputDrainedAt;
+  }
+
   function isTrackReady() {
     return trackReady;
   }
@@ -1397,6 +1410,7 @@ export function createBrowserRemoteDisplay({
     inputBufferedAmount,
     inputChannelOpen,
     isTrackReady,
+    lastInputDrainAt,
     metricsState,
     refreshMetrics,
     sendInputMessages,

@@ -19,7 +19,7 @@ import {
   sameRuntimePageOwner,
 } from "./browser-page-cleanup.js?v=browser-20260727a";
 import { DATACHANNEL_INPUT_SETTLE_MS, selkiesMessagesForInput } from "./browser-input.js?v=browser-20261022b";
-import { bindBrowserInputSurface } from "./browser-input-surface.js?v=browser-20261022b";
+import { bindBrowserInputSurface } from "./browser-input-surface.js?v=browser-20261022c";
 import {
   browserMetricsText,
   friendlyOpenError,
@@ -27,7 +27,7 @@ import {
   isMissingRuntimePageError,
   requestedDisplayMode,
 } from "./browser-status.js?v=browser-20260907c";
-import { createBrowserRemoteDisplay } from "./browser-remote-display.js?v=browser-20261022b";
+import { createBrowserRemoteDisplay } from "./browser-remote-display.js?v=browser-20261022c";
 import { engineChoiceHidden, renderServiceSelection } from "./browser-service-selection.js?v=browser-20261015a";
 
 const STATUS_TTL_MS = 4200;
@@ -110,6 +110,7 @@ const MAX_PENDING_BROWSER_INPUTS = 128;
 const DATACHANNEL_INPUT_BARRIER_TIMEOUT_MS = 3_000;
 let browserInputQueue = null;
 let lastDatachannelInputAt = 0;
+let datachannelDrainedAt = 0;
 let restoredViewerOwner = null;
 let currentView = null;
 let currentDisplayMode = "";
@@ -1603,7 +1604,7 @@ function encodeDatachannelInput(event) {
 
 async function sendBrowserInput(
   event,
-  { focus = true, history = "push", isStale = null, onDispatch = null } = {},
+  { focus = true, history = "push", isStale = null } = {},
 ) {
   const owner = currentRuntimePageOwner();
   if (!owner) {
@@ -1629,7 +1630,6 @@ async function sendBrowserInput(
     if (isStale?.()) {
       return;
     }
-    onDispatch?.();
     return dispatchBrowserInput(event, { focus, history }, owner);
   });
   queue.tail = pending.catch(() => {
@@ -1646,44 +1646,43 @@ async function sendBrowserInput(
   }
 }
 
-// The guest must always get the button release that ends a drag. It keeps
-// queue order; if the queue drops or refuses it (page change, a failed input,
-// a full queue), it goes straight to the datachannel.
-function releaseDragButton(event, onDirect = () => {}) {
-  let dispatched = false;
-  const sendDirect = () => {
-    if (dispatched || !remoteDisplay?.inputChannelOpen()) {
-      return;
-    }
-    dispatched = true;
-    // Moves still queued for this drag must not press the button again.
-    onDirect();
-    remoteDisplay.sendInputMessages(encodeDatachannelInput(event));
-    lastDatachannelInputAt = Date.now();
-  };
-  return sendBrowserInput(event, {
-    focus: false,
-    history: "replace",
-    onDispatch: () => { dispatched = true; },
-  })
-    .catch(() => {})
-    .then(sendDirect);
+function noteDatachannelSend() {
+  const now = Date.now();
+  lastDatachannelInputAt = now;
+  datachannelDrainedAt = Number(remoteDisplay?.inputBufferedAmount?.() || 0) === 0 ? now : 0;
+}
+
+// The guest must always get the button release that ends a drag, even while
+// a Runtime request is pending: it goes straight to the datachannel, after
+// the drag's own moves on that channel. The caller marks the drag ended so
+// its still-queued moves send nothing.
+function releaseDragButton(event) {
+  if (!remoteDisplay?.inputChannelOpen()) {
+    return;
+  }
+  remoteDisplay.sendInputMessages(encodeDatachannelInput(event));
+  noteDatachannelSend();
 }
 
 // The datachannel has no guest ack, so Runtime-route input that follows a
-// datachannel send waits until the channel has drained and the guest has had
-// the settle delay to apply it. It fails rather than reorder.
+// datachannel send waits until the drain is observed and the guest has had
+// the settle delay after it. It fails rather than reorder.
 async function awaitDatachannelInputSettled() {
   if (!lastDatachannelInputAt) {
     return;
   }
   const deadline = Date.now() + DATACHANNEL_INPUT_BARRIER_TIMEOUT_MS;
-  let settleFrom = lastDatachannelInputAt;
   for (;;) {
     const now = Date.now();
     if (Number(remoteDisplay?.inputBufferedAmount?.() || 0) > 0) {
-      settleFrom = now;
-    } else if (now - settleFrom >= DATACHANNEL_INPUT_SETTLE_MS) {
+      datachannelDrainedAt = 0;
+    } else if (!datachannelDrainedAt) {
+      // Prefer the bufferedamountlow time; without it, the first poll that
+      // sees an empty buffer is the conservative drain time.
+      const eventAt = Number(remoteDisplay?.lastInputDrainAt?.() || 0);
+      datachannelDrainedAt = eventAt >= lastDatachannelInputAt ? eventAt : now;
+    }
+    if (datachannelDrainedAt && now >= datachannelDrainedAt + DATACHANNEL_INPUT_SETTLE_MS) {
       lastDatachannelInputAt = 0;
       return;
     }
@@ -1719,7 +1718,7 @@ async function dispatchBrowserInput(
       throw new Error("Browser remote-display input channel is not open.");
     }
     remoteDisplay.sendInputMessages(encodeDatachannelInput(event));
-    lastDatachannelInputAt = Date.now();
+    noteDatachannelSend();
     schedulePageStatusRefresh({
       history,
       forceAddress: true,

@@ -36,7 +36,7 @@ function assertCanceled(results) {
 }
 
 function harness() {
-  const requests = [], sends = [], mutations = [], failures = [], effects = [], channel = { open: true, buffered: 0 };
+  const requests = [], sends = [], mutations = [], failures = [], effects = [], channel = { open: true, buffered: 0, drainedAt: 0 };
   const state = vm.createContext({
     currentPage: { page_id: "page:original", title: "Original", actual_url: "https://fixture.invalid/nav?run=ordering",
       runtime_cleanup: { schema: "elastos.browser.cleanup-handle/v1", id: "cleanup:original" },
@@ -48,6 +48,7 @@ function harness() {
     remoteDisplay: {
       inputChannelOpen: () => channel.open,
       inputBufferedAmount: () => channel.buffered,
+      lastInputDrainAt: () => channel.drainedAt,
       // This observes synchronous dispatch, not a guest-side data-channel ack.
       sendInputMessages: messages => sends.push(...plain(messages)),
     },
@@ -70,12 +71,13 @@ function harness() {
   // The old implementation remains executable so the same behavioral tests can
   // record a red baseline, rather than failing merely on a missing new symbol.
   if (source.includes("function dispatchBrowserInput(")) names.push("dispatchBrowserInput");
-  for (const name of ["releaseDragButton", "awaitDatachannelInputSettled"]) {
+  for (const name of ["noteDatachannelSend", "releaseDragButton", "awaitDatachannelInputSettled"]) {
     if (source.includes(`function ${name}(`)) names.push(name);
   }
   const queue = source.match(/^let browserInputQueue = [^\n]+;$/m)?.[0] || "";
   const cap = source.match(/^const MAX_PENDING_BROWSER_INPUTS = [0-9_]+;$/m)?.[0] || "";
-  const barrier = [/^const DATACHANNEL_INPUT_BARRIER_TIMEOUT_MS = [0-9_]+;$/m, /^let lastDatachannelInputAt = [^\n]+;$/m]
+  const barrier = [/^const DATACHANNEL_INPUT_BARRIER_TIMEOUT_MS = [0-9_]+;$/m, /^let lastDatachannelInputAt = [^\n]+;$/m,
+    /^let datachannelDrainedAt = [^\n]+;$/m]
     .map(pattern => source.match(pattern)?.[0] || "").join("\n");
   vm.runInContext(queue + "\n" + cap + "\n" + barrier + "\n" + names.map(declaration).join("\n"), state);
   const submit = (event, options) => Promise.resolve(state.sendBrowserInput(event, options))
@@ -421,44 +423,43 @@ test("a datachannel that never drains fails the barrier visibly instead of reord
   assert.equal(h.requests.length, 0);
 });
 
-test("a drag release keeps queue order behind pending Runtime text", async () => {
+test("a stalled Runtime request does not hold the drag release", async () => {
   const h = harness(), typed = h.submit(text("r"));
-  const released = h.state.releaseDragButton(release);
+  const move = h.submit({ type: "mouse", x: 20, y: 20, buttons: 1 }, { isStale: () => true });
   await nextTurn();
-  assert.deepEqual(h.sends, [], "release must not overtake queued input");
+  h.state.releaseDragButton(release);
+  assert.deepEqual(h.sends, ["m,30,20,0,0"], "the release must go at once, not behind the pending request");
   h.requests[0].ack();
-  await released;
+  await Promise.all([typed, move]);
+  assert.deepEqual(h.sends, ["m,30,20,0,0"], "the ended drag's queued move must not press the button again");
+});
+
+test("Runtime text after a direct drag release waits for its drain and settle", async () => {
+  const h = harness();
+  h.state.releaseDragButton(release);
+  const typed = h.submit(text("x"));
+  await sleep(DATACHANNEL_INPUT_SETTLE_MS - 50);
+  assert.equal(h.requests.length, 0);
+  await sleep(100);
+  assert.equal(h.requests.length, 1);
+  h.requests[0].ack();
   assert.equal((await typed).status, "fulfilled");
-  assert.deepEqual(h.sends, ["m,30,20,0,0"]);
 });
 
-for (const kind of ["page", "failed"]) test(`a drag release still reaches the guest after a ${kind === "page" ? "page-owner change" : "failed queue"}`, async () => {
-  const h = harness(), typed = h.submit(text("r"));
-  const move = h.submit({ type: "mouse", x: 20, y: 20, buttons: 1 });
-  await nextTurn();
-  const released = h.state.releaseDragButton(release);
-  if (kind === "page") {
-    h.changeOwner("page");
-    h.requests[0].ack();
-  } else {
-    h.requests[0].reject(new TypeError("unknown delivery"));
-  }
-  await Promise.all([typed, move, released]);
-  assert.deepEqual(h.sends, ["m,30,20,0,0"], "dropped moves stay dropped; the release still goes");
-});
-
-test("a full queue sends the release directly and the ended drag's queued moves send nothing", async () => {
-  const h = harness(), state = { direct: false };
-  const queued = Array.from({ length: 127 }, (_, index) => h.submit(text(`input-${index}`)));
-  const move = h.submit({ type: "mouse", x: 20, y: 20, buttons: 1 }, { isStale: () => state.direct });
-  await nextTurn();
-  await h.state.releaseDragButton(release, () => { state.direct = true; });
-  assert.ok(state.direct);
-  assert.deepEqual(h.sends, ["m,30,20,0,0"]);
-  for (let index = 0; index < 127; index++) {
-    while (h.requests.length <= index) await sleep(5);
-    h.requests[index].ack(); await nextTurn();
-  }
-  await Promise.all([...queued, move]);
-  assert.deepEqual(h.sends, ["m,30,20,0,0"], "the stale move must not press the button again");
+test("settle starts at the observed drain, not at the first check", async () => {
+  // Send at 0, drain at ~190 (bufferedamountlow), text at ~200: not before ~340.
+  const h = harness();
+  h.channel.buffered = 64;
+  await h.submit(release);
+  await sleep(190);
+  h.channel.buffered = 0;
+  h.channel.drainedAt = Date.now();
+  await sleep(10);
+  const typed = h.submit(text("x"));
+  await sleep(DATACHANNEL_INPUT_SETTLE_MS - 40);
+  assert.equal(h.requests.length, 0, "text must wait the settle after the observed drain");
+  await sleep(80);
+  assert.equal(h.requests.length, 1);
+  h.requests[0].ack();
+  assert.equal((await typed).status, "fulfilled");
 });

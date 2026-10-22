@@ -335,8 +335,9 @@ export function bindBrowserInputSurface({
   function sendMouseMove(state, point) {
     sendBrowserInput(
       { type: "mouse", x: point.x, y: point.y, buttons: 1 },
-      // Only a release that bypassed the queue can overtake these moves.
-      { history: "replace", isStale: () => state.releasedDirectly },
+      // The release goes straight to the channel; moves of an ended drag
+      // still waiting in the queue must not press the button again.
+      { history: "replace", isStale: () => state.ended },
     ).catch((error) => {
       showStatus(friendlyOpenError(error), { sticky: true });
     });
@@ -361,6 +362,7 @@ export function bindBrowserInputSurface({
     if (!state?.dragging) {
       return false;
     }
+    state.ended = true;
     if (state.frame) {
       cancelAnimationFrameFn?.(state.frame);
     }
@@ -371,12 +373,11 @@ export function bindBrowserInputSurface({
       (event && browserPointFromEvent(event, true)) ||
       state.pendingPoint ||
       state.lastPoint;
-    releaseDragButton(
-      { type: "mouse", x: point.x, y: point.y, buttons: 0 },
-      () => { state.releasedDirectly = true; },
-    ).catch((error) => {
+    try {
+      releaseDragButton({ type: "mouse", x: point.x, y: point.y, buttons: 0 });
+    } catch (error) {
       showStatus(friendlyOpenError(error), { sticky: true });
-    });
+    }
     suppressSyntheticClickUntil = Date.now() + 700;
     return true;
   }
@@ -409,7 +410,7 @@ export function bindBrowserInputSurface({
       lastPoint: start,
       pendingPoint: null,
       dragging: false,
-      releasedDirectly: false,
+      ended: false,
       frame: 0,
     };
   });
