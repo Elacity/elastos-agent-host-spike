@@ -110,6 +110,7 @@ Source: OMP.md section 3 and reports/OMP-AUDIT.md row 2 (omp at `2220e58`):
 - a step that is not a Child has a budget, a count or a stop;
 - a Child's resource is not strictly under its parent's ("not a subset"), or it is past the depth limit;
 - a Child's count is not the number of calls in its subtree;
+- a Child below a stopped Child has not stopped;
 - a Child's budget is zero, below its count, or larger (requests or seconds) than its owner's budget, or the task's
   ("over the parent's budget"); a Child without a budget has a count;
 - the task budget is zero, or fewer than the calls made;
@@ -143,7 +144,7 @@ closed (R2, PRINCIPLES 11). They change what the guest allows, not what a stored
 
 ## Tests and falsifiers
 
-Each rule has a test, and each check has a mutation (CL01-CL91, report omp2-child-limits.md).
+Each rule has a test, and each check has a mutation (CL01-CL92, report omp2-child-limits.md).
 
 | Test | What it proves |
 | --- | --- |
