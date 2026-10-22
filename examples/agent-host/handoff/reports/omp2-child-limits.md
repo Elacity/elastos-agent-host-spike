@@ -276,4 +276,66 @@ Guest hash:   032afd9244427b25211bd9799ed70586cb7c15668a0ad1b5b5115b5e6ba33883 o
 Import list:  unchanged (the core import section /1/2 is byte-identical to #30).
 ```
 
-**What is next:** Codex on #31. Sasha closes #25 when #31 merges.
+## Update: Codex FAIL at 206da0d, seven findings (22 Oct)
+
+All seven reproduced. Root cause for 1-3, as Codex said: some paths skipped the checks. Now one function per kind of
+check, and every path calls it. A child's limits come only from the parent's journal.
+
+```text
+Commits:      3998623 (merge of spike/agent-host with #33; LOG.md kept both sides)
+              b796516 (the fixes and seven tests), bc16234 (propose_child through usable_child only),
+              b543367 (no second stopped or cancelled check), 8e6315f (notes); this report is the next commit
+Shared:       child_rules       every child, on every load (stored_children_ok) and every live use
+              usable_child      child_rules + a budget + not stopped + task not cancelled: propose_child (child
+                                parent), ask_model (each child in the chain), child_grant_ok, open_child_host
+              child_grant_ok    authorize_child and an inbox answer for a child
+              stored_rules_ok   paths and children: decode_journal, and read_stored_journal (reread, resume)
+Finding 1:    reread and resume used decode_bytes + stored_paths_ok only. Now stored_rules_ok.
+              a_reread_or_resume_refuses_a_journal_that_breaks_a_child_rule (a running child below a stopped one,
+              a wider child resource; reread Err, resume Refused, cursor unchanged)
+Finding 2:    an inbox answer checked only "not the parent's grant". Now child_grant_ok, for the child's whole
+              resource; a deny needs no check.
+              an_inbox_answer_grants_only_a_usable_child_under_a_granted_parent (legacy child, parent without a
+              grant, stopped child; journal unchanged; control granted)
+Finding 3:    open_child_host took a parent step and a resource, and the host could record its own budget. Now it
+              takes a child step that must be usable in the parent's journal; a host (depth above 0) refuses
+              record_task_budget and ask_model ("child host"), and a stored host with a budget or a model call is
+              refused. Its calls are ask_model(parent, Some(child), ..).
+              a_child_host_spends_the_parent_budget_and_keeps_its_stop (one-request child: one request, also after
+              reload; stopped child gives no host; forged host budget or call refused)
+Finding 4:    the granted resource was dropped. A child's grant now keeps its scope in memory (grant_scope: the
+              grant resource, or the whole resource for an inbox answer); a grandchild is granted only inside it.
+              a_child_grant_scope_bounds_its_children (granted src/a: src/b refused for authorize and inbox, src/a/x
+              granted; an inbox-granted child hands its scope on)
+Finding 5:    records were counted in total. Now per child.
+              each_child_has_exactly_its_own_records (B's budget or stop record moved to A)
+Finding 6:    the task was checked before the chain. Now the children first.
+              the_task_and_a_child_running_out_together_stops_the_child (child stops with requests, its child with
+              cancelled, journal reloads)
+Finding 7:    "no budget" and "parent has no budget" for a budget never recorded. Now TASK_BUDGET_REASON, also for
+              a child from before idea 2 (its task predates budgets: start a new task).
+              a_missing_budget_is_refused_with_the_task_budget_reason (ask_model and propose_child, task and
+              legacy child; a legacy parent is refused before the child's own budget)
+Failing first: the seven tests on 206da0d's lib.rs: "187 passed; 7 failed" (each of the seven FAILED).
+Also:         a_cancelled_task_says_cancelled_on_every_live_path; a_child_that_breaks_a_rule_is_refused_on_every_live_path
+              (an in-memory child with a wrong count is refused by every live path, through usable_child)
+Changed tests: open_child_host now takes the child step (four tests and the run fixture); every_format_2_field_round_trips
+              checks the header depth on a child host; the reload test's depth case is a host-with-a-budget case, plus a
+              child past the limit inside a host at the limit; "no budget" expectations are TASK_BUDGET_REASON.
+Tests run:    ./examples/agent-host/verify.sh -> "196 passed" (187 + 9), clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Falsifiers:   CF01-CF21 new; CL01-CL92 rerun, the moved ones re-targeted (same id, same intent); TB01.
+              First pass at bc16234: 4 of 113 survived (CL23, CL25, CF18, CF19), all redundancy from the one-path
+              change. b543367 removes the two second checks (CL23, CL25 retire with their code) and adds the two
+              tests above (CF18, CF19 then fail them).
+              Full rerun at b543367: CF, CL, TB 111 of 111 caught (CL24 re-targeted to the dedented line: caught).
+              CL02 retires (a host's depth is its child's; CF10 covers it).
+              JF01-JF37 and the O* set at b543367: all caught except OZ01 (survives by design, as in #24);
+              OY19 caught as a compile error; OS01, OP01, JF14, JF15 retired as before; OY06 and JF07 skip, and their
+              re-targets OY06c (stored_rules_ok without the path rule: 4 FAILED) and JF07b (1 FAILED) are caught.
+Guest hash:   35102c274fc29f59d187d7af0149361e1bf98a0d4b0813cb8753a63f5f702277 on verify.sh and a clean rebuild.
+              wasm_sections.py: file 653844 bytes; /1/10 389892 91384db4aedcf2a8; /1/11 176551 7ca2e33174526964.
+Import list:  unchanged (the core import section /1/2, 149 bytes, 5ee6b40d46f6a045, is byte-identical to #30).
+```
+
+**What is next:** the Mac check and Codex on #31. Sasha closes #25 when #31 merges.
