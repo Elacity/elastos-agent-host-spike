@@ -269,9 +269,10 @@ Changed:      examples/agent-host/src/lib.rs - TASK_BUDGET_REASON = "the task bu
                 task", used by the run fixture's three refusals; the_guest_never_sets_the_top_task_budget pins the text
 Tests run:    ./examples/agent-host/verify.sh -> "187 passed", clippy clean, build OK
               ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
-Falsifiers:   TB01 the reason loses "; start a new task" -> FAILED_TB01
-              CL01-CL92 rerun on this head -> CL_RERUN
-Guest hash:   GUEST_HASH_2
+Falsifiers:   TB01 the reason loses "; start a new task" -> the_guest_never_sets_the_top_task_budget FAILED
+              CL01-CL92 rerun on this head -> 92 of 92 caught; no survivors; tree clean
+Guest hash:   032afd9244427b25211bd9799ed70586cb7c15668a0ad1b5b5115b5e6ba33883 on two clean builds and verify.sh.
+              wasm_sections.py: file 652410 bytes; /1/10 388475 301b48d231337dbd; /1/11 176543 5963e6487618a95e.
 Import list:  unchanged (the core import section /1/2 is byte-identical to #30).
 ```
 
