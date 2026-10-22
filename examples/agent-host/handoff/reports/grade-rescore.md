@@ -170,4 +170,15 @@ Cursor: #33 is docs only.
 
 Checklist stays 56 of 63.
 
+## Update: past review records (22 Oct)
+
+From Cursor's log, one file per merged PR in `handoff/reviews/<PR>-<short head>.md`, at the merged head:
+- Codex (GPT family), PASS: #8, #9, #19, #20, #24, #27, #30 (earlier FAIL rounds named in each finding line).
+- Cursor (Claude family), PASS: #1, #2.
+- Cursor (Claude family), no cross-family record: #3, #5, #6 (PASS as their merge commits record), #4, #11, #22
+  (verdict not recorded). All six are docs or tests only.
+
+`hold-adversarial` stays pending: it needs a cross-family PASS before any push to Elacity, and the records now show
+where one exists.
+
 **What is next:** Codex on #33 (docs only). OMP idea 2 is #31.
