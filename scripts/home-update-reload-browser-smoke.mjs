@@ -174,11 +174,11 @@ async function openHome(browser, origin, options) {
   const page = await context.newPage();
   page.on("pageerror", (error) => errors.push(`page: ${error}`));
   await page.goto(`${origin}/apps/home/`);
-  await page.waitForFunction(() => document.body.dataset.homeStatus === "ready"
+  await page.waitForFunction(() => document.body?.dataset.homeStatus === "ready"
     && document.querySelector("#active-shell-frame")?.hidden === false, null, { timeout: 15_000 });
   const shell = () => page.frames().find((frame) => frame.url().includes("/apps/home-gui/"));
   await waitUntil(() => shell(), "Home mounted the Desktop shell");
-  await shell().waitForFunction(() => document.body.dataset.homeStatus === "ready", null, { timeout: 15_000 });
+  await shell().waitForFunction(() => document.body?.dataset.homeStatus === "ready", null, { timeout: 15_000 });
   await waitUntil(() => streams.size > 0, "Home opened its event stream");
   return page;
 }
