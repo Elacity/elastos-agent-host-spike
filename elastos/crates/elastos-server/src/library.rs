@@ -3897,6 +3897,22 @@ fn compress_library_archive(
 
     let uri = uri.ok_or_else(|| anyhow!("library compress_archive requires uri or uris"))?;
     let target = library_target(data_dir, principal_id, uri)?;
+    if target.uri == target.localhost_root {
+        bail!("library root compress is not supported; use Recovery Kit for full backups");
+    }
+    if is_runtime_private_uri(&target.localhost_root, &target.uri) {
+        bail!("runtime-private Library folders cannot be compressed");
+    }
+    if !target.path.is_file() && !target.path.is_dir() {
+        bail!("library compress_archive target must be a file or directory");
+    }
+    // Before the revision check, which reads the whole object.
+    ensure_library_archive_budget(
+        data_dir,
+        principal_id,
+        std::slice::from_ref(&target),
+        LibraryArchiveBudget::Compress,
+    )?;
     check_revision(data_dir, principal_id, &target.uri, if_revision)?;
     let parent_uri = target
         .uri
@@ -4020,17 +4036,32 @@ impl std::fmt::Display for LibraryArchiveTooLarge {
 
 impl std::error::Error for LibraryArchiveTooLarge {}
 
-/// Walks the targets' metadata only. A file counts three quarters of its
-/// stored size, the content a base64 envelope of that size holds.
+/// Reads no content: each file counts the most a read of it can return,
+/// judged from its head and tail (`principal_root_object_content_bound`).
 fn ensure_library_archive_budget(
     data_dir: &Path,
     principal_id: &str,
     targets: &[LibraryTarget],
     budget: LibraryArchiveBudget,
 ) -> anyhow::Result<()> {
+    let Some(localhost_root) = targets.first().map(|target| target.localhost_root.as_str()) else {
+        return Ok(());
+    };
+    let protection =
+        crate::auth::load_principal_root_protection(data_dir, principal_id, localhost_root)?;
+    let data_key_id = protection
+        .as_ref()
+        .map(|protection| protection.data_key_id.as_str());
     let (mut total, mut largest) = (0u64, 0u64);
     for target in targets {
-        add_library_archive_source_bytes(data_dir, principal_id, target, &mut total, &mut largest)?;
+        add_library_archive_source_bytes(
+            data_dir,
+            principal_id,
+            data_key_id,
+            target,
+            &mut total,
+            &mut largest,
+        )?;
     }
     if !budget.admits(total, largest) {
         return Err(LibraryArchiveTooLarge(budget).into());
@@ -4041,13 +4072,19 @@ fn ensure_library_archive_budget(
 fn add_library_archive_source_bytes(
     data_dir: &Path,
     principal_id: &str,
+    data_key_id: Option<&str>,
     target: &LibraryTarget,
     total: &mut u64,
     largest: &mut u64,
 ) -> anyhow::Result<()> {
-    let metadata = fs::metadata(&target.path)?;
-    if !metadata.is_dir() {
-        let content = metadata.len() / 4 * 3;
+    if !fs::metadata(&target.path)?.is_dir() {
+        let content = crate::auth::principal_root_object_content_bound(
+            principal_id,
+            &target.localhost_root,
+            &target.uri,
+            &target.path,
+            data_key_id,
+        )?;
         *total = total.saturating_add(content);
         *largest = (*largest).max(content);
         return Ok(());
@@ -4055,7 +4092,14 @@ fn add_library_archive_source_bytes(
     for entry in fs::read_dir(&target.path)? {
         let name = entry?.file_name().to_string_lossy().to_string();
         let child = library_target(data_dir, principal_id, &format!("{}/{}", target.uri, name))?;
-        add_library_archive_source_bytes(data_dir, principal_id, &child, total, largest)?;
+        add_library_archive_source_bytes(
+            data_dir,
+            principal_id,
+            data_key_id,
+            &child,
+            total,
+            largest,
+        )?;
     }
     Ok(())
 }
@@ -4243,21 +4287,6 @@ fn archive_library_single_zip(
     principal_id: &str,
     target: &LibraryTarget,
 ) -> anyhow::Result<Vec<u8>> {
-    if target.uri == target.localhost_root {
-        bail!("library root compress is not supported; use Recovery Kit for full backups");
-    }
-    if is_runtime_private_uri(&target.localhost_root, &target.uri) {
-        bail!("runtime-private Library folders cannot be compressed");
-    }
-    if !target.path.is_file() && !target.path.is_dir() {
-        bail!("library compress_archive target must be a file or directory");
-    }
-    ensure_library_archive_budget(
-        data_dir,
-        principal_id,
-        std::slice::from_ref(target),
-        LibraryArchiveBudget::Compress,
-    )?;
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     let name = target
         .uri

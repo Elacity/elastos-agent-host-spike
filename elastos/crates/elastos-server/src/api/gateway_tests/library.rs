@@ -6657,8 +6657,6 @@ async fn lazy_protection_bounds_size_and_class() {
 /// never reads them, and an admitted one stops at their unencrypted bytes.
 #[tokio::test]
 async fn archive_creation_refuses_above_its_budget_before_reading() {
-    const COMPRESS_REFUSAL: &str =
-        "Too large to compress at once (limit 100 MB). Choose fewer or smaller items.";
     const DOWNLOAD_REFUSAL: &str = "Too large to download at once (limit 1 GB, and no file \
                                     over 100 MB). Choose fewer or smaller items.";
     let dir = tempfile::tempdir().unwrap();
@@ -6693,17 +6691,17 @@ async fn archive_creation_refuses_above_its_budget_before_reading() {
             (status, String::from_utf8_lossy(&body).to_string())
         }
     };
-    // A file counts 3/4 of its stored size. One of 136 MiB stored holds
-    // 102 MiB: over Compress's 100 MB and over one download entry.
+    // These files are not envelopes, so each counts its whole length. One
+    // of 101 MiB is over Compress's 100 MB and over one download entry.
     let trip = format!("{root}/Videos/Trip");
-    sparse(&format!("{trip}/a.mp4"), 136);
-    // Eleven of 128 MiB stored hold 96 MiB each: 1056 MiB in all.
+    sparse(&format!("{trip}/a.mp4"), 101);
+    // Eleven of 96 MiB: each fits, 1056 MiB in all does not.
     let many_folder = format!("{root}/Videos/Many");
     let many: Vec<String> = (0..11)
         .map(|i| format!("{many_folder}/{i:02}.mp4"))
         .collect();
     for uri in &many {
-        sparse(uri, 128);
+        sparse(uri, 96);
     }
 
     for body in [
@@ -6711,7 +6709,7 @@ async fn archive_creation_refuses_above_its_budget_before_reading() {
         json!({ "uri": many_folder }),
         json!({ "uris": [many[0], many[1]] }),
     ] {
-        assert!(compress(body).await.contains(COMPRESS_REFUSAL));
+        assert!(compress(body).await.contains(ARCHIVE_COMPRESS_REFUSAL));
     }
     for uris in [vec![trip.clone()], vec![many_folder.clone()], many.clone()] {
         for archive in [None, Some("zip")] {
@@ -6737,6 +6735,142 @@ async fn archive_creation_refuses_above_its_budget_before_reading() {
     let (status, body) = download(many[..10].to_vec(), Some("zip")).await;
     assert_ne!(status, StatusCode::OK);
     assert!(!body.contains("Too large"), "{body}");
+}
+
+const ARCHIVE_COMPRESS_REFUSAL: &str =
+    "Too large to compress at once (limit 100 MB). Choose fewer or smaller items.";
+const MIB: u64 = 1024 * 1024;
+
+fn sparse_library_file(data_dir: &std::path::Path, uri: &str, len: u64) -> std::path::PathBuf {
+    let path = rooted_localhost_fs_path(data_dir, uri).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+    path
+}
+
+fn opened_among(data_dir: &std::path::Path, uris: &[String]) -> Vec<String> {
+    crate::auth::principal_root_object_opens(data_dir)
+        .into_iter()
+        .filter(|uri| uris.contains(uri))
+        .collect()
+}
+
+/// Legacy plaintext of up to 16 MiB is read whole, so the archive budget
+/// counts its whole length, not an envelope's three quarters (#481).
+#[tokio::test]
+async fn archive_budget_counts_legacy_plaintext_whole_without_reading_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &authority);
+    let root = crate::auth::principal_localhost_root(&authority.principal_id);
+    // Nine readable legacy plaintext files of 12 MiB: 108 MiB of content.
+    let folder = format!("{root}/Documents/Legacy");
+    let legacy: Vec<String> = (0..9).map(|i| format!("{folder}/{i}.bin")).collect();
+    let paths: Vec<_> = legacy
+        .iter()
+        .map(|uri| sparse_library_file(dir.path(), uri, 12 * MIB))
+        .collect();
+
+    for body in [json!({ "uri": folder }), json!({ "uris": legacy })] {
+        let (_, compressed) = post_library(app.clone(), &token, "compress_archive", body).await;
+        assert_eq!(compressed["status"], "error", "{compressed}");
+        let message = compressed["message"].as_str().unwrap();
+        assert!(message.contains(ARCHIVE_COMPRESS_REFUSAL), "{compressed}");
+    }
+    assert_eq!(opened_among(dir.path(), &legacy), Vec::<String>::new());
+    for path in &paths {
+        assert_eq!(
+            std::fs::metadata(path).unwrap().len(),
+            12 * MIB,
+            "unchanged"
+        );
+    }
+    let folder_path = rooted_localhost_fs_path(dir.path(), &folder).unwrap();
+    assert_eq!(
+        std::fs::read_dir(folder_path).unwrap().count(),
+        9,
+        "no archive"
+    );
+}
+
+/// The UI sends a revision with a single-item Compress; checking it reads the
+/// whole object, so the archive budget refuses first (#481).
+#[tokio::test]
+async fn compress_checks_the_archive_budget_before_reading_for_the_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &authority);
+    let root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let big = format!("{root}/Videos/big.mp4");
+    sparse_library_file(dir.path(), &big, 101 * MIB);
+
+    let (_, compressed) = post_library(
+        app,
+        &token,
+        "compress_archive",
+        json!({ "uri": big, "if_revision": "rev:stale" }),
+    )
+    .await;
+    assert_eq!(compressed["status"], "error", "{compressed}");
+    let message = compressed["message"].as_str().unwrap();
+    assert!(message.contains(ARCHIVE_COMPRESS_REFUSAL), "{compressed}");
+    assert_eq!(opened_among(dir.path(), &[big]), Vec::<String>::new());
+}
+
+/// An envelope counts three quarters of its length, never less than its
+/// content; anything else counts its whole length (#481).
+#[tokio::test]
+async fn archive_content_bound_never_undercounts() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(library_test_state(dir.path()).await);
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &authority);
+    let root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let note = format!("{root}/Documents/note.txt");
+    let content = vec![b'n'; 4096];
+    let (status, _) = post_library(
+        app,
+        &token,
+        "write",
+        json!({
+            "uri": note,
+            "mime": "text/plain",
+            "data": base64::engine::general_purpose::STANDARD.encode(&content),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let plain = format!("{root}/Documents/plain.bin");
+    sparse_library_file(dir.path(), &plain, 12 * MIB);
+    let protection =
+        crate::auth::load_principal_root_protection(dir.path(), &authority.principal_id, &root)
+            .unwrap()
+            .unwrap();
+    let bound = |uri: &str, data_key_id: Option<&str>| {
+        let path = rooted_localhost_fs_path(dir.path(), uri).unwrap();
+        crate::auth::principal_root_object_content_bound(
+            &authority.principal_id,
+            &root,
+            uri,
+            &path,
+            data_key_id,
+        )
+        .unwrap()
+    };
+    let key = Some(protection.data_key_id.as_str());
+    let stored = std::fs::metadata(rooted_localhost_fs_path(dir.path(), &note).unwrap())
+        .unwrap()
+        .len();
+    assert_eq!(bound(&note, key), stored / 4 * 3);
+    assert!(bound(&note, key) >= content.len() as u64);
+    // Without protection an envelope is read raw, so it counts whole.
+    assert_eq!(bound(&note, None), stored);
+    assert_eq!(bound(&plain, key), 12 * MIB);
 }
 
 #[tokio::test]

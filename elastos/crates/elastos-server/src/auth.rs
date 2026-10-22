@@ -5424,6 +5424,34 @@ fn read_protected_principal_root_object_file(
         .map_err(|_| damaged(damage))
 }
 
+/// The most content a Library read of this object can return, judged from
+/// its head and tail only, never its body (#481). A canonical envelope bound
+/// here under the current key opens only by decrypting, which returns less
+/// than three quarters of its length: the base64 ciphertext's share. Anything
+/// else counts its whole length, since a plaintext file is read whole.
+pub(crate) fn principal_root_object_content_bound(
+    principal_id: &str,
+    localhost_root: &str,
+    object_uri: &str,
+    path: &Path,
+    data_key_id: Option<&str>,
+) -> anyhow::Result<u64> {
+    let (mut file, len) = open_principal_root_object_file(path)?;
+    let expected = PrincipalRootObjectExpectation {
+        principal_id,
+        localhost_root,
+        object_uri,
+        data_key_id,
+    };
+    let mut no_whole_reads = 0;
+    let probe = classify_principal_root_object_file(&mut file, len, &expected, &mut no_whole_reads)
+        .with_context(|| format!("failed to read {path:?}"))?;
+    Ok(match probe.class {
+        PrincipalRootObjectFileClass::Envelope => len / 4 * 3,
+        _ => len,
+    })
+}
+
 /// A file whose canonical label names another format, Home, place or key is
 /// refused without reading past the label (#450 L9). It can never open: the
 /// full parse (`deny_unknown_fields`, which also refuses a repeated field)
