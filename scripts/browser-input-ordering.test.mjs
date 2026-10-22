@@ -101,6 +101,9 @@ test("rapid r/e/d waits for each Runtime ack and preserves the observed recovere
 for (const [name, event, messages] of [
   ["Backspace", { type: "key", key: "Backspace" }, ["kd,65288", "ku,65288"]],
   ["Enter", { type: "key", key: "Enter" }, ["kd,65293", "ku,65293"]],
+  ["Drag press", { type: "mouse", x: 15, y: 20, buttons: 1 }, ["m,15,20,1,0"]],
+  ["Drag release", { type: "mouse", x: 30, y: 20, buttons: 0 }, ["m,30,20,0,0"]],
+  ["Select all", { type: "key_combo", keysyms: [65507, 97] }, ["kd,65507", "kd,97", "ku,97", "ku,65507"]],
 ]) test(`${name} dispatch waits behind unresolved Runtime text`, async () => {
   const h = harness(), first = h.submit(text("r")), second = h.submit(event);
   await nextTurn();

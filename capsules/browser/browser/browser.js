@@ -18,8 +18,8 @@ import {
   runtimePageOwner,
   sameRuntimePageOwner,
 } from "./browser-page-cleanup.js?v=browser-20260727a";
-import { selkiesMessagesForInput } from "./browser-input.js?v=browser-20260520e";
-import { bindBrowserInputSurface } from "./browser-input-surface.js?v=browser-20260725b";
+import { selkiesMessagesForInput } from "./browser-input.js?v=browser-20261022a";
+import { bindBrowserInputSurface } from "./browser-input-surface.js?v=browser-20261022a";
 import {
   browserMetricsText,
   friendlyOpenError,
@@ -2593,6 +2593,11 @@ bindBrowserInputSurface({
   renderPanel,
   sendBrowserInput,
   showStatus,
+  // Held-button drags exist only as Selkies datachannel mouse messages.
+  streamsPointerDrag: () =>
+    currentDisplayMode === "webrtc_remote_display" &&
+    currentInputTransport() === "datachannel" &&
+    currentInputProtocol() === "selkies_v1",
   unlockRemoteAudioFromGesture,
 });
 

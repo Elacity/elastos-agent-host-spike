@@ -1,4 +1,5 @@
 const WHEEL_FLUSH_MS = 80;
+const MOUSE_DRAG_THRESHOLD_PX = 4;
 
 export function plainTextFromClipboardEvent(event) {
   const clipboardData = event?.clipboardData;
@@ -25,11 +26,15 @@ export function bindBrowserInputSurface({
   renderPanel,
   sendBrowserInput,
   showStatus,
+  streamsPointerDrag = () => false,
   unlockRemoteAudioFromGesture,
+  requestAnimationFrameFn = globalThis.requestAnimationFrame?.bind(globalThis),
+  cancelAnimationFrameFn = globalThis.cancelAnimationFrame?.bind(globalThis),
 }) {
   let wheelTimer = 0;
   let wheelDelta = { x: 0, y: 0 };
   let touchPanState = null;
+  let mouseDragState = null;
   let suppressSyntheticClickUntil = 0;
   const hostModifierState = {
     control: false,
@@ -326,6 +331,128 @@ export function bindBrowserInputSurface({
     }
   });
 
+  function sendMouseInput(point, buttons) {
+    sendBrowserInput(
+      { type: "mouse", x: point.x, y: point.y, buttons },
+      { history: "replace" },
+    ).catch((error) => {
+      showStatus(friendlyOpenError(error), { sticky: true });
+    });
+  }
+
+  function flushMouseDragMove() {
+    if (!mouseDragState) {
+      return;
+    }
+    mouseDragState.frame = 0;
+    const point = mouseDragState.pendingPoint;
+    mouseDragState.pendingPoint = null;
+    if (point) {
+      mouseDragState.lastPoint = point;
+      sendMouseInput(point, 1);
+    }
+  }
+
+  function finishMouseDrag(event) {
+    const state = mouseDragState;
+    mouseDragState = null;
+    if (!state?.dragging) {
+      return false;
+    }
+    if (state.frame) {
+      cancelAnimationFrameFn?.(state.frame);
+    }
+    if (renderPanel.hasPointerCapture?.(state.pointerId)) {
+      renderPanel.releasePointerCapture?.(state.pointerId);
+    }
+    const point =
+      (event && browserPointFromEvent(event)) ||
+      state.pendingPoint ||
+      state.lastPoint;
+    sendMouseInput(point, 0);
+    suppressSyntheticClickUntil = Date.now() + 700;
+    return true;
+  }
+
+  // A mouse press without movement stays the Runtime click (its completion
+  // orders following text). Movement past the threshold becomes a held-button
+  // drag over the Selkies datachannel, so the guest can select text.
+  renderPanel.addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "mouse") {
+      // A drag suppresses only its own trailing click, not the next press.
+      suppressSyntheticClickUntil = 0;
+    }
+    if (
+      event.pointerType !== "mouse" ||
+      event.button !== 0 ||
+      !getCurrentPage() ||
+      !streamsPointerDrag()
+    ) {
+      return;
+    }
+    const start = browserPointFromEvent(event);
+    if (!start) {
+      return;
+    }
+    mouseDragState = {
+      pointerId: event.pointerId,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      start,
+      lastPoint: start,
+      pendingPoint: null,
+      dragging: false,
+      frame: 0,
+    };
+  });
+
+  renderPanel.addEventListener("pointermove", (event) => {
+    const state = mouseDragState;
+    if (!state || event.pointerId !== state.pointerId) {
+      return;
+    }
+    if (!state.dragging) {
+      const dx = event.clientX - state.clientX;
+      const dy = event.clientY - state.clientY;
+      if (Math.hypot(dx, dy) < MOUSE_DRAG_THRESHOLD_PX) {
+        return;
+      }
+      state.dragging = true;
+      unlockRemoteAudioFromGesture();
+      focusKeyboardCapture();
+      renderPanel.setPointerCapture?.(event.pointerId);
+      sendMouseInput(state.start, 1);
+    }
+    event.preventDefault();
+    const point = browserPointFromEvent(event);
+    if (!point) {
+      return;
+    }
+    state.pendingPoint = point;
+    if (!state.frame) {
+      state.frame = requestAnimationFrameFn
+        ? requestAnimationFrameFn(flushMouseDragMove)
+        : (flushMouseDragMove(), 0);
+    }
+  });
+
+  renderPanel.addEventListener("pointerup", (event) => {
+    if (mouseDragState?.pointerId !== event.pointerId) {
+      return;
+    }
+    if (finishMouseDrag(event)) {
+      event.preventDefault();
+    }
+  });
+
+  for (const type of ["pointercancel", "lostpointercapture"]) {
+    renderPanel.addEventListener(type, (event) => {
+      if (mouseDragState?.pointerId === event.pointerId) {
+        finishMouseDrag(null);
+      }
+    });
+  }
+
   renderPanel.addEventListener(
     "wheel",
     (event) => {
@@ -357,6 +484,20 @@ export function bindBrowserInputSurface({
     ) {
       event.preventDefault();
       copyRemoteClipboardToHost().catch((error) => {
+        showStatus(friendlyOpenError(error), { sticky: true });
+      });
+      return;
+    }
+    if (
+      (event.ctrlKey || event.metaKey) &&
+      !event.altKey &&
+      event.key.toLowerCase() === "a"
+    ) {
+      event.preventDefault();
+      sendBrowserInput(
+        { type: "key_combo", keysyms: [65507, 97] },
+        { history: "replace" },
+      ).catch((error) => {
         showStatus(friendlyOpenError(error), { sticky: true });
       });
       return;
