@@ -1,0 +1,12 @@
+[package]
+name = "docs-model"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# The documents model: text checks and markdown to typed blocks. Pure logic,
+# shared by the Bus v1 core (`..`) and the Bus v2 guest (`../bus2`).
+
+[dependencies]
+serde_json = "1.0.151"

@@ -1,0 +1,20 @@
+# The documents viewer on the DRAFT Bus v2, run by the Bus v2 proof's stub
+# host (examples/bus2-proof/host). Its own workspace, like the proof's: Rust
+# 1.95.0 (rust-toolchain.toml) for Wasmtime 48.0.7, outside the ElastOS
+# workspace, CI and release lists.
+[workspace]
+resolver = "2"
+members = ["host-test", "guests/docs", "guests/busy"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+publish = false
+
+# The proof's release profile.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
