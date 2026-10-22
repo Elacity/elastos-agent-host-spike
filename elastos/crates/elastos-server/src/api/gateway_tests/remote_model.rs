@@ -143,7 +143,11 @@ impl Provider for FakeModelProvider {
                 { "id": "qwen-local", "title": "Qwen", "operation": "text.generate", "hosted": null },
                 { "id": "model:openrouter", "title": "GPT", "operation": "text.generate",
                   "hosted": { "placement": "hosted", "backend_provider_label": "OpenRouter" } },
-            ], "offer_revisions": {"qwen-local": revision, "model:openrouter": revision} } }));
+                // Hosted by its listing, though its id is not a hosted-instance id.
+                { "id": "model:custom", "title": "Custom", "operation": "text.generate",
+                  "hosted": { "placement": "hosted", "backend_provider_label": "OpenRouter" } },
+            ], "offer_revisions": {"qwen-local": revision, "model:openrouter": revision,
+                "model:custom": revision} } }));
         }
         if op == "runs_create" {
             let revision = self
@@ -2308,7 +2312,11 @@ async fn shared_hosted_offer_denies_fresh_creates_and_recovers_without_losing_ol
 async fn a_hosted_grant_serves_only_while_its_provider_is_an_admin() {
     use crate::api::model_provider_config::{HostedAiProvider, HostedOfferSave};
     let fx = TwoRuntimes::start().await;
-    let id = "model:openrouter";
+    let named = "model:openrouter";
+    let custom = "model:custom";
+    assert!(!crate::api::model_provider_config::is_hosted_offer_id(
+        custom
+    ));
     crate::api::model_provider_config::save_hosted_offer(
         fx.owner.path(),
         None,
@@ -2319,33 +2327,65 @@ async fn a_hosted_grant_serves_only_while_its_provider_is_an_admin() {
             expected_response_model: None,
             privacy: None,
             name: "Hosted fixture",
-            instance_id: Some(id),
+            instance_id: Some(named),
         },
     )
     .await
     .unwrap();
     crate::api::model_provider_config::set_hosted_offer_share(
         fx.owner.path(),
-        id,
+        named,
         true,
         Some(HostedAiProvider::OpenRouter.share_terms_ack()),
     )
     .unwrap();
-    fx.write_request_record_with_expiry_and_offers("approved", now_ts() + 3600, &[id]);
-    let served = fx.create_run("hosted-from-admin", id).await;
-    assert_eq!(served["ok"], true, "{served}");
+    // No fixture saves a hosted offer under a custom id, so copy the shared
+    // operator entry under one, as an operator-written config would hold it.
+    let mut offers =
+        crate::api::model_provider_config::load_model_provider_operator_offers(fx.owner.path())
+            .unwrap();
+    let mut operator_custom = offers
+        .iter()
+        .find(|offer| offer["id"] == named)
+        .unwrap()
+        .clone();
+    operator_custom["id"] = json!(custom);
+    offers.push(operator_custom);
+    std::fs::write(
+        fx.owner.path().join("providers/model-provider/config.json"),
+        serde_json::to_vec(&json!({ "offers": offers })).unwrap(),
+    )
+    .unwrap();
+    let list =
+        || json!({ "op": "offers_list", "remote_model": fx.remote(SEED_PRINCIPAL, "assistant") });
+    for id in [named, custom] {
+        fx.write_request_record_with_expiry_and_offers("approved", now_ts() + 3600, &[id]);
+        let listed = fx.call("offers_list", list()).await;
+        assert_eq!(listed["result"]["data"]["offers"][0]["id"], id, "{listed}");
+        let served = fx.create_run(&format!("{}-from-admin", &id[6..]), id).await;
+        assert_eq!(served["ok"], true, "{served}");
+    }
     let baseline = fx.create_count().await;
 
-    let mut auth = crate::auth::load_auth_state(fx.owner.path()).unwrap();
-    auth.principals
-        .iter_mut()
-        .find(|entry| entry.principal_id == fx.authority.principal_id)
-        .unwrap()
-        .role = crate::auth::RuntimePrincipalRole::Guest;
-    crate::auth::save_auth_state(fx.owner.path(), &auth).unwrap();
-    let refused = fx.create_run("hosted-after-demotion", id).await;
-    assert_eq!(refused["ok"], false, "{refused}");
-    assert_eq!(refused["code"], "denied", "{refused}");
+    // Demotion needs another admin to remain.
+    passkey_authority_with_profile_role_credential(
+        fx.owner.path(),
+        "Other admin",
+        crate::auth::RuntimePrincipalRole::Admin,
+        "gateway-test-other-admin-passkey",
+    );
+    crate::auth::demote_passkey_to_guest(fx.owner.path(), &fx.authority.proof_binding_id, now_ts())
+        .unwrap();
+    for (id, code) in [(named, "denied"), (custom, "offer_unavailable")] {
+        fx.write_request_record_with_expiry_and_offers("approved", now_ts() + 3600, &[id]);
+        let listed = fx.call("offers_list", list()).await;
+        assert!(!listed.to_string().contains(id), "{listed}");
+        let refused = fx
+            .create_run(&format!("{}-after-demotion", &id[6..]), id)
+            .await;
+        assert_eq!(refused["ok"], false, "{refused}");
+        assert_eq!(refused["code"], code, "{refused}");
+    }
     assert_eq!(
         fx.create_count().await,
         baseline,

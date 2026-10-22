@@ -4459,6 +4459,7 @@ pub(crate) fn authorize_home_service_model(
                     .ok_or_else(|| anyhow::anyhow!("model grant expiry required"))?,
                 approved_offer_ids: record.approved_offer_ids.clone(),
                 approved_offer_revision: record.approved_offer_revision.clone(),
+                provider_may_share_hosted: provider_is_admin,
             };
             grant.validate(source, requester_principal_id, now)?;
             anyhow::ensure!(authorized.is_none(), "model grant ownership is ambiguous");
@@ -5185,13 +5186,19 @@ fn home_services_record_access_decision(
             .as_deref()
             .filter(|id| super::gateway_model_service::safe_id(id, 256))
             .ok_or_else(|| anyhow::anyhow!("exact model offer request required"))?;
-        super::gateway_model_service::shareable_offer_for_home(
+        let offer = super::gateway_model_service::shareable_offer_for_home(
             &result,
             data_dir,
             home_services_local_model_shared(data_dir, context)?,
             requested_id,
         )
         .ok_or_else(|| anyhow::anyhow!("requested model offer is unavailable"))?;
+        // Sharing decides "hosted" from the listing, whatever the offer id.
+        if super::gateway_model_service::listed_offer_is_hosted(&offer)
+            && require_admin_principal(data_dir, context).is_err()
+        {
+            anyhow::bail!(HOSTED_MODEL_APPROVAL_COPY);
+        }
         let offer_revision =
             super::gateway_model_service::offer_execution_revision(&result, requested_id)
                 .ok_or_else(|| anyhow::anyhow!("requested model offer revision unavailable"))?;
