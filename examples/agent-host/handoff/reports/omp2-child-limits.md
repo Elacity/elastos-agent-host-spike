@@ -338,4 +338,41 @@ Guest hash:   35102c274fc29f59d187d7af0149361e1bf98a0d4b0813cb8753a63f5f702277 o
 Import list:  unchanged (the core import section /1/2, 149 bytes, 5ee6b40d46f6a045, is byte-identical to #30).
 ```
 
+## Update: the falsifier runner, and Codex FAIL at fe40437 (22 Oct)
+
+```text
+Runner:       examples/agent-host/falsify.py with examples/agent-host/falsifiers.json (ce522d1, 43ac688). Every
+              live mutation is data: id, file, exact original text, replacement, command (host or e2e), expectation,
+              and the named tests that must ALL fail. By id or prefix, --list, --self-test. The original is kept as a
+              hard link and renamed back after each mutation, also on error, Ctrl-C or SIGTERM; a run killed outright
+              is recovered at the next start; it stops below 2 GiB free or on a full-disk message.
+              Checked here: --self-test OK (one named test still passing gives SURVIVED); SIGINT, SIGTERM and SIGKILL
+              mid-mutation each leave src/lib.rs byte for byte as committed; the disk check stops with exit 3.
+Codex hole 1: a child host kept open after its child stopped still got a grant.
+Codex hole 2: a host reached src/b while its child was granted only src/a.
+Cause:        the host was checked once, when it opened.
+Fix:          d6129f5, 9328f13: every host action takes the parent's current journal and the child and goes through
+              host_step_ok (host_scope: usable_child in the parent's journal, the host at the child's depth, the child
+              granted; the step's resource on the path rule and inside the child's granted scope; not the parent
+              step's grant). The plain authorize, apply_inbox and dispatch refuse a host's steps.
+Other copies: a child's grant scope lives on the child step in the parent's journal and is read at each use; the
+              journal cursor's revision and head are meant to be kept (compare and swap); grants are in memory only.
+              No other object keeps a parent's or a child's state across calls.
+Tests:        a_child_host_gets_nothing_once_its_child_stops (time stop, parent stop, cancel; a deny is still
+              recorded) and a_child_host_touches_only_what_its_child_was_granted. Both failed on fe40437 (written
+              against its API: "1 passed; 2 failed"). The run fixture covers the host inbox and dispatch.
+Falsifiers:   HC01-HC14 added (HC03 survived first: its test case used "..", which host_path already refuses; the
+              case is now an NFD name, and HC03 is caught).
+Tests run:    ./examples/agent-host/verify.sh -> "198 passed", clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Full run:     python3 -I examples/agent-host/falsify.py at 8f29f73: "206 CAUGHT, 1 CAUGHT (does not build), 1 SURVIVED
+                (expected, by design) of 208", exit 0. The 208: CF01-CF21, CL01-CL92 without CL02, CL23, CL25,
+                TB01, HC01-HC14, JF01-JF37 without JF07, JF14, JF15 plus JF07b, and the O* set without OS01, OP01,
+                OY06 plus OY06c. OY19 must not build; OZ01 survives by design. The first full pass (43ac688) had one
+                NO MATCH, CF08: host_scope now has the same line as open_child_host; re-targeted in 8f29f73 and caught.
+Guest hash:   d05d64ddd6cb0d8563cc22d044e988dbc5b3c7c23b78492dc00199da5aae75dd on verify.sh and a clean rebuild.
+              wasm_sections.py: file 657248 bytes; /1/10 392957 766f332d45d8c9e0; /1/11 176647 638faf0d30d1afd1.
+Import list:  unchanged (the core import section /1/2, 149 bytes, 5ee6b40d46f6a045, is byte-identical to #30).
+```
+
 **What is next:** the Mac check and Codex on #31. Sasha closes #25 when #31 merges.
