@@ -389,20 +389,30 @@ them):
   `.elastos.update-journal.json`, `.elastos.update-stage` and
   `.elastos.update-rollback`
 - `data`: from the data directory, `.elastos.update-stage`,
-  `.elastos.update-rollback`, `.elastos.update-support` and
-  `update-controller/active-request.json`
+  `.elastos.update-rollback`, `.elastos.update-support`,
+  `update-controller/active-request.json` and, if present,
+  `update-controller/request.json`
 - `installation`: from the data directory's `installation` folder,
   `.elastos.update-stage` and `.elastos.update-rollback`
 
-Then run the install command as the same user, with the same `HOME` (and on
-Linux the same `XDG_DATA_HOME`) as this Home, and add
-`-s -- --install-dir <folder>` when the `elastos` binary is not in
-`~/.local/bin`:
-`curl -fsSL https://elastos.elacitylabs.com/install.sh | bash`. The installer
-finds the data directory from `HOME` and `XDG_DATA_HOME` (it ignores
-`ELASTOS_RECOVERY_DATA`). It installs the current release and runs
-`elastos setup`, and keeps that data directory and its identity. Start Home
-with `elastos home --browser`.
+Then run the install command with `--install-only`, as the same user, with the
+same `HOME` (and on Linux the same `XDG_DATA_HOME`) as this Home. Add
+`--install-dir <folder>` when the `elastos` binary is not in `~/.local/bin`.
+
+```bash
+curl -fsSL https://elastos.elacitylabs.com/install.sh | bash -s -- --install-only
+```
+
+The installer finds the data directory from `HOME` and `XDG_DATA_HOME` (it
+ignores `ELASTOS_RECOVERY_DATA`). It installs the current release and keeps that
+data directory and its identity.
+
+An app can be left half replaced, so also move the `capsules` and `tools`
+folders from the data directory into your `data` subfolder. They hold only
+installed apps and tools; your files and app data stay elsewhere in the data
+directory. Then run `elastos setup`, which installs them again from the signed
+release. If you added components with `elastos setup --with`, run that again
+too. Start Home with `elastos home --browser`.
 
 ## Compare and change the release signer
 
