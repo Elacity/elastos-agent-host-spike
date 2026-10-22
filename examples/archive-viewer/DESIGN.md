@@ -1,0 +1,344 @@
+# Archive viewer: design (no code)
+
+The next app from the capsule kit: wave B, roadmap 2.6 ("move apps one at a time"). It replaces what
+`capsules/archive-manager` does for reading: list an archive's entries and show a text or image entry inside
+it. It is read-only. It never extracts anything to disk.
+
+Branch `claude/photo-archive-design`, from `spike/photo-viewer` `cf4eab03`. Design only: no code, no Runtime
+change. The code comes after #32 merges and the kit's shared crate exists (see [Order of work](#order-of-work)).
+
+## In one paragraph
+
+A WASM core reads one archive object through `providers.invoke`, with a grant for that one object, using the
+offset and length read window. It never reads the whole archive. For a ZIP it reads the end record and the
+central directory, checks them against each other, and lists every entry with a status. It checks and shows
+at most a few small text or image entries, each read through its local header, inflated through a fixed
+window, and checked against its declared size and CRC. Every cap is counted before any early return. It writes
+one bounded view object that a render-only page draws. Nothing is extracted, and a nested archive is listed,
+not opened.
+
+## Contents
+
+1. [Rong's four layers](#rongs-four-layers)
+2. [What it does and does not do](#what-it-does-and-does-not-do)
+3. [The shape of the app](#the-shape-of-the-app)
+4. [Formats](#formats)
+5. [Crates](#crates)
+6. [Hostile archives](#hostile-archives)
+7. [Limits and the fuel budget](#limits-and-the-fuel-budget)
+8. [What the kit gives, and what it is missing](#what-the-kit-gives-and-what-it-is-missing)
+9. [Falsifier plan](#falsifier-plan)
+10. [Order of work](#order-of-work)
+11. [Questions for Sasha](#questions-for-sasha)
+
+## Rong's four layers
+
+The layers as `examples/capsule-kit/PATTERNS.md` reads them, and how this app meets each one.
+
+| Layer | How the archive viewer meets it |
+|---|---|
+| **Own RTOS** | All archive parsing runs inside a fuel-metered component. Today the Runtime parses archives in its own process (`elastos-server/src/library.rs`, `zip` and `tar` crates); this app moves that work into the sandbox, which is the reason the roadmap gives for this app ("archive parsing is a classic attack surface"). On Bus v1 the run has the fixed 100,000,000 fuel, and the worst archive within the caps must use at most 80% of it. On Bus v2 the guest runs under fuel slices and the epoch deadline. There is no file system, clock or socket for the parser to reach. |
+| **Trap down** | Every byte of the archive comes through `providers.invoke` with a grant for that one archive object, asked for with one action (`read`). The only write is the app's own view object, under its own grant and storage prefix. There is no extract operation: the capsule has no grant on Documents or Library to write to, and asks for none. A content failure skips one entry; an authority failure stops the run with a `bus-error` that names the resource. |
+| **Component Model** | The core imports only `elastos:bus` (`types`, `runtime`, `capabilities`, `providers`), and admission checks it. The archive crates were built for `wasm32-unknown-unknown` and checked to add no import at all ([Crates](#crates)). |
+| **Double-checking** | The core trusts no part of the archive. The end record, the central directory, each local header and the bytes that come out of the decompressor are each checked against the others: sizes, offsets, names, methods and CRC. A declared size is shown as declared, never used to size a buffer or to skip a check. The page checks the view's schema; Runtime checks every grant. The launch context check (pattern 7) is still a gap: the core cannot yet check which archive it was opened on. |
+
+## What it does and does not do
+
+Does:
+- list the entries of one ZIP archive: path, kind, declared sizes, method, and a status per entry (shown,
+  listed, ambiguous, unsupported, encrypted, blocked) with a reason;
+- show up to a few small entries: text (UTF-8, the documents viewer's text checks) and images (PNG, JPEG or
+  WebP, the photo viewer's header checks), each checked whole before it is shown;
+- list a nested archive as an entry of kind `archive`.
+
+Does not:
+- extract an entry to disk, Library or any object other than its own view (today's `entry.extract` is not in
+  this app; see [Questions](#questions-for-sasha));
+- decode a method other than stored (0) and deflate (8), or anything encrypted;
+- open a nested archive (Bus v1), or one that is not stored (Bus v2);
+- follow a symlink entry, or treat an entry name as a path anywhere.
+
+## The shape of the app
+
+Two capsules, as in the photo and documents viewers (principle 13):
+
+| Capsule | Role | Runs as | Holds |
+|---|---|---|---|
+| `archive-viewer` | `app` | a WASM component | a read grant for the one archive; a write grant for its own view object |
+| `archive-reader` | `viewer` | a render-only page | its launch token, nothing else |
+
+**Input.** The Bus v1 Component ABI has no input, so, as for the documents shelf, the archive to open is named
+in a principal-scoped request object at a fixed path (`.AppData/App/archive-viewer/open.json`, schema
+`elastos.archive-viewer.open/v1`, one `uri` under `Users/self/`, and optionally the entry indexes to show).
+Who writes it is a missing piece: Home binds a launch only for `image-viewer` today (kit, "What was missing" 2).
+
+**Output.** One view object, `.AppData/App/archive-viewer/view.json` (schema `elastos.archive-viewer.view/v1`),
+written once and whole, with sorted keys, capped as a whole (PATTERNS 1, "cap the whole output"):
+- `archive`: the URI and its size;
+- `entries`: index, path (text), kind, declared sizes, method, status, reason;
+- `previews`: for each shown entry, either the docs-model typed blocks of its text, or its checked image type,
+  width, height and bytes (base64);
+- `skipped`: entries the request named that could not be shown, with a reason code and message.
+
+**Bus v1 run.** One run lists the archive and shows at most the requested entries (or, with none named, the
+first few that can be shown), within the budget below.
+
+**Bus v2 run.** A resident guest in the Bus v2 proof's host: it lists once, draws the listing with
+`ui.present`, and shows an entry when a `user-input` event names it. It never holds more than one entry's
+bytes. Images are a gap here: `ui.present` draws images by granted handle only, and an image that comes out of
+an archive has no handle ([Missing](#what-the-kit-gives-and-what-it-is-missing), M5).
+
+**The page.** It draws the listing and the previews with `textContent` only; text previews use the documents
+viewer's block kinds; an image preview becomes a `Blob` of the checked type, shown through a `blob:` URL (the
+app CSP allows `img-src blob:`). It never builds a path, never fetches an entry, and drops `path` fields as
+text only.
+
+## Formats
+
+| Order | Format | Why |
+|---|---|---|
+| 1 | **ZIP**, stored and deflate only | The central directory lists every entry without reading or inflating any of them, and each entry can be reached by offset: it fits the read window. It is also the most common format in Library and the one with the most known tricks. |
+| 2 | **tar** (uncompressed) | No directory: listing walks a 512-byte header per entry. On Bus v1 each header costs about 212,000 fuel to read, so a run can list only about 64 entries. Worth doing after ZIP, with the same path and size rules. |
+| 3 | **tar.gz, .gz** | No random access: listing means inflating from the start. Only with Bus v2 streams, and only up to a fixed decompressed total, with the listing marked as cut short. |
+| - | 7z, rar, xz, bz2, zst | Listed by today's capsule as "unsupported family"; the same here. Each is a new decoder in the sandbox; none is needed for a first app. |
+
+Within ZIP: no zip64 (refused as `unsupported` in the first version: a first app does not need archives over
+4 GiB or 65,535 entries), no multi-disk archives, no encryption (traditional or AES, listed as `encrypted`).
+
+## Crates
+
+Each candidate was built in this container with Rust 1.91.0 for `wasm32-unknown-unknown` (`opt-level = "s"`,
+LTO), from a small probe that calls its read path. The import section of every probe module was then read: none
+has any import, so none would add a WASI or host import to the component. Sizes are of the probe module.
+
+| Crate | Version | Licence | Dependencies (wasm32) | Imports | Probe size | Use |
+|---|---|---|---|---|---|---|
+| **rawzip** | 0.5.2 | MIT | none | none | 15.5 KB | **Chosen** for the ZIP structure. Zero dependencies, `#![forbid(unsafe_code)]`, `no_std` capable. It reads through a `ReaderAt` trait (read N bytes at an offset), which maps onto the Bus read window, and lets the caller bring the decompressor. It has CRC-32 built in. |
+| **miniz_oxide** | 0.9.1 | MIT OR Zlib OR Apache-2.0 | adler2 (0BSD OR MIT OR Apache-2.0) | none | 26.4 KB | **Chosen** to inflate. Streaming inflate into a caller's fixed buffer, so the core counts every output byte and stops at its cap mid-stream. Pure Rust, `no_std` with `alloc`. The Runtime already uses it (through flate2). |
+| zip | 9.0.5 | MIT | 13 crates (flate2, miniz_oxide, indexmap, hashbrown, typed-path, memchr, ...) | none | 137 KB | Not chosen: wants `Read + Seek` over the archive, builds the whole directory in memory, and ties in its decompressor, so a cap is outside it rather than in the loop. The Runtime uses 2.4.2 today. |
+| flate2 | 1.1.10 | MIT OR Apache-2.0 | miniz_oxide, crc32fast, adler2, simd-adler32 | none | 66.4 KB | Not needed: a `Read` wrapper over miniz_oxide. Would be the gzip reader for format 3. |
+| tar | 0.4.46 | MIT OR Apache-2.0 | filetime, cfg-if | none | 55.9 KB | For format 2, or a small ustar reader of our own (the format is a fixed 512-byte header). Decide when tar is built. |
+| unicode-normalization | 0.1.26 | (MIT OR Apache-2.0) AND Unicode-3.0 | tinyvec (Zlib OR Apache-2.0 OR MIT) | none | 145.8 KB | Optional, for name collisions that differ only in Unicode composition. It would more than double the component. See question 3. |
+
+The builds and checks were throwaway probes in the scratchpad, not in this branch.
+
+## Hostile archives
+
+Each rule says what the core does. "Blocked" means the entry is listed with a reason and never read or shown;
+"refused" means the whole archive is shown as not readable, with the reason, and no entry is listed as safe.
+
+### Zip bombs
+
+Measured here (Wasmtime 36, the Runtime's version): inflating text costs about 30 fuel per output byte, but
+inflating a run of zeros costs only about 1.3, and a stored copy almost nothing. Wasmtime charges fuel per
+instruction, so one bulk memory copy costs the same fuel whatever its length. **Fuel alone cannot stop a
+bomb**; the caps below do, and they are counted in the inflate loop, not taken from the archive.
+
+- **B1, preview size cap.** An entry is shown only if its declared uncompressed size is at most 16 KiB (text) or
+  16 KiB (image, Bus v1). The decompressor writes into a fixed 16 KiB window plus one byte: the first byte past
+  the cap stops it, and the entry is skipped `oversize`.
+- **B2, ratio cap.** Output may never pass 100 times the compressed bytes consumed so far (plus 1 KiB of slack
+  for tiny entries). Checked after every inflate step; past it, the entry is skipped `ratio`. A declared ratio
+  over 100 is not even read. Text compresses about 7:1 here; a 16 KiB run of zeros about 800:1.
+- **B3, total inflate cap.** All entries shown in one run inflate at most 64 KiB in all, counted as it comes out,
+  whether the entry is then shown or skipped (PATTERNS 1, "count before any early return").
+- **B4, overlapping entries.** Two entries whose data ranges overlap (one compressed stream reused by many
+  directory records, the "non-recursive" bomb) refuse the archive. Checked from the directory alone: each
+  entry's range, from its local header offset to the end of its compressed data, must not overlap the next
+  one, and all must end before the directory starts.
+- **B5, declared totals are display only.** The sum of declared sizes is shown as declared. It never sizes a
+  buffer and never decides that something is safe. Listing a 2 GB archive costs the same as listing a small
+  one, because no entry is inflated to list it.
+
+### Path tricks
+
+A name is shown as text, never used as a path. The rules decide its status:
+
+- **P1, absolute names**: a leading `/` or `\`, a drive (`C:`), or `\\server` is blocked.
+- **P2, `..`, `.` and empty segments** (`a//b`) are blocked. A trailing `/` is allowed only on a directory entry.
+- **P3, a backslash** anywhere is blocked (it is a separator on Windows and a character elsewhere).
+- **P4, characters**: NUL, any other control character, and the bidirectional controls (U+202A to U+202E,
+  U+2066 to U+2069, which can make `txt.exe` read as `exe.txt`) are blocked. A name marked UTF-8 (flag bit 11)
+  must be valid UTF-8; an unmarked name must be printable ASCII, else blocked.
+- **P5, duplicates**: two entries with the same name after the P1 to P3 rules are both blocked `duplicate`:
+  which one a reader sees depends on the reader.
+- **P6, case collisions**: two names equal after lower-casing (Rust's `to_lowercase`, which needs no extra
+  crate) are both listed `ambiguous` and not shown. Nothing is extracted, so they cannot overwrite each other;
+  the risk is a person choosing the wrong one of two look-alikes.
+- **P7, a file and a directory** of the same path (`a` and `a/b`) are both `ambiguous`.
+- **P8, size**: a name over 255 bytes or 32 segments is blocked; an archive over 256 entries is refused as
+  `too_many_entries` (the directory cap, below, comes first).
+- **P9, kinds**: only regular files and directories are listed as such; a symlink (Unix mode in the external
+  attributes) or any other kind is blocked.
+
+### Nested archives
+
+- **N1, depth cap.** On Bus v1 the depth is 0: an entry that is an archive (by its first bytes, `PK\x03\x04`, or by
+  name, `.zip`, `.tar`, `.gz`, ...) is listed as kind `archive`, never opened. Opening it would mean extracting it.
+- **N2, Bus v2.** A nested ZIP may be opened only if it is stored (method 0), because then it is a byte range of
+  the outer object and the same read window reaches it without extracting anything. The depth cap is 2, and
+  each level has its own caps inside the outer run's caps.
+
+### Slow decompression
+
+- **S1, Bus v1.** The run has fixed fuel and a trap is an authority-looking stop, so a content failure must
+  never trap (PATTERNS 1). B1 to B3 bound the inflate work; the fuel gate (below) runs the worst archive of each
+  hostile class through the real `ComponentProvider` and requires at most 80%.
+- **S2, Bus v2.** Inflate runs in slices that yield; a stop during an inflate ends the run as cancelled; the
+  epoch backstop ends one that never yields (the Bus v2 proof's limits).
+- **S3, memory.** The inflate state is about 43 KiB (43,296 bytes, measured natively: a 32 KiB dictionary plus
+  tables) and the output window
+  16 KiB; the core holds at most one entry's bytes at a time.
+
+### A central directory that lies
+
+- **L1, end record.** It is searched for only in the last 22 + 1,024 bytes (a comment over 1 KiB is refused,
+  `comment_too_long`). Exactly one valid end record must be there, and its comment must run exactly to the end
+  of the object; two candidates refuse the archive (`ambiguous_end`).
+- **L2, directory bounds.** The directory's offset plus size must lie inside the object and end exactly where the
+  end record begins. No gap, no overlap. Disk numbers must be 0.
+- **L3, counts.** The number of records parsed must equal both counts in the end record.
+- **L4, records.** Each directory record must have its signature, and its name, extra and comment lengths must
+  fit inside the directory.
+- **L5, local header.** Before an entry is shown, its local header is read: the signature, the name byte for byte,
+  the method and the flags (except bit 3) must equal the directory's; without a data descriptor (bit 3), the local
+  CRC and sizes must equal the directory's too. The local extra field must fit before the data.
+- **L6, sizes from the bytes.** Inflating must end (`StreamEnd`) exactly within the declared compressed size, and
+  produce exactly the declared uncompressed size: one byte more or less skips the entry `size_mismatch`.
+- **L7, CRC.** The CRC-32 of the output must equal the directory's, else the entry is skipped `crc_mismatch`.
+- **L8, stored entries.** For method 0 the compressed and uncompressed sizes must be equal.
+- **L9, directories.** A directory entry must have size 0.
+
+A refused archive (L1 to L4, B4, P8 count) is a content failure of the whole archive: the view is written with
+the reason and no entries. Only an authority failure (no grant, a refused or failed call) stops the run without
+writing.
+
+## Limits and the fuel budget
+
+Bus v1, one run, 100,000,000 fuel, gate 80%. Read costs about 415 fuel a byte (measured for the photo viewer);
+write about 200 a byte (estimated for the documents viewer, and higher with the shared write path: the gate
+decides); inflate 30 and CRC 8.3 a byte (measured here).
+
+| Step | Cap | Estimated fuel |
+|---|---|---|
+| End record and comment | 22 + 1,024 bytes | 0.4 M |
+| Central directory | 16 KiB, 256 entries | 6.8 M |
+| Local headers of shown entries | 8 entries, at most 350 bytes each | 1.2 M |
+| Compressed data of shown entries | 24 KiB in all, counted on every read | 10.2 M |
+| Inflate | 64 KiB out in all (B3) | 2.0 M |
+| CRC | 64 KiB | 0.5 M |
+| Text and image checks, docs-model blocks | the shown entries | measure |
+| View object | 64 KiB in all: listing at most 24 KiB, previews the rest | 13 to 26 M |
+| **Total** | | **about 35 to 50 M**, under the 80 M gate with room for parsing |
+
+On Bus v1 an image preview is therefore small: at most one image of 16 KiB a run. Bus v2 streams remove the
+JSON byte arrays, so its caps are set again from measurements there, not carried over.
+
+## What the kit gives, and what it is missing
+
+**Given by the kit** (`examples/capsule-kit`, after #32):
+
+| Need | Kit item |
+|---|---|
+| The Bus calls, the read window, the write, the fake Runtime | A1 `v1-guest` (`bus.rs`, `component.rs`, `fake.rs`) |
+| The `ComponentProvider` run, admission import check, fuel gate | A2 `v1-host-test` (`Bridge`, `run`, `admission`, `measure`) |
+| Manifest check, pinned container build | A3 `scripts/check-manifest.py`, `repro/build-in-container.sh` |
+| One falsifier per rule, `--check` | A4 `falsify/falsify_kit.py` |
+| Page tests and the Chromium smoke in Home's sandbox | A5 `surface/test-kit.mjs`, `surface/stand-in.mjs` |
+| Both capsules packed, named by CID, admitted | A6 `capsule-bundle pack`, `capsule_bundle::testing` |
+| Resident guest, stop, slices, epoch | A7 the Bus v2 proof's host and helpers |
+| The rules this design follows | A8 `PATTERNS.md`, including the (review) rules |
+
+**Missing for this app:**
+
+| # | What | Why it matters here | Where it belongs |
+|---|---|---|---|
+| M1 | A counted positioned reader: `read_counted` (docs viewer) as a kit item, with a `ReaderAt` adapter | rawzip reads through `ReaderAt`; every byte it reads must be counted against the budget before anything returns | the kit's shared crate (after #32) |
+| M2 | The text checks and typed blocks (`docs-model`) as a kit item | text entries are shown exactly as documents are | shared crate |
+| M3 | The image header checks (photo `image.rs`: PNG, JPEG, WebP, dimension caps) as a kit item | image entries need the same checks, on bytes from the decompressor instead of the object | shared crate; moving them is part of the one-time photo hash change |
+| M4 | Hostile-archive fixtures: a builder for ZIPs that lie (wrong counts, overlapping ranges, local and directory names that differ) | none of the kit's fixtures are archives, and real tools refuse to write these | test support in this app, then the kit if a second format needs it |
+| M5 | A way to present bytes the guest produced as an image on Bus v2 | `ui.present` takes images by granted handle only | the draft Bus v2 WIT (Anders) |
+| M6 | The launch binding: which archive was opened, in the signed launch context, and the generic viewer route | the core reads a fixed request object today; the page has only the stand-in server | Runtime and Home (kit "missing" 1, 2 and 6; pattern 7) |
+| M7 | Deleting the native listing, preview and extract routes for `archive-manager` | "Move" means the old version goes in the same change | Runtime, with Sasha's yes |
+
+## Falsifier plan
+
+One falsifier per limit and per rule: an exact text change in the source that must compile, and named tests
+that must then fail (PATTERNS 5). Each test uses a fixture built to break exactly that rule. Runtime falsifiers
+rebuild the component and run in `ComponentProvider`.
+
+| # | Rule | Mutant | Test that must fail |
+|---|---|---|---|
+| F1 | B1 preview cap | the window grows to 64 KiB | `an_entry_over_the_preview_cap_is_skipped_after_one_byte_past_it` |
+| F2 | B1 declared size | the declared size is not checked first | `an_entry_declared_over_the_cap_is_not_read` |
+| F3 | B2 ratio | the ratio check is removed | `a_bomb_entry_stops_at_the_ratio_cap` |
+| F4 | B2 declared ratio | the declared ratio is not checked | `an_entry_declared_past_the_ratio_is_not_read` |
+| F5 | B3 total inflate | output of skipped entries is not counted | `no_run_inflates_more_than_its_total` (sweep) |
+| F6 | B4 overlap | the range check is removed | `entries_that_share_data_refuse_the_archive` |
+| F7 | P1 absolute | `/` and drive names pass | `absolute_names_are_blocked` |
+| F8 | P2 dot segments | `..` passes | `dot_and_empty_segments_are_blocked` |
+| F9 | P3 backslash | backslash passes | `a_backslash_is_blocked` |
+| F10 | P4 control and bidi | the bidi range is dropped | `control_and_bidi_characters_are_blocked` |
+| F11 | P4 encoding | an unmarked non-ASCII name passes | `names_are_utf8_when_marked_and_ascii_otherwise` |
+| F12 | P5 duplicates | duplicates keep the first | `duplicate_names_are_both_blocked` |
+| F13 | P6 case | the collision key is not lower-cased | `names_that_differ_only_in_case_are_ambiguous` |
+| F14 | P7 file and directory | the prefix check is removed | `a_file_and_a_directory_of_one_path_are_ambiguous` |
+| F15 | P8 name and count caps | the caps are doubled | `a_name_over_its_cap_is_blocked`, `too_many_entries_refuse_the_archive` |
+| F16 | P9 kinds | the mode check is removed | `a_symlink_entry_is_blocked` |
+| F17 | N1 depth | a nested ZIP is opened | `a_nested_archive_is_listed_not_opened` |
+| F18 | N2 depth (Bus v2) | the depth cap is 3 | `nesting_past_two_is_not_opened` |
+| F19 | L1 comment | the tail search reads 64 KiB | `a_comment_over_1_kib_refuses_the_archive_without_reading_it` |
+| F20 | L1 ambiguous end | the last candidate wins | `two_end_records_refuse_the_archive` |
+| F21 | L2 bounds | the gap check is removed | `a_directory_that_does_not_end_at_the_end_record_refuses_the_archive` |
+| F22 | L3 counts | the count is taken from the end record | `a_count_that_differs_from_the_records_refuses_the_archive` |
+| F23 | L4 record lengths | lengths are not bounded | `a_record_that_runs_past_the_directory_refuses_the_archive` |
+| F24 | L5 local name | the name compare is removed | `a_local_name_that_differs_skips_the_entry` |
+| F25 | L5 local method and sizes | the method compare is removed | `a_local_header_that_differs_skips_the_entry` |
+| F26 | L6 size from bytes | output stops at the cap, not at the declared size | `an_entry_longer_or_shorter_than_declared_is_skipped` |
+| F27 | L7 CRC | the CRC compare is removed | `a_crc_mismatch_skips_the_entry` |
+| F28 | L8 stored sizes | the stored compare is removed | `a_stored_entry_with_two_sizes_is_skipped` |
+| F29 | Method | method 12 is treated as stored | `other_methods_are_listed_unsupported` |
+| F30 | Encryption | flag bit 0 is ignored | `encrypted_entries_are_listed_not_read` |
+| F31 | Read budget | a read is not counted | `every_read_counts_toward_the_budget` (sweep, PATTERNS review rule) |
+| F32 | Output cap | only previews are capped | `no_view_is_longer_than_its_cap` (sweep) |
+| F33 | Text checks | the whole-text check is removed | `a_text_entry_that_is_not_text_is_skipped` |
+| F34 | Image checks | the header check is removed | `an_entry_named_png_that_is_not_one_is_skipped` |
+| F35 | Grant | the archive read uses no grant (in the component) | `no_grant_stops_the_run_through_the_runtime` |
+| F36 | Fuel | the ratio check is removed (in the component) | `worst_archives_stay_under_80_percent_of_the_runtime_fuel` |
+| F37 | Page | a path is drawn as markup | `an_entry_path_is_text` |
+| F38 | Page | an image of an unchecked type is drawn | `only_a_checked_image_type_is_drawn` |
+| F39 | Page | an inherited property name picks a kind | `a_kind_named_after_an_inherited_property_is_not_drawn` |
+
+The fuel gate (F36) runs one archive per hostile class at its caps: the largest directory, the most names at
+their longest, the most shown entries, a bomb at the ratio cap, a text entry of the worst inflate cost, and the
+largest view.
+
+## Order of work
+
+1. #32 merges.
+2. The kit's real shared crate (the next slice): the symlinks become a Cargo path dependency; the per-app copies
+   (`Refusal`, `grant`, `read_at`, `read_bounded`, the URI check) and their tests move in, with `read_counted`
+   (M1); the documents viewer gets its own write path back. The photo hash changes once, recorded with the
+   reason, with every photo falsifier, the whole `falsify-seam.py` and both container builds run again.
+3. Then this app, Bus v1 first, in `examples/archive-viewer`:
+   - the core: request, end record, directory, listing, statuses, all P and L rules, with tests and falsifiers
+     F7 to F25 and F29 to F31;
+   - previews: inflate with B1 to B3, L6 to L8, text and image checks; F1 to F6, F26 to F28, F32 to F34;
+   - the host test in `ComponentProvider` and the fuel gate; F35 and F36;
+   - the page and its smoke; F37 to F39;
+   - the bundle and the container build;
+   - then the Bus v2 guest in the proof's host, with N2 and F18.
+4. tar after ZIP is shown on both buses.
+
+## Questions for Sasha
+
+1. **Extraction.** Today's capsule can extract entries (with the person's approval) into a Runtime-owned
+   namespace. This design drops it. When `archive-manager` moves, does extraction go away, or stay as a Runtime
+   operation that this app cannot reach?
+2. **The old routes.** The Move rule deletes the native listing, preview and extract routes in the same change.
+   That is a Runtime change; is it part of the archive-manager slice, or later?
+3. **Unicode composition.** Should names that differ only in Unicode composition (`é` as one or two code
+   points) count as a collision? That needs `unicode-normalization`, which would more than double the
+   component. Without it, they are listed as two names.
+4. **Image previews on Bus v1.** One 16 KiB image a run is all the budget allows. Is text-first enough for the
+   first version, with images waiting for Bus v2 and M5?
