@@ -1,4 +1,9 @@
-# UsersAI journal: object contract, format 1
+# UsersAI journal: object contract, format 2
+
+**Format 2 since 22 Oct 2026** (the code PR for the design in `JOURNAL-FORMAT-2.md`, PR #25). Every node has a typed
+kind, and a format 1 journal is refused with `journal format 1 not supported; start a new task`. The format 2 bytes,
+kinds, rendering table and refusals are in "Format 2" below. The rest of this note is the S2 and S3 contract; where it
+says format 1, format 2 keeps the same rule unless "Format 2" says otherwise.
 
 Written 20 Oct 2026 for slice S2 (overnight 1). `docs/AGENT_ARCHITECTURE.md` lines 332-343 say agent state lives under the agent principal's `UsersAI/...` space, and that the path layout needs its own versioned object contract before anything depends on it. This is that contract for one object: the Agent Host task journal. S2 builds only the bytes, in the guest, with no I/O. S3 stores them.
 
@@ -72,7 +77,7 @@ trailer  head [32]
 | more than 192 KiB | `too large` |
 | shorter than a header, or a record or trailer cut short | `truncated` |
 | magic is not `EAHJ` | `not a journal` |
-| format is not 1 | `format version` |
+| format is not 2 (format 1 has its own reason, see Format 2) | `format version` |
 | a link or the trailer head does not match the chain | `hash` |
 | a tag out of order, unknown, or a backup or pending record without its flag | `record` |
 | a bad enum tag, a bool that is not 0 or 1, bad UTF-8, or a length past the payload | `record` |
@@ -91,6 +96,95 @@ trailer  head [32]
 - `the_cap_holds_at_the_last_byte`: exactly 192 KiB encodes and decodes; one byte more is refused.
 - `a_relinked_but_malformed_journal_is_refused`: records out of order, a bad bool, a non-canonical option, an unflagged backup or pending record, and an unknown tag are refused even with every link recomputed.
 - `the_previous_head_links_two_versions`: version 2's `prev_head` is version 1's head.
+
+## Format 2 (22 Oct)
+
+**Why.** In format 1, records the person and the model can see (todo, plan, goal, spill pointer, inbox answer, refusal)
+were message nodes whose text started with a label line, and readers picked them out by that label. So a person who
+typed `goal\nship it` got a node that compaction kept as a goal, and `spill\n<resource>\n<version>` read back as a
+spill pointer. Format 2 gives every node a typed kind; no reader looks at text to decide a kind.
+
+**Decided (Sasha, 21 Oct).** One path: the guest writes and reads only format 2. A format 1 journal is refused with
+`journal format 1 not supported; start a new task`; nothing migrates it, and the old object is never touched.
+
+**Bytes** (integers little-endian, strings u32 length plus UTF-8, a bool exactly 0 or 1):
+
+```text
+header   magic "EAHJ" | format u16 = 2 | epoch u64 | compaction_open u8 | backup u8 | backup_epoch u64
+         | pending u8 | cancelled_from (u8 flag + u64 step id) | task_budget (u8 flag + requests u32 + seconds u64)
+         | depth u8 | prev_head [32] | record_count u32                                    (84 bytes)
+records  tag u8 | len u32 | payload | link [32]       (same chain and the same tag order 1..6 as format 1)
+trailer  head [32]
+```
+
+- `cancelled_from`, `task_budget` and `depth` are room for OMP idea 2. Until it is built they are written as zeros, and
+  decode refuses anything else (`record`).
+- **Step payload:** format 1's fields, then `depth u8 | budget (u8 flag + requests u32 + seconds u64) | requests_used u32
+  | stop u8`, all zero until idea 2 (decode refuses anything else). No existing field changes meaning.
+- **Turn payload:** unchanged.
+- **Node payload:** `role u8 | kind u8 | fields`. Each kind fixes its role; any other pairing is `record`, and the
+  encoder gives nothing. Kinds without free text keep the node's text empty (the encoder refuses otherwise).
+
+| kind | tag | role | fields | model-visible text (`render_record`) |
+| --- | --- | --- | --- | --- |
+| head | 1 | system | text | text |
+| history | 2 | system (a later system line), assistant, or tool result | text | text |
+| message | 3 | user | text | text |
+| snapshot | 4 | user | text | text |
+| skill | 5 | user | text | text |
+| turn marker | 6 | user | none | not visible |
+| step marker | 7 | user | step id u64 | not visible |
+| compaction checkpoint | 8 | user | text | text |
+| observation | 9 | user | resource, version u64, text hash [32], revision (u8 flag + string, empty when absent), window (u8 flag + first u64 + count u64, zeros when absent), cut u8, text | not visible |
+| todo | 10 | user | text | `todo: <text>` |
+| plan entered | 11 | user | text | `plan entered: <text>` |
+| plan exit asked | 12 | user | text | `plan exit asked: <text>` |
+| goal | 13 | user | text | `goal: <text>` |
+| spill | 14 | user | resource, version u64 | `spill: <resource> version <n>` |
+| inbox answer | 15 | user | answer u8 (1 allow-once, 2 allow-session, 3 standing, 4 deny) | `inbox: <answer name>` |
+| refused | 16 | user | reason, what | `refused: <reason> (<what>)` |
+
+- Tags 17 (child budget) and 18 (child stop) are kept for OMP idea 2 and refused until it is built.
+- History allows a system role because `admit_system(.., in_history = true)` writes a later system line; the design note
+  listed only assistant and tool result.
+- An observation's fields must fit its text: the hash, a revision that is one token, a cut only with a window, a window
+  only with a revision, a window from line 1 or later with exactly `count` whole lines. A read at version `u64::MAX`
+  decodes but is not a read (that is never a version number).
+
+**The rendering table is frozen for format 2.** `render_record` is the one place that builds model text for a record.
+The model view (`derive`), `visible_bytes`, the summary input and the cache bytes use it. No function turns the text
+back into a kind. The texts above have no trailing newline.
+- Golden bytes for one example of every kind are pinned in `each_kind_renders_byte_for_byte`.
+- `the_rendering_changes_only_with_the_format_number` hashes the rendered golden table and pins the hash next to the
+  format number (`RENDERING_FORMAT` must equal `JOURNAL_FORMAT`).
+- So changing a rendering needs a format bump. That refuses stored journals of the old format, which keeps the cached
+  prefix of every live task stable.
+
+**Cache bytes.** `model_bytes` writes, for each node, the rendered text (u32 length + bytes) and then the typed record
+(u32 length + the node payload above). `replay` decodes the record and refuses bytes whose rendered text is not what the
+record renders to, so the round trip stays exact.
+
+**A format 1 task.**
+- Every load decodes: resume gives `ResumeOutcome::FormatNotSupported("journal format 1 not supported; start a new
+  task")` (not `Unknown`, so the task does not wait on a person), and reread gives the same text as its error.
+- The guest's run, when its first append meets a stored format 1 journal (a conflict), rereads it and returns that text
+  as its refusal (`BusError::Invalid`). No append is sent over it, and the old object is not touched.
+- Home: whether Home shows a capsule's run refusal on the task is not checked in this PR (no Home change here).
+
+**Paths (Sasha, 22 Oct).** `path_key` wherever it makes a limit stricter (the no-op count, the duplicate checks);
+the exact canonical NFC path wherever it decides which file (reads, versions, seen ranges, spill pointers, the project,
+grants). A spill pointer's resource follows the path rule on load, like a read's.
+
+**Refusals added by format 2** (the table above still holds; format 1 now has its own reason):
+
+| Input | Error |
+| --- | --- |
+| format 1 | `journal format 1 not supported; start a new task` |
+| a format other than 1 or 2 | `format version` |
+| an unknown kind (17 and 18 included), or a kind with the wrong role | `record` |
+| an observation whose fields do not fit its text, or an absent revision or window with a value | `record` |
+| an unknown inbox answer | `record` |
+| a non-zero idea 2 field in the header or a step | `record` |
 
 ## Not in S2
 
