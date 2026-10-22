@@ -52,7 +52,7 @@ falsifier that made it fail at cee6d55.
 | 11 Hosted and secrets | 2 | 3 | 3 | none. G3 is pinned (S0c `a_hosted_proposal_must_name_a_localhost_resource`), and grants are never stored (S2 `a_grant_is_never_stored`, S2e), but there is still no hosted run. | No hosted run. | Runtime/Anders (hosted provider, grant budgets) |
 | 12 Capability model | 2 | 4 | 4 | none. The guest now gets real Runtime grants (row 5), but that is the row 5 point. | The real shell policy (`home-auto.json`) is not exercised for the agent; `UsersAI` root; no review file for hold-adversarial. | Home, Runtime/Anders |
 | 13 Create an app | 3 | 2 | 2 | none on this branch | No in-Home scaffold write; Demo in Apps is manual. The Photos surface page (#23) is on spike/photo-viewer. | Runtime (provider write), Home |
-| 14 Package and sell | 0 | 1 | 1 | none on this branch | The signature covers the entrypoint only; a second Home and revocation. The P4b bundle tool (#21: closure CID, signed trust policy with rollback floor and revocation, staged admission, 49 of 49 falsifiers in its own report) is on spike/photo-viewer, so not counted. | Anders (second Home, revocation); Sasha (question 3) |
+| 14 Package and sell | 0 | 1 | 1 | none on this branch | The signature covers the entrypoint only; a second Home and revocation. The P4b bundle tool (#21: closure CID, signed trust policy with rollback floor and revocation, staged admission, 49 of 49 falsifiers in its own report) is on spike/photo-viewer, so not counted. | Anders (second Home, revocation). Photo PRs do not count (Sasha, 22 Oct). |
 
 **Total: 42 of 70** (2 + 5 + 6 + 7 each +1). Target 62, so 20 to go. DeepSeek Harness 46.
 
