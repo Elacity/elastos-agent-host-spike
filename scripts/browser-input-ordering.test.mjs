@@ -36,7 +36,7 @@ function assertCanceled(results) {
 }
 
 function harness() {
-  const requests = [], sends = [], mutations = [], failures = [], effects = [], channel = { open: true, buffered: 0, drainedAt: 0 };
+  const requests = [], sends = [], mutations = [], failures = [], effects = [], channel = { open: true, buffered: 0, drainedAt: 0, generation: 1 };
   const state = vm.createContext({
     currentPage: { page_id: "page:original", title: "Original", actual_url: "https://fixture.invalid/nav?run=ordering",
       runtime_cleanup: { schema: "elastos.browser.cleanup-handle/v1", id: "cleanup:original" },
@@ -49,6 +49,7 @@ function harness() {
       inputChannelOpen: () => channel.open,
       inputBufferedAmount: () => channel.buffered,
       lastInputDrainAt: () => channel.drainedAt,
+      currentInputChannelGeneration: () => channel.generation,
       // This observes synchronous dispatch, not a guest-side data-channel ack.
       sendInputMessages: messages => sends.push(...plain(messages)),
     },
@@ -427,7 +428,7 @@ test("a stalled Runtime request does not hold the drag release", async () => {
   const h = harness(), typed = h.submit(text("r"));
   const move = h.submit({ type: "mouse", x: 20, y: 20, buttons: 1 }, { isStale: () => true });
   await nextTurn();
-  h.state.releaseDragButton(release);
+  h.state.releaseDragButton(release, h.state.currentRuntimePageOwner());
   assert.deepEqual(h.sends, ["m,30,20,0,0"], "the release must go at once, not behind the pending request");
   h.requests[0].ack();
   await Promise.all([typed, move]);
@@ -436,7 +437,7 @@ test("a stalled Runtime request does not hold the drag release", async () => {
 
 test("Runtime text after a direct drag release waits for its drain and settle", async () => {
   const h = harness();
-  h.state.releaseDragButton(release);
+  h.state.releaseDragButton(release, h.state.currentRuntimePageOwner());
   const typed = h.submit(text("x"));
   await sleep(DATACHANNEL_INPUT_SETTLE_MS - 50);
   assert.equal(h.requests.length, 0);
@@ -444,6 +445,36 @@ test("Runtime text after a direct drag release waits for its drain and settle", 
   assert.equal(h.requests.length, 1);
   h.requests[0].ack();
   assert.equal((await typed).status, "fulfilled");
+});
+
+test("a drag release for a replaced page is dropped, not sent to the replacement", () => {
+  const h = harness(), dragOwner = h.state.currentRuntimePageOwner();
+  h.changeOwner("page");
+  h.state.releaseDragButton(release, dragOwner);
+  assert.deepEqual(h.sends, []);
+});
+
+for (const [name, lose] of [
+  ["closes", channel => { channel.open = false; channel.buffered = 0; }],
+  ["reconnects on the same page", channel => { channel.generation += 1; channel.buffered = 0; }],
+]) test(`Runtime input is refused, not settled, when the channel ${name} with bytes pending`, async () => {
+  // #482 fixture: bufferedAmount=64, channel lost after 20 ms reporting 0.
+  const h = harness();
+  h.channel.buffered = 64;
+  await h.submit(release);
+  const typed = h.submit(text("x"));
+  await sleep(20);
+  lose(h.channel);
+  const result = await typed;
+  assert.equal(result.status, "rejected");
+  assert.equal(result.error.message, "Browser input is still being delivered. Check the page before typing again.");
+  assert.equal(h.requests.length, 0);
+  h.channel.open = true;
+  const fresh = h.submit(text("y"));
+  await nextTurn();
+  assert.equal(h.requests.length, 1, "fresh input after the refusal is not held by the lost channel");
+  h.requests[0].ack();
+  assert.equal((await fresh).status, "fulfilled");
 });
 
 test("settle starts at the observed drain, not at the first check", async () => {

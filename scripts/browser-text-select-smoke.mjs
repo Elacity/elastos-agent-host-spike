@@ -49,6 +49,7 @@ window.deliverGuestMessage = (message) => clipboard.handleRemoteInputChannelMess
 bindBrowserInputSurface({
   copyRemoteClipboardToHost: clipboard.copyRemoteClipboardToHost, friendlyOpenError: String,
   getCurrentPage: () => page, getCurrentView: () => view, keyboardCapture: null,
+  getInputOwner: () => page, sameInputOwner: (left, right) => left === right,
   pasteHostClipboardIntoRemote: async () => {}, readHostClipboardText: async () => "",
   remoteVideo: document.getElementById("video"), renderPanel: document.getElementById("panel"),
   releaseDragButton: (event) => window.channel.push(...selkiesMessagesForInput(event, view)),

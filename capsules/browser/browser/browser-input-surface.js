@@ -18,6 +18,8 @@ export function bindBrowserInputSurface({
   copyRemoteClipboardToHost,
   friendlyOpenError,
   getCurrentPage,
+  getInputOwner,
+  sameInputOwner,
   getCurrentView,
   keyboardCapture,
   pasteHostClipboardIntoRemote,
@@ -343,11 +345,21 @@ export function bindBrowserInputSurface({
     });
   }
 
+  // A drag belongs to the page it started on. Once that page is replaced the
+  // drag ends; nothing more is sent for it to the replacement.
+  function dragOwnerChanged(state) {
+    return !sameInputOwner(getInputOwner(), state.owner);
+  }
+
   function flushMouseDragMove() {
     if (!mouseDragState) {
       return;
     }
     mouseDragState.frame = 0;
+    if (dragOwnerChanged(mouseDragState)) {
+      finishMouseDrag(null);
+      return;
+    }
     const point = mouseDragState.pendingPoint;
     mouseDragState.pendingPoint = null;
     if (point) {
@@ -374,7 +386,7 @@ export function bindBrowserInputSurface({
       state.pendingPoint ||
       state.lastPoint;
     try {
-      releaseDragButton({ type: "mouse", x: point.x, y: point.y, buttons: 0 });
+      releaseDragButton({ type: "mouse", x: point.x, y: point.y, buttons: 0 }, state.owner);
     } catch (error) {
       showStatus(friendlyOpenError(error), { sticky: true });
     }
@@ -404,6 +416,7 @@ export function bindBrowserInputSurface({
     }
     mouseDragState = {
       pointerId: event.pointerId,
+      owner: getInputOwner(),
       clientX: event.clientX,
       clientY: event.clientY,
       start,
@@ -418,6 +431,10 @@ export function bindBrowserInputSurface({
   renderPanel.addEventListener("pointermove", (event) => {
     const state = mouseDragState;
     if (!state || event.pointerId !== state.pointerId) {
+      return;
+    }
+    if (dragOwnerChanged(state)) {
+      finishMouseDrag(null);
       return;
     }
     if (!state.dragging) {

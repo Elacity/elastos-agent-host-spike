@@ -19,7 +19,7 @@ import {
   sameRuntimePageOwner,
 } from "./browser-page-cleanup.js?v=browser-20260727a";
 import { DATACHANNEL_INPUT_SETTLE_MS, selkiesMessagesForInput } from "./browser-input.js?v=browser-20261022b";
-import { bindBrowserInputSurface } from "./browser-input-surface.js?v=browser-20261022c";
+import { bindBrowserInputSurface } from "./browser-input-surface.js?v=browser-20261022e";
 import {
   browserMetricsText,
   friendlyOpenError,
@@ -27,7 +27,7 @@ import {
   isMissingRuntimePageError,
   requestedDisplayMode,
 } from "./browser-status.js?v=browser-20260907c";
-import { createBrowserRemoteDisplay } from "./browser-remote-display.js?v=browser-20261022c";
+import { createBrowserRemoteDisplay } from "./browser-remote-display.js?v=browser-20261022e";
 import { engineChoiceHidden, renderServiceSelection } from "./browser-service-selection.js?v=browser-20261015a";
 
 const STATUS_TTL_MS = 4200;
@@ -111,6 +111,8 @@ const DATACHANNEL_INPUT_BARRIER_TIMEOUT_MS = 3_000;
 let browserInputQueue = null;
 let lastDatachannelInputAt = 0;
 let datachannelDrainedAt = 0;
+let datachannelSendGeneration = 0;
+let datachannelSendDisplay = null;
 let restoredViewerOwner = null;
 let currentView = null;
 let currentDisplayMode = "";
@@ -1649,15 +1651,22 @@ async function sendBrowserInput(
 function noteDatachannelSend() {
   const now = Date.now();
   lastDatachannelInputAt = now;
+  datachannelSendDisplay = remoteDisplay;
+  datachannelSendGeneration = remoteDisplay?.currentInputChannelGeneration?.() ?? 0;
   datachannelDrainedAt = Number(remoteDisplay?.inputBufferedAmount?.() || 0) === 0 ? now : 0;
 }
 
 // The guest must always get the button release that ends a drag, even while
 // a Runtime request is pending: it goes straight to the datachannel, after
 // the drag's own moves on that channel. The caller marks the drag ended so
-// its still-queued moves send nothing.
-function releaseDragButton(event) {
-  if (!remoteDisplay?.inputChannelOpen()) {
+// its still-queued moves send nothing. A drag belongs to the page it started
+// on: once that page is replaced, the release is dropped rather than pressed
+// into the replacement's guest.
+function releaseDragButton(event, dragOwner) {
+  if (
+    !sameRuntimePageOwner(currentRuntimePageOwner(), dragOwner) ||
+    !remoteDisplay?.inputChannelOpen()
+  ) {
     return;
   }
   remoteDisplay.sendInputMessages(encodeDatachannelInput(event));
@@ -1674,6 +1683,16 @@ async function awaitDatachannelInputSettled() {
   const deadline = Date.now() + DATACHANNEL_INPUT_BARRIER_TIMEOUT_MS;
   for (;;) {
     const now = Date.now();
+    // A closed or rebound channel says nothing about the earlier bytes: refuse
+    // rather than treat its empty buffer as delivery.
+    if (
+      remoteDisplay !== datachannelSendDisplay ||
+      !remoteDisplay?.inputChannelOpen() ||
+      (remoteDisplay?.currentInputChannelGeneration?.() ?? 0) !== datachannelSendGeneration
+    ) {
+      lastDatachannelInputAt = 0;
+      throw new Error("Browser input is still being delivered. Check the page before typing again.");
+    }
     if (Number(remoteDisplay?.inputBufferedAmount?.() || 0) > 0) {
       datachannelDrainedAt = 0;
     } else if (!datachannelDrainedAt) {
@@ -2644,6 +2663,8 @@ bindBrowserInputSurface({
   copyRemoteClipboardToHost,
   friendlyOpenError,
   getCurrentPage: () => currentPage,
+  getInputOwner: currentRuntimePageOwner,
+  sameInputOwner: sameRuntimePageOwner,
   getCurrentView: () => currentView,
   keyboardCapture,
   pasteHostClipboardIntoRemote,

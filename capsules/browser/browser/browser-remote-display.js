@@ -41,6 +41,7 @@ export function createBrowserRemoteDisplay({
   let audioPeerConnection = null;
   let inputChannel = null;
   let inputDrainedAt = 0;
+  let inputChannelGeneration = 0;
   let mediaStream = null;
   let trackReady = false;
   let connectTimer = 0;
@@ -526,6 +527,8 @@ export function createBrowserRemoteDisplay({
 
   function bindInputChannel(channel) {
     inputChannel = channel || null;
+    // A rebound channel cannot vouch for bytes sent on the previous one.
+    inputChannelGeneration += 1;
     if (!inputChannel) {
       return;
     }
@@ -1388,6 +1391,10 @@ export function createBrowserRemoteDisplay({
     return inputDrainedAt;
   }
 
+  function currentInputChannelGeneration() {
+    return inputChannelGeneration;
+  }
+
   function isTrackReady() {
     return trackReady;
   }
@@ -1411,6 +1418,7 @@ export function createBrowserRemoteDisplay({
     inputChannelOpen,
     isTrackReady,
     lastInputDrainAt,
+    currentInputChannelGeneration,
     metricsState,
     refreshMetrics,
     sendInputMessages,
