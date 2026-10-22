@@ -10059,6 +10059,77 @@ async fn test_inbox_projects_approved_model_grant_outside_pending_counts() {
     );
 }
 
+#[tokio::test]
+async fn test_only_an_admin_approves_a_hosted_model_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let admin = passkey_authority_with_profile(dir.path(), "Mac");
+    let guest = passkey_authority_with_profile_role_credential(
+        dir.path(),
+        "Guest",
+        crate::auth::RuntimePrincipalRole::Guest,
+        "gateway-test-guest-passkey",
+    );
+    let app = gateway_router(test_state(dir.path()));
+    let hosted = "model:hosted-0123456789abcdef0123456789abcdef";
+    let local = "model:local-0123456789abcdef0123456789abcdef";
+    for (authority, model_id, refused) in [
+        (&guest, hosted, true),
+        (&guest, local, false),
+        (&admin, hosted, false),
+    ] {
+        let now = crate::auth::now_ts();
+        write_home_principal_object_json_for_authority(
+            dir.path(),
+            authority,
+            "services-requests.json",
+            json!({
+                "schema": "elastos.services.requests/v1",
+                "principal_id": authority.principal_id,
+                "localhost_root": crate::auth::principal_localhost_root(&authority.principal_id),
+                "updated_at": now,
+                "requests": { "model-request-1": {
+                    "request_id": "model-request-1",
+                    "offer_id": "local:provider:model",
+                    "service_uri": "elastos://peer/model",
+                    "service_kind": "remote_model",
+                    "service_display_name": "Mac model",
+                    "requested_model_offer_id": model_id,
+                    "requested_model_offer_revision": format!("sha256:{}", "a".repeat(64)),
+                    "requester_peer_id": "peer-seed",
+                    "requester_did": "did:key:seed",
+                    "requester_principal_id": "seed-principal-a",
+                    "requester_display_name": "Seed",
+                    "created_at": now,
+                    "updated_at": now,
+                    "status": "pending",
+                    "authenticated_request": true
+                } }
+            }),
+        );
+        let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, authority);
+        let (status, body) = services_contact_post(
+            &app,
+            &token,
+            "/api/apps/inbox/actions",
+            json!({"action_id":"service-approve-request:model-request-1"}),
+        )
+        .await;
+        // No contact is accepted here, so every approval stops; only a guest's
+        // hosted approval stops at the admin rule.
+        assert!(!status.is_success(), "{body}");
+        assert_eq!(
+            body == "Only an admin can approve use of this Home's hosted AI connection.",
+            refused,
+            "{model_id}: {body}"
+        );
+        let saved = services_mailbox_saved_state(dir.path(), authority, "services-requests.json");
+        assert_eq!(
+            saved["requests"]["model-request-1"]["status"], "pending",
+            "{saved}"
+        );
+    }
+}
+
 async fn services_contact_pending_engine_request(
     left: &std::path::Path,
     right: &std::path::Path,

@@ -4393,6 +4393,7 @@ pub(crate) fn authorize_home_service_model(
         .ok_or_else(|| anyhow::anyhow!("model signing identity unavailable"))?;
     let mut authorized = None;
     for principal in principals {
+        let provider_is_admin = crate::auth::is_admin(&principal);
         let context = HomeLaunchTokenContext {
             principal_id: principal.principal_id,
             proof_binding_id: Some(principal.proof_binding_id),
@@ -4405,11 +4406,17 @@ pub(crate) fn authorize_home_service_model(
             .values()
             .filter(|record| super::model_grant_id(&record.request_id) == grant_id)
         {
+            // Only a current admin hands out the Home's hosted AI connection.
             anyhow::ensure!(
                 record.authenticated_request
                     && record.status == "approved"
                     && record.service_uri == super::MODEL_SERVICE_URI
                     && record.service_kind == super::MODEL_SERVICE_KIND
+                    && (provider_is_admin
+                        || !record
+                            .approved_offer_ids
+                            .iter()
+                            .any(|id| crate::api::model_provider_config::is_hosted_offer_id(id)))
                     && (home_services_local_model_shared(data_dir, &context)?
                         || crate::api::any_hosted_model_shared(data_dir)),
                 "model grant is not active"
@@ -4891,6 +4898,8 @@ fn home_services_request_notification_copy(kind: &str, uri: &str) -> (&'static s
 
 const PRIVATE_ENGINE_APPROVAL_COPY: &str =
     "Your Browser Engine is private. Share it in Services before approving this request.";
+const HOSTED_MODEL_APPROVAL_COPY: &str =
+    "Only an admin can approve use of this Home's hosted AI connection.";
 
 pub(super) fn append_home_service_access_notifications(
     data_dir: &std::path::Path,
@@ -5133,6 +5142,16 @@ fn home_services_record_access_decision(
         anyhow::bail!("service request requires an authenticated requester");
     }
     if status == "approved" {
+        if request.service_kind == super::MODEL_SERVICE_KIND
+            && request.service_uri == super::MODEL_SERVICE_URI
+            && request
+                .requested_model_offer_id
+                .as_deref()
+                .is_some_and(crate::api::model_provider_config::is_hosted_offer_id)
+            && require_admin_principal(data_dir, context).is_err()
+        {
+            anyhow::bail!(HOSTED_MODEL_APPROVAL_COPY);
+        }
         let contacts = home_services_peer_contacts_state(data_dir, context, discovery_service)?;
         if !contacts.contacts.values().any(|contact| {
             contact.peer_id == request.requester_peer_id && contact.did == request.requester_did
