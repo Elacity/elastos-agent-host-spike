@@ -3933,6 +3933,27 @@ fn home_services_remote_exit_id(display_name: &str, request_id: &str) -> String 
     }
 }
 
+/// One entry per principal from the active passkey records. A principal with
+/// several passkeys has one record per passkey but owns one set of service
+/// requests, so the grant loops must read it once. The flag is true only when
+/// every active record for that principal is an admin (fail closed).
+fn passkey_principals_once(
+    records: Vec<crate::auth::PrincipalRecord>,
+) -> Vec<(crate::auth::PrincipalRecord, bool)> {
+    let mut once: Vec<(crate::auth::PrincipalRecord, bool)> = Vec::new();
+    for record in records {
+        let admin = crate::auth::is_admin(&record);
+        match once
+            .iter_mut()
+            .find(|(seen, _)| seen.principal_id == record.principal_id)
+        {
+            Some((_, all_admin)) => *all_admin &= admin,
+            None => once.push((record, admin)),
+        }
+    }
+    once
+}
+
 pub(crate) fn authorize_home_service_exit(
     data_dir: &std::path::Path,
     network: &crate::collaboration_network::VerifiedCollaborationNetworkProfile,
@@ -3948,7 +3969,7 @@ pub(crate) fn authorize_home_service_exit(
     let local_did = crate::collaboration_profile_authority::load_existing_device_did(data_dir)?
         .ok_or_else(|| anyhow::anyhow!("Exit signing identity unavailable"))?;
     let mut authorized = None;
-    for principal in principals {
+    for (principal, _) in passkey_principals_once(principals) {
         let context = HomeLaunchTokenContext {
             principal_id: principal.principal_id,
             proof_binding_id: Some(principal.proof_binding_id),
@@ -4031,7 +4052,7 @@ pub(crate) fn authorize_home_engine_preparation_cancellation(
         "Engine cancellation authority scope unavailable"
     );
     let mut matched = false;
-    for principal in principals {
+    for (principal, _) in passkey_principals_once(principals) {
         let context = HomeLaunchTokenContext {
             principal_id: principal.principal_id,
             proof_binding_id: Some(principal.proof_binding_id),
@@ -4081,7 +4102,7 @@ pub(crate) fn authorize_home_service_engine(
     let local_did = crate::collaboration_profile_authority::load_existing_device_did(data_dir)?
         .ok_or_else(|| anyhow::anyhow!("Engine signing identity unavailable"))?;
     let mut authorized = None;
-    for principal in principals {
+    for (principal, _) in passkey_principals_once(principals) {
         let context = HomeLaunchTokenContext {
             principal_id: principal.principal_id,
             proof_binding_id: Some(principal.proof_binding_id),
@@ -4392,8 +4413,7 @@ pub(crate) fn authorize_home_service_model(
     let local_did = crate::collaboration_profile_authority::load_existing_device_did(data_dir)?
         .ok_or_else(|| anyhow::anyhow!("model signing identity unavailable"))?;
     let mut authorized = None;
-    for principal in principals {
-        let provider_is_admin = crate::auth::is_admin(&principal);
+    for (principal, provider_is_admin) in passkey_principals_once(principals) {
         let context = HomeLaunchTokenContext {
             principal_id: principal.principal_id,
             proof_binding_id: Some(principal.proof_binding_id),

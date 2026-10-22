@@ -3034,6 +3034,51 @@ impl elastos_runtime::provider::Provider for ServicesCarrierRelayProvider {
 }
 
 #[tokio::test]
+async fn an_admin_with_two_passkeys_serves_a_shared_exit_grant() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
+    let (trusted_key, _) = generate_keypair();
+    let network = configured_discovery_network_profile_for_test(&trusted_key, "services-contacts");
+    let alice = services_contact_fixture(left.path(), "Alice", bus.clone(), network.clone()).await;
+    let bob = services_contact_fixture(right.path(), "Bob", bus.clone(), network.clone()).await;
+    accept_services_contact_pair(&alice, &bob);
+    let action = services_contact_pending_request(left.path(), right.path(), &alice, &bob).await;
+    let request_id = action.strip_prefix("service-approve-request:").unwrap();
+    let grant_id = format!(
+        "services-remote-exit-grant-{}",
+        hex::encode(&Sha256::digest(request_id.as_bytes())[..8])
+    );
+    let source = alice.peer_id.parse::<iroh::PublicKey>().unwrap();
+    let request = json!({"grant_id":grant_id,"principal_id":alice.authority.principal_id,
+        "stream_id":"consumer:stream:1","target":"tls://example.com:443"});
+    let token = app_token_for_authority(right.path(), INBOX_CAPSULE_ID, &bob.authority);
+    let (status, body) = services_contact_post(
+        &bob.app,
+        &token,
+        "/api/apps/inbox/actions",
+        json!({"action_id":action}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    add_second_active_passkey(
+        right.path(),
+        &bob.authority.principal_id,
+        crate::auth::RuntimePrincipalRole::Admin,
+    );
+    let grant = crate::api::gateway::authorize_home_service_exit(
+        right.path(),
+        &network,
+        &source,
+        &request,
+        now_ts(),
+    )
+    .unwrap();
+    assert_eq!(grant.provider_principal_id, bob.authority.principal_id);
+    assert_eq!(grant.grant_id, grant_id);
+}
+
+#[tokio::test]
 async fn test_services_carrier_exit_admission_requires_current_issued_contact_grant() {
     use crate::api::gateway::gateway_browser::{
         browser_attach_runtime_stream_path, close_browser_runtime_stream_listener,
@@ -10375,7 +10420,26 @@ async fn test_services_remote_engine_signed_approval_retains_scoped_execution_gr
         2,
         "foreign requests never reach Engine"
     );
+    // #485: a second passkey for the same admin principal keeps the grant
+    // serving; the rest of this test, including cancellation, runs with both.
+    add_second_active_passkey(
+        right.path(),
+        &bob.authority.principal_id,
+        crate::auth::RuntimePrincipalRole::Admin,
+    );
     let authority_request = json!({"op":"status","principal_id":alice.authority.principal_id,"grant_id":grant["grant_id"]});
+    let two_passkey = crate::api::gateway::authorize_home_service_engine(
+        right.path(),
+        &network,
+        &endpoint.id(),
+        &authority_request,
+        now_ts(),
+    )
+    .unwrap();
+    assert_eq!(
+        two_passkey.provider_principal_id,
+        bob.authority.principal_id
+    );
     assert!(crate::api::gateway::authorize_home_service_engine(
         right.path(),
         &network,
@@ -10555,6 +10619,27 @@ async fn test_services_remote_engine_signed_approval_retains_scoped_execution_gr
     assert_eq!(record["status"], "denied");
     assert!(record.get("remote_engine_grant").is_none());
     assert!(alice.exit_provider.requests.lock().await.is_empty());
+    // Two different principals holding the same grant ID stay ambiguous.
+    let carol = passkey_authority_with_profile_role_credential(
+        right.path(),
+        "Carol",
+        crate::auth::RuntimePrincipalRole::Admin,
+        "gateway-test-carol-passkey",
+    );
+    let mut copied =
+        services_contact_saved_state(right.path(), &bob.authority, "services-requests.json");
+    copied["principal_id"] = json!(carol.principal_id);
+    copied["localhost_root"] = json!(crate::auth::principal_localhost_root(&carol.principal_id));
+    write_home_principal_object_json_for_authority(
+        right.path(),
+        &carol,
+        "services-requests.json",
+        copied,
+    );
+    let refused =
+        authorize_home_engine_preparation_cancellation(right.path(), &endpoint.id(), &cancellation)
+            .unwrap_err();
+    assert!(refused.to_string().contains("does not own"), "{refused}");
     local.shutdown().await.unwrap();
     remote.shutdown().await.unwrap();
 }

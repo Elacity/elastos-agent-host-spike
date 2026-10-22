@@ -2400,6 +2400,69 @@ async fn a_hosted_grant_serves_only_while_its_provider_is_an_admin() {
 }
 
 #[tokio::test]
+async fn an_admin_with_two_passkeys_serves_local_and_hosted_model_grants() {
+    use crate::api::model_provider_config::{HostedAiProvider, HostedOfferSave};
+    let fx = TwoRuntimes::start().await;
+    let hosted = "model:openrouter";
+    crate::api::model_provider_config::save_hosted_offer(
+        fx.owner.path(),
+        None,
+        HostedOfferSave {
+            provider: HostedAiProvider::OpenRouter,
+            api_key: "fixture-key",
+            model: "fixture/model",
+            expected_response_model: None,
+            privacy: None,
+            name: "Hosted fixture",
+            instance_id: Some(hosted),
+        },
+    )
+    .await
+    .unwrap();
+    crate::api::model_provider_config::set_hosted_offer_share(
+        fx.owner.path(),
+        hosted,
+        true,
+        Some(HostedAiProvider::OpenRouter.share_terms_ack()),
+    )
+    .unwrap();
+    add_second_active_passkey(
+        fx.owner.path(),
+        &fx.authority.principal_id,
+        crate::auth::RuntimePrincipalRole::Admin,
+    );
+    fx.write_request_record("approved");
+    let local = fx.create_run("local-two-passkeys", "qwen-local").await;
+    assert_eq!(local["ok"], true, "{local}");
+    fx.write_request_record_with_expiry_and_offers("approved", now_ts() + 3600, &[hosted]);
+    let served = fx.create_run("hosted-two-passkeys", hosted).await;
+    assert_eq!(served["ok"], true, "{served}");
+    let baseline = fx.create_count().await;
+
+    // Records for one principal that disagree on role fail closed: not admin.
+    let mut auth = crate::auth::load_auth_state(fx.owner.path()).unwrap();
+    auth.principals
+        .iter_mut()
+        .find(|principal| {
+            principal.proof_binding_id != fx.authority.proof_binding_id
+                && principal.principal_id == fx.authority.principal_id
+        })
+        .unwrap()
+        .role = crate::auth::RuntimePrincipalRole::Guest;
+    crate::auth::save_auth_state(fx.owner.path(), &auth).unwrap();
+    fx.write_request_record_with_expiry_and_offers("approved", now_ts() + 3600, &[hosted]);
+    let refused = fx.create_run("hosted-mixed-roles", hosted).await;
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert_eq!(refused["code"], "denied", "{refused}");
+    assert_eq!(
+        fx.create_count().await,
+        baseline,
+        "mixed-role grant dispatched"
+    );
+    fx.shutdown().await;
+}
+
+#[tokio::test]
 async fn remote_model_expired_request_records_the_provider_refusal_phase() {
     let fx = TwoRuntimes::start().await;
     let mut remote = fx.remote(SEED_PRINCIPAL, "assistant");
