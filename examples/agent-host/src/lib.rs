@@ -19057,9 +19057,12 @@ mod tests {
             Some("read-grant")
         ));
         assert_eq!(step_of(&host, outside).grant, None);
-        // A spelling that leaves the scope through ".." is refused by the path
-        // rule, not only by the prefix.
-        let dotted = propose_read(&mut host, "localhost://Users/self/Projects/demo/src/a/../b");
+        // An NFD spelling inside the scope is refused by the path rule (it is
+        // another file's name), not by the prefix.
+        let dotted = propose_read(
+            &mut host,
+            "localhost://Users/self/Projects/demo/src/a/cafe\u{301}",
+        );
         assert!(!authorize_in_host(
             &parent,
             child,
