@@ -18372,6 +18372,26 @@ mod tests {
             decode_journal(&encode_journal(&cancelled, &[0; 32]).unwrap()).map(|_| ()),
             Err("record")
         );
+        // In a cancelled task every child has stopped: one that has not (and
+        // has nothing prepared below it) is refused on its own rule.
+        let mut running = good.clone();
+        assert!(cancel_task(&mut running));
+        step_mut(&mut running, idle).stop = None;
+        running.events.retain(
+            |node| !matches!(node.source, NodeSource::ChildStop { child, .. } if child == idle),
+        );
+        assert_eq!(
+            decode_journal(&encode_journal(&running, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        // A stop with no record, on a child with nothing below it, is refused
+        // by the per-child record count alone.
+        let mut unrecorded = good.clone();
+        step_mut(&mut unrecorded, idle).stop = Some(StopReason::Time);
+        assert_eq!(
+            decode_journal(&encode_journal(&unrecorded, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
         // A task budget is never zero, even with nothing asked.
         for zero in [budget(0, 600), budget(8, 0)] {
             let mut bare = two_turns();
@@ -19494,6 +19514,32 @@ mod tests {
         let mut back = reloaded(&host_a);
         assert!(!authorize_in_host(&journal, a, &mut back, own, Some("h")));
         assert!(authorize_in_host(&journal, a, &mut host_a, own, Some("h")));
+    }
+
+    /// `cancel_tree` on a child that already started stops it (a plain
+    /// cancel only moves a prepared step) (CL37).
+    #[test]
+    fn cancelling_a_started_child_stops_it() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert!(dispatch(&mut journal, child));
+        assert!(
+            !cancel(&mut journal, child),
+            "a started step is not cancelled"
+        );
+        assert!(cancel_tree(&mut journal, child));
+        assert_eq!(step_of(&journal, child).state, StepState::Dispatched);
+        assert_eq!(step_of(&journal, child).stop, Some(StopReason::Cancelled));
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("stopped")
+        );
     }
 
     /// A step's stop byte is 0 or a known reason (CL49).

@@ -123,8 +123,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    granted_scope(parent).is_some_and(|scope| resource_covers(scope, grant_resource))\n",
-     "new": "    granted_scope(parent).is_some()\n"
+     "old": "    scope_still_granted(journal, parent).is_some_and(|scope| resource_covers(scope, grant_resource))\n",
+     "new": "    scope_still_granted(journal, parent).is_some()\n"
     }
    ],
    "tests": [
@@ -307,8 +307,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if journal.cancelled_from.is_some() {\n        return Err(\"cancelled\");\n    }\n    if chain_stopped(journal, &child_chain(journal, Some(id))) {",
-     "new": "    if chain_stopped(journal, &child_chain(journal, Some(id))) {"
+     "old": "    if journal.cancelled_from.is_some() {\n        return Err(\"cancelled\");\n    }\n    let chain = child_chain(journal, Some(id));",
+     "new": "    let chain = child_chain(journal, Some(id));"
     }
    ],
    "tests": [
@@ -747,13 +747,8 @@
     }
    ],
    "tests": [
-    "tests::a_child_below_a_stopped_child_gets_nothing",
-    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop",
-    "tests::a_child_over_its_request_budget_stops_with_requests",
-    "tests::a_stopped_child_stops_its_children",
-    "tests::a_time_refusal_stops_the_child_with_time",
-    "tests::cancelling_a_parent_stops_started_children_at_their_next_model_call",
-    "tests::no_model_call_anywhere_in_a_cancelled_tree"
+    "tests::a_prepared_step_where_a_stop_reached_is_refused_on_load",
+    "tests::cancelling_a_parent_stops_started_children_at_their_next_model_call"
    ]
   },
   {
@@ -998,7 +993,7 @@
     }
    ],
    "tests": [
-    "tests::no_model_call_anywhere_in_a_cancelled_tree"
+    "tests::cancelling_a_started_child_stops_it"
    ]
   },
   {
@@ -1380,8 +1375,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if depth_under(journal, step.parent_id) > usize::from(CHILD_DEPTH_LIMIT) {",
-     "new": "    if depth_under(journal, step.parent_id) > usize::from(CHILD_DEPTH_LIMIT) + 1 {"
+     "old": "        && depth_under(journal, step.parent_id) > usize::from(CHILD_DEPTH_LIMIT)\n    {",
+     "new": "        && depth_under(journal, step.parent_id) > usize::from(CHILD_DEPTH_LIMIT) + 1\n    {"
     }
    ],
    "tests": [
@@ -1705,18 +1700,13 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if chain_stopped(journal, &child_chain(journal, Some(id))) {\n        return Err(\"stopped\");",
-     "new": "    if false && chain_stopped(journal, &child_chain(journal, Some(id))) {\n        return Err(\"stopped\");"
+     "old": "    if chain_stopped(journal, &chain) {\n        return Err(\"stopped\");",
+     "new": "    if false && chain_stopped(journal, &chain) {\n        return Err(\"stopped\");"
     }
    ],
    "tests": [
-    "tests::a_child_below_a_stopped_child_gets_nothing",
-    "tests::a_child_host_spends_the_parent_budget_and_keeps_its_stop",
-    "tests::a_child_over_its_request_budget_stops_with_requests",
-    "tests::a_stopped_child_stops_its_children",
-    "tests::a_time_refusal_stops_the_child_with_time",
     "tests::cancelling_a_parent_stops_started_children_at_their_next_model_call",
-    "tests::no_model_call_anywhere_in_a_cancelled_tree"
+    "tests::cancelling_a_started_child_stops_it"
    ]
   },
   {
@@ -3500,8 +3490,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    let child = usable_child(parent, child_id)?;\n    if usize::from(host.depth)",
-     "new": "    let child = parent.steps.iter().find(|step| step.id == child_id).ok_or(\"not a child\")?;\n    if usize::from(host.depth)"
+     "old": "    let child = usable_child(parent, child_id)?;\n    if host.host_of != Some(child_id)",
+     "new": "    let child = parent.steps.iter().find(|step| step.id == child_id).ok_or(\"not a child\")?;\n    if host.host_of != Some(child_id)"
     }
    ],
    "tests": [
@@ -3548,8 +3538,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    granted_scope(child).ok_or(\"not granted\")",
-     "new": "    Ok(granted_scope(child).unwrap_or(&child.resource))"
+     "old": "    scope_still_granted(parent, child).ok_or(\"not granted\")\n}",
+     "new": "    scope_still_granted(parent, child)\n        .or(Some(child.resource.as_str()))\n        .ok_or(\"not granted\")\n}"
     }
    ],
    "tests": [
@@ -3564,8 +3554,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if usize::from(host.depth) != depth_under(parent, child.parent_id) {\n        return Err(\"not this child's host\");",
-     "new": "    if false {\n        return Err(\"not this child's host\");"
+     "old": "    if host.host_of != Some(child_id)\n        || usize::from(host.depth) != depth_under(parent, child.parent_id)\n    {",
+     "new": "    if host.host_of != Some(child_id) {"
     }
    ],
    "tests": [
@@ -3682,8 +3672,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    journal.depth == 0 && authorize_step(journal, id, grant)",
-     "new": "    authorize_step(journal, id, grant)"
+     "old": "    journal.depth == 0\n        && !journal\n            .steps",
+     "new": "    true\n        && !journal\n            .steps"
     }
    ],
    "tests": [
