@@ -9,7 +9,7 @@ import {
 } from "./browser-runtime-api.js?v=browser-20260907c";
 import {
   createBrowserClipboardBridge,
-} from "./browser-clipboard.js?v=browser-20261022b";
+} from "./browser-clipboard.js?v=browser-20261022d";
 import {
   createHomeClipboardClient,
 } from "/apps/home/home-clipboard-client.js?v=home-20260726a";

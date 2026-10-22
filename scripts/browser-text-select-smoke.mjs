@@ -35,10 +35,17 @@ async function sendBrowserInput(event) {
   if (event.type === "click") { window.runtime.push(event); return { accepted: true }; }
   window.channel.push(...selkiesMessagesForInput(event, view));
 }
+window.hostWrites = [];
+window.statuses = [];
 const clipboard = createBrowserClipboardBridge({
   friendlyOpenError: String, getCurrentPage: () => page, sendBrowserInput,
-  showStatus: () => {}, writeHostClipboardTextFn: async () => {}, createClipboardRequestIdFn: () => "req",
+  showStatus: (text) => window.statuses.push(text),
+  // Stands in for Home's clipboard prompt; resolves as if the user approved.
+  writeHostClipboardTextFn: async (text, options) => { window.hostWrites.push({ text, ...options }); },
+  createClipboardRequestIdFn: () => "req",
 });
+// The guest's upstream Selkies reply to "cr" (gstwebrtc_app.send_clipboard_data).
+window.deliverGuestMessage = (message) => clipboard.handleRemoteInputChannelMessage({ data: JSON.stringify(message) });
 bindBrowserInputSurface({
   copyRemoteClipboardToHost: clipboard.copyRemoteClipboardToHost, friendlyOpenError: String,
   getCurrentPage: () => page, getCurrentView: () => view, keyboardCapture: null,
@@ -108,6 +115,19 @@ try {
     JSON.stringify(keys) === JSON.stringify(["kd,65507", "kd,97", "ku,97", "ku,65507", "kd,65507", "kd,99", "ku,99", "ku,65507", "cr"]),
     "Cmd+A then Cmd+C must select all, copy, then read the guest clipboard",
     keys,
+  );
+  // A second Cmd+C while the copy is pending is quiet and sends nothing new.
+  await page.keyboard.press("Meta+C");
+  const content = Buffer.from("selected guest text ✓", "utf8").toString("base64");
+  await page.evaluate((value) => window.deliverGuestMessage({ type: "clipboard", data: { content: value } }), content);
+  await page.waitForFunction(() => window.hostWrites.length > 0, null, { timeout: 2000 });
+  const copied = await page.evaluate(() => ({ hostWrites: window.hostWrites, statuses: window.statuses, channel: window.channel.splice(0) }));
+  assert(
+    JSON.stringify(copied.hostWrites) === JSON.stringify([{ text: "selected guest text ✓", requestId: "req" }]) &&
+      JSON.stringify(copied.statuses) === JSON.stringify(["Copied from Browser."]) &&
+      copied.channel.length === 0,
+    "the guest's upstream clipboard reply must reach the Home clipboard write once, with no pending-copy error",
+    copied,
   );
   assert(pageErrors.length === 0, "fixture page errors", pageErrors);
   console.log(JSON.stringify({ drag: drag.channel, click: click.runtime, keys }, null, 2));
