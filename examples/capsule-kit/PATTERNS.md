@@ -8,9 +8,42 @@ A new app meets a pattern only when every box is ticked **and** the proof exists
 falsifier that breaks the rule and sees that test fail. A rule with no failing falsifier is not proven.
 
 Items marked **(added)** come from the second viewer (`examples/docs-viewer`): the photo viewer did not need
-them, the documents viewer did. Why each was added is in `KIT-REPORT.md`, "What I had to change".
+them, the documents viewer did. Why each was added is in `KIT-REPORT.md`, "What I had to change". Items
+marked **(review)** come from Codex's review of that viewer (#29): each is a rule the viewer first broke.
 
-The six patterns:
+## The four layers
+
+Rong's four layers are the frame for every pattern. My reading of each, in one line (to be checked with
+Rong):
+
+| Layer | What it means for a capsule |
+|---|---|
+| **Own RTOS** | The Runtime is the capsule's whole world. It runs the code, meters it (fuel, epoch, slices) and stops it. There is no host OS, file, socket, clock or environment under it to reach. |
+| **Trap down** | Every act with authority leaves the capsule as a call down into the Runtime (`capabilities.request`, `providers.invoke`, `ui.present`, a routed read), and the Runtime decides. The capsule holds no authority of its own. |
+| **Component Model** | The boundary is typed: the capsule imports only the WIT interfaces it declares, and admission checks the imports. Nothing else can be linked. |
+| **Double-checking** | Neither side trusts the other's word. The Runtime checks every grant and token; the capsule checks every byte, answer and input it is given; a bundle is re-hashed at every load. |
+
+Each pattern against the layers: **yes** it carries that layer, **part** it carries some of it, **-** not
+its job.
+
+| Pattern | Own RTOS | Trap down | Component Model | Double-checking |
+|---|---|---|---|---|
+| 1. Grant-only reads | yes: fixed fuel, no WASI | yes: every read is a granted `providers.invoke` | yes: `elastos:bus` imports only, checked at admission | yes: header, text, size and strict input checks |
+| 2. Render-only page | part: Home's sandbox and CSP, not the Runtime's meter | yes: one read route, by launch token | - (a web projection, not a component) | yes: the page checks the schema; Runtime checks the token |
+| 3. Signed bundle | - | part: Runtime admits by CID and policy | part: the manifest names the ABI and the WIT hash | yes: CID, signature and policy, re-hashed at every load |
+| 4. Reproducible build | - | - | - | yes: two machines, one hash |
+| 5. Mutation tests | - | - | - | yes: every test is checked by a falsifier |
+| 6. Bus v2 slices and stop | yes: fuel slices, epoch, stop by close | yes: streamed `providers.invoke`, `ui.present` | yes: `elastos:bus/*@2.0.0` only | yes: credential checked against the pinned key |
+| 7. Launch context re-check (**gap**) | - | - | - | **no**: see below |
+
+**Pattern 7 is a gap: the capsule re-checks its launch context's signature and hash.** Today a capsule takes
+its launch as given. On Bus v1 the Component ABI has no input, so no launch context reaches the core at all;
+the page gets only its token. Double-checking needs the capsule to receive the signed launch context (what it
+was opened on, by whom, the output it is bound to), check the signature against a key it pins, and check the
+hash of each object it is given against the hash in the context. It needs a Runtime change, so it is listed,
+not built (KIT-REPORT, "What was missing", 1 and 6).
+
+The seven patterns:
 
 1. [Grant-only reads with header checks](#1-grant-only-reads-with-header-checks)
 2. [Render-only page with a launch token](#2-render-only-page-with-a-launch-token)
@@ -18,6 +51,7 @@ The six patterns:
 4. [Reproducible build](#4-reproducible-build)
 5. [Mutation tests](#5-mutation-tests)
 6. [Bus v2 slices and stop](#6-bus-v2-slices-and-stop)
+7. Launch context re-check: a gap, [above](#the-four-layers)
 
 ## The shape of an app
 
@@ -49,11 +83,14 @@ checks what it reads before it trusts it, and reads no more than it needs.
       size probe, and check the whole again.
 - [ ] tell an oversize object by reading one byte past the limit, not by reading it all.
 - [ ] cap everything it reads whole (input lists, documents) and everything it counts (items, segments).
-- [ ] **(added)** cap what one run reads in all, and count every byte read in full, whether the item is then
-      shown or skipped.
+- [ ] **(added)** cap what one run reads in all, whether each item is then shown or skipped.
+- [ ] **(review)** count every byte a read returns the moment it returns, before any early return: a short head
+      that is then skipped counts too. Never ask for more than is left.
 - [ ] **(added)** cap what one run writes: on Bus v1 each output byte costs fuel and travels as a number of up
       to four characters in a 1 MiB bridge frame. Write the output and the write body straight to bytes, never
       through a `serde_json::Value` per byte.
+- [ ] **(review)** cap the whole output you write (every entry, the skipped list and the frame around them),
+      not only its largest part. Hold back room for what is still to be written before you spend the rest.
 - [ ] **(added)** keep every parser linear in its input. A content failure must never cost a trap.
 - [ ] parse every input strictly: a fixed schema string, unknown fields refused, URIs checked (prefix, no empty,
       `.` or `..` segment, no `?`, `#`, `\` or control character).
@@ -68,6 +105,9 @@ checks what it reads before it trusts it, and reads no more than it needs.
       must use at most 80% of it, and a test must gate that.
 - [ ] **(added)** put in that gate the largest output and inputs made against each parser (openers that never
       close, the most spans), not only the largest input.
+- [ ] **(review)** put every hostile input class of each parser in the gate, one shelf each: openers that never
+      close, closers that never match (backtick runs of distinct lengths), the most spans, the largest output,
+      and documents read in full then skipped.
 
 **Proof:** guest tests against a fake Runtime that checks bodies the way the localhost provider does, the same
 run inside the Runtime's own `ComponentProvider`, the admission import check, and a fuel gate.
@@ -95,6 +135,9 @@ The surface draws the core's output and nothing else. It is not authority (princ
       links and images as text), and the page only draws its kinds. A kind it does not know is "not shown".
 - [ ] **(added)** be tested against what the core actually writes (a fixture the core's tests check).
 - [ ] cut every string it shows to a fixed length.
+- [ ] **(review)** look a name from the output up as an own property only (`Object.hasOwn`), never as
+      `table[name]` on a plain object: `constructor`, `__proto__` and `toString` are inherited. Anything else
+      falls back to a fixed default.
 - [ ] use no storage, no cookies, no `postMessage`, no WebSocket, no other network, no `window.open`.
 - [ ] ship no inline script, style or handler: one module script and one stylesheet.
 - [ ] check the output's schema, and refuse an output that is not one.

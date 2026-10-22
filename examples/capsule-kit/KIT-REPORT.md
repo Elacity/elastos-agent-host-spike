@@ -6,12 +6,13 @@ tools the photo viewer and the Bus v2 proof left (`examples/docs-viewer`). This 
 copy, what I had to change, and what was missing. That is what the kit must contain.
 
 Branch `claude/photo-kit`, from `spike/photo-viewer` `c7505711`. Spike only: no Runtime change, and nothing
-changed under `elastos/`, `capsules/`, `examples/photo-viewer/` or `examples/bus2-proof/`.
+changed under `elastos/`, `capsules/`, `examples/photo-viewer/` (but its handoff `LOG.md`) or
+`examples/bus2-proof/`.
 
 ## Summary
 
-- **The patterns carry over.** The documents viewer meets all six, with 67 Rust tests, 13 page tests and
-  52 falsifiers, all in one `verify.sh`.
+- **The patterns carry over.** The documents viewer meets all six, with 71 Rust tests, 14 page tests and
+  57 falsifiers, all in one `verify.sh` (67, 13 and 52 before the review fixes below).
 - **Three patterns are not fully shown, and none of the three can be finished inside an app:**
   - pattern 2: the page has run only against a stand-in server, because Runtime's read route serves the photo
     viewer alone;
@@ -29,16 +30,30 @@ changed under `elastos/`, `capsules/`, `examples/photo-viewer/` or `examples/bus
 
 | Pattern | What | Tests | Falsifiers | Status |
 |---|---|---|---|---|
-| 1. Grant-only reads with checks | `docs-viewer` core: a shelf by grant; for each document a head check, a size probe, a bounded body read, a whole-text check; markdown parsed in the sandbox into typed blocks; `pages.json` written once | 13 model, 26 guest, 12 in `ComponentProvider` | 24 guest, 4 in `ComponentProvider` | Met. Worst shelf 52.9% of the fuel (gate 80%) |
-| 2. Render-only page with a launch token | `docs-reader` page: one route, draws six block kinds with `textContent` only, no parser | 13 node, 1 Chromium smoke | 15 | Met against a stand-in server only (missing 1) |
+| 1. Grant-only reads with checks | `docs-viewer` core: a shelf by grant; for each document a head check, a size probe, a bounded body read, a whole-text check; markdown parsed in the sandbox into typed blocks; `pages.json` written once | 13 model, 30 guest, 12 in `ComponentProvider` | 28 guest, 4 in `ComponentProvider` | Met. Worst shelf 51.6% of the fuel (gate 80%) |
+| 2. Render-only page with a launch token | `docs-reader` page: one route, draws six block kinds with `textContent` only, no parser | 14 node, 1 Chromium smoke | 16 | Met against a stand-in server only (missing 1) |
 | 3. Signed bundle by CID with policy | Both capsules packed, named by CID, claimed, admitted; the page names its core by CID | 7 | 2 (the tool's own checks are falsified in the photo viewer) | Met in the tool; Runtime's manifest refuses `requires[].cid` (missing 4) |
 | 4. Reproducible build | The photo viewer's pinned container, pointed at the docs core | 1 build | - | Same hash in container and native here; second machine pending |
-| 5. Mutation tests | `falsify.py` (core, model, Runtime, bundle, Bus v2) and `falsify-surface.py` | - | 52 in all | Met |
+| 5. Mutation tests | `falsify.py` (core, model, Runtime, bundle, Bus v2) and `falsify-surface.py` | - | 57 in all | Met |
 | 6. Bus v2 slices and stop | A resident reader on the draft Bus v2, in the proof's stub host | 9 | 7 | Met; one frame cannot hold a document (missing 7) |
 
-Build facts: core component sha256 `56a577fb…3e3c`. Closure CIDs: core `bafkreib4…lvjq`, page `bafkreig3…fjaku`.
+Build facts: core component sha256 `2da05173…73db` (was `56a577fb…3e3c` before the review fixes). Closure
+CIDs: core `bafkreihh…stugu` (was `bafkreib4…lvjq`), page `bafkreig3…fjaku`.
 Bus v1 imports: `types`, `runtime`, `capabilities`, `providers`. Bus v2 imports: `types`, `capabilities`,
 `providers`, `ui`.
+
+## Review fixes (Codex, at `779f37a8`)
+
+Codex failed this branch on five points. Each is fixed, with a test that fails on the old code and a
+falsifier, and each is now a rule in `PATTERNS.md` (marked **(review)**).
+
+| # | What was wrong | Fix | Proof |
+|---|---|---|---|
+| 1 | A short head that is not text returned before the read budget counted it: six 511-byte NUL files, then two 16 KiB documents, read 35,834 bytes (cap 32,768) and showed both | Every document read goes through `read_counted`, which takes what it returns off the budget at once and never asks for more than is left. A document the shelf cannot afford is not read at all | `a_short_document_that_is_not_text_still_counts_toward_the_shelf_budget` (35,834 on the old code), `no_shelf_reads_more_than_its_budget` (64 shelves); falsifiers for an uncounted head and an uncounted body |
+| 2 | Only the rendered blocks counted toward the 64 KiB output cap: a 14,590-byte document gave 65,530 bytes of blocks and 65,906 bytes of pages | The cap is now on the whole pages text (`MAX_PAGES_BYTES`): each document's whole entry counts, and room for every item's skipped entry and the frame is held back until the item is decided | `a_document_whose_blocks_fit_but_whose_pages_would_not_is_skipped` (65,975 on the old code), `no_pages_are_longer_than_their_cap` (484 shelves, skipped items first and last); falsifiers for blocks-only, uncharged skipped entries, and nothing held back |
+| 3 | `reader.js` looked a span style up with `STYLES[style]`: `constructor`, `__proto__` and `toString` read inherited properties, and Chromium threw `InvalidCharacterError` | `styleTag` takes own properties only (`Object.hasOwn`); anything else is `span` | `a style named after an inherited property is plain` (node), the three names in the Chromium smoke (the old code times out there), one falsifier |
+| 4 | The fuel gate had no unclosed backtick runs of distinct lengths (Codex's probe: 38.98%) | Added as its own shelf | 37.3% in the gate; the worst shelf is now 51.6% (was 52.9%: the budget reads less) |
+| 5 | `verify.sh` stopped on the smoke server's 403 for `/favicon.ico` with an installed Chromium | The smoke server answers it with 204 | The smoke passes here; to check on the Mac |
 
 ## What I had to copy
 
@@ -198,22 +213,23 @@ It runs the following, and ends with `docs-viewer capsule verification: OK`:
 - fmt, clippy and the tests of the core, the model, the `ComponentProvider` host test, the bundle test and
   the Bus v2 part;
 - the page tests and the Chromium smoke;
-- all 52 falsifiers.
+- all 57 falsifiers.
 
-In this container it passes: 67 Rust tests (13 model, 26 guest, 12 host, 7 bundle, 9 Bus v2), 13 node tests,
-52 falsifiers.
+In this container it passes: 71 Rust tests (13 model, 30 guest, 12 host, 7 bundle, 9 Bus v2), 14 node tests,
+57 falsifiers.
 
 Fuel of the worst shelves in `ComponentProvider` (100,000,000 a run, gate 80%):
 
 | Shelf | Fuel |
 |---|---|
-| The longest shelf, documents with the most spans | 52.9% |
-| 8 documents with the most spans | 50.4% |
-| 8 ordinary documents | 49.5% |
-| 8 documents of brackets that never close | 39.4% |
-| 8 documents of openers that never close | 33.1% |
-| Shown to the output cap, then read to the reading cap | 22.6% |
-| 8 documents read in full and then skipped | 16.3% |
+| The longest shelf, documents with the most spans | 51.6% |
+| 8 documents with the most spans | 49.2% |
+| 8 ordinary documents | 48.2% |
+| 8 documents of brackets that never close | 38.1% |
+| 8 documents of backtick runs of distinct lengths | 37.3% |
+| 8 documents of openers that never close | 31.8% |
+| Shown to the output cap, then read to the reading cap | 22.8% |
+| 8 documents read in full and then skipped | 15.0% |
 
 These figures were measured in this cloud container. They are not guarantees.
 
