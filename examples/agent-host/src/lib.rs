@@ -74,19 +74,37 @@ enum Role {
     ToolResult,
 }
 
-/// Where a log node came from. The bytes keep this so replay can restore it.
+/// The typed kind of a log node (journal format 2). A kind is never read out
+/// of text: every reader matches on it, so a person's message can never read
+/// as a record. Kinds that carry fields keep them here. `text` on the node is
+/// the free text of the kinds that have one (see `kind_has_text`) and is empty
+/// for the others. What the model sees is `render_record`, never `text` alone.
 #[cfg(any(test, target_arch = "wasm32"))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum NodeSource {
     Head,
     InHistory,
-    Person,
+    Message,
     Snapshot,
     Skill,
     TurnMarker,
-    StepMarker,
+    StepMarker(u64),
     CompactionCheckpoint,
-    Observation,
+    /// A read: its typed fields; `text` is the text it showed.
+    Observation(Observation),
+    Todo,
+    PlanEntered,
+    PlanExitAsked,
+    Goal,
+    Spill {
+        resource: String,
+        version: u64,
+    },
+    Inbox(InboxAnswer),
+    Refused {
+        reason: String,
+        what: String,
+    },
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -172,27 +190,97 @@ fn derive(events: &[SurfaceNode]) -> Vec<SurfaceNode> {
     events
         .iter()
         .filter(|node| match node.source {
-            NodeSource::TurnMarker | NodeSource::StepMarker | NodeSource::Observation => false,
+            NodeSource::TurnMarker | NodeSource::StepMarker(_) | NodeSource::Observation(_) => {
+                false
+            }
             _ => !matches!(node.role, Role::Assistant if node.text.is_empty()),
         })
         .cloned()
         .collect()
 }
 
+/// The kind byte of journal format 2. 17 and 18 are kept for OMP idea 2
+/// (child budget, child stop) and are refused until it is built.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn source_tag(source: NodeSource) -> u8 {
+fn source_tag(source: &NodeSource) -> u8 {
     match source {
         NodeSource::Head => 1,
         NodeSource::InHistory => 2,
-        NodeSource::Person => 3,
+        NodeSource::Message => 3,
         NodeSource::Snapshot => 4,
         NodeSource::Skill => 5,
         NodeSource::TurnMarker => 6,
-        NodeSource::StepMarker => 7,
+        NodeSource::StepMarker(_) => 7,
         NodeSource::CompactionCheckpoint => 8,
-        NodeSource::Observation => 9,
+        NodeSource::Observation(_) => 9,
+        NodeSource::Todo => 10,
+        NodeSource::PlanEntered => 11,
+        NodeSource::PlanExitAsked => 12,
+        NodeSource::Goal => 13,
+        NodeSource::Spill { .. } => 14,
+        NodeSource::Inbox(_) => 15,
+        NodeSource::Refused { .. } => 16,
     }
 }
+
+/// Every kind fixes its role: the head is a system node, history is a later
+/// system line, an assistant line or a tool result, and every other kind is
+/// a user node.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn role_fits(source: &NodeSource, role: Role) -> bool {
+    match source {
+        NodeSource::Head => role == Role::System,
+        NodeSource::InHistory => {
+            matches!(role, Role::System | Role::Assistant | Role::ToolResult)
+        }
+        _ => role == Role::User,
+    }
+}
+
+/// The kinds whose node carries free text. The others keep `text` empty.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn kind_has_text(source: &NodeSource) -> bool {
+    !matches!(
+        source,
+        NodeSource::TurnMarker
+            | NodeSource::StepMarker(_)
+            | NodeSource::Spill { .. }
+            | NodeSource::Inbox(_)
+            | NodeSource::Refused { .. }
+    )
+}
+
+/// The rendering table of journal format 2: the only place that builds the
+/// text the model sees for a record. It changes only together with
+/// `JOURNAL_FORMAT` (see `RENDERING_FORMAT` and the golden tests), because it
+/// is in the cached prefix. Markers and reads are not visible: they render as
+/// nothing. No function turns this text back into a kind.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn render_record(node: &SurfaceNode) -> String {
+    match &node.source {
+        NodeSource::Head
+        | NodeSource::InHistory
+        | NodeSource::Message
+        | NodeSource::Snapshot
+        | NodeSource::Skill
+        | NodeSource::CompactionCheckpoint => node.text.clone(),
+        NodeSource::TurnMarker | NodeSource::StepMarker(_) | NodeSource::Observation(_) => {
+            String::new()
+        }
+        NodeSource::Todo => format!("todo: {}", node.text),
+        NodeSource::PlanEntered => format!("plan entered: {}", node.text),
+        NodeSource::PlanExitAsked => format!("plan exit asked: {}", node.text),
+        NodeSource::Goal => format!("goal: {}", node.text),
+        NodeSource::Spill { resource, version } => format!("spill: {resource} version {version}"),
+        NodeSource::Inbox(answer) => format!("inbox: {}", answer.name()),
+        NodeSource::Refused { reason, what } => format!("refused: {reason} ({what})"),
+    }
+}
+
+/// The format the rendering table belongs to. A test fails when this is not
+/// `JOURNAL_FORMAT`.
+#[cfg(test)]
+const RENDERING_FORMAT: u16 = 2;
 
 /// Role tags in the log. Assistant is 3 and a tool result is 4.
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -205,20 +293,21 @@ fn role_tag(role: Role) -> u8 {
     }
 }
 
-/// Canonical log bytes. Each record is role, source, length, and text.
-/// This records every node it is given, including a marker, an empty
+/// Canonical log bytes (the cache bytes). For each node: the text the model
+/// sees (`render_record`, as a u32 length and bytes), then the typed record
+/// (a u32 length and the node payload of journal format 2, with its role and
+/// kind). This records every node it is given, including a marker, an empty
 /// assistant line, and a tool result. The series epoch and the step list
 /// are not part of this. `derive` omits markers and an empty assistant line.
-/// This function does not.
+/// This function does not. A node that does not fit its kind gives nothing.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn model_bytes(events: &[SurfaceNode]) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     for event in events {
-        out.push(role_tag(event.role));
-        out.push(source_tag(event.source));
-        let len = u32::try_from(event.text.len()).ok()?;
-        out.extend_from_slice(&len.to_le_bytes());
-        out.extend_from_slice(event.text.as_bytes());
+        put_str(&mut out, &render_record(event))?;
+        let payload = node_payload(event)?;
+        out.extend_from_slice(&u32::try_from(payload.len()).ok()?.to_le_bytes());
+        out.extend_from_slice(&payload);
     }
     Some(out)
 }
@@ -229,59 +318,47 @@ fn checkpoint(journal: &Journal) -> Option<Vec<u8>> {
     model_bytes(&journal.events)
 }
 
-/// Rebuild recorded nodes from bytes. A short or unknown record returns nothing.
-/// A marker comes back as a marker. `derive` is the view that omits it.
+/// Rebuild recorded nodes from bytes. A short or unknown record returns
+/// nothing, and so does a record whose rendered text is not what its typed
+/// record renders to. A marker comes back as a marker. `derive` is the view
+/// that omits it.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn replay(bytes: &[u8]) -> Option<Vec<SurfaceNode>> {
+    let mut reader = JournalReader { bytes, at: 0 };
     let mut events = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        let role = match *bytes.get(index)? {
-            1 => Role::System,
-            2 => Role::User,
-            3 => Role::Assistant,
-            4 => Role::ToolResult,
-            _ => return None,
-        };
-        index += 1;
-        let source = match *bytes.get(index)? {
-            1 => NodeSource::Head,
-            2 => NodeSource::InHistory,
-            3 => NodeSource::Person,
-            4 => NodeSource::Snapshot,
-            5 => NodeSource::Skill,
-            6 => NodeSource::TurnMarker,
-            7 => NodeSource::StepMarker,
-            8 => NodeSource::CompactionCheckpoint,
-            9 => NodeSource::Observation,
-            _ => return None,
-        };
-        index += 1;
-        let len_bytes: [u8; 4] = bytes.get(index..index + 4)?.try_into().ok()?;
-        let len = usize::try_from(u32::from_le_bytes(len_bytes)).ok()?;
-        index += 4;
-        let text_bytes = bytes.get(index..index + len)?;
-        let text = std::str::from_utf8(text_bytes).ok()?.to_string();
-        index += len;
-        events.push(SurfaceNode { role, text, source });
+    while reader.at < bytes.len() {
+        let rendered = reader.text().ok()?;
+        let len = usize::try_from(reader.u32().ok()?).ok()?;
+        let node = decode_node(reader.take(len).ok()?).ok()?;
+        if render_record(&node) != rendered {
+            return None;
+        }
+        events.push(node);
     }
     Some(events)
 }
 
-/// Format 1 of the UsersAI journal object (`handoff/USERSAI-JOURNAL.md`).
-/// The bytes are a header, hash-linked records, and the head hash. A grant
-/// string is never encoded, so a decoded step has no grant until Runtime
-/// grants it again.
+/// Format 2 of the UsersAI journal object (`handoff/USERSAI-JOURNAL.md` and
+/// `handoff/JOURNAL-FORMAT-2.md`). The bytes are a header, hash-linked
+/// records, and the head hash. Every node has a typed kind. A grant string
+/// is never encoded, so a decoded step has no grant until Runtime grants it
+/// again. Format 1 is refused with `FORMAT_1_REASON`; nothing migrates it.
 #[cfg(any(test, target_arch = "wasm32"))]
 const JOURNAL_MAGIC: &[u8; 4] = b"EAHJ";
 #[cfg(any(test, target_arch = "wasm32"))]
-const JOURNAL_FORMAT: u16 = 1;
+const JOURNAL_FORMAT: u16 = 2;
+/// The reason a stored format 1 journal is refused, shown to the person.
+#[cfg(any(test, target_arch = "wasm32"))]
+const FORMAT_1_REASON: &str = "journal format 1 not supported; start a new task";
 /// Bytes cross the Runtime bridge as a JSON number array, up to four characters
 /// per byte ("255,"), inside a 1 MiB frame. 192 KiB of 0xFF fits; 256 KiB does not.
 #[cfg(any(test, target_arch = "wasm32"))]
 const JOURNAL_CAP: usize = 192 * 1024;
+/// magic, format, epoch, compaction_open, backup (flag + epoch), pending,
+/// cancelled_from (flag + step id), task_budget (flag + requests + seconds),
+/// depth, prev_head, record count.
 #[cfg(any(test, target_arch = "wasm32"))]
-const JOURNAL_HEADER: usize = 4 + 2 + 8 + 1 + 1 + 8 + 1 + 32 + 4;
+const JOURNAL_HEADER: usize = 4 + 2 + 8 + 1 + 1 + 8 + 1 + (1 + 8) + (1 + 4 + 8) + 1 + 32 + 4;
 
 #[cfg(any(test, target_arch = "wasm32"))]
 fn put_str(out: &mut Vec<u8>, text: &str) -> Option<()> {
@@ -296,10 +373,46 @@ fn put_opt(out: &mut Vec<u8>, value: Option<u64>) {
     out.extend_from_slice(&value.unwrap_or(0).to_le_bytes());
 }
 
+/// A node as format 2 bytes: role, kind, then the kind's fields. A node whose
+/// role does not fit its kind, or that has text its kind does not carry, or a
+/// read whose fields do not fit its text, gives nothing.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn node_payload(node: &SurfaceNode) -> Option<Vec<u8>> {
-    let mut out = vec![role_tag(node.role), source_tag(node.source)];
-    put_str(&mut out, &node.text)?;
+    if !role_fits(&node.source, node.role) || !kind_has_text(&node.source) && !node.text.is_empty()
+    {
+        return None;
+    }
+    let mut out = vec![role_tag(node.role), source_tag(&node.source)];
+    match &node.source {
+        NodeSource::TurnMarker => {}
+        NodeSource::StepMarker(id) => out.extend_from_slice(&id.to_le_bytes()),
+        NodeSource::Observation(row) => {
+            if !observation_fits(row, &node.text) {
+                return None;
+            }
+            put_str(&mut out, &row.resource)?;
+            out.extend_from_slice(&row.version.to_le_bytes());
+            out.extend_from_slice(&row.text_hash);
+            out.push(u8::from(row.revision.is_some()));
+            put_str(&mut out, row.revision.as_deref().unwrap_or(""))?;
+            out.push(u8::from(row.window.is_some()));
+            let (first, count) = row.window.unwrap_or((0, 0));
+            out.extend_from_slice(&first.to_le_bytes());
+            out.extend_from_slice(&count.to_le_bytes());
+            out.push(u8::from(row.cut));
+            put_str(&mut out, &node.text)?;
+        }
+        NodeSource::Spill { resource, version } => {
+            put_str(&mut out, resource)?;
+            out.extend_from_slice(&version.to_le_bytes());
+        }
+        NodeSource::Inbox(answer) => out.push(answer.tag()),
+        NodeSource::Refused { reason, what } => {
+            put_str(&mut out, reason)?;
+            put_str(&mut out, what)?;
+        }
+        _ => put_str(&mut out, &node.text)?,
+    }
     Some(out)
 }
 
@@ -349,6 +462,12 @@ fn step_payload(step: &Step) -> Option<Vec<u8>> {
     put_str(&mut out, &step.seat)?;
     put_opt(&mut out, step.seen_version);
     put_str(&mut out, &step.inbox)?;
+    // Room for OMP idea 2, empty until it is built: depth, budget (flag,
+    // requests, seconds), requests_used, stop.
+    out.push(0);
+    out.extend_from_slice(&[0; 1 + 4 + 8]);
+    out.extend_from_slice(&0_u32.to_le_bytes());
+    out.push(0);
     Some(out)
 }
 
@@ -403,6 +522,11 @@ fn encode_journal(journal: &Journal, prev_head: &[u8; 32]) -> Option<Vec<u8>> {
         journal.compact_backup.as_ref().map(|(_, epoch)| *epoch),
     );
     out.push(u8::from(journal.compact_pending.is_some()));
+    // Room for OMP idea 2, empty until it is built: cancelled_from (flag and
+    // step id), task_budget (flag, requests, seconds), depth.
+    out.extend_from_slice(&[0; 1 + 8]);
+    out.extend_from_slice(&[0; 1 + 4 + 8]);
+    out.push(0);
     out.extend_from_slice(prev_head);
     out.extend_from_slice(&u32::try_from(records.len()).ok()?.to_le_bytes());
     let mut link = sha256(&out);
@@ -488,33 +612,87 @@ impl<'a> JournalReader<'a> {
     }
 }
 
+/// One format 2 node. An unknown kind (17 and 18 included, until OMP idea 2),
+/// a kind with the wrong role, a read whose fields do not fit its text, or an
+/// unknown inbox answer is `record`.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn decode_node(payload: &[u8]) -> Result<SurfaceNode, &'static str> {
     let mut reader = JournalReader {
         bytes: payload,
         at: 0,
     };
-    let role = match reader.byte().map_err(|_| "record")? {
+    let fail = |_| "record";
+    let role = match reader.byte().map_err(fail)? {
         1 => Role::System,
         2 => Role::User,
         3 => Role::Assistant,
         4 => Role::ToolResult,
         _ => return Err("record"),
     };
-    let source = match reader.byte().map_err(|_| "record")? {
-        1 => NodeSource::Head,
-        2 => NodeSource::InHistory,
-        3 => NodeSource::Person,
-        4 => NodeSource::Snapshot,
-        5 => NodeSource::Skill,
+    let tag = reader.byte().map_err(fail)?;
+    let mut text = String::new();
+    let source = match tag {
+        1 | 2 | 3 | 4 | 5 | 8 | 10 | 11 | 12 | 13 => {
+            text = reader.text()?;
+            match tag {
+                1 => NodeSource::Head,
+                2 => NodeSource::InHistory,
+                3 => NodeSource::Message,
+                4 => NodeSource::Snapshot,
+                5 => NodeSource::Skill,
+                8 => NodeSource::CompactionCheckpoint,
+                10 => NodeSource::Todo,
+                11 => NodeSource::PlanEntered,
+                12 => NodeSource::PlanExitAsked,
+                _ => NodeSource::Goal,
+            }
+        }
         6 => NodeSource::TurnMarker,
-        7 => NodeSource::StepMarker,
-        8 => NodeSource::CompactionCheckpoint,
-        9 => NodeSource::Observation,
+        7 => NodeSource::StepMarker(reader.u64().map_err(fail)?),
+        9 => {
+            let resource = reader.text()?;
+            let version = reader.u64().map_err(fail)?;
+            let text_hash = reader.hash().map_err(fail)?;
+            let has_revision = reader.flag().map_err(fail)?;
+            let revision = reader.text()?;
+            let has_window = reader.flag().map_err(fail)?;
+            let first = reader.u64().map_err(fail)?;
+            let count = reader.u64().map_err(fail)?;
+            let cut = reader.flag().map_err(fail)?;
+            text = reader.text()?;
+            if !has_revision && !revision.is_empty() || !has_window && (first, count) != (0, 0) {
+                return Err("record");
+            }
+            let row = Observation {
+                resource,
+                version,
+                text_hash,
+                revision: has_revision.then_some(revision),
+                window: has_window.then_some((first, count)),
+                cut,
+            };
+            if !observation_fits(&row, &text) {
+                return Err("record");
+            }
+            NodeSource::Observation(row)
+        }
+        14 => NodeSource::Spill {
+            resource: reader.text()?,
+            version: reader.u64().map_err(fail)?,
+        },
+        15 => {
+            NodeSource::Inbox(InboxAnswer::from_tag(reader.byte().map_err(fail)?).ok_or("record")?)
+        }
+        16 => NodeSource::Refused {
+            reason: reader.text()?,
+            what: reader.text()?,
+        },
         _ => return Err("record"),
     };
-    let text = reader.text()?;
     reader.done()?;
+    if !role_fits(&source, role) {
+        return Err("record");
+    }
     Ok(SurfaceNode { role, text, source })
 }
 
@@ -561,6 +739,14 @@ fn decode_step(payload: &[u8]) -> Result<Step, &'static str> {
     let seat = reader.text()?;
     let seen_version = reader.opt().map_err(fail)?;
     let inbox = reader.text()?;
+    // OMP idea 2's fields must be empty until it is built.
+    let depth = reader.byte().map_err(fail)?;
+    let budget = reader.take(1 + 4 + 8).map_err(fail)?;
+    let requests_used = reader.u32().map_err(fail)?;
+    let stop = reader.byte().map_err(fail)?;
+    if depth != 0 || budget.iter().any(|byte| *byte != 0) || requests_used != 0 || stop != 0 {
+        return Err("record");
+    }
     reader.done()?;
     Ok(Step {
         id,
@@ -596,22 +782,28 @@ fn decode_turn(payload: &[u8]) -> Result<Turn, &'static str> {
     Ok(Turn { id, steps })
 }
 
-/// Decode format 1. The size, the format, and the whole hash chain are
-/// checked before any record is read. Returns the journal, `prev_head`, and
-/// this version's head.
+/// Decode format 2. The size, the format, and the whole hash chain are
+/// checked before any record is read. Format 1 is refused with
+/// `FORMAT_1_REASON`, any other format with `format version`. Returns the
+/// journal, `prev_head`, and this version's head.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn decode_bytes(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static str> {
     if bytes.len() > JOURNAL_CAP {
         return Err("too large");
     }
     let mut reader = JournalReader { bytes, at: 0 };
-    let header = reader.take(JOURNAL_HEADER)?;
-    if &header[..4] != JOURNAL_MAGIC {
+    let start = reader.take(6)?;
+    if &start[..4] != JOURNAL_MAGIC {
         return Err("not a journal");
     }
-    if header[4..6] != JOURNAL_FORMAT.to_le_bytes() {
+    if start[4..6] == 1_u16.to_le_bytes() {
+        return Err(FORMAT_1_REASON);
+    }
+    if start[4..6] != JOURNAL_FORMAT.to_le_bytes() {
         return Err("format version");
     }
+    reader.at = 0;
+    let header = reader.take(JOURNAL_HEADER)?;
     let mut fields = JournalReader {
         bytes: &header[6..],
         at: 0,
@@ -621,6 +813,14 @@ fn decode_bytes(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static 
     let backup_flag = fields.byte()?;
     let backup_epoch = fields.u64()?;
     let pending_flag = fields.byte()?;
+    // OMP idea 2's header fields must be empty until it is built.
+    if fields
+        .take(1 + 8 + 1 + 4 + 8 + 1)?
+        .iter()
+        .any(|byte| *byte != 0)
+    {
+        return Err("record");
+    }
     let prev_head = fields.hash()?;
     let count = fields.u32()?;
     let mut link = sha256(header);
@@ -678,7 +878,7 @@ fn decode_bytes(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static 
     Ok((journal, prev_head, link))
 }
 
-/// Decode format 1 (see `decode_bytes`), then check the stored paths (see
+/// Decode format 2 (see `decode_bytes`), then check the stored paths (see
 /// `stored_paths_ok`). Every stored journal loads through here.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn decode_journal(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static str> {
@@ -688,8 +888,8 @@ fn decode_journal(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'stati
 }
 
 /// A stored journal, of any age, passes the path rule a live one does. Every
-/// read (in the log, the compaction backup, and the pending nodes) and every
-/// step path must pass `path_refusal`, and no change may name one file twice
+/// read and every spill pointer (in the log, the compaction backup, and the
+/// pending nodes) and every step path must pass `path_refusal`, and no change may name one file twice
 /// (by `path_key`). The first miss refuses the load with its reason.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn stored_paths_ok(journal: &Journal) -> Result<(), &'static str> {
@@ -698,7 +898,10 @@ fn stored_paths_ok(journal: &Journal) -> Result<(), &'static str> {
         .iter()
         .chain(journal.compact_backup.iter().flat_map(|(nodes, _)| nodes))
         .chain(journal.compact_pending.iter().flatten());
-    let reads = nodes.filter_map(read_observation).map(|row| row.resource);
+    let reads = nodes.filter_map(|node| match &node.source {
+        NodeSource::Spill { resource, .. } => Some(resource.clone()),
+        _ => read_observation(node).map(|row| row.resource),
+    });
     let steps = journal
         .steps
         .iter()
@@ -743,9 +946,10 @@ fn system_head(events: &[SurfaceNode]) -> Option<&str> {
         .map(|event| event.text.as_str())
 }
 
+/// The bytes the model sees for these nodes (`render_record`).
 #[cfg(any(test, target_arch = "wasm32"))]
 fn visible_bytes(events: &[SurfaceNode]) -> usize {
-    events.iter().map(|event| event.text.len()).sum()
+    events.iter().map(|event| render_record(event).len()).sum()
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -804,7 +1008,7 @@ fn admit_user(journal: &mut Journal, text: &str) {
     journal.events.push(SurfaceNode {
         role: Role::User,
         text: text.to_string(),
-        source: NodeSource::Person,
+        source: NodeSource::Message,
     });
 }
 
@@ -816,7 +1020,6 @@ enum VisibleRecord {
     PlanEntered,
     PlanExitAsked,
     Goal,
-    SpillPointer,
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -830,19 +1033,18 @@ fn record_visible(journal: &mut Journal, kind: VisibleRecord, text: &str) -> boo
     if head.role != Role::System || head.source != NodeSource::Head {
         return false;
     }
-    let label = match kind {
-        VisibleRecord::Todo => "todo",
-        VisibleRecord::PlanEntered => "plan-entered",
-        VisibleRecord::PlanExitAsked => "plan-exit-asked",
-        VisibleRecord::Goal => "goal",
-        VisibleRecord::SpillPointer => "spill",
+    let source = match kind {
+        VisibleRecord::Todo => NodeSource::Todo,
+        VisibleRecord::PlanEntered => NodeSource::PlanEntered,
+        VisibleRecord::PlanExitAsked => NodeSource::PlanExitAsked,
+        VisibleRecord::Goal => NodeSource::Goal,
     };
     let epoch = journal.epoch;
     let steps = journal.steps.len();
     journal.events.push(SurfaceNode {
         role: Role::User,
-        text: format!("{label}\n{text}"),
-        source: NodeSource::Person,
+        text: text.to_string(),
+        source,
     });
     journal.epoch == epoch && journal.steps.len() == steps
 }
@@ -871,11 +1073,26 @@ fn spill_pointer(journal: &mut Journal, step_id: u64, object_resource: &str) -> 
     {
         return false;
     }
-    let pointer = format!("{object_resource}\n{version}");
-    if !record_visible(journal, VisibleRecord::SpillPointer, &pointer) {
+    if journal
+        .events
+        .first()
+        .is_none_or(|head| head.role != Role::System || head.source != NodeSource::Head)
+    {
         return false;
     }
-    record_tool_result(journal, step_id, &format!("spill\n{pointer}"))
+    journal.events.push(SurfaceNode {
+        role: Role::User,
+        text: String::new(),
+        source: NodeSource::Spill {
+            resource: object_resource.to_string(),
+            version,
+        },
+    });
+    record_tool_result(
+        journal,
+        step_id,
+        &format!("spill\n{object_resource}\n{version}"),
+    )
 }
 
 /// The text named by the newest spill pointer for this file that still has
@@ -884,27 +1101,30 @@ fn spill_pointer(journal: &mut Journal, step_id: u64, object_resource: &str) -> 
 #[cfg(any(test, target_arch = "wasm32"))]
 fn text_at_spill(events: &[SurfaceNode], object_resource: &str) -> Option<String> {
     events.iter().rev().find_map(|node| {
-        if node.source != NodeSource::Person {
+        let NodeSource::Spill { resource, version } = &node.source else {
+            return None;
+        };
+        // Which file: the exact canonical path, as for reads.
+        if resource != object_resource {
             return None;
         }
-        let mut parts = node.text.splitn(3, '\n');
-        let label = parts.next()?;
-        let resource = parts.next()?;
-        let version = parts.next()?.parse::<u64>().ok()?;
-        if label != "spill" || resource != object_resource {
-            return None;
-        }
-        observed_text_at(events, object_resource, version)
+        observed_text_at(events, object_resource, *version)
     })
 }
 
+/// The records compaction keeps after the summary: a list, a plan, a goal, a
+/// spill pointer, and an inbox answer. Matched on the kind, never on text.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn is_durable_visible(node: &SurfaceNode) -> bool {
-    node.source == NodeSource::Person
-        && matches!(
-            node.text.split_once('\n').map(|(label, _)| label),
-            Some("todo" | "plan-entered" | "plan-exit-asked" | "goal" | "spill" | "inbox")
-        )
+    matches!(
+        node.source,
+        NodeSource::Todo
+            | NodeSource::PlanEntered
+            | NodeSource::PlanExitAsked
+            | NodeSource::Goal
+            | NodeSource::Spill { .. }
+            | NodeSource::Inbox(_)
+    )
 }
 
 /// Append an assistant line. Empty text stays in the log. This does not
@@ -1024,7 +1244,7 @@ fn begin_compact(journal: &mut Journal, summary: &str) -> bool {
     let observations: Vec<SurfaceNode> = journal
         .events
         .iter()
-        .filter(|node| node.source == NodeSource::Observation)
+        .filter(|node| matches!(node.source, NodeSource::Observation(_)))
         .cloned()
         .collect();
     let snapshots: Vec<SurfaceNode> = journal
@@ -1045,7 +1265,7 @@ fn begin_compact(journal: &mut Journal, summary: &str) -> bool {
         .filter(|node| {
             !matches!(
                 node.source,
-                NodeSource::Skill | NodeSource::Observation | NodeSource::Snapshot
+                NodeSource::Skill | NodeSource::Observation(_) | NodeSource::Snapshot
             ) && !is_durable_visible(node)
         })
         .cloned()
@@ -1140,7 +1360,7 @@ fn shadowed_summary_input(journal: &Journal) -> Option<String> {
         {
             continue;
         }
-        lines.push(node.text.clone());
+        lines.push(render_record(node));
     }
     Some(lines.join("\n"))
 }
@@ -1254,14 +1474,13 @@ struct Observation {
     cut: bool,
 }
 
+/// The node of a read with no revision (a whole file).
 #[cfg(any(test, target_arch = "wasm32"))]
-fn observation_record(resource: &str, version: u64, text: &str) -> String {
-    let hash = sha256(text.as_bytes());
-    let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
-    format!("{version} {hex} {resource}\n{text}")
+fn observation_record(resource: &str, version: u64, text: &str) -> SurfaceNode {
+    observation_node(resource, version, None, None, false, text)
 }
 
-/// The record of a read that names its Runtime revision and, for a part of a
+/// The node of a read that names its Runtime revision and, for a part of a
 /// file, its window.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn bound_observation_record(
@@ -1271,17 +1490,31 @@ fn bound_observation_record(
     window: Option<(u64, u64)>,
     cut: bool,
     text: &str,
-) -> String {
-    let hash = sha256(text.as_bytes());
-    let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
-    let mut head = format!("{version} {hex} {resource} revision={revision}");
-    if let Some((first, count)) = window {
-        head.push_str(&format!(" lines={first}+{count}"));
-        if cut {
-            head.push_str(" cut");
-        }
+) -> SurfaceNode {
+    observation_node(resource, version, Some(revision), window, cut, text)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn observation_node(
+    resource: &str,
+    version: u64,
+    revision: Option<&str>,
+    window: Option<(u64, u64)>,
+    cut: bool,
+    text: &str,
+) -> SurfaceNode {
+    SurfaceNode {
+        role: Role::User,
+        text: text.to_string(),
+        source: NodeSource::Observation(Observation {
+            resource: resource.to_string(),
+            version,
+            text_hash: sha256(text.as_bytes()),
+            revision: revision.map(str::to_string),
+            window,
+            cut,
+        }),
     }
-    format!("{head}\n{text}")
 }
 
 /// The whole lines of a shown text: all of it, or, when the last line was
@@ -1305,68 +1538,37 @@ fn revision_ok(revision: &str) -> bool {
     !revision.is_empty() && !revision.contains('=') && !revision.chars().any(char::is_whitespace)
 }
 
+/// A read's fields fit the text it showed: a resource, the text's hash, a
+/// revision that is one token, a cut only with a window, a window only with a
+/// revision, and a window that starts at line 1 or later and has exactly
+/// `count` whole lines (a cut window ends in a partial line).
+#[cfg(any(test, target_arch = "wasm32"))]
+fn observation_fits(row: &Observation, text: &str) -> bool {
+    if row.resource.is_empty()
+        || row.text_hash != sha256(text.as_bytes())
+        || row
+            .revision
+            .as_deref()
+            .is_some_and(|revision| !revision_ok(revision))
+        || row.cut && row.window.is_none()
+        || row.window.is_some() && row.revision.is_none()
+    {
+        return false;
+    }
+    row.window.is_none_or(|(first, count)| {
+        let whole = whole_lines(text, row.cut);
+        first != 0 && line_count(whole) == count && !(row.cut && whole.len() == text.len())
+    })
+}
+
+/// The read a node records, if it is one and its fields fit its text. A read
+/// at u64::MAX is not a read: that is never a version number.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn read_observation(node: &SurfaceNode) -> Option<Observation> {
-    if node.source != NodeSource::Observation {
+    let NodeSource::Observation(row) = &node.source else {
         return None;
-    }
-    let (head, text) = node.text.split_once('\n')?;
-    let mut parts = head.split(' ');
-    let version: u64 = parts.next()?.parse().ok()?;
-    // u64::MAX is never a version number: a row that names it is not a read.
-    if version == u64::MAX {
-        return None;
-    }
-    let hex = parts.next()?;
-    let resource = parts.next()?;
-    if resource.is_empty() || hex.len() != 64 {
-        return None;
-    }
-    let mut text_hash = [0_u8; 32];
-    for index in 0..32 {
-        text_hash[index] = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).ok()?;
-    }
-    if text_hash != sha256(text.as_bytes()) {
-        return None;
-    }
-    // An unknown or repeated word makes the row unreadable: fail closed.
-    let (mut revision, mut window, mut cut) = (None, None, false);
-    for word in parts {
-        if let Some(value) = word.strip_prefix("revision=") {
-            if revision.is_some() || !revision_ok(value) {
-                return None;
-            }
-            revision = Some(value.to_string());
-        } else if let Some(value) = word.strip_prefix("lines=") {
-            let (first, count) = value.split_once('+')?;
-            let (first, count): (u64, u64) = (first.parse().ok()?, count.parse().ok()?);
-            if window.is_some() || first == 0 {
-                return None;
-            }
-            window = Some((first, count));
-        } else if word == "cut" && !cut {
-            cut = true;
-        } else {
-            return None;
-        }
-    }
-    if window.is_some() && revision.is_none() || cut && window.is_none() {
-        return None;
-    }
-    if let Some((_, count)) = window {
-        let whole = whole_lines(text, cut);
-        if line_count(whole) != count || cut && whole.len() == text.len() {
-            return None;
-        }
-    }
-    Some(Observation {
-        resource: resource.to_string(),
-        version,
-        text_hash,
-        revision,
-        window,
-        cut,
-    })
+    };
+    (row.version != u64::MAX && observation_fits(row, &node.text)).then(|| row.clone())
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -1386,12 +1588,7 @@ fn current_observed_text(events: &[SurfaceNode], resource: &str) -> Option<Strin
         if row.resource != resource {
             return None;
         }
-        Some(
-            row.window
-                .is_none()
-                .then(|| node.text.split_once('\n').map(|(_, text)| text.to_string()))
-                .flatten(),
-        )
+        Some(row.window.is_none().then(|| node.text.clone()))
     })?
 }
 
@@ -1412,9 +1609,7 @@ fn version_list(events: &[SurfaceNode], resource: &str) -> Vec<(u64, String)> {
         if row.resource != resource || row.window.is_some() {
             continue;
         }
-        let Some((_, text)) = node.text.split_once('\n') else {
-            continue;
-        };
+        let text = node.text.as_str();
         if let Some(existing) = rows.iter_mut().find(|(version, _)| *version == row.version) {
             existing.1 = text.to_string();
         } else {
@@ -1577,10 +1772,7 @@ fn current_reads<'a>(events: &'a [SurfaceNode], resource: &str) -> Vec<(Observat
                 break;
             }
         }
-        let Some((_, text)) = node.text.split_once('\n') else {
-            continue;
-        };
-        rows.push((row, text));
+        rows.push((row, node.text.as_str()));
     }
     rows.reverse();
     rows
@@ -1607,11 +1799,9 @@ fn observe(journal: &mut Journal, resource: &str, version: u64, text: &str) -> b
         }
     }
     let epoch = journal.epoch;
-    journal.events.push(SurfaceNode {
-        role: Role::User,
-        text: observation_record(resource, version, text),
-        source: NodeSource::Observation,
-    });
+    journal
+        .events
+        .push(observation_record(resource, version, text));
     journal.epoch == epoch
 }
 
@@ -1786,11 +1976,9 @@ fn observe_read(
         }
     }
     let epoch = journal.epoch;
-    journal.events.push(SurfaceNode {
-        role: Role::User,
-        text: bound_observation_record(resource, version, revision, window, cut, text),
-        source: NodeSource::Observation,
-    });
+    journal.events.push(bound_observation_record(
+        resource, version, revision, window, cut, text,
+    ));
     journal.epoch == epoch
 }
 
@@ -1837,8 +2025,8 @@ fn open_step(journal: &mut Journal, turn_id: u64) -> Option<u64> {
     turn.steps.push(id);
     journal.markers.push(SurfaceNode {
         role: Role::User,
-        text: id.to_string(),
-        source: NodeSource::StepMarker,
+        text: String::new(),
+        source: NodeSource::StepMarker(id),
     });
     Some(id)
 }
@@ -1977,7 +2165,7 @@ fn without_refusal_records(events: &[SurfaceNode]) -> Vec<SurfaceNode> {
 
 #[cfg(any(test, target_arch = "wasm32"))]
 fn is_refusal_record(node: &SurfaceNode) -> bool {
-    node.source == NodeSource::Person && node.text.starts_with("refused\n")
+    matches!(node.source, NodeSource::Refused { .. })
 }
 
 /// One refusal record: the word `refused`, the reason, and what was refused.
@@ -1987,8 +2175,11 @@ fn is_refusal_record(node: &SurfaceNode) -> bool {
 fn record_refusal(journal: &mut Journal, refusal: Refusal, what: &str) {
     journal.events.push(SurfaceNode {
         role: Role::User,
-        text: format!("refused\n{}\n{what}", refusal.reason()),
-        source: NodeSource::Person,
+        text: String::new(),
+        source: NodeSource::Refused {
+            reason: refusal.reason().to_string(),
+            what: what.to_string(),
+        },
     });
 }
 
@@ -2354,11 +2545,7 @@ fn note_change_wrote_checked(
                 &new_run,
             )
         };
-        journal.events.push(SurfaceNode {
-            role: Role::User,
-            text: record,
-            source: NodeSource::Observation,
-        });
+        journal.events.push(record);
         journal.events.push(SurfaceNode {
             role: Role::ToolResult,
             text: new_run,
@@ -2519,7 +2706,7 @@ fn observed_project_files(events: &[SurfaceNode], project: &str) -> Option<Vec<(
         }
         let text = match row.window {
             Some(_) => None,
-            None => Some(node.text.split_once('\n')?.1.to_string()),
+            None => Some(node.text.clone()),
         };
         if let Some(existing) = files.iter_mut().find(|(path, _)| path == relative) {
             existing.1 = text;
@@ -2808,7 +2995,7 @@ fn observed_text_at(events: &[SurfaceNode], resource: &str, version: u64) -> Opt
         if row.resource != resource || row.version != version || row.window.is_some() {
             return None;
         }
-        node.text.split_once('\n').map(|(_, text)| text.to_string())
+        Some(node.text.clone())
     })
 }
 
@@ -3057,6 +3244,7 @@ fn authorize(journal: &mut Journal, id: u64, grant: Option<&str>) -> bool {
 /// authorize another step. A child cannot be answered with the parent's
 /// grant. The answer name is kept in the log. The grant string is not.
 #[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InboxAnswer {
     AllowOnce,
     AllowSession,
@@ -3065,12 +3253,43 @@ enum InboxAnswer {
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
+impl InboxAnswer {
+    /// The answer's name, kept on the step and shown in the log.
+    fn name(self) -> &'static str {
+        match self {
+            InboxAnswer::AllowOnce => "allow-once",
+            InboxAnswer::AllowSession => "allow-session",
+            InboxAnswer::Standing => "standing",
+            InboxAnswer::Deny => "deny",
+        }
+    }
+
+    fn tag(self) -> u8 {
+        match self {
+            InboxAnswer::AllowOnce => 1,
+            InboxAnswer::AllowSession => 2,
+            InboxAnswer::Standing => 3,
+            InboxAnswer::Deny => 4,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Option<InboxAnswer> {
+        match tag {
+            1 => Some(InboxAnswer::AllowOnce),
+            2 => Some(InboxAnswer::AllowSession),
+            3 => Some(InboxAnswer::Standing),
+            4 => Some(InboxAnswer::Deny),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
 fn apply_inbox(journal: &mut Journal, id: u64, answer: InboxAnswer, grant: Option<&str>) -> bool {
-    let (name, grant) = match answer {
-        InboxAnswer::Deny => ("deny", None),
-        InboxAnswer::AllowOnce => ("allow-once", grant.filter(|grant| !grant.is_empty())),
-        InboxAnswer::AllowSession => ("allow-session", grant.filter(|grant| !grant.is_empty())),
-        InboxAnswer::Standing => ("standing", grant.filter(|grant| !grant.is_empty())),
+    let name = answer.name();
+    let grant = match answer {
+        InboxAnswer::Deny => None,
+        _ => grant.filter(|grant| !grant.is_empty()),
     };
     let (kind, parent_id) = {
         let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) else {
@@ -3106,8 +3325,8 @@ fn apply_inbox(journal: &mut Journal, id: u64, answer: InboxAnswer, grant: Optio
     {
         journal.events.push(SurfaceNode {
             role: Role::User,
-            text: format!("inbox\n{name}"),
-            source: NodeSource::Person,
+            text: String::new(),
+            source: NodeSource::Inbox(answer),
         });
     }
     authorize(journal, id, grant)
@@ -3394,6 +3613,9 @@ enum ResumeOutcome {
     /// The stored journal breaks the path rule (`stored_paths_ok`). The
     /// reason says how. A person decides.
     Refused(&'static str),
+    /// The stored journal is format 1. It carries `FORMAT_1_REASON`, the text
+    /// the person sees. Nothing is appended and the old object is not touched.
+    FormatNotSupported(&'static str),
 }
 
 /// An append records a step. It waits while an earlier append has no result,
@@ -3577,6 +3799,7 @@ fn resume_journal(
     };
     let (_, head, revision) = match read_stored_journal(bus, cursor, grant) {
         Ok(stored) => stored,
+        Err(Some(FORMAT_1_REASON)) => return ResumeOutcome::FormatNotSupported(FORMAT_1_REASON),
         Err(Some(reason)) => return ResumeOutcome::Refused(reason),
         Err(None) => return ResumeOutcome::Unknown,
     };
@@ -3595,9 +3818,10 @@ fn resume_journal(
 }
 
 /// Read and decode the stored journal: the journal, its head, and its
-/// revision. `Err(Some(reason))`: the stored journal breaks the path rule
-/// (`stored_paths_ok`), for that reason. `Err(None)`: anything else (no
-/// usable reply, or bytes that do not decode).
+/// revision. `Err(Some(reason))`: the stored journal is format 1
+/// (`FORMAT_1_REASON`) or breaks the path rule (`stored_paths_ok`), for that
+/// reason. `Err(None)`: anything else (no usable reply, or bytes that do not
+/// decode).
 #[cfg(any(test, target_arch = "wasm32"))]
 fn read_stored_journal(
     bus: &mut impl ResourceBus,
@@ -3615,7 +3839,8 @@ fn read_stored_journal(
         .and_then(|content| serde_json::from_value(content.clone()).ok())
         .ok_or(None)?;
     let revision = reply_revision(&data).ok_or(None)?;
-    let (stored, _, head) = decode_bytes(&content).map_err(|_| None)?;
+    let (stored, _, head) =
+        decode_bytes(&content).map_err(|reason| (reason == FORMAT_1_REASON).then_some(reason))?;
     stored_paths_ok(&stored).map_err(Some)?;
     Ok((stored, head, revision))
 }
@@ -3623,7 +3848,8 @@ fn read_stored_journal(
 /// After a conflict, read the stored version so the next append names it.
 /// It returns that version for the caller to look at; it does not merge.
 /// With an append still unknown, use `resume_journal` instead. A stored
-/// journal that does not load is refused with the reason.
+/// journal that does not load is refused with the reason; a format 1 journal
+/// with `FORMAT_1_REASON`.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn reread_journal(
     bus: &mut impl ResourceBus,
@@ -3640,6 +3866,21 @@ fn reread_journal(
     cursor.head = head;
     cursor.stale = false;
     Ok(stored)
+}
+
+/// The refusal a task shows the person after its append met a stored
+/// journal: `FORMAT_1_REASON` when that journal is format 1, otherwise
+/// nothing. It only reads; it never writes or changes the stored object.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn stored_task_refusal(
+    bus: &mut impl ResourceBus,
+    cursor: &mut JournalCursor,
+    grant: Option<&JournalGrant>,
+) -> Option<&'static str> {
+    match reread_journal(bus, cursor, grant) {
+        Err(FORMAT_1_REASON) => Some(FORMAT_1_REASON),
+        _ => None,
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -3834,7 +4075,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             "localhost://Users/self/Documents/note.txt",
         ) || journal.epoch != epoch
             || journal.events.first().map(|node| node.text.as_str()) != Some(head.as_str())
-            || journal.events.first().map(|node| node.source) != Some(NodeSource::Head)
+            || journal.events.first().map(|node| node.source.clone()) != Some(NodeSource::Head)
             || journal.events.len() != len_before_snap + 3
             || journal.events[len_before_snap..]
                 .iter()
@@ -3907,7 +4148,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || journal.epoch != epoch
             || journal.events.first().map(|node| node.text.as_str()) != Some(head.as_str())
             || journal.events.len() != len_before_skill + 1
-            || journal.events.last().map(|node| node.source) != Some(NodeSource::Skill)
+            || journal.events.last().map(|node| node.source.clone()) != Some(NodeSource::Skill)
             || admit_skill(&mut journal, "")
             || admit_skill(&mut journal, &"x".repeat(4_001))
             || admit_skill(&mut journal, "/tmp")
@@ -3922,7 +4163,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         if compact(&mut folded, COMPACTION_SUMMARY)
             || folded.epoch != folded_epoch
             || folded.events.get(1).map(|node| node.role) != Some(Role::User)
-            || folded.events.get(1).map(|node| node.source)
+            || folded.events.get(1).map(|node| node.source.clone())
                 != Some(NodeSource::CompactionCheckpoint)
             || folded.events.first().map(|node| node.text.as_str()) != Some(head.as_str())
             || !folded
@@ -4003,9 +4244,12 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || step_state(&journal, second_step) != Some(StepState::Prepared)
             || model_bytes(&journal.events).as_ref() != Some(&recorded)
             || view.len() != journal.events.len()
-            || view
-                .iter()
-                .any(|node| matches!(node.source, NodeSource::TurnMarker | NodeSource::StepMarker))
+            || view.iter().any(|node| {
+                matches!(
+                    node.source,
+                    NodeSource::TurnMarker | NodeSource::StepMarker(_)
+                )
+            })
             || !derive(&journal.markers).is_empty()
             || restored_markers != journal.markers
         {
@@ -4085,12 +4329,16 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || !result_view.iter().any(|node| {
                 node.role == Role::ToolResult && node.text == "The step result is recorded."
             })
-            || derive(&mixed)
-                .iter()
-                .any(|node| matches!(node.source, NodeSource::TurnMarker | NodeSource::StepMarker))
-            || !journal.markers.iter().any(|node| {
-                node.source == NodeSource::StepMarker && node.text == waiting.to_string()
+            || derive(&mixed).iter().any(|node| {
+                matches!(
+                    node.source,
+                    NodeSource::TurnMarker | NodeSource::StepMarker(_)
+                )
             })
+            || !journal
+                .markers
+                .iter()
+                .any(|node| node.source == NodeSource::StepMarker(waiting) && node.text.is_empty())
             || replay(&model_bytes(&journal.markers).unwrap_or_default()).as_ref()
                 != Some(&journal.markers)
         {
@@ -4117,7 +4365,8 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || !commit_compact(&mut open)
             || open.compaction_open
             || open.epoch != saved_epoch + 1
-            || open.events.get(1).map(|node| node.source) != Some(NodeSource::CompactionCheckpoint)
+            || open.events.get(1).map(|node| node.source.clone())
+                != Some(NodeSource::CompactionCheckpoint)
             || commit_compact(&mut open)
         {
             return Err(elastos::bus::types::BusError::Invalid(
@@ -4381,7 +4630,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || bound
                 .events
                 .iter()
-                .filter(|node| node.source == NodeSource::Observation)
+                .filter(|node| matches!(node.source, NodeSource::Observation(_)))
                 .count()
                 != 2
             // Three refusal records: the edit outside the read window, the
@@ -4390,7 +4639,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 .events
                 .iter()
                 .filter(|node| {
-                    node.source == NodeSource::Person && node.text.starts_with("refused\n")
+                    matches!(node.source, NodeSource::Refused { .. })
                 })
                 .count()
                 != 3
@@ -5455,17 +5704,16 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || !record_visible(&mut goal, VisibleRecord::Todo, "keep the note current")
             || !record_visible(&mut goal, VisibleRecord::PlanEntered, "edit the note")
             || !record_visible(&mut goal, VisibleRecord::PlanExitAsked, "the note is ready")
-            || !record_visible(&mut goal, VisibleRecord::SpillPointer, "notes.txt")
             || goal.epoch != 1
             || goal.steps.len() != goal_steps
             || !compact(&mut goal, COMPACTION_SUMMARY)
             || goal.events.iter().any(|node| node.text == "second turn")
+            || !goal
+                .events
+                .iter()
+                .any(|node| node.source == NodeSource::Goal && node.text == "finish the note")
             || !goal.events.iter().any(|node| {
-                node.source == NodeSource::Person && node.text == "goal\nfinish the note"
-            })
-            || !goal.events.iter().any(|node| {
-                node.source == NodeSource::Person
-                    && node.text == "plan-exit-asked\nthe note is ready"
+                node.source == NodeSource::PlanExitAsked && node.text == "the note is ready"
             })
         {
             return Err(elastos::bus::types::BusError::Invalid(
@@ -5504,8 +5752,8 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 })
             || model_bytes(&inbox.events).is_none_or(|bytes| {
                 !bytes
-                    .windows(b"inbox\nstanding".len())
-                    .any(|window| window == b"inbox\nstanding")
+                    .windows(b"inbox: standing".len())
+                    .any(|window| window == b"inbox: standing")
                     || bytes
                         .windows(b"fixture-grant".len())
                         .any(|window| window == b"fixture-grant")
@@ -5514,7 +5762,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || !inbox
                 .events
                 .iter()
-                .any(|node| node.source == NodeSource::Person && node.text == "inbox\nstanding")
+                .any(|node| node.source == NodeSource::Inbox(InboxAnswer::Standing))
             || model_bytes(&inbox.events).is_none_or(|bytes| {
                 bytes
                     .windows(b"fixture-grant".len())
@@ -5546,7 +5794,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || !inbox
                 .events
                 .iter()
-                .any(|node| node.source == NodeSource::Person && node.text == "inbox\nstanding")
+                .any(|node| node.source == NodeSource::Inbox(InboxAnswer::Standing))
             || step_state(&inbox, other) != Some(StepState::Prepared)
             || inbox
                 .steps
@@ -5582,7 +5830,11 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || current_observed_text(&inbox.events, notes).as_deref()
                 != Some("hello from the project")
             || !inbox.events.iter().any(|node| {
-                node.source == NodeSource::Person && node.text == format!("spill\n{notes}\n1")
+                node.source
+                    == NodeSource::Spill {
+                        resource: notes.to_string(),
+                        version: 1,
+                    }
             })
             || model_bytes(&inbox.events).is_none_or(|bytes| {
                 bytes
@@ -5614,7 +5866,11 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 != Some("hello from the project")
             || text_at_spill(&inbox.events, notes).as_deref() != Some("hello from the project")
             || !inbox.events.iter().any(|node| {
-                node.source == NodeSource::Person && node.text == format!("spill\n{notes}\n1")
+                node.source
+                    == NodeSource::Spill {
+                        resource: notes.to_string(),
+                        version: 1,
+                    }
             })
         {
             return Err(elastos::bus::types::BusError::Invalid(
@@ -5638,10 +5894,18 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || observed_text_at(&inbox.events, notes, 1).as_deref()
                 != Some("hello from the project")
             || !inbox.events.iter().any(|node| {
-                node.source == NodeSource::Person && node.text == format!("spill\n{notes}\n1")
+                node.source
+                    == NodeSource::Spill {
+                        resource: notes.to_string(),
+                        version: 1,
+                    }
             })
             || !inbox.events.iter().any(|node| {
-                node.source == NodeSource::Person && node.text == format!("spill\n{notes}\n2")
+                node.source
+                    == NodeSource::Spill {
+                        resource: notes.to_string(),
+                        version: 2,
+                    }
             })
         {
             return Err(elastos::bus::types::BusError::Invalid(
@@ -5671,8 +5935,11 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         }
         inbox.events.push(SurfaceNode {
             role: Role::User,
-            text: format!("spill\n{notes}\n9"),
-            source: NodeSource::Person,
+            text: String::new(),
+            source: NodeSource::Spill {
+                resource: notes.to_string(),
+                version: 9,
+            },
         });
         if text_at_spill(&inbox.events, notes).as_deref() != Some("hello again") {
             return Err(elastos::bus::types::BusError::Invalid(
@@ -5699,7 +5966,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         let standing_lines = |events: &[SurfaceNode]| {
             events
                 .iter()
-                .filter(|node| node.source == NodeSource::Person && node.text == "inbox\nstanding")
+                .filter(|node| node.source == NodeSource::Inbox(InboxAnswer::Standing))
                 .count()
         };
         if !apply_inbox(
@@ -7377,7 +7644,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             Some(Ok((back, prev, _))) if *back == without_grants(&journal) && *prev == [0; 32]
         ) {
             return Err(elastos::bus::types::BusError::Invalid(
-                "the journal did not round-trip through format 1".to_string(),
+                "the journal did not round-trip through format 2".to_string(),
             ));
         }
         // Ask for the two journal grants. With no write grant the append is
@@ -7399,6 +7666,15 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                     && journal.steps.last().is_some_and(|step| {
                         step.kind == ProposalKind::JournalAppend && step.state == StepState::Denied
                     })
+            }
+            (Some(_), AppendOutcome::Conflict) => {
+                // A stored format 1 journal: the task shows why and stops.
+                if let Some(reason) =
+                    stored_task_refusal(&mut WasmBus, &mut cursor, grants.read.as_ref())
+                {
+                    return Err(elastos::bus::types::BusError::Invalid(reason.to_string()));
+                }
+                false
             }
             (Some(_), AppendOutcome::Written) => {
                 cursor.revision.is_some()
@@ -7585,11 +7861,14 @@ mod tests {
         assert!(observe(&mut journal, notes, 1, "hello from the project"));
         assert!(admit_skill(&mut journal, &format!("spill\n{notes}\n1")));
         assert_eq!(text_at_spill(&journal.events, notes), None);
-        assert!(record_visible(
-            &mut journal,
-            VisibleRecord::SpillPointer,
-            &format!("{notes}\n1")
-        ));
+        journal.events.push(SurfaceNode {
+            role: Role::User,
+            text: String::new(),
+            source: NodeSource::Spill {
+                resource: notes.to_string(),
+                version: 1,
+            },
+        });
         assert_eq!(
             text_at_spill(&journal.events, notes).as_deref(),
             Some("hello from the project")
@@ -7612,10 +7891,12 @@ mod tests {
     fn only_a_well_formed_observation_counts_as_a_read() {
         let notes = "localhost://Users/self/Projects/demo/notes.txt";
         let mut journal = two_turns();
-        admit_user(
-            &mut journal,
-            &observation_record(notes, 1, "typed by a person"),
-        );
+        // A person's message shaped like a format 1 read row is a message.
+        let hex: String = sha256(b"typed by a person")
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        admit_user(&mut journal, &format!("1 {hex} {notes}\ntyped by a person"));
         assert_eq!(current_observation(&journal.events, notes), None);
         assert_eq!(
             propose_edit(&mut journal, notes, "typed", "said", Some(1)),
@@ -7623,28 +7904,18 @@ mod tests {
         );
 
         let record = observation_record("", 1, "no resource");
-        journal.events.push(SurfaceNode {
-            role: Role::User,
-            text: record,
-            source: NodeSource::Observation,
-        });
+        journal.events.push(record);
         assert_eq!(current_observation(&journal.events, ""), None);
 
-        let forged = observation_record(notes, 2, "the text that was read")
-            .replace("the text that was read", "other text");
-        journal.events.push(SurfaceNode {
-            role: Role::User,
-            text: forged,
-            source: NodeSource::Observation,
-        });
+        let mut forged = observation_record(notes, 2, "the text that was read");
+        forged.text = "other text".to_string();
+        journal.events.push(forged);
         assert_eq!(current_observation(&journal.events, notes), None);
-        let full = observation_record(notes, 4, "short");
-        let short_hash = format!("4 {} {notes}\nshort", &full[2..64]);
-        journal.events.push(SurfaceNode {
-            role: Role::User,
-            text: short_hash,
-            source: NodeSource::Observation,
-        });
+        let mut cut_whole = observation_record(notes, 4, "short");
+        if let NodeSource::Observation(row) = &mut cut_whole.source {
+            row.cut = true;
+        }
+        journal.events.push(cut_whole);
         assert_eq!(current_observation(&journal.events, notes), None);
         assert!(observe(&mut journal, notes, 3, "real"));
         assert_eq!(
@@ -7680,11 +7951,9 @@ mod tests {
         // with that name, as a stored journal could hold it, still makes the
         // project's file list unknown.
         assert!(!observe(&mut journal, &format!("{project}/"), 1, "x"));
-        journal.events.push(SurfaceNode {
-            role: Role::User,
-            text: observation_record(&format!("{project}/"), 1, "x"),
-            source: NodeSource::Observation,
-        });
+        journal
+            .events
+            .push(observation_record(&format!("{project}/"), 1, "x"));
         assert_eq!(observed_project_files(&journal.events, project), None);
 
         let notes = format!("{project}/notes.txt");
@@ -7866,13 +8135,17 @@ mod tests {
         assert!(derive(&journal.events).iter().any(|node| {
             node.role == Role::ToolResult && node.text == "note.txt has one line."
         }));
-        assert!(journal.markers.iter().any(|node| {
-            node.source == NodeSource::StepMarker && node.text == waiting.to_string()
-        }));
+        assert!(journal
+            .markers
+            .iter()
+            .any(|node| node.source == NodeSource::StepMarker(waiting) && node.text.is_empty()));
         let mut mixed = journal.events.clone();
         mixed.extend(journal.markers.clone());
         assert!(derive(&mixed).iter().all(|node| {
-            !matches!(node.source, NodeSource::TurnMarker | NodeSource::StepMarker)
+            !matches!(
+                node.source,
+                NodeSource::TurnMarker | NodeSource::StepMarker(_)
+            )
         }));
     }
 
@@ -8447,14 +8720,14 @@ mod tests {
             .windows(b"fixture-grant".len())
             .any(|window| window == b"fixture-grant"));
         assert!(bytes
-            .windows(b"inbox\nallow-once".len())
-            .any(|window| window == b"inbox\nallow-once"));
+            .windows(b"inbox: allow-once".len())
+            .any(|window| window == b"inbox: allow-once"));
         assert!(bytes
-            .windows(b"inbox\nallow-session".len())
-            .any(|window| window == b"inbox\nallow-session"));
+            .windows(b"inbox: allow-session".len())
+            .any(|window| window == b"inbox: allow-session"));
         assert!(bytes
-            .windows(b"inbox\nstanding".len())
-            .any(|window| window == b"inbox\nstanding"));
+            .windows(b"inbox: standing".len())
+            .any(|window| window == b"inbox: standing"));
         assert!(shared
             .events
             .iter()
@@ -8616,7 +8889,7 @@ mod tests {
         let standing_lines = |events: &[SurfaceNode]| {
             events
                 .iter()
-                .filter(|node| node.source == NodeSource::Person && node.text == "inbox\nstanding")
+                .filter(|node| node.source == NodeSource::Inbox(InboxAnswer::Standing))
                 .count()
         };
         assert!(apply_inbox(
@@ -10243,7 +10516,7 @@ mod tests {
     #[test]
     fn a_wrong_format_version_is_refused() {
         let bytes = encode_journal(&two_turns(), &[0; 32]).unwrap();
-        for version in [0u16, 2, u16::MAX] {
+        for version in [0u16, 3, u16::MAX] {
             let mut other = bytes.clone();
             other[4..6].copy_from_slice(&version.to_le_bytes());
             assert_eq!(decode_journal(&other).unwrap_err(), "format version");
@@ -10942,31 +11215,35 @@ mod tests {
             VisibleRecord::PlanExitAsked,
             "the note is ready"
         ));
-        assert!(record_visible(
-            &mut journal,
-            VisibleRecord::SpillPointer,
-            "notes.txt"
-        ));
+        journal.events.push(SurfaceNode {
+            role: Role::User,
+            text: String::new(),
+            source: NodeSource::Spill {
+                resource: "localhost://Users/self/Documents/notes.txt".to_string(),
+                version: 1,
+            },
+        });
         assert_eq!(journal.epoch, epoch);
         assert_eq!(journal.steps.len(), steps);
         assert!(compact(&mut journal, COMPACTION_SUMMARY));
         assert!(journal.events.iter().all(|node| node.text != "second turn"));
+        assert!(journal
+            .events
+            .iter()
+            .any(|node| { node.source == NodeSource::Goal && node.text == "finish the note" }));
         assert!(journal.events.iter().any(|node| {
-            node.source == NodeSource::Person && node.text == "goal\nfinish the note"
+            node.source == NodeSource::Todo && node.text == "keep the note current"
         }));
         assert!(journal.events.iter().any(|node| {
-            node.source == NodeSource::Person && node.text == "todo\nkeep the note current"
+            node.source == NodeSource::PlanEntered && node.text == "edit the note"
         }));
         assert!(journal.events.iter().any(|node| {
-            node.source == NodeSource::Person && node.text == "plan-entered\nedit the note"
-        }));
-        assert!(journal.events.iter().any(|node| {
-            node.source == NodeSource::Person && node.text == "plan-exit-asked\nthe note is ready"
+            node.source == NodeSource::PlanExitAsked && node.text == "the note is ready"
         }));
         assert!(journal
             .events
             .iter()
-            .any(|node| node.source == NodeSource::Person && node.text == "spill\nnotes.txt"));
+            .any(|node| matches!(node.source, NodeSource::Spill { .. })));
         assert_eq!(journal.steps.len(), steps);
         let denied = propose_step(&mut journal);
         assert!(!apply_inbox(
@@ -11045,11 +11322,11 @@ mod tests {
         assert!(journal
             .events
             .iter()
-            .any(|node| { node.source == NodeSource::Person && node.text == "inbox\nstanding" }));
+            .any(|node| { node.source == NodeSource::Inbox(InboxAnswer::Standing) }));
         let saved = model_bytes(&journal.events).unwrap();
         assert!(saved
-            .windows(b"inbox\nstanding".len())
-            .any(|window| window == b"inbox\nstanding"));
+            .windows(b"inbox: standing".len())
+            .any(|window| window == b"inbox: standing"));
         assert!(!saved
             .windows(b"fixture-grant".len())
             .any(|window| window == b"fixture-grant"));
@@ -11093,7 +11370,11 @@ mod tests {
             Some("hello from the project")
         );
         assert!(journal.events.iter().any(|node| {
-            node.source == NodeSource::Person && node.text == format!("spill\n{notes}\n1")
+            node.source
+                == NodeSource::Spill {
+                    resource: notes.to_string(),
+                    version: 1,
+                }
         }));
         let moved = propose_edit(
             &mut journal,
@@ -11136,10 +11417,18 @@ mod tests {
             Some("hello from the project")
         );
         assert!(journal.events.iter().any(|node| {
-            node.source == NodeSource::Person && node.text == format!("spill\n{notes}\n1")
+            node.source
+                == NodeSource::Spill {
+                    resource: notes.to_string(),
+                    version: 1,
+                }
         }));
         assert!(journal.events.iter().any(|node| {
-            node.source == NodeSource::Person && node.text == format!("spill\n{notes}\n2")
+            node.source
+                == NodeSource::Spill {
+                    resource: notes.to_string(),
+                    version: 2,
+                }
         }));
         let style = "localhost://Users/self/Projects/demo/style.css";
         assert!(observe(&mut journal, style, 1, "body{}"));
@@ -11207,8 +11496,11 @@ mod tests {
         );
         journal.events.push(SurfaceNode {
             role: Role::User,
-            text: format!("spill\n{notes}\n9"),
-            source: NodeSource::Person,
+            text: String::new(),
+            source: NodeSource::Spill {
+                resource: notes.to_string(),
+                version: 9,
+            },
         });
         assert_eq!(
             text_at_spill(&journal.events, notes).as_deref(),
@@ -14331,33 +14623,29 @@ mod tests {
     }
 
     #[test]
-    fn an_observation_row_with_an_unknown_word_is_not_a_read() {
-        let row = |head: &str, text: &str| {
-            let hash = sha256(text.as_bytes());
-            let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
-            SurfaceNode {
-                role: Role::User,
-                text: format!("1 {hex} {NOTES}{head}\n{text}"),
-                source: NodeSource::Observation,
-            }
+    fn an_observation_whose_fields_do_not_fit_is_not_a_read() {
+        let row = |revision: Option<&str>, window: Option<(u64, u64)>, cut: bool, text: &str| {
+            observation_node(NOTES, 1, revision, window, cut, text)
         };
-        assert!(read_observation(&row("", "a\n")).is_some());
-        assert!(read_observation(&row(" revision=r", "a\n")).is_some());
-        assert!(read_observation(&row(" revision=r lines=2+1", "a\n")).is_some());
-        assert!(read_observation(&row(" revision=r lines=2+1 cut", "a\nb")).is_some());
-        for (head, text) in [
-            (" extra", "a\n"),
-            (" revision=r revision=r", "a\n"),
-            (" revision=", "a\n"),
-            (" lines=2+1", "a\n"),
-            (" revision=r lines=0+1", "a\n"),
-            (" revision=r lines=2+2", "a\n"),
-            (" revision=r lines=2+1 cut", "a\n"),
-            (" revision=r cut", "a\nb"),
-            (" revision=r lines=2", "a\n"),
-            (" revision=r lines=2+1 lines=2+1", "a\n"),
-        ] {
-            assert_eq!(read_observation(&row(head, text)), None, "{head:?}");
+        assert!(read_observation(&row(None, None, false, "a\n")).is_some());
+        assert!(read_observation(&row(Some("r"), None, false, "a\n")).is_some());
+        assert!(read_observation(&row(Some("r"), Some((2, 1)), false, "a\n")).is_some());
+        assert!(read_observation(&row(Some("r"), Some((2, 1)), true, "a\nb")).is_some());
+        for (index, node) in [
+            row(Some(""), None, false, "a\n"),
+            row(Some("r s"), None, false, "a\n"),
+            row(Some("r=s"), None, false, "a\n"),
+            row(None, Some((2, 1)), false, "a\n"),
+            row(Some("r"), Some((0, 1)), false, "a\n"),
+            row(Some("r"), Some((2, 2)), false, "a\n"),
+            row(Some("r"), Some((2, 1)), true, "a\n"),
+            row(Some("r"), None, true, "a\nb"),
+            observation_node("", 1, None, None, false, "a\n"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(read_observation(&node), None, "case {index}");
         }
     }
 
@@ -14562,7 +14850,7 @@ mod tests {
             .events
             .iter()
             .filter(|node| is_refusal_record(node))
-            .map(|node| node.text.clone())
+            .map(render_record)
             .collect()
     }
 
@@ -14615,7 +14903,7 @@ mod tests {
                 records
                     .last()
                     .unwrap()
-                    .starts_with(&format!("refused\n{reason}\n")),
+                    .starts_with(&format!("refused: {reason} (")),
                 "{reason}"
             );
             assert_eq!(journal.steps, steps, "{reason}");
@@ -14639,11 +14927,7 @@ mod tests {
         window: Option<(u64, u64)>,
         text: &str,
     ) -> SurfaceNode {
-        SurfaceNode {
-            role: Role::User,
-            text: bound_observation_record(resource, version, revision, window, false, text),
-            source: NodeSource::Observation,
-        }
+        bound_observation_record(resource, version, revision, window, false, text)
     }
 
     /// Decode does not check that a version keeps one revision, so a stored
@@ -14909,7 +15193,7 @@ mod tests {
         );
         assert!(refusal_records(&journal)
             .iter()
-            .all(|record| record.starts_with("refused\npath not NFC\n")
+            .all(|record| record.starts_with("refused: path not NFC (")
                 && !record.contains("cafe\u{301}")));
         assert_eq!(refusal_records(&journal).len(), 2);
         // The NFC name works and is one file with its upper case.
@@ -15321,7 +15605,7 @@ mod tests {
                     records
                         .last()
                         .unwrap()
-                        .starts_with(&format!("refused\n{}\n", refusal.reason())),
+                        .starts_with(&format!("refused: {} (", refusal.reason())),
                     "{refusal:?} case {index}"
                 );
                 assert_eq!(
