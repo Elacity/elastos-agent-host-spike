@@ -3721,6 +3721,281 @@
    "tests": [
     "tests::a_child_host_touches_only_what_its_child_was_granted"
    ]
+  },
+  {
+   "id": "RV01",
+   "title": "the plain authorize grants a child",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            .any(|step| step.id == id && step.kind == ProposalKind::Child)\n        && authorize_step(journal, id, grant)",
+     "new": "            .any(|step| step.id == id && false)\n        && authorize_step(journal, id, grant)"
+    }
+   ],
+   "tests": [
+    "tests::the_plain_authorize_never_grants_a_child"
+   ]
+  },
+  {
+   "id": "RV02",
+   "title": "a denied or cancelled child in the chain stays usable",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            Some(StepState::Prepared | StepState::Dispatched) => {}\n            Some(StepState::Denied) => return Err(\"denied\"),\n            _ => return Err(\"stopped\"),",
+     "new": "            _ => {}"
+    }
+   ],
+   "tests": [
+    "tests::a_denied_child_does_nothing_more"
+   ]
+  },
+  {
+   "id": "RV03",
+   "title": "a denied child is refused as stopped, not denied",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            Some(StepState::Denied) => return Err(\"denied\"),\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::a_denied_child_does_nothing_more"
+   ]
+  },
+  {
+   "id": "RV04",
+   "title": "the plain cancel on a child records no stop",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        step.id == id && step.kind == ProposalKind::Child && step.state == StepState::Prepared",
+     "new": "        false"
+    }
+   ],
+   "tests": [
+    "tests::the_plain_cancel_on_a_child_stops_it"
+   ]
+  },
+  {
+   "id": "RV05",
+   "title": "a granted child may be granted again",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if child.grant.is_some() {\n        return false;\n    }",
+     "new": "    if false {\n        return false;\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_granted_scope_stands_only_while_every_step_above_grants_it"
+   ]
+  },
+  {
+   "id": "RV06",
+   "title": "a scope stands though a step above no longer grants it",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if !granted_scope(above).is_some_and(|wider| resource_covers(wider, scope)) {\n            return None;",
+     "new": "        if false {\n            return None;"
+    }
+   ],
+   "tests": [
+    "tests::a_granted_scope_stands_only_while_every_step_above_grants_it"
+   ]
+  },
+  {
+   "id": "RV07",
+   "title": "a child grant checks only its parent's own scope",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    scope_still_granted(journal, parent).is_some_and(|scope| resource_covers(scope, grant_resource))",
+     "new": "    granted_scope(parent).is_some_and(|scope| resource_covers(scope, grant_resource))"
+    }
+   ],
+   "tests": [
+    "tests::a_granted_scope_stands_only_while_every_step_above_grants_it"
+   ]
+  },
+  {
+   "id": "RV08",
+   "title": "a host checks only its child's own scope",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    scope_still_granted(parent, child).ok_or(\"not granted\")",
+     "new": "    granted_scope(child).ok_or(\"not granted\")"
+    }
+   ],
+   "tests": [
+    "tests::a_granted_scope_stands_only_while_every_step_above_grants_it"
+   ]
+  },
+  {
+   "id": "RV09",
+   "title": "a model call may be a parent",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if !matches!(parent.kind, ProposalKind::Run | ProposalKind::Child) {",
+     "new": "    if false {"
+    }
+   ],
+   "tests": [
+    "tests::a_model_call_is_not_a_parent"
+   ]
+  },
+  {
+   "id": "RV10",
+   "title": "a commit drops child records written during the compaction",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    replacement.extend(child_records_since_compaction(journal));\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::child_records_survive_an_open_compaction"
+   ]
+  },
+  {
+   "id": "RV11",
+   "title": "a crash restore drops child records written during the compaction",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    saved.extend(carried);\n",
+     "new": "    let _ = carried;\n"
+    }
+   ],
+   "tests": [
+    "tests::child_records_survive_an_open_compaction"
+   ]
+  },
+  {
+   "id": "RV12",
+   "title": "a prepared step at or before the cancel point loads",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            && (journal.cancelled_from.is_some_and(|last| step.id <= last)\n                ||",
+     "new": "            && (false\n                ||"
+    }
+   ],
+   "tests": [
+    "tests::a_prepared_step_where_a_stop_reached_is_refused_on_load"
+   ]
+  },
+  {
+   "id": "RV13",
+   "title": "a prepared step below a stopped child loads",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                || chain_stopped(journal, &child_chain(journal, step.parent_id)))",
+     "new": "                || false)"
+    }
+   ],
+   "tests": [
+    "tests::a_prepared_step_where_a_stop_reached_is_refused_on_load"
+   ]
+  },
+  {
+   "id": "RV14",
+   "title": "the cancel point itself may stay prepared",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "journal.cancelled_from.is_some_and(|last| step.id <= last)",
+     "new": "journal.cancelled_from.is_some_and(|last| step.id < last)"
+    }
+   ],
+   "tests": [
+    "tests::a_prepared_step_where_a_stop_reached_is_refused_on_load"
+   ]
+  },
+  {
+   "id": "RV15",
+   "title": "the depth limit refuses children from before idea 2 on load",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if step.budget.is_some()\n        && depth_under(journal, step.parent_id) > usize::from(CHILD_DEPTH_LIMIT)",
+     "new": "    if true\n        && depth_under(journal, step.parent_id) > usize::from(CHILD_DEPTH_LIMIT)"
+    }
+   ],
+   "tests": [
+    "tests::an_older_deep_child_chain_still_loads"
+   ]
+  },
+  {
+   "id": "RV16",
+   "title": "a host is not bound to its child",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if host.host_of != Some(child_id)\n        ||",
+     "new": "    if false\n        ||"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_is_bound_to_its_child"
+   ]
+  },
+  {
+   "id": "RV17",
+   "title": "open_child_host does not record its child",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    host.host_of = Some(child_id);\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::a_child_grant_is_narrower_and_does_not_inherit_the_parent_grant",
+    "tests::a_child_host_gets_nothing_once_its_child_stops",
+    "tests::a_child_host_is_bound_to_its_child",
+    "tests::a_child_host_touches_only_what_its_child_was_granted"
+   ]
   }
  ]
 }
