@@ -1310,6 +1310,9 @@ function configureAiProvider() {
     if (!hasShellAccess()) return;
     setBusy(true);
     showState("", "");
+    // The check sends the typed key, or with a blank field a key staged by an earlier check.
+    const checksStagedKey = Boolean(keyInput.value.trim())
+      || Boolean(latestStatus?.staged_connections?.some((entry) => entry.id === editingId));
     try {
       // Validation and Save use the same Runtime connection identity.
       if (!editingId) editingId = `model:hosted-${crypto.randomUUID().replaceAll("-", "")}`;
@@ -1322,15 +1325,20 @@ function configureAiProvider() {
     } catch (error) {
       const message = hostedProviderValidationError(error);
       showState(message, message === HOSTED_KEY_CHECK_PENDING ? "" : "error");
-      // Runtime staged the key before the provider refused it; remove it the way Discard
-      // does and start the next check as a new connection. A saved connection keeps its
-      // key and approval.
-      if (message === HOSTED_KEY_REJECTED && !latestStatus?.connections?.some((entry) => entry.id === editingId)) {
-        await hostedFetch("/api/apps/system/ai-provider/staged", {
-          method: "DELETE", headers: shellHeaders({ "content-type": "application/json" }),
-          body: JSON.stringify({ id: editingId }),
-        }).catch(() => {});
-        editingId = "";
+      // Runtime stages the checked key before the provider answers. Remove a refused key
+      // the way Discard does, so a later Save with a blank field cannot send it; this also
+      // ends the connection's approval, so a saved connection needs Inbox review again.
+      if (message === HOSTED_KEY_REJECTED && checksStagedKey) {
+        try {
+          await hostedFetch("/api/apps/system/ai-provider/staged", {
+            method: "DELETE", headers: shellHeaders({ "content-type": "application/json" }),
+            body: JSON.stringify({ id: editingId }),
+          });
+          // An unsaved connection starts its next check as a new one.
+          if (!latestStatus?.connections?.some((entry) => entry.id === editingId)) editingId = "";
+        } catch {
+          showState("The rejected key could not be removed. Use Discard on its card.", "error");
+        }
       }
     } finally {
       await refreshStatus().catch(() => {});

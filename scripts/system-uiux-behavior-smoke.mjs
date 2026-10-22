@@ -280,6 +280,7 @@ async function main() {
   let hostedStatus = null;
   let hostedReads = 0;
   const discardedStaged = [];
+  let failStagedDiscard = false;
   summaryAppearance = appearanceRecord();
   let appearanceInFlight = 0;
   let maxAppearanceInFlight = 0;
@@ -439,9 +440,17 @@ async function main() {
         return;
       }
       if (url.pathname === "/api/apps/system/ai-provider/staged" && request.method() === "DELETE") {
+        if (failStagedDiscard) {
+          await route.fulfill({ status: 500, contentType: "text/plain", headers: CORS_HEADERS, body: "staged hosted connection unavailable" });
+          return;
+        }
         const { id } = request.postDataJSON();
         discardedStaged.push(id);
-        hostedStatus = { ...hostedStatus, staged_connections: hostedStatus.staged_connections.filter((entry) => entry.id !== id) };
+        // Discard ends the connection's decisions: a saved connection needs Inbox review again.
+        hostedStatus = { ...hostedStatus,
+          connections: (hostedStatus.connections || []).map((entry) => entry.id === id
+            ? { ...entry, egress_state: "consent_required", egress_approval_state: "none" } : entry),
+          staged_connections: hostedStatus.staged_connections.filter((entry) => entry.id !== id) };
         await route.fulfill({ status: 200, contentType: "application/json", headers: CORS_HEADERS, body: "{\"discarded\":true}" });
         return;
       }
@@ -983,6 +992,33 @@ async function main() {
     await frame.waitForFunction(() => [...document.querySelectorAll("#ai-provider-instances details button")]
       .some((node) => node.textContent === "End hosted approval")
       && document.querySelector('[data-field="ai-provider-state"]')?.textContent === "");
+
+    // A key rejected while editing a saved connection is removed; the card then needs Inbox review.
+    await frame.click("#ai-provider-instances .ai-provider-instance >> text=Edit");
+    await frame.fill("#ai-provider-key", "rejected-key");
+    await frame.click("#ai-provider-validate");
+    await frame.waitForFunction(() => document.querySelector('[data-field="ai-provider-state"]')?.textContent
+      === "The provider rejected this key." && document.querySelector("#ai-provider-cancel").textContent === "Cancel");
+    assert(
+      discardedStaged.at(-1) === "model:hosted-22222222222222222222222222222222",
+      "System kept a key rejected while editing a saved connection",
+      { discardedStaged },
+    );
+    await frame.click("#ai-provider-cancel");
+    await frame.waitForFunction(() => document.querySelector("#ai-provider-instances .ai-provider-state")
+      ?.textContent?.trim() === "Needs Inbox review");
+
+    // A rejected key that cannot be removed is reported and stays on its card with Discard.
+    failStagedDiscard = true;
+    await frame.click("#ai-provider-add");
+    await frame.fill("#ai-provider-key", "test");
+    await frame.click("#ai-provider-validate");
+    await frame.waitForFunction(() => document.querySelector('[data-field="ai-provider-state"]')?.textContent
+      === "The rejected key could not be removed. Use Discard on its card."
+      && document.querySelector("#ai-provider-cancel").textContent === "Close");
+    await frame.click("#ai-provider-cancel");
+    await frame.waitForSelector("#ai-provider-instances .ai-provider-instance >> text=Discard staged key");
+    failStagedDiscard = false;
 
     assert(
       appearancePlans.length === 0,

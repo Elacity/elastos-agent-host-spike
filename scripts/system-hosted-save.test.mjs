@@ -30,7 +30,7 @@ function fixture(connections = [], guest = false, staged = [], status = {}) {
   let timerId = 0, gate = null;
   let stagedConnections = staged.slice();
   let rejectActivation = true;
-  let consentPending = false, rejectKey = false;
+  let consentPending = false, rejectKey = false, failDiscard = false;
   const stateNode = element();
   const document = {
     hidden: false, querySelector: node, createElement: element,
@@ -56,6 +56,7 @@ function fixture(connections = [], guest = false, staged = [], status = {}) {
         return { approval: "ended" };
       }
       if (init.method === "DELETE" && _url.endsWith("/staged")) {
+        if (failDiscard) throw new Error("request failed: 500 staged hosted connection unavailable");
         const { id } = JSON.parse(init.body);
         discarded.push(id);
         stagedConnections = stagedConnections.filter(entry => entry.id !== id);
@@ -70,8 +71,11 @@ function fixture(connections = [], guest = false, staged = [], status = {}) {
       const body = JSON.parse(init.body);
       attempts.push(body);
       if (rejectKey && _url.endsWith("/validate")) {
-        // Runtime stages the key before the provider answers (system_ai_provider_validate).
-        stagedConnections.push({ id: body.id, provider: body.provider, has_saved_model: false });
+        // Runtime stages the checked key (typed, earlier staged, or saved) before the provider answers.
+        if (!stagedConnections.some(entry => entry.id === body.id)) {
+          stagedConnections.push({ id: body.id, provider: body.provider,
+            has_saved_model: connections.some(entry => entry.id === body.id) });
+        }
         throw new Error("request failed: 400 invalid OpenRouter key");
       }
       if (consentPending) {
@@ -102,7 +106,8 @@ function fixture(connections = [], guest = false, staged = [], status = {}) {
     message: event => listeners.get("message")(event),
     shown: () => listeners.get("document:visibilitychange")(),
     activate: () => { rejectActivation = false; }, pending: () => { consentPending = true; },
-    rejectKey: () => { rejectKey = true; } };
+    rejectKey: () => { rejectKey = true; }, failDiscard: () => { failDiscard = true; },
+    staged: () => stagedConnections };
 }
 
 test("saved hosted connections keep management controls while Inbox owns access", async () => {
@@ -410,6 +415,58 @@ test("a key the provider rejects is not kept staged; a check waiting for Inbox k
   assert.equal(g.messages.at(-1), "Approve this connection in Inbox, then check the key again.");
   assert.deepEqual(g.discarded, []);
   assert.equal(g.node("#ai-provider-cancel").textContent, "Close");
+});
+
+test("a key the provider rejects while editing a saved connection is discarded; Save with a blank field cannot send it", async () => {
+  const saved = { ...veniceCard(), ...APPROVED, provider: "openrouter", processor_label: "OpenRouter" };
+  const f = fixture([saved]);
+  await new Promise(setImmediate);
+  f.node("#ai-provider-instances").children[0].children[2].children.find(node => node.textContent === "Edit").handlers.click();
+  f.rejectKey();
+  f.node("#ai-provider-key").value = "rejected-key";
+  await f.node("#ai-provider-validate").handlers.click();
+  assert.equal(f.messages.at(-1), "The provider rejected this key.");
+  assert.deepEqual(f.discarded, [saved.id]);
+  assert.deepEqual(f.staged(), []);
+  assert.equal(f.node("#ai-provider-cancel").textContent, "Cancel");
+  f.node("#ai-provider-key").value = "";
+  f.activate();
+  await f.node("#ai-provider-save").handlers.click();
+  const save = f.attempts.at(-1);
+  assert.equal(save.id, saved.id, "Edit keeps its saved connection");
+  assert.equal(save.api_key, "");
+  assert.deepEqual(f.staged(), [], "no rejected key is left for a blank-field Save to send");
+});
+
+test("a blank-field check of the saved key that the provider rejects removes nothing", async () => {
+  const saved = { ...veniceCard(), ...APPROVED, provider: "openrouter", processor_label: "OpenRouter" };
+  const f = fixture([saved]);
+  await new Promise(setImmediate);
+  f.node("#ai-provider-instances").children[0].children[2].children.find(node => node.textContent === "Edit").handlers.click();
+  f.rejectKey();
+  await f.node("#ai-provider-validate").handlers.click();
+  assert.deepEqual(f.discarded, []);
+  assert.equal(f.messages.at(-1), "The provider rejected this key.");
+  assert.equal(f.stateNode.dataset.tone, "error");
+});
+
+test("a rejected key that cannot be removed is reported and stays on its card", async () => {
+  const f = fixture();
+  f.rejectKey();
+  f.failDiscard();
+  f.node("#ai-provider-add").handlers.click();
+  f.node("#ai-provider-key").value = "test";
+  await f.node("#ai-provider-validate").handlers.click();
+  const id = f.attempts[0].id;
+  assert.equal(f.messages.at(-1), "The rejected key could not be removed. Use Discard on its card.");
+  assert.equal(f.stateNode.dataset.tone, "error");
+  assert.equal(f.node("#ai-provider-cancel").textContent, "Close", "the form keeps the staged connection");
+  assert.equal(f.node("#ai-provider-kind").disabled, true);
+  f.node("#ai-provider-cancel").handlers.click();
+  const card = f.node("#ai-provider-instances").children[0];
+  assert.equal(card.children[0].textContent, "openrouter · Key check needed");
+  assert.equal(card.children[2].textContent, "Discard staged key");
+  assert.deepEqual(f.staged().map(entry => entry.id), [id]);
 });
 
 test("a live refresh that changes the cards clears an earlier success line; a neutral line stays", async () => {
