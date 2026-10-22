@@ -324,8 +324,12 @@ in place, and stay connected to the network Home updates over.
    a connection to it, Home may not start until the connection is back.
 3. Two cases are not repaired this way: an `elastos update` that stopped while
    it was finishing, and a System update that stopped while it was replacing an
-   app. The command then stops with the same message every time. Follow
-   [If recovery keeps failing](#if-recovery-keeps-failing).
+   app. The command a message names then stops with the same message every
+   time. Do not delete or move any files. Ask for help in
+   [GitHub issues](https://github.com/Elacity/elastos-runtime/issues) and
+   include the output of `elastos --version` and the exact message. We are
+   fixing this in a later update
+   ([#108](https://github.com/Elacity/elastos-runtime/issues/108)).
 
 A Home with an installed update controller keeps its controller Runtime and
 private receipt in the data directory. The controller of the version that runs
@@ -357,8 +361,29 @@ message and run the retained controller:
 ```
 
 If it reports that the previous Home start was already attempted, the previous
-release is already back in place. Follow
-[If recovery keeps failing](#if-recovery-keeps-failing).
+release is already back in place. Stop every `elastos` process of this Home and
+move these files out of the way. Several have the same name, so make a folder
+of your own with the subfolders `bin`, `data` and `installation`, and move each
+file into the subfolder named below (keep them; do not delete them):
+
+- `bin`: from next to the installed `elastos` binary,
+  `.elastos.update-journal.json`, `.elastos.update-stage` and
+  `.elastos.update-rollback`
+- `data`: from the data directory, `.elastos.update-stage`,
+  `.elastos.update-rollback`, `.elastos.update-support` and
+  `update-controller/active-request.json`
+- `installation`: from the data directory's `installation` folder,
+  `.elastos.update-stage` and `.elastos.update-rollback`
+
+Then run the install command as the same user, with the same `HOME` (and on
+Linux the same `XDG_DATA_HOME`) as this Home, and add
+`-s -- --install-dir <folder>` when the `elastos` binary is not in
+`~/.local/bin`:
+`curl -fsSL https://elastos.elacitylabs.com/install.sh | bash`. The installer
+finds the data directory from `HOME` and `XDG_DATA_HOME` (it ignores
+`ELASTOS_RECOVERY_DATA`). It installs the current release and runs
+`elastos setup`, and keeps that data directory and its identity. Start Home
+with `elastos home --browser`.
 
 The receipt keeps Home paths, locale, desktop opener settings and Runtime launch
 bindings. It also retains the configured Wallet price API key, which Wallet reads
@@ -374,45 +399,6 @@ ownership keeps its recovery step.
 
 Operators can install one known signed release head with
 `elastos update --head-cid CID`.
-
-#### If recovery keeps failing
-
-Use these steps when the command a message names stops with the same message
-every time. They keep your data and identity. Stop every `elastos` process of
-this Home and move these files out of the way. The data directory is listed
-under [Installed files](#installed-files). Several files have the same name, so
-make a folder of your own with the subfolders `bin`, `data` and `installation`,
-and move each file into the subfolder named below (keep them; do not delete
-them):
-
-- `bin`: from next to the installed `elastos` binary,
-  `.elastos.update-journal.json`, `.elastos.update-stage` and
-  `.elastos.update-rollback`
-- `data`: from the data directory, `.elastos.update-stage`,
-  `.elastos.update-rollback`, `.elastos.update-support`,
-  `update-controller/active-request.json` and, if present,
-  `update-controller/request.json`
-- `installation`: from the data directory's `installation` folder,
-  `.elastos.update-stage` and `.elastos.update-rollback`
-
-Then run the install command with `--install-only`, as the same user, with the
-same `HOME` (and on Linux the same `XDG_DATA_HOME`) as this Home. Add
-`--install-dir <folder>` when the `elastos` binary is not in `~/.local/bin`.
-
-```bash
-curl -fsSL https://elastos.elacitylabs.com/install.sh | bash -s -- --install-only
-```
-
-The installer finds the data directory from `HOME` and `XDG_DATA_HOME` (it
-ignores `ELASTOS_RECOVERY_DATA`). It installs the current release and keeps that
-data directory and its identity.
-
-An app can be left half replaced, so also move the `capsules` and `tools`
-folders from the data directory into your `data` subfolder. They hold only
-installed apps and tools; your files and app data stay elsewhere in the data
-directory. Then run `elastos setup`, which installs them again from the signed
-release. If you added components with `elastos setup --with`, run that again
-too. Start Home with `elastos home --browser`.
 
 ## Compare and change the release signer
 
