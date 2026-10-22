@@ -114,7 +114,7 @@ todos:
     content: "Done for the Home list. The guest version list names both page wordings and does not grant. Sasha saw the Versions list on a running Home on 13 Oct. cargo is not in the image; that part moved to exec-cargo-in-image. Closed in S0."
     status: completed
   - id: exec-cargo-in-image
-    content: "Section 7. cargo is not in the VM image. The provider runs only true, false, or vm-smoke, and refuses cargo test before launch (exec_vm test cargo_is_not_in_the_image_and_an_unknown_command_does_not_launch). A+ needs a rootfs that can run cargo test under the same grant. Mac only."
+    content: "Section 7. cargo is not in the VM image. The provider runs only true, false, or vm-smoke, and refuses cargo test before launch (exec_vm test cargo_is_not_in_the_image_and_an_unknown_command_does_not_launch). Since #27 the image is built from this repo (examples/exec-image), the exit code comes only from a vsock report the command cannot write, and the command runs unprivileged. A+ needs a rootfs that can run cargo test under the same grant. Mac only; no Runtime change needed."
     status: pending
   - id: b8-snapshots
     content: "B8 done. admit_snapshot appends workspace, time, and open files as User snapshots. Empty workspace or time is refused. Empty open files adds no third node."
@@ -165,10 +165,10 @@ todos:
     content: "Done locally. A component read with no grant is Denied before the bridge. The resource bridge already returns missing_token and does not call the provider. No new HTTP route. No push."
     status: completed
   - id: hold-usersai
-    content: "Section 12. Durable journal is a Runtime resource under UsersAI, written by the host, not a path inside the guest. S3 (20 Oct): under Users/self/.AppData/Agents/ for now; bridge rules (PR #8) and guest append and resume (claude/s3-guest-journal) are in. Option B (20 Oct): the guest asks for write and read grants on its own journal with the capabilities import; the manifest declares only .AppData/Agents/agent-host/*. Still open: the end-to-end Wasmtime test through the real bridge."
+    content: "Section 12. Durable journal is a Runtime resource under UsersAI, written by the host, not a path inside the guest. S3 (20 Oct): under Users/self/.AppData/Agents/ for now; bridge rules (PR #8) and guest append and resume (claude/s3-guest-journal) are in. Option B (20 Oct): the guest asks for write and read grants on its own journal with the capabilities import; the manifest declares only .AppData/Agents/agent-host/*. The end-to-end Wasmtime test through the real bridge merged in #20 (the_agent_host_writes_and_reads_its_journal_through_the_real_bridge, the_agent_host_stores_nothing_when_its_journal_grants_are_denied). Still open (re-score, 22 Oct): the UsersAI root itself; the journal stays under Users/self by decision. Needs Runtime/Anders."
     status: pending
   - id: hold-adversarial
-    content: "Section 12. Independent adversarial review, VERDICT PASS, from another model family, on that exact head, before any push."
+    content: "Section 12. Independent adversarial review, VERDICT PASS, from another model family, on that exact head, before any push. Re-score (22 Oct): Codex reviews are recorded for #8, #24 and #27, the S3 PRs stopped for Codex before merging, and #30 had a Codex PASS, but no review file records a verdict on an exact head. Needs Sasha, no Runtime change."
     status: pending
   - id: hold-prompt-no-tools
     content: "Locked. The Assistant capsule smoke requires the live prompt to say there are no tools and no capsule authority."

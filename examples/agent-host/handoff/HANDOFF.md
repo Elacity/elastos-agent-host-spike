@@ -57,6 +57,7 @@ The task log called the spike "about 43 of 70" on 13 Oct. That was a rough total
 - Guest hash is per machine type (S0 review). Cargo's symbol hashes depend on the build machine, and they change both the `name` section and the code bytes. Reference hashes for the 19 Oct source: Mac aarch64 `fe9bcaa48669b10c9e7633f9ba7f34db1fcc65fa0dcc41ea1517c2dfc10f60c5`, Linux x86_64 `e34772d1a03a24327eea7626ba4928e19dfb13d214d14c2b70a42d698bc489a1`. In a report, give the Linux hash from two builds and the output of `python3 examples/agent-host/handoff/tools/wasm_sections.py examples/agent-host/agent-host.component.wasm`. Cursor rebuilds on the Mac. Do not change the build to make hashes match.
 - Checklist: 55 of 63 done (after S0, and after the S0b review reopened `prefix-phase-a-pack`).
 - Spike grade: 37 of 70, proven row by row in `reports/S0b-catch-up.md`. That is the baseline. A row goes up only with a named test and a falsifier.
+- Re-score at cee6d55 (22 Oct, `reports/grade-rescore.md`): **42 of 70** (rows 2, 5, 6 and 7 each +1, on top of S1's row 14). Target 62, DeepSeek Harness 46. Checklist 56 of 63.
 
 ## 3. Hard rules
 
