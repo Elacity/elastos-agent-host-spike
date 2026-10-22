@@ -21,7 +21,9 @@ Principles:   12 docs, code and tests agree: each point names its test and its f
 DeepSeek:     none (the DeepSeek column is the 12 Oct canvas, unchanged).
 Not proven:   listed per row. #21 and #23 merged into spike/photo-viewer, not spike/agent-host, so their tests are
               not counted here (row 14, below).
-Questions:    1. hold-usersai: mark it complete under the Users/self decision (S3, 20 Oct), or keep it open for the
+Answers:      Sasha, 22 Oct (see "Update" at the end): hold-usersai stays open; hold-adversarial gets one review
+              record per merged slice (template added); photo PRs do not count toward the agent-host grade.
+Questions:    (answered) 1. hold-usersai: mark it complete under the Users/self decision (S3, 20 Oct), or keep it open for the
                  UsersAI root? I kept it open.
               2. hold-adversarial: the record shows Codex (GPT family) reviews of #8, #24 and #27 (reports and
                  LOG), the S3 reports stop for Codex on #8, #9 and #20, and you reported Codex PASS for #30. No
@@ -124,8 +126,8 @@ No status moves. The seven open items, each with what it needs:
 | `prefix-aplus-hit` | Still true: `--cache-ram` is 0; no cache hit measured in Home. | Runtime (model provider admission) |
 | `compact-aplus-model` | Still true: the guest does not call a model. | Runtime (a model grant with a budget) |
 | `exec-cargo-in-image` | **Reworded:** the image is now built from this repo (`examples/exec-image`, #27), with an unforgeable exit channel; `cargo` is still not in it. | no Runtime needed (Mac) |
-| `hold-usersai` | **Stale, reworded:** the end-to-end test through the real bridge merged in #20. What is left is the `UsersAI` root itself (the journal is under `Users/self/.AppData/Agents/` by decision). Question 1. | Runtime/Anders (UsersAI root) |
-| `hold-adversarial` | **Reworded:** Codex (GPT family) reviews are recorded for #8, #24 and #27, the S3 PRs stopped for Codex before merging, and #30 had a Codex PASS; no review file records a verdict on an exact head. Question 2. | Sasha (no Runtime change) |
+| `hold-usersai` | **Stale, reworded:** the end-to-end test through the real bridge merged in #20. What is left: per-principal UsersAI root (Sasha, 22 Oct: keep open). | Runtime (Anders) |
+| `hold-adversarial` | **Reworded:** Codex (GPT family) reviews are recorded for #8, #24 and #27, the S3 PRs stopped for Codex before merging, and #30 had a Codex PASS; no review file records a verdict on an exact head. Sasha, 22 Oct: one record per merged slice, `handoff/reviews/<PR>-<short head>.md`, from `reviews/TEMPLATE.md`; Cursor sends the past verdicts. | Sasha and Cursor (no Runtime change) |
 | `sell-second-home` | Still true. | Anders |
 
 ## Falsifier reruns at cee6d55
@@ -157,5 +159,15 @@ All at cee6d55 in a separate worktree, each alone, restored with `git checkout`,
 Three older mutations no longer match the code (S2d, J01, Q02): S2d and J01 were re-targeted as RS01 and RS02 with the
 same intent, and Q01 stands in for Q02. No mutation survived.
 
-**What is next:** Sasha reviews this PR. OMP idea 2 is already on its own branch (`claude/omp2-child-limits`, from
-cee6d55f5); it is finished next, as its own draft PR.
+## Update: Sasha's answers (22 Oct)
+
+Cursor: #33 is docs only.
+1. `hold-usersai` stays open, reworded "per-principal UsersAI root; needs Runtime (Anders)".
+2. `hold-adversarial`: one review record per merged slice in `handoff/reviews/<PR>-<short head>.md`, with the PR,
+   the exact head, the reviewer and AI family, the verdict, the date and a one-line finding summary. The template is
+   `handoff/reviews/TEMPLATE.md`. Cursor sends the past verdicts; they are not written here.
+3. The photo PRs (#21, #23) do not count toward the agent-host grade. The total stays 42 of 70.
+
+Checklist stays 56 of 63.
+
+**What is next:** Codex on #33 (docs only). OMP idea 2 is #31.
