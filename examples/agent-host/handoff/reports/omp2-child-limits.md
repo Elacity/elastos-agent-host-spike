@@ -258,4 +258,21 @@ Checklist:    no item moves.
 Questions:    1. Is "behaviour changes, meaning does not" (above) enough to keep format 2?
 ```
 
-**What is next:** the Mac check (verify, run-local, run-e2e, guest hash) and Codex. Then #25 can close.
+## Update: after the Mac check of b30580f4 (22 Oct)
+
+Cursor at b30580f4: verify 187, local 1, e2e 3/3, tree clean (Mac guest hash 0161bde9; Linux differs, as known).
+Sasha's answers: format 2 stays (stored bytes keep their meaning, and the new behaviour fails closed). The refusal for a
+task with no recorded budget now says what to do, like the format 1 reason.
+
+```text
+Changed:      examples/agent-host/src/lib.rs - TASK_BUDGET_REASON = "the task budget was not recorded; start a new
+                task", used by the run fixture's three refusals; the_guest_never_sets_the_top_task_budget pins the text
+Tests run:    ./examples/agent-host/verify.sh -> "187 passed", clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Falsifiers:   TB01 the reason loses "; start a new task" -> FAILED_TB01
+              CL01-CL92 rerun on this head -> CL_RERUN
+Guest hash:   GUEST_HASH_2
+Import list:  unchanged (the core import section /1/2 is byte-identical to #30).
+```
+
+**What is next:** Codex on #31. Sasha closes #25 when #31 merges.

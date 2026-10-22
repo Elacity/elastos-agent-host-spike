@@ -464,6 +464,10 @@ const JOURNAL_FORMAT: u16 = 2;
 /// The reason a stored format 1 journal is refused, shown to the person.
 #[cfg(any(test, target_arch = "wasm32"))]
 const FORMAT_1_REASON: &str = "journal format 1 not supported; start a new task";
+/// The reason a task with no recorded budget is refused, shown to the person.
+/// Like the format 1 reason, it says what to do.
+#[cfg(any(test, target_arch = "wasm32"))]
+const TASK_BUDGET_REASON: &str = "the task budget was not recorded; start a new task";
 /// Bytes cross the Runtime bridge as a JSON number array, up to four characters
 /// per byte ("255,"), inside a 1 MiB frame. 192 KiB of 0xFF fits; 256 KiB does not.
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -5409,7 +5413,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         let mut hosted = empty_journal();
         if !record_task_budget(&mut hosted, FIXTURE_TASK_BUDGET) {
             return Err(elastos::bus::types::BusError::Invalid(
-                "the task budget was not recorded".to_string(),
+                TASK_BUDGET_REASON.to_string(),
             ));
         }
         let model = "localhost://Models/hosted";
@@ -5434,7 +5438,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         let mut family = empty_journal();
         if !record_task_budget(&mut family, FIXTURE_TASK_BUDGET) {
             return Err(elastos::bus::types::BusError::Invalid(
-                "the task budget was not recorded".to_string(),
+                TASK_BUDGET_REASON.to_string(),
             ));
         }
         let parent = propose_run(
@@ -6687,7 +6691,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         let mut family = two_turns();
         if !record_task_budget(&mut family, FIXTURE_TASK_BUDGET) {
             return Err(elastos::bus::types::BusError::Invalid(
-                "the task budget was not recorded".to_string(),
+                TASK_BUDGET_REASON.to_string(),
             ));
         }
         let parent = propose_run(
@@ -17447,6 +17451,10 @@ mod tests {
 
     #[test]
     fn the_guest_never_sets_the_top_task_budget() {
+        assert_eq!(
+            TASK_BUDGET_REASON,
+            "the task budget was not recorded; start a new task"
+        );
         let mut journal = two_turns();
         let run = propose_run(&mut journal, DEMO, &["true".to_string()]).unwrap();
         assert!(authorize(&mut journal, run, Some("fixture-grant")));

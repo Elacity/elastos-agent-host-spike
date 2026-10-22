@@ -40,7 +40,8 @@ Source: OMP.md section 3 and reports/OMP-AUDIT.md row 2 (omp at `2220e58`):
 ### Budget (R2)
 
 - `Budget { requests, seconds }`. Zero in either part is never a budget.
-- **Top task:** `record_task_budget` records the budget the Runtime granted, once, as data. A second call, or a zero
+- **Top task:** `record_task_budget` records the budget the Runtime granted, once, as data. When it was not
+  recorded, the run refuses with `the task budget was not recorded; start a new task` (`TASK_BUDGET_REASON`). A second call, or a zero
   budget, changes nothing. No guest code path picks a value. Until the Runtime hands it over (RUNTIME-BUDGET.md),
   the guest fixture and the tests use `FIXTURE_TASK_BUDGET` and `FIXTURE_CHILD_BUDGET`; both are documented as never
   defaults.
