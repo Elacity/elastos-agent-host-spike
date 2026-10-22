@@ -139,8 +139,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    let child = usable_child(parent, child_id)?;",
-     "new": "    let child = parent.steps.iter().find(|step| step.id == child_id).ok_or(\"not a child\")?;"
+     "old": "    let child = usable_child(parent, child_id)?;\n    if path_refusal(resource).is_some()",
+     "new": "    let child = parent.steps.iter().find(|step| step.id == child_id).ok_or(\"not a child\")?;\n    if path_refusal(resource).is_some()"
     }
    ],
    "tests": [
