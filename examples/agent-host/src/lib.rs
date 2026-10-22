@@ -178,6 +178,10 @@ struct Step {
     requests_used: u32,
     /// Why this child stopped; the first reason is kept (Child steps only).
     stop: Option<StopReason>,
+    /// What a granted child may hand on: the resource it was granted, which
+    /// may be narrower than its own. Held in memory with the grant, never
+    /// stored; a reload grants again through the same checks.
+    grant_scope: Option<String>,
 }
 
 /// A budget: model calls (hosted or local, one counter) and wall time.
@@ -941,6 +945,7 @@ fn decode_step(payload: &[u8]) -> Result<Step, &'static str> {
         budget,
         requests_used,
         stop,
+        grant_scope: None,
     })
 }
 
@@ -1062,24 +1067,27 @@ fn decode_bytes(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static 
 #[cfg(any(test, target_arch = "wasm32"))]
 fn decode_journal(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static str> {
     let (journal, prev_head, head) = decode_bytes(bytes)?;
-    stored_paths_ok(&journal)?;
-    stored_children_ok(&journal)?;
+    stored_rules_ok(&journal)?;
     Ok((journal, prev_head, head))
+}
+
+/// Every rule a stored journal must keep, for every path that loads one:
+/// decode, reread and resume. One function, so no load path skips a rule.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn stored_rules_ok(journal: &Journal) -> Result<(), &'static str> {
+    stored_paths_ok(journal)?;
+    stored_children_ok(journal)
 }
 
 /// A stored journal keeps every child rule a live one does (OMP idea 2):
 /// - the journal's depth is within `CHILD_DEPTH_LIMIT`;
 /// - a parent link points at an earlier step; only children and model calls
 ///   have one, and a model call's parent is a child;
+/// - a child host journal (depth above 0) holds no budget and no model call;
 /// - a step that is not a child has no budget, no count and no stop;
-/// - a child's resource sits under its parent's, its depth is within the
-///   limit, and its budget is no larger than its parent's (a child may hold
-///   a budget only when its parent does);
-/// - a child's count is exactly the model calls made in its subtree, and no
-///   more than its budget;
-/// - a child below a stopped child has stopped too;
-/// - each child budget and each stop has exactly one record, which says the
-///   same;
+/// - every child keeps `child_rules`;
+/// - each child budget and each stop has exactly one record for that child,
+///   which says the same;
 /// - a cancelled task has every child stopped and no child or model call
 ///   after it.
 ///
@@ -1088,6 +1096,17 @@ fn decode_journal(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'stati
 fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
     if journal.depth > CHILD_DEPTH_LIMIT {
         return Err("depth limit");
+    }
+    // A child host spends its parent's budget, kept in the parent's journal:
+    // it never holds a budget or a model call of its own.
+    if journal.depth > 0
+        && (journal.task_budget.is_some()
+            || journal
+                .steps
+                .iter()
+                .any(|step| step.kind == ProposalKind::Hosted))
+    {
+        return Err("record");
     }
     let find = |id: u64| journal.steps.iter().find(|step| step.id == id);
     for step in &journal.steps {
@@ -1110,63 +1129,16 @@ fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
             }
             continue;
         }
-        let parent = step.parent_id.and_then(find).ok_or("record")?;
-        if step.stop.is_none()
-            && child_chain(journal, step.parent_id)
-                .iter()
-                .any(|id| find(*id).is_some_and(|above| above.stop.is_some()))
-        {
-            return Err("record");
-        }
-        if !narrower_resource(&parent.resource, &step.resource) {
-            return Err("not a subset");
-        }
-        if depth_under(journal, step.parent_id) > usize::from(CHILD_DEPTH_LIMIT) {
-            return Err("depth limit");
-        }
-        let calls = journal
-            .steps
-            .iter()
-            .filter(|call| {
-                call.kind == ProposalKind::Hosted
-                    && child_chain(journal, call.parent_id).contains(&step.id)
-            })
-            .count();
-        if u32::try_from(calls).ok() != Some(step.requests_used) {
-            return Err("record");
-        }
-        match step.budget {
-            Some(budget) => {
-                let owner = child_chain(journal, step.parent_id).first().copied();
-                let above = match owner {
-                    Some(id) => find(id).and_then(|owner| owner.budget),
-                    None => journal.task_budget,
-                };
-                if budget.requests == 0
-                    || budget.seconds == 0
-                    || step.requests_used > budget.requests
-                    || above.is_none_or(|above| {
-                        budget.requests > above.requests || budget.seconds > above.seconds
-                    })
-                {
-                    return Err("over the parent's budget");
-                }
-            }
-            None if step.requests_used != 0 => return Err("record"),
-            None => {}
-        }
+        child_rules(journal, step)?;
     }
     if let Some(task) = journal.task_budget {
         if task.requests == 0 || task.seconds == 0 || task_requests_used(journal) > task.requests {
             return Err("record");
         }
     }
-    let mut budgets = 0;
-    let mut stops = 0;
     for node in &journal.events {
         match &node.source {
             NodeSource::ChildBudget { child, budget } => {
-                budgets += 1;
                 if find(*child).is_none_or(|step| step.budget != Some(*budget)) {
                     return Err("record");
                 }
@@ -1176,7 +1148,6 @@ fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
                 reason,
                 requests_used,
             } => {
-                stops += 1;
                 if find(*child).is_none_or(|step| {
                     step.stop != Some(*reason) || step.requests_used != *requests_used
                 }) {
@@ -1186,20 +1157,22 @@ fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
             _ => {}
         }
     }
-    if budgets
-        != journal
-            .steps
+    // Per child, not in total: two records for one child and none for
+    // another must not balance out.
+    for step in &journal.steps {
+        let (budgets, stops) = journal
+            .events
             .iter()
-            .filter(|step| step.budget.is_some())
-            .count()
-        || stops
-            != journal
-                .steps
-                .iter()
-                .filter(|step| step.stop.is_some())
-                .count()
-    {
-        return Err("record");
+            .fold((0, 0), |(budgets, stops), node| match node.source {
+                NodeSource::ChildBudget { child, .. } if child == step.id => (budgets + 1, stops),
+                NodeSource::ChildStop { child, .. } if child == step.id => (budgets, stops + 1),
+                _ => (budgets, stops),
+            });
+        if budgets != usize::from(step.budget.is_some())
+            || stops != usize::from(step.stop.is_some())
+        {
+            return Err("record");
+        }
     }
     if let Some(last) = journal.cancelled_from {
         if journal.steps.iter().any(|step| {
@@ -1210,6 +1183,141 @@ fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
         }
     }
     Ok(())
+}
+
+/// The rules every child keeps, wherever its journal comes from: made here,
+/// decoded, reread, resumed, answered in the inbox, or opened as a child
+/// host. Every path calls this one function, so none skips a rule. A child's
+/// limits come only from the journal that holds it (the parent's journal):
+/// - its parent exists and comes before it;
+/// - a child below a stopped child has stopped too;
+/// - its resource sits strictly under its parent's;
+/// - its depth is within `CHILD_DEPTH_LIMIT`;
+/// - its count is exactly the model calls made in its subtree;
+/// - a budget is non-zero, no less than its count, and no larger than its
+///   owner's (the nearest budgeted child above, or the task); a child with no
+///   budget (from before idea 2) has no count.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn child_rules(journal: &Journal, step: &Step) -> Result<(), &'static str> {
+    let find = |id: u64| journal.steps.iter().find(|step| step.id == id);
+    let parent = step
+        .parent_id
+        .filter(|parent| *parent < step.id)
+        .and_then(find)
+        .ok_or("record")?;
+    if step.stop.is_none()
+        && child_chain(journal, step.parent_id)
+            .iter()
+            .any(|id| find(*id).is_some_and(|above| above.stop.is_some()))
+    {
+        return Err("record");
+    }
+    if !narrower_resource(&parent.resource, &step.resource) {
+        return Err("not a subset");
+    }
+    if depth_under(journal, step.parent_id) > usize::from(CHILD_DEPTH_LIMIT) {
+        return Err("depth limit");
+    }
+    let calls = journal
+        .steps
+        .iter()
+        .filter(|call| {
+            call.kind == ProposalKind::Hosted
+                && child_chain(journal, call.parent_id).contains(&step.id)
+        })
+        .count();
+    if u32::try_from(calls).ok() != Some(step.requests_used) {
+        return Err("record");
+    }
+    match step.budget {
+        Some(budget) => {
+            let owner = child_chain(journal, step.parent_id).first().copied();
+            let above = match owner {
+                Some(id) => find(id).and_then(|owner| owner.budget),
+                None => journal.task_budget,
+            };
+            if budget.requests == 0
+                || budget.seconds == 0
+                || step.requests_used > budget.requests
+                || above.is_none_or(|above| {
+                    budget.requests > above.requests || budget.seconds > above.seconds
+                })
+            {
+                return Err("over the parent's budget");
+            }
+        }
+        None if step.requests_used != 0 => return Err("record"),
+        None => {}
+    }
+    Ok(())
+}
+
+/// A child a live step may act on (a model call, a new child below it, a
+/// grant, an inbox answer, a child host): it keeps `child_rules`, has a
+/// budget (a child from before idea 2 has none: `TASK_BUDGET_REASON`), and
+/// neither it nor anything above it has stopped ("stopped"), nor is the task
+/// cancelled ("cancelled").
+#[cfg(any(test, target_arch = "wasm32"))]
+fn usable_child(journal: &Journal, id: u64) -> Result<&Step, &'static str> {
+    let step = journal
+        .steps
+        .iter()
+        .find(|step| step.id == id && step.kind == ProposalKind::Child)
+        .ok_or("not a child")?;
+    child_rules(journal, step)?;
+    if step.budget.is_none() {
+        return Err(TASK_BUDGET_REASON);
+    }
+    if journal.cancelled_from.is_some() {
+        return Err("cancelled");
+    }
+    if chain_stopped(journal, &child_chain(journal, Some(id))) {
+        return Err("stopped");
+    }
+    Ok(step)
+}
+
+/// What a granted step may hand on to a child: a child, the scope it was
+/// granted; any other step, its own resource. Nothing without a grant.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn granted_scope(step: &Step) -> Option<&str> {
+    step.grant.as_deref().filter(|grant| !grant.is_empty())?;
+    if step.kind == ProposalKind::Child {
+        step.grant_scope.as_deref()
+    } else {
+        Some(&step.resource)
+    }
+}
+
+/// The one check for giving a child a grant, used by `authorize_child` and
+/// by an inbox answer: a usable child; a grant that is not empty and not the
+/// parent's; a grant resource that passes the path rule (exact canonical
+/// path), sits in the child's resource, and sits in what the parent itself
+/// was granted (`granted_scope`).
+#[cfg(any(test, target_arch = "wasm32"))]
+fn child_grant_ok(
+    journal: &Journal,
+    child_id: u64,
+    grant: Option<&str>,
+    grant_resource: &str,
+) -> bool {
+    let Ok(child) = usable_child(journal, child_id) else {
+        return false;
+    };
+    let Some(grant) = grant.filter(|grant| !grant.is_empty()) else {
+        return false;
+    };
+    if path_refusal(grant_resource).is_some() || !resource_covers(&child.resource, grant_resource) {
+        return false;
+    }
+    let Some(parent) = child
+        .parent_id
+        .and_then(|parent_id| journal.steps.iter().find(|step| step.id == parent_id))
+    else {
+        return false;
+    };
+    granted_scope(parent).is_some_and(|scope| resource_covers(scope, grant_resource))
+        && parent.grant.as_deref() != Some(grant)
 }
 
 /// A stored journal, of any age, passes the path rule a live one does. Every
@@ -1259,6 +1367,7 @@ fn without_grants(journal: &Journal) -> Journal {
     let mut copy = journal.clone();
     for step in &mut copy.steps {
         step.grant = None;
+        step.grant_scope = None;
     }
     copy
 }
@@ -2426,6 +2535,7 @@ fn propose_step(journal: &mut Journal) -> u64 {
         budget: None,
         requests_used: 0,
         stop: None,
+        grant_scope: None,
     });
     id
 }
@@ -3444,7 +3554,11 @@ fn chain_stopped(journal: &Journal, chain: &[u64]) -> bool {
 /// sets or raises it: a second call, or an empty budget, changes nothing.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn record_task_budget(journal: &mut Journal, granted: Budget) -> bool {
-    if journal.task_budget.is_some() || granted.requests == 0 || granted.seconds == 0 {
+    if journal.depth > 0
+        || journal.task_budget.is_some()
+        || granted.requests == 0
+        || granted.seconds == 0
+    {
         return false;
     }
     journal.task_budget = Some(granted);
@@ -3465,6 +3579,10 @@ fn ask_model(journal: &mut Journal, under: Option<u64>, model: &str) -> Result<u
     {
         return Err("host path");
     }
+    // A child host asks through its parent's journal, which holds its budget.
+    if journal.depth > 0 {
+        return Err("child host");
+    }
     if let Some(id) = under {
         if !journal
             .steps
@@ -3482,23 +3600,27 @@ fn ask_model(journal: &mut Journal, under: Option<u64>, model: &str) -> Result<u
         return Err("stopped");
     }
     let Some(task) = journal.task_budget else {
-        return Err("no budget");
+        return Err(TASK_BUDGET_REASON);
     };
-    if task_requests_used(journal) >= task.requests {
-        return Err("requests");
-    }
-    // Top-most first, so the widest used-up child is the one that stops.
+    // Top-most first, so the widest used-up child is the one that stops. The
+    // children are checked before the task, so a child that runs out together
+    // with the task still stops, with its subtree.
     for id in chain.iter().rev() {
-        let Some(step) = journal.steps.iter().find(|step| step.id == *id) else {
-            return Err("not a child");
-        };
-        let Some(budget) = step.budget else {
-            return Err("no budget");
-        };
-        if step.requests_used >= budget.requests {
+        let budget = usable_child(journal, *id)?
+            .budget
+            .ok_or(TASK_BUDGET_REASON)?;
+        let used = journal
+            .steps
+            .iter()
+            .find(|step| step.id == *id)
+            .map_or(0, |step| step.requests_used);
+        if used >= budget.requests {
             stop_child(journal, *id, StopReason::Requests);
             return Err("requests");
         }
+    }
+    if task_requests_used(journal) >= task.requests {
+        return Err("requests");
     }
     let id = propose_step(journal);
     let step = journal
@@ -3659,11 +3781,18 @@ fn propose_child(
     if depth_under(journal, Some(parent_id)) > usize::from(CHILD_DEPTH_LIMIT) {
         return Err("depth limit");
     }
+    if journal
+        .steps
+        .iter()
+        .any(|step| step.id == parent_id && step.kind == ProposalKind::Child)
+    {
+        usable_child(journal, parent_id)?;
+    }
     let Some(budget) = budget.filter(|budget| budget.requests > 0 && budget.seconds > 0) else {
         return Err("no budget");
     };
     let Some(left) = remaining_budget(journal, chain.first().copied()) else {
-        return Err("parent has no budget");
+        return Err(TASK_BUDGET_REASON);
     };
     if budget.requests > left.requests || budget.seconds > left.seconds {
         return Err("over the parent's budget");
@@ -3747,61 +3876,44 @@ fn authorize_child(
     grant: Option<&str>,
     grant_resource: &str,
 ) -> bool {
-    let Some(child) = journal.steps.iter().find(|step| step.id == child_id) else {
-        return false;
-    };
-    if child.kind != ProposalKind::Child
-        || child.budget.is_none()
-        || path_refusal(grant_resource).is_some()
-        || !resource_covers(&child.resource, grant_resource)
-        || chain_stopped(journal, &child_chain(journal, Some(child_id)))
-    {
+    if !child_grant_ok(journal, child_id, grant, grant_resource) {
         return false;
     }
-    let parent_grant = child.parent_id.and_then(|parent_id| {
-        journal
-            .steps
-            .iter()
-            .find(|step| step.id == parent_id)
-            .and_then(|step| step.grant.clone())
-    });
-    if parent_grant.as_deref().is_none_or(str::is_empty)
-        || grant.is_none()
-        || grant == Some("")
-        || parent_grant.as_deref() == grant
-    {
+    if !authorize(journal, child_id, grant) {
         return false;
     }
-    authorize(journal, child_id, grant)
+    if let Some(step) = journal.steps.iter_mut().find(|step| step.id == child_id) {
+        step.grant_scope = Some(grant_resource.to_string());
+    }
+    true
 }
 
-/// A child host is a second journal. It keeps the system head and does not
-/// copy the parent's log or the parent's grant. This is not a second loaded
-/// component, and it does not start a process.
+/// A child host is a second journal for one child step. It keeps the system
+/// head and does not copy the parent's log or the parent's grant. Its limits
+/// stay in the parent's journal, the one source of truth: the child must be
+/// usable there (`usable_child`), the host's resource sits in the child's,
+/// and the host never holds a budget or makes a model call of its own (its
+/// calls are `ask_model(parent, Some(child), ..)`). Its depth is the child's.
+/// This is not a second loaded component, and it does not start a process.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn open_child_host(
     parent: &Journal,
-    parent_id: u64,
+    child_id: u64,
     resource: &str,
 ) -> Result<Journal, &'static str> {
-    let Some(parent_step) = parent.steps.iter().find(|step| step.id == parent_id) else {
-        return Err("no parent");
-    };
-    if parent_step.resource.is_empty() || !narrower_resource(&parent_step.resource, resource) {
+    let child = usable_child(parent, child_id)?;
+    if path_refusal(resource).is_some() || !resource_covers(&child.resource, resource) {
         return Err("not a subset");
     }
-    let depth = depth_under(parent, Some(parent_id));
-    if depth > usize::from(CHILD_DEPTH_LIMIT) {
-        return Err("depth limit");
-    }
-    let mut child = empty_journal();
-    child.depth = u8::try_from(depth).map_err(|_| "depth limit")?;
-    admit_system(&mut child, SYSTEM_HEAD, true);
-    propose_run(&mut child, resource, &["true".to_string()])?;
-    if child.steps.iter().any(|step| step.grant.is_some()) {
+    let depth = depth_under(parent, child.parent_id);
+    let mut host = empty_journal();
+    host.depth = u8::try_from(depth).map_err(|_| "depth limit")?;
+    admit_system(&mut host, SYSTEM_HEAD, true);
+    propose_run(&mut host, resource, &["true".to_string()])?;
+    if host.steps.iter().any(|step| step.grant.is_some()) {
         return Err("inherited");
     }
-    Ok(child)
+    Ok(host)
 }
 
 /// Give the child host its own grant. The parent's grant is refused.
@@ -3881,6 +3993,7 @@ fn authorize(journal: &mut Journal, id: u64, grant: Option<&str>) -> bool {
         None | Some("") => {
             step.state = StepState::Denied;
             step.grant = None;
+            step.grant_scope = None;
             false
         }
         Some(grant_id) => {
@@ -3943,30 +4056,33 @@ fn apply_inbox(journal: &mut Journal, id: u64, answer: InboxAnswer, grant: Optio
         InboxAnswer::Deny => None,
         _ => grant.filter(|grant| !grant.is_empty()),
     };
-    let (kind, parent_id) = {
+    let kind = {
         let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) else {
             return false;
         };
         if step.state != StepState::Prepared || !step.inbox.is_empty() || step.grant.is_some() {
             return false;
         }
-        (step.kind, step.parent_id)
+        step.kind
     };
-    if kind == ProposalKind::Child {
-        let parent_grant = parent_id.and_then(|parent_id| {
-            journal
-                .steps
-                .iter()
-                .find(|parent| parent.id == parent_id)
-                .and_then(|parent| parent.grant.clone())
-        });
-        if parent_grant
-            .as_deref()
-            .is_some_and(|parent| grant == Some(parent))
-        {
+    // A child's grant goes through the same check as `authorize_child`, for
+    // the child's whole resource. A deny needs no check.
+    let child_scope = if kind == ProposalKind::Child && grant.is_some() {
+        let Some(resource) = journal
+            .steps
+            .iter()
+            .find(|step| step.id == id)
+            .map(|step| step.resource.clone())
+        else {
+            return false;
+        };
+        if !child_grant_ok(journal, id, grant, &resource) {
             return false;
         }
-    }
+        Some(resource)
+    } else {
+        None
+    };
     if let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) {
         step.inbox = name.to_string();
     }
@@ -3981,7 +4097,13 @@ fn apply_inbox(journal: &mut Journal, id: u64, answer: InboxAnswer, grant: Optio
             source: NodeSource::Inbox(answer),
         });
     }
-    authorize(journal, id, grant)
+    let granted = authorize(journal, id, grant);
+    if granted && child_scope.is_some() {
+        if let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) {
+            step.grant_scope = child_scope;
+        }
+    }
+    granted
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -4352,6 +4474,7 @@ fn reply_revision(data: &serde_json::Value) -> Option<String> {
 fn drop_step_grant(journal: &mut Journal, step_id: u64) {
     if let Some(step) = journal.steps.iter_mut().find(|step| step.id == step_id) {
         step.grant = None;
+        step.grant_scope = None;
     }
 }
 
@@ -4471,8 +4594,8 @@ fn resume_journal(
 
 /// Read and decode the stored journal: the journal, its head, and its
 /// revision. `Err(Some(reason))`: the stored journal is format 1
-/// (`FORMAT_1_REASON`) or breaks the path rule (`stored_paths_ok`), for that
-/// reason. `Err(None)`: anything else (no usable reply, or bytes that do not
+/// (`FORMAT_1_REASON`) or breaks a stored rule (`stored_rules_ok`: paths and
+/// children), for that reason. `Err(None)`: anything else (no usable reply, or bytes that do not
 /// decode).
 #[cfg(any(test, target_arch = "wasm32"))]
 fn read_stored_journal(
@@ -4493,7 +4616,7 @@ fn read_stored_journal(
     let revision = reply_revision(&data).ok_or(None)?;
     let (stored, _, head) =
         decode_bytes(&content).map_err(|reason| (reason == FORMAT_1_REASON).then_some(reason))?;
-    stored_paths_ok(&stored).map_err(Some)?;
+    stored_rules_ok(&stored).map_err(Some)?;
     Ok((stored, head, revision))
 }
 
@@ -5516,11 +5639,12 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             ));
         }
         let mut child_host =
-            open_child_host(&family, parent, "localhost://Users/self/Projects/demo/src").map_err(
+            open_child_host(&family, child, "localhost://Users/self/Projects/demo/src").map_err(
                 |_| elastos::bus::types::BusError::Invalid("a child host was refused".to_string()),
             )?;
         let family_before = family.events.len();
-        if open_child_host(&family, parent, "localhost://Users/self/Projects/other").is_ok()
+        if open_child_host(&family, child, "localhost://Users/self/Projects/other").is_ok()
+            || open_child_host(&family, parent, "localhost://Users/self/Projects/demo/src").is_ok()
             || child_host.events.len() != 1
             || child_host.events[0].text != SYSTEM_HEAD
             || child_host.steps.len() != 1
@@ -9556,10 +9680,14 @@ mod tests {
             "localhost://Users/self/Projects/demo/src"
         ));
         let mut child_host =
-            open_child_host(&journal, parent, "localhost://Users/self/Projects/demo/src").unwrap();
+            open_child_host(&journal, child, "localhost://Users/self/Projects/demo/src").unwrap();
         assert_eq!(
-            open_child_host(&journal, parent, "localhost://Users/self/Projects/other"),
+            open_child_host(&journal, child, "localhost://Users/self/Projects/other"),
             Err("not a subset")
+        );
+        assert_eq!(
+            open_child_host(&journal, parent, "localhost://Users/self/Projects/demo/src"),
+            Err("not a child")
         );
         assert_eq!(child_host.events.len(), 1);
         assert_eq!(child_host.events[0].text, SYSTEM_HEAD);
@@ -17384,15 +17512,16 @@ mod tests {
             Err("depth limit")
         );
         assert_eq!(journal, before);
-        // Inside a child host journal, the depth goes on from the parent's.
-        let host = open_child_host(&journal, child, DEMO_SRC_LIB).unwrap();
-        assert_eq!(host.depth, 2);
+        // A child host's depth is its child's; inside one at the limit, no
+        // child can be proposed.
         assert_eq!(
-            open_child_host(&journal, grandchild, deeper),
-            Err("depth limit")
+            open_child_host(&journal, child, DEMO_SRC_LIB)
+                .unwrap()
+                .depth,
+            1
         );
-        let mut deep = host.clone();
-        assert!(record_task_budget(&mut deep, budget(4, 60)));
+        let mut deep = open_child_host(&journal, grandchild, DEMO_SRC_LIB).unwrap();
+        assert_eq!(deep.depth, 2);
         let inner = deep.steps[0].id;
         assert!(authorize(&mut deep, inner, Some("child-grant")));
         assert_eq!(
@@ -17461,11 +17590,11 @@ mod tests {
         // No granted budget: no model call and no child, whatever is asked.
         assert_eq!(
             ask_model(&mut journal, None, HOSTED_MODEL),
-            Err("no budget")
+            Err(TASK_BUDGET_REASON)
         );
         assert_eq!(
             propose_child(&mut journal, run, DEMO_SRC, Some(budget(1, 1))),
-            Err("parent has no budget")
+            Err(TASK_BUDGET_REASON)
         );
         assert_eq!(journal.task_budget, None);
         assert!(!record_task_budget(&mut journal, budget(0, 60)));
@@ -17598,7 +17727,7 @@ mod tests {
     fn a_long_inline_child_result_is_refused() {
         let (mut journal, run) = task(budget(8, 600));
         let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
-        let host = open_child_host(&journal, run, DEMO_SRC).unwrap();
+        let host = open_child_host(&journal, child, DEMO_SRC).unwrap();
         let before = journal.events.len();
         assert!(!record_child_result(
             &mut journal,
@@ -17656,7 +17785,7 @@ mod tests {
         ));
         assert!(dispatch(&mut journal, child));
         assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
-        let host = open_child_host(&journal, run, DEMO_SRC).unwrap();
+        let host = open_child_host(&journal, child, DEMO_SRC).unwrap();
         assert!(cancel_tree(&mut journal, run));
         // Started: it keeps its state; its next call is refused, nothing asked.
         assert_eq!(step_of(&journal, child).state, StepState::Dispatched);
@@ -17752,15 +17881,17 @@ mod tests {
     #[test]
     fn every_format_2_field_round_trips() {
         let (mut journal, run) = task(budget(8, 600));
-        journal.depth = 1;
         let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(3, 60))).unwrap();
+        // The header depth is a child host's; it round-trips there.
+        let host = open_child_host(&journal, child, DEMO_SRC).unwrap();
+        assert_eq!(reloaded(&host).depth, 1);
         assert!(ask_model(&mut journal, Some(child), LOCAL_MODEL).is_ok());
         assert!(note_time_refusal(&mut journal, child));
         let other = propose_child(&mut journal, run, DEMO_DOC, Some(budget(1, 60))).unwrap();
         assert!(cancel_task(&mut journal));
         let back = reloaded(&journal);
         assert_eq!(back, without_grants(&journal));
-        assert_eq!((back.depth, back.task_budget), (1, Some(budget(8, 600))));
+        assert_eq!((back.depth, back.task_budget), (0, Some(budget(8, 600))));
         assert_eq!(back.cancelled_from, Some(other));
         let step = step_of(&back, child);
         assert_eq!(
@@ -17921,7 +18052,8 @@ mod tests {
                 "record",
                 Box::new(move |j: &mut Journal| step_mut(j, child).stop = Some(StopReason::Time)),
             ),
-            ("depth limit", Box::new(|j: &mut Journal| j.depth = 2)),
+            // A journal with a depth is a child host: it holds no budget.
+            ("record", Box::new(|j: &mut Journal| j.depth = 2)),
             (
                 "depth limit",
                 Box::new(|j: &mut Journal| j.depth = CHILD_DEPTH_LIMIT + 1),
@@ -18020,6 +18152,22 @@ mod tests {
                 "{zero:?}"
             );
         }
+        // A child past the depth limit, inside a child host at the limit.
+        let (mut top, run) = task(budget(8, 600));
+        let child = propose_child(&mut top, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let grandchild = propose_child(&mut top, child, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        let mut deep = open_child_host(&top, grandchild, DEMO_SRC_LIB).unwrap();
+        assert!(decode_journal(&encode_journal(&deep, &[0; 32]).unwrap()).is_ok());
+        let inner = deep.steps[0].id;
+        let past = propose_step(&mut deep);
+        step_mut(&mut deep, past).kind = ProposalKind::Child;
+        step_mut(&mut deep, past).resource =
+            "localhost://Users/self/Projects/demo/src/lib/a".into();
+        step_mut(&mut deep, past).parent_id = Some(inner);
+        assert_eq!(
+            decode_journal(&encode_journal(&deep, &[0; 32]).unwrap()).map(|_| ()),
+            Err("depth limit")
+        );
         // A stopped child's children are stopped.
         let (mut tree, run) = task(budget(8, 600));
         let parent = propose_child(&mut tree, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
@@ -18156,11 +18304,11 @@ mod tests {
         assert_eq!(encode_journal(&journal, &prev).unwrap(), bytes);
         assert_eq!(
             ask_model(&mut journal, Some(child.id), HOSTED_MODEL),
-            Err("no budget")
+            Err(TASK_BUDGET_REASON)
         );
         assert_eq!(
             ask_model(&mut journal, None, HOSTED_MODEL),
-            Err("no budget")
+            Err(TASK_BUDGET_REASON)
         );
     }
 
@@ -18230,7 +18378,7 @@ mod tests {
         let before = journal.clone();
         assert_eq!(
             ask_model(&mut journal, Some(old_child), HOSTED_MODEL),
-            Err("no budget")
+            Err(TASK_BUDGET_REASON)
         );
         assert_eq!(
             ask_model(&mut journal, Some(not_child), HOSTED_MODEL),
@@ -18305,6 +18453,287 @@ mod tests {
         assert_eq!(
             ask_model(&mut journal, Some(below), HOSTED_MODEL),
             Err("stopped")
+        );
+    }
+
+    // Codex review of 206da0d: seven findings, one test each (each failed on
+    // 206da0d).
+
+    /// Finding 1: reread and resume load through the same rules as decode,
+    /// child rules included.
+    #[test]
+    fn a_reread_or_resume_refuses_a_journal_that_breaks_a_child_rule() {
+        let (mut tree, run) = task(budget(8, 600));
+        let parent = propose_child(&mut tree, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let below = propose_child(&mut tree, parent, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(note_time_refusal(&mut tree, parent));
+        let mut running_below = tree.clone();
+        step_mut(&mut running_below, below).stop = None;
+        running_below.events.retain(
+            |node| !matches!(node.source, NodeSource::ChildStop { child, .. } if child == below),
+        );
+        let mut wider = tree.clone();
+        step_mut(&mut wider, parent).resource = "localhost://Users/self/Projects/other".into();
+        for (bad, reason) in [(running_below, "record"), (wider, "not a subset")] {
+            let (mut runtime, mut cursor) = fake_runtime();
+            runtime.stored = Some(encode_journal(&bad, &[0; 32]).unwrap());
+            assert_eq!(
+                reread_journal(&mut runtime, &mut cursor, Some(&read_grant())).map(|_| ()),
+                Err(reason)
+            );
+            let (mut runtime, mut cursor) = fake_runtime();
+            runtime.lose_reply = true;
+            let mut journal = two_turns();
+            assert_eq!(
+                append_journal(
+                    &mut runtime,
+                    &mut journal,
+                    &mut cursor,
+                    Some(&write_grant())
+                ),
+                AppendOutcome::Unknown
+            );
+            let waiting = cursor.clone();
+            runtime.stored = Some(encode_journal(&bad, &[0; 32]).unwrap());
+            assert_eq!(
+                resume_journal(&mut runtime, &mut journal, &mut cursor, Some(&read_grant())),
+                ResumeOutcome::Refused(reason)
+            );
+            assert_eq!(cursor, waiting);
+        }
+    }
+
+    /// Finding 2: an inbox answer for a child goes through the same child
+    /// checks as `authorize_child`.
+    #[test]
+    fn an_inbox_answer_grants_only_a_usable_child_under_a_granted_parent() {
+        // A legacy child with no budget.
+        let hex: String = PRE_IDEA_2_JOURNAL.concat();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect();
+        let (mut legacy, _, _) = decode_journal(&bytes).unwrap();
+        let old_child = legacy
+            .steps
+            .iter()
+            .find(|step| step.kind == ProposalKind::Child)
+            .unwrap()
+            .clone();
+        assert!(authorize(
+            &mut legacy,
+            old_child.parent_id.unwrap(),
+            Some("fixture-grant")
+        ));
+        let before = legacy.clone();
+        assert!(!apply_inbox(
+            &mut legacy,
+            old_child.id,
+            InboxAnswer::AllowOnce,
+            Some("child-grant")
+        ));
+        assert_eq!(legacy, before);
+        // A budgeted child whose parent holds no grant.
+        let mut journal = two_turns();
+        assert!(record_task_budget(&mut journal, budget(8, 600)));
+        let run = propose_run(&mut journal, DEMO, &["true".to_string()]).unwrap();
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let before = journal.clone();
+        assert!(!apply_inbox(
+            &mut journal,
+            child,
+            InboxAnswer::Standing,
+            Some("child-grant")
+        ));
+        assert_eq!(journal, before);
+        // A stopped child.
+        assert!(authorize(&mut journal, run, Some("fixture-grant")));
+        let stopped = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(note_time_refusal(&mut journal, stopped));
+        assert!(!apply_inbox(
+            &mut journal,
+            stopped,
+            InboxAnswer::AllowOnce,
+            Some("child-grant")
+        ));
+        assert_eq!(step_of(&journal, stopped).grant, None);
+        // Control: a usable child under a granted parent.
+        assert!(apply_inbox(
+            &mut journal,
+            child,
+            InboxAnswer::AllowOnce,
+            Some("child-grant")
+        ));
+        assert_eq!(
+            step_of(&journal, child).grant.as_deref(),
+            Some("child-grant")
+        );
+    }
+
+    /// Finding 3: a child host never has its own budget or makes its own
+    /// model call; its calls are counted in the parent's journal, so a
+    /// one-request child allows one request, also after reload.
+    #[test]
+    fn a_child_host_spends_the_parent_budget_and_keeps_its_stop() {
+        let (mut parent, run) = task(budget(8, 600));
+        assert!(authorize(&mut parent, run, Some("fixture-grant")));
+        let child = propose_child(&mut parent, run, DEMO_SRC, Some(budget(1, 60))).unwrap();
+        let mut host = open_child_host(&parent, child, DEMO_SRC).unwrap();
+        assert_eq!(host.depth, 1);
+        assert!(!record_task_budget(&mut host, budget(8, 600)));
+        assert_eq!(host.task_budget, None);
+        assert_eq!(ask_model(&mut host, None, HOSTED_MODEL), Err("child host"));
+        assert!(ask_model(&mut parent, Some(child), HOSTED_MODEL).is_ok());
+        assert_eq!(
+            ask_model(&mut parent, Some(child), LOCAL_MODEL),
+            Err("requests")
+        );
+        let mut back = reloaded(&parent);
+        assert_eq!(
+            ask_model(&mut back, Some(child), HOSTED_MODEL),
+            Err("stopped")
+        );
+        assert_eq!(open_child_host(&back, child, DEMO_SRC), Err("stopped"));
+        assert_eq!(open_child_host(&back, run, DEMO_SRC), Err("not a child"));
+        // A stored child host that holds a budget or a model call is refused.
+        let mut forged = host.clone();
+        forged.task_budget = Some(budget(8, 600));
+        assert_eq!(
+            decode_journal(&encode_journal(&forged, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        let mut forged = host.clone();
+        let call = propose_step(&mut forged);
+        step_mut(&mut forged, call).kind = ProposalKind::Hosted;
+        step_mut(&mut forged, call).resource = HOSTED_MODEL.into();
+        assert_eq!(
+            decode_journal(&encode_journal(&forged, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+    }
+
+    /// Finding 4: a child's grant keeps its scope; a grandchild is granted
+    /// only inside it.
+    #[test]
+    fn a_child_grant_scope_bounds_its_children() {
+        let (mut journal, run) = task(budget(8, 600));
+        assert!(authorize(&mut journal, run, Some("fixture-grant")));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let only_a = "localhost://Users/self/Projects/demo/src/a";
+        let in_a = "localhost://Users/self/Projects/demo/src/a/x";
+        let in_b = "localhost://Users/self/Projects/demo/src/b";
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            only_a
+        ));
+        let outside = propose_child(&mut journal, child, in_b, Some(budget(1, 10))).unwrap();
+        assert!(!authorize_child(
+            &mut journal,
+            outside,
+            Some("grandchild-grant"),
+            in_b
+        ));
+        assert!(!apply_inbox(
+            &mut journal,
+            outside,
+            InboxAnswer::AllowOnce,
+            Some("grandchild-grant")
+        ));
+        assert_eq!(step_of(&journal, outside).grant, None);
+        let inside = propose_child(&mut journal, child, in_a, Some(budget(1, 10))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            inside,
+            Some("grandchild-grant"),
+            in_a
+        ));
+    }
+
+    /// Finding 5: the records are counted per child, not in total.
+    #[test]
+    fn each_child_has_exactly_its_own_records() {
+        let (mut journal, run) = task(budget(8, 600));
+        let a = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let b = propose_child(&mut journal, run, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(note_time_refusal(&mut journal, a));
+        assert!(note_time_refusal(&mut journal, b));
+        assert!(decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok());
+        for kind in ["budget", "stop"] {
+            let mut bad = journal.clone();
+            for node in &mut bad.events {
+                match (&mut node.source, kind) {
+                    (NodeSource::ChildBudget { child, .. }, "budget")
+                    | (NodeSource::ChildStop { child, .. }, "stop")
+                        if *child == b =>
+                    {
+                        *child = a;
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                decode_journal(&encode_journal(&bad, &[0; 32]).unwrap()).map(|_| ()),
+                Err("record"),
+                "{kind}"
+            );
+        }
+    }
+
+    /// Finding 6: when the task and a child run out together, the child
+    /// still stops with `requests`, and its subtree with it.
+    #[test]
+    fn the_task_and_a_child_running_out_together_stops_the_child() {
+        let (mut journal, run) = task(budget(2, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let below = propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(1, 60))).unwrap();
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        assert!(ask_model(&mut journal, Some(child), LOCAL_MODEL).is_ok());
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("requests")
+        );
+        assert_eq!(step_of(&journal, child).stop, Some(StopReason::Requests));
+        assert_eq!(step_of(&journal, below).stop, Some(StopReason::Cancelled));
+        assert!(decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok());
+    }
+
+    /// Finding 7: every refusal for a budget that was never recorded says
+    /// what to do, with `TASK_BUDGET_REASON`, asserted on the refusal itself.
+    #[test]
+    fn a_missing_budget_is_refused_with_the_task_budget_reason() {
+        let mut bare = two_turns();
+        let run = propose_run(&mut bare, DEMO, &["true".to_string()]).unwrap();
+        assert_eq!(
+            ask_model(&mut bare, None, HOSTED_MODEL),
+            Err(TASK_BUDGET_REASON)
+        );
+        assert_eq!(
+            propose_child(&mut bare, run, DEMO_SRC, Some(budget(2, 60))),
+            Err(TASK_BUDGET_REASON)
+        );
+        let hex: String = PRE_IDEA_2_JOURNAL.concat();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect();
+        let (mut legacy, _, _) = decode_journal(&bytes).unwrap();
+        assert!(record_task_budget(&mut legacy, budget(8, 600)));
+        let old_child = legacy
+            .steps
+            .iter()
+            .find(|step| step.kind == ProposalKind::Child)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            ask_model(&mut legacy, Some(old_child.id), HOSTED_MODEL),
+            Err(TASK_BUDGET_REASON)
+        );
+        let grand = "localhost://Users/self/Projects/demo/src/x";
+        assert_eq!(
+            propose_child(&mut legacy, old_child.id, grand, Some(budget(1, 10))),
+            Err(TASK_BUDGET_REASON)
         );
     }
 
