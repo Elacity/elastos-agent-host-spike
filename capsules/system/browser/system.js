@@ -1337,7 +1337,7 @@ function configureAiProvider() {
           // An unsaved connection starts its next check as a new one.
           if (!latestStatus?.connections?.some((entry) => entry.id === editingId)) editingId = "";
         } catch {
-          showState("The rejected key could not be removed. Use Discard on its card.", "error");
+          showState("The rejected key could not be removed. Select Close, then Discard staged key on its card.", "error");
         }
       }
     } finally {

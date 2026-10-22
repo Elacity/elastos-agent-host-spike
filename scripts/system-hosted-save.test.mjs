@@ -458,7 +458,7 @@ test("a rejected key that cannot be removed is reported and stays on its card", 
   f.node("#ai-provider-key").value = "test";
   await f.node("#ai-provider-validate").handlers.click();
   const id = f.attempts[0].id;
-  assert.equal(f.messages.at(-1), "The rejected key could not be removed. Use Discard on its card.");
+  assert.equal(f.messages.at(-1), "The rejected key could not be removed. Select Close, then Discard staged key on its card.");
   assert.equal(f.stateNode.dataset.tone, "error");
   assert.equal(f.node("#ai-provider-cancel").textContent, "Close", "the form keeps the staged connection");
   assert.equal(f.node("#ai-provider-kind").disabled, true);

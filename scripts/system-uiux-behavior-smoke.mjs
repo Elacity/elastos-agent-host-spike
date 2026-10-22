@@ -1014,7 +1014,7 @@ async function main() {
     await frame.fill("#ai-provider-key", "test");
     await frame.click("#ai-provider-validate");
     await frame.waitForFunction(() => document.querySelector('[data-field="ai-provider-state"]')?.textContent
-      === "The rejected key could not be removed. Use Discard on its card."
+      === "The rejected key could not be removed. Select Close, then Discard staged key on its card."
       && document.querySelector("#ai-provider-cancel").textContent === "Close");
     await frame.click("#ai-provider-cancel");
     await frame.waitForSelector("#ai-provider-instances .ai-provider-instance >> text=Discard staged key");
