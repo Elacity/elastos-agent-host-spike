@@ -2463,6 +2463,89 @@ async fn an_admin_with_two_passkeys_serves_local_and_hosted_model_grants() {
 }
 
 #[tokio::test]
+async fn two_principals_holding_one_model_grant_are_refused_as_ambiguous() {
+    let fx = TwoRuntimes::start().await;
+    let served = fx.create_run("one-owner", "qwen-local").await;
+    assert_eq!(served["ok"], true, "{served}");
+    let baseline = fx.create_count().await;
+
+    // A second admin principal that passes every other check and holds a
+    // copy of the same approved request, so only ownership can refuse it.
+    let carol = passkey_authority_with_profile_role_credential(
+        fx.owner.path(),
+        "Carol",
+        crate::auth::RuntimePrincipalRole::Admin,
+        "gateway-test-carol-passkey",
+    );
+    let (owner_key, owner_did) = elastos_identity::load_or_create_did(fx.owner.path()).unwrap();
+    let (seed_key, _) = elastos_identity::load_or_create_did(fx.seed.path()).unwrap();
+    let (trusted_key, _) = generate_keypair();
+    let carol_profile = load_profile_for_authority(fx.owner.path(), &carol);
+    let carol_root = crate::auth::principal_localhost_root(&carol.principal_id);
+    let store = CollaborationContactStore::new(
+        fx.owner.path(),
+        &carol.principal_id,
+        &carol_root,
+        configured_discovery_network_profile_for_test(&trusted_key, NETWORK),
+        &carol_profile,
+        &owner_did,
+    )
+    .unwrap();
+    accept_seed_contact(&store, &owner_key, &carol_profile, &seed_key, &fx.seed_did);
+    let now = now_ts();
+    write_home_principal_object_json_for_authority(
+        fx.owner.path(),
+        &carol,
+        "services-state.json",
+        json!({
+            "schema": "elastos.services.state/v1",
+            "principal_id": carol.principal_id,
+            "localhost_root": carol_root,
+            "updated_at": now,
+            "local_offer_ids": ["local:provider:model"],
+        }),
+    );
+    write_home_principal_object_json_for_authority(
+        fx.owner.path(),
+        &carol,
+        "services-requests.json",
+        json!({
+            "schema": "elastos.services.requests/v1",
+            "principal_id": carol.principal_id,
+            "localhost_root": carol_root,
+            "updated_at": now,
+            "requests": { REQUEST_ID: {
+                "request_id": REQUEST_ID,
+                "offer_id": "local:provider:model",
+                "service_uri": "elastos://peer/model",
+                "service_kind": "remote_model",
+                "service_display_name": "Carol model",
+                "requester_peer_id": fx.seed_node.endpoint.id().to_string(),
+                "requester_did": fx.seed_did,
+                "requester_principal_id": SEED_PRINCIPAL,
+                "requester_display_name": "Seed",
+                "created_at": now,
+                "updated_at": now,
+                "status": "approved",
+                "authenticated_request": true,
+                "grant_expires_at": now + 3600,
+                "approved_offer_ids": ["qwen-local"],
+                "approved_offer_revision": format!("sha256:{}", "a".repeat(64)),
+            } },
+        }),
+    );
+    let refused = fx.create_run("two-owners", "qwen-local").await;
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert_eq!(refused["code"], "denied", "{refused}");
+    assert_eq!(
+        fx.create_count().await,
+        baseline,
+        "ambiguous grant dispatched"
+    );
+    fx.shutdown().await;
+}
+
+#[tokio::test]
 async fn remote_model_expired_request_records_the_provider_refusal_phase() {
     let fx = TwoRuntimes::start().await;
     let mut remote = fx.remote(SEED_PRINCIPAL, "assistant");

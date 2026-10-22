@@ -10175,6 +10175,168 @@ async fn test_only_an_admin_approves_a_hosted_model_request() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_only_an_admin_approves_an_offer_its_listing_marks_hosted() {
+    use crate::api::model_provider_config::{HostedAiProvider, HostedOfferSave};
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
+    let (trusted_key, _) = generate_keypair();
+    let network = configured_discovery_network_profile_for_test(&trusted_key, "services-contacts");
+    let alice = services_contact_fixture(left.path(), "Alice", bus.clone(), network.clone()).await;
+    let bob = services_contact_fixture(right.path(), "Bob", bus.clone(), network).await;
+    accept_services_contact_pair(&alice, &bob);
+    // Hosted by its listing only: the id check alone lets this through.
+    let custom = "model:custom";
+    assert!(!crate::api::model_provider_config::is_hosted_offer_id(
+        custom
+    ));
+    let named = "model:hosted-0123456789abcdef0123456789abcdef";
+    crate::api::model_provider_config::save_hosted_offer(
+        right.path(),
+        None,
+        HostedOfferSave {
+            provider: HostedAiProvider::Venice,
+            api_key: "fixture-key",
+            model: "fixture/text",
+            expected_response_model: None,
+            privacy: None,
+            name: "Hosted test",
+            instance_id: Some(named),
+        },
+    )
+    .await
+    .unwrap();
+    crate::api::model_provider_config::set_hosted_offer_share(
+        right.path(),
+        named,
+        true,
+        Some(HostedAiProvider::Venice.share_terms_ack()),
+    )
+    .unwrap();
+    // Share it under the custom id too, as an operator-written config would.
+    let mut offers =
+        crate::api::model_provider_config::load_model_provider_operator_offers(right.path())
+            .unwrap();
+    let mut operator_custom = offers
+        .iter()
+        .find(|offer| offer["id"] == named)
+        .unwrap()
+        .clone();
+    operator_custom["id"] = json!(custom);
+    offers.push(operator_custom);
+    std::fs::write(
+        right.path().join("providers/model-provider/config.json"),
+        serde_json::to_vec(&json!({ "offers": offers })).unwrap(),
+    )
+    .unwrap();
+    let revision = format!("sha256:{}", "a".repeat(64));
+    bob.registry
+        .register_sub_provider(
+            "model",
+            Arc::new(ServicesCatalogModelProvider {
+                offer: json!({"id":custom,"title":"Custom","operation":"text.generate",
+                    "hosted":{"placement":"hosted","backend_provider_label":"Venice"}}),
+                revision: Arc::new(std::sync::Mutex::new(revision.clone())),
+            }),
+        )
+        .await
+        .unwrap();
+    let offer = format!(
+        "offer:{}:model",
+        home_people_contact_id(&bob.profile.document().profile_did)
+    );
+    let token = app_token_for_authority(left.path(), SERVICES_CAPSULE_ID, &alice.authority);
+    let (status, body) = services_contact_post(
+        &alice.app,
+        &token,
+        "/api/apps/services/offers",
+        json!({"offer_id":offer,"section":"catalog","selected":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    bob.discovery_service
+        .sync_services_mailboxes_once(right.path(), 0)
+        .await;
+    let (status, summary) =
+        home_test_get_json(&alice.app, "/api/apps/services/summary", &token, "null").await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    assert_eq!(
+        summary["model_catalogs"][&offer][0]["id"], custom,
+        "{summary}"
+    );
+    let (status, body) = services_contact_post(
+        &alice.app,
+        &token,
+        "/api/apps/services/offers",
+        json!({"offer_id":offer,"section":"others","selected":true,
+            "model_offer_id":custom,"model_offer_revision":revision}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    bob.discovery_service
+        .sync_services_mailboxes_once(right.path(), 0)
+        .await;
+    let saved =
+        services_mailbox_saved_state(right.path(), &bob.authority, "services-requests.json");
+    let (request_id, request) = saved["requests"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .next()
+        .unwrap();
+    assert_eq!(request["requested_model_offer_id"], custom, "{saved}");
+    let request_id = request_id.clone();
+    let approve = json!({"action_id":format!("service-approve-request:{request_id}")});
+    let inbox_token = app_token_for_authority(right.path(), INBOX_CAPSULE_ID, &bob.authority);
+    let set_bob_role = |role| {
+        let mut auth = crate::auth::load_auth_state(right.path()).unwrap();
+        auth.principals
+            .iter_mut()
+            .find(|entry| entry.principal_id == bob.authority.principal_id)
+            .unwrap()
+            .role = role;
+        crate::auth::save_auth_state(right.path(), &auth).unwrap();
+    };
+
+    set_bob_role(crate::auth::RuntimePrincipalRole::Guest);
+    let (status, body) = services_contact_post(
+        &bob.app,
+        &inbox_token,
+        "/api/apps/inbox/actions",
+        approve.clone(),
+    )
+    .await;
+    assert!(!status.is_success(), "{body}");
+    assert_eq!(
+        body,
+        "Only an admin can approve use of this Home's hosted AI connection."
+    );
+    let saved =
+        services_mailbox_saved_state(right.path(), &bob.authority, "services-requests.json");
+    let request = &saved["requests"][&request_id];
+    assert_eq!(request["status"], "pending", "{saved}");
+    assert!(request["grant_expires_at"].is_null(), "{saved}");
+    assert!(
+        request["approved_offer_ids"]
+            .as_array()
+            .is_none_or(Vec::is_empty),
+        "{saved}"
+    );
+
+    set_bob_role(crate::auth::RuntimePrincipalRole::Admin);
+    let (status, body) =
+        services_contact_post(&bob.app, &inbox_token, "/api/apps/inbox/actions", approve).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let saved =
+        services_mailbox_saved_state(right.path(), &bob.authority, "services-requests.json");
+    let request = &saved["requests"][&request_id];
+    assert_eq!(request["status"], "approved", "{saved}");
+    assert_eq!(request["approved_offer_ids"], json!([custom]), "{saved}");
+    assert_eq!(request["approved_offer_revision"], revision, "{saved}");
+    assert!(request["grant_expires_at"].is_u64(), "{saved}");
+}
+
 async fn services_contact_pending_engine_request(
     left: &std::path::Path,
     right: &std::path::Path,
