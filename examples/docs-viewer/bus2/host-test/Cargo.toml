@@ -9,5 +9,10 @@ publish.workspace = true
 
 [dev-dependencies]
 bus2-host = { path = "../../../bus2-proof/host" }
+# For the proof's own test helpers (bus2-proof/host/tests/common), used as they
+# are: they also hold its credential helpers.
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+sha2 = "0.10"
+wat = "=1.254.2"
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 wasmtime = { version = "=48.0.7", default-features = false, features = ["anyhow", "async", "component-model", "component-model-async", "cranelift", "runtime"] }

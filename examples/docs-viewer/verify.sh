@@ -33,23 +33,28 @@ cargo test --locked --manifest-path "${VIEWER_DIR}/bundle-test/Cargo.toml" -- --
 node --test "${VIEWER_DIR}/surface/reader.test.mjs"
 node "${VIEWER_DIR}/surface/reader-browser-smoke.mjs"
 
-# Bus v2: the resident reader in the Bus v2 proof's stub host. Run from bus2/
-# so rustup picks its toolchain (Rust 1.95.0). The guests are deleted first
-# and checked after, so a stale or missing guest is never tested.
-(
-    cd "${VIEWER_DIR}/bus2"
-    guest_dir=target/wasm32-unknown-unknown/release
-    for guest in docs_bus2_guest docs_bus2_busy_guest; do rm -f "${guest_dir}/${guest}.wasm"; done
-    cargo build --locked --release --target wasm32-unknown-unknown -p docs-bus2-guest -p docs-bus2-busy-guest
-    for guest in docs_bus2_guest docs_bus2_busy_guest; do
-        if [ ! -f "${guest_dir}/${guest}.wasm" ]; then
-            echo "verify: FAILED: the build did not produce ${guest_dir}/${guest}.wasm" >&2
+# Bus v2: the resident reader in the Bus v2 proof's stub host, with the
+# proof's own test helpers and busy guest. Each part is built from its own
+# folder, so rustup picks its toolchain (Rust 1.95.0). The guests are deleted
+# first and checked after, so a stale or missing guest is never tested.
+build_guest() { # <folder> <package> <file>
+    (
+        cd "$1"
+        rm -f "target/wasm32-unknown-unknown/release/$3.wasm"
+        cargo build --locked --release --target wasm32-unknown-unknown -p "$2"
+        if [ ! -f "target/wasm32-unknown-unknown/release/$3.wasm" ]; then
+            echo "verify: FAILED: the build did not produce $1/target/wasm32-unknown-unknown/release/$3.wasm" >&2
             exit 1
         fi
-    done
+    )
+}
+build_guest "${REPO_ROOT}/examples/bus2-proof" bus2-busy-guest bus2_busy_guest
+build_guest "${VIEWER_DIR}/bus2" docs-bus2-guest docs_bus2_guest
+(
+    cd "${VIEWER_DIR}/bus2"
     cargo fmt --all -- --check
     cargo clippy --locked -p docs-bus2-host-test --all-targets -- -D warnings
-    cargo clippy --locked --release --target wasm32-unknown-unknown -p docs-bus2-guest -p docs-bus2-busy-guest -- -D warnings
+    cargo clippy --locked --release --target wasm32-unknown-unknown -p docs-bus2-guest -- -D warnings
     cargo test --locked -p docs-bus2-host-test -- --nocapture
 )
 

@@ -303,7 +303,8 @@ BUS2 = [
     ),
 ]
 
-BUS2_GUESTS = ["-p", "docs-bus2-guest", "-p", "docs-bus2-busy-guest"]
+# The busy guest is the Bus v2 proof's, built by verify.sh and never mutated.
+BUS2_GUESTS = ["-p", "docs-bus2-guest"]
 
 # The string write the "pages written as a string" mutant calls; it exists
 # only while that mutant is in place.
