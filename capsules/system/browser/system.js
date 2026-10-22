@@ -1313,6 +1313,7 @@ function configureAiProvider() {
     // The check sends the typed key, or with a blank field a key staged by an earlier check.
     const checksStagedKey = Boolean(keyInput.value.trim())
       || Boolean(latestStatus?.staged_connections?.some((entry) => entry.id === editingId));
+    let removalFailed = false;
     try {
       // Validation and Save use the same Runtime connection identity.
       if (!editingId) editingId = `model:hosted-${crypto.randomUUID().replaceAll("-", "")}`;
@@ -1337,11 +1338,18 @@ function configureAiProvider() {
           // An unsaved connection starts its next check as a new one.
           if (!latestStatus?.connections?.some((entry) => entry.id === editingId)) editingId = "";
         } catch {
-          showState("The rejected key could not be removed. Select Close, then Discard staged key on its card.", "error");
+          removalFailed = true;
         }
       }
     } finally {
-      await refreshStatus().catch(() => {});
+      const refreshed = await refreshStatus().then(() => true, () => false);
+      // The form's button reads Close and the list has the key's Discard card exactly when
+      // the shown status stages this connection; otherwise only a fresh status can show it.
+      if (removalFailed && latestStatus?.staged_connections?.some((entry) => entry.id === editingId)) {
+        showState("The rejected key could not be removed. Select Close, then Discard staged key on its card.", "error");
+      } else if (removalFailed && !refreshed) {
+        showState("The rejected key could not be removed. Reload Home, then select Discard staged key on its card.", "error");
+      }
       setBusy(false);
     }
   });

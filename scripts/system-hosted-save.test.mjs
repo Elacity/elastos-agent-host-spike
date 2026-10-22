@@ -30,7 +30,7 @@ function fixture(connections = [], guest = false, staged = [], status = {}) {
   let timerId = 0, gate = null;
   let stagedConnections = staged.slice();
   let rejectActivation = true;
-  let consentPending = false, rejectKey = false, failDiscard = false;
+  let consentPending = false, rejectKey = false, failDiscard = false, failReads = false;
   const stateNode = element();
   const document = {
     hidden: false, querySelector: node, createElement: element,
@@ -65,6 +65,7 @@ function fixture(connections = [], guest = false, staged = [], status = {}) {
       if (init.method !== "POST") {
         reads.push(_url);
         if (guest) throw new Error("request failed: 403 admin passkey required");
+        if (failReads) throw new Error("request failed: 503 service unavailable");
         // Each read is a fresh reply, as over HTTP.
         return structuredClone({ ...status, connections, staged_connections: stagedConnections });
       }
@@ -107,6 +108,7 @@ function fixture(connections = [], guest = false, staged = [], status = {}) {
     shown: () => listeners.get("document:visibilitychange")(),
     activate: () => { rejectActivation = false; }, pending: () => { consentPending = true; },
     rejectKey: () => { rejectKey = true; }, failDiscard: () => { failDiscard = true; },
+    failReads: () => { failReads = true; },
     staged: () => stagedConnections };
 }
 
@@ -467,6 +469,21 @@ test("a rejected key that cannot be removed is reported and stays on its card", 
   assert.equal(card.children[0].textContent, "openrouter · Key check needed");
   assert.equal(card.children[2].textContent, "Discard staged key");
   assert.deepEqual(f.staged().map(entry => entry.id), [id]);
+});
+
+test("a rejected key that cannot be removed while status cannot load points to a Home reload", async () => {
+  const f = fixture();
+  await new Promise(setImmediate);
+  f.rejectKey();
+  f.failDiscard();
+  f.node("#ai-provider-add").handlers.click();
+  f.node("#ai-provider-key").value = "test";
+  f.failReads();
+  await f.node("#ai-provider-validate").handlers.click();
+  assert.equal(f.messages.at(-1), "The rejected key could not be removed. Reload Home, then select Discard staged key on its card.");
+  assert.equal(f.stateNode.dataset.tone, "error");
+  assert.equal(f.node("#ai-provider-cancel").textContent, "Cancel", "the shown status has no staged card yet");
+  assert.deepEqual(f.staged().map(entry => entry.id), [f.attempts[0].id]);
 });
 
 test("a live refresh that changes the cards clears an earlier success line; a neutral line stays", async () => {
