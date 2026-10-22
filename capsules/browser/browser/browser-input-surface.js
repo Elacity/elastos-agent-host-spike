@@ -24,6 +24,7 @@ export function bindBrowserInputSurface({
   readHostClipboardText,
   remoteVideo,
   renderPanel,
+  releaseDragButton,
   sendBrowserInput,
   showStatus,
   streamsPointerDrag = () => false,
@@ -109,7 +110,7 @@ export function bindBrowserInputSurface({
     return true;
   }
 
-  function browserPointFromEvent(event) {
+  function browserPointFromEvent(event, clampToMedia = false) {
     const target = remoteVideo;
     if (!target || target.hidden) {
       return null;
@@ -124,7 +125,7 @@ export function bindBrowserInputSurface({
     }
     const x = ((event.clientX - contentRect.left) / contentRect.width) * width;
     const y = ((event.clientY - contentRect.top) / contentRect.height) * height;
-    if (x < 0 || y < 0 || x > width || y > height) {
+    if (!clampToMedia && (x < 0 || y < 0 || x > width || y > height)) {
       return null;
     }
     return {
@@ -331,10 +332,11 @@ export function bindBrowserInputSurface({
     }
   });
 
-  function sendMouseInput(point, buttons) {
+  function sendMouseMove(state, point) {
     sendBrowserInput(
-      { type: "mouse", x: point.x, y: point.y, buttons },
-      { history: "replace" },
+      { type: "mouse", x: point.x, y: point.y, buttons: 1 },
+      // Only a release that bypassed the queue can overtake these moves.
+      { history: "replace", isStale: () => state.releasedDirectly },
     ).catch((error) => {
       showStatus(friendlyOpenError(error), { sticky: true });
     });
@@ -349,7 +351,7 @@ export function bindBrowserInputSurface({
     mouseDragState.pendingPoint = null;
     if (point) {
       mouseDragState.lastPoint = point;
-      sendMouseInput(point, 1);
+      sendMouseMove(mouseDragState, point);
     }
   }
 
@@ -366,10 +368,15 @@ export function bindBrowserInputSurface({
       renderPanel.releasePointerCapture?.(state.pointerId);
     }
     const point =
-      (event && browserPointFromEvent(event)) ||
+      (event && browserPointFromEvent(event, true)) ||
       state.pendingPoint ||
       state.lastPoint;
-    sendMouseInput(point, 0);
+    releaseDragButton(
+      { type: "mouse", x: point.x, y: point.y, buttons: 0 },
+      () => { state.releasedDirectly = true; },
+    ).catch((error) => {
+      showStatus(friendlyOpenError(error), { sticky: true });
+    });
     suppressSyntheticClickUntil = Date.now() + 700;
     return true;
   }
@@ -402,6 +409,7 @@ export function bindBrowserInputSurface({
       lastPoint: start,
       pendingPoint: null,
       dragging: false,
+      releasedDirectly: false,
       frame: 0,
     };
   });
@@ -421,10 +429,11 @@ export function bindBrowserInputSurface({
       unlockRemoteAudioFromGesture();
       focusKeyboardCapture();
       renderPanel.setPointerCapture?.(event.pointerId);
-      sendMouseInput(state.start, 1);
+      sendMouseMove(state, state.start);
     }
     event.preventDefault();
-    const point = browserPointFromEvent(event);
+    // Leaving the video still extends the selection to its edge.
+    const point = browserPointFromEvent(event, true);
     if (!point) {
       return;
     }
@@ -452,6 +461,14 @@ export function bindBrowserInputSurface({
       }
     });
   }
+  // Losing the window or tab mid-drag must still release the guest button.
+  window.addEventListener("blur", () => finishMouseDrag(null));
+  window.addEventListener("pagehide", () => finishMouseDrag(null));
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      finishMouseDrag(null);
+    }
+  });
 
   renderPanel.addEventListener(
     "wheel",

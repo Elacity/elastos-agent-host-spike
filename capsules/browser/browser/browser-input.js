@@ -1,3 +1,7 @@
+// The datachannel has no guest ack. After a send drains locally, this delay is
+// how long the guest is given to apply it before dependent input proceeds.
+export const DATACHANNEL_INPUT_SETTLE_MS = 150;
+
 export function keysymForBrowserKey(key) {
   const named = {
     Enter: 65293,

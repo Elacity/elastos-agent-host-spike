@@ -1,3 +1,5 @@
+import { DATACHANNEL_INPUT_SETTLE_MS } from "./browser-input.js?v=browser-20261022b";
+
 export const MAX_CLIPBOARD_TEXT_UTF8_BYTES = 65_536;
 export const MAX_CLIPBOARD_ENCODED_BYTES =
   Math.ceil(MAX_CLIPBOARD_TEXT_UTF8_BYTES / 3) * 4;
@@ -386,7 +388,7 @@ export function createBrowserClipboardBridge({
             showStatus(friendlyOpenError(error), { sticky: true });
           }
         });
-      }, 150);
+      }, DATACHANNEL_INPUT_SETTLE_MS);
     } catch (error) {
       if (pendingRemoteCopy === intent) {
         resetRemoteCopyIntent();

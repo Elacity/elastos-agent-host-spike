@@ -1371,6 +1371,10 @@ export function createBrowserRemoteDisplay({
     return Boolean(inputChannel && inputChannel.readyState === "open");
   }
 
+  function inputBufferedAmount() {
+    return Number(inputChannel?.bufferedAmount || 0);
+  }
+
   function isTrackReady() {
     return trackReady;
   }
@@ -1390,6 +1394,7 @@ export function createBrowserRemoteDisplay({
   return {
     close,
     connect,
+    inputBufferedAmount,
     inputChannelOpen,
     isTrackReady,
     metricsState,

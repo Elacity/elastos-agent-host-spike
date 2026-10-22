@@ -44,6 +44,7 @@ bindBrowserInputSurface({
   getCurrentPage: () => page, getCurrentView: () => view, keyboardCapture: null,
   pasteHostClipboardIntoRemote: async () => {}, readHostClipboardText: async () => "",
   remoteVideo: document.getElementById("video"), renderPanel: document.getElementById("panel"),
+  releaseDragButton: (event) => sendBrowserInput(event),
   sendBrowserInput, showStatus: () => {}, streamsPointerDrag: () => true, unlockRemoteAudioFromGesture: () => {},
 });
 window.ready = true;
@@ -87,6 +88,16 @@ try {
   await page.mouse.click(100, 100);
   const click = await page.evaluate(() => ({ channel: window.channel.splice(0), runtime: window.runtime.splice(0) }));
   assert(click.channel.length === 0 && click.runtime.length === 1 && click.runtime[0].x === 200, "a still click keeps the Runtime click", click);
+
+  // A drag that leaves the video extends to its edge rather than stopping.
+  await page.mouse.move(600, 300);
+  await page.mouse.down();
+  await page.mouse.move(610, 310);
+  await page.mouse.move(700, 500, { steps: 3 });
+  await page.mouse.up();
+  await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+  const edge = await page.evaluate(() => ({ channel: window.channel.splice(0), runtime: window.runtime.splice(0) }));
+  assert(edge.runtime.length === 0 && edge.channel.at(-1) === "m,1280,720,0,0", "a drag past the video must release at its edge", edge);
 
   await page.focus("#panel");
   await page.keyboard.press("Meta+A");

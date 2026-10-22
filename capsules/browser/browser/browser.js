@@ -9,7 +9,7 @@ import {
 } from "./browser-runtime-api.js?v=browser-20260907c";
 import {
   createBrowserClipboardBridge,
-} from "./browser-clipboard.js?v=browser-20260725b";
+} from "./browser-clipboard.js?v=browser-20261022b";
 import {
   createHomeClipboardClient,
 } from "/apps/home/home-clipboard-client.js?v=home-20260726a";
@@ -18,8 +18,8 @@ import {
   runtimePageOwner,
   sameRuntimePageOwner,
 } from "./browser-page-cleanup.js?v=browser-20260727a";
-import { selkiesMessagesForInput } from "./browser-input.js?v=browser-20261022a";
-import { bindBrowserInputSurface } from "./browser-input-surface.js?v=browser-20261022a";
+import { DATACHANNEL_INPUT_SETTLE_MS, selkiesMessagesForInput } from "./browser-input.js?v=browser-20261022b";
+import { bindBrowserInputSurface } from "./browser-input-surface.js?v=browser-20261022b";
 import {
   browserMetricsText,
   friendlyOpenError,
@@ -27,7 +27,7 @@ import {
   isMissingRuntimePageError,
   requestedDisplayMode,
 } from "./browser-status.js?v=browser-20260907c";
-import { createBrowserRemoteDisplay } from "./browser-remote-display.js?v=browser-20260915d";
+import { createBrowserRemoteDisplay } from "./browser-remote-display.js?v=browser-20261022b";
 import { engineChoiceHidden, renderServiceSelection } from "./browser-service-selection.js?v=browser-20261015a";
 
 const STATUS_TTL_MS = 4200;
@@ -107,7 +107,9 @@ let currentPage = null;
 let currentPageGeneration = 0;
 let nextPageGeneration = 1;
 const MAX_PENDING_BROWSER_INPUTS = 128;
+const DATACHANNEL_INPUT_BARRIER_TIMEOUT_MS = 3_000;
 let browserInputQueue = null;
+let lastDatachannelInputAt = 0;
 let restoredViewerOwner = null;
 let currentView = null;
 let currentDisplayMode = "";
@@ -1601,7 +1603,7 @@ function encodeDatachannelInput(event) {
 
 async function sendBrowserInput(
   event,
-  { focus = true, history = "push" } = {},
+  { focus = true, history = "push", isStale = null, onDispatch = null } = {},
 ) {
   const owner = currentRuntimePageOwner();
   if (!owner) {
@@ -1623,6 +1625,11 @@ async function sendBrowserInput(
     if (queue.failed) {
       throw new Error("Browser input was canceled after a failed operation.");
     }
+    // Moves of a drag that already ended must not re-press the guest button.
+    if (isStale?.()) {
+      return;
+    }
+    onDispatch?.();
     return dispatchBrowserInput(event, { focus, history }, owner);
   });
   queue.tail = pending.catch(() => {
@@ -1636,6 +1643,54 @@ async function sendBrowserInput(
     return await pending;
   } finally {
     queue.pending -= 1;
+  }
+}
+
+// The guest must always get the button release that ends a drag. It keeps
+// queue order; if the queue drops or refuses it (page change, a failed input,
+// a full queue), it goes straight to the datachannel.
+function releaseDragButton(event, onDirect = () => {}) {
+  let dispatched = false;
+  const sendDirect = () => {
+    if (dispatched || !remoteDisplay?.inputChannelOpen()) {
+      return;
+    }
+    dispatched = true;
+    // Moves still queued for this drag must not press the button again.
+    onDirect();
+    remoteDisplay.sendInputMessages(encodeDatachannelInput(event));
+    lastDatachannelInputAt = Date.now();
+  };
+  return sendBrowserInput(event, {
+    focus: false,
+    history: "replace",
+    onDispatch: () => { dispatched = true; },
+  })
+    .catch(() => {})
+    .then(sendDirect);
+}
+
+// The datachannel has no guest ack, so Runtime-route input that follows a
+// datachannel send waits until the channel has drained and the guest has had
+// the settle delay to apply it. It fails rather than reorder.
+async function awaitDatachannelInputSettled() {
+  if (!lastDatachannelInputAt) {
+    return;
+  }
+  const deadline = Date.now() + DATACHANNEL_INPUT_BARRIER_TIMEOUT_MS;
+  let settleFrom = lastDatachannelInputAt;
+  for (;;) {
+    const now = Date.now();
+    if (Number(remoteDisplay?.inputBufferedAmount?.() || 0) > 0) {
+      settleFrom = now;
+    } else if (now - settleFrom >= DATACHANNEL_INPUT_SETTLE_MS) {
+      lastDatachannelInputAt = 0;
+      return;
+    }
+    if (now >= deadline) {
+      throw new Error("Browser input is still being delivered. Check the page before typing again.");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
 
@@ -1664,6 +1719,7 @@ async function dispatchBrowserInput(
       throw new Error("Browser remote-display input channel is not open.");
     }
     remoteDisplay.sendInputMessages(encodeDatachannelInput(event));
+    lastDatachannelInputAt = Date.now();
     schedulePageStatusRefresh({
       history,
       forceAddress: true,
@@ -1677,6 +1733,10 @@ async function dispatchBrowserInput(
     }
   } else {
     const inputPageId = inputOwner.page_id;
+    await awaitDatachannelInputSettled();
+    if (!sameRuntimePageOwner(currentRuntimePageOwner(), inputOwner)) {
+      return;
+    }
     let response;
     try {
       response = await fetchJson(
@@ -2591,6 +2651,7 @@ bindBrowserInputSurface({
   readHostClipboardText: homeClipboard.readText,
   remoteVideo,
   renderPanel,
+  releaseDragButton,
   sendBrowserInput,
   showStatus,
   // Held-button drags exist only as Selkies datachannel mouse messages.

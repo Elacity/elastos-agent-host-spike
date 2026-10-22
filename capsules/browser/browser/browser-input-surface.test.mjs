@@ -79,10 +79,11 @@ function fakeTarget(extra = {}) {
   };
 }
 
-function surface({ datachannel = true } = {}) {
-  globalThis.document ??= fakeTarget();
-  globalThis.window ??= fakeTarget({ setTimeout, clearTimeout });
+function surface({ datachannel = true, releaseDirectly = false } = {}) {
+  globalThis.document = fakeTarget({ visibilityState: "visible" });
+  globalThis.window = fakeTarget({ setTimeout, clearTimeout });
   const inputs = [];
+  const staleChecks = [];
   const frames = [];
   const captured = new Set();
   const remoteVideo = fakeTarget({
@@ -108,7 +109,14 @@ function surface({ datachannel = true } = {}) {
     readHostClipboardText: async () => "",
     remoteVideo,
     renderPanel,
-    sendBrowserInput: async (event) => inputs.push(event),
+    releaseDragButton: async (event, onDirect) => {
+      if (releaseDirectly) onDirect();
+      inputs.push(releaseDirectly ? { ...event, direct: true } : event);
+    },
+    sendBrowserInput: async (event, options = {}) => {
+      if (options.isStale) staleChecks.push(options.isStale);
+      inputs.push(event);
+    },
     showStatus: () => {},
     streamsPointerDrag: () => datachannel,
     unlockRemoteAudioFromGesture: () => {},
@@ -118,7 +126,7 @@ function surface({ datachannel = true } = {}) {
   const flushFrames = () => frames.splice(0).forEach((callback) => callback());
   const mouse = (type, clientX, clientY, extra = {}) =>
     renderPanel.fire(type, { pointerType: "mouse", pointerId: 1, button: 0, clientX, clientY, ...extra });
-  return { inputs, renderPanel, remoteVideo, mouse, flushFrames, captured };
+  return { inputs, staleChecks, renderPanel, remoteVideo, mouse, flushFrames, captured };
 }
 
 test("mouse event encodes as one Selkies held-button or release message", () => {
@@ -166,6 +174,61 @@ test("pointercancel during a drag sends the release", () => {
     { type: "mouse", x: 100, y: 100, buttons: 1 },
     { type: "mouse", x: 120, y: 100, buttons: 0 },
   ]);
+});
+
+for (const [name, end] of [
+  ["lostpointercapture", (h) => h.mouse("lostpointercapture", 0, 0)],
+  ["window blur", () => globalThis.window.fire("blur")],
+  ["pagehide", () => globalThis.window.fire("pagehide")],
+  ["hidden tab", () => {
+    globalThis.document.visibilityState = "hidden";
+    globalThis.document.fire("visibilitychange");
+  }],
+]) test(`${name} during a drag sends the release`, () => {
+  const h = surface();
+  h.mouse("pointerdown", 100, 100);
+  h.mouse("pointermove", 120, 100);
+  end(h);
+  h.flushFrames();
+  assert.deepEqual(h.inputs, [
+    { type: "mouse", x: 100, y: 100, buttons: 1 },
+    { type: "mouse", x: 120, y: 100, buttons: 0 },
+  ]);
+});
+
+test("a visible-tab visibilitychange does not end the drag", () => {
+  const h = surface();
+  h.mouse("pointerdown", 100, 100);
+  h.mouse("pointermove", 120, 100);
+  globalThis.document.fire("visibilitychange");
+  h.flushFrames();
+  assert.deepEqual(h.inputs.map((input) => input.buttons), [1, 1]);
+});
+
+test("a drag leaving the video clamps to its edge", () => {
+  const h = surface();
+  h.mouse("pointerdown", 100, 100);
+  h.mouse("pointermove", 1400, -50);
+  h.flushFrames();
+  h.mouse("pointerup", 1500, 800);
+  assert.deepEqual(h.inputs, [
+    { type: "mouse", x: 100, y: 100, buttons: 1 },
+    { type: "mouse", x: 1280, y: 0, buttons: 1 },
+    { type: "mouse", x: 1280, y: 720, buttons: 0 },
+  ]);
+});
+
+test("moves are stale only after the release bypassed the queue", () => {
+  const queued = surface();
+  queued.mouse("pointerdown", 100, 100);
+  queued.mouse("pointermove", 120, 100);
+  queued.mouse("pointerup", 130, 100);
+  assert.ok(queued.staleChecks.length > 0 && queued.staleChecks.every((isStale) => !isStale()));
+  const direct = surface({ releaseDirectly: true });
+  direct.mouse("pointerdown", 100, 100);
+  direct.mouse("pointermove", 120, 100);
+  direct.mouse("pointerup", 130, 100);
+  assert.ok(direct.staleChecks.length > 0 && direct.staleChecks.every((isStale) => isStale()));
 });
 
 test("Runtime-route input falls back to today's click without drag messages", () => {

@@ -6,7 +6,7 @@ import { setImmediate as nextTurn } from "node:timers/promises";
 import test from "node:test";
 import vm from "node:vm";
 import { runtimePageOwner, sameRuntimePageOwner } from "../capsules/browser/browser/browser-page-cleanup.js";
-import { selkiesMessagesForInput } from "../capsules/browser/browser/browser-input.js";
+import { DATACHANNEL_INPUT_SETTLE_MS, selkiesMessagesForInput } from "../capsules/browser/browser/browser-input.js";
 import { createBrowserClipboardBridge } from "../capsules/browser/browser/browser-clipboard.js";
 
 // An explicit ref runs the unchanged behavioral gate as a negative control.
@@ -36,7 +36,7 @@ function assertCanceled(results) {
 }
 
 function harness() {
-  const requests = [], sends = [], mutations = [], failures = [], effects = [];
+  const requests = [], sends = [], mutations = [], failures = [], effects = [], channel = { open: true, buffered: 0 };
   const state = vm.createContext({
     currentPage: { page_id: "page:original", title: "Original", actual_url: "https://fixture.invalid/nav?run=ordering",
       runtime_cleanup: { schema: "elastos.browser.cleanup-handle/v1", id: "cleanup:original" },
@@ -44,8 +44,10 @@ function harness() {
     currentPageGeneration: 1, currentDisplayMode: "webrtc_remote_display", currentView: { width: 1280, height: 720 },
     libraryPickerRequest: null, runtimePageOwner, sameRuntimePageOwner, selkiesMessagesForInput,
     PAGE_STATUS_AFTER_INPUT_DELAY_MS: 1, PAGE_STATUS_AFTER_SCROLL_DELAY_MS: 1,
+    DATACHANNEL_INPUT_SETTLE_MS, setTimeout,
     remoteDisplay: {
-      inputChannelOpen: () => true,
+      inputChannelOpen: () => channel.open,
+      inputBufferedAmount: () => channel.buffered,
       // This observes synchronous dispatch, not a guest-side data-channel ack.
       sendInputMessages: messages => sends.push(...plain(messages)),
     },
@@ -68,9 +70,14 @@ function harness() {
   // The old implementation remains executable so the same behavioral tests can
   // record a red baseline, rather than failing merely on a missing new symbol.
   if (source.includes("function dispatchBrowserInput(")) names.push("dispatchBrowserInput");
+  for (const name of ["releaseDragButton", "awaitDatachannelInputSettled"]) {
+    if (source.includes(`function ${name}(`)) names.push(name);
+  }
   const queue = source.match(/^let browserInputQueue = [^\n]+;$/m)?.[0] || "";
   const cap = source.match(/^const MAX_PENDING_BROWSER_INPUTS = [0-9_]+;$/m)?.[0] || "";
-  vm.runInContext(queue + "\n" + cap + "\n" + names.map(declaration).join("\n"), state);
+  const barrier = [/^const DATACHANNEL_INPUT_BARRIER_TIMEOUT_MS = [0-9_]+;$/m, /^let lastDatachannelInputAt = [^\n]+;$/m]
+    .map(pattern => source.match(pattern)?.[0] || "").join("\n");
+  vm.runInContext(queue + "\n" + cap + "\n" + barrier + "\n" + names.map(declaration).join("\n"), state);
   const submit = (event, options) => Promise.resolve(state.sendBrowserInput(event, options))
     .then(value => ({ status: "fulfilled", value }), error => ({ status: "rejected", error }));
   const changeOwner = kind => {
@@ -80,7 +87,7 @@ function harness() {
     if (kind === "cleanup") state.currentPage.runtime_cleanup.id = "cleanup:replacement";
     return plain(state.currentPage);
   };
-  return { state, requests, sends, mutations, failures, effects, submit, changeOwner };
+  return { state, requests, sends, mutations, failures, effects, channel, submit, changeOwner };
 }
 
 test("rapid r/e/d waits for each Runtime ack and preserves the observed recovered suffix", async t => {
@@ -362,4 +369,96 @@ test("128 pending inputs are bounded; overflow preserves accepted order and capa
   assert.ok((await Promise.all([...results, replacement])).every(result => result.status === "fulfilled"));
   assert.deepEqual(h.effects, [...accepted, "replacement"]);
   assert.deepEqual(h.requests.map(request => request.event.text), [...accepted, "replacement"]);
+});
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const release = { type: "mouse", x: 30, y: 20, buttons: 0 };
+
+for (const [name, first, messages] of [
+  ["drag release", release, ["m,30,20,0,0"]],
+  ["Cmd+A select-all", { type: "key_combo", keysyms: [65507, 97] }, ["kd,65507", "kd,97", "ku,97", "ku,65507"]],
+]) test(`Runtime text after a ${name} waits for the datachannel settle barrier`, async () => {
+  const h = harness(), results = [h.submit(first), h.submit(text("x"))];
+  await nextTurn();
+  assert.deepEqual(h.sends, messages);
+  await sleep(DATACHANNEL_INPUT_SETTLE_MS - 50);
+  assert.equal(h.requests.length, 0, "replacement text must not overtake the selection");
+  await sleep(100);
+  assert.equal(h.requests.length, 1);
+  h.requests[0].ack();
+  assert.ok((await Promise.all(results)).every(result => result.status === "fulfilled"));
+});
+
+test("Runtime text with no preceding datachannel input has no barrier delay", async () => {
+  const h = harness(), result = h.submit(text("x"));
+  await nextTurn();
+  assert.equal(h.requests.length, 1);
+  h.requests[0].ack();
+  assert.equal((await result).status, "fulfilled");
+});
+
+test("a buffered datachannel holds Runtime text until it drains and settles", async () => {
+  const h = harness();
+  h.channel.buffered = 64;
+  const results = [h.submit(release), h.submit(text("x"))];
+  await sleep(DATACHANNEL_INPUT_SETTLE_MS + 50);
+  assert.equal(h.requests.length, 0);
+  h.channel.buffered = 0;
+  await sleep(DATACHANNEL_INPUT_SETTLE_MS - 50);
+  assert.equal(h.requests.length, 0, "settle restarts once the buffer drains");
+  await sleep(100);
+  assert.equal(h.requests.length, 1);
+  h.requests[0].ack();
+  assert.ok((await Promise.all(results)).every(result => result.status === "fulfilled"));
+});
+
+test("a datachannel that never drains fails the barrier visibly instead of reordering", async () => {
+  const h = harness();
+  h.channel.buffered = 64;
+  const [, typed] = await Promise.all([h.submit(release), h.submit(text("x"))]);
+  assert.equal(typed.status, "rejected");
+  assert.equal(typed.error.message, "Browser input is still being delivered. Check the page before typing again.");
+  assert.equal(h.requests.length, 0);
+});
+
+test("a drag release keeps queue order behind pending Runtime text", async () => {
+  const h = harness(), typed = h.submit(text("r"));
+  const released = h.state.releaseDragButton(release);
+  await nextTurn();
+  assert.deepEqual(h.sends, [], "release must not overtake queued input");
+  h.requests[0].ack();
+  await released;
+  assert.equal((await typed).status, "fulfilled");
+  assert.deepEqual(h.sends, ["m,30,20,0,0"]);
+});
+
+for (const kind of ["page", "failed"]) test(`a drag release still reaches the guest after a ${kind === "page" ? "page-owner change" : "failed queue"}`, async () => {
+  const h = harness(), typed = h.submit(text("r"));
+  const move = h.submit({ type: "mouse", x: 20, y: 20, buttons: 1 });
+  await nextTurn();
+  const released = h.state.releaseDragButton(release);
+  if (kind === "page") {
+    h.changeOwner("page");
+    h.requests[0].ack();
+  } else {
+    h.requests[0].reject(new TypeError("unknown delivery"));
+  }
+  await Promise.all([typed, move, released]);
+  assert.deepEqual(h.sends, ["m,30,20,0,0"], "dropped moves stay dropped; the release still goes");
+});
+
+test("a full queue sends the release directly and the ended drag's queued moves send nothing", async () => {
+  const h = harness(), state = { direct: false };
+  const queued = Array.from({ length: 127 }, (_, index) => h.submit(text(`input-${index}`)));
+  const move = h.submit({ type: "mouse", x: 20, y: 20, buttons: 1 }, { isStale: () => state.direct });
+  await nextTurn();
+  await h.state.releaseDragButton(release, () => { state.direct = true; });
+  assert.ok(state.direct);
+  assert.deepEqual(h.sends, ["m,30,20,0,0"]);
+  for (let index = 0; index < 127; index++) {
+    while (h.requests.length <= index) await sleep(5);
+    h.requests[index].ack(); await nextTurn();
+  }
+  await Promise.all([...queued, move]);
+  assert.deepEqual(h.sends, ["m,30,20,0,0"], "the stale move must not press the button again");
 });
