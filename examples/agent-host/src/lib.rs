@@ -10633,7 +10633,7 @@ mod tests {
         assert_eq!(encode_journal(&over, &[0; 32]), None);
     }
 
-    /// Split format 1 bytes into the header and the records.
+    /// Split journal bytes into the header and the records.
     fn journal_records(bytes: &[u8]) -> (Vec<u8>, Vec<(u8, Vec<u8>)>) {
         let header = bytes[..JOURNAL_HEADER].to_vec();
         let mut records = Vec::new();
@@ -10647,7 +10647,7 @@ mod tests {
         (header, records)
     }
 
-    /// Build format 1 bytes with every link and the head recomputed. The hash
+    /// Build journal bytes with every link and the head recomputed. The hash
     /// chain has no key, so anyone who can write the object can do this.
     fn relinked(mut header: Vec<u8>, records: &[(u8, Vec<u8>)]) -> Vec<u8> {
         header[JOURNAL_HEADER - 4..].copy_from_slice(&(records.len() as u32).to_le_bytes());
@@ -15745,5 +15745,601 @@ mod tests {
             edit_request(&mut bound, first),
             Err("one file twice in one change")
         );
+    }
+
+    // Journal format 2 (handoff/JOURNAL-FORMAT-2.md).
+
+    /// A real format 1 journal, written by the format 1 encoder at f873957:
+    /// two turns, a person's message "goal\nship it", a goal record and a
+    /// read of notes.txt.
+    const FORMAT_1_JOURNAL: &[&str] = &[
+        "4541484a010001000000000000000000000000000000000000000000000000000000000000000000",
+        "000000000000000000000000000000000008000000012500000001011f000000596f752061726520",
+        "74686520456c6173744f53206167656e7420686f73742ea02b08ad6c00bb31f647037293207751f5",
+        "3c2263c8327d802d0366362842eae0010b00000002030500000068656c6c6fe95bec7ef4c055b5ac",
+        "9bd4132a121f4b80fee6f9e9ab1840c2b9987db191557d012300000001021d0000005265706c7920",
+        "696e206f6e652073686f7274207061726167726170682ee0d8f303b4006e394934144da53d29f29f",
+        "d5b7af273f5049ee9adfb35ee3e16a011100000002030b0000007365636f6e64207475726e3c58cd",
+        "0c1acd922f79f72b8863e82f6e5b17bc062114e1c3424e3361521380e7012b000000010225000000",
+        "4b656570207468652066697273742073797374656d206c696e6520756e6368616e6765642e1f2116",
+        "24b9d75a3b0e9be6368b55c6910e9e32513e8604c8ebb90c2df05e969d011200000002030c000000",
+        "676f616c0a73686970206974989306519e8b7d7906f58012c704d5e9235617efa2bf2a905644396e",
+        "a975da40011a000000020314000000676f616c0a66696e69736820746865206e6f7465afa8d8a679",
+        "d52cb425643fc8d448d7edea3d8eb3ec9ab24c3b77063190a654b1017a0000000209740000003120",
+        "62366139386439636539613264393134393238386661336466343264333737633365343237333761",
+        "666463646166373134653333633061313030623531303630206c6f63616c686f73743a2f2f557365",
+        "72732f73656c662f446f63756d656e74732f6e6f7465732e7478740a616c7068610a488b95a013ae",
+        "a1d802a5c30e7d04ecfa818ba6e06b0c028fa53f8383a013674a488b95a013aea1d802a5c30e7d04",
+        "ecfa818ba6e06b0c028fa53f8383a013674a",
+    ];
+
+    fn format_1_journal() -> Vec<u8> {
+        let hex: String = FORMAT_1_JOURNAL.concat();
+        (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn node(role: Role, source: NodeSource, text: &str) -> SurfaceNode {
+        SurfaceNode {
+            role,
+            text: text.to_string(),
+            source,
+        }
+    }
+
+    /// One example of every kind, with the exact bytes the model sees.
+    fn golden() -> Vec<(SurfaceNode, &'static [u8])> {
+        vec![
+            (
+                node(Role::System, NodeSource::Head, "You are the host."),
+                b"You are the host.",
+            ),
+            (
+                node(Role::Assistant, NodeSource::InHistory, "Done."),
+                b"Done.",
+            ),
+            (node(Role::User, NodeSource::Message, "hello"), b"hello"),
+            (
+                node(Role::User, NodeSource::Snapshot, "localhost://Users/self"),
+                b"localhost://Users/self",
+            ),
+            (
+                node(Role::User, NodeSource::Skill, "Prefer the Runtime grant."),
+                b"Prefer the Runtime grant.",
+            ),
+            (node(Role::User, NodeSource::TurnMarker, ""), b""),
+            (node(Role::User, NodeSource::StepMarker(7), ""), b""),
+            (
+                node(
+                    Role::User,
+                    NodeSource::CompactionCheckpoint,
+                    "The page was read.",
+                ),
+                b"The page was read.",
+            ),
+            (
+                bound_observation_record(NOTES, 1, "rev-1", Some((2, 1)), true, "beta\ngam"),
+                b"",
+            ),
+            (
+                node(Role::User, NodeSource::Todo, "keep the note current"),
+                b"todo: keep the note current",
+            ),
+            (
+                node(Role::User, NodeSource::PlanEntered, "edit the note"),
+                b"plan entered: edit the note",
+            ),
+            (
+                node(Role::User, NodeSource::PlanExitAsked, "the note is ready"),
+                b"plan exit asked: the note is ready",
+            ),
+            (
+                node(Role::User, NodeSource::Goal, "finish the note"),
+                b"goal: finish the note",
+            ),
+            (
+                node(
+                    Role::User,
+                    NodeSource::Spill {
+                        resource: NOTES.to_string(),
+                        version: 2,
+                    },
+                    "",
+                ),
+                b"spill: localhost://Users/self/Documents/notes.txt version 2",
+            ),
+            (
+                node(Role::User, NodeSource::Inbox(InboxAnswer::AllowSession), ""),
+                b"inbox: allow-session",
+            ),
+            (
+                node(
+                    Role::User,
+                    NodeSource::Refused {
+                        reason: "stale".to_string(),
+                        what: "edit 0: localhost://Users/self/Documents/notes.txt".to_string(),
+                    },
+                    "",
+                ),
+                b"refused: stale (edit 0: localhost://Users/self/Documents/notes.txt)",
+            ),
+        ]
+    }
+
+    #[test]
+    fn each_kind_renders_byte_for_byte() {
+        let golden = golden();
+        let mut tags: Vec<u8> = golden
+            .iter()
+            .map(|(node, _)| source_tag(&node.source))
+            .collect();
+        tags.sort_unstable();
+        assert_eq!(tags, (1..=16).collect::<Vec<u8>>(), "one example per kind");
+        for (node, expected) in golden {
+            assert_eq!(
+                render_record(&node).as_bytes(),
+                expected,
+                "{:?}",
+                node.source
+            );
+        }
+    }
+
+    /// The rendering table, hashed, pinned next to the format number it
+    /// belongs to. Changing a rendering changes the hash; the pin may then
+    /// only move together with JOURNAL_FORMAT.
+    const RENDERING_PIN: (u16, &str) = (2, "fb358dc06c691ec7e529fd3a488e20123374ce7e8587e89f18d08756f1219771");
+
+    #[test]
+    fn the_rendering_changes_only_with_the_format_number() {
+        let mut table = Vec::new();
+        for (node, _) in golden() {
+            let rendered = render_record(&node);
+            table.push(source_tag(&node.source));
+            table.extend_from_slice(&(rendered.len() as u32).to_le_bytes());
+            table.extend_from_slice(rendered.as_bytes());
+        }
+        let hex: String = sha256(&table)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(RENDERING_FORMAT, JOURNAL_FORMAT);
+        assert_eq!(RENDERING_PIN.0, JOURNAL_FORMAT);
+        assert_eq!(
+            hex, RENDERING_PIN.1,
+            "a rendering changed: bump JOURNAL_FORMAT"
+        );
+    }
+
+    #[test]
+    fn every_kind_round_trips() {
+        let mut journal = empty_journal();
+        journal.events = golden().into_iter().map(|(node, _)| node).collect();
+        let bytes = encode_journal(&journal, &[0; 32]).unwrap();
+        assert_eq!(decode_journal(&bytes).unwrap().0, journal);
+        let cache = model_bytes(&journal.events).unwrap();
+        assert_eq!(replay(&cache).unwrap(), journal.events);
+    }
+
+    /// A person's message is a message, whatever it starts with: in the log,
+    /// after a round trip, in the cache bytes, for the durable and refusal
+    /// readers, for the spill reader, and through compaction (summarized,
+    /// not kept).
+    #[test]
+    fn a_message_starting_with_each_label_stays_a_message() {
+        let mut texts: Vec<String> = [
+            "todo",
+            "plan-entered",
+            "plan-exit-asked",
+            "goal",
+            "spill",
+            "inbox",
+            "refused",
+        ]
+        .iter()
+        .map(|label| format!("{label}\nx"))
+        .collect();
+        texts.extend([
+            format!("spill\n{NOTES}\n1"),
+            "inbox\nstanding".to_string(),
+            "refused\nstale\nedit 0".to_string(),
+            "todo: x".to_string(),
+            "plan entered: x".to_string(),
+            "plan exit asked: x".to_string(),
+            "goal: x".to_string(),
+            format!("spill: {NOTES} version 1"),
+            "inbox: standing".to_string(),
+            "refused: stale (edit 0)".to_string(),
+        ]);
+        for text in texts {
+            let mut journal = two_turns();
+            assert!(observe(&mut journal, NOTES, 1, "alpha\n"));
+            admit_user(&mut journal, &text);
+            let last = journal.events.last().unwrap().clone();
+            assert_eq!(last.source, NodeSource::Message, "{text:?}");
+            assert_eq!(render_record(&last), text);
+            assert!(
+                !is_durable_visible(&last) && !is_refusal_record(&last),
+                "{text:?}"
+            );
+            assert_eq!(text_at_spill(&journal.events, NOTES), None, "{text:?}");
+            let back = decode_journal(&encode_journal(&journal, &[0; 32]).unwrap())
+                .unwrap()
+                .0;
+            assert_eq!(back.events.last(), Some(&last), "{text:?}");
+            assert_eq!(
+                replay(&model_bytes(&journal.events).unwrap()).unwrap(),
+                journal.events
+            );
+            assert!(shadowed_summary_input(&journal).unwrap().contains(&text));
+            assert!(compact(&mut journal, COMPACTION_SUMMARY), "{text:?}");
+            assert!(
+                journal.events.iter().all(|node| node.text != text),
+                "{text:?}"
+            );
+            assert_eq!(text_at_spill(&journal.events, NOTES), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_format_1_journal_is_refused_with_its_reason() {
+        let bytes = format_1_journal();
+        assert_eq!(&bytes[..4], b"EAHJ");
+        assert_eq!(bytes[4..6], 1_u16.to_le_bytes());
+        assert_eq!(decode_journal(&bytes).map(|_| ()), Err(FORMAT_1_REASON));
+        assert_eq!(
+            FORMAT_1_REASON,
+            "journal format 1 not supported; start a new task"
+        );
+        // Format 2 bytes relabelled as format 1 are refused the same way,
+        // before anything else is read.
+        let mut relabelled = encode_journal(&two_turns(), &[0; 32]).unwrap();
+        relabelled[4..6].copy_from_slice(&1_u16.to_le_bytes());
+        assert_eq!(
+            decode_journal(&relabelled).map(|_| ()),
+            Err(FORMAT_1_REASON)
+        );
+    }
+
+    /// A format 1 task: reread gives the reason, resume gives
+    /// FormatNotSupported with it, the run's refusal is the exact text, and
+    /// nothing is written over the old object.
+    #[test]
+    fn a_format_1_task_shows_its_reason() {
+        let stored = format_1_journal();
+        let (mut runtime, mut cursor) = fake_runtime();
+        runtime.stored = Some(stored.clone());
+        assert_eq!(
+            reread_journal(&mut runtime, &mut cursor, Some(&read_grant())).map(|_| ()),
+            Err(FORMAT_1_REASON)
+        );
+        let mut journal = two_turns();
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Conflict
+        );
+        assert_eq!(
+            stored_task_refusal(&mut runtime, &mut cursor, Some(&read_grant())),
+            Some(FORMAT_1_REASON)
+        );
+        assert_eq!(runtime.stored.as_deref(), Some(stored.as_slice()));
+
+        let (mut runtime, mut cursor) = fake_runtime();
+        runtime.lose_reply = true;
+        let mut journal = two_turns();
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Unknown
+        );
+        runtime.stored = Some(stored.clone());
+        let calls = runtime.calls.len();
+        assert_eq!(
+            resume_journal(&mut runtime, &mut journal, &mut cursor, Some(&read_grant())),
+            ResumeOutcome::FormatNotSupported(FORMAT_1_REASON)
+        );
+        assert!(cursor.pending.is_some(), "the append stays unsettled");
+        assert!(runtime.calls[calls..]
+            .iter()
+            .all(|(operation, _)| operation == "read"));
+        assert_eq!(runtime.stored.as_deref(), Some(stored.as_slice()));
+        // A format 2 journal on the same path is not a refusal.
+        let (mut runtime, mut cursor) = fake_runtime();
+        runtime.stored = Some(encode_journal(&two_turns(), &[0; 32]).unwrap());
+        assert_eq!(
+            stored_task_refusal(&mut runtime, &mut cursor, Some(&read_grant())),
+            None
+        );
+    }
+
+    fn journal_with(node: SurfaceNode) -> (Vec<u8>, Vec<(u8, Vec<u8>)>) {
+        let mut journal = empty_journal();
+        journal.events.push(node);
+        journal_records(&encode_journal(&journal, &[0; 32]).unwrap())
+    }
+
+    #[test]
+    fn an_unknown_kind_is_refused() {
+        let (header, records) = journal_with(node(Role::User, NodeSource::Message, "hello"));
+        for tag in [0_u8, 17, 18, 19, 255] {
+            let mut bad = records.clone();
+            bad[0].1[1] = tag;
+            assert_eq!(
+                decode_journal(&relinked(header.clone(), &bad)).unwrap_err(),
+                "record",
+                "kind {tag}"
+            );
+        }
+        // Kinds 17 and 18 with plausible fields are refused too.
+        for payload in [
+            [vec![2, 17], 3_u64.to_le_bytes().to_vec(), vec![0; 12]].concat(),
+            [
+                vec![2, 18],
+                3_u64.to_le_bytes().to_vec(),
+                vec![1, 0, 0, 0, 0],
+            ]
+            .concat(),
+        ] {
+            assert_eq!(decode_node(&payload).unwrap_err(), "record");
+        }
+    }
+
+    #[test]
+    fn a_kind_with_the_wrong_role_is_refused() {
+        let roles = [Role::System, Role::User, Role::Assistant, Role::ToolResult];
+        let mut refused = 0;
+        for (good, _) in golden() {
+            for role in roles {
+                if role_fits(&good.source, role) {
+                    continue;
+                }
+                let mut wrong = good.clone();
+                wrong.role = role;
+                assert_eq!(node_payload(&wrong), None, "{:?} {role:?}", good.source);
+                let (header, mut records) = journal_with(good.clone());
+                records[0].1[0] = role_tag(role);
+                assert_eq!(
+                    decode_journal(&relinked(header, &records)).unwrap_err(),
+                    "record",
+                    "{:?} {role:?}",
+                    good.source
+                );
+                refused += 1;
+            }
+        }
+        assert_eq!(refused, 16 * 3 - 2, "history fits three roles");
+    }
+
+    #[test]
+    fn a_kind_without_text_must_have_none() {
+        for (good, _) in golden() {
+            if kind_has_text(&good.source) {
+                continue;
+            }
+            let mut texted = good.clone();
+            texted.text = "x".to_string();
+            assert_eq!(node_payload(&texted), None, "{:?}", good.source);
+            let mut journal = empty_journal();
+            journal.events.push(texted);
+            assert_eq!(encode_journal(&journal, &[0; 32]), None);
+        }
+    }
+
+    /// A read's payload, byte by byte, so a test can write fields that do
+    /// not fit.
+    #[allow(clippy::too_many_arguments)]
+    fn read_payload(
+        version: u64,
+        hash: [u8; 32],
+        revision: (u8, &str),
+        window: (u8, u64, u64),
+        cut: u8,
+        text: &str,
+    ) -> Vec<u8> {
+        let mut out = vec![role_tag(Role::User), 9];
+        put_str(&mut out, NOTES).unwrap();
+        out.extend_from_slice(&version.to_le_bytes());
+        out.extend_from_slice(&hash);
+        out.push(revision.0);
+        put_str(&mut out, revision.1).unwrap();
+        out.push(window.0);
+        out.extend_from_slice(&window.1.to_le_bytes());
+        out.extend_from_slice(&window.2.to_le_bytes());
+        out.push(cut);
+        put_str(&mut out, text).unwrap();
+        out
+    }
+
+    #[test]
+    fn an_observation_with_a_wrong_hash_or_window_is_refused() {
+        let hash = |text: &str| sha256(text.as_bytes());
+        assert!(decode_node(&read_payload(1, hash("a\n"), (0, ""), (0, 0, 0), 0, "a\n")).is_ok());
+        assert!(decode_node(&read_payload(
+            1,
+            hash("a\nb"),
+            (1, "r"),
+            (1, 2, 1),
+            1,
+            "a\nb"
+        ))
+        .is_ok());
+        for (index, payload) in [
+            read_payload(1, hash("other"), (0, ""), (0, 0, 0), 0, "a\n"),
+            read_payload(1, hash("a\n"), (1, "r"), (1, 2, 2), 0, "a\n"),
+            read_payload(1, hash("a\n"), (1, "r"), (1, 0, 1), 0, "a\n"),
+            read_payload(1, hash("a\n"), (1, "r"), (1, 2, 1), 1, "a\n"),
+            read_payload(1, hash("a\nb"), (1, "r"), (0, 0, 0), 1, "a\nb"),
+            read_payload(1, hash("a\n"), (0, ""), (1, 2, 1), 0, "a\n"),
+            read_payload(1, hash("a\n"), (0, "r"), (0, 0, 0), 0, "a\n"),
+            read_payload(1, hash("a\n"), (0, ""), (0, 2, 0), 0, "a\n"),
+            read_payload(1, hash("a\n"), (1, "r s"), (0, 0, 0), 0, "a\n"),
+            read_payload(1, hash("a\n"), (2, "r"), (0, 0, 0), 0, "a\n"),
+            read_payload(1, hash("a\n"), (0, ""), (0, 0, 0), 2, "a\n"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(decode_node(&payload).unwrap_err(), "record", "case {index}");
+        }
+        // The encoder refuses a read whose fields do not fit, too.
+        let mut forged = observation_record(NOTES, 1, "a\n");
+        forged.text = "b\n".to_string();
+        assert_eq!(node_payload(&forged), None);
+    }
+
+    #[test]
+    fn an_unknown_inbox_answer_is_refused() {
+        for tag in [0_u8, 5, 255] {
+            assert_eq!(
+                decode_node(&[2, 15, tag]).unwrap_err(),
+                "record",
+                "answer {tag}"
+            );
+        }
+        for answer in [
+            InboxAnswer::AllowOnce,
+            InboxAnswer::AllowSession,
+            InboxAnswer::Standing,
+            InboxAnswer::Deny,
+        ] {
+            assert_eq!(InboxAnswer::from_tag(answer.tag()), Some(answer));
+        }
+    }
+
+    #[test]
+    fn idea_2_fields_must_be_empty_until_built() {
+        let mut journal = two_turns();
+        propose_step(&mut journal);
+        let bytes = encode_journal(&journal, &[0; 32]).unwrap();
+        let (header, records) = journal_records(&bytes);
+        // Header: cancelled_from (25..34), task_budget (34..47), depth (47).
+        assert!(header[25..48].iter().all(|byte| *byte == 0));
+        for offset in 25..48 {
+            let mut bad = header.clone();
+            bad[offset] = 1;
+            assert_eq!(
+                decode_journal(&relinked(bad, &records)).unwrap_err(),
+                "record",
+                "header offset {offset}"
+            );
+        }
+        // Step: the last 19 bytes are depth, budget, requests_used and stop.
+        let step_at = records.iter().position(|(tag, _)| *tag == 3).unwrap();
+        let len = records[step_at].1.len();
+        for offset in len - 19..len {
+            let mut bad = records.clone();
+            bad[step_at].1[offset] = 1;
+            assert_eq!(
+                decode_journal(&relinked(header.clone(), &bad)).unwrap_err(),
+                "record",
+                "step offset {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cache_bytes_refuse_a_rendering_that_does_not_match() {
+        let events = vec![node(Role::User, NodeSource::Goal, "finish the note")];
+        let mut bytes = model_bytes(&events).unwrap();
+        assert_eq!(replay(&bytes).unwrap(), events);
+        assert_eq!(&bytes[4..10], b"goal: ");
+        bytes[4] = b'G';
+        assert_eq!(replay(&bytes), None);
+    }
+
+    #[test]
+    fn a_stored_spill_pointer_follows_the_path_rule() {
+        for (resource, reason) in [
+            ("localhost://Users/self//notes.txt", "path not canonical"),
+            ("localhost://Users/self/cafe\u{301}.txt", "path not NFC"),
+        ] {
+            let mut journal = two_turns();
+            journal.events.push(node(
+                Role::User,
+                NodeSource::Spill {
+                    resource: resource.to_string(),
+                    version: 1,
+                },
+                "",
+            ));
+            let bytes = encode_journal(&journal, &[0; 32]).unwrap();
+            assert_eq!(decode_journal(&bytes).map(|_| ()), Err(reason));
+        }
+    }
+
+    /// path_key makes limits stricter; which file a read belongs to is the
+    /// exact canonical path. NOTES.txt and notes.txt are two files: a read of
+    /// one never binds an edit of the other.
+    #[test]
+    fn two_files_that_differ_only_in_case_stay_two_files() {
+        let upper = "localhost://Users/self/Documents/NOTES.txt";
+        let lower = "localhost://Users/self/Documents/notes.txt";
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            upper,
+            1,
+            "rev-u",
+            None,
+            false,
+            "alpha\n"
+        ));
+        assert_eq!(
+            propose_edit(&mut journal, lower, "alpha", "one", Some(1)),
+            Err("not observed")
+        );
+        assert_eq!(
+            propose_change(&mut journal, &[spec(lower, "rev-u", "alpha", "one")]),
+            Err((0, "not observed"))
+        );
+        let id = dispatched_edit(&mut journal, lower, "alpha", None);
+        assert_eq!(edit_request(&mut journal, id), Err("not observed"));
+        // Version 1 of the other file is its own: another revision is fine.
+        assert!(observe_read(
+            &mut journal,
+            lower,
+            1,
+            "rev-l",
+            None,
+            false,
+            "beta\n"
+        ));
+        assert_eq!(
+            current_observation(&journal.events, upper)
+                .unwrap()
+                .revision
+                .as_deref(),
+            Some("rev-u")
+        );
+        assert_eq!(
+            current_observed_text(&journal.events, upper).as_deref(),
+            Some("alpha\n")
+        );
+        journal.events.push(node(
+            Role::User,
+            NodeSource::Spill {
+                resource: upper.to_string(),
+                version: 1,
+            },
+            "",
+        ));
+        assert_eq!(
+            text_at_spill(&journal.events, upper).as_deref(),
+            Some("alpha\n")
+        );
+        assert_eq!(text_at_spill(&journal.events, lower), None);
+        // For a limit they are one file.
+        assert_eq!(path_key(upper), path_key(lower));
     }
 }
