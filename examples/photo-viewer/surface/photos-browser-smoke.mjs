@@ -1,26 +1,17 @@
 // The real Photos page in real Chromium, framed the way Home frames apps.
 //
-// A local server stands in for Runtime. It serves the surface files with the
-// headers Runtime sends for an app (the CSP, CORS and isolation headers that
-// gateway_tests/photos.rs runtime_serves_the_real_photos_surface_in_its_sandbox
-// pins), answers the CORS preflight as the gateway front door does, and
-// stands in for the two Photos routes. The page is framed in Home's opaque
-// sandbox (capsules/home-gui/browser/shell-windows.js).
+// The capsule kit's stand-in (examples/capsule-kit/surface/stand-in.mjs) plays
+// Runtime: the app headers Runtime sends, the front door's CORS preflight, and
+// here the two Photos routes. The page is framed in Home's opaque sandbox.
 //
 // Run: node examples/photo-viewer/surface/photos-browser-smoke.mjs
 import assert from "node:assert/strict";
-import { once } from "node:events";
-import { readFile } from "node:fs/promises";
-import { createServer } from "node:http";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { crc32, deflateSync } from "node:zlib";
 
-import { chromium } from "../../../scripts/system-uiux-fixture.mjs";
+import { inHome, standIn } from "../../capsule-kit/surface/stand-in.mjs";
 
 const browserRoot = fileURLToPath(new URL("./browser/", import.meta.url));
-const TOKEN = "smoke-launch-token";
-const SANDBOX = "allow-downloads allow-forms allow-modals allow-pointer-lock allow-scripts";
 const HOSTILE = '<img src=x onerror="fetch(\'/api/apps/home/state\')">';
 
 /** A real PNG of one colour. */
@@ -58,134 +49,56 @@ const PLAYLIST = {
   skipped: [{ order: 1, uri: "localhost://Users/self/Pictures/b.gif", reason: "unsupported", message: HOSTILE }],
 };
 
-const requests = [];
-const server = createServer(async (request, response) => {
-  const origin = `http://${request.headers.host}`;
-  const url = new URL(request.url, origin);
-  requests.push(`${request.method} ${url.pathname}`);
-  const opaque = request.headers.origin === "null";
-  const cors = opaque ? { "access-control-allow-origin": "null", vary: "Origin" } : {};
-  const isolation = { "cross-origin-opener-policy": "same-origin", "cross-origin-embedder-policy": "require-corp" };
-
-  if (url.pathname === "/") {
-    // Home: frames the app in an opaque sandbox.
-    response.writeHead(200, { "content-type": "text/html; charset=utf-8", ...isolation });
-    response.end(
-      `<!doctype html><title>Home</title><iframe id="app" sandbox="${SANDBOX}" ` +
-        `src="/apps/image-viewer/?home_origin=${encodeURIComponent(origin)}#home_token=${TOKEN}" ` +
-        `width="800" height="600"></iframe>`,
-    );
-    return;
-  }
-  if (url.pathname.startsWith("/apps/image-viewer/")) {
-    const name = url.pathname.slice("/apps/image-viewer/".length) || "index.html";
-    if (!["index.html", "main.js", "photos.js", "photos.css"].includes(name)) {
-      response.writeHead(404).end();
-      return;
+const { base, requests, close } = await standIn({
+  app: "image-viewer",
+  browserRoot,
+  files: ["index.html", "main.js", "photos.js", "photos.css"],
+  routes(method, path) {
+    if (method !== "GET") return null;
+    if (path === "/api/viewers/image-viewer/playlist") {
+      return { type: "application/json", body: JSON.stringify(PLAYLIST) };
     }
-    const types = { html: "text/html; charset=utf-8", js: "application/javascript", css: "text/css" };
-    const headers = {
-      "content-type": types[name.split(".").pop()],
-      "cache-control": "no-store",
-      "x-content-type-options": "nosniff",
-      "access-control-allow-origin": "null",
-      "cross-origin-resource-policy": "cross-origin",
-      "referrer-policy": "no-referrer",
-      ...isolation,
-    };
-    if (name === "index.html") {
-      // Runtime's app policy, as served (browser_capsules.rs).
-      headers["content-security-policy"] =
-        `sandbox allow-scripts allow-forms allow-downloads; default-src ${origin}; ` +
-        `script-src 'self' 'wasm-unsafe-eval'; style-src ${origin} 'unsafe-inline'; ` +
-        `img-src ${origin} blob: data:; connect-src ${origin} ws://${request.headers.host}; ` +
-        `frame-src ${origin}; object-src 'none'; base-uri 'none'; form-action ${origin}`;
+    const item = path.match(/^\/api\/viewers\/image-viewer\/playlist\/item\/(\d+)$/);
+    if (item && IMAGES[item[1]]) {
+      return { type: "application/octet-stream", headers: { "x-content-type-options": "nosniff" }, body: IMAGES[item[1]] };
     }
-    response.writeHead(200, headers);
-    response.end(await readFile(join(browserRoot, name)));
-    return;
-  }
-  if (url.pathname.startsWith("/api/") && request.method === "OPTIONS") {
-    // As the gateway front door answers a preflight from an app frame.
-    response.writeHead(204, {
-      ...cors,
-      "access-control-allow-methods": "GET, POST, PUT, DELETE, HEAD",
-      "access-control-allow-headers": "content-type,x-elastos-home-token",
-    });
-    response.end();
-    return;
-  }
-  if (request.headers["x-elastos-home-token"] !== TOKEN || !opaque) {
-    response.writeHead(403, { "content-type": "application/json", ...cors });
-    response.end(JSON.stringify({ error: "refused by the smoke server" }));
-    return;
-  }
-  if (url.pathname === "/api/viewers/image-viewer/playlist" && request.method === "GET") {
-    response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store", ...cors });
-    response.end(JSON.stringify(PLAYLIST));
-    return;
-  }
-  const item = url.pathname.match(/^\/api\/viewers\/image-viewer\/playlist\/item\/(\d+)$/);
-  if (item && request.method === "GET" && IMAGES[item[1]]) {
-    response.writeHead(200, {
-      "content-type": "application/octet-stream",
-      "x-content-type-options": "nosniff",
-      "cache-control": "no-store",
-      ...cors,
-    });
-    response.end(IMAGES[item[1]]);
-    return;
-  }
-  response.writeHead(404, cors).end();
+    return null;
+  },
 });
-
-server.listen(0, "127.0.0.1");
-await once(server, "listening");
-const base = `http://127.0.0.1:${server.address().port}`;
-const browser = await chromium.launch();
 try {
-  const page = await browser.newPage();
-  const problems = [];
-  page.on("console", (message) => {
-    if (message.type() === "error") problems.push(message.text());
+  const problems = await inHome(base, async (frame) => {
+    const photo = frame.locator("#photo");
+    await photo.evaluate((img) =>
+      img.complete && img.naturalWidth ? null : new Promise((resolve) => img.addEventListener("load", resolve, { once: true })),
+    );
+    const first = await photo.evaluate((img) => ({ src: img.src, width: img.naturalWidth, height: img.naturalHeight }));
+    assert.match(first.src, /^blob:/);
+    assert.deepEqual([first.width, first.height], [4, 3]);
+    assert.equal(await frame.locator("#caption").textContent(), "1 / 2 · 4 × 3");
+
+    // The skipped entry is text: the markup in it did not run or load anything.
+    assert.equal(await frame.locator("#skipped li").textContent(), `Photo 2: ${HOSTILE}`);
+    assert.equal(await frame.locator("#skipped img").count(), 0);
+
+    await frame.locator("#next").click();
+    await frame.locator("#caption").filter({ hasText: "2 / 2" }).waitFor();
+    const second = await photo.evaluate(async (img) => {
+      if (!img.complete || !img.naturalWidth) await new Promise((resolve) => img.addEventListener("load", resolve, { once: true }));
+      return { width: img.naturalWidth, height: img.naturalHeight };
+    });
+    assert.deepEqual([second.width, second.height], [3, 5]);
+
+    // The frame is the opaque sandbox Home gives it: no storage, no cookies.
+    const sandboxed = await frame.locator("body").evaluate(() => {
+      try {
+        window.localStorage.getItem("x");
+        return false;
+      } catch {
+        return true;
+      }
+    });
+    assert.equal(sandboxed, true);
   });
-  page.on("pageerror", (error) => problems.push(String(error)));
-  page.on("requestfailed", (request) => problems.push(`failed: ${request.url()} ${request.failure()?.errorText}`));
-  await page.goto(`${base}/`);
-  const frame = page.frameLocator("#app");
-
-  const photo = frame.locator("#photo");
-  await photo.evaluate((img) =>
-    img.complete && img.naturalWidth ? null : new Promise((resolve) => img.addEventListener("load", resolve, { once: true })),
-  );
-  const first = await photo.evaluate((img) => ({ src: img.src, width: img.naturalWidth, height: img.naturalHeight }));
-  assert.match(first.src, /^blob:/);
-  assert.deepEqual([first.width, first.height], [4, 3]);
-  assert.equal(await frame.locator("#caption").textContent(), "1 / 2 · 4 × 3");
-
-  // The skipped entry is text: the markup in it did not run or load anything.
-  assert.equal(await frame.locator("#skipped li").textContent(), `Photo 2: ${HOSTILE}`);
-  assert.equal(await frame.locator("#skipped img").count(), 0);
-
-  await frame.locator("#next").click();
-  await frame.locator("#caption").filter({ hasText: "2 / 2" }).waitFor();
-  const second = await photo.evaluate(async (img) => {
-    if (!img.complete || !img.naturalWidth) await new Promise((resolve) => img.addEventListener("load", resolve, { once: true }));
-    return { width: img.naturalWidth, height: img.naturalHeight };
-  });
-  assert.deepEqual([second.width, second.height], [3, 5]);
-
-  // The frame is the opaque sandbox Home gives it: no storage, no cookies.
-  const sandboxed = await frame.locator("body").evaluate(() => {
-    try {
-      window.localStorage.getItem("x");
-      return false;
-    } catch {
-      return true;
-    }
-  });
-  assert.equal(sandboxed, true);
-
   const api = requests.filter((line) => line.includes(" /api/"));
   assert.deepEqual(
     api.filter((line) => line.startsWith("GET")),
@@ -201,6 +114,5 @@ try {
   console.log("photos browser smoke: ok");
   console.log(requests.join("\n"));
 } finally {
-  await browser.close();
-  server.close();
+  close();
 }
