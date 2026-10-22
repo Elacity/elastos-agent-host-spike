@@ -45,6 +45,11 @@ Open Documents or Library from Home to work with your files. The source Home
 profile includes these apps and their content backend. For an installed release,
 its signed manifest determines the available components.
 
+In 0.8.0, Library can lose a save when the same file is saved from two places at
+once, or renamed, moved or deleted while it saves (#480). Edit a file in one
+window at a time, and let a save or upload finish before you rename, move or
+delete it.
+
 The same install also provides the operator runtime for `serve`, remote node
 control, WASM or microVM `run`, and non-interactive capsule work. Data
 `run` and interactive packaged capsules use the lanes in the command matrix.
