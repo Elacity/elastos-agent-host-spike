@@ -120,6 +120,10 @@ Things in the photo patterns, or in the copied code, that did not fit a document
 
 What no app can add for itself. Items 1, 2, 4 and 6 are Runtime or Home changes and need Sasha's yes.
 
+**Decided after review:** items 3 and 5 are done in the spike tools (branch `claude/photo-kit-shared`, see
+`SHARED-REPORT.md`). Items 1, 2, 4 and 6 wait for Anders, after 0.8.0; the Runtime, Home and Bus stay as they
+are.
+
 1. **A generic read route for a viewer.**
    - The seam serves `image-viewer` and the photo playlist only (`viewer_gateway.rs`, "Photos surface").
    - So `docs-reader` has run only against the stand-in server.
@@ -134,6 +138,7 @@ What no app can add for itself. Items 1, 2, 4 and 6 are Runtime or Home changes 
    - `capsule-bundle` names a folder by CID, but has nothing that decides which files ship. The source folders
      hold source, tests, fixtures and build output.
    - I wrote `pack` in the test: the manifest and the entrypoint, or for a page the entrypoint's folder.
+     (Now done: `capsule-bundle pack`, and the test uses it.)
    - Needed: `capsule-bundle pack`, with the list of shipped files declared, and a test that the CID does not
      change when a test or fixture does.
 4. **The Runtime manifest cannot name a core by CID.**
@@ -141,7 +146,8 @@ What no app can add for itself. Items 1, 2, 4 and 6 are Runtime or Home changes 
      `kind`". A test pins this.
    - Known from P4; still missing.
 5. **A policy that lists one publisher twice is not refused.**
-   - The tool reads the first entry for a DID and ignores the rest, silently. A test pins this.
+   - The tool reads the first entry for a DID and ignores the rest, silently. A test pins this. (Now done: a
+     repeated DID is refused as `publisher_listed_twice`.)
    - So "this publisher ships the app `docs-viewer` and the viewer `docs-reader`" cannot be said exactly. The
      only form is roles `[app, viewer]` with names `[docs-viewer, docs-reader]`, which also lets it ship an
      app named `docs-reader`.

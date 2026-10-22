@@ -52,8 +52,9 @@ checks what it reads before it trusts it, and reads no more than it needs.
 - [ ] **(added)** cap what one run reads in all, and count every byte read in full, whether the item is then
       shown or skipped.
 - [ ] **(added)** cap what one run writes: on Bus v1 each output byte costs fuel and travels as a number of up
-      to four characters in a 1 MiB bridge frame. Write the output and the write body straight to bytes, never
-      through a `serde_json::Value` per byte.
+      to four characters in a 1 MiB bridge frame. Write the output straight to bytes, never through a
+      `serde_json::Value` per span or block. The kit's shared write body (`v1-guest/bus.rs`) still builds a
+      `Value` per byte, because changing it changes the photo core's hash; the fuel gate must include it.
 - [ ] **(added)** keep every parser linear in its input. A content failure must never cost a trap.
 - [ ] parse every input strictly: a fixed schema string, unknown fields refused, URIs checked (prefix, no empty,
       `.` or `..` segment, no `?`, `#`, `\` or control character).
@@ -72,8 +73,9 @@ checks what it reads before it trusts it, and reads no more than it needs.
 **Proof:** guest tests against a fake Runtime that checks bodies the way the localhost provider does, the same
 run inside the Runtime's own `ComponentProvider`, the admission import check, and a fuel gate.
 
-**In the photo viewer:** `src/lib.rs` (run order, stop and skip), `src/bus.rs` (the two calls), `src/album.rs`
-(strict input), `src/image.rs` (header checks), `src/fake.rs` and `src/tests.rs`, and `host-test/`.
+**In the photo viewer:** `src/lib.rs` (run order, stop and skip), `src/album.rs` (strict input), `src/image.rs`
+(header checks), `src/tests.rs`, and `host-test/`. Shared in the kit: `v1-guest/bus.rs` (the two calls),
+`v1-guest/fake.rs`, `v1-guest/component.rs`, and the harness `v1-host-test/`.
 
 ## 2. Render-only page with a launch token
 
