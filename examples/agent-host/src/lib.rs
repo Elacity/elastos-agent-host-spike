@@ -15890,7 +15890,10 @@ mod tests {
     /// The rendering table, hashed, pinned next to the format number it
     /// belongs to. Changing a rendering changes the hash; the pin may then
     /// only move together with JOURNAL_FORMAT.
-    const RENDERING_PIN: (u16, &str) = (2, "fb358dc06c691ec7e529fd3a488e20123374ce7e8587e89f18d08756f1219771");
+    const RENDERING_PIN: (u16, &str) = (
+        2,
+        "fb358dc06c691ec7e529fd3a488e20123374ce7e8587e89f18d08756f1219771",
+    );
 
     #[test]
     fn the_rendering_changes_only_with_the_format_number() {
@@ -16081,6 +16084,14 @@ mod tests {
                 "kind {tag}"
             );
         }
+        // A bare unknown kind, with nothing after it, is refused by its tag.
+        for tag in [0_u8, 17, 18, 19, 255] {
+            assert_eq!(
+                decode_node(&[2, tag]).unwrap_err(),
+                "record",
+                "bare kind {tag}"
+            );
+        }
         // Kinds 17 and 18 with plausible fields are refused too.
         for payload in [
             [vec![2, 17], 3_u64.to_le_bytes().to_vec(), vec![0; 12]].concat(),
@@ -16123,10 +16134,21 @@ mod tests {
 
     #[test]
     fn a_kind_without_text_must_have_none() {
+        // Listed by hand, not by kind_has_text, so the test does not depend on
+        // the function it checks.
+        let mut checked = 0;
         for (good, _) in golden() {
-            if kind_has_text(&good.source) {
+            if !matches!(
+                good.source,
+                NodeSource::TurnMarker
+                    | NodeSource::StepMarker(_)
+                    | NodeSource::Spill { .. }
+                    | NodeSource::Inbox(_)
+                    | NodeSource::Refused { .. }
+            ) {
                 continue;
             }
+            checked += 1;
             let mut texted = good.clone();
             texted.text = "x".to_string();
             assert_eq!(node_payload(&texted), None, "{:?}", good.source);
@@ -16134,6 +16156,7 @@ mod tests {
             journal.events.push(texted);
             assert_eq!(encode_journal(&journal, &[0; 32]), None);
         }
+        assert_eq!(checked, 5);
     }
 
     /// A read's payload, byte by byte, so a test can write fields that do
