@@ -62,7 +62,7 @@ pub fn check_unique_under_case_folding<'a>(
     Ok(())
 }
 
-fn walk(
+pub(crate) fn walk(
     root: &Path,
     dir: &Path,
     entries: &mut Vec<Entry>,
@@ -122,7 +122,7 @@ fn relative_path(root: &Path, path: &Path) -> Result<String, Refusal> {
     Ok(segments.join("/"))
 }
 
-fn check_segment(name: &str) -> Result<(), Refusal> {
+pub(crate) fn check_segment(name: &str) -> Result<(), Refusal> {
     if name.is_empty() || name == "." || name == ".." {
         return Err(Refusal::PathInvalid(name.to_string()));
     }

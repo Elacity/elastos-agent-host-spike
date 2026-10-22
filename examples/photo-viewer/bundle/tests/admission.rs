@@ -4,6 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use capsule_bundle::sign;
+use capsule_bundle::testing::{refused, unseal};
 use capsule_bundle::*;
 use ed25519_dalek::SigningKey;
 
@@ -104,20 +105,6 @@ impl Drop for World {
     }
 }
 
-fn unseal(path: &Path) {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return;
-    };
-    if meta.is_dir() {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        for child in std::fs::read_dir(path).unwrap() {
-            unseal(&child.unwrap().path());
-        }
-    } else if meta.is_file() {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
-    }
-}
-
 fn write_manifest(
     dir: &Path,
     name: &str,
@@ -152,12 +139,6 @@ fn claim_by(key: &SigningKey, dir: &Path, name: &str, version: &str, role: &str)
         publisher_did: sign::did(key),
     }
     .sign(key)
-}
-
-fn refused<T: std::fmt::Debug>(result: Result<T, Refusal>) -> &'static str {
-    let refusal = result.expect_err("expected a refusal");
-    println!("refused: {refusal}");
-    refusal.code()
 }
 
 fn installed(name: &str, version: &str, cid: &str) -> Installed {
@@ -1640,4 +1621,39 @@ fn provenance_is_a_separate_record_that_names_the_cid() {
 
     // Admission takes no provenance and does not need one.
     admit(&dir, &claim, &world.policy(), &[], &world.store(), NOW).unwrap();
+}
+
+/// Capsule kit item 5: a publisher in two entries is refused, not merged, and
+/// the refused policy does not move the floor. One entry may list several
+/// roles and names.
+#[test]
+fn a_policy_that_lists_a_publisher_twice_is_refused() {
+    let world = World::new();
+    let mut release = world.release();
+    release.publishers.push(PublisherEntry {
+        did: sign::did(&world.publisher),
+        roles: vec!["viewer".into()],
+        names: Some(vec!["image-viewer".into()]),
+    });
+    let floor = world.floor();
+    let result = effective_policy(
+        &release.sign(&world.release_root),
+        &sign::did(&world.release_root),
+        &LocalConfig::default(),
+        NOW,
+        &floor,
+    );
+    assert_eq!(refused(result), "publisher_listed_twice");
+    assert_eq!(
+        floor.seen().unwrap(),
+        None,
+        "a refused policy moves no floor"
+    );
+
+    let mut release = world.release();
+    release.publishers[0].roles = vec!["app".into(), "viewer".into()];
+    release.publishers[0].names = Some(vec!["photo-viewer".into(), "image-viewer".into()]);
+    let policy = world.policy_from(release);
+    assert_eq!(policy.publishers.len(), 1);
+    assert_eq!(policy.publishers[0].roles, ["app", "viewer"]);
 }

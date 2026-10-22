@@ -184,6 +184,29 @@ CASES = [
     ("provenance for another CID verifies", "provenance.rs",
      [("if self.provenance.cid != cid {", "if false && self.provenance.cid != cid {")],
      ["provenance_is_a_separate_record_that_names_the_cid"]),
+    # Capsule kit item 5: one entry per publisher.
+    ("a publisher listed twice is merged", "policy.rs",
+     [("            return Err(Refusal::PublisherListedTwice(entry.did.clone()));", "            continue;")],
+     ["a_policy_that_lists_a_publisher_twice_is_refused"]),
+    # Capsule kit item 3: pack.
+    ("pack follows a symlinked entrypoint", "pack.rs",
+     [("match std::fs::symlink_metadata(source.join(&entrypoint)) {", "match std::fs::metadata(source.join(&entrypoint)) {")],
+     ["pack_refuses_what_it_cannot_ship_as_it_is"]),
+    ("pack writes into a folder that exists", "pack.rs",
+     [("    if std::fs::symlink_metadata(into).is_ok() {", "    if false {")],
+     ["pack_refuses_what_it_cannot_ship_as_it_is"]),
+    ("pack takes a core named by something that is not a CID", "pack.rs",
+     [("        check_cid_form(cid)?;", "        let _ = cid;")],
+     ["pack_refuses_what_it_cannot_ship_as_it_is"]),
+    ("pack adds a second requirement of the same name", "pack.rs",
+     [("            list.retain(|requirement| {", "            list.retain(|requirement| true || {")],
+     ["a_page_names_its_core_by_cid_and_keeps_its_other_requirements"]),
+    ("pack rewrites a manifest it has nothing to add to", "pack.rs",
+     [("    let shipped = if requires.is_empty() {", "    let shipped = if false {")],
+     ["a_component_ships_its_manifest_and_its_entrypoint_only"]),
+    ("pack ships the whole source of a page", "pack.rs",
+     [("        let folder = segments[..segments.len() - 1].join(\"/\");", "        let folder = segments[..segments.len() - 1].join(\"/\") + \"/..\";")],
+     ["a_page_ships_its_manifest_and_its_entrypoint_folder"]),
 ]
 
 

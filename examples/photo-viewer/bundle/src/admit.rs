@@ -228,7 +228,7 @@ pub fn resolve_requires(
     Ok(cores)
 }
 
-fn parse_manifest(bytes: &[u8]) -> Result<Value, Refusal> {
+pub(crate) fn parse_manifest(bytes: &[u8]) -> Result<Value, Refusal> {
     let manifest: Value = serde_json::from_slice(bytes)
         .map_err(|err| Refusal::ClaimMalformed(format!("capsule.json: {err}")))?;
     if !manifest.is_object() {
@@ -245,7 +245,7 @@ fn parse_version(name: &str, version: &str) -> Result<Version, Refusal> {
 }
 
 /// `b` and base32 lower only, so a CID is one path segment.
-fn check_cid_form(cid: &str) -> Result<(), Refusal> {
+pub(crate) fn check_cid_form(cid: &str) -> Result<(), Refusal> {
     let body = cid.strip_prefix('b').unwrap_or_default();
     if body.is_empty()
         || !body

@@ -10,15 +10,20 @@
 //! version of an installed name, then stages a read-only copy under its CID,
 //! verifies that copy, and loads only from it.
 //!
+//! [`pack`] makes the closure out of a capsule's source folder: only what the
+//! capsule runs from, so its CID does not change with its tests or source.
+//!
 //! Every refusal has a code ([`Refusal::code`]) and names what was expected.
 
 pub mod admit;
 pub mod cid;
 pub mod claim;
 pub mod listing;
+pub mod pack;
 pub mod policy;
 pub mod provenance;
 pub mod sign;
+pub mod testing;
 
 pub use admit::{admit, load, resolve_requires, Admitted, Installed, Loaded};
 pub use cid::cid_v1_raw_sha256;
@@ -27,6 +32,7 @@ pub use listing::{
     check_unique_under_case_folding, closure_cid, list_closure, listing_bytes, Entry,
     LISTING_SCHEMA,
 };
+pub use pack::pack;
 pub use policy::{
     effective_policy, DevKey, LocalConfig, PolicyFloor, PublisherEntry, ReleasePolicy,
     SignedReleasePolicy, TrustPolicy, TrustedPublisher, MAX_DEV_KEY_LIFETIME_SECS,
@@ -93,6 +99,9 @@ pub enum Refusal {
     },
     /// The publisher DID is revoked.
     PublisherRevoked(String),
+    /// The release policy lists this publisher DID in more than one entry.
+    /// One entry may list several roles and names.
+    PublisherListedTwice(String),
     /// The CID is revoked.
     CidRevoked(String),
     /// An installed capsule of the same name has a higher version.
@@ -124,6 +133,11 @@ pub enum Refusal {
     },
     /// A provenance record names another CID.
     ProvenanceCidMismatch { expected: String, named: String },
+    /// Pack: the manifest names no entrypoint, the entrypoint is not in the
+    /// source, or a page's entrypoint is not in a folder of its own.
+    PackEntrypointMissing(String),
+    /// Pack: the folder to pack into already exists.
+    PackDestinationExists(String),
     /// A filesystem error.
     Io(String),
 }
@@ -154,6 +168,7 @@ impl Refusal {
             Refusal::PublisherUntrusted(_) => "publisher_untrusted",
             Refusal::PublisherRoleRefused { .. } => "publisher_role_refused",
             Refusal::PublisherRevoked(_) => "publisher_revoked",
+            Refusal::PublisherListedTwice(_) => "publisher_listed_twice",
             Refusal::CidRevoked(_) => "cid_revoked",
             Refusal::VersionDowngrade { .. } => "version_downgrade",
             Refusal::VersionConflict { .. } => "version_conflict",
@@ -163,6 +178,8 @@ impl Refusal {
             Refusal::CoreMissing { .. } => "core_missing",
             Refusal::CoreMismatch { .. } => "core_mismatch",
             Refusal::ProvenanceCidMismatch { .. } => "provenance_cid_mismatch",
+            Refusal::PackEntrypointMissing(_) => "pack_entrypoint_missing",
+            Refusal::PackDestinationExists(_) => "pack_destination_exists",
             Refusal::Io(_) => "io",
         }
     }
