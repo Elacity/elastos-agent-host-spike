@@ -6,11 +6,14 @@ Usage: python3 -I falsify-surface.py [--check]
 Each falsifier replaces exact text in surface/browser/photos.js (it must occur
 once), runs the named node tests, and requires them to FAIL. The file is
 restored from its saved bytes afterwards, also on error or Ctrl-C. --check
-only confirms every anchor occurs once.
+only confirms every anchor occurs once. The runner is the capsule kit's
+(examples/capsule-kit/falsify).
 """
 import pathlib
-import subprocess
 import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "capsule-kit" / "falsify"))
+import falsify_kit as kit  # noqa: E402
 
 SURFACE = pathlib.Path(__file__).resolve().parent / "surface"
 PAGE = SURFACE / "browser" / "photos.js"
@@ -100,43 +103,12 @@ CASES = [
 
 
 def tests_fail(names):
-    for name in names:
-        result = subprocess.run(
-            ["node", "--test", f"--test-name-pattern={name}", str(TESTS)],
-            capture_output=True,
-            text=True,
-        )
-        if "# tests 0" in result.stdout:
-            raise SystemExit(f"no test matches {name!r}")
-        if result.returncode == 0:
-            return False
-    return True
+    return any(kit.node_test_fails(TESTS, name) for name in names)
 
 
 def main():
-    check_only = "--check" in sys.argv[1:]
-    saved = PAGE.read_bytes()
-    text = saved.decode()
-    missed = []
-    for name, old, new, tests in CASES:
-        if text.count(old) != 1:
-            raise SystemExit(f"{name}: expected the text once in photos.js, found {text.count(old)}")
-        if check_only:
-            continue
-        try:
-            PAGE.write_text(text.replace(old, new))
-            caught = tests_fail(tests)
-        finally:
-            PAGE.write_bytes(saved)
-        print(f"{'caught' if caught else 'MISSED'}: {name} -> {', '.join(tests)}", flush=True)
-        if not caught:
-            missed.append(name)
-    if check_only:
-        print(f"all {len(CASES)} anchors found once")
-        return
-    if missed:
-        raise SystemExit(f"{len(missed)} falsifier(s) not caught: {missed}")
-    print(f"all {len(CASES)} surface falsifiers caught")
+    cases = [(name, PAGE, [(old, new)], tests) for name, old, new, tests in CASES]
+    kit.main([(cases, tests_fail, None, True)], done=f"all {len(CASES)} surface falsifiers caught")
 
 
 if __name__ == "__main__":

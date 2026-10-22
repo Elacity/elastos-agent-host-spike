@@ -4,18 +4,21 @@
 Usage: python3 -I falsify.py            # guest falsifiers (host tests, fast)
        python3 -I falsify.py --runtime  # also rebuild the component once per
                                         # runtime falsifier and run host-test
+       --check                          # only confirm every anchor occurs once
+       name parts                       # run only the falsifiers they match
 
 Each falsifier replaces one exact line, runs the named tests, and requires
 them to FAIL. The file is restored from its saved bytes afterwards, also on
 error or Ctrl-C. The script exits non-zero if any falsifier is not caught or
-its line is not found exactly once.
+its line is not found exactly once. The runner is the capsule kit's
+(examples/capsule-kit/falsify).
 """
-import os
 import pathlib
-import subprocess
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / "capsule-kit" / "falsify"))
+import falsify_kit as kit  # noqa: E402
 
 # (name, file, exact old text, new text, guest test filters)
 GUEST = [
@@ -155,75 +158,36 @@ RUNTIME = [
 ]
 
 
-def env():
-    environment = dict(os.environ)
-    environment.setdefault("RUST_TEST_THREADS", "2")
-    return environment
-
-
-def run(cmd, cwd):
-    return subprocess.run(cmd, cwd=cwd, env=env(), capture_output=True, text=True)
+def cases(listed):
+    return [(name, HERE / relative, [(old, new)], tests) for name, relative, old, new, tests in listed]
 
 
 def guest_tests_fail(filters):
-    # A mutant that does not compile proves nothing.
-    build = run(["cargo", "test", "--locked", "--lib", "--no-run"], HERE)
-    if build.returncode != 0:
-        print(build.stderr[-2000:])
-        raise SystemExit("a falsifier does not compile")
-    for name in filters:
-        result = run(["cargo", "test", "--locked", "--lib", "--", "--exact", f"tests::{name}"], HERE)
-        if result.returncode == 0:
-            return False
-    return True
+    kit.cargo_compiles(HERE, ["--lib"])
+    return any(kit.cargo_test_fails(HERE, ["--lib"], f"tests::{name}") for name in filters)
 
 
 def runtime_tests_fail(filters):
-    build = run([str(HERE / "build.sh")], HERE)
+    build = kit.run([str(HERE / "build.sh")], HERE)
     if build.returncode != 0:
         print(build.stderr[-2000:])
         raise SystemExit("component build failed under a falsifier")
-    for name in filters:
-        result = run(
-            ["cargo", "test", "--locked", "--test", "component", "--", "--exact", name],
-            HERE / "host-test",
-        )
-        if result.returncode == 0:
-            return False
-    return True
-
-
-def falsify(cases, failing):
-    missed = []
-    for name, relative, old, new, filters in cases:
-        path = HERE / relative
-        saved = path.read_bytes()
-        text = saved.decode()
-        if text.count(old) != 1:
-            raise SystemExit(f"{name}: expected the line once in {relative}, found {text.count(old)}")
-        try:
-            path.write_text(text.replace(old, new))
-            caught = failing(filters)
-        finally:
-            path.write_bytes(saved)
-        print(f"{'caught' if caught else 'MISSED'}: {name} -> {', '.join(filters)}")
-        if not caught:
-            missed.append(name)
-    return missed
+    return any(kit.cargo_test_fails(HERE / "host-test", ["--test", "component"], name) for name in filters)
 
 
 def main():
-    missed = falsify(GUEST, guest_tests_fail)
-    if "--runtime" in sys.argv[1:]:
-        try:
-            missed += falsify(RUNTIME, runtime_tests_fail)
-        finally:
+    try:
+        kit.main(
+            [
+                (cases(GUEST), guest_tests_fail, None, True),
+                (cases(RUNTIME), runtime_tests_fail, "--runtime", True),
+            ]
+        )
+    finally:
+        if "--runtime" in sys.argv[1:]:
             # Leave the unmutated component in place.
-            if run([str(HERE / "build.sh")], HERE).returncode != 0:
+            if kit.run([str(HERE / "build.sh")], HERE).returncode != 0:
                 raise SystemExit("restoring the component build failed")
-    if missed:
-        raise SystemExit(f"{len(missed)} falsifier(s) not caught: {missed}")
-    print("all falsifiers caught")
 
 
 if __name__ == "__main__":

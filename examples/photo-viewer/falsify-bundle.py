@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Break each check of the P4b bundle tool, see its test fail, restore it.
 
-Usage: RUST_TEST_THREADS=2 python3 -I falsify-bundle.py
+Usage: RUST_TEST_THREADS=2 python3 -I falsify-bundle.py [--check] [name-part ...]
 
 Each falsifier replaces exact text in one file under bundle/src (every piece
 must occur once), rebuilds the tests (a mutant that does not compile proves
 nothing, so the run stops), runs the named tests, and requires them to FAIL.
 The file is restored from its saved bytes afterwards, also on error or Ctrl-C.
+The runner is the capsule kit's (examples/capsule-kit/falsify).
 """
-import os
 import pathlib
-import subprocess
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "capsule-kit" / "falsify"))
+import falsify_kit as kit  # noqa: E402
 
 BUNDLE = pathlib.Path(__file__).resolve().parent / "bundle"
 
@@ -210,53 +213,14 @@ CASES = [
 ]
 
 
-def env():
-    environment = dict(os.environ)
-    environment.setdefault("RUST_TEST_THREADS", "2")
-    return environment
-
-
-def cargo(*args):
-    return subprocess.run(["cargo", "test", "-q", *args], cwd=BUNDLE, env=env(), capture_output=True, text=True)
-
-
 def tests_fail(filters):
-    build = cargo("--no-run")
-    if build.returncode != 0:
-        print(build.stderr[-3000:])
-        raise SystemExit("a falsifier does not compile")
-    for name in filters:
-        result = cargo("--", "--exact", name)
-        ran = "1 passed" in result.stdout or "1 failed" in result.stdout
-        if not ran:
-            raise SystemExit(f"no test named {name}")
-        if result.returncode == 0:
-            return False
-    return True
+    kit.cargo_compiles(BUNDLE, ["-q"])
+    return any(kit.cargo_test_fails(BUNDLE, ["-q"], name) for name in filters)
 
 
 def main():
-    missed = []
-    for name, relative, replacements, filters in CASES:
-        path = BUNDLE / "src" / relative
-        saved = path.read_bytes()
-        text = saved.decode()
-        for old, _ in replacements:
-            if text.count(old) != 1:
-                raise SystemExit(f"{name}: expected the text once in {relative}, found {text.count(old)}")
-        try:
-            for old, new in replacements:
-                text = text.replace(old, new)
-            path.write_text(text)
-            caught = tests_fail(filters)
-        finally:
-            path.write_bytes(saved)
-        print(f"{'caught' if caught else 'MISSED'}: {name} -> {', '.join(filters)}", flush=True)
-        if not caught:
-            missed.append(name)
-    if missed:
-        raise SystemExit(f"{len(missed)} falsifier(s) not caught: {missed}")
-    print(f"all {len(CASES)} bundle falsifiers caught")
+    cases = [(name, BUNDLE / "src" / relative, replacements, tests) for name, relative, replacements, tests in CASES]
+    kit.main([(cases, tests_fail, None, True)], done=f"all {len(CASES)} bundle falsifiers caught")
 
 
 if __name__ == "__main__":

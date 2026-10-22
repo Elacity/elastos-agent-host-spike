@@ -11,15 +11,15 @@ the named tests, and requires them to FAIL. The file is restored from its
 saved bytes afterwards, also on error or Ctrl-C. The script exits non-zero if
 any falsifier is not caught or its text is not found exactly once.
 
-Copied from examples/photo-viewer/falsify.py, with two changes: a test names
-its package (the core or the model), and --check and name filters.
+The runner is the capsule kit's (examples/capsule-kit/falsify); this file
+holds the cases and says how to run their tests.
 """
-import os
 import pathlib
-import subprocess
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / "capsule-kit" / "falsify"))
+import falsify_kit as kit  # noqa: E402
 
 # (name, file, exact old text, new text, [(package, test name)])
 # package "core" is the docs-viewer guest, "model" is docs-model.
@@ -316,67 +316,35 @@ pub fn write_string(bus: &mut dyn Bus, uri: &str, grant: &str, content: &str) ->
 '''
 
 
-def env():
-    environment = dict(os.environ)
-    environment.setdefault("RUST_TEST_THREADS", "2")
-    return environment
-
-
-def run(cmd, cwd):
-    return subprocess.run(cmd, cwd=cwd, env=env(), capture_output=True, text=True)
+def cases(listed):
+    out = []
+    for name, relative, old, new, tests in listed:
+        appends = [(HERE / "src/bus.rs", WRITE_STRING)] if "write_string" in new else []
+        out.append((name, HERE / relative, [(old, new)], tests, appends))
+    return out
 
 
 def guest_tests_fail(tests):
-    # A mutant that does not compile proves nothing.
-    build = run(["cargo", "test", "--locked", "--workspace", "--lib", "--no-run"], HERE)
-    if build.returncode != 0:
-        print(build.stderr[-2000:])
-        raise SystemExit("a falsifier does not compile")
-    for package, name in tests:
-        crate = {"core": "docs-viewer", "model": "docs-model"}[package]
-        result = run(
-            ["cargo", "test", "--locked", "-p", crate, "--lib", "--", "--exact", f"tests::{name}"], HERE
-        )
-        if "1 passed" not in result.stdout and "1 failed" not in result.stdout:
-            raise SystemExit(f"no test {crate} tests::{name}\n{result.stdout[-1500:]}")
-        if result.returncode == 0:
-            return False
-    return True
+    kit.cargo_compiles(HERE, ["--workspace", "--lib"])
+    crates = {"core": "docs-viewer", "model": "docs-model"}
+    return any(kit.cargo_test_fails(HERE, ["-p", crates[package], "--lib"], f"tests::{name}") for package, name in tests)
 
 
 def runtime_tests_fail(tests):
-    build = run([str(HERE / "build.sh")], HERE)
+    build = kit.run([str(HERE / "build.sh")], HERE)
     if build.returncode != 0:
         print(build.stderr[-2000:])
         raise SystemExit("component build failed under a falsifier")
-    for name in tests:
-        result = run(
-            ["cargo", "test", "--locked", "--test", "component", "--", "--exact", name],
-            HERE / "host-test",
-        )
-        if "1 passed" not in result.stdout and "1 failed" not in result.stdout:
-            raise SystemExit(f"no host test {name}\n{result.stdout[-1500:]}")
-        if result.returncode == 0:
-            return False
-    return True
+    return any(kit.cargo_test_fails(HERE / "host-test", ["--test", "component"], name) for name in tests)
 
 
 def bundle_tests_fail(tests):
-    for name in tests:
-        result = run(
-            ["cargo", "test", "--locked", "--test", "bundle", "--", "--exact", name],
-            HERE / "bundle-test",
-        )
-        if "1 passed" not in result.stdout and "1 failed" not in result.stdout:
-            raise SystemExit(f"no bundle test {name}\n{result.stdout[-1500:]}{result.stderr[-1500:]}")
-        if result.returncode == 0:
-            return False
-    return True
+    return any(kit.cargo_test_fails(HERE / "bundle-test", ["--test", "bundle"], name) for name in tests)
 
 
 def build_bus2_guests():
     # From bus2/, so rustup picks its toolchain (Rust 1.95.0).
-    return run(
+    return kit.run(
         ["cargo", "build", "--locked", "--release", "--target", "wasm32-unknown-unknown", *BUS2_GUESTS],
         HERE / "bus2",
     )
@@ -387,76 +355,30 @@ def bus2_tests_fail(tests):
     if build.returncode != 0:
         print(build.stderr[-2000:])
         raise SystemExit("a Bus v2 falsifier does not compile")
-    for name in tests:
-        result = run(
-            ["cargo", "test", "--locked", "-p", "docs-bus2-host-test", "--test", "docs", "--", "--exact", name],
-            HERE / "bus2",
-        )
-        if "1 passed" not in result.stdout and "1 failed" not in result.stdout:
-            raise SystemExit(f"no Bus v2 test {name}\n{result.stdout[-1500:]}{result.stderr[-1500:]}")
-        if result.returncode == 0:
-            return False
-    return True
-
-
-def check(cases):
-    for name, relative, old, _new, _tests in cases:
-        text = (HERE / relative).read_text()
-        if text.count(old) != 1:
-            raise SystemExit(f"{name}: expected the text once in {relative}, found {text.count(old)}")
-
-
-def falsify(cases, failing, parts):
-    missed = []
-    for name, relative, old, new, tests in cases:
-        if parts and not any(part in name for part in parts):
-            continue
-        path = HERE / relative
-        saved = path.read_bytes()
-        bus = HERE / "src/bus.rs"
-        saved_bus = bus.read_bytes()
-        try:
-            path.write_text(saved.decode().replace(old, new))
-            if "write_string" in new:
-                bus.write_text(bus.read_text() + WRITE_STRING)
-            caught = failing(tests)
-        finally:
-            path.write_bytes(saved)
-            bus.write_bytes(saved_bus)
-        print(f"{'caught' if caught else 'MISSED'}: {name}", flush=True)
-        if not caught:
-            missed.append(name)
-    return missed
+    return any(
+        kit.cargo_test_fails(HERE / "bus2", ["-p", "docs-bus2-host-test", "--test", "docs"], name) for name in tests
+    )
 
 
 def main():
     args = sys.argv[1:]
-    parts = [arg for arg in args if not arg.startswith("--")]
-    check(GUEST)
-    check(RUNTIME)
-    check(BUNDLE)
-    check(BUS2)
-    if "--check" in args:
-        print(f"all {len(GUEST) + len(RUNTIME) + len(BUNDLE) + len(BUS2)} anchors found once")
-        return
-    missed = falsify(GUEST, guest_tests_fail, parts)
-    missed += falsify(BUNDLE, bundle_tests_fail, parts)
     try:
-        missed += falsify(BUS2, bus2_tests_fail, parts)
+        kit.main(
+            [
+                (cases(GUEST), guest_tests_fail, None, False),
+                (cases(BUNDLE), bundle_tests_fail, None, False),
+                (cases(BUS2), bus2_tests_fail, None, False),
+                (cases(RUNTIME), runtime_tests_fail, "--runtime", False),
+            ],
+            args,
+        )
     finally:
-        # Leave the unmutated guests in place.
-        if build_bus2_guests().returncode != 0:
-            raise SystemExit("restoring the Bus v2 guest build failed")
-    if "--runtime" in args:
-        try:
-            missed += falsify(RUNTIME, runtime_tests_fail, parts)
-        finally:
-            # Leave the unmutated component in place.
-            if run([str(HERE / "build.sh")], HERE).returncode != 0:
+        if "--check" not in args:
+            # Leave the unmutated guests and component in place.
+            if build_bus2_guests().returncode != 0:
+                raise SystemExit("restoring the Bus v2 guest build failed")
+            if "--runtime" in args and kit.run([str(HERE / "build.sh")], HERE).returncode != 0:
                 raise SystemExit("restoring the component build failed")
-    if missed:
-        raise SystemExit(f"{len(missed)} falsifier(s) not caught: {missed}")
-    print("all falsifiers caught")
 
 
 if __name__ == "__main__":
