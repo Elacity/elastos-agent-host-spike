@@ -72,6 +72,12 @@ export async function standIn({ app, browserRoot, files, routes }) {
       response.end(await readFile(join(browserRoot, name)));
       return;
     }
+    if (url.pathname === "/favicon.ico") {
+      // A browser asks for it on its own; Home has none. A 403 here is a
+      // console error, and the smoke fails on console errors.
+      response.writeHead(204).end();
+      return;
+    }
     if (url.pathname.startsWith("/api/") && request.method === "OPTIONS") {
       // As the gateway front door answers a preflight from an app frame.
       response.writeHead(204, {

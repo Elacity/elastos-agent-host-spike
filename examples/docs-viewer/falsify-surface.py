@@ -96,9 +96,15 @@ CASES = [
     ),
     (
         "an unknown style becomes its own element",
-        '    tag: STYLES[span && span.style] || "span",',
+        '    tag: styleTag(span && span.style),',
         '    tag: (span && span.style) || "span",',
         ["an unknown style is plain"],
+    ),
+    (
+        "a style is looked up through the prototype",
+        '  return typeof style === "string" && Object.hasOwn(STYLES, style) ? STYLES[style] : "span";',
+        '  return STYLES[style] || "span";',
+        ["a style named after an inherited property is plain"],
     ),
     (
         "a heading level is not kept within 1 to 6",

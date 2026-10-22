@@ -419,8 +419,79 @@ fn a_shelf_stops_taking_documents_at_its_budget_without_reading_the_one_that_wou
             (3, doc(3), "shelf_full".to_string()),
         ]
     );
-    // The third: its head, one byte past the document cap, one byte past the budget.
-    assert_eq!(bus.bytes_served(&doc(2)), HEAD_BYTES + 1);
+    // The budget is spent, so the third and fourth are not read at all.
+    assert_eq!(bus.bytes_served(&doc(2)), 0);
+    assert_eq!(bus.bytes_served(&doc(3)), 0);
+}
+
+/// Every byte served for the documents of a shelf.
+fn served(bus: &FakeBus, docs: &[(String, Vec<u8>)]) -> u64 {
+    docs.iter().map(|(uri, _)| bus.bytes_served(uri)).sum()
+}
+
+#[test]
+fn a_short_document_that_is_not_text_still_counts_toward_the_shelf_budget() {
+    // Codex's shelf: six short heads of NULs, then two full text documents.
+    let full = MAX_DOCUMENT_BYTES as usize;
+    let mut docs: Vec<(String, Vec<u8>)> = (0..6)
+        .map(|n| (doc(n), vec![0; HEAD_BYTES as usize - 1]))
+        .collect();
+    docs.push((doc(6), text_of(full)));
+    docs.push((doc(7), text_of(full)));
+    let refs: Vec<(&str, Vec<u8>)> = docs.iter().map(|(u, b)| (u.as_str(), b.clone())).collect();
+    let mut bus = granted(&refs);
+    run(&mut bus).unwrap();
+    assert!(
+        served(&bus, &docs) <= MAX_SHELF_TEXT_BYTES,
+        "{} bytes read",
+        served(&bus, &docs)
+    );
+    let reasons: Vec<String> = skipped(&bus)
+        .into_iter()
+        .map(|(_, _, reason)| reason)
+        .collect();
+    assert_eq!(reasons, [vec!["not_text"; 6], vec!["shelf_full"]].concat());
+    assert_eq!(written(&bus)["documents"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn no_shelf_reads_more_than_its_budget() {
+    // Every mix of short skipped heads and full documents, in either order.
+    let full = MAX_DOCUMENT_BYTES as usize;
+    for short in 0..=MAX_SHELF_ITEMS {
+        for size in [
+            1,
+            HEAD_BYTES as usize - 1,
+            HEAD_BYTES as usize,
+            HEAD_BYTES as usize + 1,
+        ] {
+            for first in [true, false] {
+                let mut docs: Vec<(String, Vec<u8>)> = Vec::new();
+                for n in 0..MAX_SHELF_ITEMS {
+                    let is_short = if first {
+                        n < short
+                    } else {
+                        n >= MAX_SHELF_ITEMS - short
+                    };
+                    let bytes = if is_short {
+                        vec![0; size]
+                    } else {
+                        text_of(full)
+                    };
+                    docs.push((doc(n), bytes));
+                }
+                let refs: Vec<(&str, Vec<u8>)> =
+                    docs.iter().map(|(u, b)| (u.as_str(), b.clone())).collect();
+                let mut bus = granted(&refs);
+                run(&mut bus).unwrap();
+                let read = served(&bus, &docs);
+                assert!(
+                    read <= MAX_SHELF_TEXT_BYTES,
+                    "{short} short of {size} bytes, first {first}: {read} bytes read"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -635,14 +706,94 @@ fn a_document_that_renders_past_what_a_shelf_may_show_is_skipped() {
             (3, doc(3), "shelf_full".to_string()),
         ]
     );
-    let shown: usize = written(&bus)["documents"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|document| document["blocks"].to_string().len())
-        .sum();
-    assert!(shown as u64 <= MAX_SHELF_SHOWN_BYTES, "{shown}");
-    assert!(text.len() < 80 * 1024, "{}", text.len());
+    assert!(text.len() as u64 <= MAX_PAGES_BYTES, "{}", text.len());
+}
+
+/// One-character code spans render to about eight times their size: one
+/// paragraph of `full` lines of 120, then one of `tail`.
+fn code_spans(full: usize, tail: usize) -> Vec<u8> {
+    let mut text = format!("{}\n\n", "`a` ".repeat(120)).repeat(full);
+    if tail > 0 {
+        text.push_str(&"`a` ".repeat(tail));
+    }
+    text.into_bytes()
+}
+
+/// The size of a document's blocks, as the core renders them.
+fn rendered_size(bytes: &[u8]) -> usize {
+    let text = std::str::from_utf8(bytes).unwrap();
+    let blocks = docs_model::blocks(docs_model::Kind::Markdown, text).unwrap();
+    let mut out = vec![b'['];
+    for (index, block) in blocks.iter().enumerate() {
+        if index > 0 {
+            out.push(b',');
+        }
+        docs_model::write_block(&mut out, block);
+    }
+    out.push(b']');
+    out.len()
+}
+
+#[test]
+fn a_document_whose_blocks_fit_but_whose_pages_would_not_is_skipped() {
+    // Codex's case: the blocks fit under the cap, the pages around them do not.
+    let uri = format!("localhost://Users/self/Documents/{}.md", "n".repeat(600));
+    let frame = pages_json(&[], &[]).len();
+    let tail = (0..120)
+        .find(|&tail| rendered_size(&code_spans(9, tail)) > MAX_PAGES_BYTES as usize - frame - 400)
+        .expect("a size just under the cap");
+    let bytes = code_spans(9, tail);
+    assert!(rendered_size(&bytes) < MAX_PAGES_BYTES as usize - frame);
+    let mut bus = granted(&[(uri.as_str(), bytes)]);
+    let text = run(&mut bus).unwrap();
+    assert!(text.len() as u64 <= MAX_PAGES_BYTES, "{}", text.len());
+    assert_eq!(skipped(&bus), [(0, uri, "shelf_full".to_string())]);
+}
+
+#[test]
+fn no_pages_are_longer_than_their_cap() {
+    // Six skipped items with long names and two documents, the skipped ones
+    // first or last; the second document grows a span at a time past what fits.
+    let skips: Vec<(String, Vec<u8>)> = (0..6)
+        .map(|n| {
+            let name = format!(
+                "localhost://Users/self/Documents/{n}{}.pdf",
+                "s".repeat(380)
+            );
+            (name, b"%PDF".to_vec())
+        })
+        .collect();
+    for skips_first in [true, false] {
+        let mut shown_at_least_once = false;
+        let mut skipped_at_least_once = false;
+        let sizes = (4..=5).flat_map(|full| (0..=120).map(move |tail| (full, tail)));
+        for (full, tail) in sizes {
+            let documents = vec![(doc(6), code_spans(4, 0)), (doc(7), code_spans(full, tail))];
+            let docs: Vec<(String, Vec<u8>)> = if skips_first {
+                [skips.clone(), documents].concat()
+            } else {
+                [documents, skips.clone()].concat()
+            };
+            let refs: Vec<(&str, Vec<u8>)> =
+                docs.iter().map(|(u, b)| (u.as_str(), b.clone())).collect();
+            let mut bus = granted(&refs);
+            let text = run(&mut bus).unwrap();
+            assert!(
+                text.len() as u64 <= MAX_PAGES_BYTES,
+                "skipped first {skips_first}, {full} lines and {tail}: {}",
+                text.len()
+            );
+            if skipped(&bus).iter().any(|(_, uri, _)| *uri == doc(7)) {
+                skipped_at_least_once = true;
+            } else {
+                shown_at_least_once = true;
+            }
+        }
+        assert!(
+            shown_at_least_once && skipped_at_least_once,
+            "skipped first {skips_first}: the sweep crosses the cap"
+        );
+    }
 }
 
 /// The pages of a shelf with every block kind, every skip the surface lists,

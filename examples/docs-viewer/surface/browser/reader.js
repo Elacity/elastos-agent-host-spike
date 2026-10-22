@@ -28,6 +28,11 @@ const MAX_MESSAGE_CHARS = 200;
 const MAX_TEXT_CHARS = 20000;
 const STYLES = { plain: "span", strong: "strong", em: "em", code: "code" };
 
+/** The element for a span style: only STYLES' own names, anything else is plain. */
+function styleTag(style) {
+  return typeof style === "string" && Object.hasOwn(STYLES, style) ? STYLES[style] : "span";
+}
+
 /** The launch token from `#home_token=...`, or "". */
 export function launchToken(hash) {
   return new URLSearchParams(String(hash || "").replace(/^#/, "")).get("home_token") || "";
@@ -45,7 +50,7 @@ function cut(value, chars, fallback) {
 function readSpans(spans) {
   if (!Array.isArray(spans) || spans.length > MAX_SPANS) return null;
   return spans.map((span) => ({
-    tag: STYLES[span && span.style] || "span",
+    tag: styleTag(span && span.style),
     text: cut(span && span.text, MAX_TEXT_CHARS, ""),
   }));
 }

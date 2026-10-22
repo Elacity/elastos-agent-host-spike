@@ -49,8 +49,8 @@ GUEST = [
     (
         "provider error on a head read skipped instead of stopping",
         "src/lib.rs",
-        "let head = read_at(bus, uri, &item_grant, 0, HEAD_BYTES)?;",
-        "let head = read_at(bus, uri, &item_grant, 0, HEAD_BYTES).unwrap_or_default();",
+        "let head = read_counted(bus, uri, &item_grant, &mut budget.read, 0, ask)?;",
+        "let head = read_counted(bus, uri, &item_grant, &mut budget.read, 0, ask).unwrap_or_default();",
         [("core", "a_provider_error_stops_the_run_and_is_not_skipped")],
     ),
     (
@@ -106,25 +106,35 @@ GUEST = [
     (
         "oversize found by reading the body",
         "src/lib.rs",
-        "if !read_at(bus, uri, &item_grant, MAX_DOCUMENT_BYTES, 1)?.is_empty() {",
-        "if false && !read_at(bus, uri, &item_grant, MAX_DOCUMENT_BYTES, 1)?.is_empty() {",
+        "        if !past.is_empty() {\n            return Ok(Err(Skip::Oversize));",
+        "        if false && !past.is_empty() {\n            return Ok(Err(Skip::Oversize));",
         [("core", "a_binary_head_and_an_oversize_document_are_found_without_reading_the_body")],
     ),
     (
         "the shelf budget is found by reading the body",
         "src/lib.rs",
-        "if left < MAX_DOCUMENT_BYTES && !read_at(bus, uri, &item_grant, left, 1)?.is_empty() {",
-        "if false && !read_at(bus, uri, &item_grant, left, 1)?.is_empty() {",
-        [("core", "a_shelf_stops_taking_documents_at_its_budget_without_reading_the_one_that_would_pass_it")],
+        "        if left < MAX_DOCUMENT_BYTES {",
+        "        if false {",
+        [("core", "a_document_skipped_after_it_was_read_still_counts_toward_the_shelf_budget")],
     ),
     (
         "a document read in full does not count toward the budget",
         "src/lib.rs",
-        "    budget.read -= bytes.len() as u64;",
-        "    let _ = bytes.len();",
+        "&mut budget.read, offset, ask)?;",
+        "&mut { u64::MAX }, offset, ask)?;",
         [
             ("core", "a_shelf_stops_taking_documents_at_its_budget_without_reading_the_one_that_would_pass_it"),
             ("core", "a_document_skipped_after_it_was_read_still_counts_toward_the_shelf_budget"),
+        ],
+    ),
+    (
+        "a head is not counted toward the budget",
+        "src/lib.rs",
+        "&mut budget.read, 0, ask)?;",
+        "&mut { u64::MAX }, 0, ask)?;",
+        [
+            ("core", "a_short_document_that_is_not_text_still_counts_toward_the_shelf_budget"),
+            ("core", "no_shelf_reads_more_than_its_budget"),
         ],
     ),
     (
@@ -144,9 +154,33 @@ GUEST = [
     (
         "a shelf may show more than its cap",
         "src/lib.rs",
-        "    if size > budget.shown {",
-        "    if false && size > budget.shown {",
+        "    if size > budget.written {",
+        "    if false && size > budget.written {",
         [("core", "a_document_that_renders_past_what_a_shelf_may_show_is_skipped")],
+    ),
+    (
+        "the pages cap counts only the blocks",
+        "src/lib.rs",
+        "    let size = entry.len() as u64 + 1;",
+        "    let size = rendered.len() as u64;",
+        [
+            ("core", "a_document_whose_blocks_fit_but_whose_pages_would_not_is_skipped"),
+            ("core", "no_pages_are_longer_than_their_cap"),
+        ],
+    ),
+    (
+        "a skipped entry takes nothing from the pages",
+        "src/lib.rs",
+        "                budget.written -= entry.len() as u64 + 1;",
+        "                let _ = entry.len();",
+        [("core", "no_pages_are_longer_than_their_cap")],
+    ),
+    (
+        "no room is held back for entries skipped later",
+        "src/lib.rs",
+        "        written: MAX_PAGES_BYTES.saturating_sub(frame + held.iter().sum::<u64>()),",
+        "        written: MAX_PAGES_BYTES.saturating_sub(frame + held.iter().sum::<u64>()) + held.iter().sum::<u64>(),",
+        [("core", "no_pages_are_longer_than_their_cap")],
     ),
     (
         "the write does not say append",

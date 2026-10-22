@@ -21,6 +21,9 @@ the Bus.
   viewer: 67 Rust and 13 page tests, 52 of 52 falsifiers.
 - **About 2,950 lines left the two viewers** and about 1,450 shared lines came in (lock files not counted).
 - **Items 3 and 5 are done**, in the bundle tool only: `capsule-bundle pack`, and `publisher_listed_twice`.
+- **Codex's fixes to #29 are merged in** (a merge commit, see [Merged with the #29 fixes](#merged-with-the-29-fixes)).
+  The documents viewer now has 71 Rust and 14 page tests and 57 of 57 falsifiers; its core is `8765e790…`,
+  worst shelf 62.2%. The photo core is still `add93842…`.
 
 ## What moved where
 
@@ -55,7 +58,8 @@ documents viewer had a cheaper one that writes the numbers straight to bytes. Ta
 the photo hash, so the kit keeps the photo one. The cost falls on the documents viewer: 52.9% to 63.3% for its
 worst shelf, within the 80% gate, which still runs. `PATTERNS.md` now says this.
 
-The cheaper write can come back with the next change that is allowed to move the photo hash.
+The cheaper write can come back with the next change that is allowed to move the photo hash. (After the
+#29 fixes the figures are 51.6% with the cheaper write and 62.2% with the shared one.)
 
 ## What is still copied, and why
 
@@ -111,10 +115,38 @@ fewer lines.
 | Documents core hash | `56a577fb…3e3c` | `87e3f454…4e98`, the same in the container |
 | Documents worst shelf | 52.9% | 63.3% (gate 80%) |
 
+## Merged with the #29 fixes
+
+`claude/photo-kit` gained Codex's five fixes (`4df2ef7c`, `ae79a57b`; see `KIT-REPORT.md`, "Review fixes").
+They are merged into this branch with a merge commit, no rebase. The conflicts were all in the documents
+viewer and the kit docs:
+
+| File | Resolved as |
+|---|---|
+| `docs-viewer/surface/reader-browser-smoke.mjs` | This branch's smoke on the shared stand-in, with the three inherited style names and their check from #29. The favicon 204 went into `capsule-kit/surface/stand-in.mjs`, so the photo smoke has it too |
+| `docs-viewer/falsify.py` | Both: #29's seven new and moved cases, this branch's write falsifier (`src/bus.rs` is the shared one) |
+| `docs-viewer/host-test/tests/component.rs` | The new backtick shelf, with this branch's `bridge_with` |
+| `docs-viewer/src/lib.rs`, `src/tests.rs` | Merged without a conflict: the fixes touch the run loop and the reads, this branch only moved the WIT glue out |
+| `capsule-kit/PATTERNS.md` | This branch's write rule, then #29's whole-output rule |
+| `docs-viewer/README.md`, `repro/README.md`, `photo-viewer/handoff/LOG.md` | Both, with the merged hash and fuel |
+
+After the merge, in this container:
+
+| | Now |
+|---|---|
+| Photo core | 29 guest, 13 host, 18/18 falsifiers; `add93842…dd22`, the same in the container |
+| Photo page | 12 tests, 13/13 falsifiers; the smoke passes on the stand-in with the favicon 204 |
+| Bundle tool | 46 tests, 56/56 falsifiers |
+| Documents viewer | 71 Rust (13 model, 30 guest, 12 host, 7 bundle, 9 Bus v2), 14 page, 57/57 falsifiers |
+| Documents core | `8765e790…da40`, the same in the container; closure CID `bafkreigk…ukr3a` |
+| Documents worst shelf | 62.2% (8 ordinary documents; gate 80%); the new backtick shelf 45.7% |
+
+The photo code did not change in the merge, so `falsify-seam.py` was not run again.
+
 ## For the Mac and Codex
 
 - Run both `verify.sh`, `photo-viewer/surface` and bundle checks, and the whole `falsify-seam.py`.
-- Run both repro scripts; the photo hash must be `add93842…`, the documents hash `87e3f454…`.
+- Run both repro scripts; the photo hash must be `add93842…`, the documents hash `8765e790…`.
 - Check the links survive a checkout on macOS (`git config core.symlinks` is true by default there).
 
 ## Commits
