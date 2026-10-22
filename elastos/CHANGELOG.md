@@ -27,6 +27,9 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   with one Reload button, and System says to reload Home. Until you reload,
   Assistant Copy says "Reload Home to copy." instead of "Copy failed.". Home
   never reloads by itself, so open windows keep work you have not saved.
+- Runtime refuses a resource request whose body is not a JSON object, and ends
+  a component activation cleanly when it finishes, including a failed or
+  panicked host call (#194).
 
 ### Developer detail
 
