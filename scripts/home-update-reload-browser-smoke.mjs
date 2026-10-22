@@ -244,7 +244,7 @@ try {
   const pagesBefore = counts.page;
   await page.evaluate(() => { window.__beforeReload = true; });
   await bar(page).getByRole("button", { name: "Reload" }).click();
-  await page.waitForFunction(() => window.__beforeReload !== true && document.body.dataset.homeStatus === "ready",
+  await page.waitForFunction(() => window.__beforeReload !== true && document.body?.dataset.homeStatus === "ready",
     null, { timeout: 15_000 });
   assert.equal(counts.page, pagesBefore + 1, "Reload loads the Home page again");
   await page.waitForFunction(() => document.querySelector("#active-shell-frame")?.hidden === false, null, { timeout: 15_000 });
