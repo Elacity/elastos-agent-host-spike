@@ -236,16 +236,16 @@ RUNTIME = [
 BUNDLE = [
     (
         "the page ships its whole source folder",
-        "bundle-test/tests/bundle.rs",
-        "        let folder = Path::new(&entrypoint).parent().unwrap();",
-        '        let folder = Path::new("");',
+        "../photo-viewer/bundle/src/pack.rs",
+        '        let folder = segments[..segments.len() - 1].join("/");',
+        '        let folder = segments[..segments.len() - 1].join("/") + "/..";',
         ["each_capsule_ships_only_what_it_runs_from"],
     ),
     (
         "the surface ships without its core's CID",
         "bundle-test/tests/bundle.rs",
-        '            requirement["cid"] = json!(cid);',
-        "            let _ = cid;",
+        '            .map(|cid| ("docs-viewer".to_string(), cid.to_string()))',
+        '            .filter(|_| false)\n            .map(|cid| ("docs-viewer".to_string(), cid.to_string()))',
         ["the_surface_names_its_core_by_cid_and_nothing_else_selects_it"],
     ),
 ]

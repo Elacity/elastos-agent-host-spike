@@ -21,5 +21,5 @@ repository builder) and the proxy options are the photo viewer's; see its README
 The Mac's native build differs, as expected (Cursor's run of `779f37a8`); the Mac has not run the container
 yet.
 
-The closure CID of the packed core (`bundle-test`) holds only for these bytes:
-`bafkreib4tdd4fjkr6t7xmokqfb6baldvmpalbrzfg2hfbvpmgo66lolvjq`.
+The closure CID of the core packed by `capsule-bundle pack` (`bundle-test`) holds only for the `87e3f454…`
+bytes: `bafkreibimy55y6ooocgvxqiswd5r37m2sgz2uqps2dythgrrbx3v4yo6si`.
