@@ -1,9 +1,11 @@
 """The capsule kit's mutation runner (kit item A4).
 
 A falsifier breaks one check by replacing exact text in a file, requires the
-mutant to compile, runs the tests that must catch it, and requires them to
-FAIL. The file is restored from its saved bytes afterwards, also on error or
-Ctrl-C. Each capsule's falsify scripts keep only their cases and say how to run
+mutant to compile, runs EVERY test named for it, and requires EVERY one to
+FAIL. A case where any named test still passes is reported as SURVIVED, with
+the tests that passed: a named test that does not notice the mutant proves
+nothing about it. The file is restored from its saved bytes afterwards, also
+on error or Ctrl-C. Each capsule's falsify scripts keep only their cases and say how to run
 their tests; this module does the rest. Moved here from the photo viewer's and
 the documents viewer's runners.
 
@@ -11,7 +13,8 @@ A case is (name, path, replacements, tests[, appends]):
 - path: the file to change (a link is followed, so a shared source is changed
   where it lives);
 - replacements: [(old, new)]; each old text must occur exactly once;
-- tests: whatever the capsule's `failing` function takes;
+- tests: a list of whatever the capsule's `test_fails` function takes, one per
+  named test;
 - appends: optional [(path, text)] added to other files while the case runs.
 
 Scripts import it with `sys.path.insert(0, <kit>/falsify)`, so they still run
@@ -43,9 +46,14 @@ def check(cases):
                 raise SystemExit(f"{name}: expected the text once in {path}, found {text.count(old)}")
 
 
-def falsify(cases, failing, parts=(), show_tests=False):
-    """Runs each case whose name holds one of `parts` (all if none). Returns
-    the names of the cases not caught."""
+def falsify(cases, prepare, test_fails, parts=(), show_tests=False):
+    """Runs each case whose name holds one of `parts` (all if none).
+
+    `prepare()` builds the mutant once (and stops the run if it does not
+    compile); it may be None. `test_fails(test)` runs one named test and says
+    whether it failed. Every named test is run, even after one has failed,
+    and the case is caught only if all of them failed. Returns the names of
+    the cases that survived."""
     missed = []
     for case in cases:
         name, path, replacements, tests = case[:4]
@@ -63,13 +71,20 @@ def falsify(cases, failing, parts=(), show_tests=False):
             for other, extra in appends:
                 other = pathlib.Path(other)
                 other.write_text(other.read_text() + extra)
-            caught = failing(tests)
+            if prepare is not None:
+                prepare()
+            results = [(test, test_fails(test)) for test in tests]
         finally:
             for each, data in saved.items():
                 each.write_bytes(data)
+        survivors = [test for test, failed in results if not failed]
+        caught = bool(results) and not survivors
         suffix = f" -> {', '.join(map(str, tests))}" if show_tests else ""
-        print(f"{'caught' if caught else 'MISSED'}: {name}{suffix}", flush=True)
-        if not caught:
+        if caught:
+            print(f"caught: {name}{suffix}", flush=True)
+        else:
+            passed = ", ".join(map(str, survivors)) or "no test named"
+            print(f"SURVIVED: {name}{suffix} (still passing: {passed})", flush=True)
             missed.append(name)
     return missed
 
@@ -101,8 +116,8 @@ def node_test_fails(test_file, name):
 
 
 def main(groups, args=None, done="all falsifiers caught"):
-    """`groups`: [(cases, failing, flag or None, show_tests)]. A group with a
-    flag runs only when that flag is given. --check confirms every anchor;
+    """`groups`: [(cases, prepare, test_fails, flag or None, show_tests)]. A
+    group with a flag runs only when that flag is given. --check confirms every anchor;
     other arguments filter cases by name."""
     args = sys.argv[1:] if args is None else args
     parts = [arg for arg in args if not arg.startswith("--")]
@@ -112,9 +127,9 @@ def main(groups, args=None, done="all falsifiers caught"):
         print(f"all {sum(len(cases) for cases, *_ in groups)} anchors found once")
         return
     missed = []
-    for cases, failing, flag, show_tests in groups:
+    for cases, prepare, test_fails, flag, show_tests in groups:
         if flag is None or flag in args:
-            missed += falsify(cases, failing, parts, show_tests)
+            missed += falsify(cases, prepare, test_fails, parts, show_tests)
     if missed:
-        raise SystemExit(f"{len(missed)} falsifier(s) not caught: {missed}")
+        raise SystemExit(f"{len(missed)} falsifier(s) survived: {missed}")
     print(done)

@@ -121,13 +121,13 @@ CASES = [
 ]
 
 
-def tests_fail(names):
-    return any(kit.node_test_fails(TESTS, name) for name in names)
+def test_fails(name):
+    return kit.node_test_fails(TESTS, name)
 
 
 def main():
     cases = [(name, PAGE, [(old, new)], tests) for name, old, new, tests in CASES]
-    kit.main([(cases, tests_fail, None, True)], done=f"all {len(CASES)} surface falsifiers caught")
+    kit.main([(cases, None, test_fails, None, True)], done=f"all {len(CASES)} surface falsifiers caught")
 
 
 if __name__ == "__main__":

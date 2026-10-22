@@ -359,22 +359,29 @@ def cases(listed):
     return out
 
 
-def guest_tests_fail(tests):
+def build_guest():
     kit.cargo_compiles(HERE, ["--workspace", "--lib"])
+
+
+def guest_test_fails(test):
+    package, name = test
     crates = {"core": "docs-viewer", "model": "docs-model"}
-    return any(kit.cargo_test_fails(HERE, ["-p", crates[package], "--lib"], f"tests::{name}") for package, name in tests)
+    return kit.cargo_test_fails(HERE, ["-p", crates[package], "--lib"], f"tests::{name}")
 
 
-def runtime_tests_fail(tests):
+def build_component():
     build = kit.run([str(HERE / "build.sh")], HERE)
     if build.returncode != 0:
         print(build.stderr[-2000:])
         raise SystemExit("component build failed under a falsifier")
-    return any(kit.cargo_test_fails(HERE / "host-test", ["--test", "component"], name) for name in tests)
 
 
-def bundle_tests_fail(tests):
-    return any(kit.cargo_test_fails(HERE / "bundle-test", ["--test", "bundle"], name) for name in tests)
+def runtime_test_fails(name):
+    return kit.cargo_test_fails(HERE / "host-test", ["--test", "component"], name)
+
+
+def bundle_test_fails(name):
+    return kit.cargo_test_fails(HERE / "bundle-test", ["--test", "bundle"], name)
 
 
 def build_bus2_guests():
@@ -385,14 +392,15 @@ def build_bus2_guests():
     )
 
 
-def bus2_tests_fail(tests):
+def build_bus2():
     build = build_bus2_guests()
     if build.returncode != 0:
         print(build.stderr[-2000:])
         raise SystemExit("a Bus v2 falsifier does not compile")
-    return any(
-        kit.cargo_test_fails(HERE / "bus2", ["-p", "docs-bus2-host-test", "--test", "docs"], name) for name in tests
-    )
+
+
+def bus2_test_fails(name):
+    return kit.cargo_test_fails(HERE / "bus2", ["-p", "docs-bus2-host-test", "--test", "docs"], name)
 
 
 def main():
@@ -400,10 +408,10 @@ def main():
     try:
         kit.main(
             [
-                (cases(GUEST), guest_tests_fail, None, False),
-                (cases(BUNDLE), bundle_tests_fail, None, False),
-                (cases(BUS2), bus2_tests_fail, None, False),
-                (cases(RUNTIME), runtime_tests_fail, "--runtime", False),
+                (cases(GUEST), build_guest, guest_test_fails, None, False),
+                (cases(BUNDLE), None, bundle_test_fails, None, False),
+                (cases(BUS2), build_bus2, bus2_test_fails, None, False),
+                (cases(RUNTIME), build_component, runtime_test_fails, "--runtime", False),
             ],
             args,
         )

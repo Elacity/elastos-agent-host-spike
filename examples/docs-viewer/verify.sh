@@ -59,6 +59,8 @@ build_guest "${VIEWER_DIR}/bus2" docs-bus2-guest docs_bus2_guest
 )
 
 # Every refusal and every page rule: break it, see its test fail, restore it.
+# The runner itself: a case is caught only when every named test fails.
+python3 -I "${VIEWER_DIR}/../capsule-kit/falsify/test_falsify_kit.py"
 python3 -I "${VIEWER_DIR}/falsify.py" --runtime
 python3 -I "${VIEWER_DIR}/falsify-surface.py"
 

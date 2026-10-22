@@ -202,7 +202,9 @@ Every check has a test, and every test is shown to catch its check being broken.
 
 - [ ] have one falsifier per refusal, per bound and per rule: an exact text replacement in the source.
 - [ ] require that each mutant **compiles**. A mutant that does not compile proves nothing.
-- [ ] require that the named tests **fail** under the mutant.
+- [ ] run **every** named test under the mutant and require **every one** to fail. A case where one named test
+      still passes has survived, however many others failed: that test does not notice the mutant
+      (`falsify/falsify_kit.py`, checked by its own self-test, `falsify/test_falsify_kit.py`).
 - [ ] restore the file from its saved bytes after each mutant, also on error or Ctrl-C, and leave a clean tree.
 - [ ] check that each anchor occurs exactly once (`--check`), so a refactor cannot silently disable one.
 - [ ] run every falsifier from the app's `verify.sh`, together with fmt, clippy and every test.

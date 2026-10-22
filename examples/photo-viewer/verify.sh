@@ -24,6 +24,8 @@ cargo clippy --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" --all
 cargo test --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" -- --nocapture
 
 # Every refusal: break it, see its test fail, restore it.
+# The runner itself: a case is caught only when every named test fails.
+python3 -I "${VIEWER_DIR}/../capsule-kit/falsify/test_falsify_kit.py"
 python3 -I "${VIEWER_DIR}/falsify.py" --runtime
 
 echo "photo-viewer capsule verification: OK"

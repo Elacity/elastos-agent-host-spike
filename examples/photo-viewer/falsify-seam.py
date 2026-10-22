@@ -181,14 +181,17 @@ CASES = [
 ARGS = ["-p", "elastos-server", "--lib"]
 
 
-def tests_fail(filters):
+def build():
     kit.cargo_compiles(ELASTOS, ARGS)
-    return any(kit.cargo_test_fails(ELASTOS, ARGS, TESTS + name) for name in filters)
+
+
+def test_fails(name):
+    return kit.cargo_test_fails(ELASTOS, ARGS, TESTS + name)
 
 
 def main():
     cases = [(name, ELASTOS / relative, [(old, new)], tests) for name, relative, old, new, tests in CASES]
-    kit.main([(cases, tests_fail, None, True)], done="all selected seam falsifiers caught")
+    kit.main([(cases, build, test_fails, None, True)], done="all selected seam falsifiers caught")
 
 
 if __name__ == "__main__":

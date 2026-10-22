@@ -143,6 +143,39 @@ After the merge, in this container:
 
 The photo code did not change in the merge, so `falsify-seam.py` was not run again.
 
+## Codex fixes (FAIL at `2c66edd6`)
+
+1. **`pack` followed symlinked parent folders.** It checked only the last part of a path, so a source with
+   `linked -> ../outside` and an entrypoint `linked/payload.component.wasm` (or `linked/browser/index.html`)
+   packed bytes from outside the source. Now `pack` lstats the source folder and every folder below it, in
+   order, before it reads or copies anything, and refuses a link anywhere on the way with
+   `symlink_in_path`; a page's own folder may not be a link either. The listing refuses a symlinked root the
+   same way (this predates #32). New test `pack_refuses_a_symlinked_folder_anywhere_on_the_path` (Codex's two
+   cases, a link in the middle of `a/b/c`, a linked page folder, a linked source root; nothing is written in
+   any of them), and the root case in `the_listing_refuses_symlinks_and_special_files`. Both fail on the old
+   code. Four new falsifiers, one of which checks only the first folders of a path, so the middle-of-path case
+   is what catches it. Bundle tool: 47 tests, 60/60 falsifiers.
+2. **The runners took any failing test as caught.** The kit's adapters had become `any(...)`, so once the first
+   named test failed the others never ran, and a test that did not notice the mutant went unseen. The shared
+   runner now takes a build step and a per-test check from each script, runs every named test, and catches a
+   case only when every one fails; otherwise it prints `SURVIVED` with the tests still passing. Its self-test
+   (`falsify/test_falsify_kit.py`, run by both `verify.sh`) has a case whose first test fails and second passes,
+   and requires `SURVIVED`. All six scripts use it. The Bus v2 proof's own runner already required every named
+   test to fail and is unchanged.
+
+Every falsifier set, run again under the restored rule in this container, with nothing surviving:
+
+| Set | Caught |
+|---|---|
+| Photo core (`falsify.py --runtime`, in `verify.sh`) | 18/18 |
+| Photo page (`falsify-surface.py`) | 13/13 |
+| Bundle tool (`falsify-bundle.py`) | 60/60 |
+| Photo seam (`falsify-seam.py`, the whole set) | 21/21 |
+| Documents viewer (`falsify.py --runtime` and `falsify-surface.py`, in `verify.sh`) | 57/57 |
+| The runner's self-test | 6 tests, OK |
+
+Tests and hashes are unchanged: photo 29 + 13, `add93842…`; documents 71 + 14, `8765e790…`, worst shelf 62.2%.
+
 ## For the Mac and Codex
 
 - Run both `verify.sh`, `photo-viewer/surface` and bundle checks, and the whole `falsify-seam.py`.

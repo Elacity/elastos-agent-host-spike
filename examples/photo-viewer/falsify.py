@@ -162,25 +162,31 @@ def cases(listed):
     return [(name, HERE / relative, [(old, new)], tests) for name, relative, old, new, tests in listed]
 
 
-def guest_tests_fail(filters):
+def build_guest():
     kit.cargo_compiles(HERE, ["--lib"])
-    return any(kit.cargo_test_fails(HERE, ["--lib"], f"tests::{name}") for name in filters)
 
 
-def runtime_tests_fail(filters):
+def guest_test_fails(name):
+    return kit.cargo_test_fails(HERE, ["--lib"], f"tests::{name}")
+
+
+def build_component():
     build = kit.run([str(HERE / "build.sh")], HERE)
     if build.returncode != 0:
         print(build.stderr[-2000:])
         raise SystemExit("component build failed under a falsifier")
-    return any(kit.cargo_test_fails(HERE / "host-test", ["--test", "component"], name) for name in filters)
+
+
+def runtime_test_fails(name):
+    return kit.cargo_test_fails(HERE / "host-test", ["--test", "component"], name)
 
 
 def main():
     try:
         kit.main(
             [
-                (cases(GUEST), guest_tests_fail, None, True),
-                (cases(RUNTIME), runtime_tests_fail, "--runtime", True),
+                (cases(GUEST), build_guest, guest_test_fails, None, True),
+                (cases(RUNTIME), build_component, runtime_test_fails, "--runtime", True),
             ]
         )
     finally:
