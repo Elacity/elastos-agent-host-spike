@@ -767,7 +767,7 @@ impl<'a> JournalReader<'a> {
     }
 }
 
-/// One format 2 node. An unknown kind (17 and 18 included, until OMP idea 2),
+/// One format 2 node. An unknown kind (0, or 20 and above),
 /// a kind with the wrong role, a read whose fields do not fit its text, or an
 /// unknown inbox answer is `record`.
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -1073,6 +1073,7 @@ fn decode_journal(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'stati
 ///   a budget only when its parent does);
 /// - a child's count is exactly the model calls made in its subtree, and no
 ///   more than its budget;
+/// - a child below a stopped child has stopped too;
 /// - each child budget and each stop has exactly one record, which says the
 ///   same;
 /// - a cancelled task has every child stopped and no child or model call
@@ -1106,6 +1107,13 @@ fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
             continue;
         }
         let parent = step.parent_id.and_then(find).ok_or("record")?;
+        if step.stop.is_none()
+            && child_chain(journal, step.parent_id)
+                .iter()
+                .any(|id| find(*id).is_some_and(|above| above.stop.is_some()))
+        {
+            return Err("record");
+        }
         if !narrower_resource(&parent.resource, &step.resource) {
             return Err("not a subset");
         }
@@ -17588,14 +17596,14 @@ mod tests {
             &mut journal,
             child,
             &host,
-            &"x".repeat(CHILD_RESULT_CAP + 1)
+            &"x".repeat(4_001)
         ));
         assert_eq!(journal.events.len(), before, "never cut, never stored");
         assert!(record_child_result(
             &mut journal,
             child,
             &host,
-            &"x".repeat(CHILD_RESULT_CAP)
+            &"x".repeat(4_000)
         ));
         assert!(
             !record_child_result(&mut journal, run, &host, "ok"),
@@ -17758,13 +17766,42 @@ mod tests {
         );
     }
 
+    /// Re-record one child's budget, in its step and in its child-budget record.
+    fn set_budget(journal: &mut Journal, id: u64, to: Option<Budget>) {
+        step_mut(journal, id).budget = to;
+        match to {
+            Some(to) => {
+                for node in &mut journal.events {
+                    if let NodeSource::ChildBudget { child, budget } = &mut node.source {
+                        if *child == id {
+                            *budget = to;
+                        }
+                    }
+                }
+            }
+            None => journal.events.retain(
+                |node| !matches!(node.source, NodeSource::ChildBudget { child, .. } if child == id),
+            ),
+        }
+    }
+
     /// A child never gets more than its parent, checked again on every load:
-    /// each rule broken in stored bytes refuses the load.
+    /// each rule broken in stored bytes refuses the load. Each case breaks one
+    /// rule and keeps every other rule true, so no other check can catch it.
     #[test]
     fn child_limits_are_checked_again_after_reload() {
         let (mut journal, run) = task(budget(8, 600));
         let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(3, 60))).unwrap();
         assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        assert!(ask_model(&mut journal, Some(child), LOCAL_MODEL).is_ok());
+        assert!(ask_model(&mut journal, None, HOSTED_MODEL).is_ok());
+        assert!(ask_model(&mut journal, None, LOCAL_MODEL).is_ok());
+        let idle = propose_child(&mut journal, run, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        let spare = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let timed = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(note_time_refusal(&mut journal, timed));
+        let later = propose_run(&mut journal, DEMO, &["true".to_string()]).unwrap();
+        let last = journal.steps.iter().map(|step| step.id).max().unwrap();
         let good = journal.clone();
         assert!(decode_journal(&encode_journal(&good, &[0; 32]).unwrap()).is_ok());
         type Tamper = Box<dyn Fn(&mut Journal)>;
@@ -17777,15 +17814,23 @@ mod tests {
             ),
             (
                 "over the parent's budget",
-                Box::new(move |j: &mut Journal| {
-                    let wider = budget(9, 60);
-                    step_mut(j, child).budget = Some(wider);
-                    for node in &mut j.events {
-                        if let NodeSource::ChildBudget { budget, .. } = &mut node.source {
-                            *budget = wider;
-                        }
-                    }
-                }),
+                Box::new(move |j: &mut Journal| set_budget(j, child, Some(budget(9, 60)))),
+            ),
+            (
+                "over the parent's budget",
+                Box::new(move |j: &mut Journal| set_budget(j, child, Some(budget(3, 601)))),
+            ),
+            (
+                "over the parent's budget",
+                Box::new(move |j: &mut Journal| set_budget(j, child, Some(budget(1, 60)))),
+            ),
+            (
+                "over the parent's budget",
+                Box::new(move |j: &mut Journal| set_budget(j, idle, Some(budget(0, 60)))),
+            ),
+            (
+                "over the parent's budget",
+                Box::new(move |j: &mut Journal| set_budget(j, idle, Some(budget(2, 0)))),
             ),
             (
                 "over the parent's budget",
@@ -17793,19 +17838,61 @@ mod tests {
             ),
             (
                 "over the parent's budget",
-                Box::new(|j: &mut Journal| {
-                    j.task_budget = Some(budget(2, 600));
+                Box::new(|j: &mut Journal| j.task_budget = Some(budget(2, 600))),
+            ),
+            (
+                "record",
+                Box::new(|j: &mut Journal| j.task_budget = Some(budget(3, 600))),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| set_budget(j, child, None)),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| step_mut(j, child).requests_used = 1),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| {
+                    j.events.retain(|node| {
+                        !matches!(node.source, NodeSource::ChildBudget { child: id, .. } if id == idle)
+                    });
                 }),
             ),
             (
                 "record",
-                Box::new(move |j: &mut Journal| step_mut(j, child).requests_used = 0),
+                Box::new(move |j: &mut Journal| {
+                    for node in &mut j.events {
+                        if let NodeSource::ChildBudget { child: id, budget } = &mut node.source {
+                            if *id == child {
+                                *budget = Budget {
+                                    requests: 2,
+                                    seconds: 60,
+                                };
+                            }
+                        }
+                    }
+                }),
             ),
             (
                 "record",
-                Box::new(|j: &mut Journal| {
-                    j.events
-                        .retain(|node| !matches!(node.source, NodeSource::ChildBudget { .. }));
+                Box::new(move |j: &mut Journal| {
+                    for node in &mut j.events {
+                        if let NodeSource::ChildStop { reason, .. } = &mut node.source {
+                            *reason = StopReason::Requests;
+                        }
+                    }
+                }),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| {
+                    for node in &mut j.events {
+                        if let NodeSource::ChildStop { requests_used, .. } = &mut node.source {
+                            *requests_used = 5;
+                        }
+                    }
                 }),
             ),
             (
@@ -17816,7 +17903,7 @@ mod tests {
                         NodeSource::ChildStop {
                             child,
                             reason: StopReason::Time,
-                            requests_used: 1,
+                            requests_used: 2,
                         },
                         "",
                     ));
@@ -17824,9 +17911,7 @@ mod tests {
             ),
             (
                 "record",
-                Box::new(move |j: &mut Journal| {
-                    step_mut(j, child).stop = Some(StopReason::Time);
-                }),
+                Box::new(move |j: &mut Journal| step_mut(j, child).stop = Some(StopReason::Time)),
             ),
             ("depth limit", Box::new(|j: &mut Journal| j.depth = 2)),
             (
@@ -17835,13 +17920,48 @@ mod tests {
             ),
             (
                 "record",
+                Box::new(move |j: &mut Journal| step_mut(j, run).budget = Some(budget(1, 1))),
+            ),
+            (
+                "record",
                 Box::new(move |j: &mut Journal| {
                     step_mut(j, run).budget = Some(budget(1, 1));
+                    j.events.push(node(
+                        Role::User,
+                        NodeSource::ChildBudget {
+                            child: run,
+                            budget: budget(1, 1),
+                        },
+                        "",
+                    ));
                 }),
             ),
             (
                 "record",
-                Box::new(move |j: &mut Journal| step_mut(j, child).parent_id = Some(child + 5)),
+                Box::new(move |j: &mut Journal| {
+                    step_mut(j, run).stop = Some(StopReason::Time);
+                    j.events.push(node(
+                        Role::User,
+                        NodeSource::ChildStop {
+                            child: run,
+                            reason: StopReason::Time,
+                            requests_used: 0,
+                        },
+                        "",
+                    ));
+                }),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| step_mut(j, child).parent_id = Some(9_999)),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| step_mut(j, idle).parent_id = Some(spare)),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| step_mut(j, later).parent_id = Some(run)),
             ),
             (
                 "record",
@@ -17849,14 +17969,17 @@ mod tests {
                     let call = j
                         .steps
                         .iter_mut()
-                        .find(|step| step.kind == ProposalKind::Hosted)
+                        .find(|step| {
+                            step.kind == ProposalKind::Hosted && step.parent_id == Some(child)
+                        })
                         .unwrap();
                     call.parent_id = Some(run);
+                    step_mut(j, child).requests_used = 1;
                 }),
             ),
             (
                 "record",
-                Box::new(|j: &mut Journal| j.cancelled_from = Some(0)),
+                Box::new(move |j: &mut Journal| j.cancelled_from = Some(last)),
             ),
         ];
         for (index, (reason, change)) in cases.iter().enumerate() {
@@ -17869,6 +17992,40 @@ mod tests {
                 "case {index}"
             );
         }
+        // A cancelled task gains no child or call after its cancel point.
+        let mut cancelled = good.clone();
+        assert!(cancel_task(&mut cancelled));
+        assert!(decode_journal(&encode_journal(&cancelled, &[0; 32]).unwrap()).is_ok());
+        cancelled.cancelled_from = Some(run);
+        assert_eq!(
+            decode_journal(&encode_journal(&cancelled, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        // A task budget is never zero, even with nothing asked.
+        for zero in [budget(0, 600), budget(8, 0)] {
+            let mut bare = two_turns();
+            assert!(record_task_budget(&mut bare, budget(8, 600)));
+            bare.task_budget = Some(zero);
+            assert_eq!(
+                decode_journal(&encode_journal(&bare, &[0; 32]).unwrap()).map(|_| ()),
+                Err("record"),
+                "{zero:?}"
+            );
+        }
+        // A stopped child's children are stopped.
+        let (mut tree, run) = task(budget(8, 600));
+        let parent = propose_child(&mut tree, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let below = propose_child(&mut tree, parent, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(note_time_refusal(&mut tree, parent));
+        assert!(decode_journal(&encode_journal(&tree, &[0; 32]).unwrap()).is_ok());
+        step_mut(&mut tree, below).stop = None;
+        tree.events.retain(
+            |node| !matches!(node.source, NodeSource::ChildStop { child, .. } if child == below),
+        );
+        assert_eq!(
+            decode_journal(&encode_journal(&tree, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
     }
 
     /// A child's grant is never more than its parent's.
@@ -17891,6 +18048,8 @@ mod tests {
             DEMO_DOC,
             "localhost://Users/self/Projects/demo/SRC",
             "localhost://Users/self/Projects/demo//src",
+            "localhost://Users/self/Projects/demo/src/../../other",
+            "localhost://Users/self/Projects/demo/src/cafe\u{301}",
         ] {
             assert!(
                 !authorize_child(&mut journal, child, Some("child-grant"), wider),
@@ -17995,5 +18154,171 @@ mod tests {
             ask_model(&mut journal, None, HOSTED_MODEL),
             Err("no budget")
         );
+    }
+
+    /// A grandchild's budget is measured against its parent child's, not the
+    /// task's (the first falsifier run found this untested: CL10).
+    #[test]
+    fn a_grandchild_budget_is_a_subset_of_its_parent_child() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let before = journal.clone();
+        for over in [budget(3, 60), budget(2, 61)] {
+            assert_eq!(
+                propose_child(&mut journal, child, DEMO_SRC_LIB, Some(over)),
+                Err("over the parent's budget"),
+                "{over:?}"
+            );
+            assert_eq!(journal, before);
+        }
+        assert!(propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 60))).is_ok());
+    }
+
+    /// When a child and its child are both used up, the wider one stops with
+    /// `requests` and the one below it with `cancelled` (CL18).
+    #[test]
+    fn the_widest_used_up_child_stops_with_requests() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let grandchild =
+            propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(ask_model(&mut journal, Some(grandchild), HOSTED_MODEL).is_ok());
+        assert!(ask_model(&mut journal, Some(grandchild), LOCAL_MODEL).is_ok());
+        assert_eq!(
+            ask_model(&mut journal, Some(grandchild), HOSTED_MODEL),
+            Err("requests")
+        );
+        assert_eq!(step_of(&journal, child).stop, Some(StopReason::Requests));
+        assert_eq!(
+            step_of(&journal, grandchild).stop,
+            Some(StopReason::Cancelled)
+        );
+    }
+
+    /// A model call is asked only for a child with a budget: an older child
+    /// with none is refused even when the task has a budget (CL20), and a step
+    /// that is not a child is not something to ask under (CL26).
+    #[test]
+    fn a_model_call_is_asked_only_for_a_budgeted_child() {
+        let hex: String = PRE_IDEA_2_JOURNAL.concat();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect();
+        let (mut journal, _, _) = decode_journal(&bytes).unwrap();
+        assert!(record_task_budget(&mut journal, budget(8, 600)));
+        let old_child = journal
+            .steps
+            .iter()
+            .find(|step| step.kind == ProposalKind::Child)
+            .unwrap()
+            .id;
+        let not_child = journal
+            .steps
+            .iter()
+            .find(|step| step.kind != ProposalKind::Child)
+            .unwrap()
+            .id;
+        let before = journal.clone();
+        assert_eq!(
+            ask_model(&mut journal, Some(old_child), HOSTED_MODEL),
+            Err("no budget")
+        );
+        assert_eq!(
+            ask_model(&mut journal, Some(not_child), HOSTED_MODEL),
+            Err("not a child")
+        );
+        assert_eq!(
+            ask_model(&mut journal, Some(9_999), HOSTED_MODEL),
+            Err("not a child")
+        );
+        assert_eq!(journal, before);
+        assert!(ask_model(&mut journal, None, HOSTED_MODEL).is_ok());
+    }
+
+    /// Only a budgeted child gets a child grant: not an older child with no
+    /// budget (CL76), and not a step that is not a child even if it carries a
+    /// budget and a parent (CL82).
+    #[test]
+    fn an_unbudgeted_child_or_a_non_child_gets_no_child_grant() {
+        let hex: String = PRE_IDEA_2_JOURNAL.concat();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect();
+        let (mut journal, _, _) = decode_journal(&bytes).unwrap();
+        let old_child = journal
+            .steps
+            .iter()
+            .find(|step| step.kind == ProposalKind::Child)
+            .unwrap()
+            .clone();
+        let parent = old_child.parent_id.unwrap();
+        assert!(authorize(&mut journal, parent, Some("fixture-grant")));
+        assert!(!authorize_child(
+            &mut journal,
+            old_child.id,
+            Some("child-grant"),
+            &old_child.resource
+        ));
+        let (mut journal, run) = task(budget(8, 600));
+        assert!(authorize(&mut journal, run, Some("fixture-grant")));
+        let later = propose_run(&mut journal, DEMO, &["true".to_string()]).unwrap();
+        step_mut(&mut journal, later).parent_id = Some(run);
+        step_mut(&mut journal, later).budget = Some(budget(1, 10));
+        assert!(!authorize_child(
+            &mut journal,
+            later,
+            Some("child-grant"),
+            DEMO
+        ));
+        assert_eq!(step_of(&journal, later).grant, None);
+    }
+
+    /// A child below a stopped child gets no grant and asks no model, even
+    /// when its own stop is missing (CL79).
+    #[test]
+    fn a_child_below_a_stopped_child_gets_nothing() {
+        let (mut journal, run) = task(budget(8, 600));
+        let parent = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let below = propose_child(&mut journal, parent, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(note_time_refusal(&mut journal, parent));
+        // Remove the cascade by hand: the chain check alone must hold.
+        step_mut(&mut journal, parent).grant = Some("parent-grant".into());
+        step_mut(&mut journal, below).stop = None;
+        step_mut(&mut journal, below).state = StepState::Prepared;
+        assert!(!authorize_child(
+            &mut journal,
+            below,
+            Some("child-grant"),
+            DEMO_SRC_LIB
+        ));
+        assert_eq!(step_of(&journal, below).grant, None);
+        assert_eq!(
+            ask_model(&mut journal, Some(below), HOSTED_MODEL),
+            Err("stopped")
+        );
+    }
+
+    /// A step's stop byte is 0 or a known reason (CL49).
+    #[test]
+    fn an_unknown_step_stop_reason_is_refused() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(note_time_refusal(&mut journal, child));
+        let mut payload = step_payload(step_of(&journal, child)).unwrap();
+        assert_eq!(payload.last(), Some(&2));
+        assert_eq!(
+            decode_step(&payload).map(|step| step.stop),
+            Ok(Some(StopReason::Time))
+        );
+        for unknown in [4u8, 9, 255] {
+            *payload.last_mut().unwrap() = unknown;
+            assert_eq!(
+                decode_step(&payload).map(|_| ()),
+                Err("record"),
+                "{unknown}"
+            );
+        }
     }
 }
