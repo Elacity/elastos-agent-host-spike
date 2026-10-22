@@ -215,6 +215,12 @@ fn resource_invoke_dispatch(
         }
         body = serde_json::json!({});
     }
+    if body.is_null() {
+        body = serde_json::json!({});
+    }
+    if !body.is_object() {
+        return Err("resource_invoke body must be a JSON object".to_string());
+    }
     if scheme == "localhost" {
         if let Some(object) = body.as_object_mut() {
             object.remove("token");
@@ -1677,6 +1683,52 @@ mod tests {
     }
 
     #[test]
+    fn resource_invoke_dispatch_refuses_non_object_body() {
+        let targets = [
+            (
+                "localhost://Local/SharedByLocalUsersAndBots/Home/a.md",
+                "read",
+            ),
+            ("elastos://chain/esc-mainnet/block_number", "block_number"),
+            ("elastos://content/status", "status"),
+        ];
+        for (uri, operation) in targets {
+            for body in [
+                serde_json::json!(["a"]),
+                serde_json::json!("a"),
+                serde_json::json!(1),
+                serde_json::json!(true),
+            ] {
+                let result = resource_invoke_dispatch(
+                    &serde_json::json!({
+                        "type": "resource_invoke",
+                        "uri": uri,
+                        "operation": operation,
+                        "body": body
+                    }),
+                    None,
+                );
+                assert_eq!(
+                    result.err().as_deref(),
+                    Some("resource_invoke body must be a JSON object"),
+                    "{uri} with body {body}"
+                );
+            }
+            let dispatch = resource_invoke_dispatch(
+                &serde_json::json!({
+                    "type": "resource_invoke",
+                    "uri": uri,
+                    "operation": operation,
+                    "body": null
+                }),
+                None,
+            )
+            .unwrap_or_else(|err| panic!("{uri} with null body should dispatch: {err}"));
+            assert_eq!(dispatch.request["op"], operation);
+        }
+    }
+
+    #[test]
     fn resource_invoke_dispatch_rejects_wallet_signing_and_raw_contract() {
         for (uri, operation) in [
             (
@@ -1805,6 +1857,24 @@ mod tests {
         assert_eq!(response["id"], 8);
         assert_eq!(response["response"]["type"], "error");
         assert_eq!(response["response"]["code"], "not_capsule_kernel_abi");
+    }
+
+    #[tokio::test]
+    async fn handle_remote_request_refuses_non_object_resource_body() {
+        let response = handle_remote_request(
+            r#"{"id":44,"request":{"type":"resource_invoke","uri":"localhost://Local/SharedByLocalUsersAndBots/Home/a.md","operation":"read","body":["a"]}}"#,
+            "http://127.0.0.1:12345",
+            "client-token",
+            "test-capsule",
+            &[],
+            None,
+        )
+        .await
+        .expect("attached bridge should refuse a non-object body before HTTP dispatch");
+
+        assert_eq!(response["id"], 44);
+        assert_eq!(response["response"]["type"], "error");
+        assert_eq!(response["response"]["code"], "invalid_resource_invoke");
     }
 
     #[tokio::test]
@@ -2326,6 +2396,21 @@ mod tests {
             provider.requests().await.is_empty(),
             "raw component Wallet dispatch must not reach ProviderRegistry"
         );
+    }
+
+    #[tokio::test]
+    async fn resource_bridge_refuses_non_object_body() {
+        let ctx = bridge_context();
+        let response = handle_request(
+            r#"{"id":45,"request":{"type":"resource_invoke","uri":"elastos://chain/esc-mainnet/block_number","operation":"block_number","body":"a"}}"#,
+            &Some(ctx),
+        )
+        .await
+        .expect("resource bridge should refuse a non-object body");
+
+        assert_eq!(response["id"], 45);
+        assert_eq!(response["response"]["type"], "error");
+        assert_eq!(response["response"]["code"], "invalid_resource_invoke");
     }
 
     #[tokio::test]
