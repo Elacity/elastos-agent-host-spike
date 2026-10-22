@@ -3534,17 +3534,17 @@ fn remaining_budget(journal: &Journal, owner: Option<u64>) -> Option<Budget> {
     })
 }
 
-/// A child, or the whole task, has stopped: no model call and no new child
-/// below it.
+/// A child in the chain has stopped: no model call and no new child below it.
+/// A cancelled task is checked on its own (`usable_child`, `ask_model`), so
+/// the person sees "cancelled", not "stopped".
 #[cfg(any(test, target_arch = "wasm32"))]
 fn chain_stopped(journal: &Journal, chain: &[u64]) -> bool {
-    journal.cancelled_from.is_some()
-        || chain.iter().any(|id| {
-            journal
-                .steps
-                .iter()
-                .any(|step| step.id == *id && step.stop.is_some())
-        })
+    chain.iter().any(|id| {
+        journal
+            .steps
+            .iter()
+            .any(|step| step.id == *id && step.stop.is_some())
+    })
 }
 
 /// Record the budget the Runtime granted this task, as data. The guest never
@@ -3592,9 +3592,6 @@ fn ask_model(journal: &mut Journal, under: Option<u64>, model: &str) -> Result<u
     let chain = child_chain(journal, under);
     if journal.cancelled_from.is_some() {
         return Err("cancelled");
-    }
-    if chain_stopped(journal, &chain) {
-        return Err("stopped");
     }
     let Some(task) = journal.task_budget else {
         return Err(TASK_BUDGET_REASON);
@@ -18755,6 +18752,56 @@ mod tests {
             Err(TASK_BUDGET_REASON),
             "the parent is refused first"
         );
+    }
+
+    /// A cancelled task is refused as "cancelled", not "stopped", on every
+    /// live path (CF18).
+    #[test]
+    fn a_cancelled_task_says_cancelled_on_every_live_path() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(cancel_task(&mut journal));
+        assert_eq!(open_child_host(&journal, child, DEMO_SRC), Err("cancelled"));
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("cancelled")
+        );
+        assert_eq!(
+            propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(1, 10))),
+            Err("parent stopped")
+        );
+    }
+
+    /// A child that breaks a child rule in memory is refused on every live
+    /// path, through `usable_child` (CF19): the same rules as on load.
+    #[test]
+    fn a_child_that_breaks_a_rule_is_refused_on_every_live_path() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        step_mut(&mut journal, child).requests_used = 1;
+        let before = journal.clone();
+        assert_eq!(open_child_host(&journal, child, DEMO_SRC), Err("record"));
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("record")
+        );
+        assert_eq!(
+            propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(1, 10))),
+            Err("record")
+        );
+        assert!(!authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert!(!apply_inbox(
+            &mut journal,
+            child,
+            InboxAnswer::AllowOnce,
+            Some("child-grant")
+        ));
+        assert_eq!(journal, before);
     }
 
     /// A step's stop byte is 0 or a known reason (CL49).
