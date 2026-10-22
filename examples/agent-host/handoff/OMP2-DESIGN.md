@@ -59,6 +59,17 @@ child step (the parent's journal), never from a child host's own journal.
   refuses with "child host", and a stored host with a budget or a model call is refused on load ("record"). Its
   model calls are `ask_model(parent, Some(child), ..)`, so they count only in the parent's journal: a one-request
   child allows one request, also after reload.
+- Every host action reads the parent's current journal again (after the Codex review of fe40437): a host keeps no
+  copy of its child's state. `authorize_in_host`, `grant_child_host`, `host_inbox` and `dispatch_in_host` take the
+  parent's journal and the child, and go through one check, `host_step_ok`:
+  - `host_scope`: the child is usable in the parent's journal now (not stopped, task not cancelled, a budget), the
+    host is at the child's depth, and the child holds a grant;
+  - the step's resource passes the path rule and sits in the scope the parent granted that child (not only in the
+    child's resource);
+  - a grant is not the parent step's grant.
+
+  The plain `authorize`, `apply_inbox` and `dispatch` refuse a host's steps, so there is no second path. A person's
+  deny is still recorded.
 
 ### Budget (R2)
 
