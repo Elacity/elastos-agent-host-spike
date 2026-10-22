@@ -41,6 +41,8 @@ const PAGES = {
         { kind: "paragraph", spans: [span("Pack "), span("boots", "strong"), span(" and "), span(HOSTILE, "code")] },
         { kind: "list", ordered: false, items: [[span("tent")], [span("stove")]] },
         { kind: "paragraph", spans: [span("the guide (javascript:fetch('/api/apps/home/state'))")] },
+        // Style names that are inherited properties draw as plain text, not an error.
+        { kind: "paragraph", spans: ["constructor", "__proto__", "toString"].map((style) => span(style, style)) },
       ],
     },
     {
@@ -102,6 +104,11 @@ const server = createServer(async (request, response) => {
     response.end(await readFile(join(browserRoot, name)));
     return;
   }
+  if (url.pathname === "/favicon.ico") {
+    // A browser asks for it on its own; Home has none.
+    response.writeHead(204).end();
+    return;
+  }
   if (url.pathname.startsWith("/api/") && request.method === "OPTIONS") {
     // As the gateway front door answers a preflight from an app frame.
     response.writeHead(204, {
@@ -149,6 +156,7 @@ try {
   assert.equal(await frame.locator("#skipped li").textContent(), `Document 2: ${HOSTILE}`);
   assert.equal(await frame.locator("img, a, script:not([src]), iframe").count(), 0);
   assert.deepEqual(await frame.locator("#titles button").allTextContents(), ["Trip notes", "Todo"]);
+  assert.equal(await frame.locator("#article p", { hasText: "constructor__proto__toString" }).count(), 1);
 
   await frame.locator("#titles button", { hasText: "Todo" }).click();
   await frame.locator("#article p").filter({ hasText: "milk" }).waitFor();

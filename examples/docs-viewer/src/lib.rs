@@ -49,15 +49,17 @@ pub const MAX_SHELF_ITEMS: usize = 8;
 /// about 415 fuel each, so this cap and the shelf budget below keep the
 /// worst shelf under 80% of the Runtime's fixed fuel (`host-test`).
 pub const MAX_DOCUMENT_BYTES: u64 = 16 * 1024;
-/// All document bytes one shelf reads in full, shown or skipped. A document
-/// that would pass it is skipped, found by one byte past what is left, not
-/// by reading it.
+/// All document bytes one shelf reads: every byte any read of a document
+/// returns counts, before anything else happens to it, shown or skipped. A
+/// document that would pass it is skipped, found by one byte past what is
+/// left, not by reading it.
 pub const MAX_SHELF_TEXT_BYTES: u64 = 32 * 1024;
-/// All rendered blocks one shelf writes. The output is written whole, each
-/// byte as a JSON number of up to four characters, so this keeps the write
-/// far under the 1 MiB bridge frame, and its fuel bounded: markdown can render
-/// to several times its own size.
-pub const MAX_SHELF_SHOWN_BYTES: u64 = 64 * 1024;
+/// The whole pages text one shelf writes: documents, skipped entries and the
+/// frame around them. The output is written whole, each byte as a JSON number
+/// of up to four characters, so this keeps the write far under the 1 MiB
+/// bridge frame, and its fuel bounded: markdown can render to several times
+/// its own size.
+pub const MAX_PAGES_BYTES: u64 = 64 * 1024;
 
 /// Bytes per read. Content travels as a JSON array of numbers, up to four
 /// characters a byte, so 8 KiB stays far under the 1 MiB bridge frame
@@ -168,11 +170,11 @@ impl Skip {
             Skip::Oversize => format!("is larger than {MAX_DOCUMENT_BYTES} bytes"),
             Skip::ShelfFull => format!(
                 "would pass what one shelf may read ({MAX_SHELF_TEXT_BYTES} bytes) \
-                 or show ({MAX_SHELF_SHOWN_BYTES} bytes)"
+                 or write ({MAX_PAGES_BYTES} bytes of pages)"
             ),
             Skip::TooLong => format!(
                 "has more than {} blocks, {} spans in a block or {} list items, \
-                 or would take more than {MAX_SHELF_SHOWN_BYTES} bytes to show",
+                 or would take more than {MAX_PAGES_BYTES} bytes to show",
                 docs_model::MAX_BLOCKS,
                 docs_model::MAX_SPANS,
                 docs_model::MAX_LIST_ITEMS
@@ -188,15 +190,31 @@ pub struct Document {
     pub kind: Kind,
     pub title: String,
     pub bytes: usize,
-    /// The blocks, rendered once as a JSON array.
-    pub rendered: Vec<u8>,
+    /// Its whole entry in the pages, written once.
+    pub entry: Vec<u8>,
 }
 
-/// What one shelf may still read and show.
+/// What one shelf may still read and write.
 struct Budget {
+    /// Document bytes: every byte a read returns is taken off at once.
     read: u64,
-    shown: u64,
+    /// Pages bytes left for documents. The frame and a worst-case skipped
+    /// entry for every item not yet decided are already taken off, so the
+    /// whole text can never pass [`MAX_PAGES_BYTES`].
+    written: u64,
 }
+
+/// Every reason, to find the longest skipped entry.
+const ALL_SKIPS: [Skip; 8] = [
+    Skip::WrongKind,
+    Skip::Empty,
+    Skip::NotText(TextError::OtherEncoding),
+    Skip::NotText(TextError::NotUtf8),
+    Skip::NotText(TextError::Control),
+    Skip::Oversize,
+    Skip::ShelfFull,
+    Skip::TooLong,
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Skipped {
@@ -215,22 +233,50 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
 
     let mut documents = Vec::with_capacity(items.len());
     let mut skipped = Vec::new();
+    // Each item may still end up skipped: hold back room for its entry.
+    let longest = ALL_SKIPS
+        .iter()
+        .max_by_key(|reason| {
+            let mut out = Vec::new();
+            skip_entry(&mut out, 0, "", reason);
+            out.len()
+        })
+        .expect("there are reasons");
+    let held: Vec<u64> = items
+        .iter()
+        .enumerate()
+        .map(|(order, uri)| {
+            let mut out = Vec::new();
+            skip_entry(&mut out, order, uri, longest);
+            out.len() as u64 + 1
+        })
+        .collect();
+    let frame = pages_json(&[], &[]).len() as u64;
     let mut budget = Budget {
         read: MAX_SHELF_TEXT_BYTES,
-        shown: MAX_SHELF_SHOWN_BYTES,
+        written: MAX_PAGES_BYTES.saturating_sub(frame + held.iter().sum::<u64>()),
     };
     for (order, uri) in items.iter().enumerate() {
+        // What was held back for this item is its own to use now.
+        budget.written += held[order];
         match check_item(bus, order, uri, &mut budget)? {
             Ok(document) => documents.push(document),
-            Err(reason) => skipped.push(Skipped {
-                order,
-                uri: uri.clone(),
-                reason,
-            }),
+            Err(reason) => {
+                let mut entry = Vec::new();
+                skip_entry(&mut entry, order, uri, &reason);
+                budget.written -= entry.len() as u64 + 1;
+                skipped.push(Skipped {
+                    order,
+                    uri: uri.clone(),
+                    reason,
+                });
+            }
         }
     }
 
     let text = pages_json(&documents, &skipped);
+    // The cap is on the whole text written, not only on what is shown.
+    debug_assert!(text.len() as u64 <= MAX_PAGES_BYTES, "{}", text.len());
     let write_grant = grant(bus, PAGES_URI, "write", "write the checked pages")?;
     bus::write_bytes(bus, PAGES_URI, &write_grant, text.as_bytes()).map_err(|error| {
         Refusal::Call {
@@ -298,40 +344,70 @@ fn check_item(
     let Some(kind) = Kind::from_name(uri) else {
         return Ok(Err(Skip::WrongKind));
     };
+    // Nothing more is read once the shelf has read what it may.
+    let left = budget.read;
+    let ask = HEAD_BYTES.min(left);
+    if ask == 0 {
+        return Ok(Err(Skip::ShelfFull));
+    }
     let item_grant = grant(bus, uri, "read", "read a document on the shelf")?;
 
-    // Text first, from the head alone.
-    let head = read_at(bus, uri, &item_grant, 0, HEAD_BYTES)?;
+    // Text first, from the head alone. Every read is counted the moment it
+    // returns (`read_counted`), so a document skipped at any step below has
+    // still paid for what was read.
+    let head = read_counted(bus, uri, &item_grant, &mut budget.read, 0, ask)?;
     if head.is_empty() {
         return Ok(Err(Skip::Empty));
     }
-    let more = head.len() as u64 == HEAD_BYTES;
+    let more = head.len() as u64 == ask;
+    if more && ask < HEAD_BYTES {
+        // It may go on past what the shelf may still read.
+        return Ok(Err(Skip::ShelfFull));
+    }
     if let Err(err) = text::check_head(&head, more) {
         return Ok(Err(Skip::NotText(err)));
     }
 
     // Size next: one byte past the limit, then one byte past what the shelf
-    // has left. Only then the rest of the document.
-    let left = budget.read;
+    // had left. Only then the rest of the document, up to the nearer of the
+    // two, which both were just shown to hold no byte.
     let bytes = if more {
-        if !read_at(bus, uri, &item_grant, MAX_DOCUMENT_BYTES, 1)?.is_empty() {
-            return Ok(Err(Skip::Oversize));
-        }
-        if left < MAX_DOCUMENT_BYTES && !read_at(bus, uri, &item_grant, left, 1)?.is_empty() {
+        if budget.read == 0 {
             return Ok(Err(Skip::ShelfFull));
         }
-        match read_bounded(bus, uri, &item_grant, head, MAX_DOCUMENT_BYTES.min(left))? {
-            Some(bytes) => bytes,
-            // It grew between the size check and the read.
-            None => return Ok(Err(Skip::Oversize)),
+        let past = read_counted(
+            bus,
+            uri,
+            &item_grant,
+            &mut budget.read,
+            MAX_DOCUMENT_BYTES,
+            1,
+        )?;
+        if !past.is_empty() {
+            return Ok(Err(Skip::Oversize));
         }
-    } else if head.len() as u64 > left {
-        return Ok(Err(Skip::ShelfFull));
+        if left < MAX_DOCUMENT_BYTES {
+            let past = read_counted(bus, uri, &item_grant, &mut budget.read, left, 1)?;
+            if !past.is_empty() {
+                return Ok(Err(Skip::ShelfFull));
+            }
+        }
+        let end = MAX_DOCUMENT_BYTES.min(left);
+        let mut bytes = head;
+        while (bytes.len() as u64) < end {
+            let offset = bytes.len() as u64;
+            let ask = READ_CHUNK_BYTES.min(end - offset);
+            let chunk = read_counted(bus, uri, &item_grant, &mut budget.read, offset, ask)?;
+            let short = (chunk.len() as u64) < ask;
+            bytes.extend_from_slice(&chunk);
+            if short {
+                break;
+            }
+        }
+        bytes
     } else {
         head
     };
-    // Read in full: it counts, whatever comes next.
-    budget.read -= bytes.len() as u64;
 
     let text = match text::check_whole(&bytes) {
         Ok(text) => text,
@@ -341,36 +417,88 @@ fn check_item(
         Ok(blocks) => blocks,
         Err(ModelError::TooLong) => return Ok(Err(Skip::TooLong)),
     };
-    // Rendered once, and measured before it counts.
+    // Rendered once. Stop as soon as it is too long for any pages: what is
+    // past the cap is never used.
     let mut rendered = vec![b'['];
     for (index, block) in blocks.iter().enumerate() {
         if index > 0 {
             rendered.push(b',');
         }
         docs_model::write_block(&mut rendered, block);
-        // Stop as soon as it is too long: what is past the cap is never used.
-        if rendered.len() as u64 >= MAX_SHELF_SHOWN_BYTES {
+        if rendered.len() as u64 >= MAX_PAGES_BYTES {
             return Ok(Err(Skip::TooLong));
         }
     }
     rendered.push(b']');
-    let size = rendered.len() as u64;
-    if size > MAX_SHELF_SHOWN_BYTES {
-        return Ok(Err(Skip::TooLong));
-    }
-    if size > budget.shown {
+    let name = uri.rsplit('/').next().unwrap_or(uri);
+    let title = docs_model::title(&blocks, name);
+    let entry = document_entry(&rendered, bytes.len(), kind, order, &title, uri);
+    // The whole entry counts against the pages, with its comma.
+    let size = entry.len() as u64 + 1;
+    if size > budget.written {
         return Ok(Err(Skip::ShelfFull));
     }
-    budget.shown -= size;
-    let name = uri.rsplit('/').next().unwrap_or(uri);
+    budget.written -= size;
     Ok(Ok(Document {
         order,
         uri: uri.to_string(),
         kind,
-        title: docs_model::title(&blocks, name),
+        title,
         bytes: bytes.len(),
-        rendered,
+        entry,
     }))
+}
+
+/// One read of a document, taken off what the shelf may still read before
+/// anything else can happen to it. The read window refuses an answer longer
+/// than it asked for, so `length` is the most it can take off.
+fn read_counted(
+    bus: &mut dyn Bus,
+    uri: &str,
+    grant: &str,
+    left: &mut u64,
+    offset: u64,
+    length: u64,
+) -> Result<Vec<u8>, Refusal> {
+    assert!(length <= *left, "a read past what the shelf may read");
+    let bytes = read_at(bus, uri, grant, offset, length)?;
+    *left -= bytes.len() as u64;
+    Ok(bytes)
+}
+
+/// One document's entry in the pages, keys in sorted order.
+fn document_entry(
+    rendered: &[u8],
+    bytes: usize,
+    kind: Kind,
+    order: usize,
+    title: &str,
+    uri: &str,
+) -> Vec<u8> {
+    use docs_model::write_str;
+    let mut out = Vec::with_capacity(rendered.len() + 256);
+    out.extend_from_slice(br#"{"blocks":"#);
+    out.extend_from_slice(rendered);
+    out.extend_from_slice(format!(r#","bytes":{bytes},"mime":"#).as_bytes());
+    write_str(&mut out, kind.mime());
+    out.extend_from_slice(format!(r#","order":{order},"title":"#).as_bytes());
+    write_str(&mut out, title);
+    out.extend_from_slice(br#","uri":"#);
+    write_str(&mut out, uri);
+    out.push(b'}');
+    out
+}
+
+/// One skipped entry in the pages, keys in sorted order.
+fn skip_entry(out: &mut Vec<u8>, order: usize, uri: &str, reason: &Skip) {
+    use docs_model::write_str;
+    out.extend_from_slice(br#"{"message":"#);
+    write_str(out, &reason.message());
+    out.extend_from_slice(format!(r#","order":{order},"reason":"#).as_bytes());
+    write_str(out, reason.code());
+    out.extend_from_slice(br#","uri":"#);
+    write_str(out, uri);
+    out.push(b'}');
 }
 
 /// The pages, with keys in sorted order so the text is deterministic. Written
@@ -384,15 +512,7 @@ pub fn pages_json(documents: &[Document], skipped: &[Skipped]) -> String {
         if index > 0 {
             out.push(b',');
         }
-        out.extend_from_slice(br#"{"blocks":"#);
-        out.extend_from_slice(&document.rendered);
-        out.extend_from_slice(format!(r#","bytes":{},"mime":"#, document.bytes).as_bytes());
-        write_str(&mut out, document.kind.mime());
-        out.extend_from_slice(format!(r#","order":{},"title":"#, document.order).as_bytes());
-        write_str(&mut out, &document.title);
-        out.extend_from_slice(br#","uri":"#);
-        write_str(&mut out, &document.uri);
-        out.push(b'}');
+        out.extend_from_slice(&document.entry);
     }
     out.extend_from_slice(br#"],"schema":"#);
     write_str(&mut out, PAGES_SCHEMA);
@@ -403,13 +523,7 @@ pub fn pages_json(documents: &[Document], skipped: &[Skipped]) -> String {
         if index > 0 {
             out.push(b',');
         }
-        out.extend_from_slice(br#"{"message":"#);
-        write_str(&mut out, &skip.reason.message());
-        out.extend_from_slice(format!(r#","order":{},"reason":"#, skip.order).as_bytes());
-        write_str(&mut out, skip.reason.code());
-        out.extend_from_slice(br#","uri":"#);
-        write_str(&mut out, &skip.uri);
-        out.push(b'}');
+        skip_entry(&mut out, skip.order, &skip.uri, &skip.reason);
     }
     out.extend_from_slice(b"]}");
     String::from_utf8(out).expect("only UTF-8 was written")

@@ -270,6 +270,20 @@ fn never_closed(size: usize) -> Vec<u8> {
     repeat_to("[a](*b <c:", size)
 }
 
+/// `size` bytes of backtick runs that never close: each run has a length no
+/// other run has (Codex's probe).
+fn distinct_backticks(size: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(size + 256);
+    let mut run = 1;
+    while bytes.len() < size {
+        bytes.extend_from_slice(&vec![b'`'; run]);
+        bytes.extend_from_slice(b"a ");
+        run += 1;
+    }
+    bytes.truncate(size);
+    bytes
+}
+
 fn repeat_to(unit: &str, size: usize) -> Vec<u8> {
     let mut bytes = unit.repeat(size / unit.len() + 1).into_bytes();
     bytes.truncate(size);
@@ -440,6 +454,10 @@ fn worst_case_shelves() -> Vec<(&'static str, Bridge)> {
         (
             "8 full documents of brackets that never close",
             shelf_of(|size| repeat_to("[", size)),
+        ),
+        (
+            "8 full documents of backtick runs of distinct lengths",
+            shelf_of(distinct_backticks),
         ),
         ("the longest shelf of the most spans", Bridge::with(&named)),
         ("shown to the cap, then read to the cap", {

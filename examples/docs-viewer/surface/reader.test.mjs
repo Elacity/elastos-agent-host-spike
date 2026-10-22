@@ -236,6 +236,17 @@ test("an unknown style is plain and a heading level stays within 1 to 6", () => 
   assert.deepEqual(paragraph.spans.map((s) => s.tag), ["span", "span"]);
 });
 
+test("a style named after an inherited property is plain", () => {
+  const names = ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf"];
+  const { documents } = readPages(
+    pages([doc(0, [{ kind: "paragraph", spans: names.map((style) => ({ style, text: style })) }])]),
+  );
+  const tags = documents[0].blocks[0].spans.map((s) => s.tag);
+  assert.deepEqual(tags, names.map(() => "span"));
+  // Each is a name the page can create an element from.
+  for (const tag of tags) assert.equal(typeof tag, "string");
+});
+
 test("the titles and the arrow keys switch documents, in shelf order", async () => {
   const { reader, view, env } = await mounted({
     [PAGES_ROUTE]: response(

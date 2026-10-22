@@ -61,11 +61,11 @@ Two kinds of failure, as in the photo viewer:
 | Shelf | 4 KiB, 8 items | Read whole |
 | Head | 512 bytes | Read before anything else |
 | Document | 16 KiB | Read whole, after its head is checked; one byte past it is read, the rest is not |
-| Read per shelf | 32 KiB | Every document read in full counts, shown or skipped |
-| Shown per shelf | 64 KiB of rendered blocks | Markdown can render to several times its size; the write is each byte as a number, far under the 1 MiB bridge frame |
+| Read per shelf | 32 KiB | Every byte any read of a document returns counts at once, before any skip; a document that would pass it is not read |
+| Pages per shelf | 64 KiB, the whole text written | Documents, skipped entries and the frame; room for every item's skipped entry is held back until it is decided. Markdown can render to several times its size; the write is each byte as a number, far under the 1 MiB bridge frame |
 | Blocks, spans, list items | 512, 256 per block, 256 per list | |
 
-Fuel: `ComponentProvider` gives every run 100,000,000. The worst shelf within these limits uses 52.9%, and
+Fuel: `ComponentProvider` gives every run 100,000,000. The worst shelf within these limits uses 51.6%, and
 `host-test` gates every worst case at 80%, including documents made of openers that never close. The inline
 parser finds every closer through an index built once, so it is linear in the text.
 
