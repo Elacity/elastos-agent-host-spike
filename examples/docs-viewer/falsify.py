@@ -231,6 +231,25 @@ RUNTIME = [
     ),
 ]
 
+# The bundle: what this app adds to the bundle tool (whose own checks have
+# their falsifiers in examples/photo-viewer/falsify-bundle.py).
+BUNDLE = [
+    (
+        "the page ships its whole source folder",
+        "bundle-test/tests/bundle.rs",
+        "        let folder = Path::new(&entrypoint).parent().unwrap();",
+        '        let folder = Path::new("");',
+        ["each_capsule_ships_only_what_it_runs_from"],
+    ),
+    (
+        "the surface ships without its core's CID",
+        "bundle-test/tests/bundle.rs",
+        '            requirement["cid"] = json!(cid);',
+        "            let _ = cid;",
+        ["the_surface_names_its_core_by_cid_and_nothing_else_selects_it"],
+    ),
+]
+
 # The string write the "pages written as a string" mutant calls; it exists
 # only while that mutant is in place.
 WRITE_STRING = '''
@@ -287,6 +306,19 @@ def runtime_tests_fail(tests):
     return True
 
 
+def bundle_tests_fail(tests):
+    for name in tests:
+        result = run(
+            ["cargo", "test", "--locked", "--test", "bundle", "--", "--exact", name],
+            HERE / "bundle-test",
+        )
+        if "1 passed" not in result.stdout and "1 failed" not in result.stdout:
+            raise SystemExit(f"no bundle test {name}\n{result.stdout[-1500:]}{result.stderr[-1500:]}")
+        if result.returncode == 0:
+            return False
+    return True
+
+
 def check(cases):
     for name, relative, old, _new, _tests in cases:
         text = (HERE / relative).read_text()
@@ -322,10 +354,12 @@ def main():
     parts = [arg for arg in args if not arg.startswith("--")]
     check(GUEST)
     check(RUNTIME)
+    check(BUNDLE)
     if "--check" in args:
-        print(f"all {len(GUEST) + len(RUNTIME)} anchors found once")
+        print(f"all {len(GUEST) + len(RUNTIME) + len(BUNDLE)} anchors found once")
         return
     missed = falsify(GUEST, guest_tests_fail, parts)
+    missed += falsify(BUNDLE, bundle_tests_fail, parts)
     if "--runtime" in args:
         try:
             missed += falsify(RUNTIME, runtime_tests_fail, parts)

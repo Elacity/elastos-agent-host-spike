@@ -52,6 +52,11 @@ cargo fmt --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" -- --check
 cargo clippy --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" --all-targets -- -D warnings
 cargo test --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" -- --nocapture
 
+# Bundle: both capsules packed, named by CID, claimed and admitted under a policy.
+cargo fmt --manifest-path "${VIEWER_DIR}/bundle-test/Cargo.toml" -- --check
+cargo clippy --locked --manifest-path "${VIEWER_DIR}/bundle-test/Cargo.toml" --all-targets -- -D warnings
+cargo test --locked --manifest-path "${VIEWER_DIR}/bundle-test/Cargo.toml" -- --nocapture
+
 # Surface: the render-only page, against a fake fetch, then in real Chromium
 # framed in Home's sandbox against a stand-in server (Playwright's Chromium).
 node --test "${VIEWER_DIR}/surface/reader.test.mjs"
