@@ -3491,6 +3491,236 @@
     "tests::every_key_is_normalized_and_its_own_key",
     "tests::spellings_equal_without_case_and_normal_form_share_one_key"
    ]
+  },
+  {
+   "id": "HC01",
+   "title": "host_scope skips usable_child (hole 1)",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let child = usable_child(parent, child_id)?;\n    if usize::from(host.depth)",
+     "new": "    let child = parent.steps.iter().find(|step| step.id == child_id).ok_or(\"not a child\")?;\n    if usize::from(host.depth)"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_gets_nothing_once_its_child_stops"
+   ]
+  },
+  {
+   "id": "HC02",
+   "title": "a host step need not sit in the child's granted scope (hole 2)",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if path_refusal(&step.resource).is_some() || !resource_covers(scope, &step.resource) {",
+     "new": "    if path_refusal(&step.resource).is_some() {"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_touches_only_what_its_child_was_granted"
+   ]
+  },
+  {
+   "id": "HC03",
+   "title": "a host step skips the path rule",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if path_refusal(&step.resource).is_some() || !resource_covers(scope, &step.resource) {",
+     "new": "    if !resource_covers(scope, &step.resource) {"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_touches_only_what_its_child_was_granted"
+   ]
+  },
+  {
+   "id": "HC04",
+   "title": "an ungranted child's host uses the child's whole resource",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    granted_scope(child).ok_or(\"not granted\")",
+     "new": "    Ok(granted_scope(child).unwrap_or(&child.resource))"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_touches_only_what_its_child_was_granted"
+   ]
+  },
+  {
+   "id": "HC05",
+   "title": "a host at another depth counts as the child's",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if usize::from(host.depth) != depth_under(parent, child.parent_id) {\n        return Err(\"not this child's host\");",
+     "new": "    if false {\n        return Err(\"not this child's host\");"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_touches_only_what_its_child_was_granted"
+   ]
+  },
+  {
+   "id": "HC06",
+   "title": "a host step may take the parent step's grant",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    grant.is_none_or(|grant| Some(grant) != parent_grant)",
+     "new": "    grant.is_none_or(|_| true)"
+    }
+   ],
+   "tests": [
+    "tests::a_child_grant_is_narrower_and_does_not_inherit_the_parent_grant",
+    "tests::a_child_host_touches_only_what_its_child_was_granted"
+   ]
+  },
+  {
+   "id": "HC07",
+   "title": "authorize_in_host skips host_step_ok",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    host_step_ok(parent, child_id, host, step_id, grant) && authorize_step(host, step_id, grant)",
+     "new": "    authorize_step(host, step_id, grant)"
+    }
+   ],
+   "tests": [
+    "tests::a_child_grant_is_narrower_and_does_not_inherit_the_parent_grant",
+    "tests::a_child_host_gets_nothing_once_its_child_stops",
+    "tests::a_child_host_touches_only_what_its_child_was_granted"
+   ]
+  },
+  {
+   "id": "HC08",
+   "title": "grant_child_host goes around authorize_in_host",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    authorize_in_host(parent, child_id, host, id, grant)\n}",
+     "new": "    authorize_step(host, id, grant)\n}"
+    }
+   ],
+   "tests": [
+    "tests::a_child_grant_is_narrower_and_does_not_inherit_the_parent_grant",
+    "tests::a_child_host_gets_nothing_once_its_child_stops",
+    "tests::a_child_host_touches_only_what_its_child_was_granted"
+   ]
+  },
+  {
+   "id": "HC09",
+   "title": "host_inbox skips host_step_ok",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if answer != InboxAnswer::Deny && !host_step_ok(parent, child_id, host, step_id, grant) {",
+     "new": "    if false && !host_step_ok(parent, child_id, host, step_id, grant) {"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_gets_nothing_once_its_child_stops",
+    "tests::a_child_host_touches_only_what_its_child_was_granted"
+   ]
+  },
+  {
+   "id": "HC10",
+   "title": "host_inbox checks a deny too (a person's deny is lost)",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if answer != InboxAnswer::Deny && !host_step_ok(parent, child_id, host, step_id, grant) {",
+     "new": "    if !host_step_ok(parent, child_id, host, step_id, grant) {"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_gets_nothing_once_its_child_stops"
+   ]
+  },
+  {
+   "id": "HC11",
+   "title": "dispatch_in_host skips host_step_ok",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    host_step_ok(parent, child_id, host, step_id, None) && dispatch_step(host, step_id)",
+     "new": "    dispatch_step(host, step_id)"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_gets_nothing_once_its_child_stops"
+   ]
+  },
+  {
+   "id": "HC12",
+   "title": "the plain authorize grants a host's step",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    journal.depth == 0 && authorize_step(journal, id, grant)",
+     "new": "    authorize_step(journal, id, grant)"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_touches_only_what_its_child_was_granted"
+   ]
+  },
+  {
+   "id": "HC13",
+   "title": "the plain apply_inbox answers a host's step",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    journal.depth == 0 && apply_inbox_step(journal, id, answer, grant)",
+     "new": "    apply_inbox_step(journal, id, answer, grant)"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_touches_only_what_its_child_was_granted"
+   ]
+  },
+  {
+   "id": "HC14",
+   "title": "the plain dispatch runs a host's step",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    journal.depth == 0 && dispatch_step(journal, id)",
+     "new": "    dispatch_step(journal, id)"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_touches_only_what_its_child_was_granted"
+   ]
   }
  ]
 }
