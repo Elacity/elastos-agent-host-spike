@@ -338,8 +338,8 @@ fn replay(bytes: &[u8]) -> Option<Vec<SurfaceNode>> {
     Some(events)
 }
 
-/// Format 2 of the UsersAI journal object (`handoff/USERSAI-JOURNAL.md` and
-/// `handoff/JOURNAL-FORMAT-2.md`). The bytes are a header, hash-linked
+/// Format 2 of the UsersAI journal object (`handoff/USERSAI-JOURNAL.md`; the
+/// design is `JOURNAL-FORMAT-2.md` in PR #25). The bytes are a header, hash-linked
 /// records, and the head hash. Every node has a typed kind. A grant string
 /// is never encoded, so a decoded step has no grant until Runtime grants it
 /// again. Format 1 is refused with `FORMAT_1_REASON`; nothing migrates it.
