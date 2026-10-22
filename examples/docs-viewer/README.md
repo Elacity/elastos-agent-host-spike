@@ -75,10 +75,17 @@ parser finds every closer through an index built once, so it is linear in the te
 ./verify.sh
 ```
 
-It checks the manifest against the WIT hash, runs the model and guest tests against a fake Runtime, builds
-the component, runs it inside the Runtime's own `ComponentProvider` with a fake bridge (`host-test/`), checks
-its imports with a copy of the Runtime admission check, gates the fuel of the worst shelves, and runs every
-falsifier (`falsify.py --runtime`).
+It checks the manifest against the WIT hash, then runs:
+
+- the model and guest tests against a fake Runtime;
+- the component build, and the component inside the Runtime's own `ComponentProvider` with a fake bridge
+  (`host-test/`): the admission import check and the fuel gate of the worst shelves;
+- the bundle tests (`bundle-test/`): both capsules packed, named by CID, claimed and admitted;
+- the Bus v2 reader (`bus2/`, Rust 1.95.0) in the Bus v2 proof's stub host;
+- the page tests and the page in real Chromium (`surface/`);
+- every falsifier (`falsify.py --runtime`, `falsify-surface.py`).
+
+The reproducible build is separate: `repro/build-in-container.sh` (needs Docker).
 
 ## Package shape
 
@@ -91,4 +98,7 @@ falsifier (`falsify.py --runtime`).
 | `src/fake.rs`, `src/tests.rs` | Fake Runtime (copied) and guest tests |
 | `model/` | Text checks and markdown to blocks; shared with the Bus v2 guest |
 | `host-test/` | The component in `ComponentProvider`, admission check, fuel gate (harness copied) |
-| `falsify.py` | Break each check and see its test fail |
+| `bundle-test/` | Pack, CID, claim and admission of both capsules |
+| `bus2/` | The same reader as a resident Bus v2 guest, and its tests |
+| `repro/` | The pinned container build |
+| `falsify.py`, `falsify-surface.py` | Break each check and see its test fail |

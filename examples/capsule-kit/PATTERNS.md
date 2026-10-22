@@ -7,6 +7,9 @@ where the photo viewer does it today.
 A new app meets a pattern only when every box is ticked **and** the proof exists: a test for each rule, and a
 falsifier that breaks the rule and sees that test fail. A rule with no failing falsifier is not proven.
 
+Items marked **(added)** come from the second viewer (`examples/docs-viewer`): the photo viewer did not need
+them, the documents viewer did. Why each was added is in `KIT-REPORT.md`, "What I had to change".
+
 The six patterns:
 
 1. [Grant-only reads with header checks](#1-grant-only-reads-with-header-checks)
@@ -42,8 +45,16 @@ checks what it reads before it trusts it, and reads no more than it needs.
       writes it. Never reuse one object's grant for another.
 - [ ] read with the offset/length window only, and always name a `length`.
 - [ ] check the type from the first bytes (magic bytes, or the encoding for text) before reading further.
+- [ ] **(added)** for a format that must be read whole (text), read the rest only after the head check and the
+      size probe, and check the whole again.
 - [ ] tell an oversize object by reading one byte past the limit, not by reading it all.
 - [ ] cap everything it reads whole (input lists, documents) and everything it counts (items, segments).
+- [ ] **(added)** cap what one run reads in all, and count every byte read in full, whether the item is then
+      shown or skipped.
+- [ ] **(added)** cap what one run writes: on Bus v1 each output byte costs fuel and travels as a number of up
+      to four characters in a 1 MiB bridge frame. Write the output and the write body straight to bytes, never
+      through a `serde_json::Value` per byte.
+- [ ] **(added)** keep every parser linear in its input. A content failure must never cost a trap.
 - [ ] parse every input strictly: a fixed schema string, unknown fields refused, URIs checked (prefix, no empty,
       `.` or `..` segment, no `?`, `#`, `\` or control character).
 - [ ] sort its failures in two kinds:
@@ -55,6 +66,8 @@ checks what it reads before it trusts it, and reads no more than it needs.
 - [ ] write its output once, whole, to its own output object, with a deterministic encoding (sorted keys).
 - [ ] stay within the Runtime's fixed fuel (100,000,000 per run on Bus v1): the worst input within its caps
       must use at most 80% of it, and a test must gate that.
+- [ ] **(added)** put in that gate the largest output and inputs made against each parser (openers that never
+      close, the most spans), not only the largest input.
 
 **Proof:** guest tests against a fake Runtime that checks bodies the way the localhost provider does, the same
 run inside the Runtime's own `ComponentProvider`, the admission import check, and a fuel gate.
@@ -78,6 +91,9 @@ The surface draws the core's output and nothing else. It is not authority (princ
       unread.
 - [ ] show text with `textContent` only. No `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`,
       `eval` or `Function`.
+- [ ] **(added)** have no parser of its own: the core turns content into a typed document (text-only blocks;
+      links and images as text), and the page only draws its kinds. A kind it does not know is "not shown".
+- [ ] **(added)** be tested against what the core actually writes (a fixture the core's tests check).
 - [ ] cut every string it shows to a fixed length.
 - [ ] use no storage, no cookies, no `postMessage`, no WebSocket, no other network, no `window.open`.
 - [ ] ship no inline script, style or handler: one module script and one stylesheet.
@@ -159,6 +175,8 @@ On Bus v2 the core is a resident guest. It runs until Runtime closes its events,
 
 - [ ] import only `elastos:bus/*@2.0.0`, never v1 and v2 together.
 - [ ] stop when its events stream closes, and return. It must not depend on `stop-requested`.
+- [ ] **(added)** end the run on an authority failure (a refused grant, a denied read) with its reason; for
+      content it cannot show, draw a frame that says so and go on.
 - [ ] do no work at start-up beyond setting up. Start-up runs guest code too, and is limited the same way.
 - [ ] read with `providers.invoke` under a cap it states, refuse more bytes than it asked for, and use no byte
       until the trailing future says the read is whole.
