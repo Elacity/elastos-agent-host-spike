@@ -199,3 +199,74 @@ fn pack_refuses_what_it_cannot_ship_as_it_is() {
         "path_invalid"
     );
 }
+
+#[test]
+fn pack_refuses_a_symlinked_folder_anywhere_on_the_path() {
+    let root = tempfile::tempdir().unwrap();
+    let r = root.path();
+    // Bytes outside the source that a followed link would ship.
+    write(&r.join("outside/payload.component.wasm"), b"\0asm outside");
+    write(
+        &r.join("outside/browser/index.html"),
+        b"<!doctype html> outside",
+    );
+    write(&r.join("outside/deep/c/x.component.wasm"), b"\0asm outside");
+    let shipped_nothing = |into: &Path| assert!(!into.exists(), "{} was written", into.display());
+
+    // Codex's case: the entrypoint under a linked folder (component).
+    let core = component_source(&r.join("c1"));
+    symlink("../../outside", core.join("linked")).unwrap();
+    write(
+        &core.join("capsule.json"),
+        &manifest("component", "linked/payload.component.wasm"),
+    );
+    assert_eq!(refused(pack(&core, &r.join("o1"), &[])), "symlink_in_path");
+    shipped_nothing(&r.join("o1"));
+
+    // The same for a page: its folder is under a linked folder.
+    let page = page_source(&r.join("p1"));
+    symlink("../../outside", page.join("linked")).unwrap();
+    write(
+        &page.join("capsule.json"),
+        &manifest("web-projection", "linked/browser/index.html"),
+    );
+    assert_eq!(refused(pack(&page, &r.join("o2"), &[])), "symlink_in_path");
+    shipped_nothing(&r.join("o2"));
+
+    // A link in the middle of a path: a/b is a link, a and c are real.
+    let core = component_source(&r.join("c2"));
+    std::fs::create_dir_all(core.join("a")).unwrap();
+    symlink("../../../outside/deep", core.join("a/b")).unwrap();
+    write(
+        &core.join("capsule.json"),
+        &manifest("component", "a/b/c/x.component.wasm"),
+    );
+    assert_eq!(refused(pack(&core, &r.join("o3"), &[])), "symlink_in_path");
+    shipped_nothing(&r.join("o3"));
+
+    // A page's own folder is a link (the last folder of its entrypoint).
+    let page = page_source(&r.join("p2"));
+    std::fs::remove_dir_all(page.join("browser")).unwrap();
+    symlink("../../outside/browser", page.join("browser")).unwrap();
+    assert_eq!(refused(pack(&page, &r.join("o4"), &[])), "symlink_in_path");
+    shipped_nothing(&r.join("o4"));
+
+    // The source folder itself is a link.
+    let core = component_source(&r.join("c3"));
+    symlink(&core, r.join("core-alias")).unwrap();
+    assert_eq!(
+        refused(pack(&r.join("core-alias"), &r.join("o5"), &[])),
+        "symlink_in_path"
+    );
+    shipped_nothing(&r.join("o5"));
+
+    // Without the links, the same layouts pack (the refusals are the links).
+    let core = component_source(&r.join("c4"));
+    write(&core.join("a/b/c/x.component.wasm"), b"\0asm inside");
+    write(
+        &core.join("capsule.json"),
+        &manifest("component", "a/b/c/x.component.wasm"),
+    );
+    let (_, entries) = pack(&core, &r.join("o6"), &[]).unwrap();
+    assert_eq!(paths(&entries), ["a/b/c/x.component.wasm", "capsule.json"]);
+}

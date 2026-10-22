@@ -52,6 +52,10 @@ pub enum Refusal {
     PathCaseCollision(String, String),
     /// A symlink, FIFO, socket or device file.
     SpecialFile(String),
+    /// A folder on the way to what is read is a symlink: the root itself, or
+    /// any folder between the root and a file. Nothing is read through a
+    /// link, because every check after it would describe another place.
+    SymlinkInPath(String),
     /// The closure has no `capsule.json` at its root.
     ManifestMissing,
     /// The claim, the manifest or a version does not parse as required.
@@ -149,6 +153,7 @@ impl Refusal {
             Refusal::PathNotNfc(_) => "path_not_nfc",
             Refusal::PathCaseCollision(..) => "path_case_collision",
             Refusal::SpecialFile(_) => "special_file",
+            Refusal::SymlinkInPath(_) => "symlink_in_path",
             Refusal::ManifestMissing => "manifest_missing",
             Refusal::ClaimMalformed(_) => "claim_malformed",
             Refusal::CidMismatch { .. } => "cid_mismatch",

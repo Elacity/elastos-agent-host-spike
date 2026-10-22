@@ -34,6 +34,7 @@ pub fn list_closure(root: &Path) -> Result<Vec<Entry>, Refusal> {
 
 /// The listing and the `capsule.json` bytes it lists, read in the same pass.
 pub(crate) fn read_closure(root: &Path) -> Result<(Vec<Entry>, Vec<u8>), Refusal> {
+    check_root(root)?;
     let mut entries = Vec::new();
     let mut manifest = None;
     walk(root, root, &mut entries, &mut manifest)?;
@@ -42,6 +43,16 @@ pub(crate) fn read_closure(root: &Path) -> Result<(Vec<Entry>, Vec<u8>), Refusal
     check_unique_under_case_folding(entries.iter().map(|entry| entry.path.as_str()))?;
     let manifest = manifest.ok_or(Refusal::ManifestMissing)?;
     Ok((entries, manifest))
+}
+
+/// The root is not followed either: a link there would list another folder.
+/// The walk below lstats every entry, so no folder under the root is a link.
+pub(crate) fn check_root(root: &Path) -> Result<(), Refusal> {
+    let meta = std::fs::symlink_metadata(root).map_err(|err| io(err, root))?;
+    if meta.file_type().is_symlink() {
+        return Err(Refusal::SymlinkInPath(root.display().to_string()));
+    }
+    Ok(())
 }
 
 /// Two paths that differ only by case would be one file on a

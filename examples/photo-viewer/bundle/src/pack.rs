@@ -12,8 +12,11 @@
 //! Each `(name, cid)` in `requires` becomes a `{name, kind: "capsule", cid}`
 //! requirement on the packed manifest, replacing one of the same name: so a
 //! page names its core by CID. Without `requires` the manifest is copied byte
-//! for byte. Symlinks and special files are refused, never followed. The
-//! result is checked by listing it, and its CID is returned.
+//! for byte. Symlinks and special files are refused, never followed: every
+//! component of every path is lstat'ed, from the source folder down, before
+//! anything is read or copied, so a link in the middle of a path is refused
+//! too (`symlink_in_path`). The result is checked by listing it, and its CID
+//! is returned.
 
 use std::path::Path;
 
@@ -21,6 +24,33 @@ use serde_json::{json, Value};
 
 use crate::admit::{check_cid_form, parse_manifest};
 use crate::listing::{check_segment, closure_cid, walk};
+
+/// lstats `source`, then each segment below it, in order. `source` and every
+/// segment but the last must be real folders, never links: a link anywhere on
+/// the way would make every check after it describe another place. The last
+/// segment's metadata is returned for the caller to check (it is not
+/// followed either). `None` when a segment does not exist, or a file stands
+/// where a folder should.
+fn lstat_each(source: &Path, segments: &[&str]) -> Result<Option<std::fs::Metadata>, Refusal> {
+    let mut path = source.to_path_buf();
+    let mut shown = source.display().to_string();
+    let mut meta = std::fs::symlink_metadata(&path).map_err(|err| io(err, &path))?;
+    for segment in segments {
+        if meta.file_type().is_symlink() {
+            return Err(Refusal::SymlinkInPath(shown));
+        }
+        if !meta.is_dir() {
+            return Ok(None);
+        }
+        path.push(segment);
+        shown = format!("{shown}/{segment}");
+        meta = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(_) => return Ok(None),
+        };
+    }
+    Ok(Some(meta))
+}
 use crate::{io, Entry, Refusal};
 
 pub fn pack(
@@ -29,12 +59,12 @@ pub fn pack(
     requires: &[(String, String)],
 ) -> Result<(String, Vec<Entry>), Refusal> {
     let manifest_path = source.join("capsule.json");
-    let manifest_bytes = match std::fs::symlink_metadata(&manifest_path) {
-        Ok(meta) if meta.is_file() => {
+    let manifest_bytes = match lstat_each(source, &["capsule.json"])? {
+        Some(meta) if meta.is_file() => {
             std::fs::read(&manifest_path).map_err(|err| io(err, &manifest_path))?
         }
-        Ok(_) => return Err(Refusal::SpecialFile("capsule.json".to_string())),
-        Err(_) => return Err(Refusal::ManifestMissing),
+        Some(_) => return Err(Refusal::SpecialFile("capsule.json".to_string())),
+        None => return Err(Refusal::ManifestMissing),
     };
     let mut manifest = parse_manifest(&manifest_bytes)?;
     let entrypoint = manifest
@@ -67,10 +97,17 @@ pub fn pack(
         }
         let folder = segments[..segments.len() - 1].join("/");
         let root = source.join(&folder);
-        if !std::fs::symlink_metadata(&root).is_ok_and(|meta| meta.is_dir()) {
-            return Err(Refusal::PackEntrypointMissing(format!(
-                "{folder} is not a folder"
-            )));
+        match lstat_each(source, &segments[..segments.len() - 1])? {
+            // The folder itself is walked, so it must not be a link either.
+            Some(meta) if meta.file_type().is_symlink() => {
+                return Err(Refusal::SymlinkInPath(root.display().to_string()))
+            }
+            Some(meta) if meta.is_dir() => {}
+            _ => {
+                return Err(Refusal::PackEntrypointMissing(format!(
+                    "{folder} is not a folder"
+                )))
+            }
         }
         let mut entries = Vec::new();
         let mut none = None;
@@ -86,10 +123,10 @@ pub fn pack(
             )));
         }
     } else {
-        match std::fs::symlink_metadata(source.join(&entrypoint)) {
-            Ok(meta) if meta.is_file() => files.push(entrypoint.clone()),
-            Ok(_) => return Err(Refusal::SpecialFile(entrypoint)),
-            Err(_) => {
+        match lstat_each(source, &segments)? {
+            Some(meta) if meta.is_file() => files.push(entrypoint.clone()),
+            Some(_) => return Err(Refusal::SpecialFile(entrypoint)),
+            None => {
                 return Err(Refusal::PackEntrypointMissing(format!(
                     "{entrypoint} is not in the source; build it first"
                 )))

@@ -346,6 +346,13 @@ fn the_listing_refuses_symlinks_and_special_files() {
     std::os::unix::fs::symlink("real.json", manifest.join("capsule.json")).unwrap();
     assert_eq!(refused(list_closure(&manifest)), "special_file");
 
+    // The root itself is not followed: a link there would list another folder.
+    let real = world.capsule("link-root", "0.1.0");
+    let alias = world.dir("aliases").join("link-root");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    assert_eq!(refused(list_closure(&alias)), "symlink_in_path");
+    assert!(list_closure(&real).is_ok());
+
     let socket = world.capsule("socket", "0.1.0");
     let _listener = std::os::unix::net::UnixListener::bind(socket.join("s")).unwrap();
     assert_eq!(refused(list_closure(&socket)), "special_file");

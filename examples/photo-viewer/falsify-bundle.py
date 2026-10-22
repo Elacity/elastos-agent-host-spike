@@ -193,8 +193,23 @@ CASES = [
      ["a_policy_that_lists_a_publisher_twice_is_refused"]),
     # Capsule kit item 3: pack.
     ("pack follows a symlinked entrypoint", "pack.rs",
-     [("match std::fs::symlink_metadata(source.join(&entrypoint)) {", "match std::fs::metadata(source.join(&entrypoint)) {")],
+     [("        meta = match std::fs::symlink_metadata(&path) {", "        meta = match std::fs::metadata(&path) {")],
      ["pack_refuses_what_it_cannot_ship_as_it_is"]),
+    ("pack follows a symlinked folder on the path", "pack.rs",
+     [("        if meta.file_type().is_symlink() {\n            return Err(Refusal::SymlinkInPath(shown));",
+       "        if false && meta.file_type().is_symlink() {\n            return Err(Refusal::SymlinkInPath(shown));")],
+     ["pack_refuses_a_symlinked_folder_anywhere_on_the_path"]),
+    ("pack checks only the first folders of a path for links", "pack.rs",
+     [("        if meta.file_type().is_symlink() {\n            return Err(Refusal::SymlinkInPath(shown));",
+       "        if path.components().count() <= source.components().count() + 1 && meta.file_type().is_symlink() {\n            return Err(Refusal::SymlinkInPath(shown));")],
+     ["pack_refuses_a_symlinked_folder_anywhere_on_the_path"]),
+    ("pack walks a linked page folder", "pack.rs",
+     [("            Some(meta) if meta.file_type().is_symlink() => {", "            Some(meta) if false && meta.file_type().is_symlink() => {")],
+     ["pack_refuses_a_symlinked_folder_anywhere_on_the_path"]),
+    ("the listing follows a symlinked root", "listing.rs",
+     [("    if meta.file_type().is_symlink() {\n        return Err(Refusal::SymlinkInPath(root.display().to_string()));",
+       "    if false && meta.file_type().is_symlink() {\n        return Err(Refusal::SymlinkInPath(root.display().to_string()));")],
+     ["the_listing_refuses_symlinks_and_special_files"]),
     ("pack writes into a folder that exists", "pack.rs",
      [("    if std::fs::symlink_metadata(into).is_ok() {", "    if false {")],
      ["pack_refuses_what_it_cannot_ship_as_it_is"]),
@@ -213,14 +228,17 @@ CASES = [
 ]
 
 
-def tests_fail(filters):
+def build():
     kit.cargo_compiles(BUNDLE, ["-q"])
-    return any(kit.cargo_test_fails(BUNDLE, ["-q"], name) for name in filters)
+
+
+def test_fails(name):
+    return kit.cargo_test_fails(BUNDLE, ["-q"], name)
 
 
 def main():
     cases = [(name, BUNDLE / "src" / relative, replacements, tests) for name, relative, replacements, tests in CASES]
-    kit.main([(cases, tests_fail, None, True)], done=f"all {len(CASES)} bundle falsifiers caught")
+    kit.main([(cases, build, test_fails, None, True)], done=f"all {len(CASES)} bundle falsifiers caught")
 
 
 if __name__ == "__main__":
