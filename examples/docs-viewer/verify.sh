@@ -52,7 +52,13 @@ cargo fmt --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" -- --check
 cargo clippy --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" --all-targets -- -D warnings
 cargo test --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" -- --nocapture
 
-# Every refusal: break it, see its test fail, restore it.
+# Surface: the render-only page, against a fake fetch, then in real Chromium
+# framed in Home's sandbox against a stand-in server (Playwright's Chromium).
+node --test "${VIEWER_DIR}/surface/reader.test.mjs"
+node "${VIEWER_DIR}/surface/reader-browser-smoke.mjs"
+
+# Every refusal and every page rule: break it, see its test fail, restore it.
 python3 -I "${VIEWER_DIR}/falsify.py" --runtime
+python3 -I "${VIEWER_DIR}/falsify-surface.py"
 
 echo "docs-viewer capsule verification: OK"

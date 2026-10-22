@@ -1,0 +1,188 @@
+{
+  "documents": [
+    {
+      "blocks": [
+        {
+          "kind": "heading",
+          "level": 1,
+          "spans": [
+            {
+              "style": "plain",
+              "text": "Trip notes"
+            }
+          ]
+        },
+        {
+          "kind": "paragraph",
+          "spans": [
+            {
+              "style": "plain",
+              "text": "Pack "
+            },
+            {
+              "style": "strong",
+              "text": "boots"
+            },
+            {
+              "style": "plain",
+              "text": ", "
+            },
+            {
+              "style": "em",
+              "text": "socks"
+            },
+            {
+              "style": "plain",
+              "text": " and a "
+            },
+            {
+              "style": "code",
+              "text": "map"
+            },
+            {
+              "style": "plain",
+              "text": "."
+            }
+          ]
+        },
+        {
+          "items": [
+            [
+              {
+                "style": "plain",
+                "text": "tent"
+              }
+            ],
+            [
+              {
+                "style": "plain",
+                "text": "stove"
+              }
+            ]
+          ],
+          "kind": "list",
+          "ordered": false
+        },
+        {
+          "items": [
+            [
+              {
+                "style": "plain",
+                "text": "drive"
+              }
+            ],
+            [
+              {
+                "style": "plain",
+                "text": "walk"
+              }
+            ]
+          ],
+          "kind": "list",
+          "ordered": true
+        },
+        {
+          "kind": "quote",
+          "spans": [
+            {
+              "style": "plain",
+              "text": "Leave early."
+            }
+          ]
+        },
+        {
+          "kind": "rule"
+        },
+        {
+          "kind": "code",
+          "text": "fn go() {}"
+        }
+      ],
+      "bytes": 126,
+      "mime": "text/markdown",
+      "order": 0,
+      "title": "Trip notes",
+      "uri": "localhost://Users/self/Documents/notes.md"
+    },
+    {
+      "blocks": [
+        {
+          "kind": "paragraph",
+          "spans": [
+            {
+              "style": "plain",
+              "text": "milk\nbread"
+            }
+          ]
+        },
+        {
+          "kind": "paragraph",
+          "spans": [
+            {
+              "style": "plain",
+              "text": "later"
+            }
+          ]
+        }
+      ],
+      "bytes": 17,
+      "mime": "text/plain",
+      "order": 2,
+      "title": "milk",
+      "uri": "localhost://Users/self/Documents/trip/todo.txt"
+    },
+    {
+      "blocks": [
+        {
+          "kind": "heading",
+          "level": 1,
+          "spans": [
+            {
+              "style": "plain",
+              "text": "<img src=x onerror=\"fetch('/api/apps/home/state')\">"
+            }
+          ]
+        },
+        {
+          "kind": "paragraph",
+          "spans": [
+            {
+              "style": "plain",
+              "text": "Read the guide (javascript:fetch('/x')) and [image: a cat]."
+            }
+          ]
+        },
+        {
+          "kind": "paragraph",
+          "spans": [
+            {
+              "style": "plain",
+              "text": "<script>alert(1)</script>"
+            }
+          ]
+        }
+      ],
+      "bytes": 153,
+      "mime": "text/markdown",
+      "order": 3,
+      "title": "<img src=x onerror=\"fetch('/api/apps/home/state')\">",
+      "uri": "localhost://Users/self/Documents/hostile.md"
+    }
+  ],
+  "schema": "elastos.docs-viewer.pages/v1",
+  "shelf": "localhost://Users/self/.AppData/App/docs-viewer/shelf.json",
+  "skipped": [
+    {
+      "message": "is not a .md, .markdown or .txt document",
+      "order": 1,
+      "reason": "wrong_kind",
+      "uri": "localhost://Users/self/Documents/page.html"
+    },
+    {
+      "message": "has a NUL or control character; it is not text",
+      "order": 4,
+      "reason": "not_text",
+      "uri": "localhost://Users/self/Documents/binary.md"
+    }
+  ]
+}

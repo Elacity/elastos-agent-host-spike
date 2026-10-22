@@ -639,3 +639,46 @@ fn a_document_that_renders_past_what_a_shelf_may_show_is_skipped() {
     assert!(shown as u64 <= MAX_SHELF_SHOWN_BYTES, "{shown}");
     assert!(text.len() < 80 * 1024, "{}", text.len());
 }
+
+/// The pages of a shelf with every block kind, every skip the surface lists,
+/// and hostile text, as the core writes them. The surface tests read this
+/// file (`surface/fixtures/pages.json`), so both sides are held to one format.
+/// Run with `DOCS_VIEWER_WRITE_FIXTURE=1` to write it again.
+#[test]
+fn the_surface_fixture_is_what_the_core_writes() {
+    let hostile = "# <img src=x onerror=\"fetch('/api/apps/home/state')\">\n\n\
+                   Read [the guide](javascript:fetch('/x')) and ![a cat](http://h/c.png).\n\n\
+                   <script>alert(1)</script>\n";
+    let kinds = "# Trip notes\n\nPack **boots**, *socks* and a `map`.\n\n- tent\n- stove\n\n\
+                 1. drive\n2. walk\n\n> Leave early.\n\n---\n\n```\nfn go() {}\n```\n";
+    let mut bus = granted(&[
+        (A, kinds.as_bytes().to_vec()),
+        (
+            "localhost://Users/self/Documents/page.html",
+            b"<p>hi</p>".to_vec(),
+        ),
+        (B, b"milk\nbread\n\nlater".to_vec()),
+        (
+            "localhost://Users/self/Documents/hostile.md",
+            hostile.as_bytes().to_vec(),
+        ),
+        (
+            "localhost://Users/self/Documents/binary.md",
+            b"\0\x01".to_vec(),
+        ),
+    ]);
+    let text = run(&mut bus).unwrap();
+    let pretty = serde_json::to_string_pretty(&serde_json::from_str::<Value>(&text).unwrap())
+        .unwrap()
+        + "\n";
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("surface/fixtures/pages.json");
+    if std::env::var_os("DOCS_VIEWER_WRITE_FIXTURE").is_some() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &pretty).unwrap();
+    }
+    let checked_in = std::fs::read_to_string(&path).expect("surface/fixtures/pages.json");
+    assert_eq!(
+        checked_in, pretty,
+        "the core writes other pages than the surface is tested with"
+    );
+}
