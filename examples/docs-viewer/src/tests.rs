@@ -579,17 +579,22 @@ fn a_document_skipped_after_it_was_read_still_counts_toward_the_shelf_budget() {
 }
 
 #[test]
-fn the_write_body_is_the_json_the_provider_takes() {
-    let content: Vec<u8> = (0..=255).collect();
-    let body = crate::bus::write_body("localhost://Users/self/Documents/\"q\".md", &content);
-    let parsed: Value = serde_json::from_str(&body).unwrap();
+fn the_write_is_one_byte_array_with_append_false() {
+    let mut bus = granted(&[(A, b"# a".to_vec())]);
+    let text = run(&mut bus).unwrap();
+    let writes: Vec<&Value> = bus
+        .calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::Invoke {
+                operation, body, ..
+            } if operation == "write" => Some(body),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        parsed,
-        json!({ "path": "localhost://Users/self/Documents/\"q\".md", "content": content, "append": false })
-    );
-    assert_eq!(
-        crate::bus::write_body("u", b""),
-        r#"{"append":false,"content":[],"path":"u"}"#
+        writes,
+        [&json!({ "path": PAGES_URI, "content": text.as_bytes(), "append": false })]
     );
 }
 

@@ -149,11 +149,11 @@ GUEST = [
         [("core", "a_document_that_renders_past_what_a_shelf_may_show_is_skipped")],
     ),
     (
-        "the write body does not say append",
+        "the write does not say append",
         "src/bus.rs",
-        'body.push_str(r#"{"append":false,"content":["#);',
-        'body.push_str(r#"{"content":["#);',
-        [("core", "the_write_body_is_the_json_the_provider_takes"), ("core", "a_shelf_is_read_and_its_pages_are_written")],
+        'json!({ "path": uri, "content": content, "append": false })',
+        'json!({ "path": uri, "content": content })',
+        [("core", "the_write_is_one_byte_array_with_append_false"), ("core", "a_shelf_is_read_and_its_pages_are_written")],
     ),
     # The model: what counts as text, and what a block may hold.
     (
