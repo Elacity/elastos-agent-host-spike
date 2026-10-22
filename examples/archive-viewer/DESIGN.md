@@ -1,8 +1,9 @@
 # Archive viewer: design (no code)
 
 The next app from the capsule kit: wave B, roadmap 2.6 ("move apps one at a time"). It replaces what
-`capsules/archive-manager` does for reading: list an archive's entries and show a text or image entry inside
-it. It is read-only. It never extracts anything to disk.
+`capsules/archive-manager` does for reading: list an archive's entries and show a text entry inside it (image
+entries on Bus v2). It is read-only. It never extracts anything to disk; extraction becomes a Runtime operation
+the person approves, outside this app.
 
 Branch `claude/photo-archive-design`, from `spike/photo-viewer` `cf4eab03`. Design only: no code, no Runtime
 change. The code comes after #32 merges and the kit's shared crate exists (see [Order of work](#order-of-work)).
@@ -12,7 +13,7 @@ change. The code comes after #32 merges and the kit's shared crate exists (see [
 A WASM core reads one archive object through `providers.invoke`, with a grant for that one object, using the
 offset and length read window. It never reads the whole archive. For a ZIP it reads the end record and the
 central directory, checks them against each other, and lists every entry with a status. It checks and shows
-at most a few small text or image entries, each read through its local header, inflated through a fixed
+at most a few small text entries, each read through its local header, inflated through a fixed
 window, and checked against its declared size and CRC. Every cap is counted before any early return. It writes
 one bounded view object that a render-only page draws. Nothing is extracted, and a nested archive is listed,
 not opened.
@@ -29,7 +30,8 @@ not opened.
 8. [What the kit gives, and what it is missing](#what-the-kit-gives-and-what-it-is-missing)
 9. [Falsifier plan](#falsifier-plan)
 10. [Order of work](#order-of-work)
-11. [Questions for Sasha](#questions-for-sasha)
+11. [Decisions](#decisions)
+12. [Ready-PR note: the old routes](#ready-pr-note-the-old-routes)
 
 ## Rong's four layers
 
@@ -46,14 +48,15 @@ The layers as `examples/capsule-kit/PATTERNS.md` reads them, and how this app me
 
 Does:
 - list the entries of one ZIP archive: path, kind, declared sizes, method, and a status per entry (shown,
-  listed, ambiguous, unsupported, encrypted, blocked) with a reason;
-- show up to a few small entries: text (UTF-8, the documents viewer's text checks) and images (PNG, JPEG or
-  WebP, the photo viewer's header checks), each checked whole before it is shown;
+  listed, unsupported, encrypted, blocked) with a reason;
+- show up to a few small text entries (UTF-8, the documents viewer's text checks), each checked whole before
+  it is shown. Image entries are listed; image previews wait for Bus v2 and the typed UI document (decision 4);
 - list a nested archive as an entry of kind `archive`.
 
 Does not:
-- extract an entry to disk, Library or any object other than its own view (today's `entry.extract` is not in
-  this app; see [Questions](#questions-for-sasha));
+- extract an entry to disk, Library or any object other than its own view. Extraction stays, but not in this
+  app: it writes to the person's storage, so it becomes a Runtime operation the person approves, which the
+  capsule cannot reach (decision 1);
 - decode a method other than stored (0) and deflate (8), or anything encrypted;
 - open a nested archive (Bus v1), or one that is not stored (Bus v2);
 - follow a symlink entry, or treat an entry name as a path anywhere.
@@ -76,8 +79,7 @@ Who writes it is a missing piece: Home binds a launch only for `image-viewer` to
 written once and whole, with sorted keys, capped as a whole (PATTERNS 1, "cap the whole output"):
 - `archive`: the URI and its size;
 - `entries`: index, path (text), kind, declared sizes, method, status, reason;
-- `previews`: for each shown entry, either the docs-model typed blocks of its text, or its checked image type,
-  width, height and bytes (base64);
+- `previews`: for each shown entry, the docs-model typed blocks of its text;
 - `skipped`: entries the request named that could not be shown, with a reason code and message.
 
 **Bus v1 run.** One run lists the archive and shows at most the requested entries (or, with none named, the
@@ -85,13 +87,13 @@ first few that can be shown), within the budget below.
 
 **Bus v2 run.** A resident guest in the Bus v2 proof's host: it lists once, draws the listing with
 `ui.present`, and shows an entry when a `user-input` event names it. It never holds more than one entry's
-bytes. Images are a gap here: `ui.present` draws images by granted handle only, and an image that comes out of
-an archive has no handle ([Missing](#what-the-kit-gives-and-what-it-is-missing), M5).
+bytes. Image previews come here, once the typed UI document exists: today `ui.present` draws images by granted
+handle only, and an image that comes out of an archive has no handle
+([Missing](#what-the-kit-gives-and-what-it-is-missing), M5).
 
 **The page.** It draws the listing and the previews with `textContent` only; text previews use the documents
-viewer's block kinds; an image preview becomes a `Blob` of the checked type, shown through a `blob:` URL (the
-app CSP allows `img-src blob:`). It never builds a path, never fetches an entry, and drops `path` fields as
-text only.
+viewer's block kinds. It never builds a path, never fetches an entry, shows `path` fields as text only, and
+draws no image on Bus v1.
 
 ## Formats
 
@@ -118,7 +120,7 @@ has any import, so none would add a WASI or host import to the component. Sizes 
 | zip | 9.0.5 | MIT | 13 crates (flate2, miniz_oxide, indexmap, hashbrown, typed-path, memchr, ...) | none | 137 KB | Not chosen: wants `Read + Seek` over the archive, builds the whole directory in memory, and ties in its decompressor, so a cap is outside it rather than in the loop. The Runtime uses 2.4.2 today. |
 | flate2 | 1.1.10 | MIT OR Apache-2.0 | miniz_oxide, crc32fast, adler2, simd-adler32 | none | 66.4 KB | Not needed: a `Read` wrapper over miniz_oxide. Would be the gzip reader for format 3. |
 | tar | 0.4.46 | MIT OR Apache-2.0 | filetime, cfg-if | none | 55.9 KB | For format 2, or a small ustar reader of our own (the format is a fixed 512-byte header). Decide when tar is built. |
-| unicode-normalization | 0.1.26 | (MIT OR Apache-2.0) AND Unicode-3.0 | tinyvec (Zlib OR Apache-2.0 OR MIT) | none | 145.8 KB | Optional, for name collisions that differ only in Unicode composition. It would more than double the component. See question 3. |
+| unicode-normalization | 0.1.26 | (MIT OR Apache-2.0) AND Unicode-3.0 | tinyvec (Zlib OR Apache-2.0 OR MIT) | none | 145.8 KB | **Not used** (decision 3). It would only serve a collision check, which belongs to the extraction operation. |
 
 The builds and checks were throwaway probes in the scratchpad, not in this branch.
 
@@ -134,8 +136,8 @@ inflating a run of zeros costs only about 1.3, and a stored copy almost nothing.
 instruction, so one bulk memory copy costs the same fuel whatever its length. **Fuel alone cannot stop a
 bomb**; the caps below do, and they are counted in the inflate loop, not taken from the archive.
 
-- **B1, preview size cap.** An entry is shown only if its declared uncompressed size is at most 16 KiB (text) or
-  16 KiB (image, Bus v1). The decompressor writes into a fixed 16 KiB window plus one byte: the first byte past
+- **B1, preview size cap.** An entry is shown only if its declared uncompressed size is at most 16 KiB. The
+  decompressor writes into a fixed 16 KiB window plus one byte: the first byte past
   the cap stops it, and the entry is skipped `oversize`.
 - **B2, ratio cap.** Output may never pass 100 times the compressed bytes consumed so far (plus 1 KiB of slack
   for tiny entries). Checked after every inflate step; past it, the entry is skipped `ratio`. A declared ratio
@@ -162,10 +164,11 @@ A name is shown as text, never used as a path. The rules decide its status:
   must be valid UTF-8; an unmarked name must be printable ASCII, else blocked.
 - **P5, duplicates**: two entries with the same name after the P1 to P3 rules are both blocked `duplicate`:
   which one a reader sees depends on the reader.
-- **P6, case collisions**: two names equal after lower-casing (Rust's `to_lowercase`, which needs no extra
-  crate) are both listed `ambiguous` and not shown. Nothing is extracted, so they cannot overwrite each other;
-  the risk is a person choosing the wrong one of two look-alikes.
-- **P7, a file and a directory** of the same path (`a` and `a/b`) are both `ambiguous`.
+- **P6, look-alike names** (names that differ only in case or in Unicode composition) are both listed, each
+  under its own name, and each can be shown. Read-only means a look-alike cannot overwrite anything; the
+  collision check belongs to the extraction operation (decision 3). No case folding and no
+  `unicode-normalization` in the viewer.
+- **P7, a file and a directory** of the same path (`a` and `a/b`) are both listed, for the same reason.
 - **P8, size**: a name over 255 bytes or 32 segments is blocked; an archive over 256 entries is refused as
   `too_many_entries` (the directory cap, below, comes first).
 - **P9, kinds**: only regular files and directories are listed as such; a symlink (Unix mode in the external
@@ -227,12 +230,13 @@ decides); inflate 30 and CRC 8.3 a byte (measured here).
 | Compressed data of shown entries | 24 KiB in all, counted on every read | 10.2 M |
 | Inflate | 64 KiB out in all (B3) | 2.0 M |
 | CRC | 64 KiB | 0.5 M |
-| Text and image checks, docs-model blocks | the shown entries | measure |
+| Text checks, docs-model blocks | the shown entries | measure |
 | View object | 64 KiB in all: listing at most 24 KiB, previews the rest | 13 to 26 M |
 | **Total** | | **about 35 to 50 M**, under the 80 M gate with room for parsing |
 
-On Bus v1 an image preview is therefore small: at most one image of 16 KiB a run. Bus v2 streams remove the
-JSON byte arrays, so its caps are set again from measurements there, not carried over.
+This budget would leave room for at most one 16 KiB image a run, which is why images wait for Bus v2
+(decision 4). Bus v2 streams remove the JSON byte arrays, so its caps are set again from measurements there,
+not carried over.
 
 ## What the kit gives, and what it is missing
 
@@ -255,11 +259,11 @@ JSON byte arrays, so its caps are set again from measurements there, not carried
 |---|---|---|---|
 | M1 | A counted positioned reader: `read_counted` (docs viewer) as a kit item, with a `ReaderAt` adapter | rawzip reads through `ReaderAt`; every byte it reads must be counted against the budget before anything returns | the kit's shared crate (after #32) |
 | M2 | The text checks and typed blocks (`docs-model`) as a kit item | text entries are shown exactly as documents are | shared crate |
-| M3 | The image header checks (photo `image.rs`: PNG, JPEG, WebP, dimension caps) as a kit item | image entries need the same checks, on bytes from the decompressor instead of the object | shared crate; moving them is part of the one-time photo hash change |
+| M3 | The image header checks (photo `image.rs`: PNG, JPEG, WebP, dimension caps) as a kit item | image previews on Bus v2 need the same checks, on bytes from the decompressor instead of the object | shared crate; moving them is part of the one-time photo hash change |
 | M4 | Hostile-archive fixtures: a builder for ZIPs that lie (wrong counts, overlapping ranges, local and directory names that differ) | none of the kit's fixtures are archives, and real tools refuse to write these | test support in this app, then the kit if a second format needs it |
 | M5 | A way to present bytes the guest produced as an image on Bus v2 | `ui.present` takes images by granted handle only | the draft Bus v2 WIT (Anders) |
 | M6 | The launch binding: which archive was opened, in the signed launch context, and the generic viewer route | the core reads a fixed request object today; the page has only the stand-in server | Runtime and Home (kit "missing" 1, 2 and 6; pattern 7) |
-| M7 | Deleting the native listing, preview and extract routes for `archive-manager` | "Move" means the old version goes in the same change | Runtime, with Sasha's yes |
+| M7 | Deleting the native listing and preview routes for `archive-manager`, and making extraction a Runtime operation the person approves | "Move" means the old version goes in the same change | the real move PR after 0.8.0 ([ready-PR note](#ready-pr-note-the-old-routes)) |
 
 ## Falsifier plan
 
@@ -281,8 +285,8 @@ rebuild the component and run in `ComponentProvider`.
 | F10 | P4 control and bidi | the bidi range is dropped | `control_and_bidi_characters_are_blocked` |
 | F11 | P4 encoding | an unmarked non-ASCII name passes | `names_are_utf8_when_marked_and_ascii_otherwise` |
 | F12 | P5 duplicates | duplicates keep the first | `duplicate_names_are_both_blocked` |
-| F13 | P6 case | the collision key is not lower-cased | `names_that_differ_only_in_case_are_ambiguous` |
-| F14 | P7 file and directory | the prefix check is removed | `a_file_and_a_directory_of_one_path_are_ambiguous` |
+| F13 | P6 look-alikes | look-alikes are merged by a lower-cased key | `names_that_differ_only_in_case_are_both_listed` |
+| F14 | P7 file and directory | the directory hides the file of its path | `a_file_and_a_directory_of_one_path_are_both_listed` |
 | F15 | P8 name and count caps | the caps are doubled | `a_name_over_its_cap_is_blocked`, `too_many_entries_refuse_the_archive` |
 | F16 | P9 kinds | the mode check is removed | `a_symlink_entry_is_blocked` |
 | F17 | N1 depth | a nested ZIP is opened | `a_nested_archive_is_listed_not_opened` |
@@ -302,11 +306,11 @@ rebuild the component and run in `ComponentProvider`.
 | F31 | Read budget | a read is not counted | `every_read_counts_toward_the_budget` (sweep, PATTERNS review rule) |
 | F32 | Output cap | only previews are capped | `no_view_is_longer_than_its_cap` (sweep) |
 | F33 | Text checks | the whole-text check is removed | `a_text_entry_that_is_not_text_is_skipped` |
-| F34 | Image checks | the header check is removed | `an_entry_named_png_that_is_not_one_is_skipped` |
+| F34 | Images (Bus v2) | the header check is removed | `an_entry_named_png_that_is_not_one_is_not_drawn` |
 | F35 | Grant | the archive read uses no grant (in the component) | `no_grant_stops_the_run_through_the_runtime` |
 | F36 | Fuel | the ratio check is removed (in the component) | `worst_archives_stay_under_80_percent_of_the_runtime_fuel` |
 | F37 | Page | a path is drawn as markup | `an_entry_path_is_text` |
-| F38 | Page | an image of an unchecked type is drawn | `only_a_checked_image_type_is_drawn` |
+| F38 | Page (Bus v1) | an image entry is drawn | `the_page_draws_no_image_on_bus_v1` |
 | F39 | Page | an inherited property name picks a kind | `a_kind_named_after_an_inherited_property_is_not_drawn` |
 
 The fuel gate (F36) runs one archive per hostile class at its caps: the largest directory, the most names at
@@ -323,22 +327,36 @@ largest view.
 3. Then this app, Bus v1 first, in `examples/archive-viewer`:
    - the core: request, end record, directory, listing, statuses, all P and L rules, with tests and falsifiers
      F7 to F25 and F29 to F31;
-   - previews: inflate with B1 to B3, L6 to L8, text and image checks; F1 to F6, F26 to F28, F32 to F34;
+   - text previews: inflate with B1 to B3, L6 to L8, the text checks; F1 to F6, F26 to F28, F32, F33;
    - the host test in `ComponentProvider` and the fuel gate; F35 and F36;
    - the page and its smoke; F37 to F39;
    - the bundle and the container build;
-   - then the Bus v2 guest in the proof's host, with N2 and F18.
+   - then the Bus v2 guest in the proof's host, with N2 and F18; image previews (F34) once the typed UI
+     document and M5 exist.
 4. tar after ZIP is shown on both buses.
 
-## Questions for Sasha
+## Decisions
 
-1. **Extraction.** Today's capsule can extract entries (with the person's approval) into a Runtime-owned
-   namespace. This design drops it. When `archive-manager` moves, does extraction go away, or stay as a Runtime
-   operation that this app cannot reach?
-2. **The old routes.** The Move rule deletes the native listing, preview and extract routes in the same change.
-   That is a Runtime change; is it part of the archive-manager slice, or later?
-3. **Unicode composition.** Should names that differ only in Unicode composition (`é` as one or two code
-   points) count as a collision? That needs `unicode-normalization`, which would more than double the
-   component. Without it, they are listed as two names.
-4. **Image previews on Bus v1.** One 16 KiB image a run is all the budget allows. Is text-first enough for the
-   first version, with images waiting for Bus v2 and M5?
+Sasha, 22 Oct 2026, on #34:
+
+1. **Extraction stays, but not in this app.** It writes to the person's storage, so it becomes a Runtime
+   operation that the person approves, which the capsule cannot reach. The viewer stays read-only.
+2. **The old routes** are deleted in the real move PR after 0.8.0, in the same change. In the spike they are a
+   ready-PR note (below).
+3. **Look-alike names: no `unicode-normalization` in the viewer.** Read-only means look-alikes cannot overwrite
+   anything; the collision check belongs to the extraction operation. Both names are listed (P6, P7).
+4. **Images on Bus v1: text first.** Image previews wait for Bus v2 and the typed UI document.
+
+## Ready-PR note: the old routes
+
+For the real move PR after 0.8.0, not for the spike. In one change:
+
+- delete the native archive listing and preview in `elastos/crates/elastos-server/src/library.rs`
+  (`archive_entries_for_object`, `archive_preview_entry_for_object` and the ZIP and tar listing and preview
+  helpers), and the `archive-manager` branches of `viewer_gateway.rs` that serve them;
+- keep extraction, as a Runtime operation the person approves (decision 1). It is not reachable from the
+  viewer capsule. The collision check (case, Unicode composition, file and directory of one path) moves with
+  it, because only extraction can overwrite;
+- replace `capsules/archive-manager` with the two capsules here, named by CID;
+- the old journeys are the gate: the Library open, listing and preview journeys pass on the new capsules, and
+  the extraction journey passes on the Runtime operation.
