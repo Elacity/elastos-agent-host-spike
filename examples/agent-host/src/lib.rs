@@ -282,6 +282,10 @@ struct Journal {
     task_budget: Option<Budget>,
     /// Set when the whole task was cancelled: the last step id at that time.
     cancelled_from: Option<u64>,
+    /// A child host's child step, in the parent's journal. Held in memory
+    /// only, never stored: a reloaded host belongs to no child and can do
+    /// nothing until it is opened again.
+    host_of: Option<u64>,
 }
 
 /// Model view. Markers, a step with no result, and an empty assistant line
@@ -1089,7 +1093,9 @@ fn stored_rules_ok(journal: &Journal) -> Result<(), &'static str> {
 /// - each child budget and each stop has exactly one record for that child,
 ///   which says the same;
 /// - a cancelled task has every child stopped and no child or model call
-///   after it.
+///   after it;
+/// - no step is still prepared below a stopped child or at or before the
+///   cancel point.
 ///
 /// Old format 2 journals (before idea 2) pass: all these fields are empty.
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -1174,6 +1180,15 @@ fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
             return Err("record");
         }
     }
+    // A stop cancels every prepared step below it, and a task cancel every
+    // prepared step it had; a prepared one there was put back by hand.
+    if journal.steps.iter().any(|step| {
+        step.state == StepState::Prepared
+            && (journal.cancelled_from.is_some_and(|last| step.id <= last)
+                || chain_stopped(journal, &child_chain(journal, step.parent_id)))
+    }) {
+        return Err("record");
+    }
     if let Some(last) = journal.cancelled_from {
         if journal.steps.iter().any(|step| {
             step.kind == ProposalKind::Child && step.stop.is_none()
@@ -1193,7 +1208,7 @@ fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
 ///   load);
 /// - a child below a stopped child has stopped too;
 /// - its resource sits strictly under its parent's;
-/// - its depth is within `CHILD_DEPTH_LIMIT`;
+/// - a budgeted child's depth is within `CHILD_DEPTH_LIMIT`;
 /// - its count is exactly the model calls made in its subtree;
 /// - a budget is non-zero, no less than its count, and no larger than its
 ///   owner's (the nearest budgeted child above, or the task); a child with no
@@ -1212,7 +1227,11 @@ fn child_rules(journal: &Journal, step: &Step) -> Result<(), &'static str> {
     if !narrower_resource(&parent.resource, &step.resource) {
         return Err("not a subset");
     }
-    if depth_under(journal, step.parent_id) > usize::from(CHILD_DEPTH_LIMIT) {
+    // Children from before idea 2 (no budget) had no depth limit and can do
+    // nothing now; the limit holds for every budgeted child.
+    if step.budget.is_some()
+        && depth_under(journal, step.parent_id) > usize::from(CHILD_DEPTH_LIMIT)
+    {
         return Err("depth limit");
     }
     let calls = journal
@@ -1253,7 +1272,8 @@ fn child_rules(journal: &Journal, step: &Step) -> Result<(), &'static str> {
 /// grant, an inbox answer, a child host): it keeps `child_rules`, has a
 /// budget (a child from before idea 2 has none: `TASK_BUDGET_REASON`), and
 /// neither it nor anything above it has stopped ("stopped"), nor is the task
-/// cancelled ("cancelled").
+/// cancelled ("cancelled"); every child in its chain is prepared or
+/// dispatched (a denied one: "denied"; cancelled or crashed: "stopped").
 #[cfg(any(test, target_arch = "wasm32"))]
 fn usable_child(journal: &Journal, id: u64) -> Result<&Step, &'static str> {
     let step = journal
@@ -1268,14 +1288,29 @@ fn usable_child(journal: &Journal, id: u64) -> Result<&Step, &'static str> {
     if journal.cancelled_from.is_some() {
         return Err("cancelled");
     }
-    if chain_stopped(journal, &child_chain(journal, Some(id))) {
+    let chain = child_chain(journal, Some(id));
+    if chain_stopped(journal, &chain) {
         return Err("stopped");
+    }
+    // A child denied, cancelled, or crashed, here or above, does nothing more.
+    for above in &chain {
+        match journal
+            .steps
+            .iter()
+            .find(|step| step.id == *above)
+            .map(|step| step.state)
+        {
+            Some(StepState::Prepared | StepState::Dispatched) => {}
+            Some(StepState::Denied) => return Err("denied"),
+            _ => return Err("stopped"),
+        }
     }
     Ok(step)
 }
 
 /// What a granted step may hand on to a child: a child, the scope it was
 /// granted; any other step, its own resource. Nothing without a grant.
+/// Use `scope_still_granted`, which also checks every step above.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn granted_scope(step: &Step) -> Option<&str> {
     step.grant.as_deref().filter(|grant| !grant.is_empty())?;
@@ -1284,6 +1319,26 @@ fn granted_scope(step: &Step) -> Option<&str> {
     } else {
         Some(&step.resource)
     }
+}
+
+/// A step's granted scope, if it still stands: the step holds a grant, and
+/// every child above it, up to and including the first step that is not a
+/// child, still holds a grant whose scope covers it. A parent denied or
+/// stopped since takes the scope away from everything below it.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn scope_still_granted<'a>(journal: &'a Journal, step: &'a Step) -> Option<&'a str> {
+    let scope = granted_scope(step)?;
+    let mut below = step;
+    while below.kind == ProposalKind::Child {
+        let above = below
+            .parent_id
+            .and_then(|id| journal.steps.iter().find(|step| step.id == id))?;
+        if !granted_scope(above).is_some_and(|wider| resource_covers(wider, scope)) {
+            return None;
+        }
+        below = above;
+    }
+    Some(scope)
 }
 
 /// The one check for giving a child a grant, used by `authorize_child` and
@@ -1301,6 +1356,11 @@ fn child_grant_ok(
     let Ok(child) = usable_child(journal, child_id) else {
         return false;
     };
+    // A child is granted once; a second grant could change its scope under
+    // its children and hosts.
+    if child.grant.is_some() {
+        return false;
+    }
     let Some(grant) = grant.filter(|grant| !grant.is_empty()) else {
         return false;
     };
@@ -1313,7 +1373,7 @@ fn child_grant_ok(
     else {
         return false;
     };
-    granted_scope(parent).is_some_and(|scope| resource_covers(scope, grant_resource))
+    scope_still_granted(journal, parent).is_some_and(|scope| resource_covers(scope, grant_resource))
         && parent.grant.as_deref() != Some(grant)
 }
 
@@ -1718,15 +1778,39 @@ fn begin_compact(journal: &mut Journal, summary: &str) -> bool {
     true
 }
 
+/// Child-budget and child-stop records written while a compaction is open.
+/// The step already holds what they record, so they are carried into the
+/// committed or restored log, never dropped.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn child_records_since_compaction(journal: &Journal) -> Vec<SurfaceNode> {
+    let from = journal
+        .compact_backup
+        .as_ref()
+        .map_or(journal.events.len(), |(saved, _)| saved.len());
+    journal
+        .events
+        .iter()
+        .skip(from)
+        .filter(|node| {
+            matches!(
+                node.source,
+                NodeSource::ChildBudget { .. } | NodeSource::ChildStop { .. }
+            )
+        })
+        .cloned()
+        .collect()
+}
+
 /// Apply an open compaction and start the next series.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn commit_compact(journal: &mut Journal) -> bool {
     if !journal.compaction_open {
         return false;
     }
-    let Some(replacement) = journal.compact_pending.take() else {
+    let Some(mut replacement) = journal.compact_pending.take() else {
         return false;
     };
+    replacement.extend(child_records_since_compaction(journal));
     journal.events = replacement;
     journal.compaction_open = false;
     journal.compact_backup = None;
@@ -1741,10 +1825,12 @@ fn note_crash_during_compact(journal: &mut Journal) -> bool {
         return false;
     }
     journal.compact_pending = None;
-    let Some((saved, saved_epoch)) = journal.compact_backup.take() else {
+    let carried = child_records_since_compaction(journal);
+    let Some((mut saved, saved_epoch)) = journal.compact_backup.take() else {
         journal.compaction_open = false;
         return false;
     };
+    saved.extend(carried);
     journal.events = saved;
     journal.epoch = saved_epoch;
     journal.compaction_open = false;
@@ -2430,6 +2516,7 @@ fn empty_journal() -> Journal {
         depth: 0,
         task_budget: None,
         cancelled_from: None,
+        host_of: None,
     }
 }
 
@@ -3765,6 +3852,9 @@ fn propose_child(
     let Some(parent) = journal.steps.iter().find(|step| step.id == parent_id) else {
         return Err("no parent");
     };
+    if !matches!(parent.kind, ProposalKind::Run | ProposalKind::Child) {
+        return Err("not a parent");
+    }
     if parent.resource.is_empty() || !narrower_resource(&parent.resource, resource) {
         return Err("not a subset");
     }
@@ -3874,7 +3964,7 @@ fn authorize_child(
     if !child_grant_ok(journal, child_id, grant, grant_resource) {
         return false;
     }
-    if !authorize(journal, child_id, grant) {
+    if !authorize_step(journal, child_id, grant) {
         return false;
     }
     if let Some(step) = journal.steps.iter_mut().find(|step| step.id == child_id) {
@@ -3903,6 +3993,7 @@ fn open_child_host(
     let depth = depth_under(parent, child.parent_id);
     let mut host = empty_journal();
     host.depth = u8::try_from(depth).map_err(|_| "depth limit")?;
+    host.host_of = Some(child_id);
     admit_system(&mut host, SYSTEM_HEAD, true);
     propose_run(&mut host, resource, &["true".to_string()])?;
     if host.steps.iter().any(|step| step.grant.is_some()) {
@@ -3924,10 +4015,12 @@ fn host_scope<'a>(
     host: &Journal,
 ) -> Result<&'a str, &'static str> {
     let child = usable_child(parent, child_id)?;
-    if usize::from(host.depth) != depth_under(parent, child.parent_id) {
+    if host.host_of != Some(child_id)
+        || usize::from(host.depth) != depth_under(parent, child.parent_id)
+    {
         return Err("not this child's host");
     }
-    granted_scope(child).ok_or("not granted")
+    scope_still_granted(parent, child).ok_or("not granted")
 }
 
 /// The one check for a child host's step (a grant, an inbox answer, a
@@ -4066,10 +4159,16 @@ fn record_child_result(parent: &mut Journal, child_id: u64, child: &Journal, res
 }
 
 /// A missing grant denies the step. A grant id is recorded and does not run it.
-/// A child host's steps are granted only through `authorize_in_host`.
+/// A child host's steps are granted only through `authorize_in_host`, and a
+/// child only through `authorize_child` or an inbox answer.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn authorize(journal: &mut Journal, id: u64, grant: Option<&str>) -> bool {
-    journal.depth == 0 && authorize_step(journal, id, grant)
+    journal.depth == 0
+        && !journal
+            .steps
+            .iter()
+            .any(|step| step.id == id && step.kind == ProposalKind::Child)
+        && authorize_step(journal, id, grant)
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -4270,6 +4369,12 @@ fn dispatch_step(journal: &mut Journal, id: u64) -> bool {
 /// Cancel only from `Prepared`. A step that already left is not rewritten.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn cancel(journal: &mut Journal, id: u64) -> bool {
+    // A child is cancelled as a stop, with its record and its subtree.
+    if journal.steps.iter().any(|step| {
+        step.id == id && step.kind == ProposalKind::Child && step.state == StepState::Prepared
+    }) {
+        return stop_child(journal, id, StopReason::Cancelled);
+    }
     let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) else {
         return false;
     };
@@ -12509,7 +12614,12 @@ mod tests {
             Some(FIXTURE_CHILD_BUDGET),
         )
         .unwrap();
-        assert!(authorize(&mut journal, child, Some("child-grant")));
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            "localhost://Users/self/Projects/demo/src"
+        ));
         assert!(dispatch(&mut journal, child));
         assert!(!spill_pointer(&mut journal, child, notes));
         assert!(spill_pointer(&mut journal, child, main));
@@ -18285,6 +18395,7 @@ mod tests {
         step_mut(&mut deep, past).resource =
             "localhost://Users/self/Projects/demo/src/lib/a".into();
         step_mut(&mut deep, past).parent_id = Some(inner);
+        step_mut(&mut deep, past).budget = Some(budget(1, 10));
         assert_eq!(
             decode_journal(&encode_journal(&deep, &[0; 32]).unwrap()).map(|_| ()),
             Err("depth limit")
@@ -19125,6 +19236,264 @@ mod tests {
             step,
             Some("read-grant")
         ));
+    }
+
+    // Independent review of 10a31e2 (same AI family, not a cross-family
+    // review): ten findings, one test each; each failed on 10a31e2.
+
+    /// R1: the plain `authorize` never grants a child; only `authorize_child`
+    /// or an inbox answer do, through `child_grant_ok`.
+    #[test]
+    fn the_plain_authorize_never_grants_a_child() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(!authorize(&mut journal, child, Some("fixture-grant")));
+        assert!(!authorize(&mut journal, child, Some("child-grant")));
+        assert_eq!(step_of(&journal, child).grant, None);
+        assert_eq!(step_of(&journal, child).state, StepState::Prepared);
+    }
+
+    /// R2: a denied child, or one below a denied child, does nothing more.
+    #[test]
+    fn a_denied_child_does_nothing_more() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let below = propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(!apply_inbox(&mut journal, child, InboxAnswer::Deny, None));
+        assert_eq!(step_of(&journal, child).state, StepState::Denied);
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("denied")
+        );
+        assert_eq!(
+            ask_model(&mut journal, Some(below), HOSTED_MODEL),
+            Err("denied")
+        );
+        let deeper = "localhost://Users/self/Projects/demo/src/lib/a";
+        assert_eq!(
+            propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(1, 10))),
+            Err("denied")
+        );
+        assert!(!authorize_child(
+            &mut journal,
+            below,
+            Some("below-grant"),
+            deeper
+        ));
+        assert_eq!(
+            open_child_host(&journal, below, DEMO_SRC_LIB),
+            Err("denied")
+        );
+    }
+
+    /// R3: the plain `cancel` on a child is a stop: recorded, with its subtree.
+    #[test]
+    fn the_plain_cancel_on_a_child_stops_it() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let below = propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(cancel(&mut journal, child));
+        assert_eq!(step_of(&journal, child).state, StepState::Cancelled);
+        assert_eq!(step_of(&journal, child).stop, Some(StopReason::Cancelled));
+        assert_eq!(step_of(&journal, below).stop, Some(StopReason::Cancelled));
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("stopped")
+        );
+        assert!(decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok());
+    }
+
+    /// R4: a child is granted once, and a scope stands only while every step
+    /// above it still grants it: a re-grant is refused, and a run denied after
+    /// its children were granted takes the scope from them and their hosts.
+    #[test]
+    fn a_granted_scope_stands_only_while_every_step_above_grants_it() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let narrower = "localhost://Users/self/Projects/demo/src/doc";
+        assert!(!authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant-2"),
+            narrower
+        ));
+        assert_eq!(
+            step_of(&journal, child).grant_scope.as_deref(),
+            Some(DEMO_SRC)
+        );
+        let below = propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            below,
+            Some("below-grant"),
+            DEMO_SRC_LIB
+        ));
+        let mut host = open_child_host(&journal, below, DEMO_SRC_LIB).unwrap();
+        let other = propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(1, 10))).unwrap();
+        // The person denies the run after granting: nothing below is granted.
+        assert!(!authorize(&mut journal, run, None));
+        assert!(!grant_child_host(
+            &journal,
+            below,
+            &mut host,
+            Some("host-grant")
+        ));
+        assert!(!authorize_child(
+            &mut journal,
+            other,
+            Some("other-grant"),
+            DEMO_SRC_LIB
+        ));
+    }
+
+    /// R5: only a run or a child is a parent; a model call is not.
+    #[test]
+    fn a_model_call_is_not_a_parent() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let call = ask_model(&mut journal, Some(child), HOSTED_MODEL).unwrap();
+        assert!(note_time_refusal(&mut journal, child));
+        let before = journal.clone();
+        let under = format!("{HOSTED_MODEL}/x");
+        assert_eq!(
+            propose_child(&mut journal, call, &under, Some(budget(1, 10))),
+            Err("not a parent")
+        );
+        assert_eq!(journal, before);
+        assert!(decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok());
+    }
+
+    /// R6, R7: child records written while a compaction is open are carried
+    /// into the committed log and into a crash restore, so the task loads.
+    #[test]
+    fn child_records_survive_an_open_compaction() {
+        for crash in [false, true] {
+            let (mut journal, run) = task(budget(8, 600));
+            let stopped = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+            for n in 0..6 {
+                admit_user(
+                    &mut journal,
+                    &format!("a long line of conversation number {n} to compact away"),
+                );
+            }
+            assert!(begin_compact(&mut journal, "sum"));
+            let made = propose_child(&mut journal, run, DEMO_DOC, Some(budget(2, 60))).unwrap();
+            assert!(note_time_refusal(&mut journal, stopped));
+            if crash {
+                assert!(note_crash_during_compact(&mut journal));
+            } else {
+                assert!(commit_compact(&mut journal));
+            }
+            assert_eq!(
+                child_stops(&journal)
+                    .iter()
+                    .filter(|stop| stop.0 == stopped)
+                    .count(),
+                1,
+                "crash {crash}"
+            );
+            assert!(journal.events.iter().any(|node| matches!(
+                node.source,
+                NodeSource::ChildBudget { child, .. } if child == made
+            )));
+            assert!(
+                decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok(),
+                "crash {crash}"
+            );
+        }
+    }
+
+    /// R8: on load, no step is still prepared at or before a cancel point or
+    /// below a stopped child (a stop cancels them; one put back is forged).
+    #[test]
+    fn a_prepared_step_where_a_stop_reached_is_refused_on_load() {
+        let (mut journal, _run) = task(budget(8, 600));
+        let call = ask_model(&mut journal, None, HOSTED_MODEL).unwrap();
+        assert!(cancel_task(&mut journal));
+        step_mut(&mut journal, call).state = StepState::Prepared;
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let call = ask_model(&mut journal, Some(child), HOSTED_MODEL).unwrap();
+        assert!(note_time_refusal(&mut journal, child));
+        assert_eq!(step_of(&journal, call).state, StepState::Cancelled);
+        step_mut(&mut journal, call).state = StepState::Prepared;
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        // A step proposed after the cancel point may still be prepared.
+        let (mut journal, _run) = task(budget(8, 600));
+        assert!(cancel_task(&mut journal));
+        propose_read(&mut journal, DEMO_SRC_LIB);
+        assert!(decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok());
+    }
+
+    /// R9: a journal from before idea 2 with children three deep still loads
+    /// (they had no depth limit and, with no budget, can do nothing now).
+    #[test]
+    fn an_older_deep_child_chain_still_loads() {
+        let mut journal = two_turns();
+        let run = propose_run(&mut journal, DEMO, &["true".to_string()]).unwrap();
+        let mut parent = run;
+        let mut resource = DEMO.to_string();
+        let mut ids = Vec::new();
+        for part in ["a", "b", "c"] {
+            resource = format!("{resource}/{part}");
+            let id = propose_step(&mut journal);
+            let step = step_mut(&mut journal, id);
+            step.kind = ProposalKind::Child;
+            step.resource = resource.clone();
+            step.parent_id = Some(parent);
+            parent = id;
+            ids.push(id);
+        }
+        let mut back = reloaded(&journal);
+        assert_eq!(back, journal);
+        assert!(record_task_budget(&mut back, budget(8, 600)));
+        assert_eq!(
+            ask_model(&mut back, Some(ids[2]), HOSTED_MODEL),
+            Err(TASK_BUDGET_REASON)
+        );
+        // A budgeted child that deep is still refused.
+        step_mut(&mut journal, ids[2]).budget = Some(budget(1, 10));
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err("depth limit")
+        );
+    }
+
+    /// R10: a host is bound to the child it was opened for; a sibling's
+    /// scope does not fit it, and a reloaded host belongs to no child.
+    #[test]
+    fn a_child_host_is_bound_to_its_child() {
+        let (mut journal, run) = task(budget(8, 600));
+        let a = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let b = propose_child(&mut journal, run, DEMO_DOC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(&mut journal, a, Some("a-grant"), DEMO_SRC));
+        assert!(authorize_child(&mut journal, b, Some("b-grant"), DEMO_DOC));
+        let mut host_a = open_child_host(&journal, a, DEMO_SRC).unwrap();
+        let read = propose_read(&mut host_a, "localhost://Users/self/Projects/demo/doc/x");
+        assert!(!authorize_in_host(
+            &journal,
+            b,
+            &mut host_a,
+            read,
+            Some("h")
+        ));
+        let own = propose_read(&mut host_a, DEMO_SRC_LIB);
+        let mut back = reloaded(&host_a);
+        assert!(!authorize_in_host(&journal, a, &mut back, own, Some("h")));
+        assert!(authorize_in_host(&journal, a, &mut host_a, own, Some("h")));
     }
 
     /// A step's stop byte is 0 or a known reason (CL49).
