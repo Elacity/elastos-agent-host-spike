@@ -108,6 +108,17 @@ enum NodeSource {
     /// A later system line (`admit_system` with `in_history`). Only the host
     /// writes it; no person's, model's or tool's text becomes this kind.
     SystemLine,
+    /// OMP idea 2: the budget a child was given.
+    ChildBudget {
+        child: u64,
+        budget: Budget,
+    },
+    /// OMP idea 2: why a child stopped, and the model calls it had used.
+    ChildStop {
+        child: u64,
+        reason: StopReason,
+        requests_used: u32,
+    },
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -161,7 +172,83 @@ struct Step {
     seat: String,
     seen_version: Option<u64>,
     inbox: String,
+    /// OMP idea 2: a child's budget (Child steps only).
+    budget: Option<Budget>,
+    /// Model calls made in this child's subtree (Child steps only).
+    requests_used: u32,
+    /// Why this child stopped; the first reason is kept (Child steps only).
+    stop: Option<StopReason>,
 }
+
+/// A budget: model calls (hosted or local, one counter) and wall time.
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Budget {
+    requests: u32,
+    seconds: u64,
+}
+
+/// Why a child stopped.
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StopReason {
+    Requests,
+    Time,
+    Cancelled,
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+impl StopReason {
+    fn name(self) -> &'static str {
+        match self {
+            StopReason::Requests => "requests",
+            StopReason::Time => "time",
+            StopReason::Cancelled => "cancelled",
+        }
+    }
+
+    fn tag(self) -> u8 {
+        match self {
+            StopReason::Requests => 1,
+            StopReason::Time => 2,
+            StopReason::Cancelled => 3,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Option<StopReason> {
+        match tag {
+            1 => Some(StopReason::Requests),
+            2 => Some(StopReason::Time),
+            3 => Some(StopReason::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+/// How deep children may nest: the top task is depth 0, so a grandchild (2)
+/// is the deepest; it cannot propose a child.
+#[cfg(any(test, target_arch = "wasm32"))]
+const CHILD_DEPTH_LIMIT: u8 = 2;
+
+/// A child result longer than this is not stored inline; it must be a spill
+/// pointer.
+#[cfg(any(test, target_arch = "wasm32"))]
+const CHILD_RESULT_CAP: usize = 4_000;
+
+/// The task budget the tests and the self-test record as if the Runtime had
+/// granted it. Not a default: a task with no granted budget has none.
+#[cfg(any(test, target_arch = "wasm32"))]
+const FIXTURE_TASK_BUDGET: Budget = Budget {
+    requests: 8,
+    seconds: 600,
+};
+
+/// The child budget the tests and the self-test propose.
+#[cfg(any(test, target_arch = "wasm32"))]
+const FIXTURE_CHILD_BUDGET: Budget = Budget {
+    requests: 2,
+    seconds: 60,
+};
 
 /// One turn. The id is the turn's own number. It is not the series epoch.
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -183,6 +270,14 @@ struct Journal {
     compaction_open: bool,
     compact_backup: Option<(Vec<SurfaceNode>, u64)>,
     compact_pending: Option<Vec<SurfaceNode>>,
+    /// OMP idea 2: the depth of this task (0 for the top task; a child host
+    /// journal is its child's depth).
+    depth: u8,
+    /// The budget the Runtime granted this task, recorded as data. The guest
+    /// never sets or raises it (`record_task_budget`).
+    task_budget: Option<Budget>,
+    /// Set when the whole task was cancelled: the last step id at that time.
+    cancelled_from: Option<u64>,
 }
 
 /// Model view. Markers, a step with no result, and an empty assistant line
@@ -202,9 +297,8 @@ fn derive(events: &[SurfaceNode]) -> Vec<SurfaceNode> {
         .collect()
 }
 
-/// The kind byte of journal format 2. 17 and 18 are kept for OMP idea 2
-/// (child budget, child stop) and are refused until it is built. A later
-/// system line is 19.
+/// The kind byte of journal format 2. 17 and 18 are OMP idea 2's child
+/// budget and child stop. A later system line is 19.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn source_tag(source: &NodeSource) -> u8 {
     match source {
@@ -224,6 +318,8 @@ fn source_tag(source: &NodeSource) -> u8 {
         NodeSource::Spill { .. } => 14,
         NodeSource::Inbox(_) => 15,
         NodeSource::Refused { .. } => 16,
+        NodeSource::ChildBudget { .. } => 17,
+        NodeSource::ChildStop { .. } => 18,
         NodeSource::SystemLine => 19,
     }
 }
@@ -250,6 +346,8 @@ fn kind_has_text(source: &NodeSource) -> bool {
             | NodeSource::Spill { .. }
             | NodeSource::Inbox(_)
             | NodeSource::Refused { .. }
+            | NodeSource::ChildBudget { .. }
+            | NodeSource::ChildStop { .. }
     )
 }
 
@@ -278,6 +376,18 @@ fn render_record(node: &SurfaceNode) -> String {
         NodeSource::Spill { resource, version } => format!("spill: {resource} version {version}"),
         NodeSource::Inbox(answer) => format!("inbox: {}", answer.name()),
         NodeSource::Refused { reason, what } => format!("refused: {reason} ({what})"),
+        NodeSource::ChildBudget { child, budget } => format!(
+            "child {child} budget: {} requests, {} s",
+            budget.requests, budget.seconds
+        ),
+        NodeSource::ChildStop {
+            child,
+            reason,
+            requests_used,
+        } => format!(
+            "child {child} stopped: {} ({requests_used} requests used)",
+            reason.name()
+        ),
     }
 }
 
@@ -415,6 +525,20 @@ fn node_payload(node: &SurfaceNode) -> Option<Vec<u8>> {
             put_str(&mut out, reason)?;
             put_str(&mut out, what)?;
         }
+        NodeSource::ChildBudget { child, budget } => {
+            out.extend_from_slice(&child.to_le_bytes());
+            out.extend_from_slice(&budget.requests.to_le_bytes());
+            out.extend_from_slice(&budget.seconds.to_le_bytes());
+        }
+        NodeSource::ChildStop {
+            child,
+            reason,
+            requests_used,
+        } => {
+            out.extend_from_slice(&child.to_le_bytes());
+            out.push(reason.tag());
+            out.extend_from_slice(&requests_used.to_le_bytes());
+        }
         _ => put_str(&mut out, &node.text)?,
     }
     Some(out)
@@ -466,13 +590,26 @@ fn step_payload(step: &Step) -> Option<Vec<u8>> {
     put_str(&mut out, &step.seat)?;
     put_opt(&mut out, step.seen_version);
     put_str(&mut out, &step.inbox)?;
-    // Room for OMP idea 2, empty until it is built: depth, budget (flag,
-    // requests, seconds), requests_used, stop.
+    // OMP idea 2: depth (always 0: a child's depth is derived from its
+    // parent_id links and the header depth, never stored per step), budget
+    // (flag, requests, seconds), requests_used, stop (0 none, else the reason).
     out.push(0);
-    out.extend_from_slice(&[0; 1 + 4 + 8]);
-    out.extend_from_slice(&0_u32.to_le_bytes());
-    out.push(0);
+    put_budget(&mut out, step.budget);
+    out.extend_from_slice(&step.requests_used.to_le_bytes());
+    out.push(step.stop.map_or(0, StopReason::tag));
     Some(out)
+}
+
+/// A flag and a budget; with no budget, the flag and the values are zero.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn put_budget(out: &mut Vec<u8>, budget: Option<Budget>) {
+    out.push(u8::from(budget.is_some()));
+    let budget = budget.unwrap_or(Budget {
+        requests: 0,
+        seconds: 0,
+    });
+    out.extend_from_slice(&budget.requests.to_le_bytes());
+    out.extend_from_slice(&budget.seconds.to_le_bytes());
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -526,11 +663,11 @@ fn encode_journal(journal: &Journal, prev_head: &[u8; 32]) -> Option<Vec<u8>> {
         journal.compact_backup.as_ref().map(|(_, epoch)| *epoch),
     );
     out.push(u8::from(journal.compact_pending.is_some()));
-    // Room for OMP idea 2, empty until it is built: cancelled_from (flag and
-    // step id), task_budget (flag, requests, seconds), depth.
-    out.extend_from_slice(&[0; 1 + 8]);
-    out.extend_from_slice(&[0; 1 + 4 + 8]);
-    out.push(0);
+    // OMP idea 2: cancelled_from (flag and step id), task_budget (flag,
+    // requests, seconds), depth.
+    put_opt(&mut out, journal.cancelled_from);
+    put_budget(&mut out, journal.task_budget);
+    out.push(journal.depth);
     out.extend_from_slice(prev_head);
     out.extend_from_slice(&u32::try_from(records.len()).ok()?.to_le_bytes());
     let mut link = sha256(&out);
@@ -608,6 +745,20 @@ impl<'a> JournalReader<'a> {
             (true, value) => Ok(Some(value)),
             (false, 0) => Ok(None),
             (false, _) => Err("record"),
+        }
+    }
+
+    /// A flag and a budget. With the flag off, the values must be zero.
+    fn budget(&mut self) -> Result<Option<Budget>, &'static str> {
+        let present = self.flag()?;
+        let budget = Budget {
+            requests: self.u32()?,
+            seconds: self.u64()?,
+        };
+        match (present, budget.requests, budget.seconds) {
+            (true, _, _) => Ok(Some(budget)),
+            (false, 0, 0) => Ok(None),
+            (false, _, _) => Err("record"),
         }
     }
 
@@ -692,6 +843,18 @@ fn decode_node(payload: &[u8]) -> Result<SurfaceNode, &'static str> {
             reason: reader.text()?,
             what: reader.text()?,
         },
+        17 => NodeSource::ChildBudget {
+            child: reader.u64().map_err(fail)?,
+            budget: Budget {
+                requests: reader.u32().map_err(fail)?,
+                seconds: reader.u64().map_err(fail)?,
+            },
+        },
+        18 => NodeSource::ChildStop {
+            child: reader.u64().map_err(fail)?,
+            reason: StopReason::from_tag(reader.byte().map_err(fail)?).ok_or("record")?,
+            requests_used: reader.u32().map_err(fail)?,
+        },
         _ => return Err("record"),
     };
     reader.done()?;
@@ -744,14 +907,17 @@ fn decode_step(payload: &[u8]) -> Result<Step, &'static str> {
     let seat = reader.text()?;
     let seen_version = reader.opt().map_err(fail)?;
     let inbox = reader.text()?;
-    // OMP idea 2's fields must be empty until it is built.
-    let depth = reader.byte().map_err(fail)?;
-    let budget = reader.take(1 + 4 + 8).map_err(fail)?;
-    let requests_used = reader.u32().map_err(fail)?;
-    let stop = reader.byte().map_err(fail)?;
-    if depth != 0 || budget.iter().any(|byte| *byte != 0) || requests_used != 0 || stop != 0 {
+    // OMP idea 2: the depth byte stays 0 (depth is derived); a stop is 0 for
+    // none or a known reason.
+    if reader.byte().map_err(fail)? != 0 {
         return Err("record");
     }
+    let budget = reader.budget().map_err(fail)?;
+    let requests_used = reader.u32().map_err(fail)?;
+    let stop = match reader.byte().map_err(fail)? {
+        0 => None,
+        tag => Some(StopReason::from_tag(tag).ok_or("record")?),
+    };
     reader.done()?;
     Ok(Step {
         id,
@@ -768,6 +934,9 @@ fn decode_step(payload: &[u8]) -> Result<Step, &'static str> {
         seat,
         seen_version,
         inbox,
+        budget,
+        requests_used,
+        stop,
     })
 }
 
@@ -818,14 +987,11 @@ fn decode_bytes(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static 
     let backup_flag = fields.byte()?;
     let backup_epoch = fields.u64()?;
     let pending_flag = fields.byte()?;
-    // OMP idea 2's header fields must be empty until it is built.
-    if fields
-        .take(1 + 8 + 1 + 4 + 8 + 1)?
-        .iter()
-        .any(|byte| *byte != 0)
-    {
-        return Err("record");
-    }
+    // OMP idea 2: cancelled_from, task_budget, depth. Their rules are
+    // checked once the records are read (`stored_children_ok`).
+    let cancelled_from = fields.opt().map_err(|_| "record")?;
+    let task_budget = fields.budget().map_err(|_| "record")?;
+    let depth = fields.byte()?;
     let prev_head = fields.hash()?;
     let count = fields.u32()?;
     let mut link = sha256(header);
@@ -880,16 +1046,158 @@ fn decode_bytes(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static 
     }
     journal.compact_backup = backup.then_some((backup_nodes, backup_epoch));
     journal.compact_pending = pending.then_some(pending_nodes);
+    journal.cancelled_from = cancelled_from;
+    journal.task_budget = task_budget;
+    journal.depth = depth;
     Ok((journal, prev_head, link))
 }
 
 /// Decode format 2 (see `decode_bytes`), then check the stored paths (see
-/// `stored_paths_ok`). Every stored journal loads through here.
+/// `stored_paths_ok`) and the children (see `stored_children_ok`). Every
+/// stored journal loads through here.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn decode_journal(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static str> {
     let (journal, prev_head, head) = decode_bytes(bytes)?;
     stored_paths_ok(&journal)?;
+    stored_children_ok(&journal)?;
     Ok((journal, prev_head, head))
+}
+
+/// A stored journal keeps every child rule a live one does (OMP idea 2):
+/// - the journal's depth is within `CHILD_DEPTH_LIMIT`;
+/// - a parent link points at an earlier step; only children and model calls
+///   have one, and a model call's parent is a child;
+/// - a step that is not a child has no budget, no count and no stop;
+/// - a child's resource sits under its parent's, its depth is within the
+///   limit, and its budget is no larger than its parent's (a child may hold
+///   a budget only when its parent does);
+/// - a child's count is exactly the model calls made in its subtree, and no
+///   more than its budget;
+/// - each child budget and each stop has exactly one record, which says the
+///   same;
+/// - a cancelled task has every child stopped and no child or model call
+///   after it.
+///
+/// Old format 2 journals (before idea 2) pass: all these fields are empty.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
+    if journal.depth > CHILD_DEPTH_LIMIT {
+        return Err("depth limit");
+    }
+    let find = |id: u64| journal.steps.iter().find(|step| step.id == id);
+    for step in &journal.steps {
+        if let Some(parent_id) = step.parent_id {
+            let parent = find(parent_id)
+                .filter(|_| parent_id < step.id)
+                .ok_or("record")?;
+            let allowed = match step.kind {
+                ProposalKind::Child => true,
+                ProposalKind::Hosted => parent.kind == ProposalKind::Child,
+                _ => false,
+            };
+            if !allowed {
+                return Err("record");
+            }
+        }
+        if step.kind != ProposalKind::Child {
+            if step.budget.is_some() || step.requests_used != 0 || step.stop.is_some() {
+                return Err("record");
+            }
+            continue;
+        }
+        let parent = step.parent_id.and_then(find).ok_or("record")?;
+        if !narrower_resource(&parent.resource, &step.resource) {
+            return Err("not a subset");
+        }
+        if depth_under(journal, step.parent_id) > usize::from(CHILD_DEPTH_LIMIT) {
+            return Err("depth limit");
+        }
+        let calls = journal
+            .steps
+            .iter()
+            .filter(|call| {
+                call.kind == ProposalKind::Hosted
+                    && child_chain(journal, call.parent_id).contains(&step.id)
+            })
+            .count();
+        if u32::try_from(calls).ok() != Some(step.requests_used) {
+            return Err("record");
+        }
+        match step.budget {
+            Some(budget) => {
+                let owner = child_chain(journal, step.parent_id).first().copied();
+                let above = match owner {
+                    Some(id) => find(id).and_then(|owner| owner.budget),
+                    None => journal.task_budget,
+                };
+                if budget.requests == 0
+                    || budget.seconds == 0
+                    || step.requests_used > budget.requests
+                    || above.is_none_or(|above| {
+                        budget.requests > above.requests || budget.seconds > above.seconds
+                    })
+                {
+                    return Err("over the parent's budget");
+                }
+            }
+            None if step.requests_used != 0 => return Err("record"),
+            None => {}
+        }
+    }
+    if let Some(task) = journal.task_budget {
+        if task.requests == 0 || task.seconds == 0 || task_requests_used(journal) > task.requests {
+            return Err("record");
+        }
+    }
+    let mut budgets = 0;
+    let mut stops = 0;
+    for node in &journal.events {
+        match &node.source {
+            NodeSource::ChildBudget { child, budget } => {
+                budgets += 1;
+                if find(*child).is_none_or(|step| step.budget != Some(*budget)) {
+                    return Err("record");
+                }
+            }
+            NodeSource::ChildStop {
+                child,
+                reason,
+                requests_used,
+            } => {
+                stops += 1;
+                if find(*child).is_none_or(|step| {
+                    step.stop != Some(*reason) || step.requests_used != *requests_used
+                }) {
+                    return Err("record");
+                }
+            }
+            _ => {}
+        }
+    }
+    if budgets
+        != journal
+            .steps
+            .iter()
+            .filter(|step| step.budget.is_some())
+            .count()
+        || stops
+            != journal
+                .steps
+                .iter()
+                .filter(|step| step.stop.is_some())
+                .count()
+    {
+        return Err("record");
+    }
+    if let Some(last) = journal.cancelled_from {
+        if journal.steps.iter().any(|step| {
+            step.kind == ProposalKind::Child && step.stop.is_none()
+                || matches!(step.kind, ProposalKind::Child | ProposalKind::Hosted) && step.id > last
+        }) {
+            return Err("record");
+        }
+    }
+    Ok(())
 }
 
 /// A stored journal, of any age, passes the path rule a live one does. Every
@@ -1118,7 +1426,8 @@ fn text_at_spill(events: &[SurfaceNode], object_resource: &str) -> Option<String
 }
 
 /// The records compaction keeps after the summary: a list, a plan, a goal, a
-/// spill pointer, and an inbox answer. Matched on the kind, never on text.
+/// spill pointer, an inbox answer, and a child's budget and stop. Matched on
+/// the kind, never on text.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn is_durable_visible(node: &SurfaceNode) -> bool {
     matches!(
@@ -1129,6 +1438,8 @@ fn is_durable_visible(node: &SurfaceNode) -> bool {
             | NodeSource::Goal
             | NodeSource::Spill { .. }
             | NodeSource::Inbox(_)
+            | NodeSource::ChildBudget { .. }
+            | NodeSource::ChildStop { .. }
     )
 }
 
@@ -1998,6 +2309,9 @@ fn empty_journal() -> Journal {
         compaction_open: false,
         compact_backup: None,
         compact_pending: None,
+        depth: 0,
+        task_budget: None,
+        cancelled_from: None,
     }
 }
 
@@ -2097,6 +2411,9 @@ fn propose_step(journal: &mut Journal) -> u64 {
         seat: String::new(),
         seen_version: None,
         inbox: String::new(),
+        budget: None,
+        requests_used: 0,
+        stop: None,
     });
     id
 }
@@ -3033,15 +3350,143 @@ fn propose_restore(
     Ok(id)
 }
 
-/// Record a hosted model proposal. The resource names the model. There is
-/// no secret field. This does not call a provider.
+/// Record a hosted model proposal for the top task (see `ask_model`). The
+/// resource names the model. There is no secret field. This does not call a
+/// provider.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn propose_hosted(journal: &mut Journal, resource: &str) -> Result<u64, &'static str> {
-    if !resource.starts_with("localhost://")
-        || resource.chars().any(char::is_whitespace)
-        || host_path(resource)
+    ask_model(journal, None, resource)
+}
+
+/// The child steps above a step, nearest first: the step itself when it is a
+/// child, then each child on its `parent_id` links. Empty means the step
+/// belongs to the top task. Parent ids are always smaller than the step's own
+/// id (checked on load), so this ends.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn child_chain(journal: &Journal, from: Option<u64>) -> Vec<u64> {
+    let mut chain = Vec::new();
+    let mut at = from;
+    while let Some(id) = at {
+        let Some(step) = journal.steps.iter().find(|step| step.id == id) else {
+            break;
+        };
+        if step.kind == ProposalKind::Child {
+            chain.push(id);
+        }
+        at = step.parent_id.filter(|parent| *parent < id);
+    }
+    chain
+}
+
+/// The depth a new child under `parent` would have: this journal's depth,
+/// plus the children above it, plus one.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn depth_under(journal: &Journal, parent: Option<u64>) -> usize {
+    usize::from(journal.depth) + child_chain(journal, parent).len() + 1
+}
+
+/// Model calls made anywhere in the task: every model call is one `Hosted`
+/// step, hosted or local, so this is the one counter.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn task_requests_used(journal: &Journal) -> u32 {
+    let calls = journal
+        .steps
+        .iter()
+        .filter(|step| step.kind == ProposalKind::Hosted)
+        .count();
+    u32::try_from(calls).unwrap_or(u32::MAX)
+}
+
+/// What a step may still give a new child: for a child, its budget less the
+/// calls made in its subtree; for the top task, the granted task budget less
+/// every call in the task. Nothing when there is no budget.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn remaining_budget(journal: &Journal, owner: Option<u64>) -> Option<Budget> {
+    let (budget, used) = match owner {
+        Some(id) => {
+            let step = journal.steps.iter().find(|step| step.id == id)?;
+            (step.budget?, step.requests_used)
+        }
+        None => (journal.task_budget?, task_requests_used(journal)),
+    };
+    Some(Budget {
+        requests: budget.requests.saturating_sub(used),
+        seconds: budget.seconds,
+    })
+}
+
+/// A child, or the whole task, has stopped: no model call and no new child
+/// below it.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn chain_stopped(journal: &Journal, chain: &[u64]) -> bool {
+    journal.cancelled_from.is_some()
+        || chain.iter().any(|id| {
+            journal
+                .steps
+                .iter()
+                .any(|step| step.id == *id && step.stop.is_some())
+        })
+}
+
+/// Record the budget the Runtime granted this task, as data. The guest never
+/// sets or raises it: a second call, or an empty budget, changes nothing.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn record_task_budget(journal: &mut Journal, granted: Budget) -> bool {
+    if journal.task_budget.is_some() || granted.requests == 0 || granted.seconds == 0 {
+        return false;
+    }
+    journal.task_budget = Some(granted);
+    true
+}
+
+/// Ask one model call, hosted or local: both are one `Hosted` step and one
+/// counter. `under` is the child the call is made for, or nothing for the top
+/// task. The call is refused before anything is asked when the task was
+/// cancelled, a child above it has stopped, there is no budget, or a budget is
+/// used up; a used-up child stops with `requests`, and its subtree with it.
+/// Each accepted call counts against every child above it and the task.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn ask_model(journal: &mut Journal, under: Option<u64>, model: &str) -> Result<u64, &'static str> {
+    if !model.starts_with("localhost://")
+        || model.chars().any(char::is_whitespace)
+        || host_path(model)
     {
         return Err("host path");
+    }
+    if let Some(id) = under {
+        if !journal
+            .steps
+            .iter()
+            .any(|step| step.id == id && step.kind == ProposalKind::Child)
+        {
+            return Err("not a child");
+        }
+    }
+    let chain = child_chain(journal, under);
+    if journal.cancelled_from.is_some() {
+        return Err("cancelled");
+    }
+    if chain_stopped(journal, &chain) {
+        return Err("stopped");
+    }
+    let Some(task) = journal.task_budget else {
+        return Err("no budget");
+    };
+    if task_requests_used(journal) >= task.requests {
+        return Err("requests");
+    }
+    // Top-most first, so the widest used-up child is the one that stops.
+    for id in chain.iter().rev() {
+        let Some(step) = journal.steps.iter().find(|step| step.id == *id) else {
+            return Err("not a child");
+        };
+        let Some(budget) = step.budget else {
+            return Err("no budget");
+        };
+        if step.requests_used >= budget.requests {
+            stop_child(journal, *id, StopReason::Requests);
+            return Err("requests");
+        }
     }
     let id = propose_step(journal);
     let step = journal
@@ -3050,23 +3495,166 @@ fn propose_hosted(journal: &mut Journal, resource: &str) -> Result<u64, &'static
         .find(|step| step.id == id)
         .expect("just pushed");
     step.kind = ProposalKind::Hosted;
-    step.resource = resource.to_string();
+    step.resource = model.to_string();
+    step.parent_id = under;
+    for child in &chain {
+        if let Some(step) = journal.steps.iter_mut().find(|step| step.id == *child) {
+            step.requests_used = step.requests_used.saturating_add(1);
+        }
+    }
     Ok(id)
 }
 
-/// A child is a separate step. Its resource must sit under the parent's
-/// resource. It does not copy the parent's grant.
+/// Every step whose `parent_id` links pass through `id`.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn descendants(journal: &Journal, id: u64) -> Vec<u64> {
+    journal
+        .steps
+        .iter()
+        .filter(|step| {
+            let mut at = step.parent_id.filter(|parent| *parent < step.id);
+            while let Some(parent) = at {
+                if parent == id {
+                    return true;
+                }
+                at = journal
+                    .steps
+                    .iter()
+                    .find(|other| other.id == parent)
+                    .and_then(|other| other.parent_id.filter(|above| *above < parent));
+            }
+            false
+        })
+        .map(|step| step.id)
+        .collect()
+}
+
+/// Stop one child and everything below it. The child keeps its first reason
+/// (a later one does not replace it) and every child below that has not
+/// stopped stops with `cancelled`. Each stop writes one child-stop record.
+/// A step still prepared becomes cancelled; a started one keeps its state and
+/// its partial result, and its next model call is refused.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn stop_child(journal: &mut Journal, id: u64, reason: StopReason) -> bool {
+    let first = stop_one(journal, id, reason);
+    for below in descendants(journal, id) {
+        stop_one(journal, below, StopReason::Cancelled);
+    }
+    first
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn stop_one(journal: &mut Journal, id: u64, reason: StopReason) -> bool {
+    let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) else {
+        return false;
+    };
+    if step.state == StepState::Prepared {
+        step.state = StepState::Cancelled;
+    }
+    if step.kind != ProposalKind::Child || step.stop.is_some() {
+        return false;
+    }
+    step.stop = Some(reason);
+    let requests_used = step.requests_used;
+    journal.events.push(SurfaceNode {
+        role: Role::User,
+        text: String::new(),
+        source: NodeSource::ChildStop {
+            child: id,
+            reason,
+            requests_used,
+        },
+    });
+    true
+}
+
+/// A model call for a child was refused because its grant expired: the
+/// child stops with `time`, unless it already stopped. The guest has no
+/// clock; the code that runs the child calls this.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn note_time_refusal(journal: &mut Journal, child: u64) -> bool {
+    journal
+        .steps
+        .iter()
+        .any(|step| step.id == child && step.kind == ProposalKind::Child)
+        && stop_child(journal, child, StopReason::Time)
+}
+
+/// Cancel a step and its whole subtree: a child stops with `cancelled`, its
+/// children too, and prepared steps below become cancelled. A step that is
+/// not a child is cancelled as before (only from prepared), and the children
+/// below it stop.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn cancel_tree(journal: &mut Journal, id: u64) -> bool {
+    let Some(kind) = journal
+        .steps
+        .iter()
+        .find(|step| step.id == id)
+        .map(|step| step.kind)
+    else {
+        return false;
+    };
+    if kind == ProposalKind::Child {
+        return stop_child(journal, id, StopReason::Cancelled);
+    }
+    let cancelled = cancel(journal, id);
+    let mut stopped = false;
+    for below in descendants(journal, id) {
+        stopped |= stop_one(journal, below, StopReason::Cancelled);
+    }
+    cancelled || stopped
+}
+
+/// Cancel the whole task: no model call anywhere in it from now on, every
+/// child stops with `cancelled`, and prepared steps become cancelled. The
+/// header keeps the last step id at that time, so a reload stays cancelled.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn cancel_task(journal: &mut Journal) -> bool {
+    if journal.cancelled_from.is_some() {
+        return false;
+    }
+    let ids: Vec<u64> = journal.steps.iter().map(|step| step.id).collect();
+    journal.cancelled_from = Some(ids.iter().copied().max().unwrap_or(0));
+    for id in ids {
+        stop_one(journal, id, StopReason::Cancelled);
+    }
+    true
+}
+
+/// A child is a separate step. It never gets more than its parent: its
+/// resource sits under the parent's resource, its budget is explicit and no
+/// larger than what the parent has left (`remaining_budget`), and it does not
+/// copy the parent's grant. No child below a stopped child or a cancelled
+/// task, and none past `CHILD_DEPTH_LIMIT`. The budget is written as one
+/// child-budget record.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn propose_child(
     journal: &mut Journal,
     parent_id: u64,
     resource: &str,
+    budget: Option<Budget>,
 ) -> Result<u64, &'static str> {
     let Some(parent) = journal.steps.iter().find(|step| step.id == parent_id) else {
         return Err("no parent");
     };
     if parent.resource.is_empty() || !narrower_resource(&parent.resource, resource) {
         return Err("not a subset");
+    }
+    let chain = child_chain(journal, Some(parent_id));
+    if chain_stopped(journal, &chain) {
+        return Err("parent stopped");
+    }
+    if depth_under(journal, Some(parent_id)) > usize::from(CHILD_DEPTH_LIMIT) {
+        return Err("depth limit");
+    }
+    let Some(budget) = budget.filter(|budget| budget.requests > 0 && budget.seconds > 0) else {
+        return Err("no budget");
+    };
+    let Some(left) = remaining_budget(journal, chain.first().copied()) else {
+        return Err("parent has no budget");
+    };
+    if budget.requests > left.requests || budget.seconds > left.seconds {
+        return Err("over the parent's budget");
     }
     let id = propose_step(journal);
     let step = journal
@@ -3078,6 +3666,12 @@ fn propose_child(
     step.resource = resource.to_string();
     step.parent_id = Some(parent_id);
     step.grant = None;
+    step.budget = Some(budget);
+    journal.events.push(SurfaceNode {
+        role: Role::User,
+        text: String::new(),
+        source: NodeSource::ChildBudget { child: id, budget },
+    });
     Ok(id)
 }
 
@@ -3127,14 +3721,29 @@ fn narrower_resource(parent: &str, child: &str) -> bool {
     rest.starts_with('/') && rest.len() > 1 && !host_path(child)
 }
 
-/// Give a child its own grant. The parent's grant string is refused, and the
-/// child stays prepared. This does not start a process.
+/// Give a child its own grant. Its grant is never more than its parent's:
+/// the parent must hold a grant itself, the child's grant is not the
+/// parent's, and the Runtime granted it for the child's resource or a part of
+/// it (`grant_resource`, exact canonical paths). A child with no budget, a
+/// stopped child, or one below a cancelled task gets nothing. Grants are
+/// never stored, so after a reload every child is granted again through
+/// here. The child stays prepared. This does not start a process.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn authorize_child(journal: &mut Journal, child_id: u64, grant: Option<&str>) -> bool {
+fn authorize_child(
+    journal: &mut Journal,
+    child_id: u64,
+    grant: Option<&str>,
+    grant_resource: &str,
+) -> bool {
     let Some(child) = journal.steps.iter().find(|step| step.id == child_id) else {
         return false;
     };
-    if child.kind != ProposalKind::Child {
+    if child.kind != ProposalKind::Child
+        || child.budget.is_none()
+        || path_refusal(grant_resource).is_some()
+        || !resource_covers(&child.resource, grant_resource)
+        || chain_stopped(journal, &child_chain(journal, Some(child_id)))
+    {
         return false;
     }
     let parent_grant = child.parent_id.and_then(|parent_id| {
@@ -3144,7 +3753,11 @@ fn authorize_child(journal: &mut Journal, child_id: u64, grant: Option<&str>) ->
             .find(|step| step.id == parent_id)
             .and_then(|step| step.grant.clone())
     });
-    if grant.is_none() || grant == Some("") || parent_grant.as_deref() == grant {
+    if parent_grant.as_deref().is_none_or(str::is_empty)
+        || grant.is_none()
+        || grant == Some("")
+        || parent_grant.as_deref() == grant
+    {
         return false;
     }
     authorize(journal, child_id, grant)
@@ -3165,7 +3778,12 @@ fn open_child_host(
     if parent_step.resource.is_empty() || !narrower_resource(&parent_step.resource, resource) {
         return Err("not a subset");
     }
+    let depth = depth_under(parent, Some(parent_id));
+    if depth > usize::from(CHILD_DEPTH_LIMIT) {
+        return Err("depth limit");
+    }
     let mut child = empty_journal();
+    child.depth = u8::try_from(depth).map_err(|_| "depth limit")?;
     admit_system(&mut child, SYSTEM_HEAD, true);
     propose_run(&mut child, resource, &["true".to_string()])?;
     if child.steps.iter().any(|step| step.grant.is_some()) {
@@ -3195,11 +3813,23 @@ fn grant_child_host(child: &mut Journal, parent_grant: Option<&str>, grant: Opti
     authorize(child, id, grant)
 }
 
-/// The parent stores one result line. The child's log is not copied in.
-/// A grant string in the result is refused.
+/// The parent stores one result line for a child step. The child's log is
+/// not copied in. A grant string in the result is refused. A result longer
+/// than `CHILD_RESULT_CAP` is refused, never cut: it must be a spill pointer
+/// (`spill_pointer`). A stopped child's partial result is kept and marked
+/// with its stop reason.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn record_child_result(parent: &mut Journal, child: &Journal, result: &str) -> bool {
+fn record_child_result(parent: &mut Journal, child_id: u64, child: &Journal, result: &str) -> bool {
+    let Some(stop) = parent
+        .steps
+        .iter()
+        .find(|step| step.id == child_id && step.kind == ProposalKind::Child)
+        .map(|step| step.stop)
+    else {
+        return false;
+    };
     if result.is_empty()
+        || result.len() > CHILD_RESULT_CAP
         || host_path(result)
         || child
             .events
@@ -3217,7 +3847,12 @@ fn record_child_result(parent: &mut Journal, child: &Journal, result: &str) -> b
     }
     let epoch = parent.epoch;
     let before = parent.events.len();
-    admit_tool_result(parent, result);
+    match stop {
+        Some(reason) => {
+            admit_tool_result(parent, &format!("partial ({}): {result}", reason.name()))
+        }
+        None => admit_tool_result(parent, result),
+    }
     parent.epoch == epoch && parent.events.len() == before + 1
 }
 
@@ -4764,6 +5399,11 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             ));
         }
         let mut hosted = empty_journal();
+        if !record_task_budget(&mut hosted, FIXTURE_TASK_BUDGET) {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "the task budget was not recorded".to_string(),
+            ));
+        }
         let model = "localhost://Models/hosted";
         let hosted_id = propose_hosted(&mut hosted, model).map_err(|_| {
             elastos::bus::types::BusError::Invalid("a hosted proposal was refused".to_string())
@@ -4784,6 +5424,11 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             ));
         }
         let mut family = empty_journal();
+        if !record_task_budget(&mut family, FIXTURE_TASK_BUDGET) {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "the task budget was not recorded".to_string(),
+            ));
+        }
         let parent = propose_run(
             &mut family,
             "localhost://Users/self/Projects/demo",
@@ -4796,7 +5441,13 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             elastos::bus::types::BusError::Invalid("the parent run was refused".to_string())
         })?;
         if !authorize(&mut family, parent, Some("fixture-grant"))
-            || propose_child(&mut family, parent, "localhost://Users/self/Projects/other").is_ok()
+            || propose_child(
+                &mut family,
+                parent,
+                "localhost://Users/self/Projects/other",
+                Some(FIXTURE_CHILD_BUDGET),
+            )
+            .is_ok()
             || family.steps.len() != 1
         {
             return Err(elastos::bus::types::BusError::Invalid(
@@ -4807,6 +5458,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             &mut family,
             parent,
             "localhost://Users/self/Projects/demo/src",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .map_err(|_| {
             elastos::bus::types::BusError::Invalid("a narrower child was refused".to_string())
@@ -4824,13 +5476,23 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || child_step.grant.is_some()
             || child_step.parent_id != Some(parent)
             || child_step.effect_id == parent
-            || authorize_child(&mut family, child, Some("fixture-grant"))
+            || authorize_child(
+                &mut family,
+                child,
+                Some("fixture-grant"),
+                "localhost://Users/self/Projects/demo/src",
+            )
             || family
                 .steps
                 .iter()
                 .find(|step| step.id == child)
                 .is_none_or(|step| step.grant.is_some() || step.state != StepState::Prepared)
-            || !authorize_child(&mut family, child, Some("child-grant"))
+            || !authorize_child(
+                &mut family,
+                child,
+                Some("child-grant"),
+                "localhost://Users/self/Projects/demo/src",
+            )
             || family
                 .steps
                 .iter()
@@ -4859,8 +5521,8 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || child_host.steps[0].grant.is_some()
             || !grant_child_host(&mut child_host, Some("fixture-grant"), Some("child-grant"))
             || child_host.steps[0].grant.as_deref() != Some("child-grant")
-            || record_child_result(&mut family, &child_host, "fixture-grant")
-            || !record_child_result(&mut family, &child_host, "child result ok")
+            || record_child_result(&mut family, child, &child_host, "fixture-grant")
+            || !record_child_result(&mut family, child, &child_host, "child result ok")
             || family.events.len() != family_before + 1
             || family
                 .events
@@ -4870,6 +5532,69 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         {
             return Err(elastos::bus::types::BusError::Invalid(
                 "a child host shared the parent log".to_string(),
+            ));
+        }
+        let spent = |journal: &Journal, id: u64| {
+            journal
+                .steps
+                .iter()
+                .find(|step| step.id == id)
+                .and_then(|step| step.stop)
+        };
+        if ask_model(&mut family, Some(child), "localhost://Models/hosted").is_err()
+            || ask_model(&mut family, Some(child), "localhost://Models/local").is_err()
+            || ask_model(&mut family, Some(child), "localhost://Models/hosted") != Err("requests")
+            || spent(&family, child) != Some(StopReason::Requests)
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "a child went past its request budget".to_string(),
+            ));
+        }
+        let timed = propose_child(
+            &mut family,
+            parent,
+            "localhost://Users/self/Projects/demo/src",
+            Some(FIXTURE_CHILD_BUDGET),
+        )
+        .map_err(|_| {
+            elastos::bus::types::BusError::Invalid("a second child was refused".to_string())
+        })?;
+        let live = propose_child(
+            &mut family,
+            parent,
+            "localhost://Users/self/Projects/demo/src",
+            Some(FIXTURE_CHILD_BUDGET),
+        )
+        .map_err(|_| {
+            elastos::bus::types::BusError::Invalid("a third child was refused".to_string())
+        })?;
+        if !note_time_refusal(&mut family, timed)
+            || note_time_refusal(&mut family, timed)
+            || spent(&family, timed) != Some(StopReason::Time)
+            || cancel_tree(&mut family, timed)
+            || !cancel_task(&mut family)
+            || cancel_task(&mut family)
+            || spent(&family, live) != Some(StopReason::Cancelled)
+            || ask_model(&mut family, Some(live), "localhost://Models/hosted") != Err("cancelled")
+            || ask_model(&mut family, None, "localhost://Models/hosted") != Err("cancelled")
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "a stop did not reach the child tree".to_string(),
+            ));
+        }
+        let family_bytes = encode_journal(&family, &[0; 32]).ok_or_else(|| {
+            elastos::bus::types::BusError::Invalid("the child tree did not encode".to_string())
+        })?;
+        if decode_journal(&family_bytes)
+            .ok()
+            .is_none_or(|(reloaded, _, _)| {
+                reloaded.cancelled_from.is_none()
+                    || spent(&reloaded, child) != Some(StopReason::Requests)
+                    || spent(&reloaded, timed) != Some(StopReason::Time)
+            })
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "the child limits did not survive a reload".to_string(),
             ));
         }
         let mut project = empty_journal();
@@ -5952,6 +6677,11 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             ));
         }
         let mut family = two_turns();
+        if !record_task_budget(&mut family, FIXTURE_TASK_BUDGET) {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "the task budget was not recorded".to_string(),
+            ));
+        }
         let parent = propose_run(
             &mut family,
             "localhost://Users/self/Projects/demo",
@@ -5964,6 +6694,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             &mut family,
             parent,
             "localhost://Users/self/Projects/demo/src",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .map_err(|_| {
             elastos::bus::types::BusError::Invalid("a child took the parent grant".to_string())
@@ -6030,6 +6761,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             &mut family,
             parent,
             "localhost://Users/self/Projects/demo/lib",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .map_err(|_| {
             elastos::bus::types::BusError::Invalid(
@@ -6057,6 +6789,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             &mut family,
             parent,
             "localhost://Users/self/Projects/demo/tests",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .map_err(|_| {
             elastos::bus::types::BusError::Invalid(
@@ -7724,10 +8457,20 @@ mod tests {
     fn a_child_grant_needs_a_child_step() {
         let mut journal = two_turns();
         let read = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
-        assert!(!authorize_child(&mut journal, read, Some("child-grant")));
+        assert!(!authorize_child(
+            &mut journal,
+            read,
+            Some("child-grant"),
+            "localhost://Users/self/Documents/note.txt"
+        ));
         assert_eq!(step_state(&journal, read), Some(StepState::Prepared));
         assert!(journal.steps.iter().all(|step| step.grant.is_none()));
-        assert!(!authorize_child(&mut journal, 99, Some("child-grant")));
+        assert!(!authorize_child(
+            &mut journal,
+            99,
+            Some("child-grant"),
+            "localhost://Users/self/Documents/note.txt"
+        ));
     }
 
     #[test]
@@ -8609,6 +9352,7 @@ mod tests {
     #[test]
     fn a_hosted_proposal_must_name_a_localhost_resource() {
         let mut journal = two_turns();
+        assert!(record_task_budget(&mut journal, FIXTURE_TASK_BUDGET));
         let before = journal.clone();
         for refused in ["https://api.example.com/v1/model", "qwen2.5-1.5b"] {
             assert_eq!(propose_hosted(&mut journal, refused), Err("host path"));
@@ -8623,6 +9367,7 @@ mod tests {
     fn a_hosted_proposal_has_no_secret_and_a_missing_grant_is_denied() {
         let model = "localhost://Models/hosted";
         let mut journal = empty_journal();
+        assert!(record_task_budget(&mut journal, FIXTURE_TASK_BUDGET));
         assert_eq!(propose_hosted(&mut journal, "/tmp/model"), Err("host path"));
         assert!(journal.steps.is_empty());
         let id = propose_hosted(&mut journal, model).unwrap();
@@ -8637,6 +9382,7 @@ mod tests {
         assert!(!dispatch(&mut journal, id));
         assert_eq!(journal.events, events);
         let mut shared = two_turns();
+        assert!(record_task_budget(&mut shared, FIXTURE_TASK_BUDGET));
         let project = "localhost://Users/self/Projects/demo";
         let argv = [
             "vm-smoke".to_string(),
@@ -8742,6 +9488,7 @@ mod tests {
     #[test]
     fn a_child_grant_is_narrower_and_does_not_inherit_the_parent_grant() {
         let mut journal = empty_journal();
+        assert!(record_task_budget(&mut journal, FIXTURE_TASK_BUDGET));
         let parent = propose_run(
             &mut journal,
             "localhost://Users/self/Projects/demo",
@@ -8756,7 +9503,8 @@ mod tests {
             propose_child(
                 &mut journal,
                 parent,
-                "localhost://Users/self/Projects/other"
+                "localhost://Users/self/Projects/other",
+                Some(FIXTURE_CHILD_BUDGET)
             ),
             Err("not a subset")
         );
@@ -8765,6 +9513,7 @@ mod tests {
             &mut journal,
             parent,
             "localhost://Users/self/Projects/demo/src",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .unwrap();
         let child_step = journal.steps.iter().find(|step| step.id == child).unwrap();
@@ -8772,7 +9521,12 @@ mod tests {
         assert_eq!(child_step.parent_id, Some(parent));
         assert_eq!(child_step.grant, None);
         assert_ne!(child_step.effect_id, parent);
-        assert!(!authorize_child(&mut journal, child, Some("fixture-grant")));
+        assert!(!authorize_child(
+            &mut journal,
+            child,
+            Some("fixture-grant"),
+            "localhost://Users/self/Projects/demo/src"
+        ));
         assert_eq!(
             journal
                 .steps
@@ -8783,7 +9537,12 @@ mod tests {
             None
         );
         assert_eq!(step_state(&journal, child), Some(StepState::Prepared));
-        assert!(authorize_child(&mut journal, child, Some("child-grant")));
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            "localhost://Users/self/Projects/demo/src"
+        ));
         let mut child_host =
             open_child_host(&journal, parent, "localhost://Users/self/Projects/demo/src").unwrap();
         assert_eq!(
@@ -8806,15 +9565,22 @@ mod tests {
             Some("child-grant")
         ));
         let parent_events = journal.events.len();
-        assert!(!record_child_result(&mut journal, &child_host, ""));
-        assert!(!record_child_result(&mut journal, &child_host, "/tmp/out"));
+        assert!(!record_child_result(&mut journal, child, &child_host, ""));
         assert!(!record_child_result(
             &mut journal,
+            child,
+            &child_host,
+            "/tmp/out"
+        ));
+        assert!(!record_child_result(
+            &mut journal,
+            child,
             &child_host,
             "saw fixture-grant"
         ));
         assert!(record_child_result(
             &mut journal,
+            child,
             &child_host,
             "child result ok"
         ));
@@ -8847,6 +9613,7 @@ mod tests {
             &mut journal,
             parent,
             "localhost://Users/self/Projects/demo/notes.txt",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .unwrap();
         assert!(!apply_inbox(
@@ -8879,6 +9646,7 @@ mod tests {
             .find(|step| step.id == parent)
             .is_some_and(|step| step.grant.as_deref() == Some("fixture-grant")));
         let mut logged = two_turns();
+        assert!(record_task_budget(&mut logged, FIXTURE_TASK_BUDGET));
         let logged_parent = propose_run(
             &mut logged,
             "localhost://Users/self/Projects/demo",
@@ -8889,6 +9657,7 @@ mod tests {
             &mut logged,
             logged_parent,
             "localhost://Users/self/Projects/demo/src",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .unwrap();
         let standing_lines = |events: &[SurfaceNode]| {
@@ -8927,6 +9696,7 @@ mod tests {
             &mut logged,
             logged_parent,
             "localhost://Users/self/Projects/demo/lib",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .unwrap();
         assert!(apply_inbox(
@@ -8952,6 +9722,7 @@ mod tests {
             &mut logged,
             logged_parent,
             "localhost://Users/self/Projects/demo/tests",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .unwrap();
         assert!(apply_inbox(
@@ -9006,6 +9777,7 @@ mod tests {
             "localhost://Users/self/Projects/demo/x"
         ));
         let mut journal = empty_journal();
+        assert!(record_task_budget(&mut journal, FIXTURE_TASK_BUDGET));
         let parent = propose_run(&mut journal, demo, &["true".to_string()]).unwrap();
         for refused in [
             "localhost://Users/self/Projects/demo2",
@@ -9014,7 +9786,7 @@ mod tests {
             "localhost://Users/self/Projects/demo/",
         ] {
             assert_eq!(
-                propose_child(&mut journal, parent, refused),
+                propose_child(&mut journal, parent, refused, Some(FIXTURE_CHILD_BUDGET)),
                 Err("not a subset")
             );
             assert!(open_child_host(&journal, parent, refused).is_err());
@@ -9024,6 +9796,7 @@ mod tests {
             &mut journal,
             parent,
             "localhost://Users/self/Projects/demo/x",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .unwrap();
         let child_step = journal.steps.iter().find(|step| step.id == child).unwrap();
@@ -10429,6 +11202,7 @@ mod tests {
     /// and an open compaction with its backup and pending copies.
     fn a_rich_journal() -> Journal {
         let mut journal = two_turns();
+        assert!(record_task_budget(&mut journal, FIXTURE_TASK_BUDGET));
         admit_user(&mut journal, &"a long person line ".repeat(20));
         assert!(admit_snapshot(
             &mut journal,
@@ -10460,6 +11234,7 @@ mod tests {
             &mut journal,
             run,
             "localhost://Users/self/Projects/demo/src",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .unwrap();
         let mut cursor = journal_cursor("demo-agent", "task-1").unwrap();
@@ -11342,6 +12117,7 @@ mod tests {
     #[test]
     fn a_spill_pointer_keeps_the_file_text() {
         let mut journal = two_turns();
+        assert!(record_task_budget(&mut journal, FIXTURE_TASK_BUDGET));
         let notes = "localhost://Users/self/Projects/demo/notes.txt";
         assert!(observe(&mut journal, notes, 1, "hello from the project"));
         let id = propose_run(
@@ -11468,6 +12244,7 @@ mod tests {
             &mut journal,
             parent,
             "localhost://Users/self/Projects/demo/src",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .unwrap();
         assert!(authorize(&mut journal, child, Some("child-grant")));
@@ -15883,14 +16660,13 @@ mod tests {
 
     #[test]
     fn each_kind_renders_byte_for_byte() {
-        let golden = golden();
+        let golden: Vec<_> = golden().into_iter().chain(golden_idea_2()).collect();
         let mut tags: Vec<u8> = golden
             .iter()
             .map(|(node, _)| source_tag(&node.source))
             .collect();
         tags.sort_unstable();
-        let mut kinds: Vec<u8> = (1..=16).collect();
-        kinds.push(19);
+        let kinds: Vec<u8> = (1..=19).collect();
         assert_eq!(tags, kinds, "one example per kind");
         for (node, expected) in golden {
             assert_eq!(
@@ -16090,7 +16866,7 @@ mod tests {
     #[test]
     fn an_unknown_kind_is_refused() {
         let (header, records) = journal_with(node(Role::User, NodeSource::Message, "hello"));
-        for tag in [0_u8, 17, 18, 20, 255] {
+        for tag in [0_u8, 20, 21, 255] {
             let mut bad = records.clone();
             bad[0].1[1] = tag;
             assert_eq!(
@@ -16100,25 +16876,30 @@ mod tests {
             );
         }
         // A bare unknown kind, with nothing after it, is refused by its tag.
-        for tag in [0_u8, 17, 18, 20, 255] {
+        for tag in [0_u8, 20, 21, 255] {
             assert_eq!(
                 decode_node(&[2, tag]).unwrap_err(),
                 "record",
                 "bare kind {tag}"
             );
         }
-        // Kinds 17 and 18 with plausible fields are refused too.
-        for payload in [
-            [vec![2, 17], 3_u64.to_le_bytes().to_vec(), vec![0; 12]].concat(),
+        // A child stop with an unknown reason is refused; a known one decodes.
+        let stop = |reason: u8| {
             [
                 vec![2, 18],
                 3_u64.to_le_bytes().to_vec(),
-                vec![1, 0, 0, 0, 0],
+                vec![reason, 1, 0, 0, 0],
             ]
-            .concat(),
-        ] {
-            assert_eq!(decode_node(&payload).unwrap_err(), "record");
+            .concat()
+        };
+        for reason in [0_u8, 4, 255] {
+            assert_eq!(
+                decode_node(&stop(reason)).unwrap_err(),
+                "record",
+                "reason {reason}"
+            );
         }
+        assert!(decode_node(&stop(1)).is_ok());
     }
 
     #[test]
@@ -16256,32 +17037,47 @@ mod tests {
     }
 
     #[test]
-    fn idea_2_fields_must_be_empty_until_built() {
+    fn idea_2_fields_follow_their_rules() {
         let mut journal = two_turns();
         propose_step(&mut journal);
         let bytes = encode_journal(&journal, &[0; 32]).unwrap();
         let (header, records) = journal_records(&bytes);
         // Header: cancelled_from (25..34), task_budget (34..47), depth (47).
         assert!(header[25..48].iter().all(|byte| *byte == 0));
-        for offset in 25..48 {
+        for (offset, value, reason) in [
+            (26, 1_u8, "record"),
+            (25, 2, "record"),
+            (35, 1, "record"),
+            (34, 2, "record"),
+            (47, CHILD_DEPTH_LIMIT + 1, "depth limit"),
+        ] {
             let mut bad = header.clone();
-            bad[offset] = 1;
+            bad[offset] = value;
             assert_eq!(
                 decode_journal(&relinked(bad, &records)).unwrap_err(),
-                "record",
+                reason,
                 "header offset {offset}"
             );
         }
-        // Step: the last 19 bytes are depth, budget, requests_used and stop.
+        // Step: the last 19 bytes are depth (always 0), budget, requests_used
+        // and stop. A step that is not a child holds none of them.
         let step_at = records.iter().position(|(tag, _)| *tag == 3).unwrap();
         let len = records[step_at].1.len();
-        for offset in len - 19..len {
+        for (offset, value) in [
+            (len - 19, 1_u8),
+            (len - 18, 2),
+            (len - 17, 1),
+            (len - 18, 1),
+            (len - 5, 1),
+            (len - 1, 1),
+            (len - 1, 4),
+        ] {
             let mut bad = records.clone();
-            bad[step_at].1[offset] = 1;
+            bad[step_at].1[offset] = value;
             assert_eq!(
                 decode_journal(&relinked(header.clone(), &bad)).unwrap_err(),
                 "record",
-                "step offset {offset}"
+                "step offset {offset} value {value}"
             );
         }
     }
@@ -16444,6 +17240,760 @@ mod tests {
         assert_eq!(
             decode_journal(&relinked(header, &records)).unwrap_err(),
             "record"
+        );
+    }
+
+    // OMP idea 2: child limits (handoff/OMP2-DESIGN.md).
+
+    /// Kinds 17 and 18, with the exact bytes the model sees. Pinned on their
+    /// own, so the format 2 table above (and its pin) stays as it shipped.
+    fn golden_idea_2() -> Vec<(SurfaceNode, &'static [u8])> {
+        vec![
+            (
+                node(
+                    Role::User,
+                    NodeSource::ChildBudget {
+                        child: 7,
+                        budget: Budget {
+                            requests: 8,
+                            seconds: 600,
+                        },
+                    },
+                    "",
+                ),
+                b"child 7 budget: 8 requests, 600 s",
+            ),
+            (
+                node(
+                    Role::User,
+                    NodeSource::ChildStop {
+                        child: 7,
+                        reason: StopReason::Requests,
+                        requests_used: 8,
+                    },
+                    "",
+                ),
+                b"child 7 stopped: requests (8 requests used)",
+            ),
+        ]
+    }
+
+    const IDEA_2_RENDERING_PIN: (u16, &str) = (
+        2,
+        "b103247016a82aa2dac7a9d8b54072e663d1079b85a96b7927cd77c6b588450f",
+    );
+
+    #[test]
+    fn the_child_records_render_byte_for_byte_and_are_pinned() {
+        let mut table = Vec::new();
+        for (node, expected) in golden_idea_2() {
+            let rendered = render_record(&node);
+            assert_eq!(rendered.as_bytes(), expected);
+            table.push(source_tag(&node.source));
+            table.extend_from_slice(&(rendered.len() as u32).to_le_bytes());
+            table.extend_from_slice(rendered.as_bytes());
+        }
+        for (reason, name) in [
+            (StopReason::Requests, "requests"),
+            (StopReason::Time, "time"),
+            (StopReason::Cancelled, "cancelled"),
+        ] {
+            assert_eq!(reason.name(), name);
+            assert_eq!(StopReason::from_tag(reason.tag()), Some(reason));
+        }
+        let hex: String = sha256(&table)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(IDEA_2_RENDERING_PIN.0, JOURNAL_FORMAT);
+        assert_eq!(hex, IDEA_2_RENDERING_PIN.1);
+    }
+
+    const DEMO: &str = "localhost://Users/self/Projects/demo";
+    const DEMO_SRC: &str = "localhost://Users/self/Projects/demo/src";
+    const DEMO_SRC_LIB: &str = "localhost://Users/self/Projects/demo/src/lib";
+    const DEMO_DOC: &str = "localhost://Users/self/Projects/demo/doc";
+    const HOSTED_MODEL: &str = "localhost://Models/hosted";
+    const LOCAL_MODEL: &str = "localhost://Users/self/.AppData/Models/local";
+
+    fn budget(requests: u32, seconds: u64) -> Budget {
+        Budget { requests, seconds }
+    }
+
+    /// A task with a granted budget and one granted run step to hang
+    /// children under.
+    fn task(granted: Budget) -> (Journal, u64) {
+        let mut journal = two_turns();
+        assert!(record_task_budget(&mut journal, granted));
+        let run = propose_run(&mut journal, DEMO, &["true".to_string()]).unwrap();
+        assert!(authorize(&mut journal, run, Some("fixture-grant")));
+        (journal, run)
+    }
+
+    fn step_of(journal: &Journal, id: u64) -> &Step {
+        journal.steps.iter().find(|step| step.id == id).unwrap()
+    }
+
+    fn step_mut(journal: &mut Journal, id: u64) -> &mut Step {
+        journal.steps.iter_mut().find(|step| step.id == id).unwrap()
+    }
+
+    fn child_stops(journal: &Journal) -> Vec<(u64, StopReason, u32)> {
+        journal
+            .events
+            .iter()
+            .filter_map(|node| match node.source {
+                NodeSource::ChildStop {
+                    child,
+                    reason,
+                    requests_used,
+                } => Some((child, reason, requests_used)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn reloaded(journal: &Journal) -> Journal {
+        decode_journal(&encode_journal(journal, &[0; 32]).unwrap())
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn a_child_at_the_depth_limit_cannot_propose_a_child() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let grandchild =
+            propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        let before = journal.clone();
+        let deeper = "localhost://Users/self/Projects/demo/src/lib/a";
+        assert_eq!(
+            propose_child(&mut journal, grandchild, deeper, Some(budget(1, 10))),
+            Err("depth limit")
+        );
+        assert_eq!(journal, before);
+        // Inside a child host journal, the depth goes on from the parent's.
+        let host = open_child_host(&journal, child, DEMO_SRC_LIB).unwrap();
+        assert_eq!(host.depth, 2);
+        assert_eq!(
+            open_child_host(&journal, grandchild, deeper),
+            Err("depth limit")
+        );
+        let mut deep = host.clone();
+        assert!(record_task_budget(&mut deep, budget(4, 60)));
+        let inner = deep.steps[0].id;
+        assert!(authorize(&mut deep, inner, Some("child-grant")));
+        assert_eq!(
+            propose_child(&mut deep, inner, deeper, Some(budget(1, 10))),
+            Err("depth limit")
+        );
+    }
+
+    #[test]
+    fn a_child_without_a_budget_is_refused() {
+        let (mut journal, run) = task(budget(8, 600));
+        let before = journal.clone();
+        for refused in [None, Some(budget(0, 60)), Some(budget(2, 0))] {
+            assert_eq!(
+                propose_child(&mut journal, run, DEMO_SRC, refused),
+                Err("no budget"),
+                "{refused:?}"
+            );
+            assert_eq!(journal, before);
+        }
+    }
+
+    #[test]
+    fn a_child_budget_larger_than_the_parent_remaining_is_refused() {
+        let (mut journal, run) = task(budget(4, 600));
+        assert!(ask_model(&mut journal, None, HOSTED_MODEL).is_ok());
+        // The task has 3 requests and 600 s left.
+        for over in [budget(4, 60), budget(3, 601)] {
+            assert_eq!(
+                propose_child(&mut journal, run, DEMO_SRC, Some(over)),
+                Err("over the parent's budget"),
+                "{over:?}"
+            );
+        }
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(3, 600))).unwrap();
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        // The child has 2 requests and 600 s left: a grandchild gets no more.
+        assert_eq!(
+            propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(3, 60))),
+            Err("over the parent's budget")
+        );
+        assert_eq!(
+            propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 601))),
+            Err("over the parent's budget")
+        );
+        assert!(propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 600))).is_ok());
+        assert_eq!(
+            journal
+                .events
+                .iter()
+                .filter(|node| matches!(node.source, NodeSource::ChildBudget { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn the_guest_never_sets_the_top_task_budget() {
+        let mut journal = two_turns();
+        let run = propose_run(&mut journal, DEMO, &["true".to_string()]).unwrap();
+        assert!(authorize(&mut journal, run, Some("fixture-grant")));
+        // No granted budget: no model call and no child, whatever is asked.
+        assert_eq!(
+            ask_model(&mut journal, None, HOSTED_MODEL),
+            Err("no budget")
+        );
+        assert_eq!(
+            propose_child(&mut journal, run, DEMO_SRC, Some(budget(1, 1))),
+            Err("parent has no budget")
+        );
+        assert_eq!(journal.task_budget, None);
+        assert!(!record_task_budget(&mut journal, budget(0, 60)));
+        assert!(!record_task_budget(&mut journal, budget(5, 0)));
+        assert!(record_task_budget(&mut journal, budget(5, 60)));
+        // Recorded once: never raised or changed.
+        assert!(!record_task_budget(&mut journal, budget(50, 600)));
+        assert_eq!(journal.task_budget, Some(budget(5, 60)));
+    }
+
+    #[test]
+    fn hosted_and_local_model_calls_share_one_counter() {
+        let (mut journal, run) = task(budget(3, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        assert!(ask_model(&mut journal, Some(child), LOCAL_MODEL).is_ok());
+        assert_eq!(step_of(&journal, child).requests_used, 2);
+        assert_eq!(
+            ask_model(&mut journal, Some(child), LOCAL_MODEL),
+            Err("requests")
+        );
+        assert!(ask_model(&mut journal, None, LOCAL_MODEL).is_ok());
+        assert_eq!(task_requests_used(&journal), 3);
+        assert_eq!(ask_model(&mut journal, None, HOSTED_MODEL), Err("requests"));
+    }
+
+    #[test]
+    fn a_child_over_its_request_budget_stops_with_requests() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        let steps = journal.steps.len();
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("requests")
+        );
+        assert_eq!(journal.steps.len(), steps, "nothing asked after the limit");
+        assert_eq!(step_of(&journal, child).stop, Some(StopReason::Requests));
+        assert_eq!(
+            child_stops(&journal),
+            vec![(child, StopReason::Requests, 2)]
+        );
+        assert_eq!(
+            render_record(journal.events.last().unwrap()),
+            format!("child {child} stopped: requests (2 requests used)")
+        );
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("stopped")
+        );
+        assert_eq!(child_stops(&journal).len(), 1);
+    }
+
+    /// Stopping a parent stops its children, each with a recorded reason.
+    #[test]
+    fn a_stopped_child_stops_its_children() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let grandchild =
+            propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(ask_model(&mut journal, Some(grandchild), HOSTED_MODEL).is_ok());
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        // The child's budget is used up by the two calls in its subtree.
+        assert_eq!(
+            ask_model(&mut journal, Some(grandchild), HOSTED_MODEL),
+            Err("requests")
+        );
+        assert_eq!(
+            child_stops(&journal),
+            vec![
+                (child, StopReason::Requests, 2),
+                (grandchild, StopReason::Cancelled, 1)
+            ]
+        );
+        assert_eq!(step_of(&journal, grandchild).state, StepState::Cancelled);
+        assert_eq!(
+            propose_child(
+                &mut journal,
+                grandchild,
+                "localhost://Users/self/Projects/demo/src/lib/a",
+                Some(budget(1, 10))
+            ),
+            Err("parent stopped")
+        );
+    }
+
+    #[test]
+    fn a_time_refusal_stops_the_child_with_time() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(
+            !note_time_refusal(&mut journal, run),
+            "only a child stops with time"
+        );
+        assert!(note_time_refusal(&mut journal, child));
+        assert_eq!(step_of(&journal, child).stop, Some(StopReason::Time));
+        assert_eq!(child_stops(&journal), vec![(child, StopReason::Time, 0)]);
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("stopped")
+        );
+    }
+
+    #[test]
+    fn the_first_stop_reason_is_kept() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(1, 60))).unwrap();
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("requests")
+        );
+        assert!(!note_time_refusal(&mut journal, child));
+        assert!(!cancel_tree(&mut journal, child));
+        assert_eq!(step_of(&journal, child).stop, Some(StopReason::Requests));
+        assert_eq!(
+            child_stops(&journal),
+            vec![(child, StopReason::Requests, 1)]
+        );
+        let other = propose_child(&mut journal, run, DEMO_DOC, Some(budget(1, 60))).unwrap();
+        assert!(note_time_refusal(&mut journal, other));
+        assert!(cancel_task(&mut journal));
+        assert_eq!(step_of(&journal, other).stop, Some(StopReason::Time));
+        assert_eq!(step_of(&journal, child).stop, Some(StopReason::Requests));
+        assert_eq!(child_stops(&journal).len(), 2);
+    }
+
+    #[test]
+    fn a_long_inline_child_result_is_refused() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let host = open_child_host(&journal, run, DEMO_SRC).unwrap();
+        let before = journal.events.len();
+        assert!(!record_child_result(
+            &mut journal,
+            child,
+            &host,
+            &"x".repeat(CHILD_RESULT_CAP + 1)
+        ));
+        assert_eq!(journal.events.len(), before, "never cut, never stored");
+        assert!(record_child_result(
+            &mut journal,
+            child,
+            &host,
+            &"x".repeat(CHILD_RESULT_CAP)
+        ));
+        assert!(
+            !record_child_result(&mut journal, run, &host, "ok"),
+            "only for a child step"
+        );
+    }
+
+    #[test]
+    fn a_long_child_result_is_a_spill_pointer() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert!(dispatch(&mut journal, child));
+        let object = "localhost://Users/self/Projects/demo/src/result.txt";
+        let long = "y".repeat(CHILD_RESULT_CAP + 1);
+        assert!(observe(&mut journal, object, 1, &long));
+        assert!(spill_pointer(&mut journal, child, object));
+        assert_eq!(
+            text_at_spill(&journal.events, object).as_deref(),
+            Some(long.as_str())
+        );
+        assert!(journal
+            .events
+            .iter()
+            .all(|node| node.text != long || matches!(node.source, NodeSource::Observation(_))));
+    }
+
+    #[test]
+    fn cancelling_a_parent_stops_started_children_at_their_next_model_call() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert!(dispatch(&mut journal, child));
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        let host = open_child_host(&journal, run, DEMO_SRC).unwrap();
+        assert!(cancel_tree(&mut journal, run));
+        // Started: it keeps its state; its next call is refused, nothing asked.
+        assert_eq!(step_of(&journal, child).state, StepState::Dispatched);
+        assert_eq!(step_of(&journal, child).stop, Some(StopReason::Cancelled));
+        let steps = journal.steps.len();
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("stopped")
+        );
+        assert_eq!(journal.steps.len(), steps);
+        // Its partial result is kept, marked with the reason.
+        assert!(record_child_result(&mut journal, child, &host, "half done"));
+        assert_eq!(
+            journal.events.last().unwrap().text,
+            "partial (cancelled): half done"
+        );
+        assert_eq!(
+            child_stops(&journal),
+            vec![(child, StopReason::Cancelled, 1)]
+        );
+    }
+
+    #[test]
+    fn no_model_call_anywhere_in_a_cancelled_tree() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let grandchild =
+            propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        let held = ask_model(&mut journal, Some(grandchild), HOSTED_MODEL).unwrap();
+        assert!(cancel_tree(&mut journal, child));
+        assert_eq!(
+            ask_model(&mut journal, Some(grandchild), HOSTED_MODEL),
+            Err("stopped")
+        );
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("stopped")
+        );
+        assert_eq!(
+            step_of(&journal, held).state,
+            StepState::Cancelled,
+            "a prepared call below is cancelled"
+        );
+        assert_eq!(
+            child_stops(&journal),
+            vec![
+                (child, StopReason::Cancelled, 1),
+                (grandchild, StopReason::Cancelled, 1)
+            ]
+        );
+        // The rest of the task still runs until the task itself is cancelled.
+        assert!(ask_model(&mut journal, None, HOSTED_MODEL).is_ok());
+        let other = propose_child(&mut journal, run, DEMO_DOC, Some(budget(1, 60))).unwrap();
+        assert!(cancel_task(&mut journal));
+        assert!(!cancel_task(&mut journal));
+        assert_eq!(
+            ask_model(&mut journal, None, HOSTED_MODEL),
+            Err("cancelled")
+        );
+        assert_eq!(
+            ask_model(&mut journal, Some(other), HOSTED_MODEL),
+            Err("cancelled")
+        );
+        assert_eq!(step_of(&journal, other).stop, Some(StopReason::Cancelled));
+        assert_eq!(
+            propose_child(
+                &mut journal,
+                run,
+                "localhost://Users/self/Projects/demo/x",
+                Some(budget(1, 60))
+            ),
+            Err("parent stopped")
+        );
+    }
+
+    #[test]
+    fn a_cancelled_tree_stays_cancelled_after_resume() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        assert!(cancel_task(&mut journal));
+        let mut back = reloaded(&journal);
+        assert_eq!(back, without_grants(&journal));
+        assert!(back.cancelled_from.is_some());
+        assert_eq!(ask_model(&mut back, None, HOSTED_MODEL), Err("cancelled"));
+        assert_eq!(
+            ask_model(&mut back, Some(child), HOSTED_MODEL),
+            Err("cancelled")
+        );
+        assert_eq!(step_of(&back, child).stop, Some(StopReason::Cancelled));
+    }
+
+    #[test]
+    fn every_format_2_field_round_trips() {
+        let (mut journal, run) = task(budget(8, 600));
+        journal.depth = 1;
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(3, 60))).unwrap();
+        assert!(ask_model(&mut journal, Some(child), LOCAL_MODEL).is_ok());
+        assert!(note_time_refusal(&mut journal, child));
+        let other = propose_child(&mut journal, run, DEMO_DOC, Some(budget(1, 60))).unwrap();
+        assert!(cancel_task(&mut journal));
+        let back = reloaded(&journal);
+        assert_eq!(back, without_grants(&journal));
+        assert_eq!((back.depth, back.task_budget), (1, Some(budget(8, 600))));
+        assert_eq!(back.cancelled_from, Some(other));
+        let step = step_of(&back, child);
+        assert_eq!(
+            (step.budget, step.requests_used, step.stop),
+            (Some(budget(3, 60)), 1, Some(StopReason::Time))
+        );
+        assert_eq!(step_of(&back, other).stop, Some(StopReason::Cancelled));
+        assert_eq!(
+            replay(&model_bytes(&journal.events).unwrap()).unwrap(),
+            journal.events
+        );
+    }
+
+    /// A child never gets more than its parent, checked again on every load:
+    /// each rule broken in stored bytes refuses the load.
+    #[test]
+    fn child_limits_are_checked_again_after_reload() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(3, 60))).unwrap();
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        let good = journal.clone();
+        assert!(decode_journal(&encode_journal(&good, &[0; 32]).unwrap()).is_ok());
+        type Tamper = Box<dyn Fn(&mut Journal)>;
+        let cases: Vec<(&str, Tamper)> = vec![
+            (
+                "not a subset",
+                Box::new(move |j: &mut Journal| {
+                    step_mut(j, child).resource = "localhost://Users/self/Projects/other".into();
+                }),
+            ),
+            (
+                "over the parent's budget",
+                Box::new(move |j: &mut Journal| {
+                    let wider = budget(9, 60);
+                    step_mut(j, child).budget = Some(wider);
+                    for node in &mut j.events {
+                        if let NodeSource::ChildBudget { budget, .. } = &mut node.source {
+                            *budget = wider;
+                        }
+                    }
+                }),
+            ),
+            (
+                "over the parent's budget",
+                Box::new(|j: &mut Journal| j.task_budget = None),
+            ),
+            (
+                "over the parent's budget",
+                Box::new(|j: &mut Journal| {
+                    j.task_budget = Some(budget(2, 600));
+                }),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| step_mut(j, child).requests_used = 0),
+            ),
+            (
+                "record",
+                Box::new(|j: &mut Journal| {
+                    j.events
+                        .retain(|node| !matches!(node.source, NodeSource::ChildBudget { .. }));
+                }),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| {
+                    j.events.push(node(
+                        Role::User,
+                        NodeSource::ChildStop {
+                            child,
+                            reason: StopReason::Time,
+                            requests_used: 1,
+                        },
+                        "",
+                    ));
+                }),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| {
+                    step_mut(j, child).stop = Some(StopReason::Time);
+                }),
+            ),
+            ("depth limit", Box::new(|j: &mut Journal| j.depth = 2)),
+            (
+                "depth limit",
+                Box::new(|j: &mut Journal| j.depth = CHILD_DEPTH_LIMIT + 1),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| {
+                    step_mut(j, run).budget = Some(budget(1, 1));
+                }),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| step_mut(j, child).parent_id = Some(child + 5)),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| {
+                    let call = j
+                        .steps
+                        .iter_mut()
+                        .find(|step| step.kind == ProposalKind::Hosted)
+                        .unwrap();
+                    call.parent_id = Some(run);
+                }),
+            ),
+            (
+                "record",
+                Box::new(|j: &mut Journal| j.cancelled_from = Some(0)),
+            ),
+        ];
+        for (index, (reason, change)) in cases.iter().enumerate() {
+            let mut bad = good.clone();
+            change(&mut bad);
+            let bytes = encode_journal(&bad, &[0; 32]).unwrap();
+            assert_eq!(
+                decode_journal(&bytes).map(|_| ()),
+                Err(*reason),
+                "case {index}"
+            );
+        }
+    }
+
+    /// A child's grant is never more than its parent's.
+    #[test]
+    fn a_child_grant_is_a_subset_of_its_parent() {
+        let mut journal = two_turns();
+        assert!(record_task_budget(&mut journal, budget(8, 600)));
+        let run = propose_run(&mut journal, DEMO, &["true".to_string()]).unwrap();
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        // A parent with no grant has none to give.
+        assert!(!authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert!(authorize(&mut journal, run, Some("fixture-grant")));
+        for wider in [
+            DEMO,
+            DEMO_DOC,
+            "localhost://Users/self/Projects/demo/SRC",
+            "localhost://Users/self/Projects/demo//src",
+        ] {
+            assert!(
+                !authorize_child(&mut journal, child, Some("child-grant"), wider),
+                "{wider}"
+            );
+        }
+        assert!(!authorize_child(
+            &mut journal,
+            child,
+            Some("fixture-grant"),
+            DEMO_SRC
+        ));
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC_LIB
+        ));
+        // After a reload no grant is left; the same checks run again.
+        let mut back = reloaded(&journal);
+        assert_eq!(step_of(&back, child).grant, None);
+        assert!(
+            !authorize_child(&mut back, child, Some("child-grant"), DEMO_SRC),
+            "the parent has no grant either"
+        );
+        assert!(authorize(&mut back, run, Some("fixture-grant-2")));
+        assert!(authorize_child(
+            &mut back,
+            child,
+            Some("child-grant-2"),
+            DEMO_SRC
+        ));
+        // A stopped child gets nothing.
+        let (mut stopped, run) = task(budget(8, 600));
+        let child = propose_child(&mut stopped, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(note_time_refusal(&mut stopped, child));
+        assert!(!authorize_child(
+            &mut stopped,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+    }
+
+    /// A format 2 journal written before idea 2 (at cee6d55: a child with no
+    /// budget and a model call with no task budget) still loads and means the
+    /// same; under idea 2 its unbudgeted child and task make no model call.
+    const PRE_IDEA_2_JOURNAL: &[&str] = &[
+        "4541484a020001000000000000000000000000000000000000000000000000000000000000000000",
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "08000000012500000001011f000000596f75206172652074686520456c6173744f53206167656e74",
+        "20686f73742e29b5994e5fb22cb34f2927d069f40e9c95ba8018443d6847d80a80cbab4eb991010b",
+        "00000002030500000068656c6c6fd41e10bf57633e67561ec4e2132eb6cd3cbb7aae7419643a7ec9",
+        "9aea21e549ab012300000001131d0000005265706c7920696e206f6e652073686f72742070617261",
+        "67726170682e7f7601038fca3a126a5ac8c033ee56c3c59eb31b82c4d8970637592c4012ba200111",
+        "00000002030b0000007365636f6e64207475726e28538fd7f9dda927f4010533b7aeaf715ae9e4b6",
+        "349dde9aa423ffcbdbc0aef3012b0000000113250000004b65657020746865206669727374207379",
+        "7374656d206c696e6520756e6368616e6765642ef04853d3523062922e8c0ff93f929e0bdea995d8",
+        "1c1ff52079d3cd55a22add61038300000001000000000000000104240000006c6f63616c686f7374",
+        "3a2f2f55736572732f73656c662f50726f6a656374732f64656d6f01000000000000000000000000",
+        "00000000010000000400000074727565000000000000000000070000006d6963726f766d00000000",
+        "00000000000000000000000000000000000000000000000000000000e91b55f29b52bd7266c87ca3",
+        "cc1b9ab75d85ac39602df48ac54f032efef04e54037800000002000000000000000107280000006c",
+        "6f63616c686f73743a2f2f55736572732f73656c662f50726f6a656374732f64656d6f2f73726302",
+        "00000000000000000000000000000000000000000101000000000000000000000000000000000000",
+        "0000000000000000000000000000000000000000000000000023861ee70bad241c58cb9ea30c2472",
+        "2e736a1dee1ac6eb932b9f99cd21f41248036900000003000000000000000106190000006c6f6361",
+        "6c686f73743a2f2f4d6f64656c732f686f7374656403000000000000000000000000000000000000",
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "00000000000000c3169f72f843afd94ba022be99f8ade78ab5cef7af649f8786af11346e690b37c3",
+        "169f72f843afd94ba022be99f8ade78ab5cef7af649f8786af11346e690b37",
+    ];
+
+    #[test]
+    fn a_journal_written_before_idea_2_still_loads() {
+        let hex: String = PRE_IDEA_2_JOURNAL.concat();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect();
+        let (mut journal, prev, _) = decode_journal(&bytes).unwrap();
+        assert_eq!(
+            (journal.depth, journal.task_budget, journal.cancelled_from),
+            (0, None, None)
+        );
+        let child = journal
+            .steps
+            .iter()
+            .find(|step| step.kind == ProposalKind::Child)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (child.budget, child.requests_used, child.stop),
+            (None, 0, None)
+        );
+        assert_eq!(encode_journal(&journal, &prev).unwrap(), bytes);
+        assert_eq!(
+            ask_model(&mut journal, Some(child.id), HOSTED_MODEL),
+            Err("no budget")
+        );
+        assert_eq!(
+            ask_model(&mut journal, None, HOSTED_MODEL),
+            Err("no budget")
         );
     }
 }
