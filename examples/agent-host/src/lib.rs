@@ -600,7 +600,7 @@ fn decode_turn(payload: &[u8]) -> Result<Turn, &'static str> {
 /// checked before any record is read. Returns the journal, `prev_head`, and
 /// this version's head.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn decode_journal(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static str> {
+fn decode_bytes(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static str> {
     if bytes.len() > JOURNAL_CAP {
         return Err("too large");
     }
@@ -676,6 +676,53 @@ fn decode_journal(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'stati
     journal.compact_backup = backup.then_some((backup_nodes, backup_epoch));
     journal.compact_pending = pending.then_some(pending_nodes);
     Ok((journal, prev_head, link))
+}
+
+/// Decode format 1 (see `decode_bytes`), then check the stored paths (see
+/// `stored_paths_ok`). Every stored journal loads through here.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn decode_journal(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static str> {
+    let (journal, prev_head, head) = decode_bytes(bytes)?;
+    stored_paths_ok(&journal)?;
+    Ok((journal, prev_head, head))
+}
+
+/// A stored journal, of any age, passes the path rule a live one does. Every
+/// read (in the log, the compaction backup, and the pending nodes) and every
+/// step path must pass `path_refusal`, and no change may name one file twice
+/// (by `path_key`). The first miss refuses the load with its reason.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn stored_paths_ok(journal: &Journal) -> Result<(), &'static str> {
+    let nodes = journal
+        .events
+        .iter()
+        .chain(journal.compact_backup.iter().flat_map(|(nodes, _)| nodes))
+        .chain(journal.compact_pending.iter().flatten());
+    let reads = nodes.filter_map(read_observation).map(|row| row.resource);
+    let steps = journal
+        .steps
+        .iter()
+        .filter(|step| !step.resource.is_empty())
+        .map(|step| step.resource.clone());
+    for resource in reads.chain(steps) {
+        if let Some(refusal) = path_refusal(&resource) {
+            return Err(refusal.reason());
+        }
+    }
+    let edits: Vec<&Step> = journal
+        .steps
+        .iter()
+        .filter(|step| step.kind == ProposalKind::Edit)
+        .collect();
+    for (index, step) in edits.iter().enumerate() {
+        if edits[..index].iter().any(|earlier| {
+            earlier.effect_id == step.effect_id
+                && path_key(&earlier.resource) == path_key(&step.resource)
+        }) {
+            return Err(Refusal::OneFileTwice.reason());
+        }
+    }
+    Ok(())
 }
 
 /// The journal as it reads back from storage: every grant is cleared.
@@ -1190,12 +1237,21 @@ fn sha256(message: &[u8]) -> [u8; 32] {
 
 /// One recorded read. Older versions stay in the log. The last row for a
 /// resource is the current one.
+///
+/// A read may also carry the Runtime revision it read (`revision`) and the
+/// part of the file it showed (`window`: first line and number of whole
+/// lines). A read with a window shows only those lines; `cut` means the text
+/// ends in a partial line, which is not part of the window. A read with no
+/// window showed the whole file.
 #[cfg(any(test, target_arch = "wasm32"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Observation {
     resource: String,
     version: u64,
     text_hash: [u8; 32],
+    revision: Option<String>,
+    window: Option<(u64, u64)>,
+    cut: bool,
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -1205,14 +1261,62 @@ fn observation_record(resource: &str, version: u64, text: &str) -> String {
     format!("{version} {hex} {resource}\n{text}")
 }
 
+/// The record of a read that names its Runtime revision and, for a part of a
+/// file, its window.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn bound_observation_record(
+    resource: &str,
+    version: u64,
+    revision: &str,
+    window: Option<(u64, u64)>,
+    cut: bool,
+    text: &str,
+) -> String {
+    let hash = sha256(text.as_bytes());
+    let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
+    let mut head = format!("{version} {hex} {resource} revision={revision}");
+    if let Some((first, count)) = window {
+        head.push_str(&format!(" lines={first}+{count}"));
+        if cut {
+            head.push_str(" cut");
+        }
+    }
+    format!("{head}\n{text}")
+}
+
+/// The whole lines of a shown text: all of it, or, when the last line was
+/// cut, everything up to and including the last line break.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn whole_lines(text: &str, cut: bool) -> &str {
+    if !cut {
+        return text;
+    }
+    text.rfind('\n').map_or("", |at| &text[..=at])
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn line_count(text: &str) -> u64 {
+    u64::try_from(text.split_inclusive('\n').count()).unwrap_or(u64::MAX)
+}
+
+/// A revision is one token: not empty, no whitespace, no '='.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn revision_ok(revision: &str) -> bool {
+    !revision.is_empty() && !revision.contains('=') && !revision.chars().any(char::is_whitespace)
+}
+
 #[cfg(any(test, target_arch = "wasm32"))]
 fn read_observation(node: &SurfaceNode) -> Option<Observation> {
     if node.source != NodeSource::Observation {
         return None;
     }
     let (head, text) = node.text.split_once('\n')?;
-    let mut parts = head.splitn(3, ' ');
-    let version = parts.next()?.parse().ok()?;
+    let mut parts = head.split(' ');
+    let version: u64 = parts.next()?.parse().ok()?;
+    // u64::MAX is never a version number: a row that names it is not a read.
+    if version == u64::MAX {
+        return None;
+    }
     let hex = parts.next()?;
     let resource = parts.next()?;
     if resource.is_empty() || hex.len() != 64 {
@@ -1225,10 +1329,43 @@ fn read_observation(node: &SurfaceNode) -> Option<Observation> {
     if text_hash != sha256(text.as_bytes()) {
         return None;
     }
+    // An unknown or repeated word makes the row unreadable: fail closed.
+    let (mut revision, mut window, mut cut) = (None, None, false);
+    for word in parts {
+        if let Some(value) = word.strip_prefix("revision=") {
+            if revision.is_some() || !revision_ok(value) {
+                return None;
+            }
+            revision = Some(value.to_string());
+        } else if let Some(value) = word.strip_prefix("lines=") {
+            let (first, count) = value.split_once('+')?;
+            let (first, count): (u64, u64) = (first.parse().ok()?, count.parse().ok()?);
+            if window.is_some() || first == 0 {
+                return None;
+            }
+            window = Some((first, count));
+        } else if word == "cut" && !cut {
+            cut = true;
+        } else {
+            return None;
+        }
+    }
+    if window.is_some() && revision.is_none() || cut && window.is_none() {
+        return None;
+    }
+    if let Some((_, count)) = window {
+        let whole = whole_lines(text, cut);
+        if line_count(whole) != count || cut && whole.len() == text.len() {
+            return None;
+        }
+    }
     Some(Observation {
         resource: resource.to_string(),
         version,
         text_hash,
+        revision,
+        window,
+        cut,
     })
 }
 
@@ -1240,6 +1377,8 @@ fn current_observation(events: &[SurfaceNode], resource: &str) -> Option<Observa
         .find_map(|node| read_observation(node).filter(|row| row.resource == resource))
 }
 
+/// The whole text of a file as last read. When the last read showed only a
+/// window, the whole text is not known, and this returns nothing.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn current_observed_text(events: &[SurfaceNode], resource: &str) -> Option<String> {
     events.iter().rev().find_map(|node| {
@@ -1247,12 +1386,18 @@ fn current_observed_text(events: &[SurfaceNode], resource: &str) -> Option<Strin
         if row.resource != resource {
             return None;
         }
-        node.text.split_once('\n').map(|(_, text)| text.to_string())
-    })
+        Some(
+            row.window
+                .is_none()
+                .then(|| node.text.split_once('\n').map(|(_, text)| text.to_string()))
+                .flatten(),
+        )
+    })?
 }
 
-/// Every version this file has been shown, lowest number first. A later read
-/// of the same version keeps that version's text. A blank name or a host path
+/// Every version this file has been shown whole, lowest number first. A
+/// later read of the same version keeps that version's text. A windowed read
+/// is not a whole version and is left out. A blank name or a host path
 /// returns nothing. This list is not a grant and does not change the file.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn version_list(events: &[SurfaceNode], resource: &str) -> Vec<(u64, String)> {
@@ -1264,7 +1409,7 @@ fn version_list(events: &[SurfaceNode], resource: &str) -> Vec<(u64, String)> {
         let Some(row) = read_observation(node) else {
             continue;
         };
-        if row.resource != resource {
+        if row.resource != resource || row.window.is_some() {
             continue;
         }
         let Some((_, text)) = node.text.split_once('\n') else {
@@ -1280,14 +1425,178 @@ fn version_list(events: &[SurfaceNode], resource: &str) -> Vec<(u64, String)> {
     rows
 }
 
-/// Append a read. An empty resource, a resource with whitespace, or a host
-/// path adds nothing. A higher version is a new read. An older version is allowed only when the
+/// Every reason an edit proposal, its provider request, or its written
+/// result can be refused. Each refusal writes exactly one refusal record with
+/// this reason. A new reason is a new variant: it is then in `Refusal::ALL`,
+/// and the refusal table test must trigger it.
+macro_rules! refusals {
+    ($($name:ident => $reason:literal,)*) => {
+        #[cfg(any(test, target_arch = "wasm32"))]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum Refusal {
+            $($name,)*
+        }
+
+        #[cfg(any(test, target_arch = "wasm32"))]
+        impl Refusal {
+            #[cfg(test)]
+            const ALL: &'static [Refusal] = &[$(Refusal::$name,)*];
+
+            fn reason(self) -> &'static str {
+                match self {
+                    $(Refusal::$name => $reason,)*
+                }
+            }
+        }
+    };
+}
+
+refusals! {
+    PathNotCanonical => "path not canonical",
+    PathNotNfc => "path not NFC",
+    ChangeSize => "change size",
+    OneFileTwice => "one file twice in one change",
+    NotObserved => "not observed",
+    Stale => "stale",
+    NoRevision => "no revision",
+    StaleRevision => "stale revision",
+    Empty => "empty",
+    OutsideWindow => "outside the read window",
+    NotUnique => "not unique",
+    HostPath => "host path",
+    WindowLineBreak => "edit removes the window's last line break",
+    RepeatedNoOp => "repeated no-op edit",
+    NoChange => "no change",
+    NotDispatched => "not dispatched",
+    EarlierWriteOpen => "an earlier write is open",
+    WrittenMismatch => "written files do not match the change",
+    NoVersionLeft => "no version number left",
+}
+
+/// Why a path is refused, or nothing. A path must be canonical (see
+/// `canonical_resource`) and already NFC, so one name has one spelling. A
+/// path in another normal form is refused, never converted: fail closed.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn path_refusal(resource: &str) -> Option<Refusal> {
+    if !canonical_resource(resource) {
+        Some(Refusal::PathNotCanonical)
+    } else if !unicode_normalization::is_nfc(resource) {
+        Some(Refusal::PathNotNfc)
+    } else {
+        None
+    }
+}
+
+/// A resource is canonical when no other spelling of it names the same file:
+/// after the scheme, every segment is non-empty, is not "." or "..", and does
+/// not end in "." (the segment rule of the Runtime's Agents check). So "//",
+/// "/./", "/../", a trailing "/" and a trailing "." are refused.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn canonical_resource(resource: &str) -> bool {
+    if resource.is_empty() || resource.chars().any(char::is_whitespace) || host_path(resource) {
+        return false;
+    }
+    let rest = match resource.split_once("://") {
+        Some(("", _)) => return false,
+        Some((_, rest)) => rest,
+        None => resource,
+    };
+    !rest.is_empty()
+        && rest.split('/').all(|segment| {
+            !segment.is_empty() && segment != "." && segment != ".." && !segment.ends_with('.')
+        })
+}
+
+/// The key that counts one file once, whatever its case and normal form:
+/// stricter than the file system, which is safe for a limit. It follows
+/// Unicode's canonical caseless match: NFD, then fold case, then NFD again,
+/// because folding case can change the normal form (U+0390 and U+03AA
+/// U+0301 are one name). The fold is lowercase, uppercase, lowercase, so
+/// capital sharp s (U+1E9E), small sharp s and "ss" are one name too. Every
+/// key is NFD and is its own key. The no-op count, both duplicate checks and
+/// the check on load all use this one key.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn path_key(resource: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    let decomposed: String = resource.nfd().collect();
+    let folded = decomposed.to_lowercase().to_uppercase().to_lowercase();
+    folded.nfd().collect()
+}
+
+/// A version of a file is bound forever to the revision (or to no revision)
+/// it was first read at.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn version_bound_elsewhere(
+    events: &[SurfaceNode],
+    resource: &str,
+    version: u64,
+    revision: Option<&str>,
+) -> bool {
+    events.iter().any(|node| {
+        read_observation(node).is_some_and(|row| {
+            row.resource == resource
+                && row.version == version
+                && row.revision.as_deref() != revision
+        })
+    })
+}
+
+/// The next version number never used for this file, or nothing when no
+/// number is left. u64::MAX is never a version, so it is never returned.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn next_version(events: &[SurfaceNode], resource: &str) -> Option<u64> {
+    let highest = events
+        .iter()
+        .filter_map(read_observation)
+        .filter(|row| row.resource == resource)
+        .map(|row| row.version)
+        .max();
+    match highest {
+        None => Some(1),
+        Some(version) => version.checked_add(1).filter(|next| *next != u64::MAX),
+    }
+}
+
+/// The reads that count as seen now: the newest read of this file and the
+/// reads just before it with the same version and the same revision. A read
+/// at another revision (or with none) ends the run, so it clears what was
+/// seen before it.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn current_reads<'a>(events: &'a [SurfaceNode], resource: &str) -> Vec<(Observation, &'a str)> {
+    let mut rows = Vec::new();
+    for node in events.iter().rev() {
+        let Some(row) = read_observation(node) else {
+            continue;
+        };
+        if row.resource != resource {
+            continue;
+        }
+        if let Some((first, _)) = rows.first() {
+            let first: &Observation = first;
+            if row.version != first.version || row.revision != first.revision {
+                break;
+            }
+        }
+        let Some((_, text)) = node.text.split_once('\n') else {
+            continue;
+        };
+        rows.push((row, text));
+    }
+    rows.reverse();
+    rows
+}
+
+/// Append a read. A path that `path_refusal` refuses, or the version
+/// u64::MAX, adds nothing. A higher version is a new read. An older version is allowed only when the
 /// text still matches that version, so a reread can make it current again
 /// without replacing the page. This does not start a series and does not
 /// read a file.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn observe(journal: &mut Journal, resource: &str, version: u64, text: &str) -> bool {
-    if resource.is_empty() || resource.chars().any(char::is_whitespace) || host_path(resource) {
+    if path_refusal(resource).is_some()
+        || version == u64::MAX
+        || version_bound_elsewhere(&journal.events, resource, version, None)
+    {
         return false;
     }
     if let Some(row) = current_observation(&journal.events, resource) {
@@ -1301,6 +1610,185 @@ fn observe(journal: &mut Journal, resource: &str, version: u64, text: &str) -> b
     journal.events.push(SurfaceNode {
         role: Role::User,
         text: observation_record(resource, version, text),
+        source: NodeSource::Observation,
+    });
+    journal.epoch == epoch
+}
+
+/// Every whole line the current reads of a file have shown (see
+/// `current_reads`), by line number (from 1). Nothing when `version` is not
+/// the version those reads are at.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn seen_lines(
+    events: &[SurfaceNode],
+    resource: &str,
+    version: u64,
+) -> Option<std::collections::BTreeMap<u64, String>> {
+    let rows = current_reads(events, resource);
+    if rows.first().is_none_or(|(row, _)| row.version != version) {
+        return None;
+    }
+    let mut lines = std::collections::BTreeMap::new();
+    for (row, text) in rows {
+        let first = row.window.map_or(1, |(first, _)| first);
+        put_lines(&mut lines, first, whole_lines(text, row.cut));
+    }
+    Some(lines)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn put_lines(lines: &mut std::collections::BTreeMap<u64, String>, first: u64, text: &str) {
+    let mut at = first;
+    for line in text.split_inclusive('\n') {
+        lines.insert(at, line.to_string());
+        at = at.saturating_add(1);
+    }
+}
+
+/// The lines one version of a file has shown, as runs of consecutive whole
+/// lines: (first line, text). A whole read is one run from line 1. Lines
+/// never shown are in no run. Nothing when the version was never read.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn seen_runs(events: &[SurfaceNode], resource: &str, version: u64) -> Option<Vec<(u64, String)>> {
+    let mut runs: Vec<(u64, u64, String)> = Vec::new();
+    for (at, line) in seen_lines(events, resource, version)? {
+        match runs.last_mut() {
+            Some((_, last, text)) if *last + 1 == at => {
+                *last = at;
+                text.push_str(&line);
+            }
+            _ => runs.push((at, at, line)),
+        }
+    }
+    Some(
+        runs.into_iter()
+            .map(|(first, _, text)| (first, text))
+            .collect(),
+    )
+}
+
+/// Where `old` is in what one version of a file has shown: the one run that
+/// holds it exactly once, and no other run holding it. A read that showed
+/// only a window covers only that window.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn find_in_seen(
+    events: &[SurfaceNode],
+    resource: &str,
+    version: u64,
+    old: &str,
+) -> Result<(u64, String), Refusal> {
+    let runs = seen_runs(events, resource, version).ok_or(Refusal::NotObserved)?;
+    let whole = events_show_whole(events, resource, version);
+    let mut found = None;
+    let mut count = 0;
+    for (first, text) in runs {
+        let here = text.matches(old).count();
+        count += here;
+        if here == 1 {
+            found = Some((first, text));
+        }
+    }
+    match (count, found) {
+        (1, Some(run)) => Ok(run),
+        (0, _) if !whole => Err(Refusal::OutsideWindow),
+        _ => Err(Refusal::NotUnique),
+    }
+}
+
+/// The edit must keep a window a window: when only part of the file was
+/// read, the run must still end where it ended, at a line break, or the
+/// edited line would join a line nobody has seen. Host paths in the text are
+/// refused, as for a single write.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn edit_keeps_its_window(run: &str, whole: bool, old: &str, new: &str) -> Result<(), Refusal> {
+    if host_path(old) || host_path(new) {
+        return Err(Refusal::HostPath);
+    }
+    if !whole && run.ends_with('\n') && !run.replacen(old, new, 1).ends_with('\n') {
+        return Err(Refusal::WindowLineBreak);
+    }
+    Ok(())
+}
+
+/// Append a read that names the Runtime revision it read. `window` is the
+/// first line shown, or nothing for the whole file; `cut` means the text ends
+/// in a partial line. A refused path, the version u64::MAX, a window with no
+/// whole line, an unknown revision word,
+/// a version older than the current one, or a second read of the current
+/// version that names another revision or disagrees on a line adds nothing.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn observe_read(
+    journal: &mut Journal,
+    resource: &str,
+    version: u64,
+    revision: &str,
+    window: Option<u64>,
+    cut: bool,
+    text: &str,
+) -> bool {
+    if path_refusal(resource).is_some()
+        || version == u64::MAX
+        || !revision_ok(revision)
+        || version_bound_elsewhere(&journal.events, resource, version, Some(revision))
+    {
+        return false;
+    }
+    let window = match window {
+        None if cut => return false,
+        None => None,
+        Some(first) => {
+            let count = line_count(whole_lines(text, cut));
+            if first == 0 || count == 0 || cut && whole_lines(text, cut).len() == text.len() {
+                return false;
+            }
+            Some((first, count))
+        }
+    };
+    if let Some(row) = current_observation(&journal.events, resource) {
+        if version < row.version {
+            return false;
+        }
+        if version == row.version {
+            if row.revision.as_deref() != Some(revision) {
+                return false;
+            }
+            // The same version may be read again in parts; every line it
+            // shows again must be the line it showed before.
+            let Some(before) = seen_lines(&journal.events, resource, version) else {
+                return false;
+            };
+            let mut shown = std::collections::BTreeMap::new();
+            put_lines(
+                &mut shown,
+                window.map_or(1, |(first, _)| first),
+                whole_lines(text, cut),
+            );
+            if shown
+                .iter()
+                .any(|(at, line)| before.get(at).is_some_and(|seen| seen != line))
+            {
+                return false;
+            }
+            // A whole read fixes the number of lines; no read of the same
+            // version may show a line past it.
+            let whole_count = |lines: &std::collections::BTreeMap<u64, String>| {
+                u64::try_from(lines.len()).unwrap_or(u64::MAX)
+            };
+            let last = |lines: &std::collections::BTreeMap<u64, String>| {
+                lines.keys().next_back().copied().unwrap_or(0)
+            };
+            if events_show_whole(&journal.events, resource, version)
+                && last(&shown) > whole_count(&before)
+                || window.is_none() && last(&before) > whole_count(&shown)
+            {
+                return false;
+            }
+        }
+    }
+    let epoch = journal.epoch;
+    journal.events.push(SurfaceNode {
+        role: Role::User,
+        text: bound_observation_record(resource, version, revision, window, cut, text),
         source: NodeSource::Observation,
     });
     journal.epoch == epoch
@@ -1366,6 +1854,7 @@ fn earlier_write_is_open(journal: &Journal, step_id: u64) -> bool {
     }
     journal.steps.iter().any(|earlier| {
         earlier.id < step.id
+            && earlier.effect_id != step.effect_id
             && is_write(earlier.kind)
             && !earlier.has_result
             && matches!(
@@ -1432,8 +1921,35 @@ fn propose_read(journal: &mut Journal, resource: &str) -> u64 {
     id
 }
 
+/// How many times the same edit that changes nothing may be proposed for one
+/// file. The next one is refused, so a model cannot loop on it.
+#[cfg(any(test, target_arch = "wasm32"))]
+const NOOP_EDIT_LIMIT: usize = 2;
+
+/// The same no-op edit (old equal to new) has already been proposed for this
+/// file `NOOP_EDIT_LIMIT` times.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn noop_edit_repeated(journal: &Journal, resource: &str, old: &str, new: &str) -> bool {
+    old == new
+        && journal
+            .steps
+            .iter()
+            .filter(|step| {
+                step.kind == ProposalKind::Edit
+                    && path_key(&step.resource) == path_key(resource)
+                    && step.old == old
+                    && step.new == new
+            })
+            .count()
+            >= NOOP_EDIT_LIMIT
+}
+
 /// Record an edit proposal. An unread target, a stale version, empty old
-/// text, or old text that does not occur once creates no step. This does not write.
+/// text, old text that is not exactly once in what that version has shown
+/// (a read that showed a window covers only that window), or a no-op edit
+/// repeated past the limit creates no step. A path that is not canonical or
+/// not NFC is refused. Every refusal writes one refusal record. This does not
+/// write.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn propose_edit(
     journal: &mut Journal,
@@ -1442,20 +1958,74 @@ fn propose_edit(
     new: &str,
     seen: Option<u64>,
 ) -> Result<u64, &'static str> {
+    let result = propose_edit_checked(journal, resource, old, new, seen);
+    result.map_err(|refusal| {
+        record_refusal(journal, refusal, &refused_path(resource));
+        refusal.reason()
+    })
+}
+
+/// The log without refusal records: what a refusal must leave unchanged.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn without_refusal_records(events: &[SurfaceNode]) -> Vec<SurfaceNode> {
+    events
+        .iter()
+        .filter(|node| !is_refusal_record(node))
+        .cloned()
+        .collect()
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn is_refusal_record(node: &SurfaceNode) -> bool {
+    node.source == NodeSource::Person && node.text.starts_with("refused\n")
+}
+
+/// One refusal record: the word `refused`, the reason, and what was refused.
+/// It is journal data the person and the model can see. It is not a step and
+/// does not grant.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn record_refusal(journal: &mut Journal, refusal: Refusal, what: &str) {
+    journal.events.push(SurfaceNode {
+        role: Role::User,
+        text: format!("refused\n{}\n{what}", refusal.reason()),
+        source: NodeSource::Person,
+    });
+}
+
+/// A refused path is written into the record only when it passes
+/// `path_refusal`.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn refused_path(resource: &str) -> String {
+    match path_refusal(resource) {
+        None => resource.to_string(),
+        Some(Refusal::PathNotNfc) => "(a path that is not NFC)".to_string(),
+        Some(_) => "(a path that is not canonical)".to_string(),
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn propose_edit_checked(
+    journal: &mut Journal,
+    resource: &str,
+    old: &str,
+    new: &str,
+    seen: Option<u64>,
+) -> Result<u64, Refusal> {
+    if let Some(refusal) = path_refusal(resource) {
+        return Err(refusal);
+    }
     let Some(row) = current_observation(&journal.events, resource) else {
-        return Err("not observed");
+        return Err(Refusal::NotObserved);
     };
     if seen != Some(row.version) {
-        return Err("stale");
+        return Err(Refusal::Stale);
     }
     if old.is_empty() {
-        return Err("empty");
+        return Err(Refusal::Empty);
     }
-    let Some(text) = current_observed_text(&journal.events, resource) else {
-        return Err("not observed");
-    };
-    if text.matches(old).count() != 1 {
-        return Err("not unique");
+    find_in_seen(&journal.events, resource, row.version, old)?;
+    if noop_edit_repeated(journal, resource, old, new) {
+        return Err(Refusal::RepeatedNoOp);
     }
     let id = propose_step(journal);
     let step = journal
@@ -1469,6 +2039,340 @@ fn propose_edit(
     step.new = new.to_string();
     step.seen_version = Some(row.version);
     Ok(id)
+}
+
+/// One file's part of a change: the revision the edit was made against, the
+/// text it replaces, and the new text.
+#[cfg(any(test, target_arch = "wasm32"))]
+struct EditSpec<'a> {
+    resource: &'a str,
+    revision: &'a str,
+    old: &'a str,
+    new: &'a str,
+}
+
+/// The most files one change may touch.
+#[cfg(any(test, target_arch = "wasm32"))]
+const CHANGE_FILES_LIMIT: usize = 16;
+
+/// Record a change of one or more files, written all or none. Every file is
+/// checked before any step is made: it must be read, the read must carry the
+/// Runtime revision, the edit must name that same revision, and its old text
+/// must be exactly once in what that revision has shown. A file named twice,
+/// or any miss, creates no step at all and names the edit and the reason.
+/// The steps share one effect id, the first step's id. A path that is not
+/// canonical or not NFC is refused, and one file is one file whatever its
+/// case. Every refusal writes one refusal record. This does not write.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn propose_change(
+    journal: &mut Journal,
+    edits: &[EditSpec<'_>],
+) -> Result<Vec<u64>, (usize, &'static str)> {
+    let result = propose_change_checked(journal, edits);
+    result.map_err(|(index, refusal)| {
+        let what = match edits.get(index) {
+            Some(edit) if refusal != Refusal::ChangeSize => {
+                format!("edit {index}: {}", refused_path(edit.resource))
+            }
+            _ => format!("a change of {} files", edits.len()),
+        };
+        record_refusal(journal, refusal, &what);
+        (index, refusal.reason())
+    })
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn propose_change_checked(
+    journal: &mut Journal,
+    edits: &[EditSpec<'_>],
+) -> Result<Vec<u64>, (usize, Refusal)> {
+    if edits.is_empty() || edits.len() > CHANGE_FILES_LIMIT {
+        return Err((0, Refusal::ChangeSize));
+    }
+    let mut versions = Vec::with_capacity(edits.len());
+    for (index, edit) in edits.iter().enumerate() {
+        if let Some(refusal) = path_refusal(edit.resource) {
+            return Err((index, refusal));
+        }
+        if edits[..index]
+            .iter()
+            .any(|earlier| path_key(earlier.resource) == path_key(edit.resource))
+        {
+            return Err((index, Refusal::OneFileTwice));
+        }
+        let Some(row) = current_observation(&journal.events, edit.resource) else {
+            return Err((index, Refusal::NotObserved));
+        };
+        let Some(read) = row.revision.as_deref() else {
+            return Err((index, Refusal::NoRevision));
+        };
+        if edit.revision != read {
+            return Err((index, Refusal::StaleRevision));
+        }
+        if edit.old.is_empty() {
+            return Err((index, Refusal::Empty));
+        }
+        let (_, run) = find_in_seen(&journal.events, edit.resource, row.version, edit.old)
+            .map_err(|reason| (index, reason))?;
+        let whole = events_show_whole(&journal.events, edit.resource, row.version);
+        edit_keeps_its_window(&run, whole, edit.old, edit.new).map_err(|reason| (index, reason))?;
+        if noop_edit_repeated(journal, edit.resource, edit.old, edit.new) {
+            return Err((index, Refusal::RepeatedNoOp));
+        }
+        versions.push(row.version);
+    }
+    let mut ids = Vec::with_capacity(edits.len());
+    for (edit, version) in edits.iter().zip(versions) {
+        let id = propose_step(journal);
+        let effect_id = ids.first().copied().unwrap_or(id);
+        let step = journal
+            .steps
+            .iter_mut()
+            .find(|step| step.id == id)
+            .expect("just pushed");
+        step.kind = ProposalKind::Edit;
+        step.resource = edit.resource.to_string();
+        step.old = edit.old.to_string();
+        step.new = edit.new.to_string();
+        step.seen_version = Some(version);
+        step.effect_id = effect_id;
+        ids.push(id);
+    }
+    Ok(ids)
+}
+
+/// One file of a change, checked against the journal now: the revision it
+/// was read at and the run of shown lines that holds its old text.
+#[cfg(any(test, target_arch = "wasm32"))]
+struct BoundEdit {
+    step_id: u64,
+    resource: String,
+    revision: String,
+    whole: bool,
+    first_line: u64,
+    run: String,
+    old: String,
+    new: String,
+}
+
+/// Check every file of one change, before anything is sent or recorded.
+/// Each step must be a dispatched edit with a grant and no result; its path
+/// must pass `path_refusal` and name a file no other step of the change
+/// names; no write outside this change may still be open; the file's current
+/// read must be the version the edit was made against, carry a revision, and
+/// still show the old text exactly once. One miss refuses the whole change.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn bind_change(journal: &Journal, effect_id: u64) -> Result<Vec<BoundEdit>, Refusal> {
+    let steps: Vec<&Step> = journal
+        .steps
+        .iter()
+        .filter(|step| step.kind == ProposalKind::Edit && step.effect_id == effect_id)
+        .collect();
+    if steps.is_empty() {
+        return Err(Refusal::NoChange);
+    }
+    let mut bound: Vec<BoundEdit> = Vec::with_capacity(steps.len());
+    for step in steps {
+        if step.state != StepState::Dispatched
+            || step.grant.as_deref().is_none_or(str::is_empty)
+            || step.has_result
+        {
+            return Err(Refusal::NotDispatched);
+        }
+        if let Some(refusal) = path_refusal(&step.resource) {
+            return Err(refusal);
+        }
+        if bound
+            .iter()
+            .any(|earlier| path_key(&earlier.resource) == path_key(&step.resource))
+        {
+            return Err(Refusal::OneFileTwice);
+        }
+        if earlier_write_is_open(journal, step.id) {
+            return Err(Refusal::EarlierWriteOpen);
+        }
+        let Some(row) = current_observation(&journal.events, &step.resource) else {
+            return Err(Refusal::NotObserved);
+        };
+        if step.seen_version != Some(row.version) {
+            return Err(Refusal::Stale);
+        }
+        let Some(revision) = row.revision.clone() else {
+            return Err(Refusal::NoRevision);
+        };
+        if step.old.is_empty() {
+            return Err(Refusal::Empty);
+        }
+        let (first_line, run) =
+            find_in_seen(&journal.events, &step.resource, row.version, &step.old)?;
+        let whole = seen_runs(&journal.events, &step.resource, row.version)
+            .is_some_and(|runs| runs.len() == 1)
+            && first_line == 1
+            && events_show_whole(&journal.events, &step.resource, row.version);
+        edit_keeps_its_window(&run, whole, &step.old, &step.new)?;
+        bound.push(BoundEdit {
+            step_id: step.id,
+            resource: step.resource.clone(),
+            revision,
+            whole,
+            first_line,
+            run,
+            old: step.old.clone(),
+            new: step.new.clone(),
+        });
+    }
+    Ok(bound)
+}
+
+/// One of the current reads of this file, at this version, showed it whole.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn events_show_whole(events: &[SurfaceNode], resource: &str, version: u64) -> bool {
+    current_reads(events, resource)
+        .iter()
+        .any(|(row, _)| row.version == version && row.window.is_none())
+}
+
+/// The one provider request for a change: every file, each with the Runtime
+/// revision it was read at (`if_revision`), the lines it may touch, and the
+/// text to replace there. The provider applies all files or none. A change
+/// that does not bind sends nothing and writes one refusal record.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn edit_request(journal: &mut Journal, effect_id: u64) -> Result<Vec<u8>, &'static str> {
+    let result = bind_change(journal, effect_id);
+    result.map(|bound| request_body(&bound)).map_err(|refusal| {
+        record_refusal(journal, refusal, &format!("change {effect_id}"));
+        refusal.reason()
+    })
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn request_body(bound: &[BoundEdit]) -> Vec<u8> {
+    let files: Vec<serde_json::Value> = bound
+        .iter()
+        .map(|edit| {
+            serde_json::json!({
+                "path": edit.resource,
+                "if_revision": edit.revision,
+                "first_line": edit.first_line,
+                "line_count": line_count(&edit.run),
+                "old": edit.old,
+                "new": edit.new,
+            })
+        })
+        .collect();
+    serde_json::json!({ "op": "edit", "all_or_none": true, "files": files })
+        .to_string()
+        .into_bytes()
+}
+
+/// Record that the provider wrote a whole change. `written` names each file
+/// of the change once, with the revision the provider gave its new text.
+/// Every file is checked first; one miss records nothing for any file and
+/// denies every step of the change. Each file then gets a new read: the
+/// whole new text when the old version was read whole, otherwise only the
+/// edited lines. When a file has no version number left, nothing is
+/// recorded and every step is denied. Every refusal writes one refusal
+/// record. This does not write a file.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn note_change_wrote(
+    journal: &mut Journal,
+    effect_id: u64,
+    written: &[(&str, &str)],
+) -> Result<(), &'static str> {
+    let result = note_change_wrote_checked(journal, effect_id, written);
+    result.map_err(|refusal| {
+        record_refusal(journal, refusal, &format!("change {effect_id}"));
+        refusal.reason()
+    })
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn note_change_wrote_checked(
+    journal: &mut Journal,
+    effect_id: u64,
+    written: &[(&str, &str)],
+) -> Result<(), Refusal> {
+    let deny = |journal: &mut Journal| {
+        for step in journal.steps.iter_mut() {
+            if step.kind == ProposalKind::Edit
+                && step.effect_id == effect_id
+                && step.state == StepState::Dispatched
+                && !step.has_result
+            {
+                step.state = StepState::Denied;
+            }
+        }
+    };
+    let bound = match bind_change(journal, effect_id) {
+        Ok(bound) => bound,
+        Err(refusal) => {
+            if refusal != Refusal::NoChange {
+                deny(journal);
+            }
+            return Err(refusal);
+        }
+    };
+    let mut revisions = Vec::with_capacity(bound.len());
+    for edit in &bound {
+        let named: Vec<&str> = written
+            .iter()
+            .filter(|(resource, _)| *resource == edit.resource)
+            .map(|(_, revision)| *revision)
+            .collect();
+        match named.as_slice() {
+            [revision] if revision_ok(revision) => revisions.push(*revision),
+            _ => {
+                deny(journal);
+                return Err(Refusal::WrittenMismatch);
+            }
+        }
+    }
+    if written.len() != bound.len() {
+        deny(journal);
+        return Err(Refusal::WrittenMismatch);
+    }
+    let mut versions = Vec::with_capacity(bound.len());
+    for edit in &bound {
+        let Some(version) = next_version(&journal.events, &edit.resource) else {
+            deny(journal);
+            return Err(Refusal::NoVersionLeft);
+        };
+        versions.push(version);
+    }
+    for ((edit, revision), version) in bound.iter().zip(revisions).zip(versions) {
+        let new_run = edit.run.replacen(&edit.old, &edit.new, 1);
+        let record = if edit.whole {
+            bound_observation_record(&edit.resource, version, revision, None, false, &new_run)
+        } else {
+            let count = line_count(&new_run);
+            bound_observation_record(
+                &edit.resource,
+                version,
+                revision,
+                Some((edit.first_line, count)),
+                false,
+                &new_run,
+            )
+        };
+        journal.events.push(SurfaceNode {
+            role: Role::User,
+            text: record,
+            source: NodeSource::Observation,
+        });
+        journal.events.push(SurfaceNode {
+            role: Role::ToolResult,
+            text: new_run,
+            source: NodeSource::InHistory,
+        });
+        if let Some(step) = journal
+            .steps
+            .iter_mut()
+            .find(|step| step.id == edit.step_id)
+        {
+            step.has_result = true;
+        }
+    }
+    Ok(())
 }
 
 /// Whether Runtime may be asked to write. A missing grant or a version that
@@ -1513,6 +2417,14 @@ fn note_provider_wrote(journal: &mut Journal, step_id: u64) -> bool {
         return false;
     };
     let step = &journal.steps[index];
+    // A step of a change of several files is written only with its change.
+    if journal
+        .steps
+        .iter()
+        .any(|other| other.id != step.id && other.effect_id == step.effect_id)
+    {
+        return false;
+    }
     if step.kind != ProposalKind::Edit
         || step.state != StepState::Dispatched
         || step.grant.as_deref().is_none_or(|grant| grant.is_empty())
@@ -1588,11 +2500,13 @@ fn propose_run(
 #[cfg(any(test, target_arch = "wasm32"))]
 const RUN_LOG_BUDGET: usize = 4_000;
 
-/// Current text of each file under a project. A host path produces nothing.
+/// Current text of each file under a project. A host path produces nothing,
+/// and so does a file whose last read showed only a window: its whole text
+/// is not known.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn observed_project_files(events: &[SurfaceNode], project: &str) -> Option<Vec<(String, String)>> {
     let prefix = format!("{project}/");
-    let mut files: Vec<(String, String)> = Vec::new();
+    let mut files: Vec<(String, Option<String>)> = Vec::new();
     for node in events {
         let Some(row) = read_observation(node) else {
             continue;
@@ -1603,7 +2517,10 @@ fn observed_project_files(events: &[SurfaceNode], project: &str) -> Option<Vec<(
         if relative.is_empty() || relative.starts_with('/') || host_path(relative) {
             return None;
         }
-        let text = node.text.split_once('\n')?.1.to_string();
+        let text = match row.window {
+            Some(_) => None,
+            None => Some(node.text.split_once('\n')?.1.to_string()),
+        };
         if let Some(existing) = files.iter_mut().find(|(path, _)| path == relative) {
             existing.1 = text;
         } else {
@@ -1611,10 +2528,12 @@ fn observed_project_files(events: &[SurfaceNode], project: &str) -> Option<Vec<(
         }
     }
     if files.is_empty() {
-        None
-    } else {
-        Some(files)
+        return None;
     }
+    files
+        .into_iter()
+        .map(|(path, text)| text.map(|text| (path, text)))
+        .collect()
 }
 
 /// The log may name a project digest only when it is the digest of the
@@ -1886,7 +2805,7 @@ fn is_write(kind: ProposalKind) -> bool {
 fn observed_text_at(events: &[SurfaceNode], resource: &str, version: u64) -> Option<String> {
     events.iter().rev().find_map(|node| {
         let row = read_observation(node)?;
-        if row.resource != resource || row.version != version {
+        if row.resource != resource || row.version != version || row.window.is_some() {
             return None;
         }
         node.text.split_once('\n').map(|(_, text)| text.to_string())
@@ -2472,6 +3391,9 @@ enum ResumeOutcome {
     Unknown,
     /// No read grant. Nothing was sent.
     Denied,
+    /// The stored journal breaks the path rule (`stored_paths_ok`). The
+    /// reason says how. A person decides.
+    Refused(&'static str),
 }
 
 /// An append records a step. It waits while an earlier append has no result,
@@ -2653,8 +3575,10 @@ fn resume_journal(
     let Some(grant) = grant else {
         return ResumeOutcome::Denied;
     };
-    let Some((_, head, revision)) = read_stored_journal(bus, cursor, grant) else {
-        return ResumeOutcome::Unknown;
+    let (_, head, revision) = match read_stored_journal(bus, cursor, grant) {
+        Ok(stored) => stored,
+        Err(Some(reason)) => return ResumeOutcome::Refused(reason),
+        Err(None) => return ResumeOutcome::Unknown,
     };
     let (outcome, word) = if head == pending.sent_head {
         (ResumeOutcome::Written, "written")
@@ -2670,42 +3594,52 @@ fn resume_journal(
     outcome
 }
 
-/// Read and decode the stored journal: the journal, its head, and its revision.
+/// Read and decode the stored journal: the journal, its head, and its
+/// revision. `Err(Some(reason))`: the stored journal breaks the path rule
+/// (`stored_paths_ok`), for that reason. `Err(None)`: anything else (no
+/// usable reply, or bytes that do not decode).
 #[cfg(any(test, target_arch = "wasm32"))]
 fn read_stored_journal(
     bus: &mut impl ResourceBus,
     cursor: &JournalCursor,
     grant: &JournalGrant,
-) -> Option<(Journal, [u8; 32], String)> {
+) -> Result<(Journal, [u8; 32], String), Option<&'static str>> {
     let reply = bus
         .invoke(&cursor.resource, "read", b"{}", grant.id())
-        .ok()?;
-    let ProviderReply::Ok(data) = provider_reply(&reply)? else {
-        return None;
+        .map_err(|_| None)?;
+    let Some(ProviderReply::Ok(data)) = provider_reply(&reply) else {
+        return Err(None);
     };
-    let content: Vec<u8> = serde_json::from_value(data.get("content")?.clone()).ok()?;
-    let revision = reply_revision(&data)?;
-    let (stored, _, head) = decode_journal(&content).ok()?;
-    Some((stored, head, revision))
+    let content: Vec<u8> = data
+        .get("content")
+        .and_then(|content| serde_json::from_value(content.clone()).ok())
+        .ok_or(None)?;
+    let revision = reply_revision(&data).ok_or(None)?;
+    let (stored, _, head) = decode_bytes(&content).map_err(|_| None)?;
+    stored_paths_ok(&stored).map_err(Some)?;
+    Ok((stored, head, revision))
 }
 
 /// After a conflict, read the stored version so the next append names it.
 /// It returns that version for the caller to look at; it does not merge.
-/// With an append still unknown, use `resume_journal` instead.
+/// With an append still unknown, use `resume_journal` instead. A stored
+/// journal that does not load is refused with the reason.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn reread_journal(
     bus: &mut impl ResourceBus,
     cursor: &mut JournalCursor,
     grant: Option<&JournalGrant>,
-) -> Option<Journal> {
+) -> Result<Journal, &'static str> {
     if cursor.pending.is_some() {
-        return None;
+        return Err("an append is unknown");
     }
-    let (stored, head, revision) = read_stored_journal(bus, cursor, grant?)?;
+    let grant = grant.ok_or("no read grant")?;
+    let (stored, head, revision) =
+        read_stored_journal(bus, cursor, grant).map_err(|reason| reason.unwrap_or("no reply"))?;
     cursor.revision = Some(revision);
     cursor.head = head;
     cursor.stale = false;
-    Some(stored)
+    Ok(stored)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -3241,7 +4175,13 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || propose_edit(&mut seen, resource, "two", "three", None).is_ok()
             || propose_edit(&mut seen, resource, "", "three", Some(2)).is_ok()
             || !seen.steps.is_empty()
-            || seen.events != before_edit
+            || without_refusal_records(&seen.events) != before_edit
+            || seen
+                .events
+                .iter()
+                .filter(|node| is_refusal_record(node))
+                .count()
+                != 4
             || seen.epoch != epoch_before_edit
         {
             return Err(elastos::bus::types::BusError::Invalid(
@@ -3265,7 +4205,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || step.old != "two"
             || step.new != "three"
             || step.has_result
-            || seen.events != before_edit
+            || without_refusal_records(&seen.events) != before_edit
             || seen.epoch != epoch_before_edit
         {
             return Err(elastos::bus::types::BusError::Invalid(
@@ -3282,7 +4222,8 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         if propose_edit(&mut seen, resource, "alpha", "one", Some(3)).is_ok()
             || propose_edit(&mut seen, resource, "gamma", "one", Some(3)).is_ok()
             || seen.steps.len() != steps_before
-            || seen.events != events_before
+            || without_refusal_records(&seen.events) != without_refusal_records(&events_before)
+            || seen.events.len() != events_before.len() + 2
         {
             return Err(elastos::bus::types::BusError::Invalid(
                 "an edit whose old text was not unique created a step".to_string(),
@@ -3295,7 +4236,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             elastos::bus::types::BusError::Invalid("observation bytes did not replay".to_string())
         })?;
         if seen.steps.len() != steps_before + 1
-            || seen.events != events_before
+            || without_refusal_records(&seen.events) != without_refusal_records(&events_before)
             || step_state(&seen, unique) != Some(StepState::Prepared)
             || read_observation(replayed.first().unwrap_or(&seen.events[0]))
                 .is_none_or(|row| row.version != 1)
@@ -3362,6 +4303,119 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         {
             return Err(elastos::bus::types::BusError::Invalid(
                 "a provider write changed the journal".to_string(),
+            ));
+        }
+        // Seen range and edit binding: an edit touches only lines that were
+        // shown, names the revision it read, and a change of two files is
+        // written all or none.
+        let mut bound = empty_journal();
+        let notes = "localhost://Users/self/Documents/notes.txt";
+        let style = "localhost://Users/self/Documents/style.css";
+        if !observe_read(&mut bound, notes, 1, "rn-1", Some(2), true, "beta\ngam")
+            || !observe_read(&mut bound, style, 1, "rs-1", None, false, "body{}\n")
+            || propose_change(
+                &mut bound,
+                &[EditSpec {
+                    resource: notes,
+                    revision: "rn-1",
+                    old: "gam",
+                    new: "g",
+                }],
+            ) != Err((0, "outside the read window"))
+            || propose_change(
+                &mut bound,
+                &[EditSpec {
+                    resource: style,
+                    revision: "rs-0",
+                    old: "body",
+                    new: "h1",
+                }],
+            ) != Err((0, "stale revision"))
+            || !bound.steps.is_empty()
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "an unread or stale edit was accepted".to_string(),
+            ));
+        }
+        let change = propose_change(
+            &mut bound,
+            &[
+                EditSpec {
+                    resource: notes,
+                    revision: "rn-1",
+                    old: "beta",
+                    new: "two",
+                },
+                EditSpec {
+                    resource: style,
+                    revision: "rs-1",
+                    old: "body",
+                    new: "h1",
+                },
+            ],
+        )
+        .map_err(|_| {
+            elastos::bus::types::BusError::Invalid("the change was refused".to_string())
+        })?;
+        for id in &change {
+            if !authorize(&mut bound, *id, Some("fixture-grant")) || !dispatch(&mut bound, *id) {
+                return Err(elastos::bus::types::BusError::Invalid(
+                    "the change was not dispatched".to_string(),
+                ));
+            }
+        }
+        let request = edit_request(&mut bound, change[0])
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        let revisions = request
+            .as_ref()
+            .and_then(|body| body["files"].as_array())
+            .map(|files| {
+                files
+                    .iter()
+                    .map(|file| file["if_revision"].as_str().unwrap_or_default().to_string())
+                    .collect::<Vec<_>>()
+            });
+        if revisions != Some(vec!["rn-1".to_string(), "rs-1".to_string()])
+            || note_change_wrote(&mut bound, change[0], &[(notes, "rn-2")]).is_ok()
+            || bound
+                .events
+                .iter()
+                .filter(|node| node.source == NodeSource::Observation)
+                .count()
+                != 2
+            // Three refusal records: the edit outside the read window, the
+            // stale revision, and the partial written list.
+            || bound
+                .events
+                .iter()
+                .filter(|node| {
+                    node.source == NodeSource::Person && node.text.starts_with("refused\n")
+                })
+                .count()
+                != 3
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "a change was sent without its revisions or written in part".to_string(),
+            ));
+        }
+        let mut noop = empty_journal();
+        if !observe_read(&mut noop, notes, 1, "rn-1", None, false, "alpha\n")
+            || (0..NOOP_EDIT_LIMIT)
+                .any(|_| propose_edit(&mut noop, notes, "alpha", "alpha", Some(1)).is_err())
+            || propose_edit(&mut noop, notes, "alpha", "alpha", Some(1))
+                != Err("repeated no-op edit")
+            || propose_edit(
+                &mut noop,
+                "localhost://Users/self/Documents//notes.txt",
+                "alpha",
+                "x",
+                Some(1),
+            ) != Err("path not canonical")
+            || observe_read(&mut noop, notes, 1, "rn-other", None, false, "alpha\n")
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "a repeated no-op edit, a path alias or a second revision was accepted".to_string(),
             ));
         }
         let project = "localhost://Users/self/Projects/demo";
@@ -6348,7 +7402,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             }
             (Some(_), AppendOutcome::Written) => {
                 cursor.revision.is_some()
-                    && reread_journal(&mut WasmBus, &mut cursor, grants.read.as_ref()).is_some_and(
+                    && reread_journal(&mut WasmBus, &mut cursor, grants.read.as_ref()).is_ok_and(
                         |stored| {
                             stored.steps.last().is_some_and(|step| {
                                 step.kind == ProposalKind::JournalAppend
@@ -6426,8 +7480,10 @@ mod tests {
     fn an_edit_at_the_last_version_number_is_denied_and_not_recorded() {
         let note = "localhost://Users/self/Projects/demo/notes.txt";
         let mut journal = two_turns();
-        assert!(observe(&mut journal, note, u64::MAX, "hello"));
-        let edit = propose_edit(&mut journal, note, "hello", "hi", Some(u64::MAX)).unwrap();
+        // u64::MAX is never a version, so u64::MAX - 1 is the last one.
+        assert!(!observe(&mut journal, note, u64::MAX, "hello"));
+        assert!(observe(&mut journal, note, u64::MAX - 1, "hello"));
+        let edit = propose_edit(&mut journal, note, "hello", "hi", Some(u64::MAX - 1)).unwrap();
         assert!(authorize(&mut journal, edit, Some("write-grant")));
         assert!(dispatch(&mut journal, edit));
         let events = journal.events.len();
@@ -6620,7 +7676,15 @@ mod tests {
             project,
             "project file a/b"
         ));
-        assert!(observe(&mut journal, &format!("{project}/"), 1, "x"));
+        // A trailing "/" is not a canonical path: observe refuses it. A row
+        // with that name, as a stored journal could hold it, still makes the
+        // project's file list unknown.
+        assert!(!observe(&mut journal, &format!("{project}/"), 1, "x"));
+        journal.events.push(SurfaceNode {
+            role: Role::User,
+            text: observation_record(&format!("{project}/"), 1, "x"),
+            source: NodeSource::Observation,
+        });
         assert_eq!(observed_project_files(&journal.events, project), None);
 
         let notes = format!("{project}/notes.txt");
@@ -7018,6 +8082,9 @@ mod tests {
                 resource: resource.to_string(),
                 version: 1,
                 text_hash: sha256(b"one line"),
+                revision: None,
+                window: None,
+                cut: false,
             }
         );
         assert!(observe(&mut journal, resource, 2, "two lines"));
@@ -7032,6 +8099,15 @@ mod tests {
         assert!(derive(&journal.events).is_empty());
     }
 
+    /// The journal without its refusal records. A refusal makes no step and
+    /// changes nothing else; it adds exactly one record (see
+    /// `each_refusal_writes_exactly_one_record`).
+    fn without_refusals(journal: &Journal) -> Journal {
+        let mut rest = journal.clone();
+        rest.events = without_refusal_records(&journal.events);
+        rest
+    }
+
     #[test]
     fn an_unread_or_stale_edit_creates_no_step() {
         let resource = "localhost://Users/self/Documents/note.txt";
@@ -7041,7 +8117,8 @@ mod tests {
             propose_edit(&mut journal, resource, "one", "two", Some(1)),
             Err("not observed")
         );
-        assert_eq!(journal, before);
+        assert_eq!(without_refusals(&journal), before);
+        assert_eq!(refusal_records(&journal).len(), 1);
         assert!(observe(&mut journal, resource, 1, "one line"));
         assert!(observe(&mut journal, resource, 2, "two lines"));
         let observed = journal.clone();
@@ -7057,7 +8134,8 @@ mod tests {
             propose_edit(&mut journal, resource, "", "three", Some(2)),
             Err("empty")
         );
-        assert_eq!(journal, observed);
+        assert_eq!(without_refusals(&journal), without_refusals(&observed));
+        assert_eq!(refusal_records(&journal).len(), 4);
         let id = propose_edit(&mut journal, resource, "two", "three", Some(2)).unwrap();
         let step = journal.steps.iter().find(|step| step.id == id).unwrap();
         assert_eq!(step.kind, ProposalKind::Edit);
@@ -7066,7 +8144,10 @@ mod tests {
         assert_eq!(step.old, "two");
         assert_eq!(step.new, "three");
         assert!(!step.has_result);
-        assert_eq!(journal.events, observed.events);
+        assert_eq!(
+            without_refusals(&journal).events,
+            without_refusals(&observed).events
+        );
         assert_eq!(journal.epoch, observed.epoch);
         assert_eq!(step_state(&journal, id), Some(StepState::Prepared));
     }
@@ -7085,10 +8166,11 @@ mod tests {
             propose_edit(&mut journal, resource, "gamma", "one", Some(1)),
             Err("not unique")
         );
-        assert_eq!(journal, before);
+        assert_eq!(without_refusals(&journal), before);
+        assert_eq!(refusal_records(&journal).len(), 2);
         let id = propose_edit(&mut journal, resource, "beta", "one", Some(1)).unwrap();
         assert_eq!(journal.steps.len(), 1);
-        assert_eq!(journal.events, before.events);
+        assert_eq!(without_refusals(&journal).events, before.events);
         assert_eq!(step_state(&journal, id), Some(StepState::Prepared));
         assert!(observe(&mut journal, resource, 2, "beta once"));
         let restored = replay(&model_bytes(&journal.events).unwrap()).unwrap();
@@ -12040,7 +13122,10 @@ mod tests {
         );
         assert_eq!(journal.steps.len(), steps);
         assert_eq!(runtime.calls.len(), 1);
-        assert_eq!(reread_journal(&mut runtime, &mut cursor, None), None);
+        assert_eq!(
+            reread_journal(&mut runtime, &mut cursor, None),
+            Err("no read grant")
+        );
         assert_eq!(runtime.calls.len(), 1);
 
         let stored = reread_journal(&mut runtime, &mut cursor, Some(&read_grant())).unwrap();
@@ -12087,7 +13172,7 @@ mod tests {
         let waiting = cursor.clone();
         assert_eq!(
             reread_journal(&mut runtime, &mut cursor, Some(&read_grant())),
-            None
+            Err("an append is unknown")
         );
         assert_eq!(cursor, waiting);
         assert_eq!(runtime.calls.len(), 1);
@@ -12629,7 +13714,7 @@ mod tests {
             ),
             AppendOutcome::Written
         );
-        assert!(reread_journal(&mut runtime, &mut cursor, grants.read.as_ref()).is_some());
+        assert!(reread_journal(&mut runtime, &mut cursor, grants.read.as_ref()).is_ok());
     }
 
     #[test]
@@ -12650,7 +13735,7 @@ mod tests {
         );
         assert_eq!(
             reread_journal(&mut runtime, &mut cursor, grants.read.as_ref()),
-            None
+            Err("no read grant")
         );
         assert!(runtime.calls.iter().all(|(kind, _)| kind == "request"));
         assert_eq!(runtime.calls.len(), 2);
@@ -12672,5 +13757,1709 @@ mod tests {
             );
         }
         assert!(runtime.calls.is_empty());
+    }
+
+    // omp idea 1: seen range and edit binding.
+
+    const NOTES: &str = "localhost://Users/self/Documents/notes.txt";
+    const STYLE: &str = "localhost://Users/self/Documents/style.css";
+
+    fn spec<'a>(resource: &'a str, revision: &'a str, old: &'a str, new: &'a str) -> EditSpec<'a> {
+        EditSpec {
+            resource,
+            revision,
+            old,
+            new,
+        }
+    }
+
+    fn granted(journal: &mut Journal, ids: &[u64]) {
+        for id in ids {
+            assert!(authorize(journal, *id, Some("fixture-grant")));
+        }
+        for id in ids {
+            assert!(dispatch(journal, *id), "dispatch {id}");
+        }
+    }
+
+    #[test]
+    fn an_edit_outside_the_read_window_creates_no_step() {
+        let mut journal = empty_journal();
+        assert!(observe(
+            &mut journal,
+            NOTES,
+            1,
+            "alpha\nbeta\ngamma\ndelta\n"
+        ));
+        // Version 2 is shown only from line 3. "alpha" was seen in version 1,
+        // not in version 2.
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            2,
+            "rev-2",
+            Some(3),
+            false,
+            "gamma\ndelta\n"
+        ));
+        assert_eq!(
+            propose_edit(&mut journal, NOTES, "alpha", "one", Some(2)),
+            Err("outside the read window")
+        );
+        assert_eq!(
+            propose_change(&mut journal, &[spec(NOTES, "rev-2", "alpha", "one")]),
+            Err((0, "outside the read window"))
+        );
+        // Two parts of version 3 with line 2 never shown: an edit across the
+        // gap is outside what was read.
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            3,
+            "rev-3",
+            Some(1),
+            false,
+            "alpha\n"
+        ));
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            3,
+            "rev-3",
+            Some(3),
+            false,
+            "gamma\n"
+        ));
+        assert_eq!(
+            propose_change(&mut journal, &[spec(NOTES, "rev-3", "alpha\nbeta", "x")]),
+            Err((0, "outside the read window"))
+        );
+        assert_eq!(
+            propose_change(&mut journal, &[spec(NOTES, "rev-3", "alpha\ngamma", "x")]),
+            Err((0, "outside the read window"))
+        );
+        // A cut read: the partial last line is shown but not seen.
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            4,
+            "rev-4",
+            Some(1),
+            true,
+            "alpha\nbet"
+        ));
+        assert_eq!(
+            propose_change(&mut journal, &[spec(NOTES, "rev-4", "bet", "x")]),
+            Err((0, "outside the read window"))
+        );
+        assert!(journal.steps.is_empty(), "no refusal made a step");
+        // Inside the window the edit is a step, bound to the version it read.
+        let ids = propose_change(&mut journal, &[spec(NOTES, "rev-4", "alpha", "one")]).unwrap();
+        let step = journal.steps.iter().find(|step| step.id == ids[0]).unwrap();
+        assert_eq!(step.seen_version, Some(4));
+        assert_eq!(step.effect_id, ids[0]);
+    }
+
+    #[test]
+    fn an_edit_names_the_revision_it_read() {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rev-1",
+            None,
+            false,
+            "alpha beta\n"
+        ));
+        assert!(observe(&mut journal, STYLE, 1, "body{}\n"));
+        assert_eq!(
+            propose_change(&mut journal, &[spec(NOTES, "rev-0", "alpha", "one")]),
+            Err((0, "stale revision"))
+        );
+        assert_eq!(
+            propose_change(&mut journal, &[spec(STYLE, "rev-1", "body", "h1")]),
+            Err((0, "no revision"))
+        );
+        assert!(journal.steps.is_empty());
+        let ids = propose_change(&mut journal, &[spec(NOTES, "rev-1", "alpha", "one")]).unwrap();
+        assert_eq!(edit_request(&mut journal, ids[0]), Err("not dispatched"));
+        granted(&mut journal, &ids);
+        let body: serde_json::Value =
+            serde_json::from_slice(&edit_request(&mut journal, ids[0]).unwrap()).unwrap();
+        assert_eq!(body["op"], "edit");
+        assert_eq!(body["all_or_none"], true);
+        assert_eq!(body["files"].as_array().unwrap().len(), 1);
+        let file = &body["files"][0];
+        assert_eq!(file["path"], NOTES);
+        assert_eq!(file["if_revision"], "rev-1");
+        assert_eq!(file["first_line"], 1);
+        assert_eq!(file["line_count"], 1);
+        assert_eq!(file["old"], "alpha");
+        assert_eq!(file["new"], "one");
+        // An edit made on a read with no revision has nothing to send.
+        let mut unbound = empty_journal();
+        assert!(observe(&mut unbound, STYLE, 1, "body{}\n"));
+        let legacy = propose_edit(&mut unbound, STYLE, "body", "h1", Some(1)).unwrap();
+        granted(&mut unbound, &[legacy]);
+        assert_eq!(edit_request(&mut unbound, legacy), Err("no revision"));
+        // A newer read arrives before the write: the change is stale, sends
+        // nothing, and records nothing.
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            2,
+            "rev-2",
+            None,
+            false,
+            "alpha gamma\n"
+        ));
+        assert_eq!(edit_request(&mut journal, ids[0]), Err("stale"));
+        let events = journal.events.clone();
+        assert_eq!(
+            note_change_wrote(&mut journal, ids[0], &[(NOTES, "rev-3")]),
+            Err("stale")
+        );
+        // Only the refusal record is added.
+        assert_eq!(journal.events.len(), events.len() + 1);
+        assert_eq!(
+            without_refusal_records(&journal.events),
+            without_refusal_records(&events)
+        );
+        assert_eq!(step_state(&journal, ids[0]), Some(StepState::Denied));
+    }
+
+    #[test]
+    fn a_repeated_no_op_edit_is_refused() {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rev-1",
+            None,
+            false,
+            "alpha beta\n"
+        ));
+        for _ in 0..NOOP_EDIT_LIMIT {
+            assert!(propose_edit(&mut journal, NOTES, "alpha", "alpha", Some(1)).is_ok());
+        }
+        let steps = journal.steps.len();
+        assert_eq!(
+            propose_edit(&mut journal, NOTES, "alpha", "alpha", Some(1)),
+            Err("repeated no-op edit")
+        );
+        assert_eq!(
+            propose_change(&mut journal, &[spec(NOTES, "rev-1", "alpha", "alpha")]),
+            Err((0, "repeated no-op edit"))
+        );
+        assert_eq!(journal.steps.len(), steps);
+        // A real edit, and a different no-op, are still allowed.
+        assert!(propose_edit(&mut journal, NOTES, "alpha", "one", Some(1)).is_ok());
+        assert!(propose_edit(&mut journal, NOTES, "beta", "beta", Some(1)).is_ok());
+    }
+
+    #[test]
+    fn a_two_file_change_writes_both_or_neither() {
+        let start = || {
+            let mut journal = empty_journal();
+            assert!(observe_read(
+                &mut journal,
+                NOTES,
+                1,
+                "rn-1",
+                None,
+                false,
+                "alpha\n"
+            ));
+            assert!(observe_read(
+                &mut journal,
+                STYLE,
+                1,
+                "rs-1",
+                None,
+                false,
+                "body{}\n"
+            ));
+            let ids = propose_change(
+                &mut journal,
+                &[
+                    spec(NOTES, "rn-1", "alpha", "one"),
+                    spec(STYLE, "rs-1", "body", "h1"),
+                ],
+            )
+            .unwrap();
+            let effects: Vec<u64> = ids
+                .iter()
+                .map(|id| {
+                    journal
+                        .steps
+                        .iter()
+                        .find(|step| step.id == *id)
+                        .unwrap()
+                        .effect_id
+                })
+                .collect();
+            assert_eq!(effects, vec![ids[0], ids[0]], "one change, one effect");
+            granted(&mut journal, &ids);
+            (journal, ids)
+        };
+
+        // Both written.
+        let (mut journal, ids) = start();
+        let body: serde_json::Value =
+            serde_json::from_slice(&edit_request(&mut journal, ids[0]).unwrap()).unwrap();
+        assert_eq!(body["files"].as_array().unwrap().len(), 2);
+        assert_eq!(body["files"][1]["if_revision"], "rs-1");
+        assert_eq!(
+            note_change_wrote(&mut journal, ids[0], &[(NOTES, "rn-2"), (STYLE, "rs-2")]),
+            Ok(())
+        );
+        for (resource, revision, text) in [(NOTES, "rn-2", "one\n"), (STYLE, "rs-2", "h1{}\n")] {
+            let row = current_observation(&journal.events, resource).unwrap();
+            assert_eq!((row.version, row.revision.as_deref()), (2, Some(revision)));
+            assert_eq!(
+                current_observed_text(&journal.events, resource).unwrap(),
+                text
+            );
+        }
+        assert!(ids.iter().all(|id| journal
+            .steps
+            .iter()
+            .find(|step| step.id == *id)
+            .unwrap()
+            .has_result));
+
+        // The second file was read again before the write: neither is written.
+        let (mut journal, ids) = start();
+        assert!(observe_read(
+            &mut journal,
+            STYLE,
+            2,
+            "rs-2",
+            None,
+            false,
+            "p{}\n"
+        ));
+        let events = journal.events.clone();
+        assert_eq!(
+            note_change_wrote(&mut journal, ids[0], &[(NOTES, "rn-2"), (STYLE, "rs-3")]),
+            Err("stale")
+        );
+        assert_eq!(
+            without_refusal_records(&journal.events),
+            without_refusal_records(&events),
+            "the first file was not recorded"
+        );
+        assert_eq!(journal.events.len(), events.len() + 1);
+        assert_eq!(
+            current_observation(&journal.events, NOTES).unwrap().version,
+            1
+        );
+        for id in &ids {
+            assert_eq!(step_state(&journal, *id), Some(StepState::Denied));
+        }
+
+        // The provider's list must name each file of the change once, with
+        // one revision word, and no other file: otherwise nothing is recorded.
+        let other = "localhost://Users/self/Documents/other.txt";
+        for written in [
+            vec![(NOTES, "rn-2")],
+            vec![(NOTES, "rn-2"), (NOTES, "rn-3")],
+            vec![(NOTES, "rn-2"), (STYLE, "rs-2"), (other, "ro-2")],
+            vec![(NOTES, "rn-2"), (STYLE, "two words")],
+        ] {
+            let (mut journal, ids) = start();
+            let events = journal.events.clone();
+            assert_eq!(
+                note_change_wrote(&mut journal, ids[0], &written),
+                Err("written files do not match the change"),
+                "{written:?}"
+            );
+            // Nothing but the one refusal record.
+            assert_eq!(journal.events.len(), events.len() + 1);
+            assert_eq!(
+                without_refusal_records(&journal.events),
+                without_refusal_records(&events)
+            );
+            assert_eq!(step_state(&journal, ids[1]), Some(StepState::Denied));
+        }
+
+        // One file of the change cannot be written alone.
+        let (mut journal, ids) = start();
+        let events = journal.events.clone();
+        assert!(!note_provider_wrote(&mut journal, ids[0]));
+        assert!(!note_provider_wrote(&mut journal, ids[1]));
+        assert_eq!(journal.events, events);
+    }
+
+    #[test]
+    fn a_change_that_fails_on_any_file_stages_nothing() {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rn-1",
+            None,
+            false,
+            "alpha\n"
+        ));
+        assert!(observe_read(
+            &mut journal,
+            STYLE,
+            1,
+            "rs-1",
+            Some(5),
+            false,
+            "body{}\n"
+        ));
+        let before = journal.clone();
+        for (edits, refused) in [
+            (
+                vec![
+                    spec(NOTES, "rn-1", "alpha", "one"),
+                    spec(STYLE, "rs-1", "p", "h1"),
+                ],
+                (1, "outside the read window"),
+            ),
+            (
+                vec![
+                    spec(NOTES, "rn-1", "alpha", "one"),
+                    spec(NOTES, "rn-1", "alpha", "two"),
+                ],
+                (1, "one file twice in one change"),
+            ),
+            (
+                vec![
+                    spec(NOTES, "rn-1", "alpha", "one"),
+                    spec(STYLE, "rs-0", "body", "h1"),
+                ],
+                (1, "stale revision"),
+            ),
+            (
+                vec![
+                    spec(NOTES, "rn-1", "alpha", "one"),
+                    spec("localhost://Users/self/x", "r", "a", "b"),
+                ],
+                (1, "not observed"),
+            ),
+            (vec![], (0, "change size")),
+        ] {
+            let records = refusal_records(&journal).len();
+            assert_eq!(propose_change(&mut journal, &edits), Err(refused));
+            assert_eq!(without_refusals(&journal), before, "{refused:?}");
+            assert_eq!(refusal_records(&journal).len(), records + 1, "{refused:?}");
+        }
+        let many: Vec<String> = (0..=CHANGE_FILES_LIMIT)
+            .map(|index| format!("localhost://Users/self/f{index}"))
+            .collect();
+        let edits: Vec<EditSpec<'_>> = many.iter().map(|path| spec(path, "r", "a", "b")).collect();
+        assert_eq!(
+            propose_change(&mut journal, &edits),
+            Err((0, "change size"))
+        );
+        assert_eq!(without_refusals(&journal), before);
+    }
+
+    #[test]
+    fn a_windowed_change_records_only_the_edited_lines() {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rev-1",
+            Some(10),
+            false,
+            "ten\neleven\n"
+        ));
+        let ids =
+            propose_change(&mut journal, &[spec(NOTES, "rev-1", "eleven", "11\n11b")]).unwrap();
+        granted(&mut journal, &ids);
+        let body: serde_json::Value =
+            serde_json::from_slice(&edit_request(&mut journal, ids[0]).unwrap()).unwrap();
+        assert_eq!(body["files"][0]["first_line"], 10);
+        assert_eq!(body["files"][0]["line_count"], 2);
+        assert_eq!(
+            note_change_wrote(&mut journal, ids[0], &[(NOTES, "rev-2")]),
+            Ok(())
+        );
+        let row = current_observation(&journal.events, NOTES).unwrap();
+        assert_eq!((row.version, row.window), (2, Some((10, 3))));
+        assert_eq!(
+            seen_runs(&journal.events, NOTES, 2).unwrap(),
+            vec![(10, "ten\n11\n11b\n".to_string())]
+        );
+        assert_eq!(current_observed_text(&journal.events, NOTES), None);
+        // An edit may not remove the window's last line break: the edited
+        // line would join line 13, which nobody has seen.
+        assert_eq!(
+            propose_change(&mut journal, &[spec(NOTES, "rev-2", "11b\n", "x")]),
+            Err((0, "edit removes the window's last line break"))
+        );
+        assert_eq!(
+            propose_change(&mut journal, &[spec(NOTES, "rev-2", "11b", "/etc/passwd")]),
+            Err((0, "host path"))
+        );
+        // The same edit on a whole read is fine: the end of the file is seen.
+        let mut whole = empty_journal();
+        assert!(observe_read(
+            &mut whole, NOTES, 1, "rev-1", None, false, "a\nb\n"
+        ));
+        assert!(propose_change(&mut whole, &[spec(NOTES, "rev-1", "b\n", "b")]).is_ok());
+    }
+
+    #[test]
+    fn a_window_is_not_a_whole_file() {
+        let mut journal = empty_journal();
+        assert!(observe(&mut journal, NOTES, 1, "alpha\n"));
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            2,
+            "rev-2",
+            Some(4),
+            false,
+            "delta\n"
+        ));
+        assert_eq!(current_observed_text(&journal.events, NOTES), None);
+        assert_eq!(observed_text_at(&journal.events, NOTES, 2), None);
+        assert_eq!(
+            version_list(&journal.events, NOTES),
+            vec![(1, "alpha\n".to_string())]
+        );
+        assert_eq!(propose_restore(&mut journal, NOTES, 2), Err("unknown"));
+        // An edit on the window may be proposed, but only a change can write it.
+        let id = propose_edit(&mut journal, NOTES, "delta", "four", Some(2)).unwrap();
+        granted(&mut journal, &[id]);
+        assert!(!note_provider_wrote(&mut journal, id));
+        assert_eq!(
+            current_observation(&journal.events, NOTES).unwrap().version,
+            2
+        );
+        // A project with a file last read in part has no tree text to quote.
+        let project = "localhost://Users/self/Projects/demo";
+        let mut tree = empty_journal();
+        assert!(observe(&mut tree, &format!("{project}/a.txt"), 1, "a\n"));
+        assert!(observed_project_files(&tree.events, project).is_some());
+        assert!(observe_read(
+            &mut tree,
+            &format!("{project}/b.txt"),
+            1,
+            "r",
+            Some(2),
+            false,
+            "b\n"
+        ));
+        assert_eq!(observed_project_files(&tree.events, project), None);
+    }
+
+    #[test]
+    fn reads_of_one_version_must_agree() {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            2,
+            "rev-2",
+            Some(1),
+            false,
+            "a\nb\n"
+        ));
+        // Another part of the same version, same revision: kept.
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            2,
+            "rev-2",
+            Some(2),
+            false,
+            "b\nc\n"
+        ));
+        let before = journal.clone();
+        for (version, revision, window, cut, text) in [
+            (2, "rev-x", Some(3), false, "c\n"), // another revision for this version
+            (2, "rev-2", Some(2), false, "B\n"), // a line that disagrees
+            (1, "rev-1", None, false, "a\n"),    // an older version
+            (3, "rev-3", Some(1), false, ""),    // no whole line
+            (3, "rev-3", Some(1), true, "partial"), // only a partial line
+            (3, "rev-3", Some(0), false, "a\n"), // line 0
+            (3, "rev-3", None, true, "a\nb"),    // cut needs a window
+            (3, "two words", None, false, "a\n"), // a revision is one word
+            (3, "", None, false, "a\n"),         // and is not empty
+        ] {
+            assert!(
+                !observe_read(&mut journal, NOTES, version, revision, window, cut, text),
+                "{version} {revision:?} {window:?} {cut} {text:?}"
+            );
+            assert_eq!(journal, before);
+        }
+        // A whole read fixes the line count: a part past it is refused, and a
+        // whole read shorter than the parts already shown is refused.
+        assert!(!observe_read(
+            &mut journal,
+            NOTES,
+            2,
+            "rev-2",
+            None,
+            false,
+            "a\nb\n"
+        ));
+        let mut whole = empty_journal();
+        assert!(observe_read(
+            &mut whole, NOTES, 1, "rev-1", None, false, "a\nb\n"
+        ));
+        assert!(!observe_read(
+            &mut whole,
+            NOTES,
+            1,
+            "rev-1",
+            Some(3),
+            false,
+            "c\n"
+        ));
+        assert!(observe_read(
+            &mut whole,
+            NOTES,
+            1,
+            "rev-1",
+            Some(2),
+            false,
+            "b\n"
+        ));
+    }
+
+    #[test]
+    fn an_observation_row_with_an_unknown_word_is_not_a_read() {
+        let row = |head: &str, text: &str| {
+            let hash = sha256(text.as_bytes());
+            let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
+            SurfaceNode {
+                role: Role::User,
+                text: format!("1 {hex} {NOTES}{head}\n{text}"),
+                source: NodeSource::Observation,
+            }
+        };
+        assert!(read_observation(&row("", "a\n")).is_some());
+        assert!(read_observation(&row(" revision=r", "a\n")).is_some());
+        assert!(read_observation(&row(" revision=r lines=2+1", "a\n")).is_some());
+        assert!(read_observation(&row(" revision=r lines=2+1 cut", "a\nb")).is_some());
+        for (head, text) in [
+            (" extra", "a\n"),
+            (" revision=r revision=r", "a\n"),
+            (" revision=", "a\n"),
+            (" lines=2+1", "a\n"),
+            (" revision=r lines=0+1", "a\n"),
+            (" revision=r lines=2+2", "a\n"),
+            (" revision=r lines=2+1 cut", "a\n"),
+            (" revision=r cut", "a\nb"),
+            (" revision=r lines=2", "a\n"),
+            (" revision=r lines=2+1 lines=2+1", "a\n"),
+        ] {
+            assert_eq!(read_observation(&row(head, text)), None, "{head:?}");
+        }
+    }
+
+    #[test]
+    fn a_bound_change_survives_the_journal_round_trip() {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rn-1",
+            Some(3),
+            true,
+            "c\nd\npart"
+        ));
+        assert!(observe_read(
+            &mut journal,
+            STYLE,
+            1,
+            "rs-1",
+            None,
+            false,
+            "body{}\n"
+        ));
+        let ids = propose_change(
+            &mut journal,
+            &[
+                spec(NOTES, "rn-1", "d", "D"),
+                spec(STYLE, "rs-1", "body", "h1"),
+            ],
+        )
+        .unwrap();
+        let bytes = encode_journal(&journal, &[0; 32]).unwrap();
+        let (decoded, _, _) = decode_journal(&bytes).unwrap();
+        assert_eq!(decoded, without_grants(&journal));
+        assert_eq!(
+            current_observation(&decoded.events, NOTES).unwrap().window,
+            Some((3, 2))
+        );
+        let effects: Vec<u64> = decoded
+            .steps
+            .iter()
+            .filter(|step| ids.contains(&step.id))
+            .map(|step| step.effect_id)
+            .collect();
+        assert_eq!(effects, vec![ids[0], ids[0]]);
+    }
+
+    // Codex review of #24 at 4a431ff: the three reproductions.
+
+    /// Finding 1: a version reused with another revision mixed seen lines, so
+    /// an edit on line 1 (seen only at revision A) was sent with revision B.
+    #[test]
+    fn seen_lines_never_mix_revisions() {
+        let mut journal = empty_journal();
+        assert!(observe(&mut journal, NOTES, 0, "alpha\nbeta\n"));
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rev-a",
+            Some(1),
+            false,
+            "alpha\n"
+        ));
+        assert!(observe(&mut journal, NOTES, 0, "alpha\nbeta\n"));
+        let accepted = observe_read(&mut journal, NOTES, 1, "rev-b", Some(2), false, "beta\n");
+        // Line 1 was seen only at rev-a: no edit of it may be sent with rev-b.
+        assert!(propose_change(&mut journal, &[spec(NOTES, "rev-b", "alpha", "one")]).is_err());
+        assert!(propose_edit(&mut journal, NOTES, "alpha", "one", Some(1)).is_err());
+        assert!(journal.steps.is_empty());
+        // Version 1 is bound to rev-a forever: rev-b at version 1 is refused.
+        assert!(!accepted);
+        // A read at a new revision clears what was seen before it: line 1 was
+        // seen at rev-c, then version 3 at rev-d shows only line 2.
+        let mut cleared = empty_journal();
+        assert!(observe_read(
+            &mut cleared,
+            NOTES,
+            2,
+            "rev-c",
+            Some(1),
+            false,
+            "alpha\n"
+        ));
+        assert!(observe_read(
+            &mut cleared,
+            NOTES,
+            3,
+            "rev-d",
+            Some(2),
+            false,
+            "beta\n"
+        ));
+        assert_eq!(
+            propose_change(&mut cleared, &[spec(NOTES, "rev-d", "alpha", "one")]),
+            Err((0, "outside the read window"))
+        );
+        // A legacy read (no revision) at a version bound to a revision is refused.
+        assert!(!observe(&mut cleared, NOTES, 3, "alpha\nbeta\n"));
+    }
+
+    /// Finding 2: path spellings that name one file bypassed the no-op limit
+    /// and the duplicate check.
+    #[test]
+    fn path_aliases_are_refused_and_case_counts_as_one_file() {
+        let doubled = "localhost://Users/self/Documents//notes.txt";
+        let dotted = "localhost://Users/self/Documents/./notes.txt";
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rev-1",
+            None,
+            false,
+            "alpha\n"
+        ));
+        for alias in [
+            doubled,
+            dotted,
+            "localhost://Users/self/Documents/x/../notes.txt",
+            "localhost://Users/self/Documents/notes.txt.",
+            "localhost://Users/self/Documents/notes.txt/",
+            "localhost:///Users/self/Documents/notes.txt",
+        ] {
+            assert!(!observe(&mut journal, alias, 1, "alpha\n"), "{alias}");
+            assert!(
+                !observe_read(&mut journal, alias, 1, "rev-1", None, false, "alpha\n"),
+                "{alias}"
+            );
+            assert_eq!(
+                propose_edit(&mut journal, alias, "alpha", "alpha", Some(1)),
+                Err("path not canonical"),
+                "{alias}"
+            );
+        }
+        for _ in 0..NOOP_EDIT_LIMIT {
+            assert!(propose_edit(&mut journal, NOTES, "alpha", "alpha", Some(1)).is_ok());
+        }
+        // Another case is the same file for the no-op count.
+        let upper = "localhost://Users/self/Documents/NOTES.txt";
+        assert!(observe_read(
+            &mut journal,
+            upper,
+            1,
+            "rev-u",
+            None,
+            false,
+            "alpha\n"
+        ));
+        assert_eq!(
+            propose_edit(&mut journal, upper, "alpha", "alpha", Some(1)),
+            Err("repeated no-op edit")
+        );
+        // One change cannot name one file twice, however it is spelled.
+        let mut change = empty_journal();
+        assert!(observe_read(
+            &mut change,
+            NOTES,
+            1,
+            "rev-1",
+            None,
+            false,
+            "alpha beta\n"
+        ));
+        assert!(observe_read(
+            &mut change,
+            upper,
+            1,
+            "rev-u",
+            None,
+            false,
+            "alpha beta\n"
+        ));
+        assert_eq!(
+            propose_change(
+                &mut change,
+                &[
+                    spec(NOTES, "rev-1", "alpha", "1"),
+                    spec(doubled, "rev-1", "beta", "2"),
+                    spec(dotted, "rev-1", "beta", "3")
+                ]
+            ),
+            Err((1, "path not canonical"))
+        );
+        assert_eq!(
+            propose_change(
+                &mut change,
+                &[
+                    spec(NOTES, "rev-1", "alpha", "1"),
+                    spec(upper, "rev-u", "beta", "2")
+                ]
+            ),
+            Err((1, "one file twice in one change"))
+        );
+        assert!(change.steps.is_empty());
+    }
+
+    fn refusal_records(journal: &Journal) -> Vec<String> {
+        journal
+            .events
+            .iter()
+            .filter(|node| is_refusal_record(node))
+            .map(|node| node.text.clone())
+            .collect()
+    }
+
+    /// Finding 3: every refusal writes exactly one record with its reason.
+    #[test]
+    fn each_refusal_writes_exactly_one_record() {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rev-1",
+            Some(3),
+            false,
+            "gamma\n"
+        ));
+        assert!(observe(&mut journal, STYLE, 1, "body{}\n"));
+        let many: Vec<String> = (0..=CHANGE_FILES_LIMIT)
+            .map(|index| format!("localhost://Users/self/f{index}"))
+            .collect();
+        let too_many: Vec<EditSpec<'_>> =
+            many.iter().map(|path| spec(path, "r", "a", "b")).collect();
+        let cases: Vec<(Vec<EditSpec<'_>>, &str)> = vec![
+            (too_many, "change size"),
+            (
+                vec![spec("localhost://Users/self/unread.txt", "r", "a", "b")],
+                "not observed",
+            ),
+            (vec![spec(NOTES, "rev-0", "gamma", "g")], "stale revision"),
+            (
+                vec![spec(NOTES, "rev-1", "alpha", "a")],
+                "outside the read window",
+            ),
+            (vec![spec(STYLE, "rev-1", "body", "h1")], "no revision"),
+            (
+                vec![spec("localhost://Users/self//x", "r", "a", "b")],
+                "path not canonical",
+            ),
+        ];
+        for (edits, reason) in cases {
+            let before = refusal_records(&journal).len();
+            let steps = journal.steps.clone();
+            assert_eq!(
+                propose_change(&mut journal, &edits).map_err(|(_, why)| why),
+                Err(reason)
+            );
+            let records = refusal_records(&journal);
+            assert_eq!(records.len(), before + 1, "{reason}");
+            assert!(
+                records
+                    .last()
+                    .unwrap()
+                    .starts_with(&format!("refused\n{reason}\n")),
+                "{reason}"
+            );
+            assert_eq!(journal.steps, steps, "{reason}");
+        }
+        let before = refusal_records(&journal).len();
+        assert_eq!(
+            propose_edit(&mut journal, NOTES, "alpha", "a", Some(1)),
+            Err("outside the read window")
+        );
+        assert_eq!(
+            propose_edit(&mut journal, NOTES, "gamma", "g", Some(0)),
+            Err("stale")
+        );
+        assert_eq!(refusal_records(&journal).len(), before + 2);
+    }
+
+    fn raw_read(
+        resource: &str,
+        version: u64,
+        revision: &str,
+        window: Option<(u64, u64)>,
+        text: &str,
+    ) -> SurfaceNode {
+        SurfaceNode {
+            role: Role::User,
+            text: bound_observation_record(resource, version, revision, window, false, text),
+            source: NodeSource::Observation,
+        }
+    }
+
+    /// Decode does not check that a version keeps one revision, so a stored
+    /// journal can hold rows that mix them. Seen lines still never mix: only
+    /// the newest run of one version and one revision counts.
+    #[test]
+    fn a_stored_journal_that_mixes_revisions_still_does_not_mix_seen_lines() {
+        let mut journal = empty_journal();
+        journal
+            .events
+            .push(raw_read(NOTES, 1, "rev-a", Some((1, 1)), "alpha\n"));
+        journal
+            .events
+            .push(raw_read(NOTES, 1, "rev-b", Some((2, 1)), "beta\n"));
+        let bytes = encode_journal(&journal, &[0; 32]).unwrap();
+        let (mut journal, _, _) = decode_journal(&bytes).unwrap();
+        assert_eq!(
+            propose_change(&mut journal, &[spec(NOTES, "rev-b", "alpha", "one")]),
+            Err((0, "outside the read window"))
+        );
+        assert!(propose_change(&mut journal, &[spec(NOTES, "rev-b", "beta", "two")]).is_ok());
+    }
+
+    /// A write is recorded at a version number never used for the file, even
+    /// when a stored journal holds a higher one than the current read.
+    #[test]
+    fn a_written_change_takes_a_version_never_used() {
+        let mut journal = empty_journal();
+        journal
+            .events
+            .push(raw_read(NOTES, 3, "rev-old", None, "old\n"));
+        journal
+            .events
+            .push(raw_read(NOTES, 2, "rev-2", None, "alpha\n"));
+        let ids = propose_change(&mut journal, &[spec(NOTES, "rev-2", "alpha", "one")]).unwrap();
+        granted(&mut journal, &ids);
+        assert_eq!(
+            note_change_wrote(&mut journal, ids[0], &[(NOTES, "rev-new")]),
+            Ok(())
+        );
+        let row = current_observation(&journal.events, NOTES).unwrap();
+        assert_eq!((row.version, row.revision.as_deref()), (4, Some("rev-new")));
+    }
+
+    /// Only the current version's lines count: lines of an older version are
+    /// never seen at a newer one, with or without revisions.
+    #[test]
+    fn an_older_version_line_is_not_seen_at_the_newer_version() {
+        let mut journal = empty_journal();
+        assert!(observe(&mut journal, NOTES, 1, "alpha\nbeta\n"));
+        assert!(observe(&mut journal, NOTES, 2, "gamma\n"));
+        assert_eq!(
+            propose_edit(&mut journal, NOTES, "beta", "b", Some(2)),
+            Err("not unique")
+        );
+        assert_eq!(seen_lines(&journal.events, NOTES, 1), None);
+        assert_eq!(seen_runs(&journal.events, NOTES, 1), None);
+        assert_eq!(
+            seen_runs(&journal.events, NOTES, 2),
+            Some(vec![(1, "gamma\n".to_string())])
+        );
+    }
+
+    // Codex re-review of #24 at bc7918e4b: four findings.
+
+    /// Finding 1: u64::MAX was reused across revisions. Two edits queued at
+    /// the last version: the first is written at a new revision, and the
+    /// second must never be sent with that revision.
+    #[test]
+    fn a_queued_edit_never_takes_a_newer_revision() {
+        let mut journal = empty_journal();
+        journal.events.push(raw_read(
+            NOTES,
+            u64::MAX - 1,
+            "rev-a",
+            None,
+            "alpha\nbeta\n",
+        ));
+        let first = propose_change(&mut journal, &[spec(NOTES, "rev-a", "alpha", "one")]).unwrap();
+        granted(&mut journal, &first);
+        // No version number is left after u64::MAX - 1: the write is refused,
+        // nothing but its refusal record is added, and the step is denied.
+        assert_eq!(next_version(&journal.events, NOTES), None);
+        let events = journal.events.clone();
+        assert_eq!(
+            note_change_wrote(&mut journal, first[0], &[(NOTES, "rev-b")]),
+            Err("no version number left")
+        );
+        assert_eq!(journal.events.len(), events.len() + 1);
+        assert_eq!(without_refusal_records(&journal.events), events);
+        assert_eq!(step_state(&journal, first[0]), Some(StepState::Denied));
+        let row = current_observation(&journal.events, NOTES).unwrap();
+        assert_eq!(
+            (row.version, row.revision.as_deref()),
+            (u64::MAX - 1, Some("rev-a"))
+        );
+        // u64::MAX is not a version: not as a read, not in a stored row.
+        let mut fresh = empty_journal();
+        assert!(!observe(&mut fresh, NOTES, u64::MAX, "alpha\n"));
+        assert!(!observe_read(
+            &mut fresh,
+            NOTES,
+            u64::MAX,
+            "rev-b",
+            None,
+            false,
+            "alpha\n"
+        ));
+        assert!(fresh.events.is_empty());
+        let mut stored = empty_journal();
+        stored
+            .events
+            .push(raw_read(NOTES, u64::MAX, "rev-b", None, "alpha\nbeta\n"));
+        assert_eq!(current_observation(&stored.events, NOTES), None);
+        assert_eq!(next_version(&stored.events, NOTES), Some(1));
+        // Codex's case: before the fix, two edits made at u64::MAX against
+        // rev-b, the first written as rev-c, and the second was then sent
+        // with if_revision rev-c.
+        let second = propose_change(&mut stored, &[spec(NOTES, "rev-b", "beta", "two")]);
+        assert_eq!(second, Err((0, "not observed")));
+    }
+
+    /// Finding 2: a stored legacy journal is checked by the same path rule
+    /// as a live one.
+    fn legacy_edit(journal: &mut Journal, resource: &str, effect_id: Option<u64>) -> u64 {
+        let id = propose_step(journal);
+        let step = journal.steps.iter_mut().find(|step| step.id == id).unwrap();
+        step.kind = ProposalKind::Edit;
+        step.resource = resource.to_string();
+        step.old = "alpha".to_string();
+        step.new = "one".to_string();
+        step.seen_version = Some(1);
+        if let Some(effect_id) = effect_id {
+            step.effect_id = effect_id;
+        }
+        id
+    }
+
+    #[test]
+    fn a_legacy_journal_with_a_path_alias_is_refused_on_load() {
+        let doubled = "localhost://Users/self/Documents//notes.txt";
+        let nfd = "localhost://Users/self/Documents/cafe\u{301}.txt";
+        let upper = "localhost://Users/self/Documents/NOTES.txt";
+        let mut cases: Vec<(Journal, &str)> = Vec::new();
+        let mut journal = empty_journal();
+        journal
+            .events
+            .push(raw_read(doubled, 1, "rev-1", None, "alpha\n"));
+        legacy_edit(&mut journal, doubled, None);
+        cases.push((journal, "path not canonical"));
+        let mut journal = empty_journal();
+        journal
+            .events
+            .push(raw_read(nfd, 1, "rev-1", None, "alpha\n"));
+        cases.push((journal, "path not NFC"));
+        let mut journal = empty_journal();
+        legacy_edit(&mut journal, nfd, None);
+        cases.push((journal, "path not NFC"));
+        let mut journal = empty_journal();
+        journal
+            .events
+            .push(raw_read(NOTES, 1, "rev-1", None, "alpha\n"));
+        journal
+            .events
+            .push(raw_read(upper, 1, "rev-u", None, "alpha\n"));
+        let first = legacy_edit(&mut journal, NOTES, None);
+        legacy_edit(&mut journal, upper, Some(first));
+        cases.push((journal, "one file twice in one change"));
+        let mut journal = empty_journal();
+        journal.compact_backup = Some((vec![raw_read(doubled, 1, "rev-1", None, "alpha\n")], 0));
+        cases.push((journal, "path not canonical"));
+        let mut journal = empty_journal();
+        journal.compact_pending = Some(vec![raw_read(nfd, 1, "rev-1", None, "alpha\n")]);
+        cases.push((journal, "path not NFC"));
+        for (journal, reason) in cases {
+            let bytes = encode_journal(&journal, &[0; 32]).unwrap();
+            assert_eq!(decode_journal(&bytes).map(|_| ()), Err(reason));
+        }
+        // Two files in two changes, and a Chinese name, still load.
+        let mut fine = empty_journal();
+        let chinese = "localhost://Users/self/Documents/\u{7b14}\u{8bb0}.txt";
+        fine.events
+            .push(raw_read(chinese, 1, "rev-1", None, "alpha\n"));
+        legacy_edit(&mut fine, NOTES, None);
+        legacy_edit(&mut fine, upper, None);
+        legacy_edit(&mut fine, chinese, None);
+        let bytes = encode_journal(&fine, &[0; 32]).unwrap();
+        assert!(decode_journal(&bytes).is_ok());
+    }
+
+    #[test]
+    fn a_reread_of_a_legacy_journal_with_a_path_alias_is_refused() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        let mut legacy = two_turns();
+        legacy_edit(
+            &mut legacy,
+            "localhost://Users/self/Documents/./notes.txt",
+            None,
+        );
+        runtime.stored = Some(encode_journal(&legacy, &[0; 32]).unwrap());
+        assert_eq!(
+            reread_journal(&mut runtime, &mut cursor, Some(&read_grant())).map(|_| ()),
+            Err("path not canonical")
+        );
+        // A resume that finds such a journal stored is refused with the reason.
+        let (mut runtime, mut cursor) = fake_runtime();
+        runtime.lose_reply = true;
+        let mut journal = two_turns();
+        assert_eq!(
+            append_journal(
+                &mut runtime,
+                &mut journal,
+                &mut cursor,
+                Some(&write_grant())
+            ),
+            AppendOutcome::Unknown
+        );
+        let waiting = cursor.clone();
+        runtime.stored = Some(encode_journal(&legacy, &[0; 32]).unwrap());
+        assert_eq!(
+            resume_journal(&mut runtime, &mut journal, &mut cursor, Some(&read_grant())),
+            ResumeOutcome::Refused("path not canonical")
+        );
+        assert_eq!(cursor, waiting);
+    }
+
+    /// Finding 3: an NFD spelling of an accented name was another file for
+    /// the no-op count and the duplicate check. Only NFC is accepted.
+    #[test]
+    fn a_path_must_be_nfc_and_non_ascii_names_still_work() {
+        let nfc = "localhost://Users/self/Documents/caf\u{e9}.txt";
+        let nfd = "localhost://Users/self/Documents/cafe\u{301}.txt";
+        let upper = "localhost://Users/self/Documents/CAF\u{c9}.txt";
+        let chinese = "localhost://Users/self/Documents/\u{7b14}\u{8bb0}.txt";
+        let mut journal = empty_journal();
+        assert!(!observe(&mut journal, nfd, 1, "alpha\n"));
+        assert!(!observe_read(
+            &mut journal,
+            nfd,
+            1,
+            "rev-1",
+            None,
+            false,
+            "alpha\n"
+        ));
+        assert!(journal.events.is_empty());
+        assert!(observe_read(
+            &mut journal,
+            nfc,
+            1,
+            "rev-1",
+            None,
+            false,
+            "alpha beta\n"
+        ));
+        assert_eq!(
+            propose_edit(&mut journal, nfd, "alpha", "alpha", Some(1)),
+            Err("path not NFC")
+        );
+        assert_eq!(
+            propose_change(&mut journal, &[spec(nfd, "rev-1", "alpha", "1")]),
+            Err((0, "path not NFC"))
+        );
+        assert!(refusal_records(&journal)
+            .iter()
+            .all(|record| record.starts_with("refused\npath not NFC\n")
+                && !record.contains("cafe\u{301}")));
+        assert_eq!(refusal_records(&journal).len(), 2);
+        // The NFC name works and is one file with its upper case.
+        for _ in 0..NOOP_EDIT_LIMIT {
+            assert!(propose_edit(&mut journal, nfc, "alpha", "alpha", Some(1)).is_ok());
+        }
+        assert!(observe_read(
+            &mut journal,
+            upper,
+            1,
+            "rev-u",
+            None,
+            false,
+            "alpha beta\n"
+        ));
+        assert_eq!(
+            propose_edit(&mut journal, upper, "alpha", "alpha", Some(1)),
+            Err("repeated no-op edit")
+        );
+        assert_eq!(
+            propose_change(
+                &mut journal,
+                &[
+                    spec(nfc, "rev-1", "alpha", "1"),
+                    spec(upper, "rev-u", "beta", "2")
+                ]
+            ),
+            Err((1, "one file twice in one change"))
+        );
+        // A Chinese name is read, edited and changed like any other.
+        assert!(observe_read(
+            &mut journal,
+            chinese,
+            1,
+            "rev-c",
+            None,
+            false,
+            "\u{4f60}\u{597d}\n"
+        ));
+        assert!(propose_edit(&mut journal, chinese, "\u{4f60}", "\u{60a8}", Some(1)).is_ok());
+        assert!(propose_change(
+            &mut journal,
+            &[
+                spec(chinese, "rev-c", "\u{597d}", "\u{5440}"),
+                spec(nfc, "rev-1", "beta", "2")
+            ]
+        )
+        .is_ok());
+    }
+
+    /// Finding 4: a refusal of the provider request or of the written result
+    /// wrote no refusal record.
+    #[test]
+    fn a_refused_request_or_result_writes_one_record() {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rev-1",
+            None,
+            false,
+            "alpha\n"
+        ));
+        let ids = propose_change(&mut journal, &[spec(NOTES, "rev-1", "alpha", "one")]).unwrap();
+        let before = refusal_records(&journal).len();
+        assert_eq!(edit_request(&mut journal, ids[0]), Err("not dispatched"));
+        assert_eq!(refusal_records(&journal).len(), before + 1);
+        granted(&mut journal, &ids);
+        assert_eq!(
+            note_change_wrote(&mut journal, ids[0], &[(STYLE, "rev-2")]),
+            Err("written files do not match the change")
+        );
+        assert_eq!(refusal_records(&journal).len(), before + 2);
+    }
+
+    /// A journal and a call that must be refused on it.
+    type Trigger = (Journal, fn(&mut Journal) -> Result<(), &'static str>);
+
+    /// A dispatched, granted edit step as a stored journal could hold it.
+    fn dispatched_edit(
+        journal: &mut Journal,
+        resource: &str,
+        old: &str,
+        effect: Option<u64>,
+    ) -> u64 {
+        let id = legacy_edit(journal, resource, effect);
+        let step = journal.steps.iter_mut().find(|step| step.id == id).unwrap();
+        step.old = old.to_string();
+        step.state = StepState::Dispatched;
+        step.grant = Some("fixture-grant".to_string());
+        id
+    }
+
+    fn read_notes(text: &str) -> Journal {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rev-1",
+            None,
+            false,
+            text
+        ));
+        journal
+    }
+
+    fn windowed_notes() -> Journal {
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            NOTES,
+            1,
+            "rev-1",
+            Some(10),
+            false,
+            "ten\neleven\n"
+        ));
+        journal
+    }
+
+    const NFD: &str = "localhost://Users/self/Documents/cafe\u{301}.txt";
+    const ALIAS: &str = "localhost://Users/self/Documents//notes.txt";
+    const UPPER: &str = "localhost://Users/self/Documents/NOTES.txt";
+
+    fn request(journal: &mut Journal) -> Result<(), &'static str> {
+        let effect = journal.steps.last().map_or(99, |step| step.effect_id);
+        edit_request(journal, effect).map(|_| ())
+    }
+
+    fn result(journal: &mut Journal) -> Result<(), &'static str> {
+        let effect = journal.steps.last().map_or(99, |step| step.effect_id);
+        note_change_wrote(journal, effect, &[(NOTES, "rev-2")])
+    }
+
+    /// Both ends of a bound change, the request and the result.
+    fn both_ends(journal: Journal) -> Vec<Trigger> {
+        vec![(journal.clone(), request), (journal, result)]
+    }
+
+    /// A refused path: proposed alone, in a change, and as a stored step.
+    fn path_triggers(
+        path: &str,
+        edit: fn(&mut Journal) -> Result<(), &'static str>,
+        change: fn(&mut Journal) -> Result<(), &'static str>,
+    ) -> Vec<Trigger> {
+        let mut bound = read_notes("alpha\n");
+        dispatched_edit(&mut bound, path, "alpha", None);
+        let mut out: Vec<Trigger> = vec![
+            (read_notes("alpha\n"), edit),
+            (read_notes("alpha\n"), change),
+        ];
+        out.extend(both_ends(bound));
+        out
+    }
+
+    /// Every refusal, by every entry that can give it. The match has no
+    /// wildcard: a new `Refusal` does not compile until it has a trigger here.
+    fn triggers(refusal: Refusal) -> Vec<Trigger> {
+        match refusal {
+            Refusal::PathNotCanonical => path_triggers(
+                ALIAS,
+                |j| propose_edit(j, ALIAS, "alpha", "a", Some(1)).map(|_| ()),
+                |j| {
+                    propose_change(j, &[spec(ALIAS, "rev-1", "alpha", "a")])
+                        .map(|_| ())
+                        .map_err(|(_, why)| why)
+                },
+            ),
+            Refusal::PathNotNfc => path_triggers(
+                NFD,
+                |j| propose_edit(j, NFD, "alpha", "a", Some(1)).map(|_| ()),
+                |j| {
+                    propose_change(j, &[spec(NFD, "rev-1", "alpha", "a")])
+                        .map(|_| ())
+                        .map_err(|(_, why)| why)
+                },
+            ),
+            Refusal::ChangeSize => vec![(read_notes("alpha\n"), |j| {
+                propose_change(j, &[]).map(|_| ()).map_err(|(_, why)| why)
+            })],
+            Refusal::OneFileTwice => {
+                let mut bound = read_notes("alpha\n");
+                assert!(observe_read(
+                    &mut bound, UPPER, 1, "rev-u", None, false, "alpha\n"
+                ));
+                let first = dispatched_edit(&mut bound, NOTES, "alpha", None);
+                dispatched_edit(&mut bound, UPPER, "alpha", Some(first));
+                let mut out: Vec<Trigger> = vec![(bound.clone(), |j| {
+                    propose_change(
+                        j,
+                        &[
+                            spec(NOTES, "rev-1", "alpha", "a"),
+                            spec(UPPER, "rev-u", "alpha", "b"),
+                        ],
+                    )
+                    .map(|_| ())
+                    .map_err(|(_, why)| why)
+                })];
+                out.extend(both_ends(bound));
+                out
+            }
+            Refusal::NotObserved => {
+                let mut bound = empty_journal();
+                dispatched_edit(&mut bound, NOTES, "alpha", None);
+                let mut out: Vec<Trigger> = vec![
+                    (empty_journal(), |j| {
+                        propose_edit(j, NOTES, "alpha", "a", Some(1)).map(|_| ())
+                    }),
+                    (empty_journal(), |j| {
+                        propose_change(j, &[spec(NOTES, "rev-1", "alpha", "a")])
+                            .map(|_| ())
+                            .map_err(|(_, why)| why)
+                    }),
+                ];
+                out.extend(both_ends(bound));
+                out
+            }
+            Refusal::Stale => {
+                let mut bound = read_notes("alpha\n");
+                dispatched_edit(&mut bound, NOTES, "alpha", None);
+                assert!(observe_read(
+                    &mut bound, NOTES, 2, "rev-2", None, false, "beta\n"
+                ));
+                let mut out: Vec<Trigger> = vec![(read_notes("alpha\n"), |j| {
+                    propose_edit(j, NOTES, "alpha", "a", Some(0)).map(|_| ())
+                })];
+                out.extend(both_ends(bound));
+                out
+            }
+            Refusal::NoRevision => {
+                let mut unbound = empty_journal();
+                assert!(observe(&mut unbound, NOTES, 1, "alpha\n"));
+                let mut bound = unbound.clone();
+                dispatched_edit(&mut bound, NOTES, "alpha", None);
+                let mut out: Vec<Trigger> = vec![(unbound, |j| {
+                    propose_change(j, &[spec(NOTES, "rev-1", "alpha", "a")])
+                        .map(|_| ())
+                        .map_err(|(_, why)| why)
+                })];
+                out.extend(both_ends(bound));
+                out
+            }
+            Refusal::StaleRevision => vec![(read_notes("alpha\n"), |j| {
+                propose_change(j, &[spec(NOTES, "rev-0", "alpha", "a")])
+                    .map(|_| ())
+                    .map_err(|(_, why)| why)
+            })],
+            Refusal::Empty => {
+                let mut bound = read_notes("alpha\n");
+                dispatched_edit(&mut bound, NOTES, "", None);
+                let mut out: Vec<Trigger> = vec![
+                    (read_notes("alpha\n"), |j| {
+                        propose_edit(j, NOTES, "", "a", Some(1)).map(|_| ())
+                    }),
+                    (read_notes("alpha\n"), |j| {
+                        propose_change(j, &[spec(NOTES, "rev-1", "", "a")])
+                            .map(|_| ())
+                            .map_err(|(_, why)| why)
+                    }),
+                ];
+                out.extend(both_ends(bound));
+                out
+            }
+            Refusal::OutsideWindow => {
+                let mut bound = windowed_notes();
+                dispatched_edit(&mut bound, NOTES, "alpha", None);
+                let mut out: Vec<Trigger> = vec![
+                    (windowed_notes(), |j| {
+                        propose_edit(j, NOTES, "alpha", "a", Some(1)).map(|_| ())
+                    }),
+                    (windowed_notes(), |j| {
+                        propose_change(j, &[spec(NOTES, "rev-1", "alpha", "a")])
+                            .map(|_| ())
+                            .map_err(|(_, why)| why)
+                    }),
+                ];
+                out.extend(both_ends(bound));
+                out
+            }
+            Refusal::NotUnique => {
+                let mut bound = read_notes("alpha alpha\n");
+                dispatched_edit(&mut bound, NOTES, "alpha", None);
+                let mut out: Vec<Trigger> = vec![
+                    (read_notes("alpha alpha\n"), |j| {
+                        propose_edit(j, NOTES, "alpha", "a", Some(1)).map(|_| ())
+                    }),
+                    (read_notes("alpha alpha\n"), |j| {
+                        propose_change(j, &[spec(NOTES, "rev-1", "alpha", "a")])
+                            .map(|_| ())
+                            .map_err(|(_, why)| why)
+                    }),
+                ];
+                out.extend(both_ends(bound));
+                out
+            }
+            Refusal::HostPath => {
+                let mut bound = read_notes("alpha\n");
+                let id = dispatched_edit(&mut bound, NOTES, "alpha", None);
+                bound
+                    .steps
+                    .iter_mut()
+                    .find(|step| step.id == id)
+                    .unwrap()
+                    .new = "/etc/passwd".to_string();
+                let mut out: Vec<Trigger> = vec![(read_notes("alpha\n"), |j| {
+                    propose_change(j, &[spec(NOTES, "rev-1", "alpha", "/etc/passwd")])
+                        .map(|_| ())
+                        .map_err(|(_, why)| why)
+                })];
+                out.extend(both_ends(bound));
+                out
+            }
+            Refusal::WindowLineBreak => {
+                let mut bound = windowed_notes();
+                let id = dispatched_edit(&mut bound, NOTES, "eleven\n", None);
+                bound
+                    .steps
+                    .iter_mut()
+                    .find(|step| step.id == id)
+                    .unwrap()
+                    .new = "x".to_string();
+                let mut out: Vec<Trigger> = vec![(windowed_notes(), |j| {
+                    propose_change(j, &[spec(NOTES, "rev-1", "eleven\n", "x")])
+                        .map(|_| ())
+                        .map_err(|(_, why)| why)
+                })];
+                out.extend(both_ends(bound));
+                out
+            }
+            Refusal::RepeatedNoOp => {
+                let mut repeated = read_notes("alpha\n");
+                for _ in 0..NOOP_EDIT_LIMIT {
+                    assert!(propose_edit(&mut repeated, NOTES, "alpha", "alpha", Some(1)).is_ok());
+                }
+                vec![
+                    (repeated.clone(), |j| {
+                        propose_edit(j, NOTES, "alpha", "alpha", Some(1)).map(|_| ())
+                    }),
+                    (repeated, |j| {
+                        propose_change(j, &[spec(NOTES, "rev-1", "alpha", "alpha")])
+                            .map(|_| ())
+                            .map_err(|(_, why)| why)
+                    }),
+                ]
+            }
+            Refusal::NoChange => both_ends(read_notes("alpha\n")),
+            Refusal::NotDispatched => {
+                let mut journal = read_notes("alpha\n");
+                propose_change(&mut journal, &[spec(NOTES, "rev-1", "alpha", "a")]).unwrap();
+                both_ends(journal)
+            }
+            Refusal::EarlierWriteOpen => {
+                let mut bound = read_notes("alpha\n");
+                let earlier = dispatched_edit(&mut bound, STYLE, "body", None);
+                bound
+                    .steps
+                    .iter_mut()
+                    .find(|step| step.id == earlier)
+                    .unwrap()
+                    .state = StepState::Prepared;
+                dispatched_edit(&mut bound, NOTES, "alpha", None);
+                both_ends(bound)
+            }
+            Refusal::WrittenMismatch => {
+                let mut journal = read_notes("alpha\n");
+                let ids =
+                    propose_change(&mut journal, &[spec(NOTES, "rev-1", "alpha", "a")]).unwrap();
+                granted(&mut journal, &ids);
+                vec![(journal, |j| {
+                    let effect = j.steps.last().unwrap().effect_id;
+                    note_change_wrote(j, effect, &[(STYLE, "rev-2")])
+                })]
+            }
+            Refusal::NoVersionLeft => {
+                let mut journal = empty_journal();
+                journal
+                    .events
+                    .push(raw_read(NOTES, u64::MAX - 1, "rev-1", None, "alpha\n"));
+                let ids =
+                    propose_change(&mut journal, &[spec(NOTES, "rev-1", "alpha", "a")]).unwrap();
+                granted(&mut journal, &ids);
+                vec![(journal, result)]
+            }
+        }
+    }
+
+    /// Finding 4: every refusal, from every entry that can give it, writes
+    /// exactly one refusal record with its reason, and changes nothing else in
+    /// the log.
+    #[test]
+    fn every_refusal_writes_exactly_one_record() {
+        let mut count = 0;
+        for &refusal in Refusal::ALL {
+            let cases = triggers(refusal);
+            assert!(!cases.is_empty(), "{refusal:?} has no trigger");
+            for (index, (mut journal, call)) in cases.into_iter().enumerate() {
+                let events = journal.events.clone();
+                let before = refusal_records(&journal).len();
+                assert_eq!(
+                    call(&mut journal),
+                    Err(refusal.reason()),
+                    "{refusal:?} case {index}"
+                );
+                let records = refusal_records(&journal);
+                assert_eq!(records.len(), before + 1, "{refusal:?} case {index}");
+                assert!(
+                    records
+                        .last()
+                        .unwrap()
+                        .starts_with(&format!("refused\n{}\n", refusal.reason())),
+                    "{refusal:?} case {index}"
+                );
+                assert_eq!(
+                    without_refusal_records(&journal.events),
+                    without_refusal_records(&events),
+                    "{refusal:?} case {index}"
+                );
+                count += 1;
+            }
+        }
+        assert!(count >= Refusal::ALL.len());
+    }
+
+    // Codex review of #24 at 3d1ef56: the key must be normalized after the
+    // case step.
+
+    const IOTA_DIALYTIKA_TONOS: &str = "localhost://Users/self/Documents/\u{390}.txt";
+    const CAPITAL_IOTA_DIALYTIKA_ACUTE: &str =
+        "localhost://Users/self/Documents/\u{3aa}\u{301}.txt";
+
+    #[test]
+    fn spellings_equal_without_case_and_normal_form_share_one_key() {
+        for (a, b) in [
+            // Codex's pair.
+            ("\u{390}", "\u{3aa}\u{301}"),
+            ("\u{1f0}", "J\u{30c}"),
+            // The first NFD matters: U+0345 sorts after U+0308 only when
+            // decomposed.
+            ("\u{1f80}\u{308}", "\u{1f00}\u{308}\u{3b9}"),
+            // Capital sharp s folds to "ss", like small sharp s.
+            ("\u{1e9e}", "\u{df}"),
+            ("\u{1e9e}", "ss"),
+            ("caf\u{e9}", "CAF\u{c9}"),
+        ] {
+            assert!(unicode_normalization::is_nfc(a) && unicode_normalization::is_nfc(b));
+            assert_eq!(path_key(a), path_key(b), "{a:?} {b:?}");
+        }
+        assert_ne!(path_key("caf\u{e9}"), path_key("cafe"));
+        assert_eq!(path_key("\u{7b14}\u{8bb0}"), "\u{7b14}\u{8bb0}");
+    }
+
+    /// Every key is NFD, a key is its own key, and canonically equivalent
+    /// strings share one key. Swept over Latin, Greek, Cyrillic and more,
+    /// alone and with combining marks.
+    #[test]
+    fn every_key_is_normalized_and_its_own_key() {
+        use unicode_normalization::UnicodeNormalization;
+        let marks = [
+            '\u{301}', '\u{308}', '\u{345}', '\u{307}', '\u{30c}', '\u{342}', '\u{313}', '\u{3b9}',
+        ];
+        let mut inputs: Vec<String> = (0x20_u32..0x3000)
+            .chain(0x1e00..0x2000)
+            .filter_map(char::from_u32)
+            .map(String::from)
+            .collect();
+        for base in (0x41_u32..0x250)
+            .chain(0x370..0x400)
+            .chain(0x1e00..0x2000)
+            .filter_map(char::from_u32)
+        {
+            for first in marks {
+                inputs.push(format!("{base}{first}"));
+                for second in marks {
+                    inputs.push(format!("{base}{first}{second}"));
+                }
+            }
+        }
+        for input in &inputs {
+            let key = path_key(input);
+            assert!(unicode_normalization::is_nfd(&key), "{input:?}");
+            assert_eq!(path_key(&key), key, "{input:?}");
+            let nfd: String = input.nfd().collect();
+            let nfc: String = input.nfc().collect();
+            assert_eq!(path_key(&nfd), key, "{input:?}");
+            assert_eq!(path_key(&nfc), key, "{input:?}");
+        }
+    }
+
+    /// Codex's reproduction: the two spellings are one file for the no-op
+    /// count, a change, a stored journal, and a bound request.
+    #[test]
+    fn codex_greek_spellings_are_one_file_everywhere() {
+        let (a, b) = (IOTA_DIALYTIKA_TONOS, CAPITAL_IOTA_DIALYTIKA_ACUTE);
+        let mut journal = empty_journal();
+        assert!(observe_read(
+            &mut journal,
+            a,
+            1,
+            "rev-a",
+            None,
+            false,
+            "alpha beta\n"
+        ));
+        assert!(observe_read(
+            &mut journal,
+            b,
+            1,
+            "rev-b",
+            None,
+            false,
+            "alpha beta\n"
+        ));
+        for _ in 0..NOOP_EDIT_LIMIT {
+            assert!(propose_edit(&mut journal, a, "alpha", "alpha", Some(1)).is_ok());
+        }
+        assert_eq!(
+            propose_edit(&mut journal, b, "alpha", "alpha", Some(1)),
+            Err("repeated no-op edit")
+        );
+        assert_eq!(
+            propose_change(
+                &mut journal,
+                &[spec(a, "rev-a", "beta", "1"), spec(b, "rev-b", "beta", "2")]
+            ),
+            Err((1, "one file twice in one change"))
+        );
+        // A stored change with both spellings does not load.
+        let mut stored = empty_journal();
+        let first = legacy_edit(&mut stored, a, None);
+        legacy_edit(&mut stored, b, Some(first));
+        let bytes = encode_journal(&stored, &[0; 32]).unwrap();
+        assert_eq!(
+            decode_journal(&bytes).map(|_| ()),
+            Err("one file twice in one change")
+        );
+        // A change built any other way is refused when it binds.
+        let mut bound = empty_journal();
+        assert!(observe_read(
+            &mut bound, a, 1, "rev-a", None, false, "alpha\n"
+        ));
+        assert!(observe_read(
+            &mut bound, b, 1, "rev-b", None, false, "alpha\n"
+        ));
+        let first = dispatched_edit(&mut bound, a, "alpha", None);
+        dispatched_edit(&mut bound, b, "alpha", Some(first));
+        assert_eq!(
+            edit_request(&mut bound, first),
+            Err("one file twice in one change")
+        );
     }
 }
