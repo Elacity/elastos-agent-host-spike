@@ -168,6 +168,54 @@ because the Runtime's gateway test installs exactly four Photos page files (unch
 | Documents worst shelf | 62.2% | 50.2% |
 | Photo worst album | 64.9% | 59.1% |
 
+## Notes for the next builder
+
+Written on 23 Oct 2026, when the Photo track moved to its own lane. The archive viewer's own notes are in
+`examples/archive-viewer/DESIGN.md`, "Notes for the next builder".
+
+### Traps (each one cost a run here)
+
+- **macOS `/var` and `/tmp` are links.** The bundle tool refuses a path through any link (`symlink_in_path`), so
+  tests must name temporary folders by their real path (`tempdir().path().canonicalize()`; see the `Temp`
+  helper in `photo-viewer/bundle/tests/pack.rs`). A person on macOS must give `pack` and `listing` real paths too.
+- **No `..` in a path given to the bundle tool** (`path_invalid`). Use `Path::parent()`, not `join("..")` (the
+  docs bundle test did this). The host tests' `join("..")` is fine: it goes to the Runtime's loader.
+- **`build.sh` keeps the old artifact when a build fails.** A host test run after a failed build tests the old
+  component. Delete the `.wasm` first when you check a build by hand; `verify.sh` stops on the failure.
+- **Only the pinned-container hash counts.** The kit's crate is a path dependency outside each viewer's
+  workspace, so native builds differ with the checkout path. The container mounts the repository at
+  `/build/elastos-runtime`, not at the builder's remap target (see "Reproducible build").
+- **One build folder for the whole repository** (`.cargo/config.toml` points every workspace at
+  `target-build/`). Two Cargo runs wait on its lock. Do not run a container build or another `verify.sh` while a
+  falsifier set runs: the falsifiers edit kit and viewer sources in place, and a build at that moment compiles a
+  mutant.
+- **Falsifier mutants must compile and must end.** `--check` only finds the anchors; a new text that names a
+  renamed item (for example `Refusal::ShelfTooLarge` after it became `InputTooLarge`) stops the whole run with
+  "a falsifier does not compile". A mutant that makes a read loop forever is killed (the fake's call log fills
+  memory) and is reported as "no test": pick mutants that end (`>` to `>=`, not a limit plus one).
+- **Name only tests that notice.** Every named test must fail. A test that fails for another reason proves
+  nothing either: the fake's body test had to give the fake a real object before its unknown-field case meant
+  anything.
+- **rustup picks the toolchain by the current folder.** The Bus v2 parts (Rust 1.95.0) run from their own
+  folder; the guests use the default (1.91.0 here).
+- **Container builds here** need `dockerd` started, and `HTTPS_PROXY` plus `ELASTOS_REPRO_CA=/root/.ccr/ca-bundle.crt`.
+  A Mac passes neither.
+- **Disk is tight in the cloud container.** `target-build/debug/incremental` grows past 2 GB; deleting it is safe.
+- `export RUST_TEST_THREADS=2` before tests.
+
+### Open kit gaps
+
+- **The strict input-list parser** is still in each viewer (`album.rs`, `shelf.rs`).
+- **The typed blocks** (markdown to blocks) are `docs-model`, not the kit; only the text checks moved.
+- **Page code** (`launchToken`, the client, `cut`) is still per page, because the Runtime's gateway test installs
+  exactly four Photos page files.
+- **One shared `examples/` workspace** would make native builds path-free again: a proposed slice, above.
+- **From the archive design:** M4 (lying-archive fixtures) is the app's; M5, M6 and M7 need Anders, the Runtime
+  or the real move PR.
+- **From KIT-REPORT, still open for Anders after 0.8.0:** the generic viewer route, choosing a viewer by what it
+  accepts, `requires[].cid` in the Runtime manifest, and the fixed-path output.
+- **Pattern 7** (the capsule's own entitlement check) has no Capsule Runtime to run in yet.
+
 ## For the Mac and Codex
 
 - Run both `verify.sh` (each runs `capsule-kit/guest/verify.sh` first), the photo page and bundle checks, and
