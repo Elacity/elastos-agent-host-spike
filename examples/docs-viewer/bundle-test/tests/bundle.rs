@@ -21,7 +21,10 @@ const NOW: u64 = 1_800_000_000;
 const DAY: u64 = 24 * 3600;
 
 fn viewer_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("bundle-test has a parent folder")
+        .to_path_buf()
 }
 
 fn manifest_of(dir: &Path) -> Value {
@@ -36,8 +39,10 @@ struct World {
 
 impl World {
     fn new() -> World {
+        // macOS `/var` is a link; the resolver keeps the real folder.
+        let base = std::env::temp_dir().canonicalize().unwrap();
         World {
-            root: tempfile::tempdir().unwrap(),
+            root: tempfile::tempdir_in(base).unwrap(),
             release_root: sign::generate(),
             publisher: sign::generate(),
         }

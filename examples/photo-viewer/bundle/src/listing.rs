@@ -6,7 +6,7 @@
 //! (JCS) form of the document.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -34,10 +34,10 @@ pub fn list_closure(root: &Path) -> Result<Vec<Entry>, Refusal> {
 
 /// The listing and the `capsule.json` bytes it lists, read in the same pass.
 pub(crate) fn read_closure(root: &Path) -> Result<(Vec<Entry>, Vec<u8>), Refusal> {
-    check_root(root)?;
+    let root = resolve_path(root)?;
     let mut entries = Vec::new();
     let mut manifest = None;
-    walk(root, root, &mut entries, &mut manifest)?;
+    walk(&root, &root, &mut entries, &mut manifest)?;
     entries.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
 
     check_unique_under_case_folding(entries.iter().map(|entry| entry.path.as_str()))?;
@@ -45,14 +45,42 @@ pub(crate) fn read_closure(root: &Path) -> Result<(Vec<Entry>, Vec<u8>), Refusal
     Ok((entries, manifest))
 }
 
-/// The root is not followed either: a link there would list another folder.
-/// The walk below lstats every entry, so no folder under the root is a link.
-pub(crate) fn check_root(root: &Path) -> Result<(), Refusal> {
-    let meta = std::fs::symlink_metadata(root).map_err(|err| io(err, root))?;
-    if meta.file_type().is_symlink() {
-        return Err(Refusal::SymlinkInPath(root.display().to_string()));
+/// The one way `pack` and the listing resolve a folder (P10). The path is
+/// rebuilt from its components, so a trailing `/` or `.` cannot hide the last
+/// part from the lstat, and a leading `./` cannot either. Every prefix is
+/// lstatted in order, from the first component down, so a link in the middle
+/// of the path is refused too (`symlink_in_path`). An empty path and any `..`
+/// part name no folder this tool can describe by its own bytes, so both are
+/// refused (`path_invalid`). The caller uses what this returns, never the path
+/// it passed.
+pub(crate) fn resolve_path(path: &Path) -> Result<PathBuf, Refusal> {
+    let mut resolved = PathBuf::new();
+    let mut parts = 0usize;
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => continue,
+            std::path::Component::ParentDir => {
+                return Err(Refusal::PathInvalid(path.display().to_string()))
+            }
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                resolved.push(part.as_os_str());
+            }
+            std::path::Component::Normal(name) => {
+                resolved.push(name);
+                parts += 1;
+            }
+        }
+        // lstat, never stat: a link is seen as itself. The prefixes are built
+        // in order, so no part below the first is reached through a link.
+        let meta = std::fs::symlink_metadata(&resolved).map_err(|err| io(err, &resolved))?;
+        if meta.file_type().is_symlink() {
+            return Err(Refusal::SymlinkInPath(resolved.display().to_string()));
+        }
     }
-    Ok(())
+    if parts == 0 {
+        return Err(Refusal::PathInvalid(path.display().to_string()));
+    }
+    Ok(resolved)
 }
 
 /// Two paths that differ only by case would be one file on a

@@ -6,6 +6,32 @@ use std::path::{Path, PathBuf};
 use capsule_bundle::testing::refused;
 use capsule_bundle::*;
 
+/// macOS `/var` and `/tmp` are links themselves, so tests keep their real
+/// folder: every prefix of the test root is then a real folder for the one
+/// path resolver.
+fn tempdir() -> tempfile::TempDir {
+    let base = std::env::temp_dir().canonicalize().unwrap();
+    tempfile::tempdir_in(base).unwrap()
+}
+
+/// Runs with `dir` as the current folder, so a path can start with `./`, and
+/// puts the previous one back even when an assertion panics.
+struct CurrentDir(PathBuf);
+
+impl CurrentDir {
+    fn set(dir: &Path) -> CurrentDir {
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir).unwrap();
+        CurrentDir(previous)
+    }
+}
+
+impl Drop for CurrentDir {
+    fn drop(&mut self) {
+        std::env::set_current_dir(&self.0).unwrap();
+    }
+}
+
 fn write(path: &Path, bytes: &[u8]) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, bytes).unwrap();
@@ -59,7 +85,7 @@ fn paths(entries: &[Entry]) -> Vec<&str> {
 
 #[test]
 fn a_component_ships_its_manifest_and_its_entrypoint_only() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempdir();
     let source = component_source(root.path());
     let into = root.path().join("packed");
     let (cid, entries) = pack(&source, &into, &[]).unwrap();
@@ -74,7 +100,7 @@ fn a_component_ships_its_manifest_and_its_entrypoint_only() {
 
 #[test]
 fn a_page_ships_its_manifest_and_its_entrypoint_folder() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempdir();
     let (_, entries) = pack(&page_source(root.path()), &root.path().join("packed"), &[]).unwrap();
     assert_eq!(
         paths(&entries),
@@ -89,7 +115,7 @@ fn a_page_ships_its_manifest_and_its_entrypoint_folder() {
 
 #[test]
 fn the_cid_does_not_change_when_a_test_source_or_fixture_does() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempdir();
     let page = page_source(root.path());
     let (first, _) = pack(&page, &root.path().join("one"), &[]).unwrap();
     write(&page.join("page.test.mjs"), b"// other tests");
@@ -104,7 +130,7 @@ fn the_cid_does_not_change_when_a_test_source_or_fixture_does() {
 
 #[test]
 fn a_page_names_its_core_by_cid_and_keeps_its_other_requirements() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempdir();
     let core = component_source(root.path());
     let (core_cid, _) = pack(&core, &root.path().join("core-packed"), &[]).unwrap();
     let page = page_source(root.path());
@@ -137,7 +163,7 @@ fn a_page_names_its_core_by_cid_and_keeps_its_other_requirements() {
 
 #[test]
 fn pack_refuses_what_it_cannot_ship_as_it_is() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempdir();
     let r = root.path();
 
     // No manifest; no entrypoint; an entrypoint that is not built.
@@ -202,7 +228,7 @@ fn pack_refuses_what_it_cannot_ship_as_it_is() {
 
 #[test]
 fn pack_refuses_a_symlinked_folder_anywhere_on_the_path() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempdir();
     let r = root.path();
     // Bytes outside the source that a followed link would ship.
     write(&r.join("outside/payload.component.wasm"), b"\0asm outside");
@@ -269,4 +295,74 @@ fn pack_refuses_a_symlinked_folder_anywhere_on_the_path() {
     );
     let (_, entries) = pack(&core, &r.join("o6"), &[]).unwrap();
     assert_eq!(paths(&entries), ["a/b/c/x.component.wasm", "capsule.json"]);
+}
+
+#[test]
+fn pack_refuses_a_symlinked_root_spelled_with_a_trailing_slash_or_dot() {
+    let root = tempdir();
+    let r = root.path();
+    let core = component_source(&r.join("c1"));
+    let link = r.join("root-link");
+    symlink(&core, &link).unwrap();
+    let shipped_nothing = |into: &Path| assert!(!into.exists(), "{} was written", into.display());
+
+    // The same linked folder, spelled so that a raw lstat would follow it.
+    let forms = [
+        format!("{}/", link.display()),
+        format!("{}/.", link.display()),
+        format!("{}//", link.display()),
+    ];
+    for (index, form) in forms.iter().enumerate() {
+        let into = r.join(format!("o{index}"));
+        assert_eq!(
+            refused(pack(Path::new(form), &into, &[])),
+            "symlink_in_path",
+            "{form}"
+        );
+        shipped_nothing(&into);
+    }
+
+    // A leading `./`, then the same link.
+    {
+        let _cwd = CurrentDir::set(r);
+        let dot = refused(pack(Path::new("./root-link/"), &r.join("o-dot"), &[]));
+        assert_eq!(dot, "symlink_in_path");
+    }
+    shipped_nothing(&r.join("o-dot"));
+
+    // A link in the middle of the path: `a/link` is the link, `./` hides it not.
+    let mid = r.join("mid");
+    component_source(&r.join("outside/b"));
+    std::fs::create_dir_all(mid.join("a")).unwrap();
+    symlink("../../outside", mid.join("a/link")).unwrap();
+    let through = format!("{}/a/./link/b", mid.display());
+    assert_eq!(
+        refused(pack(Path::new(&through), &r.join("o-mid"), &[])),
+        "symlink_in_path"
+    );
+    shipped_nothing(&r.join("o-mid"));
+
+    // The same spelling with a real `a/link/b` packs, so the refusal is the link.
+    let real = r.join("real/a/link/b");
+    write(
+        &real.join("capsule.json"),
+        &manifest("component", "x.component.wasm"),
+    );
+    write(&real.join("x.component.wasm"), b"\0asm component");
+    let through = format!("{}/a/./link/b", r.join("real").display());
+    let (_, entries) = pack(Path::new(&through), &r.join("o-ok"), &[]).unwrap();
+    assert_eq!(paths(&entries), ["capsule.json", "x.component.wasm"]);
+
+    // An empty path and a `..` part name no folder this tool can describe.
+    assert_eq!(
+        refused(pack(Path::new(""), &r.join("o-empty"), &[])),
+        "path_invalid"
+    );
+    shipped_nothing(&r.join("o-empty"));
+    let up = format!("{}/..", core.display());
+    assert_eq!(
+        refused(pack(Path::new(&up), &r.join("o-up"), &[])),
+        "path_invalid"
+    );
+    shipped_nothing(&r.join("o-up"));
 }

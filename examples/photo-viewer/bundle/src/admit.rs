@@ -379,7 +379,9 @@ mod tests {
     /// A source that changes after it was listed and verified is not staged.
     #[test]
     fn a_source_changed_after_verification_is_not_staged() {
-        let root = tempfile::tempdir().unwrap();
+        // macOS `/var` is a link; the resolver keeps the real folder.
+        let base = std::env::temp_dir().canonicalize().unwrap();
+        let root = tempfile::tempdir_in(base).unwrap();
         let source = root.path().join("source");
         let store = root.path().join("store");
         std::fs::create_dir(&source).unwrap();

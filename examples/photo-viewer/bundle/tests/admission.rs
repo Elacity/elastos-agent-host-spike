@@ -12,6 +12,32 @@ use ed25519_dalek::SigningKey;
 const NOW: u64 = 1_800_000_000;
 const HOUR: u64 = 3600;
 
+/// macOS `/var` and `/tmp` are links themselves, so tests keep their real
+/// folder: every prefix of the test root is then a real folder for the one
+/// path resolver.
+fn tempdir() -> tempfile::TempDir {
+    let base = std::env::temp_dir().canonicalize().unwrap();
+    tempfile::tempdir_in(base).unwrap()
+}
+
+/// Runs with `dir` as the current folder, so a path can start with `./`, and
+/// puts the previous one back even when an assertion panics.
+struct CurrentDir(PathBuf);
+
+impl CurrentDir {
+    fn set(dir: &Path) -> CurrentDir {
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir).unwrap();
+        CurrentDir(previous)
+    }
+}
+
+impl Drop for CurrentDir {
+    fn drop(&mut self) {
+        std::env::set_current_dir(&self.0).unwrap();
+    }
+}
+
 struct World {
     root: tempfile::TempDir,
     floors: std::cell::Cell<u32>,
@@ -22,7 +48,7 @@ struct World {
 impl World {
     fn new() -> World {
         World {
-            root: tempfile::tempdir().unwrap(),
+            root: tempdir(),
             floors: std::cell::Cell::new(0),
             release_root: sign::generate(),
             publisher: sign::generate(),
@@ -364,6 +390,68 @@ fn the_listing_refuses_symlinks_and_special_files() {
         .unwrap();
     assert!(made.success());
     assert_eq!(refused(list_closure(&fifo)), "special_file");
+}
+
+#[test]
+fn the_listing_refuses_a_symlinked_root_spelled_with_a_trailing_slash_or_dot() {
+    let world = World::new();
+    let real = world.capsule("real-root", "0.1.0");
+    let links = world.dir("links");
+    let link = links.join("root-link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    // The same linked folder, spelled so that a raw lstat would follow it.
+    let forms = [
+        format!("{}/", link.display()),
+        format!("{}/.", link.display()),
+        format!("{}//", link.display()),
+    ];
+    for form in &forms {
+        assert_eq!(
+            refused(list_closure(Path::new(form))),
+            "symlink_in_path",
+            "{form}"
+        );
+    }
+
+    // A leading `./`, then the same link.
+    {
+        let _cwd = CurrentDir::set(&links);
+        assert_eq!(
+            refused(list_closure(Path::new("./root-link/"))),
+            "symlink_in_path"
+        );
+    }
+
+    // A link in the middle of the path: `a/link` is the link, `./` hides it not.
+    let mid = world.dir("mid");
+    world.dir("mid/a");
+    std::os::unix::fs::symlink(world.dir("outside"), mid.join("a/link")).unwrap();
+    let through = format!("{}/a/./link/b", mid.display());
+    assert_eq!(
+        refused(list_closure(Path::new(&through))),
+        "symlink_in_path"
+    );
+
+    // The same spelling with a real `a/link/b` lists, so the refusal is the link.
+    let inside = world.capsule("inside/a/link/b", "0.1.0");
+    let through = format!("{}/a/./link/b", world.dir("inside").display());
+    let entries = list_closure(Path::new(&through)).unwrap();
+    let listed: Vec<&str> = entries.iter().map(|entry| entry.path.as_str()).collect();
+    assert_eq!(
+        listed,
+        [
+            "capsule.json",
+            "icons/photos.png",
+            "photo-viewer.component.wasm"
+        ]
+    );
+    assert!(list_closure(&inside).is_ok());
+
+    // An empty path and a `..` part name no folder this tool can describe.
+    assert_eq!(refused(list_closure(Path::new(""))), "path_invalid");
+    let up = format!("{}/..", real.display());
+    assert_eq!(refused(list_closure(Path::new(&up))), "path_invalid");
 }
 
 // ---- The detached claim ----

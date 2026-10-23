@@ -15,15 +15,16 @@
 //! for byte. Symlinks and special files are refused, never followed: every
 //! component of every path is lstat'ed, from the source folder down, before
 //! anything is read or copied, so a link in the middle of a path is refused
-//! too (`symlink_in_path`). The result is checked by listing it, and its CID
-//! is returned.
+//! too (`symlink_in_path`). A trailing `/` or `.` cannot hide the last part:
+//! the path is rebuilt from its components before the first lstat. The result
+//! is checked by listing it, and its CID is returned.
 
 use std::path::Path;
 
 use serde_json::{json, Value};
 
 use crate::admit::{check_cid_form, parse_manifest};
-use crate::listing::{check_segment, closure_cid, walk};
+use crate::listing::{check_segment, closure_cid, resolve_path, walk};
 
 /// lstats `source`, then each segment below it, in order. `source` and every
 /// segment but the last must be real folders, never links: a link anywhere on
@@ -58,8 +59,11 @@ pub fn pack(
     into: &Path,
     requires: &[(String, String)],
 ) -> Result<(String, Vec<Entry>), Refusal> {
+    // One resolver for pack and the listing (P10): `root-link/`, `root-link/.`
+    // and `./root-link/` cannot hide a link from the first lstat.
+    let source = resolve_path(source)?;
     let manifest_path = source.join("capsule.json");
-    let manifest_bytes = match lstat_each(source, &["capsule.json"])? {
+    let manifest_bytes = match lstat_each(&source, &["capsule.json"])? {
         Some(meta) if meta.is_file() => {
             std::fs::read(&manifest_path).map_err(|err| io(err, &manifest_path))?
         }
@@ -97,7 +101,7 @@ pub fn pack(
         }
         let folder = segments[..segments.len() - 1].join("/");
         let root = source.join(&folder);
-        match lstat_each(source, &segments[..segments.len() - 1])? {
+        match lstat_each(&source, &segments[..segments.len() - 1])? {
             // The folder itself is walked, so it must not be a link either.
             Some(meta) if meta.file_type().is_symlink() => {
                 return Err(Refusal::SymlinkInPath(root.display().to_string()))
@@ -123,7 +127,7 @@ pub fn pack(
             )));
         }
     } else {
-        match lstat_each(source, &segments)? {
+        match lstat_each(&source, &segments)? {
             Some(meta) if meta.is_file() => files.push(entrypoint.clone()),
             Some(_) => return Err(Refusal::SpecialFile(entrypoint)),
             None => {
