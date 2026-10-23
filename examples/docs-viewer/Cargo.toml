@@ -9,10 +9,14 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# The capsule kit's guest crate: the Bus calls, refusals, reads, URI check
+# and text checks, and the Bus v1 WIT glue.
+capsule-kit-guest = { path = "../capsule-kit/guest", features = ["wit"] }
 docs-model = { path = "model" }
-serde = { version = "1.0.229", default-features = false, features = ["std"] }
 serde_json = "1.0.151"
-wit-bindgen = "0.57.1"
+
+[dev-dependencies]
+capsule-kit-guest = { path = "../capsule-kit/guest", features = ["fake"] }
 
 [profile.release]
 opt-level = 3

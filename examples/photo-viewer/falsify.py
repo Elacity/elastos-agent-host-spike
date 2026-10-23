@@ -11,7 +11,9 @@ Each falsifier replaces one exact line, runs the named tests, and requires
 them to FAIL. The file is restored from its saved bytes afterwards, also on
 error or Ctrl-C. The script exits non-zero if any falsifier is not caught or
 its line is not found exactly once. The runner is the capsule kit's
-(examples/capsule-kit/falsify).
+(examples/capsule-kit/falsify). Cases on `../capsule-kit/guest/src/` break
+the kit crate's code and require the photo viewer's own tests to notice; the
+kit's own falsifiers are in `examples/capsule-kit/guest/falsify.py`.
 """
 import pathlib
 import sys
@@ -52,13 +54,6 @@ GUEST = [
         ["a_provider_error_stops_the_run_and_is_not_skipped"],
     ),
     (
-        "provider status ignored",
-        "src/bus.rs",
-        'Some("ok") if parsed.has_data => Ok(parsed),',
-        '_ if parsed.has_data => Ok(parsed),',
-        ["an_error_answer_that_also_carries_data_is_still_an_error"],
-    ),
-    (
         "unknown album fields allowed",
         "src/album.rs",
         '.find(|key| !matches!(key.as_str(), "schema" | "items"))',
@@ -67,7 +62,7 @@ GUEST = [
     ),
     (
         "dot-dot segments allowed",
-        "src/album.rs",
+        "../capsule-kit/guest/src/uri.rs",
         '.any(|part| part.is_empty() || part == "." || part == "..")',
         '.any(|part| part.is_empty() || part == ".")',
         ["malformed_albums_stop_before_any_image_is_read"],
@@ -77,19 +72,19 @@ GUEST = [
         "content failure stops the run instead of skipping",
         "src/lib.rs",
         "match check_item(bus, order, item)? {",
-        "match check_item(bus, order, item)?.map_err(|_| Refusal::AlbumTooLarge).map(Ok)? {",
+        "match check_item(bus, order, item)?.map_err(|_| Refusal::InputTooLarge).map(Ok)? {",
         ["a_bad_item_is_skipped_and_the_rest_play_in_order"],
     ),
     (
         "wrong type accepted as PNG",
-        "src/image.rs",
+        "../capsule-kit/guest/src/image.rs",
         "    Err(HeaderError::UnknownType)\n}",
         "    Ok(Kind::Png)\n}",
         ["wrong_type_is_skipped_after_reading_only_its_header"],
     ),
     (
         "truncated magic treated as unknown",
-        "src/image.rs",
+        "../capsule-kit/guest/src/image.rs",
         "if is_prefix_of_magic(header) {",
         "if false && is_prefix_of_magic(header) {",
         ["truncated_magic_is_skipped"],
@@ -110,24 +105,24 @@ GUEST = [
     ),
     (
         "JPEG segment cap doubled",
-        "src/image.rs",
+        "../capsule-kit/guest/src/image.rs",
         "for _ in 0..MAX_JPEG_SEGMENTS {",
         "for _ in 0..MAX_JPEG_SEGMENTS * 2 {",
         ["malformed_headers_are_skipped"],
     ),
     (
         "JPEG segment payloads read",
-        "src/image.rs",
+        "../capsule-kit/guest/src/image.rs",
         "let marker = read(at, 4)?;",
         "let _payload = read(at, 70_000)?;\n        let marker = read(at, 4)?;",
         ["a_jpeg_frame_header_after_large_exif_is_found_without_reading_the_payloads"],
     ),
     # Body shapes the localhost provider accepts.
     (
-        "playlist written as a string without append (the P1 shape)",
-        "src/bus.rs",
-        'json!({ "path": uri, "content": content, "append": false })',
-        'json!({ "path": uri, "content": String::from_utf8_lossy(content) })',
+        "playlist written without append (the P1 shape)",
+        "../capsule-kit/guest/src/bus.rs",
+        'body.push_str(r#"{"append":false,"content":["#);',
+        'body.push_str(r#"{"content":["#);',
         ["the_playlist_is_written_as_bytes_with_append_false", "plays_png_jpeg_and_webp_in_album_order"],
     ),
 ]
@@ -136,7 +131,7 @@ GUEST = [
 RUNTIME = [
     (
         "wrong type accepted as PNG (in the component)",
-        "src/image.rs",
+        "../capsule-kit/guest/src/image.rs",
         "    Err(HeaderError::UnknownType)\n}",
         "    Ok(Kind::Png)\n}",
         ["content_failures_are_skipped_and_listed_through_the_runtime"],
@@ -149,10 +144,10 @@ RUNTIME = [
         ["no_grant_stops_the_run_through_the_runtime"],
     ),
     (
-        "playlist written as a string (in the component)",
-        "src/bus.rs",
-        'json!({ "path": uri, "content": content, "append": false })',
-        'json!({ "path": uri, "content": String::from_utf8_lossy(content) })',
+        "playlist written without append (in the component)",
+        "../capsule-kit/guest/src/bus.rs",
+        'body.push_str(r#"{"append":false,"content":["#);',
+        'body.push_str(r#"{"content":["#);',
         ["album_plays_and_the_playlist_is_written"],
     ),
 ]

@@ -20,19 +20,16 @@
 //! `elastos:bus@v1`. It has no files, sockets, clock or environment.
 
 mod album;
-mod bus;
-mod image;
 
-#[cfg(test)]
-mod fake;
 #[cfg(test)]
 mod tests;
 
+use capsule_kit_guest::{bus, grant, image, read_at, read_bounded, App};
 use serde_json::{json, Value};
 
 pub use album::{AlbumItem, ALBUM_SCHEMA};
-pub use bus::{Bus, BusFailure, CallError, InvokeReply};
-pub use image::{Kind, MAX_JPEG_SEGMENTS};
+pub use capsule_kit_guest::image::{Kind, HEADER_BYTES, MAX_JPEG_SEGMENTS};
+pub use capsule_kit_guest::{Bus, BusFailure, CallError, InvokeReply, Refusal, READ_CHUNK_BYTES};
 
 /// The album the person asked to play.
 pub const ALBUM_URI: &str = "localhost://Users/self/.AppData/App/photo-viewer/album.json";
@@ -53,80 +50,12 @@ pub const DEFAULT_DURATION_MS: u64 = 5_000;
 pub const MIN_DURATION_MS: u64 = 1_000;
 pub const MAX_DURATION_MS: u64 = 60_000;
 
-/// Bytes per album read. Content travels as a JSON array of numbers, up to
-/// four characters a byte, so 8 KiB stays far under the 1 MiB bridge frame
-/// (`elastos-server/src/resource_bridge.rs:32`).
-pub const READ_CHUNK_BYTES: u64 = 8 * 1024;
-/// Bytes read before the type is known. Enough for the PNG IHDR and the
-/// WebP VP8, VP8L and VP8X frame headers.
-pub const HEADER_BYTES: u64 = 32;
-
-/// Why the run stopped. Each variant names what is missing.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Refusal {
-    NoGrant {
-        resource: String,
-        failure: BusFailure,
-    },
-    Call {
-        resource: String,
-        error: CallError,
-    },
-    AlbumTooLarge,
-    Album(String),
-}
-
-impl Refusal {
-    pub fn message(&self) -> String {
-        match self {
-            Refusal::NoGrant { resource, failure } => {
-                format!(
-                    "photo-viewer has no grant for {resource}: {}",
-                    failure.message()
-                )
-            }
-            Refusal::Call { resource, error } => match error {
-                CallError::Bus(failure) => {
-                    format!(
-                        "photo-viewer call on {resource} failed: {}",
-                        failure.message()
-                    )
-                }
-                CallError::Provider { code, message } => {
-                    format!("photo-viewer call on {resource} failed: {code}: {message}")
-                }
-                CallError::Shape(message) => {
-                    format!("photo-viewer call on {resource} had an unexpected answer: {message}")
-                }
-            },
-            Refusal::AlbumTooLarge => {
-                format!("photo-viewer album is larger than {MAX_ALBUM_BYTES} bytes")
-            }
-            Refusal::Album(message) => format!("photo-viewer album refused: {message}"),
-        }
-    }
-
-    /// The `bus-error` Runtime receives from `lifecycle.run`.
-    pub fn to_bus_failure(&self) -> BusFailure {
-        let message = self.message();
-        match self {
-            Refusal::NoGrant { .. } => BusFailure::Denied(message),
-            Refusal::Call { error, .. } => match error {
-                CallError::Bus(BusFailure::Denied(_)) => BusFailure::Denied(message),
-                CallError::Bus(BusFailure::NotFound(_)) => BusFailure::NotFound(message),
-                CallError::Bus(BusFailure::Timeout(_)) => BusFailure::Timeout(message),
-                CallError::Bus(BusFailure::Unavailable(_)) | CallError::Provider { .. } => {
-                    BusFailure::Unavailable(message)
-                }
-                CallError::Bus(BusFailure::Invalid(_)) => BusFailure::Invalid(message),
-                CallError::Bus(BusFailure::Internal(_)) | CallError::Shape(_) => {
-                    BusFailure::Internal(message)
-                }
-            },
-            Refusal::AlbumTooLarge | Refusal::Album(_) => BusFailure::Invalid(message),
-        }
-    }
-}
+/// What the photo viewer's refusals say about it.
+pub const APP: App = App {
+    name: "photo-viewer",
+    input: "album",
+    max_input_bytes: MAX_ALBUM_BYTES,
+};
 
 /// Why one item is left out of the playlist.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -193,9 +122,9 @@ pub struct Skipped {
 /// Returns the playlist text that was written.
 pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
     let album_grant = grant(bus, ALBUM_URI, "read", "read the album to play")?;
-    let album_bytes = read_bounded(bus, ALBUM_URI, &album_grant, MAX_ALBUM_BYTES)?
-        .ok_or(Refusal::AlbumTooLarge)?;
-    let items = album::parse(&album_bytes).map_err(Refusal::Album)?;
+    let album_bytes = read_bounded(bus, ALBUM_URI, &album_grant, Vec::new(), MAX_ALBUM_BYTES)?
+        .ok_or(Refusal::InputTooLarge)?;
+    let items = album::parse(&album_bytes).map_err(Refusal::Input)?;
 
     let mut playlist = Vec::with_capacity(items.len());
     let mut skipped = Vec::new();
@@ -219,51 +148,6 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
         }
     })?;
     Ok(text)
-}
-
-fn grant(bus: &mut dyn Bus, resource: &str, action: &str, reason: &str) -> Result<String, Refusal> {
-    bus.request(resource, action, reason)
-        .map_err(|failure| Refusal::NoGrant {
-            resource: resource.to_string(),
-            failure,
-        })
-}
-
-fn read_at(
-    bus: &mut dyn Bus,
-    uri: &str,
-    grant: &str,
-    offset: u64,
-    length: u64,
-) -> Result<Vec<u8>, Refusal> {
-    bus::read_window(bus, uri, grant, offset, length).map_err(|error| Refusal::Call {
-        resource: uri.to_string(),
-        error,
-    })
-}
-
-/// Reads the whole object in chunks. `None` means it is larger than `limit`.
-fn read_bounded(
-    bus: &mut dyn Bus,
-    uri: &str,
-    grant: &str,
-    limit: u64,
-) -> Result<Option<Vec<u8>>, Refusal> {
-    let mut bytes = Vec::new();
-    loop {
-        let offset = bytes.len() as u64;
-        // Ask for one byte past the limit so an exact fit is told apart from more.
-        let ask = READ_CHUNK_BYTES.min(limit + 1 - offset);
-        let chunk = read_at(bus, uri, grant, offset, ask)?;
-        let short = (chunk.len() as u64) < ask;
-        bytes.extend_from_slice(&chunk);
-        if bytes.len() as u64 > limit {
-            return Ok(None);
-        }
-        if short {
-            return Ok(Some(bytes));
-        }
-    }
 }
 
 /// The outer error stops the run; the inner one skips the item.
@@ -347,34 +231,14 @@ pub fn playlist_json(items: &[PlaylistItem], skipped: &[Skipped]) -> String {
 }
 
 #[cfg(target_arch = "wasm32")]
-wit_bindgen::generate!({
-    path: "../../elastos/wit",
-    world: "product-capsule-v1",
-});
-
-#[cfg(target_arch = "wasm32")]
-const EXPECTED_RUNTIME_ABI: &str = "elastos.component/v1";
-
-#[cfg(target_arch = "wasm32")]
-mod component;
-
-#[cfg(target_arch = "wasm32")]
 struct PhotoViewer;
 
 #[cfg(target_arch = "wasm32")]
-impl exports::elastos::bus::lifecycle::Guest for PhotoViewer {
-    fn run() -> Result<(), elastos::bus::types::BusError> {
-        let abi = component::runtime_abi();
-        if abi != EXPECTED_RUNTIME_ABI {
-            return Err(elastos::bus::types::BusError::Invalid(format!(
-                "photo-viewer requires {EXPECTED_RUNTIME_ABI}, received {abi}"
-            )));
-        }
-        run(&mut component::WitBus)
-            .map(|_| ())
-            .map_err(|refusal| component::to_wit(refusal.to_bus_failure()))
+impl capsule_kit_guest::wit::exports::elastos::bus::lifecycle::Guest for PhotoViewer {
+    fn run() -> Result<(), capsule_kit_guest::wit::elastos::bus::types::BusError> {
+        capsule_kit_guest::component::lifecycle_run(&APP, |bus| run(bus).map(|_| ()))
     }
 }
 
 #[cfg(target_arch = "wasm32")]
-export!(PhotoViewer);
+capsule_kit_guest::wit::export_lifecycle!(PhotoViewer with_types_in capsule_kit_guest::wit);

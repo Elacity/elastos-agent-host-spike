@@ -1,4 +1,5 @@
-//! Magic bytes and frame dimensions for PNG, JPEG and WebP.
+//! Magic bytes and frame dimensions for PNG, JPEG and WebP. Moved here from
+//! the photo viewer.
 //!
 //! Only the container headers are read. Nothing here decodes pixels.
 
@@ -77,12 +78,14 @@ fn is_prefix_of_magic(header: &[u8]) -> bool {
     false
 }
 
+/// Bytes read before the type is known. Enough for the PNG IHDR and the
+/// WebP VP8, VP8L and VP8X frame headers.
+pub const HEADER_BYTES: u64 = 32;
+
 /// Width and height of a PNG or WebP from its first [`HEADER_BYTES`] bytes.
 ///
 /// JPEG keeps its frame header after a run of marker segments; use
 /// [`jpeg_dimensions`] for it.
-///
-/// [`HEADER_BYTES`]: crate::HEADER_BYTES
 pub fn header_dimensions(kind: Kind, header: &[u8]) -> Result<(u32, u32), HeaderError> {
     let (width, height) = match kind {
         Kind::Png => png_dimensions(header)?,

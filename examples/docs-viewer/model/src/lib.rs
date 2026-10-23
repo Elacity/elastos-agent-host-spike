@@ -8,7 +8,9 @@
 //! nothing in a document can become markup or a request.
 
 pub mod markdown;
-pub mod text;
+
+/// Is this text: the capsule kit's check, shared with every guest.
+pub use capsule_kit_guest::text;
 
 use serde_json::{json, Value};
 

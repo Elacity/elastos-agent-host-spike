@@ -1,1 +1,0 @@
-../../capsule-kit/v1-guest/bus.rs

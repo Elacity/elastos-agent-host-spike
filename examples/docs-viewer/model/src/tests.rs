@@ -1,5 +1,4 @@
 use crate::markdown::{inline, parse};
-use crate::text::{check_head, check_whole, TextError};
 use crate::*;
 
 fn plain(text: &str) -> Span {
@@ -17,53 +16,6 @@ fn para(text: &str) -> Block {
     Block::Paragraph {
         spans: vec![plain(text)],
     }
-}
-
-#[test]
-fn text_is_utf8_with_no_control_character_but_tab_and_line_ends() {
-    assert_eq!(check_whole(b"a\tb\r\nc\n"), Ok("a\tb\r\nc\n"));
-    assert_eq!(
-        check_whole("caf\u{e9} \u{1f600}".as_bytes()),
-        Ok("caf\u{e9} \u{1f600}")
-    );
-    assert_eq!(
-        check_whole(b"\xEF\xBB\xBFtitle"),
-        Ok("title"),
-        "a UTF-8 BOM goes"
-    );
-    assert_eq!(check_whole(b"a\0b"), Err(TextError::Control));
-    assert_eq!(check_whole(b"a\x1bb"), Err(TextError::Control), "escape");
-    assert_eq!(check_whole(b"a\x0cb"), Err(TextError::Control), "form feed");
-    assert_eq!(
-        check_whole("a\u{85}b".as_bytes()),
-        Err(TextError::Control),
-        "C1"
-    );
-    assert_eq!(check_whole(b"a\xffb"), Err(TextError::NotUtf8));
-    assert_eq!(check_whole(b"\xFF\xFEa\0"), Err(TextError::OtherEncoding));
-    assert_eq!(check_whole(b"\xFE\xFF\0a"), Err(TextError::OtherEncoding));
-    assert_eq!(
-        check_whole(b"\x00\x00\xFE\xFF"),
-        Err(TextError::OtherEncoding)
-    );
-}
-
-#[test]
-fn a_head_may_end_inside_a_character_only_if_the_document_goes_on() {
-    let text = "ab\u{e9}".as_bytes();
-    let cut = &text[..text.len() - 1];
-    assert_eq!(check_head(cut, true), Ok(()));
-    assert_eq!(check_head(cut, false), Err(TextError::NotUtf8));
-    assert_eq!(
-        check_head(b"a\xffb", true),
-        Err(TextError::NotUtf8),
-        "bad in the middle"
-    );
-    assert_eq!(check_head(b"ab\0", true), Err(TextError::Control));
-    assert_eq!(
-        check_head(b"\xFF\xFEa", true),
-        Err(TextError::OtherEncoding)
-    );
 }
 
 #[test]

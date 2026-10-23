@@ -52,9 +52,15 @@ the host triple has to be the same, so the platform is pinned.
 | Commit | Slice | sha256 |
 | --- | --- | --- |
 | `ca5560aa` | P1 | `9cf6874985454b5be310a68ea28493d8b3cac6a7a914d5831c4500bb3d17bade` |
-| `8fc30615` | P1b (guest unchanged since) | `add93842bb7253bdab18d27067d0976558913fda6bd354f772f04c5e9fc9dd22` |
+| `8fc30615` | P1b (guest unchanged to `3ecb8ae9`) | `add93842bb7253bdab18d27067d0976558913fda6bd354f772f04c5e9fc9dd22` |
+| `claude/photo-kit-crate` | the kit's shared crate (the one planned hash change), in the container | `053b198d14e0b2abf1a2d911f3513e2d5bc9280b7202af806f56c71b86529cfc` |
 
-Both were built in this container in cloud. The P1 build also ran with
+All were built in this container in cloud. The guest code moved into the kit's crate
+(`examples/capsule-kit/guest`) and now writes its playlist through the kit's cheaper write, so its bytes
+and its hash change once; see `examples/capsule-kit/CRATE-REPORT.md`. From that commit on, only the
+container build is the reference: the kit's crate is a path dependency outside this workspace, and Cargo
+hashes it by its absolute path, so a native build gives a hash of its own checkout path (here, natively,
+`5a284f2f…`). The container mounts the repository at one fixed path. The P1 build also ran with
 `CARGO_BUILD_JOBS=1` and gave the same hash. Both equal the cloud-native
 builds, as expected: cloud is already `x86_64-unknown-linux-gnu`.
 

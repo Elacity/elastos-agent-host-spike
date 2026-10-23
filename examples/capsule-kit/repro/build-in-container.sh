@@ -16,8 +16,15 @@ CAPSULE="${1:?usage: build-in-container.sh <capsule-dir relative to the reposito
 # order, and so the code bytes. One platform means one host triple.
 IMAGE="rust:1.91.0-slim-bookworm@sha256:81c97592d519ba7397e8adccb0345fb5a91965c0a44b82af83bd1ef06c36cef5"
 PLATFORM="linux/amd64"
-# The same path the builder remaps the repository to, so no host path differs.
-SRC="/src/elastos-runtime"
+# One fixed mount point, and not the path the builder remaps the repository to
+# (/src/elastos-runtime): the builder refuses an artifact that holds the
+# repository's own path, and a remapped path is that same text when the two
+# are one. The kit's guest crate is a path dependency outside each viewer's
+# workspace, so its remapped path is in panic locations, and Cargo hashes it
+# by its absolute path: the mount point reaches the bytes. So it is fixed
+# here, and a native build elsewhere gives another hash (see
+# examples/capsule-kit/CRATE-REPORT.md, "Reproducible build").
+SRC="/build/elastos-runtime"
 
 # A host that reaches the network through a proxy with its own CA (the cloud
 # sessions) passes both in; a plain host (a Mac) passes nothing.

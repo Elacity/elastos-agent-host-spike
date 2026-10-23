@@ -1,5 +1,9 @@
 # Capsule kit: one shared source
 
+> **Superseded for A1** by `CRATE-REPORT.md`: the guest sources are no longer links but a real crate
+> (`guest/`, `capsule-kit-guest`), and the photo core's hash changed once there. This report is the record of
+> the step before.
+
 The task: move the copies A1 to A8 (`KIT-REPORT.md`) into `examples/capsule-kit`, as one source that the photo
 viewer and the documents viewer both use, so no copy can drift. Both `verify.sh` must pass with the same
 counts, and the photo core's hash must not change. Also, two spike-tool gaps from the kit draft: a pack step

@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 
-use crate::fake::{Call, FakeBus};
 use crate::*;
+use capsule_kit_guest::fake::{Call, FakeBus};
 
 const A: &str = "localhost://Users/self/Documents/notes.md";
 const B: &str = "localhost://Users/self/Documents/trip/todo.txt";
@@ -162,7 +162,7 @@ fn shelf_without_a_read_grant_stops_before_any_read() {
         .allow(PAGES_URI, "write");
     let err = run(&mut bus).unwrap_err();
     assert!(matches!(&err, Refusal::NoGrant { resource, .. } if resource == SHELF_URI));
-    assert!(matches!(err.to_bus_failure(), BusFailure::Denied(_)));
+    assert!(matches!(err.to_bus_failure(&APP), BusFailure::Denied(_)));
     assert!(bus.invokes_on(SHELF_URI).is_empty());
     assert_nothing_written(&bus);
 }
@@ -173,7 +173,7 @@ fn document_without_a_read_grant_stops_the_run_and_is_not_skipped() {
     bus.allowed.remove(&(A.to_string(), "read".to_string()));
     let err = run(&mut bus).unwrap_err();
     assert!(matches!(&err, Refusal::NoGrant { resource, .. } if resource == A));
-    assert!(err.message().contains(A));
+    assert!(err.message(&APP).contains(A));
     assert!(bus.invokes_on(A).is_empty());
     assert!(bus.invokes_on(B).is_empty(), "the run stops at the first");
     assert_nothing_written(&bus);
@@ -201,8 +201,11 @@ fn a_provider_error_stops_the_run_and_is_not_skipped() {
         &err,
         Refusal::Call { resource, error: CallError::Provider { code, .. } } if resource == A && code == "read_failed"
     ));
-    assert!(matches!(err.to_bus_failure(), BusFailure::Unavailable(_)));
-    assert!(err.message().contains("disk gone"));
+    assert!(matches!(
+        err.to_bus_failure(&APP),
+        BusFailure::Unavailable(_)
+    ));
+    assert!(err.message(&APP).contains("disk gone"));
     assert!(bus.invokes_on(B).is_empty());
     assert_nothing_written(&bus);
 }
@@ -272,8 +275,8 @@ fn malformed_shelves_stop_before_any_document_is_read() {
     for (bytes, expected) in cases {
         let mut bus = granted(&[(A, b"# a".to_vec())]).object(SHELF_URI, bytes);
         let err = run(&mut bus).unwrap_err();
-        let message = err.message();
-        assert!(matches!(err, Refusal::Shelf(_)), "{message}");
+        let message = err.message(&APP);
+        assert!(matches!(err, Refusal::Input(_)), "{message}");
         assert!(
             message.contains(expected),
             "{message} should say {expected}"
@@ -289,7 +292,7 @@ fn a_shelf_over_its_cap_stops() {
     let bytes = format!(r#"{{"schema":"{SHELF_SCHEMA}","items":[{{"uri":"{A}"}}]}}{padding}"#);
     let mut bus = granted(&[(A, b"# a".to_vec())]).object(SHELF_URI, bytes.into_bytes());
     let err = run(&mut bus).unwrap_err();
-    assert_eq!(err, Refusal::ShelfTooLarge);
+    assert_eq!(err, Refusal::InputTooLarge);
     assert_nothing_written(&bus);
     // Exactly at the cap is still read.
     let fits = format!(r#"{{"schema":"{SHELF_SCHEMA}","items":[{{"uri":"{A}"}}]}}"#);
@@ -552,66 +555,6 @@ fn every_output_block_has_one_of_six_shapes_and_only_text() {
         };
         assert_eq!(keys, allowed.iter().collect::<Vec<_>>(), "{block}");
     }
-}
-
-struct OddAnswers(Value);
-
-impl Bus for OddAnswers {
-    fn request(&mut self, _: &str, _: &str, _: &str) -> Result<String, BusFailure> {
-        Ok("grant".into())
-    }
-
-    fn invoke(&mut self, _: &str, _: &str, _: &[u8], _: &str) -> Result<InvokeReply, BusFailure> {
-        Ok(InvokeReply {
-            status: "ok".into(),
-            body: serde_json::to_vec(&self.0).unwrap(),
-        })
-    }
-}
-
-#[test]
-fn an_answer_without_byte_content_stops_the_run() {
-    for answer in [
-        json!({ "status": "ok" }),
-        json!({ "status": "ok", "data": {} }),
-        json!({ "status": "ok", "data": { "content": "AAEC" } }),
-        json!({ "status": "ok", "data": { "content": [1, 2, 300] } }),
-        json!({ "status": "pending" }),
-    ] {
-        let err = run(&mut OddAnswers(answer.clone())).unwrap_err();
-        assert!(
-            matches!(
-                &err,
-                Refusal::Call {
-                    error: CallError::Shape(_),
-                    ..
-                }
-            ),
-            "{answer}: {err:?}"
-        );
-    }
-}
-
-#[test]
-fn an_error_answer_that_also_carries_data_is_still_an_error() {
-    let answer = json!({
-        "status": "error",
-        "code": "read_failed",
-        "message": "partial",
-        "data": { "content": [0x23, 0x20] },
-    });
-    let err = run(&mut OddAnswers(answer)).unwrap_err();
-    assert!(
-        matches!(&err, Refusal::Call { error: CallError::Provider { code, .. }, .. } if code == "read_failed"),
-        "{err:?}"
-    );
-}
-
-#[test]
-fn a_read_answer_longer_than_asked_is_refused() {
-    let answer = json!({ "status": "ok", "data": { "content": [1, 2, 3, 4] } });
-    let err = crate::bus::read_window(&mut OddAnswers(answer), A, "grant", 0, 3).unwrap_err();
-    assert!(matches!(err, CallError::Shape(_)), "{err:?}");
 }
 
 #[test]
