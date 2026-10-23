@@ -96,9 +96,29 @@ Two things came with the crate:
    machine. Pattern 4 already names the container build as the one that counts; native Linux matched it before
    only because each core was its own workspace root.
 
-To make native builds path-free again, the kit's crate and the viewers would have to share one Cargo workspace
-(rooted at `examples/`, with one lock file). That changes the layout of every example folder, so it is a
-question for Sasha, not part of this slice.
+Decided (Sasha, 23 Oct 2026): no shared Cargo workspace in this PR. The container hash stays the only
+reference (pattern 4). The workspace is written up below as a proposed next slice, not built.
+
+## Proposed next slice: one Cargo workspace for the guests
+
+Not built; for a later slice if native builds are to match the container again.
+
+- **What:** one `examples/Cargo.toml` workspace with the guest crates as members: `capsule-kit/guest`,
+  `photo-viewer`, `docs-viewer`, `docs-viewer/model`. One `examples/Cargo.lock`. The release profile
+  (`opt-level = 3`, `lto = true`) moves to the workspace root, where Cargo reads it.
+- **Why:** Cargo hashes a path package by its path relative to the workspace root when it is under that root.
+  With all three under `examples/`, no absolute path reaches the bytes, and a native Linux build gives the
+  container's hash again, from any checkout folder. The panic locations become relative too, so the container
+  could mount at the builder's remap target again.
+- **What stays out:** every folder that is its own workspace today and is not a guest (`host-test`,
+  `bundle-test`, `bus2`, the bundle tool, `v1-host-test`, `bus2-proof`, `hello`) keeps its `[workspace]` table
+  and its own lock file. `examples/agent-host/` is not touched: it is the DeepSeek chat's, and it is not a
+  member; a check that it still builds on its own is part of the slice.
+- **What it costs:** the viewers' own `[workspace]` tables and lock files go; `verify.sh`, `build.sh` and the
+  falsify scripts call Cargo with the same manifest paths, but `--locked` then reads the shared lock; the photo
+  and documents hashes change once more (and become path-free); both container builds and every falsifier set
+  are run again.
+- **Proof:** the same hash from a native build in two different checkout folders and from the container.
 
 ## Lines
 
@@ -140,7 +160,7 @@ because the Runtime's gateway test installs exactly four Photos page files (unch
 | Kit guest crate | (links, no own tests) | 18 tests, 21/21 falsifiers |
 | Photo core | 29 guest, 13 host, 18/18 | 24 guest, 13 host, 17/17 (5 tests and 1 falsifier moved to the kit) |
 | Photo page | 12 tests, 13/13 | the same |
-| Bundle tool | 47 tests, 60/60 | the same |
+| Bundle tool | 47 tests, 60/60 | 48 tests, 63/63 (the #32 fix for a trailing `/` or `/.`, merged in) |
 | Photo seam (`falsify-seam.py`, whole set) | 21/21 | 21/21 |
 | Documents viewer | 71 Rust, 14 page, 57/57 | 66 Rust (11 model, 27 guest, 12 host, 7 bundle, 9 Bus v2), 14 page, 52/52 (36 + 16; 5 tests and 5 falsifiers moved to the kit) |
 | Photo core hash | `add93842…dd22` | container `053b198d…9cfc`; native here `5a284f2f…a516` |

@@ -8,12 +8,29 @@ use capsule_bundle::testing::{refused, unseal};
 use capsule_bundle::*;
 use ed25519_dalek::SigningKey;
 
+/// A temporary folder named by its real path. On macOS the system's temporary
+/// folder is under a link (`/var` is `/private/var`), and the bundle tool
+/// refuses a path through a link.
+struct Temp(#[allow(dead_code)] tempfile::TempDir, PathBuf);
+
+impl Temp {
+    fn path(&self) -> &Path {
+        &self.1
+    }
+}
+
+fn tempdir() -> Temp {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().canonicalize().unwrap();
+    Temp(dir, real)
+}
+
 /// Unix seconds; every test runs at this time.
 const NOW: u64 = 1_800_000_000;
 const HOUR: u64 = 3600;
 
 struct World {
-    root: tempfile::TempDir,
+    root: Temp,
     floors: std::cell::Cell<u32>,
     release_root: SigningKey,
     publisher: SigningKey,
@@ -22,7 +39,7 @@ struct World {
 impl World {
     fn new() -> World {
         World {
-            root: tempfile::tempdir().unwrap(),
+            root: tempdir(),
             floors: std::cell::Cell::new(0),
             release_root: sign::generate(),
             publisher: sign::generate(),

@@ -6,7 +6,7 @@
 //! (JCS) form of the document.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -34,7 +34,8 @@ pub fn list_closure(root: &Path) -> Result<Vec<Entry>, Refusal> {
 
 /// The listing and the `capsule.json` bytes it lists, read in the same pass.
 pub(crate) fn read_closure(root: &Path) -> Result<(Vec<Entry>, Vec<u8>), Refusal> {
-    check_root(root)?;
+    let (root, _) = real_path(root)?;
+    let root = root.as_path();
     let mut entries = Vec::new();
     let mut manifest = None;
     walk(root, root, &mut entries, &mut manifest)?;
@@ -45,14 +46,45 @@ pub(crate) fn read_closure(root: &Path) -> Result<(Vec<Entry>, Vec<u8>), Refusal
     Ok((entries, manifest))
 }
 
-/// The root is not followed either: a link there would list another folder.
-/// The walk below lstats every entry, so no folder under the root is a link.
-pub(crate) fn check_root(root: &Path) -> Result<(), Refusal> {
-    let meta = std::fs::symlink_metadata(root).map_err(|err| io(err, root))?;
-    if meta.file_type().is_symlink() {
-        return Err(Refusal::SymlinkInPath(root.display().to_string()));
+/// `path` rebuilt from its parts, with every prefix lstat'ed: no part of it may
+/// be a symlink (the root itself, or a folder on the way to it). The walk
+/// lstats everything below it, so nothing is read through a link.
+///
+/// The path is rebuilt from `Path::components()` before any lstat, because on
+/// POSIX lstat of `link/` or `link/.` follows the link: trailing `/` and `.`
+/// parts go. A `..` part and an empty path are refused. A path through a
+/// system link (macOS `/tmp` or `/var`) is refused too; give its real path.
+/// Returns the rebuilt path and its metadata.
+pub(crate) fn real_path(path: &Path) -> Result<(PathBuf, std::fs::Metadata), Refusal> {
+    if path.as_os_str().is_empty() {
+        return Err(Refusal::PathInvalid("an empty path".to_string()));
     }
-    Ok(())
+    let mut rebuilt = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::Prefix(_) | Component::RootDir => rebuilt.push(part.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(Refusal::PathInvalid(format!(
+                    "{} has a .. part",
+                    path.display()
+                )))
+            }
+            Component::Normal(name) => {
+                rebuilt.push(name);
+                let meta = std::fs::symlink_metadata(&rebuilt).map_err(|err| io(err, &rebuilt))?;
+                if meta.file_type().is_symlink() {
+                    return Err(Refusal::SymlinkInPath(rebuilt.display().to_string()));
+                }
+            }
+        }
+    }
+    if rebuilt.as_os_str().is_empty() {
+        // Only `.` parts: the current folder, which lstat reports as itself.
+        rebuilt.push(".");
+    }
+    let meta = std::fs::symlink_metadata(&rebuilt).map_err(|err| io(err, &rebuilt))?;
+    Ok((rebuilt, meta))
 }
 
 /// Two paths that differ only by case would be one file on a

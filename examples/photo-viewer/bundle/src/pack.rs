@@ -23,7 +23,7 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 use crate::admit::{check_cid_form, parse_manifest};
-use crate::listing::{check_segment, closure_cid, walk};
+use crate::listing::{check_segment, closure_cid, real_path, walk};
 
 /// lstats `source`, then each segment below it, in order. `source` and every
 /// segment but the last must be real folders, never links: a link anywhere on
@@ -58,6 +58,9 @@ pub fn pack(
     into: &Path,
     requires: &[(String, String)],
 ) -> Result<(String, Vec<Entry>), Refusal> {
+    // The source as its parts: no trailing `/` or `.`, no `..`, no link on the way.
+    let (source, _) = real_path(source)?;
+    let source = source.as_path();
     let manifest_path = source.join("capsule.json");
     let manifest_bytes = match lstat_each(source, &["capsule.json"])? {
         Some(meta) if meta.is_file() => {

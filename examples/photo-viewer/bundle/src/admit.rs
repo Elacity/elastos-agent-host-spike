@@ -380,8 +380,10 @@ mod tests {
     #[test]
     fn a_source_changed_after_verification_is_not_staged() {
         let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("source");
-        let store = root.path().join("store");
+        // Its real path: on macOS the temporary folder is under a link.
+        let base = root.path().canonicalize().unwrap();
+        let source = base.join("source");
+        let store = base.join("store");
         std::fs::create_dir(&source).unwrap();
         std::fs::write(source.join("capsule.json"), b"{}").unwrap();
         std::fs::write(source.join("a.wasm"), b"verified").unwrap();
