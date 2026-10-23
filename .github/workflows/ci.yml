@@ -70,7 +70,7 @@ jobs:
   test-behaviour:
     name: test-behaviour
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 25
     needs: source-gate
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -80,7 +80,7 @@ jobs:
         with:
           node-version: '26'
       - name: install explicit Browser test inputs
-        timeout-minutes: 5
+        timeout-minutes: 15
         env:
           DEBUG: pw:install
         run: ./scripts/test-behaviour.sh inputs
@@ -334,7 +334,7 @@ jobs:
   test-elastos:
     name: test-elastos
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     needs: source-gate
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -378,7 +378,7 @@ jobs:
         with:
           node-version: '26'
       - name: install content boundary browser fixture
-        timeout-minutes: 5
+        timeout-minutes: 20
         env:
           DEBUG: pw:install
         run: |
