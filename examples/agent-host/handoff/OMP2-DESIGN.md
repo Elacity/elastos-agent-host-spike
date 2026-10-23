@@ -45,7 +45,11 @@ child step (the parent's journal), never from a child host's own journal.
   idea 2) are kept, not replaced with a bare false; each refused grant leaves one refusal record with that reason.
 - `call_parent_usable`: a model call already proposed under a child is authorized and dispatched only while
   `usable_child` still passes for that child, so a deny, stop or cancel after the proposal takes the pending call
-  with it.
+  with it. A granted child is authorized and dispatched only while `usable_child` and `scope_still_granted` both
+  pass, so a run denied after granting its child takes the child's dispatch with it.
+- `host_step_ok` returns the reason it refused, and `authorize_in_host`, `host_inbox` and `dispatch_in_host` each
+  write one refusal record in the host's journal with that reason (a stop, the missing-budget
+  `TASK_BUDGET_REASON`, a path or scope miss), so a host refusal keeps the shared check's words.
 
 ### Depth (R1)
 
@@ -140,8 +144,10 @@ child step (the parent's journal), never from a child host's own journal.
 
 ### Result cap (R4)
 
-- `record_child_result` and `record_tool_result` on a child step both use `child_result_ok`: a result longer than
-  `CHILD_RESULT_CAP` is refused, never cut. A long result goes as a spill pointer (`spill_pointer`, today's rules).
+- `record_child_result` and `record_tool_result` on a child step both use `child_result_ok`, over the parent's
+  steps and the child host's steps: a result longer than `CHILD_RESULT_CAP` is refused, never cut, and a grant
+  string held by the host is refused as well as one held by the parent. A long result goes as a spill pointer
+  (`spill_pointer`, today's rules; the guest generates that text and has no host journal).
 - A stopped child's result is kept and marked `partial (<reason>): <result>` on both entry points.
 
 ### Cancel (R5)

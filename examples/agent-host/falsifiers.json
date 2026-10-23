@@ -3508,8 +3508,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if path_refusal(&step.resource).is_some() || !resource_covers(scope, &step.resource) {",
-     "new": "    if path_refusal(&step.resource).is_some() {"
+     "old": "    if !resource_covers(scope, &step.resource) {\n        return Err(\"not in the parent's grant\");\n    }",
+     "new": "    if false && !resource_covers(scope, &step.resource) {\n        return Err(\"not in the parent's grant\");\n    }"
     }
    ],
    "tests": [
@@ -3524,8 +3524,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if path_refusal(&step.resource).is_some() || !resource_covers(scope, &step.resource) {",
-     "new": "    if !resource_covers(scope, &step.resource) {"
+     "old": "    if let Some(refusal) = path_refusal(&step.resource) {\n        return Err(refusal.reason());\n    }\n    if !resource_covers(scope, &step.resource) {",
+     "new": "    if let Some(refusal) = path_refusal(&step.resource).filter(|_| false) {\n        return Err(refusal.reason());\n    }\n    if !resource_covers(scope, &step.resource) {"
     }
    ],
    "tests": [
@@ -3572,8 +3572,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    grant.is_none_or(|grant| Some(grant) != parent_grant)",
-     "new": "    grant.is_none_or(|_| true)"
+     "old": "    if grant.is_some_and(|grant| Some(grant) == parent_grant) {",
+     "new": "    if false && grant.is_some_and(|grant| Some(grant) == parent_grant) {"
     }
    ],
    "tests": [
@@ -3589,8 +3589,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    host_step_ok(parent, child_id, host, step_id, grant) && authorize_step(host, step_id, grant)",
-     "new": "    authorize_step(host, step_id, grant)"
+     "old": "    match host_step_ok(parent, child_id, host, step_id, grant) {\n        Ok(()) => authorize_step(host, step_id, grant),",
+     "new": "    match Ok::<(), &'static str>(()) {\n        Ok(()) => authorize_step(host, step_id, grant),"
     }
    ],
    "tests": [
@@ -3625,8 +3625,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if answer != InboxAnswer::Deny && !host_step_ok(parent, child_id, host, step_id, grant) {",
-     "new": "    if false && !host_step_ok(parent, child_id, host, step_id, grant) {"
+     "old": "    if answer != InboxAnswer::Deny {\n        if let Err(reason) = host_step_ok(parent, child_id, host, step_id, grant) {",
+     "new": "    if false && answer != InboxAnswer::Deny {\n        if let Err(reason) = host_step_ok(parent, child_id, host, step_id, grant) {"
     }
    ],
    "tests": [
@@ -3642,8 +3642,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if answer != InboxAnswer::Deny && !host_step_ok(parent, child_id, host, step_id, grant) {",
-     "new": "    if !host_step_ok(parent, child_id, host, step_id, grant) {"
+     "old": "    if answer != InboxAnswer::Deny {\n        if let Err(reason) = host_step_ok(parent, child_id, host, step_id, grant) {",
+     "new": "    if true {\n        if let Err(reason) = host_step_ok(parent, child_id, host, step_id, grant) {"
     }
    ],
    "tests": [
@@ -3658,8 +3658,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    host_step_ok(parent, child_id, host, step_id, None) && dispatch_step(host, step_id)",
-     "new": "    dispatch_step(host, step_id)"
+     "old": "    match host_step_ok(parent, child_id, host, step_id, None) {\n        Ok(()) => dispatch_step(host, step_id),",
+     "new": "    match Ok::<(), &'static str>(()) {\n        Ok(()) => dispatch_step(host, step_id),"
     }
    ],
    "tests": [
@@ -4113,8 +4113,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    let text = if journal.steps[index].kind == ProposalKind::Child {\n        if !child_result_ok(journal.steps.iter(), text) {\n            return false;\n        }\n        match journal.steps[index].stop {\n            Some(reason) => format!(\"partial ({}): {text}\", reason.name()),\n            None => text.to_string(),\n        }\n    } else {\n        text.to_string()\n    };",
-     "new": "    let text = text.to_string();"
+     "old": "    let text = if journal.steps[index].kind == ProposalKind::Child {\n        if !child_result_ok(\n            journal\n                .steps\n                .iter()\n                .chain(child.into_iter().flat_map(|child| child.steps.iter())),\n            text,\n        ) {\n            return false;\n        }\n        match journal.steps[index].stop {\n            Some(reason) => format!(\"partial ({}): {text}\", reason.name()),\n            None => text.to_string(),\n        }\n    } else {\n        text.to_string()\n    };",
+     "new": "    let _ = child;\n    let text = text.to_string();"
     }
    ],
    "tests": [
@@ -4183,6 +4183,88 @@
    ],
    "tests": [
     "interruption during replacement"
+   ]
+  },
+  {
+   "id": "PX09",
+   "title": "a granted child dispatches after the grant above it is withdrawn",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        ProposalKind::Child if step.grant.is_some() => {\n            usable_child(journal, step.id).is_ok() && scope_still_granted(journal, step).is_some()\n        }",
+     "new": "        ProposalKind::Child if step.grant.is_some() => usable_child(journal, step.id).is_ok(),"
+    }
+   ],
+   "tests": [
+    "tests::a_child_dispatch_needs_the_grant_above_it"
+   ]
+  },
+  {
+   "id": "PX10",
+   "title": "the generic result path checks only the parent's grants",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if !child_result_ok(\n            journal\n                .steps\n                .iter()\n                .chain(child.into_iter().flat_map(|child| child.steps.iter())),\n            text,\n        ) {",
+     "new": "        let _ = child;\n        if !child_result_ok(journal.steps.iter(), text) {"
+    }
+   ],
+   "tests": [
+    "tests::both_child_result_paths_keep_the_child_result_rules"
+   ]
+  },
+  {
+   "id": "PX11",
+   "title": "a host refusal replaces the shared check's reason with a generic one",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let scope = host_scope(parent, child_id, host)?;",
+     "new": "    let Ok(scope) = host_scope(parent, child_id, host) else {\n        return Err(\"refused\");\n    };"
+    }
+   ],
+   "tests": [
+    "tests::a_refused_host_action_says_why",
+    "tests::a_child_host_gets_nothing_once_its_child_stops"
+   ]
+  },
+  {
+   "id": "PX12",
+   "title": "a host step's path and scope refusals lose their reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if let Some(refusal) = path_refusal(&step.resource) {\n        return Err(refusal.reason());\n    }\n    if !resource_covers(scope, &step.resource) {\n        return Err(\"not in the parent's grant\");\n    }",
+     "new": "    if path_refusal(&step.resource).is_some() || !resource_covers(scope, &step.resource) {\n        return Err(\"refused\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_refused_host_action_says_why"
+   ]
+  },
+  {
+   "id": "PX13",
+   "title": "an authorize_in_host refusal leaves no record",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        Ok(()) => authorize_step(host, step_id, grant),\n        Err(reason) => {\n            refuse_host_step(host, step_id, reason);\n            false\n        }",
+     "new": "        Ok(()) => authorize_step(host, step_id, grant),\n        Err(_reason) => false,"
+    }
+   ],
+   "tests": [
+    "tests::a_refused_host_action_says_why",
+    "tests::a_child_host_gets_nothing_once_its_child_stops"
    ]
   }
  ]

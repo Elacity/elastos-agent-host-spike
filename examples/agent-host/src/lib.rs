@@ -1670,6 +1670,7 @@ fn spill_pointer(journal: &mut Journal, step_id: u64, object_resource: &str) -> 
         journal,
         step_id,
         &format!("spill\n{object_resource}\n{version}"),
+        None,
     )
 }
 
@@ -2666,11 +2667,19 @@ fn earlier_write_is_open(journal: &Journal, step_id: u64) -> bool {
 
 /// Append one tool result for a step. A missing step, a second result, or a
 /// later write that is still waiting leaves the journal unchanged. A child
-/// step's result keeps `child_result_ok` and the stop label, so this path is
-/// not a second, looser copy of `record_child_result`. This does not run a
-/// tool and does not start a series.
+/// step's result keeps `child_result_ok` over the parent's steps and the
+/// child host's steps (`child`, when the result came from a host), and the
+/// stop label, so this path has the same grant context as
+/// `record_child_result`. A result the guest itself generates (a spill
+/// pointer) has no child host and passes nothing. This does not run a tool
+/// and does not start a series.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn record_tool_result(journal: &mut Journal, step_id: u64, text: &str) -> bool {
+fn record_tool_result(
+    journal: &mut Journal,
+    step_id: u64,
+    text: &str,
+    child: Option<&Journal>,
+) -> bool {
     let Some(index) = journal.steps.iter().position(|step| step.id == step_id) else {
         return false;
     };
@@ -2678,7 +2687,13 @@ fn record_tool_result(journal: &mut Journal, step_id: u64, text: &str) -> bool {
         return false;
     }
     let text = if journal.steps[index].kind == ProposalKind::Child {
-        if !child_result_ok(journal.steps.iter(), text) {
+        if !child_result_ok(
+            journal
+                .steps
+                .iter()
+                .chain(child.into_iter().flat_map(|child| child.steps.iter())),
+            text,
+        ) {
             return false;
         }
         match journal.steps[index].stop {
@@ -4144,7 +4159,8 @@ fn host_scope<'a>(
 /// dispatch): `host_scope`, and the step's resource passes the path rule and
 /// sits in that scope (exact canonical paths). A grant, when one is given, is
 /// not the parent step's grant (an empty or missing grant denies the step, as
-/// `authorize` does).
+/// `authorize` does). The error is the shared check's own words, which the
+/// caller records: `TASK_BUDGET_REASON` from `usable_child` among them.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn host_step_ok(
     parent: &Journal,
@@ -4152,15 +4168,16 @@ fn host_step_ok(
     host: &Journal,
     step_id: u64,
     grant: Option<&str>,
-) -> bool {
-    let Ok(scope) = host_scope(parent, child_id, host) else {
-        return false;
-    };
+) -> Result<(), &'static str> {
+    let scope = host_scope(parent, child_id, host)?;
     let Some(step) = host.steps.iter().find(|step| step.id == step_id) else {
-        return false;
+        return Err("not a step");
     };
-    if path_refusal(&step.resource).is_some() || !resource_covers(scope, &step.resource) {
-        return false;
+    if let Some(refusal) = path_refusal(&step.resource) {
+        return Err(refusal.reason());
+    }
+    if !resource_covers(scope, &step.resource) {
+        return Err("not in the parent's grant");
     }
     let parent_grant = parent
         .steps
@@ -4169,7 +4186,18 @@ fn host_step_ok(
         .and_then(|child| child.parent_id)
         .and_then(|id| parent.steps.iter().find(|step| step.id == id))
         .and_then(|step| step.grant.as_deref());
-    grant.is_none_or(|grant| Some(grant) != parent_grant)
+    if grant.is_some_and(|grant| Some(grant) == parent_grant) {
+        return Err("the parent's grant");
+    }
+    Ok(())
+}
+
+/// One refusal record for a host step, in the host's own journal: the shared
+/// check's exact reason and the step it refused. A host's steps stay in the
+/// host; the parent's log keeps no host action.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn refuse_host_step(host: &mut Journal, step_id: u64, reason: &str) {
+    record_refusal_reason(host, reason, &format!("host step {step_id}"));
 }
 
 /// Grant one step of a child host, through `host_step_ok`.
@@ -4181,7 +4209,13 @@ fn authorize_in_host(
     step_id: u64,
     grant: Option<&str>,
 ) -> bool {
-    host_step_ok(parent, child_id, host, step_id, grant) && authorize_step(host, step_id, grant)
+    match host_step_ok(parent, child_id, host, step_id, grant) {
+        Ok(()) => authorize_step(host, step_id, grant),
+        Err(reason) => {
+            refuse_host_step(host, step_id, reason);
+            false
+        }
+    }
 }
 
 /// Give the child host's run step its own grant, through `authorize_in_host`.
@@ -4208,7 +4242,7 @@ fn grant_child_host(
 }
 
 /// Answer a child host's step in the inbox. A deny needs no check; any other
-/// answer goes through `host_step_ok`.
+/// answer goes through `host_step_ok`, whose refusal is recorded.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn host_inbox(
     parent: &Journal,
@@ -4218,18 +4252,27 @@ fn host_inbox(
     answer: InboxAnswer,
     grant: Option<&str>,
 ) -> bool {
-    if answer != InboxAnswer::Deny && !host_step_ok(parent, child_id, host, step_id, grant) {
-        return false;
+    if answer != InboxAnswer::Deny {
+        if let Err(reason) = host_step_ok(parent, child_id, host, step_id, grant) {
+            refuse_host_step(host, step_id, reason);
+            return false;
+        }
     }
     apply_inbox_step(host, step_id, answer, grant)
 }
 
 /// Dispatch a granted step of a child host. The parent's journal is read
 /// again here: a child stopped, or a task cancelled, since the grant
-/// dispatches nothing.
+/// dispatches nothing, and the refusal keeps the shared check's reason.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn dispatch_in_host(parent: &Journal, child_id: u64, host: &mut Journal, step_id: u64) -> bool {
-    host_step_ok(parent, child_id, host, step_id, None) && dispatch_step(host, step_id)
+    match host_step_ok(parent, child_id, host, step_id, None) {
+        Ok(()) => dispatch_step(host, step_id),
+        Err(reason) => {
+            refuse_host_step(host, step_id, reason);
+            false
+        }
+    }
 }
 
 /// The one set of child-result rules, used by both entry points
@@ -4252,8 +4295,9 @@ fn child_result_ok<'a>(steps: impl IntoIterator<Item = &'a Step>, result: &str) 
 /// The parent stores one result line for a child step. The child's log is
 /// not copied in. The child journal must keep the system head, and its steps
 /// take part in the grant rule. Every other rule is the one set in
-/// `child_result_ok`, through `record_tool_result`; a stopped child's partial
-/// result is marked with its stop reason there.
+/// `child_result_ok`, through `record_tool_result`, which checks the parent's
+/// steps and the child host's steps; a stopped child's partial result is
+/// marked with its stop reason there.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn record_child_result(parent: &mut Journal, child_id: u64, child: &Journal, result: &str) -> bool {
     if !parent
@@ -4264,23 +4308,30 @@ fn record_child_result(parent: &mut Journal, child_id: u64, child: &Journal, res
             .events
             .first()
             .is_none_or(|node| node.text != SYSTEM_HEAD)
-        || !child_result_ok(child.steps.iter(), result)
     {
         return false;
     }
-    record_tool_result(parent, child_id, result)
+    record_tool_result(parent, child_id, result, Some(child))
 }
 
-/// A model call under a child is authorized or dispatched only while that
-/// child is still usable (`usable_child`): a child denied, stopped,
-/// cancelled, or without its budget since the call was proposed takes the
-/// pending call with it. A call of the top task has no parent to check.
+/// A call or a child is authorized or dispatched only while its parent is
+/// live and still in scope (`usable_child`, `scope_still_granted`): a model
+/// call under a child is taken with that child when it is denied, stopped,
+/// cancelled or loses its budget, and a granted child is taken with the
+/// grant above it when that grant is withdrawn. A call of the top task, a
+/// child being granted (it has no grant yet), and a step with no parent have
+/// nothing to check.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn call_parent_usable(journal: &Journal, step: &Step) -> bool {
-    step.kind != ProposalKind::Hosted
-        || step
+    match step.kind {
+        ProposalKind::Hosted => step
             .parent_id
-            .is_none_or(|child| usable_child(journal, child).is_ok())
+            .is_none_or(|child| usable_child(journal, child).is_ok()),
+        ProposalKind::Child if step.grant.is_some() => {
+            usable_child(journal, step.id).is_ok() && scope_still_granted(journal, step).is_some()
+        }
+        _ => true,
+    }
 }
 
 /// A missing grant denies the step. A grant id is recorded and does not run it.
@@ -5426,9 +5477,13 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             ));
         }
         let waiting = second_step;
-        if !record_tool_result(&mut journal, first_step, "The step result is recorded.")
-            || record_tool_result(&mut journal, first_step, "a second result")
-            || record_tool_result(&mut journal, 0, "a missing step")
+        if !record_tool_result(
+            &mut journal,
+            first_step,
+            "The step result is recorded.",
+            None,
+        ) || record_tool_result(&mut journal, first_step, "a second result", None)
+            || record_tool_result(&mut journal, 0, "a missing step", None)
             || journal
                 .steps
                 .iter()
@@ -5653,9 +5708,9 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || !authorize(&mut writes, second, Some("fixture-grant"))
             || dispatch(&mut writes, second)
             || step_state(&writes, second) != Some(StepState::Prepared)
-            || record_tool_result(&mut writes, second, "beta replaced")
+            || record_tool_result(&mut writes, second, "beta replaced", None)
             || writes.events != events_before
-            || !record_tool_result(&mut writes, first, "alpha replaced")
+            || !record_tool_result(&mut writes, first, "alpha replaced", None)
             || !dispatch(&mut writes, second)
             || step_state(&writes, second) != Some(StepState::Dispatched)
         {
@@ -6013,7 +6068,13 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 .events
                 .last()
                 .is_none_or(|node| node.role != Role::ToolResult || node.text != "child result ok")
-            || child_host.events.len() != 1
+            || child_host.events.len() != 2
+            || child_host.events.last().is_none_or(|node| {
+                !matches!(
+                    &node.source,
+                    NodeSource::Refused { reason, .. } if reason == "the parent's grant"
+                )
+            })
         {
             return Err(elastos::bus::types::BusError::Invalid(
                 "a child host shared the parent log".to_string(),
@@ -9360,11 +9421,17 @@ mod tests {
         assert!(record_tool_result(
             &mut journal,
             done,
-            "note.txt has one line."
+            "note.txt has one line.",
+            None
         ));
         let after_one = journal.events.clone();
-        assert!(!record_tool_result(&mut journal, done, "a second result"));
-        assert!(!record_tool_result(&mut journal, 0, "a missing step"));
+        assert!(!record_tool_result(
+            &mut journal,
+            done,
+            "a second result",
+            None
+        ));
+        assert!(!record_tool_result(&mut journal, 0, "a missing step", None));
         assert_eq!(journal.events, after_one);
         assert_eq!(journal.epoch, epoch);
         assert!(journal
@@ -9721,9 +9788,19 @@ mod tests {
         assert!(authorize(&mut journal, second, Some("fixture-grant")));
         assert!(!dispatch(&mut journal, second));
         assert_eq!(step_state(&journal, second), Some(StepState::Prepared));
-        assert!(!record_tool_result(&mut journal, second, "beta replaced"));
+        assert!(!record_tool_result(
+            &mut journal,
+            second,
+            "beta replaced",
+            None
+        ));
         assert_eq!(journal.events, events);
-        assert!(record_tool_result(&mut journal, first, "alpha replaced"));
+        assert!(record_tool_result(
+            &mut journal,
+            first,
+            "alpha replaced",
+            None
+        ));
         assert!(dispatch(&mut journal, second));
         assert_eq!(step_state(&journal, second), Some(StepState::Dispatched));
     }
@@ -10062,6 +10139,13 @@ mod tests {
             &mut child_host,
             Some("fixture-grant")
         ));
+        assert_eq!(
+            child_host.events.last().unwrap().source,
+            NodeSource::Refused {
+                reason: "the parent's grant".to_string(),
+                what: format!("host step {}", child_host.steps[0].id),
+            }
+        );
         assert!(child_host.steps.iter().all(|step| step.grant.is_none()));
         assert!(grant_child_host(
             &journal,
@@ -10091,7 +10175,7 @@ mod tests {
         ));
         assert_eq!(journal.events.len(), parent_events + 1);
         assert_eq!(journal.events.last().unwrap().text, "child result ok");
-        assert_eq!(child_host.events.len(), 1);
+        assert_eq!(child_host.events.len(), 2);
         let parent_bytes = model_bytes(&journal.events).unwrap();
         let child_bytes = model_bytes(&child_host.events).unwrap();
         assert!(!parent_bytes
@@ -17716,7 +17800,7 @@ mod tests {
             admit_assistant(&mut journal, text);
             admit_tool_result(&mut journal, text);
             let id = propose_step(&mut journal);
-            assert!(record_tool_result(&mut journal, id, text));
+            assert!(record_tool_result(&mut journal, id, text, None));
             let back = decode_journal(&encode_journal(&journal, &[0; 32]).unwrap())
                 .unwrap()
                 .0;
@@ -18119,7 +18203,9 @@ mod tests {
 
     /// Codex at 1c0449a: the child-result rules hold at the second entry
     /// point too. `record_tool_result` on a child keeps the cap, the grant
-    /// rule and the partial-result stop label, as `record_child_result` does.
+    /// rule and the partial-result stop label, as `record_child_result` does,
+    /// and it checks the same grants: the parent's steps and the child
+    /// host's steps (Codex at b5fa55d).
     #[test]
     fn both_child_result_paths_keep_the_child_result_rules() {
         let (mut journal, run) = task(budget(8, 600));
@@ -18131,24 +18217,63 @@ mod tests {
             Some("first-grant"),
             DEMO_SRC
         ));
-        let host = open_child_host(&journal, first, DEMO_SRC).unwrap();
+        let mut host = open_child_host(&journal, first, DEMO_SRC).unwrap();
+        let host_step = host
+            .steps
+            .iter()
+            .find(|step| step.kind == ProposalKind::Run)
+            .unwrap()
+            .id;
+        assert!(grant_child_host(
+            &journal,
+            first,
+            &mut host,
+            Some("host-only-grant")
+        ));
+        assert_eq!(
+            step_of(&host, host_step).grant.as_deref(),
+            Some("host-only-grant")
+        );
         let before = journal.events.len();
         let long = "x".repeat(CHILD_RESULT_CAP + 1);
-        // Both paths refuse the same oversize and the same grant string.
-        assert!(!record_tool_result(&mut journal, first, &long));
+        // Both paths refuse the same oversize and the same grant string,
+        // including a grant the host holds and the parent does not.
+        assert!(!record_tool_result(&mut journal, first, &long, Some(&host)));
         assert!(!record_child_result(&mut journal, first, &host, &long));
-        assert!(!record_tool_result(&mut journal, first, "first-grant"));
+        assert!(!record_tool_result(
+            &mut journal,
+            first,
+            "first-grant",
+            Some(&host)
+        ));
+        assert!(!record_tool_result(
+            &mut journal,
+            first,
+            "host-only-grant",
+            Some(&host)
+        ));
         assert!(!record_child_result(
             &mut journal,
             first,
             &host,
             "first-grant"
         ));
+        assert!(!record_child_result(
+            &mut journal,
+            first,
+            &host,
+            "host-only-grant"
+        ));
         assert_eq!(journal.events.len(), before, "never cut, never stored");
         assert!(!step_of(&journal, first).has_result);
         // A stopped child's partial result is labelled on both paths.
         assert!(note_time_refusal(&mut journal, first));
-        assert!(record_tool_result(&mut journal, first, "half done"));
+        assert!(record_tool_result(
+            &mut journal,
+            first,
+            "half done",
+            Some(&host)
+        ));
         assert_eq!(
             journal.events.last().unwrap().text,
             "partial (time): half done"
@@ -18163,6 +18288,131 @@ mod tests {
         assert_eq!(
             journal.events.last().unwrap().text,
             "partial (time): half done"
+        );
+    }
+
+    /// Codex at b5fa55d: a granted child is dispatched only while the grant
+    /// above it still stands. A run denied after its child was granted takes
+    /// the child's dispatch with it.
+    #[test]
+    fn a_child_dispatch_needs_the_grant_above_it() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        // The person denies the run after granting the child.
+        assert!(!authorize(&mut journal, run, None));
+        assert_eq!(step_of(&journal, child).state, StepState::Prepared);
+        assert!(!dispatch(&mut journal, child), "no grant above it");
+        assert_eq!(step_of(&journal, child).state, StepState::Prepared);
+        // With the run's grant still standing, the same child dispatches.
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert!(dispatch(&mut journal, child));
+    }
+
+    /// Codex at b5fa55d: a refused host action keeps the shared check's exact
+    /// reason, in one record in the host's own journal: a stop, the required
+    /// missing-budget message, a step outside the child's granted scope, and a
+    /// path that is not canonical.
+    #[test]
+    fn a_refused_host_action_says_why() {
+        let host_step = |host: &Journal| {
+            host.steps
+                .iter()
+                .find(|step| step.kind == ProposalKind::Run)
+                .unwrap()
+                .id
+        };
+        // A stopped child: `usable_child`'s own word.
+        let (mut parent, run) = task(budget(8, 600));
+        let child = propose_child(&mut parent, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut parent,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let mut host = open_child_host(&parent, child, DEMO_SRC).unwrap();
+        let id = host_step(&host);
+        assert!(note_time_refusal(&mut parent, child));
+        let before = host.events.len();
+        assert!(!grant_child_host(
+            &parent,
+            child,
+            &mut host,
+            Some("host-grant")
+        ));
+        assert_eq!(host.events.len(), before + 1);
+        assert_eq!(
+            refusal_records(&host),
+            vec![format!("refused: stopped (host step {id})")]
+        );
+        assert_eq!(step_of(&host, id).grant, None);
+        // A child from before idea 2: the required budget message is kept.
+        let (mut parent, run) = task(budget(8, 600));
+        let child = propose_child(&mut parent, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut parent,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let mut host = open_child_host(&parent, child, DEMO_SRC).unwrap();
+        let id = host_step(&host);
+        step_mut(&mut parent, child).budget = None;
+        assert!(!grant_child_host(
+            &parent,
+            child,
+            &mut host,
+            Some("host-grant")
+        ));
+        assert_eq!(
+            refusal_records(&host),
+            vec![format!("refused: {TASK_BUDGET_REASON} (host step {id})")]
+        );
+        // Outside the granted scope, and a path that is not canonical.
+        let (mut parent, run) = task(budget(8, 600));
+        let child = propose_child(&mut parent, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut parent,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let mut host = open_child_host(&parent, child, DEMO_SRC).unwrap();
+        let outside = propose_read(&mut host, DEMO_DOC);
+        assert!(!authorize_in_host(
+            &parent,
+            child,
+            &mut host,
+            outside,
+            Some("read-grant")
+        ));
+        let not_canonical = propose_read(&mut host, "/tmp/secret");
+        assert!(!authorize_in_host(
+            &parent,
+            child,
+            &mut host,
+            not_canonical,
+            Some("read-grant")
+        ));
+        assert_eq!(
+            refusal_records(&host),
+            vec![
+                format!("refused: not in the parent's grant (host step {outside})"),
+                format!("refused: path not canonical (host step {not_canonical})"),
+            ]
         );
     }
 
@@ -19375,7 +19625,28 @@ mod tests {
                 !dispatch_in_host(&parent, child, &mut host, granted),
                 "{stop}"
             );
-            assert_eq!(host, before, "{stop}");
+            // Each refused action leaves one record with the shared reason;
+            // no step moves.
+            let reason = if stop == "cancel" {
+                "cancelled"
+            } else {
+                "stopped"
+            };
+            let added = &host.events[before.events.len()..];
+            assert_eq!(added.len(), 4, "{stop}");
+            assert!(
+                added.iter().all(|node| matches!(
+                    &node.source,
+                    NodeSource::Refused { reason: why, .. } if why == reason
+                )),
+                "{stop}: {added:?}"
+            );
+            assert_eq!(host.steps, before.steps, "{stop}");
+            assert_eq!(
+                without_refusal_records(&host.events),
+                before.events,
+                "{stop}"
+            );
             // A person's deny is still recorded.
             assert!(!host_inbox(
                 &parent,
