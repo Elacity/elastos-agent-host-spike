@@ -30,8 +30,9 @@ not opened.
 8. [What the kit gives, and what it is missing](#what-the-kit-gives-and-what-it-is-missing)
 9. [Falsifier plan](#falsifier-plan)
 10. [Order of work](#order-of-work)
-11. [Decisions](#decisions)
-12. [Ready-PR note: the old routes](#ready-pr-note-the-old-routes)
+11. [Notes for the next builder](#notes-for-the-next-builder)
+12. [Decisions](#decisions)
+13. [Ready-PR note: the old routes](#ready-pr-note-the-old-routes)
 
 ## Rong's four layers
 
@@ -253,11 +254,11 @@ not carried over.
 
 ## What the kit gives, and what it is missing
 
-**Given by the kit** (`examples/capsule-kit`, after #32):
+**Given by the kit** (`examples/capsule-kit`, after #32 and #35):
 
 | Need | Kit item |
 |---|---|
-| The Bus calls, the read window, the write, the fake Runtime | A1 `v1-guest` (`bus.rs`, `component.rs`, `fake.rs`) |
+| The Bus calls, the read window, the write, the refusals and reads, the URI check, the fake Runtime, the WIT glue | A1 the guest crate `guest/` (`capsule-kit-guest`): `bus`, `read`, `uri`, `fake`, `component`, `wit` |
 | The `ComponentProvider` run, admission import check, fuel gate | A2 `v1-host-test` (`Bridge`, `run`, `admission`, `measure`) |
 | Manifest check, pinned container build | A3 `scripts/check-manifest.py`, `repro/build-in-container.sh` |
 | One falsifier per rule, `--check` | A4 `falsify/falsify_kit.py` |
@@ -270,9 +271,9 @@ not carried over.
 
 | # | What | Why it matters here | Where it belongs |
 |---|---|---|---|
-| M1 | A counted positioned reader: `read_counted` (docs viewer) as a kit item, with a `ReaderAt` adapter | rawzip reads through `ReaderAt`; every byte it reads must be counted against the budget before anything returns | the kit's shared crate (after #32) |
-| M2 | The text checks and typed blocks (`docs-model`) as a kit item | text entries are shown exactly as documents are | shared crate |
-| M3 | The image header checks (photo `image.rs`: PNG, JPEG, WebP, dimension caps) as a kit item | image previews on Bus v2 need the same checks, on bytes from the decompressor instead of the object | shared crate; moving them is part of the one-time photo hash change |
+| M1 | A counted positioned reader | rawzip reads through `ReaderAt`; every byte it reads must be counted against the budget before anything returns | **Done in #35:** `capsule_kit_guest::read_counted`. Still to write, in this app: the `ReaderAt` adapter over it (see [Notes](#notes-for-the-next-builder)) |
+| M2 | The text checks as a kit item | text entries are checked exactly as documents are | **Done in #35:** `capsule_kit_guest::text` (`check_head`, `check_whole`). The typed blocks are still `docs-model` (markdown to blocks), not the kit |
+| M3 | The image header checks as a kit item | image previews on Bus v2 need the same checks, on bytes from the decompressor instead of the object | **Done in #35:** `capsule_kit_guest::image` (`sniff`, `header_dimensions`, `jpeg_dimensions`, `HEADER_BYTES`); the dimension caps stay the photo viewer's constants |
 | M4 | Hostile-archive fixtures: a builder for ZIPs that lie (wrong counts, overlapping ranges, local and directory names that differ) | none of the kit's fixtures are archives, and real tools refuse to write these | test support in this app, then the kit if a second format needs it |
 | M5 | A way to present bytes the guest produced as an image on Bus v2 | `ui.present` takes images by granted handle only | the draft Bus v2 WIT (Anders) |
 | M6 | The launch binding: which archive was opened, in the signed launch context, and the generic viewer route | the core reads a fixed request object today; the page has only the stand-in server | Runtime and Home (kit "missing" 1, 2 and 6); a capability check, not pattern 7 |
@@ -333,10 +334,8 @@ largest view.
 ## Order of work
 
 1. #32 merges.
-2. The kit's real shared crate (the next slice): the symlinks become a Cargo path dependency; the per-app copies
-   (`Refusal`, `grant`, `read_at`, `read_bounded`, the URI check) and their tests move in, with `read_counted`
-   (M1); the documents viewer gets its own write path back. The photo hash changes once, recorded with the
-   reason, with every photo falsifier, the whole `falsify-seam.py` and both container builds run again.
+2. Done in #35: the kit's guest crate (`examples/capsule-kit/guest`), with the counted reader, the text checks
+   and the image header checks (M1 to M3), and the one photo hash change.
 3. Then this app, Bus v1 first, in `examples/archive-viewer`:
    - the core: request, end record, directory, listing, statuses, all P and L rules, with tests and falsifiers
      F7 to F25 and F29 to F31;
@@ -347,6 +346,72 @@ largest view.
    - then the Bus v2 guest in the proof's host, with N2 and F18; image previews (F34) once the typed UI
      document and M5 exist.
 4. tar after ZIP is shown on both buses.
+
+## Notes for the next builder
+
+Written on 23 Oct 2026, when the Photo track moved to its own lane. Read with `examples/capsule-kit/CRATE-REPORT.md`
+("Notes for the next builder" there holds the kit-wide traps).
+
+### Start from the kit's crate
+
+- Depend on `capsule-kit-guest` by path: `features = ["wit"]` in `[dependencies]`, `features = ["fake"]` in
+  `[dev-dependencies]`. Copy the shape of `examples/docs-viewer/Cargo.toml` and `src/lib.rs`.
+- Name the app once: `pub const APP: App = App { name: "archive-viewer", input: "request", max_input_bytes: … }`.
+  `Refusal::message(&APP)` and `to_bus_failure(&APP)` take it.
+- The export is nine lines: implement `capsule_kit_guest::wit::exports::elastos::bus::lifecycle::Guest`, call
+  `capsule_kit_guest::component::lifecycle_run(&APP, |bus| run(bus).map(|_| ()))`, and export with
+  `capsule_kit_guest::wit::export_lifecycle!(… with_types_in capsule_kit_guest::wit)`. The macro is in the
+  `wit` module, not at the crate root.
+- A Bus v2 guest takes the crate with `default-features = false` (text, image and URI checks only), so no Bus v1
+  binding reaches it.
+
+### Traps in this app's own code
+
+- **The `ReaderAt` adapter.** rawzip's `ReaderAt::read_at(&self, …)` takes `&self` and returns
+  `std::io::Result`. So the adapter needs interior mutability over the Bus and the budget (a `RefCell`), and:
+  - it must never call `read_counted` with more than is left: `read_counted` asserts that, and a panic in the
+    guest is a trap, which the Runtime sees as a stop. Clamp the ask to what is left, and when nothing is left
+    return an error that the core turns into a content skip with its reason (a read budget spent), not a trap;
+  - it must keep a `Refusal` (an authority failure) aside and return it after rawzip gives up. If the refusal
+    is folded into an `io::Error`, a denied read becomes a skipped entry, which breaks the stop/skip rule.
+    Test it: a denied read during the directory read stops the run.
+- **rawzip's own checks are not the design's checks.** It parses; L1 to L9 and P1 to P9 are still this app's
+  to write and test. I did not check what rawzip's `try_normalize` accepts; test P1 to P4 against this app's
+  own rules, not against it.
+- **The request's URI prefix.** `check_object_uri(uri, prefix)` takes one prefix. `localhost://Users/self/` alone
+  would also take the app's own `.AppData/App/archive-viewer/view.json` and any other app's AppData. Refuse
+  `.AppData/` explicitly (or take a fixed list of the person's folders) and test it.
+- **Fuel.** The kit's write is the cheap one now, but the view still costs about 200 fuel a byte on Bus v1.
+  Measure the budget table in [Limits](#limits-and-the-fuel-budget) with the real gate before trusting it.
+- **Fixtures (M4).** Real zip tools refuse to write archives that lie. Build them byte by byte in a test-only
+  module (rawzip's writer can make the good ones), one fixture per rule, so each falsifier has exactly one test.
+
+### Which falsifiers belong together
+
+Build them in these groups; each group shares fixtures and a test helper, and lands in one slice:
+
+| Group | Falsifiers | Shares |
+|---|---|---|
+| Directory and end record | F19 to F23 (L1 to L4), F6 (B4 overlap) | the end-record and directory fixture builder; all refuse the whole archive |
+| Names | F7 to F16 (P1 to P9) | one fixture with many names; a table test per rule |
+| Methods and encryption | F29, F30 | a directory-only fixture; nothing is inflated |
+| Local header and the bytes | F24, F25 (L5), F26 to F28 (L6 to L8) | an entry fixture whose local header or data is changed after the fact |
+| Bomb caps | F1 to F5 (B1 to B3) | the inflate loop; F5 is a sweep (many entries, every order), like the docs viewer's budget sweeps |
+| Budgets | F31 (reads), F32 (the whole view) | sweeps over shelves of mixed entries; they must also cover entries skipped after reading |
+| Text | F33 | the kit's text checks through this app's run |
+| Nesting | F17 (Bus v1), F18 (Bus v2) | a stored inner ZIP fixture |
+| In the component | F35 (grant), F36 (fuel gate) | `--runtime`: the component is rebuilt for each case |
+| Page | F37 to F39 (Bus v1); F38 becomes "no image drawn" | the kit's page test kit and stand-in |
+| Bus v2 images | F34 | waits for M5 and the typed UI document (decision 4) |
+
+### Gaps that stay open
+
+- M4 (lying-archive fixtures) is this app's to build; M5 (image bytes on Bus v2), M6 (launch binding, generic
+  viewer route) and M7 (old routes, extraction as a Runtime operation) are not the lane's: they need Anders,
+  the Runtime or the real move PR.
+- Pattern 7 (entitlement) does not apply: a free first-party viewer.
+- Native builds differ by checkout path; record the pinned-container hash only (`CRATE-REPORT.md`,
+  "Reproducible build"). A shared `examples/` workspace that would fix it is a proposed slice, not built.
 
 ## Decisions
 
