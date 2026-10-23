@@ -176,6 +176,26 @@ Every falsifier set, run again under the restored rule in this container, with n
 
 Tests and hashes are unchanged: photo 29 + 13, `add93842…`; documents 71 + 14, `8765e790…`, worst shelf 62.2%.
 
+## Codex fix (FAIL at `3ecb8ae9`)
+
+**A trailing `/` or `/.` got past the symlinked-root refusal.** With `root-link` pointing at a valid capsule
+folder, `capsule-bundle pack root-link/ out` packed the linked files, and the listing of `root-link/.` went
+through: on POSIX, lstat of `link/` or `link/.` follows the link.
+
+Now pack and the listing both start from `real_path` (`bundle/src/listing.rs`): the path is rebuilt from
+`Path::components()` before any lstat (trailing `/` and `.` parts go), a `..` part and an empty path are
+refused (`path_invalid`), and every prefix is lstat'ed (`symlink_in_path` on a link anywhere on the way).
+
+- New test `a_symlinked_root_is_refused_however_its_path_is_written`: `root-link/`, `root-link/.`,
+  `root-link//`, `./root-link/` and `a/./link/core`, each refused by pack and by the listing, with nothing
+  written; the same folder spelled without a link packs and lists; `a/../core` and an empty path are refused.
+  It fails on the old code (pack `root-link/` succeeds).
+- Three new falsifiers: the old lookup back (lstat of the path as written), a `..` part taken, an empty path
+  taken as the current folder; and the root falsifier re-anchored on the new check.
+- A path through a system link is refused too, so the bundle tests now name their temporary folders by their
+  real paths (macOS keeps them under `/var`, a link to `/private/var`).
+- Bundle tool: 48 tests, 63/63 falsifiers.
+
 ## For the Mac and Codex
 
 - Run both `verify.sh`, `photo-viewer/surface` and bundle checks, and the whole `falsify-seam.py`.

@@ -16,12 +16,33 @@ use capsule_bundle::*;
 use ed25519_dalek::SigningKey;
 use serde_json::{json, Value};
 
+/// A temporary folder named by its real path. On macOS the system's temporary
+/// folder is under a link (`/var` is `/private/var`), and the bundle tool
+/// refuses a path through a link.
+struct Temp(#[allow(dead_code)] tempfile::TempDir, PathBuf);
+
+impl Temp {
+    fn path(&self) -> &Path {
+        &self.1
+    }
+}
+
+fn tempdir() -> Temp {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().canonicalize().unwrap();
+    Temp(dir, real)
+}
+
 /// Unix seconds; every test runs at this time (as in the bundle tool's tests).
 const NOW: u64 = 1_800_000_000;
 const DAY: u64 = 24 * 3600;
 
+/// The viewer's folder, named without a `..` part: the bundle tool refuses one.
 fn viewer_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("bundle-test is inside the viewer's folder")
+        .to_path_buf()
 }
 
 fn manifest_of(dir: &Path) -> Value {
@@ -29,7 +50,7 @@ fn manifest_of(dir: &Path) -> Value {
 }
 
 struct World {
-    root: tempfile::TempDir,
+    root: Temp,
     release_root: SigningKey,
     publisher: SigningKey,
 }
@@ -37,7 +58,7 @@ struct World {
 impl World {
     fn new() -> World {
         World {
-            root: tempfile::tempdir().unwrap(),
+            root: tempdir(),
             release_root: sign::generate(),
             publisher: sign::generate(),
         }

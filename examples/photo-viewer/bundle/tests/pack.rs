@@ -6,6 +6,23 @@ use std::path::{Path, PathBuf};
 use capsule_bundle::testing::refused;
 use capsule_bundle::*;
 
+/// A temporary folder named by its real path. On macOS the system's temporary
+/// folder is under a link (`/var` is `/private/var`), and the bundle tool
+/// refuses a path through a link.
+struct Temp(#[allow(dead_code)] tempfile::TempDir, PathBuf);
+
+impl Temp {
+    fn path(&self) -> &Path {
+        &self.1
+    }
+}
+
+fn tempdir() -> Temp {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().canonicalize().unwrap();
+    Temp(dir, real)
+}
+
 fn write(path: &Path, bytes: &[u8]) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, bytes).unwrap();
@@ -59,7 +76,7 @@ fn paths(entries: &[Entry]) -> Vec<&str> {
 
 #[test]
 fn a_component_ships_its_manifest_and_its_entrypoint_only() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempdir();
     let source = component_source(root.path());
     let into = root.path().join("packed");
     let (cid, entries) = pack(&source, &into, &[]).unwrap();
@@ -74,7 +91,7 @@ fn a_component_ships_its_manifest_and_its_entrypoint_only() {
 
 #[test]
 fn a_page_ships_its_manifest_and_its_entrypoint_folder() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempdir();
     let (_, entries) = pack(&page_source(root.path()), &root.path().join("packed"), &[]).unwrap();
     assert_eq!(
         paths(&entries),
@@ -89,7 +106,7 @@ fn a_page_ships_its_manifest_and_its_entrypoint_folder() {
 
 #[test]
 fn the_cid_does_not_change_when_a_test_source_or_fixture_does() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempdir();
     let page = page_source(root.path());
     let (first, _) = pack(&page, &root.path().join("one"), &[]).unwrap();
     write(&page.join("page.test.mjs"), b"// other tests");
@@ -104,7 +121,7 @@ fn the_cid_does_not_change_when_a_test_source_or_fixture_does() {
 
 #[test]
 fn a_page_names_its_core_by_cid_and_keeps_its_other_requirements() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempdir();
     let core = component_source(root.path());
     let (core_cid, _) = pack(&core, &root.path().join("core-packed"), &[]).unwrap();
     let page = page_source(root.path());
@@ -137,7 +154,7 @@ fn a_page_names_its_core_by_cid_and_keeps_its_other_requirements() {
 
 #[test]
 fn pack_refuses_what_it_cannot_ship_as_it_is() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempdir();
     let r = root.path();
 
     // No manifest; no entrypoint; an entrypoint that is not built.
@@ -202,7 +219,7 @@ fn pack_refuses_what_it_cannot_ship_as_it_is() {
 
 #[test]
 fn pack_refuses_a_symlinked_folder_anywhere_on_the_path() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempdir();
     let r = root.path();
     // Bytes outside the source that a followed link would ship.
     write(&r.join("outside/payload.component.wasm"), b"\0asm outside");
@@ -269,4 +286,54 @@ fn pack_refuses_a_symlinked_folder_anywhere_on_the_path() {
     );
     let (_, entries) = pack(&core, &r.join("o6"), &[]).unwrap();
     assert_eq!(paths(&entries), ["a/b/c/x.component.wasm", "capsule.json"]);
+}
+
+#[test]
+fn a_symlinked_root_is_refused_however_its_path_is_written() {
+    let root = tempdir();
+    let r = root.path();
+    let core = component_source(r);
+    // root-link -> core, a valid capsule folder; a/link -> the temporary
+    // folder, so a/./link/core reaches the same capsule through a link.
+    symlink(&core, r.join("root-link")).unwrap();
+    std::fs::create_dir_all(r.join("a")).unwrap();
+    symlink(r, r.join("a/link")).unwrap();
+
+    // Relative paths, as a shell gives them; nothing else in this file uses
+    // the current folder.
+    let back = std::env::current_dir().unwrap();
+    std::env::set_current_dir(r).unwrap();
+    let spellings = [
+        "root-link/",
+        "root-link/.",
+        "root-link//",
+        "./root-link/",
+        "a/./link/core",
+    ];
+    let mut outcome = Vec::new();
+    for (n, spelling) in spellings.iter().enumerate() {
+        let into = r.join(format!("out{n}"));
+        outcome.push((
+            *spelling,
+            refused(pack(Path::new(spelling), &into, &[])).to_string(),
+            refused(list_closure(Path::new(spelling))).to_string(),
+            into.exists(),
+        ));
+    }
+    // Written without a link, the same folder packs and lists.
+    let fine = pack(Path::new("./core/."), &r.join("fine"), &[]).map(|(cid, _)| cid);
+    let listed = list_closure(Path::new("core/")).map(|entries| entries.len());
+    let parent = refused(pack(Path::new("a/../core"), &r.join("up"), &[])).to_string();
+    let empty = refused(list_closure(Path::new(""))).to_string();
+    std::env::set_current_dir(back).unwrap();
+
+    for (spelling, packed, listed, written) in outcome {
+        assert_eq!(packed, "symlink_in_path", "pack {spelling}");
+        assert_eq!(listed, "symlink_in_path", "listing {spelling}");
+        assert!(!written, "pack {spelling} wrote its output");
+    }
+    assert!(fine.is_ok(), "{fine:?}");
+    assert_eq!(listed.unwrap(), list_closure(&core).unwrap().len());
+    assert_eq!(parent, "path_invalid");
+    assert_eq!(empty, "path_invalid");
 }
