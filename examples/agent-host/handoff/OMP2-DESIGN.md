@@ -80,7 +80,11 @@ child step (the parent's journal), never from a child host's own journal.
   its children were granted takes the scope from them, their children and their hosts.
 - `usable_child` needs every child in the chain prepared or dispatched: a denied one refuses with "denied", a
   cancelled or crashed one with "stopped". The plain `cancel` on a child is a stop (record and subtree).
-- Only a run or a child is a parent ("not a parent"): no child below a model call.
+- Only a run or a child is a parent ("not a parent"): no child below a model call. After the Codex review of
+  355e659 this is one function, `may_hold_a_child`, used by `propose_child`, by every budgeted child on load
+  (`child_rules`: decode, reread, resume) and by the scope walk, which gives no scope at a step that cannot hold a
+  child. Children from before idea 2 could sit under any step; like the depth limit, the rule holds for budgeted
+  children, and the older ones load and can do nothing.
 - Child-budget and child-stop records written while a compaction is open are carried into the committed log and into
   a crash restore, so a compaction never leaves a task that does not load.
 - On load, no step may still be prepared below a stopped child or at or before the cancel point.

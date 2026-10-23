@@ -201,6 +201,7 @@ grants). A spill pointer's resource follows the path rule on load, like a read's
 | an unknown inbox answer | `record` |
 | a non-zero step depth byte, an unknown stop reason, or a budget flag of 0 with values | `record` |
 | a journal past the depth limit, or a budgeted child past it in its chain | `depth limit` |
+| a budgeted child whose parent is not a run or a child | `not a parent` |
 | a child resource not strictly under its parent's | `not a subset` |
 | a child budget of zero, below its count, or larger than its owner's (or the task's) | `over the parent's budget` |
 | a parent that is missing or later than its child; a parent on a step other than a child or a call under a child; a budget, count or stop on a step that is not a child; a count that is not the calls below it; a zero task budget or more calls than it; child records that do not match the steps one for one, counted per child; a child host journal (depth above 0) holding a task budget or a model call; a child below a stopped child that has not stopped; a step still prepared below a stopped child or at or before the cancel point; a cancelled task with a running child or a later child or call | `record` |

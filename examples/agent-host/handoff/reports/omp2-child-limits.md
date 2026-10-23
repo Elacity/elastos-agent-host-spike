@@ -417,4 +417,38 @@ Guest hash:   3e25a62cb23a74a94243e73adacff5542636448b85241db9eb31cbf4d2cf2d2a o
 Import list:  unchanged (the core import section /1/2, 149 bytes, 5ee6b40d46f6a045, is byte-identical to #30).
 ```
 
-**What is next:** the Mac check and Codex on #31 when they are available. Sasha closes #25 when #31 merges.
+## Update: Codex FAIL at 355e659, two findings (23 Oct)
+
+Codex: both fe40437 holes fixed; its run passed 208 / 1 / 3 and 58 of 58 focused mutations; OY19 and OZ01 stand.
+
+```text
+Finding 1:    a stored budgeted child moved beneath a model call (resource Models/hosted/x) loaded through decode
+              and the provider reread, and once granted its host acted outside the ancestor's src/a scope. Load used
+              a second, looser parent rule, and the scope walk stopped at the model call.
+Fix:          04a25cc, 6e00cb9: one function, may_hold_a_child (a run or a child), for propose_child, for every
+              budgeted child on load (child_rules: decode, reread, resume refuse "not a parent"), and for the scope
+              walk (no scope at a step that cannot hold a child). Children from before idea 2 keep loading, like the
+              depth limit (a test now also loads one under a read step, and refuses a budgeted one there).
+Tests:        a_stored_child_below_a_model_call_is_refused (decode, reread and resume refuse; no grant, inbox
+              answer, host or dispatch for it) and the_scope_walk_does_not_stop_at_a_model_call (a parent child
+              moved below a granted model call: its child's host gets no grant). Both failed on 355e659.
+Falsifiers:   PR01 the load path drops the parent rule; PR02 the walk stops at a step that cannot hold a child;
+              PR03 any step may hold a child; PR04 the rule also refuses older children; RV09 re-targeted to the
+              shared line. All caught.
+Finding 2:    the runner parsed test output, so a panic printing "test genuinely_passing ... FAILED" overwrote a
+              real pass (confirmed: the 355e659 parser gives CAUGHT on that case).
+Fix:          73843ef: the mutation is built first (a failed build is its own result); each named test is listed
+              with --exact (exactly one must match) and run alone with --exact; failed only if it exits non-zero.
+              Output is read only to stop on a full disk. --self-test reproduces Codex's case on a throwaway crate
+              and must report SURVIVED naming the passing test; verify.sh runs it. --self-test --with-repo also
+              runs TB01 with a passing name added (SURVIVED) and as listed (CAUGHT).
+Tests run:    ./examples/agent-host/verify.sh -> "210 passed", runner self-test OK, clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+              python3 -I examples/agent-host/falsify.py --self-test --with-repo -> OK
+Full run:     python3 -I examples/agent-host/falsify.py at 6e00cb9 -> 227 CAUGHT, 1 CAUGHT (does not build:
+              OY19), 1 SURVIVED (expected, by design: OZ01) of 229; no NOT RUN, no NO MATCH
+Guest hash:   39a003b2b1b421e3dc0fbdb6bb5580997d0dc264f060783fef8e5921a6501d9e on verify.sh and a clean rebuild.
+Import list:  unchanged (the core import section /1/2, 149 bytes, 5ee6b40d46f6a045, is byte-identical to #30).
+```
+
+**What is next:** the Mac check and Codex on #31. Sasha closes #25 when #31 merges.
