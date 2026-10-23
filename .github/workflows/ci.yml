@@ -462,7 +462,7 @@ jobs:
         with:
           node-version: '24'
       - name: install browser layout smoke tools
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           sudo apt-get update
           sudo apt-get install -y just
@@ -896,7 +896,7 @@ jobs:
         with:
           node-version: '24'
       - name: prepare installed Home browser
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           npm ci --ignore-scripts --prefix elastos/tools/browser-playwright-engine
           export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/installed-home-browser"
@@ -1449,7 +1449,7 @@ jobs:
         with:
           node-version: '24'
       - name: prepare installed Home browser
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           npm ci --ignore-scripts --prefix elastos/tools/browser-playwright-engine
           export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/installed-home-browser"
