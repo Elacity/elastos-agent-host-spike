@@ -1531,7 +1531,7 @@ test("with no model the empty Assistant names the one step and opens Marketplace
   shelf.syncAgentSendButton();
   assert.equal(send.disabled, true);
   assert.equal(send.title, "Get a model to start");
-  assert.match(controller.NO_MODEL_OFFER_STATUS, /Open Apps → Models/);
+  assert.match(controller.NO_MODEL_OFFER_STATUS, /Open Marketplace → Models/);
   assert.doesNotMatch(controller.NO_MODEL_OFFER_STATUS, /Store|Services/);
 });
 

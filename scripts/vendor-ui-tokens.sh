@@ -110,19 +110,18 @@ for target_dir in "${TARGETS[@]}"; do
   fi
 done
 
-for target_dir in marketplace/browser system/browser; do
-  for asset in model-management.js model-management.css; do
-    model_source="capsules/_shared/$asset"
-    model_target="capsules/$target_dir/$asset"
-    if [[ "$MODE" == "--check" ]]; then
-      if ! cmp -s "$model_source" "$model_target"; then
-        echo "[vendor-ui] DRIFT: $model_target" >&2
-        FAILED=1
-      fi
-    else
-      cp "$model_source" "$model_target"
+# Marketplace uses only the controller; its compact rows take Marketplace's own list styles.
+for model_target in marketplace/browser/model-management.js system/browser/model-management.js system/browser/model-management.css; do
+  model_source="capsules/_shared/${model_target##*/}"
+  model_target="capsules/$model_target"
+  if [[ "$MODE" == "--check" ]]; then
+    if ! cmp -s "$model_source" "$model_target"; then
+      echo "[vendor-ui] DRIFT: $model_target" >&2
+      FAILED=1
     fi
-  done
+  else
+    cp "$model_source" "$model_target"
+  fi
 done
 
 # Marketplace and Assistant present the same provider-owned model facts.

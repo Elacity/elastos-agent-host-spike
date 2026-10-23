@@ -63,8 +63,10 @@ test("one refresh discovers a grant installed by Services summary, including sum
   const fn = source.slice(source.indexOf("  async function loadSharedModels()"), source.indexOf("  async function loadCatalogData()"));
   for (const summaryFails of [false, true]) {
     let reconciled = false;
-    const state = { remoteAvailability: [{ status: "stale" }] };
+    const toasts = [];
+    const state = { destination: "models", remoteAvailability: [{ status: "stale" }] };
     const context = vm.createContext({ state, homeToken: "fixture", render() {}, AbortSignal,
+      showToast: (message, isError) => toasts.push([message, isError]),
       modelAccessOpportunities, sharedModelOffers: payload => sharedModelOffers(payload, 100),
       fetch: async url => {
         if (url.endsWith("summary")) {
@@ -81,9 +83,44 @@ test("one refresh discovers a grant installed by Services summary, including sum
     await context.loadSharedModels();
     assert.equal(state.sharedModels[0].id, offer().id);
     assert.equal(state.remoteAvailability.length, 0);
-    assert.equal(Boolean(state.accessError), summaryFails);
+    assert.deepEqual(toasts, summaryFails ? [["Couldn’t load shared models.", true]] : []);
     assert.equal(state.sharedLoading, false);
   }
+});
+
+test("Models show catalog, shared and contact rows in one list, and a plain line when the catalog is unverified", () => {
+  const source = readFileSync(new URL("../capsules/marketplace/browser/marketplace.js", import.meta.url), "utf8");
+  const els = { storeSections: { innerHTML: "" } };
+  const state = { search: "", sharedLoading: false, modelCatalogState: "verified", remoteAvailability: [],
+    sharedModels: [], modelAccess: [] };
+  let local = [];
+  const context = vm.createContext({ state, els, MODEL_ICON: {}, icons: { search: "" },
+    filteredByDestination: () => local, renderAppRow: app => `<article class="store-row">${app.name}</article>`,
+    skeletonRows: () => "skeleton", emptyState: (title, description) => `empty:${title}|${description}`,
+    escapeHtml: String, escapeAttr: String, appIconHtml: () => "", bindAppActions() {} });
+  vm.runInContext(source.slice(source.indexOf("  function renderModels()"), source.indexOf("  function renderCategorySections()")), context);
+  const html = () => els.storeSections.innerHTML;
+
+  context.renderModels();
+  assert.equal(html(), "empty:No models to show|Choose another category from the sidebar.");
+  state.modelCatalogState = "unavailable";
+  context.renderModels();
+  assert.equal(html(), "empty:Models are not available right now.|");
+  state.sharedLoading = true;
+  context.renderModels();
+  assert.equal(html(), "skeleton");
+
+  state.sharedLoading = false;
+  local = [{ name: "Catalog model" }];
+  state.sharedModels = [{ id: "remote:one", title: "Shared writing model", owner: "Owner Home" }];
+  state.modelAccess = [{ id: "offer:one", title: "Contact AI", status: "Not shared yet", requestable: true }];
+  context.renderModels();
+  assert.equal((html().match(/<article class="store-row/g) || []).length, 3);
+  assert(html().indexOf("Catalog model") < html().indexOf("Shared writing model"), "catalog models come first");
+  assert.match(html(), /<div class="store-row-sub">Shared by Owner Home<\/div>/);
+  assert.match(html(), /<div class="store-row-sub">From a contact · Not shared yet<\/div>/);
+  assert.doesNotMatch(html(), /class="badge/, "model rows carry no badge, like app rows");
+  assert.doesNotMatch(html(), /store-section-head|Run on this Home|Shared with you|Nothing shared|Refresh|internet/);
 });
 
 function publisherFixture() {
@@ -131,7 +168,7 @@ test("invalid or unavailable model catalog verification clears publisher cards",
       ? { model_catalog_state: status, capsules: [{ ...model, ...changes }] } : { interfaces: [] } });
     await context.loadCatalogData();
     assert.equal(context.state.apps.length, accepted ? 1 : 0);
-    if (accepted) assert.equal(context.detailPublisher(context.state.apps[0]), "Verified publisher · 1.02 KB");
+    if (accepted) assert.equal(context.detailPublisher(context.state.apps[0]), "Verified publisher");
     else assert.match(context.state.appLoadError, /verification is unavailable/);
   }
 });

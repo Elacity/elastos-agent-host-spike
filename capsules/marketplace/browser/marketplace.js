@@ -32,8 +32,6 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
     modelAccess: [],
     sharedLoading: false,
     sharedLoaded: false,
-    sharedError: "",
-    accessError: "",
     remoteAvailability: [],
   };
 
@@ -266,7 +264,7 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
       return;
     }
     if (window.top === window || !homeParentOrigin) {
-      showToast("Open Apps from Home to use this model.", true);
+      showToast("Open Marketplace from Home to use this model.", true);
       return;
     }
     const query = { model_cid: cid };
@@ -283,6 +281,8 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
 
   function handleHomeMenuCommand(command) {
     if (command === "refresh") {
+      // View > Refresh also reads an open model detail again, in place.
+      void detailModels?.refresh();
       loadData()
         .then(render)
         .catch((error) => {
@@ -333,7 +333,6 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
     state.sharedModels = [];
     state.modelAccess = [];
     state.remoteAvailability = [];
-    state.sharedError = state.accessError = "";
     render();
     const read = async (url, post = false) => {
       const response = await fetch(url, { method: post ? "POST" : "GET", headers: {
@@ -344,16 +343,18 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
       if (reply?.status === "error") throw new Error("Model access unavailable");
       return reply;
     };
+    let failed = false;
     // Summary reconciles new Inbox approvals into grants before discovery reads them.
     await read("/api/apps/services/summary")
       .then(reply => { state.modelAccess = modelAccessOpportunities(reply); })
-      .catch(() => { state.accessError = "Couldn’t check access right now."; });
+      .catch(() => { failed = true; });
     await read("/api/provider/model/offers_list", true).then(reply => {
       state.sharedModels = sharedModelOffers(reply);
       state.remoteAvailability = (reply?.data ?? reply)?.remote_services || [];
-    }).catch(() => { state.sharedError = "Couldn’t load shared models. Select Refresh to try again."; });
+    }).catch(() => { failed = true; });
     state.sharedLoading = false;
     render();
+    if (failed && state.destination === "models") showToast("Couldn’t load shared models.", true);
   }
 
   async function loadCatalogData() {
@@ -472,7 +473,7 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
       badges: model ? ["model"] : appBadges(role, capsule, installed),
       acceptedContent: acceptedContentLabels(capsule, capsulesByName, interfaceEntries),
       dependencies,
-      availableActions: model ? [] : executableActions(interfaceEntries),
+      availableActions: model ? ["Get and keep on this device", "Open in Assistant", "Remove in System → Models"] : executableActions(interfaceEntries),
       viewerTitle: String(capsule.viewer_title || ""),
       sourceSummary: capsule.cid ? "SmartWeb" : "Local",
     };
@@ -697,7 +698,6 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
   }
 
   function surfaceState() {
-    if (state.destination === "models") return { destination: "models", loading: false, error: null };
     if (state.destination === "media") {
       return {
         destination: "media",
@@ -765,53 +765,30 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
     bindAppActions(els.storeSections);
   }
 
-  function openAiProviderSettings() {
-    if (window.top === window || !homeParentOrigin) {
-      showToast("Open Apps from Home to open Settings.", true);
+  // Models use the same store rows as every category: models this Home can run,
+  // then models shared with it and contacts' AI services.
+  function renderModels() {
+    const matches = item => !state.search || JSON.stringify(item).toLowerCase().includes(state.search);
+    const rows = [
+      ...filteredByDestination().map(renderAppRow),
+      ...state.sharedModels.filter(matches).map(renderSharedModelRow),
+      ...state.modelAccess.filter(matches).map(renderModelAccessRow),
+    ];
+    if (!rows.length) {
+      els.storeSections.innerHTML = state.sharedLoading ? skeletonRows(3)
+        : state.search ? emptyState("No results", "Try a different search.", icons.search)
+        : state.modelCatalogState === "unavailable" ? emptyState("Models are not available right now.", "", icons.search)
+        : emptyState("No models to show", "Choose another category from the sidebar.", icons.search);
       return;
     }
-    window.top.postMessage({
-      type: "home:open-target",
-      target: "system",
-      query: { settings: "models" },
-      homeToken,
-    }, homeParentOrigin);
-  }
-
-  // Models use the same store rows as every category: models this Home can run,
-  // models shared with it, and contacts' AI services it can ask for.
-  function renderModels() {
-    const local = filteredByDestination();
-    const matches = item => !state.search || JSON.stringify(item).toLowerCase().includes(state.search);
-    const shared = state.sharedModels.filter(matches);
-    const access = state.modelAccess.filter(matches);
-    const localNote = state.appLoading ? "Loading models…" : state.appLoadError
-      || (state.modelCatalogState === "unavailable" ? "Couldn’t load or verify the model list. Check your internet connection, then try again." : "")
-      || (local.length ? "" : state.search ? "No models match your search." : "No models available.");
-    const sharedNote = state.sharedLoading ? "Checking for shared models…" : state.sharedError
-      || (shared.length ? "" : state.search ? "No shared models match your search." : "Nothing shared with you yet.");
     const unreachable = state.sharedLoading ? 0 : state.remoteAvailability.filter(service => service.status !== "reachable").length;
-    const refresh = `<button type="button" class="store-see-all" data-action="refresh-shared-models"${state.sharedLoading ? " disabled" : ""}>Refresh</button>`;
     els.storeSections.innerHTML = `
-      ${modelSection("Run on this Home", "", localNote, local.map(renderAppRow))}
-      ${modelSection("Shared with you", refresh, sharedNote, shared.map(renderSharedModelRow),
-        unreachable ? `${unreachable} approved service${unreachable === 1 ? " is" : "s are"} not reachable right now.` : "")}
-      ${state.accessError || access.length ? modelSection("From contacts", "", state.accessError, access.map(renderModelAccessRow)) : ""}
-    `;
-    bindAppActions(els.storeSections);
-  }
-
-  function modelSection(title, headAction, note, rows, footnote = "") {
-    return `
       <section class="store-section">
-        <div class="store-section-head">
-          <h2 class="store-section-title">${escapeHtml(title)}</h2>
-          ${headAction}
-        </div>
-        ${note ? `<p class="store-inline-note" role="status">${escapeHtml(note)}</p>` : `<div class="store-row-grid">${rows.join("")}</div>`}
-        ${footnote ? `<p class="store-inline-note" role="status">${escapeHtml(footnote)}</p>` : ""}
+        <div class="store-row-grid">${rows.join("")}</div>
+        ${unreachable ? `<p class="store-inline-note" role="status">${unreachable} approved service${unreachable === 1 ? " is" : "s are"} not reachable right now.</p>` : ""}
       </section>
     `;
+    bindAppActions(els.storeSections);
   }
 
   function renderSharedModelRow(model) {
@@ -820,7 +797,7 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
         ${appIconHtml(MODEL_ICON, "store-row-icon")}
         <div class="store-row-text">
           <div class="store-row-title">${escapeHtml(model.title)}</div>
-          <div class="store-row-sub">From ${escapeHtml(model.owner)}</div>
+          <div class="store-row-sub">Shared by ${escapeHtml(model.owner)}</div>
         </div>
         <button class="store-pill" type="button" data-action="use-shared-model" data-offer="${escapeAttr(model.id)}">Open</button>
       </article>
@@ -833,7 +810,7 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
         ${appIconHtml(MODEL_ICON, "store-row-icon")}
         <div class="store-row-text">
           <div class="store-row-title">${escapeHtml(item.title)}</div>
-          <div class="store-row-sub">${escapeHtml(item.status)}</div>
+          <div class="store-row-sub">From a contact · ${escapeHtml(item.status)}</div>
         </div>
         <button class="store-pill" type="button" data-action="model-service-access" data-offer="${escapeAttr(item.id)}">${item.requestable ? "Ask" : "Review"}</button>
       </article>
@@ -944,7 +921,7 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
   }
 
   function detailPublisher(app) {
-    if (app.modelCid) return `Verified publisher · ${modelSizeLabel(app.contentBytes)}`;
+    if (app.modelCid) return "Verified publisher";
     const author = app.developer;
     return !author || /^unknown publisher$/i.test(author)
       ? "Publisher unknown"
@@ -1100,64 +1077,44 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
     focusTarget?.focus();
   }
 
+  // Every item uses one detail layout: About, Status, Works with (when it has
+  // relationships), Available actions and Technical details, with its one
+  // forward action next to Close.
   function showAppDetail(appId) {
     const app = state.apps.find((candidate) => candidate.id === appId);
     if (!app) {
       return;
     }
-    const about = `<section class="modal-section">
-          <div class="modal-section-title">About</div>
-          <div class="modal-description">${escapeHtml(app.description)}</div>
-        </section>`;
+    renderDetail({
+      icon: appIconHtml(app, "modal-icon-size"), title: app.name, developer: detailPublisher(app),
+      developerTitle: app.modelCid ? app.developer : "", version: app.version,
+      badges: badgesHtml(app), footerNote: packageLabel(app),
+      body: `${aboutSection(app.description)}
+        ${app.modelCid
+          ? listSection("Status", [], 'data-model-management role="group" aria-label="Model status"')
+          : listSection("Status", statusItems(app))}
+        ${relationshipSection(app)}
+        ${listSection("Available actions", availableActionItems(app))}
+        ${technicalDetails(app)}`,
+      actions: app.modelCid ? '<span class="model-actions" data-model-actions></span>'
+        : app.launchable
+          ? `<button class="modal-btn primary" type="button" data-action="open" data-app="${escapeAttr(app.id)}">Open</button>`
+          : "",
+    });
     if (app.modelCid) {
       // Runtime owns the model's state: the shared controller fills Status and
       // puts Get, Retry, Stop or Open in Assistant next to Close.
-      renderDetail({
-        icon: appIconHtml(app, "modal-icon-size"), title: app.name, developer: detailPublisher(app), developerTitle: app.developer,
-        version: app.version, badges: badgesHtml(app),
-        body: `${about}
-        <section class="modal-section">
-          <div class="modal-section-head">
-            <div class="modal-section-title">Status</div>
-            <span class="model-refresh" data-model-refresh></span>
-          </div>
-          <div data-model-management role="group" aria-label="Model status"></div>
-        </section>
-        ${technicalDetails(app)}`,
-        actions: '<span class="model-actions" data-model-actions></span>',
-      });
+      const itemMarker = document.createElement("span");
+      itemMarker.className = "permission-icon";
+      itemMarker.innerHTML = icons.check;
       detailModels = window.ElastosModelManagement.create({
         root: els.detailContent.querySelector("[data-model-management]"), capsule: "marketplace", token: homeToken,
-        buttonClass: "modal-btn secondary", cid: app.modelCid, compact: true, onReadyOpen: openReadyModelInAssistant,
+        buttonClass: "modal-btn secondary", primaryButtonClass: "modal-btn primary", cid: app.modelCid, compact: true, itemMarker,
+        onReadyOpen: openReadyModelInAssistant,
         actionsRoot: els.detailContent.querySelector("[data-model-actions]"),
-        refreshRoot: els.detailContent.querySelector("[data-model-refresh]"),
       });
       detailModels.setVisible(true);
-      activateDetail();
-      return;
     }
-    renderDetail({
-      icon: appIconHtml(app, "modal-icon-size"), title: app.name, developer: detailPublisher(app), version: app.version,
-      badges: badgesHtml(app), footerNote: packageLabel(app),
-      body: `${about}
-        <section class="modal-section">
-          <div class="modal-section-title">Status</div>
-          <ul class="permissions-list">
-            ${statusItems(app).map((item) => `<li><span class="permission-icon">${icons.check}</span>${escapeHtml(item)}</li>`).join("")}
-          </ul>
-        </section>
-        ${relationshipSection(app)}
-        <section class="modal-section">
-          <div class="modal-section-title">Available actions</div>
-          <ul class="permissions-list">
-            ${availableActionItems(app).map((item) => `<li><span class="permission-icon">${icons.check}</span>${escapeHtml(item)}</li>`).join("")}
-          </ul>
-        </section>
-        ${technicalDetails(app)}`,
-      actions: app.launchable
-        ? `<button class="modal-btn primary" type="button" data-action="open" data-app="${escapeAttr(app.id)}">Open</button>`
-        : "",
-    });
     activateDetail();
   }
 
@@ -1169,24 +1126,34 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
     }
     const facts = [{ term: "Model", value: model.facts.requestedModel }, ...model.facts.detailRows];
     renderDetail({
-      icon: appIconHtml(MODEL_ICON, "modal-icon-size"), title: model.title, developer: `From ${model.owner}`,
-      badges: badgesHtml({ badges: ["model"] }),
-      body: `<section class="modal-section">
-          <div class="modal-section-title">How it runs</div>
-          <ul class="permissions-list">
-            ${facts.map((row) => `<li>${escapeHtml(row.term)}: ${escapeHtml(row.value)}</li>`).join("")}
-          </ul>
-        </section>
-        <details class="modal-section technical-details">
-          <summary class="modal-section-title">Technical details</summary>
-          <ul class="permissions-list">
-            <li>Access ends ${escapeHtml(new Date(model.expiresAt * 1000).toLocaleString())}</li>
-            <li class="shared-model-identity">${escapeHtml(model.id)}</li>
-          </ul>
-        </details>`,
+      icon: appIconHtml(MODEL_ICON, "modal-icon-size"), title: model.title, developer: `Shared by ${model.owner}`,
+      badges: badgesHtml({ badges: ["model", "shared"] }),
+      footerNote: `Access ends ${new Date(model.expiresAt * 1000).toLocaleString()}`,
+      body: `${aboutSection(`Shared with this Home by ${model.owner}.`)}
+        ${listSection("Status", facts.map((row) => `${row.term}: ${row.value}`))}
+        ${listSection("Available actions", ["Open in Assistant"])}
+        ${technicalSection(["Shared", "Model", "Remote"], [`Offer ID: ${model.id}`])}`,
       actions: `<button class="modal-btn primary" type="button" data-action="use-shared-model" data-offer="${escapeAttr(model.id)}">Open in Assistant</button>`,
     });
     activateDetail();
+  }
+
+  function aboutSection(description) {
+    return `<section class="modal-section">
+          <div class="modal-section-title">About</div>
+          <div class="modal-description">${escapeHtml(description)}</div>
+        </section>`;
+  }
+
+  function listSection(title, items, listAttributes = "") {
+    return `
+      <section class="modal-section">
+        <div class="modal-section-title">${escapeHtml(title)}</div>
+        <ul class="permissions-list"${listAttributes ? ` ${listAttributes}` : ""}>
+          ${items.map((item) => `<li><span class="permission-icon">${icons.check}</span><span>${escapeHtml(item)}</span></li>`).join("")}
+        </ul>
+      </section>
+    `;
   }
 
   function closeDetail() {
@@ -1245,52 +1212,35 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
     if (app.viewerTitle) items.push(`Opens with ${app.viewerTitle}`);
     if (app.acceptedContent.length) items.push(`Accepts ${app.acceptedContent.join(", ")}`);
     if (app.dependencies.length) items.push(`Needs ${app.dependencies.join(", ")}`);
-    if (!items.length) {
-      return "";
-    }
-    return `
-      <section class="modal-section">
-        <div class="modal-section-title">Works with</div>
-        <ul class="permissions-list">
-          ${items.map((item) => `<li><span class="permission-icon">${icons.check}</span>${escapeHtml(item)}</li>`).join("")}
-        </ul>
-      </section>
-    `;
+    return items.length ? listSection("Works with", items) : "";
   }
 
   function technicalDetails(app) {
-    if (app.modelCid) {
-      return `
-      <details class="modal-section technical-details">
-        <summary class="modal-section-title">Technical details</summary>
-        <ul class="permissions-list">
-          <li><span class="permission-icon">${icons.check}</span>Catalog signature verified</li>
-          <li class="model-publisher-identity">Publisher: ${escapeHtml(app.developer)}</li>
-          <li class="model-content-identity">Content ID: ${escapeHtml(app.modelCid)}</li>
-          <li>${escapeHtml(app.contentBytes.toLocaleString())} bytes</li>
-        </ul>
-        <button class="modal-btn secondary model-storage" type="button" data-action="open-ai-provider-settings">Manage storage in System</button>
-      </details>
-    `;
-    }
+    return app.modelCid
+      ? technicalSection([app.sourceSummary, roleLabel(app.role), "Model"], [
+        packageLabel(app), `Publisher: ${app.developer}`, `Content ID: ${app.modelCid}`, `${app.contentBytes.toLocaleString()} bytes`,
+      ])
+      : technicalSection([app.sourceSummary, roleLabel(app.role), app.capsuleType || "Unknown"], [signatureLabel(app), packageLabel(app)]);
+  }
+
+  function technicalSection([source, role, type], rows) {
     return `
       <details class="modal-section technical-details">
         <summary class="modal-section-title">Technical details</summary>
         <div class="requirements-grid">
-          <div class="requirement-item"><div class="requirement-value">${escapeHtml(app.sourceSummary)}</div><div class="requirement-label">Source</div></div>
-          <div class="requirement-item"><div class="requirement-value">${escapeHtml(roleLabel(app.role))}</div><div class="requirement-label">Role</div></div>
-          <div class="requirement-item"><div class="requirement-value">${escapeHtml(app.capsuleType || "Unknown")}</div><div class="requirement-label">Type</div></div>
+          <div class="requirement-item"><div class="requirement-value">${escapeHtml(source)}</div><div class="requirement-label">Source</div></div>
+          <div class="requirement-item"><div class="requirement-value">${escapeHtml(role)}</div><div class="requirement-label">Role</div></div>
+          <div class="requirement-item"><div class="requirement-value">${escapeHtml(type)}</div><div class="requirement-label">Type</div></div>
         </div>
         <ul class="permissions-list">
-          <li><span class="permission-icon">${icons.check}</span>${escapeHtml(signatureLabel(app))}</li>
-          <li><span class="permission-icon">${icons.check}</span>${escapeHtml(packageLabel(app))}</li>
+          ${rows.map((row) => `<li><span class="permission-icon">${icons.check}</span><span>${escapeHtml(row)}</span></li>`).join("")}
         </ul>
       </details>
     `;
   }
 
-  function packageLabel() {
-    return "Publisher verification unavailable";
+  function packageLabel(app) {
+    return app.modelCid ? "Catalog signature verified" : "Publisher verification unavailable";
   }
 
   function trustLabel(stateValue) {
@@ -1317,7 +1267,7 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
       return;
     }
     if (window.top === window || !homeParentOrigin) {
-      showToast("Open Apps from Home to launch apps.", true);
+      showToast("Open Marketplace from Home to launch apps.", true);
       return;
     }
     window.top.postMessage({
@@ -1332,7 +1282,7 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
       return;
     }
     if (window.top === window || !homeParentOrigin) {
-      showToast("Open Apps from Home to launch apps.", true);
+      showToast("Open Marketplace from Home to launch apps.", true);
       return;
     }
     window.top.postMessage({
@@ -1426,10 +1376,6 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
         if (action === "close-detail") {
           closeDetail();
         }
-        if (action === "open-ai-provider-settings") {
-          openAiProviderSettings();
-        }
-        if (action === "refresh-shared-models") void loadSharedModels();
         if (action === "use-shared-model" && REMOTE_MODEL_ID.test(target.dataset.offer || "")
             && state.sharedModels.some(model => model.id === target.dataset.offer)) {
           closeDetail();
@@ -1475,7 +1421,7 @@ import { sharedModelOffers, modelAccessOpportunities, REMOTE_MODEL_ID, SERVICE_O
       <div class="empty-state">
         <div class="empty-icon">${icon}</div>
         <div class="empty-title">${escapeHtml(title)}</div>
-        <div class="empty-description">${escapeHtml(description)}</div>
+        ${description ? `<div class="empty-description">${escapeHtml(description)}</div>` : ""}
       </div>
     `;
   }

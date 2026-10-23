@@ -140,10 +140,11 @@
       offer_id: output.offer_id, preparation }, cid);
   }
   window.ElastosModelManagement = {
-    // actionsRoot and refreshRoot let a host place the action buttons and Refresh in its own
-    // layout (the Marketplace detail footer and Status heading); without them both stay in root.
-    create({ root, capsule, token, buttonClass = "pc2-btn pc2-btn-secondary", cid: requiredCid = null, compact = false, onReadyOpen = null,
-      actionsRoot = null, refreshRoot = null }) {
+    // Compact mode is the Marketplace detail: root is its Status list, so each
+    // fact is a list row led by a copy of itemMarker; the actions go to
+    // actionsRoot (the detail footer) and Refresh appears only when a read failed.
+    create({ root, capsule, token, buttonClass = "pc2-btn pc2-btn-secondary", primaryButtonClass = buttonClass,
+      cid: requiredCid = null, compact = false, onReadyOpen = null, actionsRoot = null, itemMarker = null }) {
       let visible = false, closed = false, generation = 0, busy = false, timer, reader;
       let selectedCid = requiredCid, choices = [], model = null, methods = new Map(), message = "", loading = false;
       let unresolvedUse = null, reconcileRequired = false, refusal = "";
@@ -154,7 +155,8 @@
       let statusFailures = 0, statusFailingSince = 0;
       // When this view first saw the current operation finishing setup.
       let finishingOperation = "", finishingSince = 0;
-      root.classList.add("model-management");
+      // The full view brings its own styles; compact rows use the host's list styles.
+      if (!compact) root.classList.add("model-management");
       root.tabIndex = -1;
       const show = () => visible && !closed && !document.hidden;
       function stopRead() { clearTimeout(timer); reader?.abort(); reader = null; }
@@ -338,12 +340,20 @@
           else if (show()) void load();
         }
       }
-      function button(label, run, disabled = false) {
-        const node = element("button", label, buttonClass);
+      function button(label, run, disabled = false, className = buttonClass) {
+        const node = element("button", label, className);
         node.type = "button"; node.disabled = disabled || busy || loading; node.addEventListener("click", run); return node;
       }
+      // One line of status: a paragraph in the full view, a list row in compact.
+      function fact(value, className) {
+        if (!compact) return element("p", value, className);
+        const item = element("li", "", className);
+        if (itemMarker) item.append(itemMarker.cloneNode(true));
+        item.append(element("span", value));
+        return item;
+      }
       function render() {
-        const hosts = [root, actionsRoot, refreshRoot].filter(Boolean);
+        const hosts = [root, actionsRoot].filter(Boolean);
         const focused = hosts.some(host => host.contains(document.activeElement)) ? document.activeElement?.dataset.modelControl || pendingFocus : null;
         pendingFocus = focused;
         const restoreFocus = () => {
@@ -355,11 +365,11 @@
         for (const host of hosts) host.replaceChildren();
         const refresh = button(compact ? "Refresh" : "Refresh models", () => void load(), loading);
         refresh.dataset.modelControl = "refresh";
-        if (refreshRoot) refreshRoot.append(refresh);
-        else if (!compact) root.append(refresh);
-        const trailingRefresh = () => { if (compact && !refreshRoot) root.append(refresh); };
-        const status = element("p", loading ? "Loading models…" : message || refusal || (statusFailures ? "Checking status…" : ""));
-        status.setAttribute("role", "status"); status.hidden = compact && !status.textContent; root.append(status);
+        if (!compact) root.append(refresh);
+        else if (message || refusal || statusFailures) (actionsRoot || root).append(refresh);
+        const statusText = loading ? "Loading models…" : message || refusal || (statusFailures ? "Checking status…" : "");
+        const status = fact(statusText);
+        status.setAttribute("role", "status"); status.hidden = compact && !statusText; root.append(status);
         if (!model) {
           if (!loading && !message && !requiredCid && choices.length > 1) {
             root.append(element("p", "Select a verified model. Keep and removal apply to the model you select."));
@@ -372,17 +382,15 @@
               list.append(row);
             }
             root.append(list);
-            trailingRefresh();
             restoreFocus();
             return;
           }
-          if (!loading && !message) root.append(element("p", "No verified model is available. Ask your administrator to configure a trusted catalog."));
-          trailingRefresh();
+          if (!loading && !message) root.append(fact("No verified model is available. Ask your administrator to configure a trusted catalog."));
           restoreFocus();
           return;
         }
         const r = model.model_runtime, p = r.preparation;
-        const row = element("article", "", "model-row");
+        const row = compact ? root : element("article", "", "model-row");
         if (!compact) {
           row.append(element("h2", model.title), element("p", formatBytes(model.content_size_bytes), "model-size"));
           const identity = element("details", "", "model-details");
@@ -398,26 +406,29 @@
           : phase === "capacity" ? capacityText(p) : phase === "service_unavailable" && r.dispatch_unavailable_reason
           ? DISPATCH_UNAVAILABLE_TEXT[r.dispatch_unavailable_reason] : phase === "service_unavailable" && p?.failure_class
             ? failureText(p) : (compact ? COMPACT_PHASE_TEXT : PHASE_TEXT)[phase];
-        row.append(element("p", label));
-        row.append(element("p", (compact ? COMPACT_MEMORY_FIT_TEXT : MEMORY_FIT_TEXT)[model.model_memory_fit], "model-memory-fit"));
+        row.append(fact(label));
+        if (compact) row.append(fact(`Download size: ${formatBytes(model.content_size_bytes)}`, "model-size"));
+        row.append(fact((compact ? COMPACT_MEMORY_FIT_TEXT : MEMORY_FIT_TEXT)[model.model_memory_fit], "model-memory-fit"));
         if (active(p)) {
           const progress = element("progress"); progress.max = p.total_bytes || 1; progress.value = p.completed_bytes;
-          progress.setAttribute("aria-label", "Preparation progress"); row.append(progress, element("p", `${formatBytes(p.completed_bytes)} of ${formatBytes(p.total_bytes)}`));
+          progress.setAttribute("aria-label", "Preparation progress");
+          const done = fact(`${formatBytes(p.completed_bytes)} of ${formatBytes(p.total_bytes)}`);
+          if (compact) { done.append(progress); row.append(done); } else row.append(progress, done);
         }
         const controls = actionsRoot || element("div", "", "model-controls");
         const useLabel = r.dispatch_unavailable_reason === "catalog_updated" ? "Use"
           : (p && p.state !== "reclaimed") || unresolvedUse ? "Retry" : compact ? "Get" : "Download";
         const use = button(useLabel, () => void act("use"), active(p) || reconcileRequired
-          || (!unresolvedUse && model.model_memory_fit !== "fits"));
+          || (!unresolvedUse && model.model_memory_fit !== "fits"), primaryButtonClass);
         use.dataset.modelControl = "use";
         if (!active(p) && !r.dispatch_ready && phase !== "finishing") controls.append(use);
         if (r.dispatch_ready && typeof onReadyOpen === "function") {
-          const open = button("Open in Assistant", () => void act("open"), reconcileRequired);
+          const open = button("Open in Assistant", () => void act("open"), reconcileRequired, primaryButtonClass);
           open.dataset.modelControl = "open-assistant";
           controls.append(open);
         }
         if (r.admitted && !active(p) && reclaimStep === "busy") {
-          row.append(element("p", RECLAIM_BUSY_TEXT, "model-reclaim-busy"));
+          row.append(fact(RECLAIM_BUSY_TEXT, "model-reclaim-busy"));
         }
         if (!compact && r.admitted && !active(p) && reclaimStep === "confirm") {
           row.append(element("p", RECLAIM_CONFIRM_TEXT, "model-reclaim-confirm"));
@@ -431,7 +442,7 @@
           reclaim.dataset.modelControl = "reclaim";
           controls.append(reclaim);
         }
-        if (active(p)) { const cancel = button(compact ? "Stop" : "Cancel preparation", () => void act("cancel"), p.cancel_requested || reconcileRequired); cancel.dataset.modelControl = "cancel"; controls.append(cancel); }
+        if (active(p)) { const cancel = button(compact ? "Stop" : "Cancel preparation", () => void act("cancel"), p.cancel_requested || reconcileRequired, primaryButtonClass); cancel.dataset.modelControl = "cancel"; controls.append(cancel); }
         if (!compact && reclaimStep !== "confirm") {
           const labelNode = element("label", "", "model-keep"), toggle = element("input");
           toggle.type = "checkbox"; toggle.checked = r.kept; toggle.disabled = !(r.admitted || active(p)) || p?.cancel_requested || busy || loading || reconcileRequired; toggle.dataset.modelControl = "keep";
@@ -445,8 +456,7 @@
             : "Prepared files can be removed during cache cleanup.", "model-hint"));
           row.append(element("p", "The model loads into memory when you use it in Assistant.", "model-hint"));
         }
-        root.append(row);
-        trailingRefresh();
+        if (!compact) root.append(row);
         if (!requiredCid && choices.length > 1) {
           const back = button("Choose another model", () => { selectedCid = null; model = null; void load(); });
           back.dataset.modelControl = "choose-another";

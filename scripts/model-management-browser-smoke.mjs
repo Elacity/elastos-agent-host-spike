@@ -172,9 +172,20 @@ try {
     await page.goto(`http://127.0.0.1:${server.address().port}/?app=${app}`);
     const frame = page.frameLocator("iframe");
     async function refreshModels() {
-      await frame.locator('[data-model-control="refresh"]').click();
+      const refresh = frame.locator('[data-model-control="refresh"]');
+      if (app === "marketplace" && !(await refresh.count())) {
+        // The detail reads the model each time it opens; Refresh shows only after a failed read.
+        const shown = (await frame.locator(".technical-details li").filter({ hasText: /^Content ID: / }).textContent()).trim().slice("Content ID: ".length);
+        await frame.locator('#detail-content .modal-footer [data-action="close-detail"]').click();
+        await frame.locator(`.store-row[data-app="model:${shown}"]`).click();
+        await frame.locator('[data-model-management] li[role="status"]', { hasText: "Loading models…" }).waitFor({ state: "detached" });
+        return;
+      }
+      await refresh.click();
       // Repeated state copy can match the old row while this read is pending.
-      await frame.locator('[data-model-control="refresh"]:enabled').waitFor();
+      await (app === "marketplace"
+        ? frame.locator('[data-model-management] li[role="status"]:not(:has-text("Loading models…"))').first().waitFor({ state: "attached" })
+        : frame.locator('[data-model-control="refresh"]:enabled').waitFor());
     }
     if (app === "marketplace") {
       for (const title of ["Installed", "Apps", "Models"]) {
@@ -191,7 +202,7 @@ try {
     if (app === "marketplace") {
       await frame.locator(`[data-action="model-detail"][data-app="model:${cid}"]`).waitFor();
       assert.equal(await frame.getByRole("heading", { name: "Models", exact: true }).count(), 1, "Models has one page title");
-      await frame.getByRole("heading", { name: "Run on this Home", exact: true }).waitFor();
+      assert.equal(await frame.locator("#store-sections .store-section-head").count(), 0, "Models omits group headings like every category");
       // A model is a standard store row: the row opens the detail and carries its facts, with no extra pill.
       const row = frame.locator(`.store-row[data-action="model-detail"][data-app="model:${cid}"]`);
       assert.equal(await row.locator(".store-row-sub").innerText(), "1.02 KB · Fits this device");
@@ -201,17 +212,18 @@ try {
     await (app === "marketplace" ? frame.locator(".modal-title") : frame.getByRole("heading", { name: "Fixture model", exact: true })).waitFor();
     assert.match(await frame.locator("body").textContent(), /did:key:zFixturePublisher/);
     if (app === "marketplace") {
-      // The model detail is the app detail: one publisher-and-size line, About, Status, Technical details,
-      // and the forward action next to Close in the footer.
-      assert.equal(await frame.locator(".modal-developer").innerText(), "Verified publisher · 1.02 KB");
+      // The model detail is the app detail: About, Status, Available actions and Technical details,
+      // with the size as a Status row and the forward action next to Close in the footer.
+      assert.equal(await frame.locator(".modal-developer").innerText(), "Verified publisher");
       assert.equal(await frame.locator(".modal-developer").getAttribute("title"), "did:key:zFixturePublisher");
-      assert.deepEqual(await frame.locator(".modal-body .modal-section-title:visible").allInnerTexts(), ["About", "Status", "Technical details"]);
+      assert.deepEqual(await frame.locator(".modal-body .modal-section-title:visible").allInnerTexts(), ["About", "Status", "Available actions", "Technical details"]);
       assert.equal(await frame.locator(".modal-description").innerText(), "Language model for Assistant.");
-      assert.equal(await frame.locator(".modal-footer-price, .trust-chip").count(), 0, "the publisher is named once");
+      assert.equal(await frame.locator(".modal-footer .trust-chip").innerText(), "Catalog signature verified");
       assert.equal(await frame.locator("[data-model-management] .model-hint").count(), 0, "compact detail carries no cache or memory hints");
-      assert.equal(await frame.locator('.modal-section-head [data-model-control="refresh"]').count(), 1, "Refresh sits in the Status heading");
+      assert.equal(await frame.locator('[data-model-control="refresh"]').count(), 0, "Refresh shows only after a failed read");
       assert.equal(await frame.locator('.modal-footer-actions [data-model-control="use"]').count(), 1, "Get sits next to Close");
-      assert.match(await frame.locator(".technical-details .model-publisher-identity").evaluate(node => node.textContent), /^Publisher: did:key:zFixturePublisher$/);
+      assert.equal(await frame.locator("[data-model-management] li", { hasText: "Download size: 1.02 KB" }).count(), 1, "the size is a Status row");
+      assert.equal(await frame.locator(".technical-details li", { hasText: /^Publisher: did:key:zFixturePublisher$/ }).count(), 1);
       assert.equal(await frame.getByText("Not on this device yet", { exact: true }).count(), 1);
       assert.equal(await frame.getByRole("button", { name: "Get", exact: true }).isEnabled(), true);
     }
@@ -344,7 +356,7 @@ try {
     const activationUses = calls.filter(c => c.method === "content.use").length;
     assert.equal(await frame.getByRole("button", { name: stop, exact: true }).count(), 0, "admitted content is not cancellable");
     activationPending = false; activationFailure = false; dispatchPending = false;
-    await frame.locator("[data-model-management] p").filter({ hasText: /^Available on this device$/ }).waitFor();
+    await frame.locator("[data-model-management] :is(p, li)").filter({ hasText: /^Available on this device$/ }).waitFor();
     assert.equal(calls.filter(c => c.method === "content.use").length, activationUses, "activation readiness uses status without another Use");
     if (app === "marketplace") {
       // The ready detail hands exactly this model and its live offer to Assistant through Home.
@@ -357,7 +369,7 @@ try {
         "invalid Keep acknowledgement preserves the current surface");
       mismatchRetention = false;
       await refreshModels();
-      await frame.locator("[data-model-management] p").filter({ hasText: /^Available on this device$/ }).waitFor();
+      await frame.locator("[data-model-management] :is(p, li)").filter({ hasText: /^Available on this device$/ }).waitFor();
       let releaseOpen;
       const openRetention = new Promise(resolveRetention => {
         delayRetention = reply => { releaseOpen = reply; resolveRetention(); };
@@ -388,14 +400,14 @@ try {
       assert.equal(calls.filter(c => c.method === "content.reclaim").length, reclaimBeforeDecline, "first Remove asks before reclaim");
       assert.doesNotMatch(reclaimCopy, /only copy|will stop/i);
       await frame.locator('[data-model-control="reclaim-decline"]').click();
-      await frame.locator("[data-model-management] p").filter({ hasText: /^Available on this device$/ }).waitFor();
+      await frame.locator("[data-model-management] :is(p, li)").filter({ hasText: /^Available on this device$/ }).waitFor();
       assert.equal(await frame.getByRole("button", { name: "Remove from this device", exact: true }).count(), 1);
       assert.equal(calls.filter(c => c.method === "content.reclaim").length, reclaimBeforeDecline, "decline leaves the admission");
       protectReclaim = true;
       await frame.getByRole("button", { name: "Remove from this device", exact: true }).click();
       await frame.getByRole("button", { name: "Remove now", exact: true }).click();
       await frame.getByText("Stop the current reply in Assistant, then try Remove again.", { exact: true }).waitFor();
-      await frame.locator("[data-model-management] p").filter({ hasText: /^Available on this device$/ }).waitFor();
+      await frame.locator("[data-model-management] :is(p, li)").filter({ hasText: /^Available on this device$/ }).waitFor();
       assert.equal(await frame.getByRole("button", { name: "Remove from this device", exact: true }).count(), 1, "busy reclaim keeps Remove");
       assert.equal(calls.filter(c => c.method === "content.reclaim").length, reclaimBeforeDecline + 1, "busy Remove now still invokes reclaim");
       protectReclaim = false;
@@ -405,7 +417,7 @@ try {
       assert.equal(calls.filter(c => c.method === "content.reclaim").length, reclaimBeforeDecline + 2, "Remove now dispatches reclaim once after the busy reject");
       phase = "admitted";
       await refreshModels();
-      await frame.locator("[data-model-management] p").filter({ hasText: /^Available on this device$/ }).waitFor();
+      await frame.locator("[data-model-management] :is(p, li)").filter({ hasText: /^Available on this device$/ }).waitFor();
       phase = "preparing";
       await refreshModels();
       await frame.getByRole("button", { name: stop, exact: true }).waitFor();
@@ -422,7 +434,7 @@ try {
       assert.equal(pendingRetentionAck.kept, true);
       phase = "admitted";
       delayRetention = null; releaseRetention();
-      await frame.locator("[data-model-management] p").filter({ hasText: /^Available on this device$/ }).waitFor();
+      await frame.locator("[data-model-management] :is(p, li)").filter({ hasText: /^Available on this device$/ }).waitFor();
       await frame.locator('[data-model-management] input:enabled:checked').waitFor();
       assert.equal(await frame.getByRole("button", { name: stop, exact: true }).count(), 0, "fresh admission replaces the pending preparation after retention settles");
       assert.equal(calls.filter(c => c.method === "content.use").length, usesBeforeRetentionRace, "admission during retention does not dispatch another Use");
@@ -448,7 +460,8 @@ try {
     } else {
       assert.equal(await frame.getByRole("checkbox", { name: "Keep on this device" }).count(), 0);
       assert.equal(await frame.getByRole("button", { name: "Remove from this device", exact: true }).count(), 0);
-      assert.equal(await frame.locator('.technical-details [data-action="open-ai-provider-settings"]').textContent(), "Manage storage in System");
+      assert.equal(await frame.locator(".technical-details li", { hasText: "Remove in System → Models" }).count(), 0, "Remove is named under Available actions");
+      assert.equal(await frame.locator(".modal-body li", { hasText: "Remove in System → Models" }).count(), 1);
     }
     const bounds = async () => {
       assert.equal(await frame.locator("html").evaluate(n => n.scrollWidth <= n.clientWidth + 1), true, `${app} page clips`);
@@ -469,15 +482,18 @@ try {
     phase = "unprepared"; kept = false;
     await refreshModels();
     await frame.getByRole("button", { name: acquire, exact: true }).waitFor();
-    let releaseCatalog;
-    const catalogReceived = new Promise(resolveCatalog => { delayCatalog = reply => { releaseCatalog = reply; resolveCatalog(); }; });
-    const beforeRefreshUses = calls.filter(c => c.method === "content.use").length;
-    await frame.locator('[data-model-control="refresh"]').click();
-    await catalogReceived;
-    assert.equal(await frame.getByRole("button", { name: acquire, exact: true }).isDisabled(), true);
-    await frame.getByRole("button", { name: acquire, exact: true }).evaluate(n => n.click());
-    assert.equal(calls.filter(c => c.method === "content.use").length, beforeRefreshUses, "catalog refresh blocks old-model mutation");
-    delayCatalog = null; releaseCatalog();
+    // Only System keeps Refresh beside a loaded model; Marketplace reads again when the detail opens.
+    if (app === "system") {
+      let releaseCatalog;
+      const catalogReceived = new Promise(resolveCatalog => { delayCatalog = reply => { releaseCatalog = reply; resolveCatalog(); }; });
+      const beforeRefreshUses = calls.filter(c => c.method === "content.use").length;
+      await frame.locator('[data-model-control="refresh"]').click();
+      await catalogReceived;
+      assert.equal(await frame.getByRole("button", { name: acquire, exact: true }).isDisabled(), true);
+      await frame.getByRole("button", { name: acquire, exact: true }).evaluate(n => n.click());
+      assert.equal(calls.filter(c => c.method === "content.use").length, beforeRefreshUses, "catalog refresh blocks old-model mutation");
+      delayCatalog = null; releaseCatalog();
+    }
     await frame.locator('[data-model-control="use"]:enabled').waitFor();
     loseUseResponse = true;
     const usesBeforeLoss = calls.filter(c => c.method === "content.use").length;
@@ -607,13 +623,13 @@ try {
     if (app === "marketplace") await frame.locator(`[data-action="model-detail"][data-app="model:${selectedCid}"]`).click();
     if (app === "system") await frame.getByText("Content details", { exact: true }).click();
     if (app === "marketplace") await frame.getByText("Technical details", { exact: true }).click();
-    await frame.locator(app === "marketplace" ? ".model-content-identity" : ".model-identity").filter({ hasText: selectedCid }).waitFor();
+    await frame.locator(app === "marketplace" ? ".technical-details li" : ".model-identity").filter({ hasText: selectedCid }).waitFor();
     delayStatus = null; releaseStatus();
     const deliveredStatus = await frame.locator("body").evaluate(() => window.modelStatusDelivered);
     assert.equal(deliveredStatus.cid, cid, "old status actually reaches the consumer after the CID switch");
     assert.equal(deliveredStatus.operation_id, operation);
     assert.equal(await frame.getByRole("button", { name: stop, exact: true }).count(), 0, "late old operation cannot replace new identity");
-    assert.match(await frame.locator(app === "marketplace" ? ".model-content-identity" : ".model-identity").innerText(), new RegExp(selectedCid));
+    assert.match(await frame.locator(app === "marketplace" ? ".technical-details li:has-text('Content ID:')" : ".model-identity").innerText(), new RegExp(selectedCid));
     if (app === "marketplace") {
       await frame.getByRole("button", { name: acquire, exact: true }).waitFor();
       const detailCid = selectedCid;
@@ -623,10 +639,13 @@ try {
       });
       const mutationsBeforeRotation = calls.filter(c => c.method !== "content.status").length;
       selectedCid = `bafybei${"c".repeat(52)}`;
-      await refreshModels();
+      // View > Refresh reads the open detail again in place.
+      await frame.locator("body").evaluate(() => window.dispatchEvent(new MessageEvent("message", {
+        origin: "null", source: window.parent, data: { type: "elastos:menu-command", cmd: "refresh" },
+      })));
       await frame.getByText("No verified model is available. Ask your administrator to configure a trusted catalog.", { exact: true }).waitFor();
       assert.equal(await frame.locator("[data-model-management]").evaluate(node => node === window.fixtureOpenModelDetail), true, "CID rotation leaves the same detail controller mounted");
-      assert.match(await frame.locator(".model-content-identity").innerText(), new RegExp(detailCid), "the open detail keeps its original CID");
+      assert.match(await frame.locator(".technical-details li:has-text('Content ID:')").innerText(), new RegExp(detailCid), "the open detail keeps its original CID");
       assert.equal(await frame.locator('[data-model-control="use"], [data-model-control="keep"], [data-model-control="cancel"]').count(), 0, "the previous detail exposes no actions for the replacement CID");
       const staleMutationAttempts = await frame.locator("body").evaluate(() => {
         const originalFetch = window.fetch;

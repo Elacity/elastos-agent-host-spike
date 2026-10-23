@@ -281,8 +281,6 @@ button {
   cursor: default;
 }
 
-.model-content-identity,
-.shared-model-identity,
 .modal-developer {
   overflow-wrap: anywhere;
 }
@@ -475,6 +473,7 @@ button {
 .badge.wallet { --badge-hue: #f97316; }
 .badge.installed { --badge-hue: #22c55e; }
 .badge.model { --badge-hue: #22c55e; }
+.badge.shared { --badge-hue: #8b5cf6; }
 
 .badge.app,
 .badge.viewer,
@@ -485,7 +484,8 @@ button {
 .badge.ddrm,
 .badge.wallet,
 .badge.installed,
-.badge.model {
+.badge.model,
+.badge.shared {
   color: color-mix(in srgb, var(--badge-hue) 62%, var(--el-text));
   background: color-mix(in srgb, var(--badge-hue) 18%, transparent);
 }
@@ -650,9 +650,19 @@ button {
   letter-spacing: 0;
 }
 
+.permissions-list li[hidden] {
+  display: none;
+}
+
+.permissions-list li > span:not(.permission-icon) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .permission-icon {
   width: 16px;
   height: 16px;
+  flex-shrink: 0;
   color: var(--success);
 }
 
@@ -705,84 +715,15 @@ button {
   background: var(--bg-hover);
 }
 
-/* A model detail keeps the app layout: its forward action (Get, Retry or
-   Open in Assistant) is the footer's primary button, Refresh sits where a
-   section's See All link would, and Status reads like the About text. */
-.modal-btn[data-model-control="use"],
-.modal-btn[data-model-control="open-assistant"] {
-  border: 0;
-  color: #fff;
-  background: var(--accent);
-}
-
-.modal-btn[data-model-control="use"]:hover,
-.modal-btn[data-model-control="open-assistant"]:hover {
-  background: var(--accent-hover);
-}
-
-.modal-btn[data-model-control="use"]:disabled,
-.modal-btn[data-model-control="open-assistant"]:disabled {
+.modal-btn:disabled {
   cursor: default;
   opacity: 0.55;
 }
 
+/* Get, Retry, Stop or Open in Assistant come from the shared model controller,
+   which fills this wrapper in the footer actions. */
 .model-actions {
   display: contents;
-}
-
-.modal-section-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.model-refresh .modal-btn {
-  min-height: 0;
-  padding: 0;
-  border: 0;
-  color: var(--accent);
-  background: transparent;
-  font-weight: 500;
-}
-
-.model-refresh .modal-btn:hover {
-  background: transparent;
-  filter: brightness(1.08);
-}
-
-.model-refresh .modal-btn:disabled {
-  cursor: default;
-  opacity: 0.55;
-}
-
-[data-model-management] .model-row {
-  padding: 0;
-  border-top: 0;
-}
-
-[data-model-management] p,
-[data-model-management] .model-row p {
-  margin: 0 0 6px;
-  color: var(--text-secondary);
-  font-size: 14px;
-  line-height: 1.6;
-}
-
-[data-model-management] .model-row > p:first-child {
-  color: var(--text-primary);
-  font-weight: 600;
-}
-
-[data-model-management] .model-row progress {
-  display: block;
-  width: 100%;
-  max-width: none;
-  margin: 8px 0 4px;
-}
-
-.technical-details .model-storage {
-  margin-top: 12px;
 }
 
 .store-loading {

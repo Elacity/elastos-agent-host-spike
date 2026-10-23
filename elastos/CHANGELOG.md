@@ -8,15 +8,19 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 
 ### Changed
 
-- Apps lists models in the same rows as other items. Model details use the
-  shared detail window, with Get, Retry, Stop or Open in Assistant beside Close.
-  Each row shows the download size and device memory fit. Shared model details
-  show where prompts go, and keyboard users can open Technical details.
+- The app catalog is called Marketplace again everywhere: its Home title,
+  window, menu and Assistant hints. Marketplace lists models in the same rows
+  as other items: catalog models first, then models shared with you and
+  contacts' AI services, in one list. A model opens the same detail as an app:
+  About, Status with the download size and memory fit, Available actions and
+  Technical details, with Get, Retry, Stop or Open in Assistant beside Close.
+  Shared model details show where prompts go.
 
 ### Fixed
 
-- Apps keeps its title clear of Home window controls in narrow windows. Phone
-  detail controls have full touch targets, and Tab skips closed detail content.
+- Marketplace keeps its title clear of Home window controls in narrow windows.
+  Phone detail controls have full touch targets, and Tab skips closed detail
+  content.
 - In Assistant, Copy now copies: on a message (also while a reply is still
   arriving), on a code block and in the pasted-text editor. Before, it did
   nothing. Home asks you to confirm, then copies the text you sent, the reply as
@@ -180,7 +184,7 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 - Updates: test-channel Homes update to 0.8.0 in System; the install command moves them to stable (#335). If an update needs the install command, System and `elastos update` show it and keep your version. Home now waits up to 2 minutes for the new Runtime, so it starts after an update on a slow device such as a Jetson. If the old version was put back but cannot start, `elastos home --browser` starts it.
 - A Home joins the shared Community by default; to keep it out, run `elastos setup --isolated` before it first joins. An admin can leave in System → Security. Signed posts reach members without Discovery, also across networks, through the seed's Community node, which can read them until the relay arrives in 0.8.1. Direct messages need a direct connection, which some networks block until then; contact requests across networks need Discovery on.
 - Community: Inbox asks once whether members see you online (Always, Only while Community is open, Later or Never); change it in System → Security. Before Undo to a test version without this choice, turn Discovery off in People to stay hidden. A post whose delivery could not be confirmed says "Delivery unconfirmed".
-- Apps lists models in the same rows and detail window as other items, with Get, Retry, Stop or Open in Assistant, the download size and whether it fits your device's memory.
+- Marketplace lists models in the same rows and detail window as other items, with Get, Retry, Stop or Open in Assistant, the download size and whether it fits your device's memory.
 - Hosted AI on a Mac, for admins: add a Venice or OpenRouter key in System → Models. Nothing is sent until you approve it in Inbox; End there or in System stops it, even mid-reply (#85).
 - Known issues: Browser runs only on Apple Silicon Macs, takes about 5 seconds to close, and has no Chinese, Japanese or Korean fonts. On the Jetson, getting Qwen takes about 43 minutes and its first reply about 22 seconds. Library can lose a save of a file that is saved from two places at once or renamed, moved or deleted meanwhile (#480).
 - Known issues when updating: from 0.7.1 or earlier, run the install command once, as releases have a new signing key (#186); your Home keeps its data. From a test version older than 0.8.0-alpha.18 on a slow device such as a Jetson, System update can fail. Earlier versions cannot start a Home with a Library file over 16 MB or over 64 MB in total: update with the install command and do not use Undo. If an update leaves Home stuck, follow "Recover an interrupted update" in `docs/INSTALL.md` (#108).

@@ -845,7 +845,7 @@ function buildInstalledModelRows(host, emptyText) {
   }
   for (const [action, label] of [
     ["refresh-models", "Refresh models"],
-    ["open-models", "Find models in Apps"],
+    ["open-models", "Find models in Marketplace"],
     ["open-ai-provider-settings", "Manage models"],
   ]) {
     const button = document.createElement("button");

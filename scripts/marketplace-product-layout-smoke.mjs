@@ -291,7 +291,7 @@ function buildShellDocument(appSrc) {
   return `<!doctype html>
 <html>
 <body style="margin:0">
-  <iframe id="app" title="Apps" sandbox="allow-forms allow-modals allow-pointer-lock allow-scripts" src="${appSrc}" style="border:0;width:100%;height:100vh"></iframe>
+  <iframe id="app" title="Marketplace" sandbox="allow-forms allow-modals allow-pointer-lock allow-scripts" src="${appSrc}" style="border:0;width:100%;height:100vh"></iframe>
   <script>
     window.addEventListener("message", (event) => {
       if (event.data?.type !== "fixture:post-to-app") return;
@@ -643,19 +643,51 @@ async function lastOpenTarget(page) {
   return (await readHomeMessages(page)).filter((entry) => entry.type === "home:open-target").at(-1);
 }
 
+// Element structure of a store row, in the page: the same element, icon slot,
+// text block and an optional action button for every kind of item.
+function storeRowShape(node) {
+  return {
+    row: `${node.tagName}.${node.classList.contains("store-row")}`,
+    children: [...node.children].map((child) => child.classList.contains("app-icon") ? `icon.${child.classList.contains("store-row-icon")}` : child.tagName === "BUTTON" ? null : child.className).filter(Boolean),
+    text: [...node.querySelector(".store-row-text").children].map((child) => child.className),
+    actionSlot: [...node.querySelectorAll(":scope > button")].every((child) => child.className === "store-pill"),
+  };
+}
+
+// Section structure of the open detail, in the page: header, the body's
+// sections in order (Works with is optional) and the footer.
+function detailShape() {
+  const content = document.querySelector("#detail-content");
+  const classes = (nodes) => [...nodes].map((node) => node.classList.contains("app-icon") ? "icon" : `${node.tagName.toLowerCase()}.${node.className}`);
+  return {
+    header: classes(content.querySelector(".modal-header").children),
+    title: classes(content.querySelectorAll(".modal-title-section > :not(.modal-version)")),
+    sections: [...content.querySelector(".modal-body").children]
+      .filter((section) => section.querySelector(".modal-section-title")?.textContent.trim() !== "Works with")
+      .map((section) => `${section.tagName.toLowerCase()}.${section.className}:${section.querySelector(".modal-section-title")?.textContent.trim()}:${classes([...section.children].slice(1)).join("+")}`),
+    footer: classes(content.querySelector(".modal-footer").children),
+    actions: classes(content.querySelectorAll(".modal-footer-actions button")).map((name) => name.replace(/^button\.modal-btn (secondary|primary).*$/, "button.modal-btn $1")),
+  };
+}
+
 // Models are ordinary Marketplace items: store rows, the app detail modal and
 // its footer actions, with size and device fit in the row's facts line.
 async function assertModelsLayout(page, frame, { appPrimaryStyle, appRowStyle }) {
+  await frame.locator('#category-list [data-destination="apps"]').click();
+  const appRow = frame.locator('.store-row[data-app="documents"]').first();
+  await appRow.waitFor();
+  const appRowShape = await appRow.evaluate(storeRowShape);
+  await appRow.click();
+  await frame.locator("#detail-modal.active").waitFor();
+  const appDetailShape = await frame.evaluate(detailShape);
+  await page.keyboard.press("Escape");
+  await frame.locator("#detail-modal:not(.active)").waitFor({ state: "attached" });
   await frame.locator('#category-list [data-destination="models"]').click();
   const modelRow = frame.locator(`.store-row[data-app="model:${modelCid}"]`);
   await modelRow.waitFor();
   await frame.getByText("Contact AI", { exact: true }).waitFor();
-  const titles = await frame.locator("#store-sections .store-section-title").allInnerTexts();
-  assert(
-    JSON.stringify(titles) === JSON.stringify(["Run on this Home", "Shared with you", "From contacts"]),
-    "Models must group rows under plain section titles",
-    titles,
-  );
+  const heads = await frame.locator("#store-sections .store-section-head, #store-sections [data-action=\"refresh-shared-models\"]").count();
+  assert(heads === 0, "Models must list one row set like every category, with no group headings or Refresh", { heads });
   await frame.locator('.store-row[data-action="shared-detail"]').waitFor();
   const ownComponents = await frame.locator(
     ".shared-model-card, .store-models-settings, .shared-model-facts, #store-sections .store-section > p:not(.store-inline-note)",
@@ -670,12 +702,17 @@ async function assertModelsLayout(page, frame, { appPrimaryStyle, appRowStyle })
   assert(
     JSON.stringify(rows) === JSON.stringify([
       { title: modelTitle, sub: "1.32 GB · Fits this device", pill: "", icon: true },
-      { title: "Shared writing model", sub: "From Owner Home", pill: "Open", icon: true },
-      { title: "Contact AI", sub: "Not shared yet", pill: "Ask", icon: true },
+      { title: "Shared writing model", sub: "Shared by Owner Home", pill: "Open", icon: true },
+      { title: "Contact AI", sub: "From a contact · Not shared yet", pill: "Ask", icon: true },
     ]),
     "Model rows must carry a title, one facts line and at most one row action",
     rows,
   );
+  // A model row is the app row: same element, icon slot, text block and action slot.
+  for (const row of await frame.locator("#store-sections .store-row").all()) {
+    const shape = await row.evaluate(storeRowShape);
+    assert(JSON.stringify(shape) === JSON.stringify(appRowShape), "Model rows must share the app row structure", { shape, appRowShape });
+  }
   const modelRowStyle = await modelRow.evaluate(readBoxStyle);
   assert(JSON.stringify(modelRowStyle) === JSON.stringify(appRowStyle), "Model rows must use the app row layout", { modelRowStyle, appRowStyle });
   await assertNoHorizontalOverflow(frame, "Marketplace Models");
@@ -689,29 +726,28 @@ async function assertModelsLayout(page, frame, { appPrimaryStyle, appRowStyle })
   await frame.getByRole("group", { name: "Model status" }).waitFor();
   const detail = await frame.evaluate(() => ({
     developer: document.querySelector(".modal-developer")?.textContent.trim(),
-    sections: [...document.querySelectorAll(".modal-body .modal-section-title")].map((node) => node.textContent.trim()),
-    status: [...document.querySelectorAll("[data-model-management] p:not([hidden])")].map((node) => node.textContent.trim()),
-    refresh: document.querySelector('.modal-section-head [data-model-control="refresh"]')?.textContent.trim(),
+    status: [...document.querySelectorAll("[data-model-management] li:not([hidden])")].map((node) => node.textContent.trim()),
+    actions: [...document.querySelectorAll(".modal-body .modal-section:nth-child(3) li")].map((node) => node.textContent.trim()),
     footer: [...document.querySelectorAll(".modal-footer-actions button")].map((node) => node.textContent.trim()),
-    trustChips: document.querySelectorAll(".modal-footer .trust-chip").length,
+    chip: document.querySelector(".modal-footer .trust-chip")?.textContent.trim(),
   }));
   assert(
     JSON.stringify(detail) === JSON.stringify({
-      developer: "Verified publisher · 1.32 GB",
-      sections: ["About", "Status", "Technical details"],
-      status: ["Not on this device yet", "Fits this device's memory. It needs some free memory to reply."],
-      refresh: "Refresh",
+      developer: "Verified publisher",
+      status: ["Not on this device yet", "Download size: 1.32 GB", "Fits this device's memory. It needs some free memory to reply."],
+      actions: ["Get and keep on this device", "Open in Assistant", "Remove in System → Models"],
       footer: ["Close", "Get"],
-      trustChips: 0,
+      chip: "Catalog signature verified",
     }),
     "The model detail must use the app detail layout with Get next to Close",
     detail,
   );
+  const modelDetailShape = await frame.evaluate(detailShape);
+  assert(JSON.stringify(modelDetailShape) === JSON.stringify(appDetailShape), "A model detail must share the app detail structure", { modelDetailShape, appDetailShape });
   const getStyle = await get.evaluate(readBoxStyle);
   assert(JSON.stringify(getStyle) === JSON.stringify(appPrimaryStyle), "Get must look like an app's Open button", { getStyle, appPrimaryStyle });
   await page.waitForTimeout(MODAL_FADE_MS);
   await page.screenshot({ path: MODEL_DETAIL_SCREENSHOT });
-  // Manage storage lives in Technical details, so Tab must reach the summary and then the button.
   let summaryFocused = false;
   for (let step = 0; step < 8 && !summaryFocused; step += 1) {
     await page.keyboard.press("Tab");
@@ -723,9 +759,8 @@ async function assertModelsLayout(page, frame, { appPrimaryStyle, appRowStyle })
   assert(closedDetailsNext === "Close", "Tab must skip the contents of closed Technical details", { closedDetailsNext });
   await page.keyboard.press("Shift+Tab");
   await page.keyboard.press("Enter");
-  await page.keyboard.press("Tab");
-  const storageFocus = await frame.evaluate(() => document.activeElement?.textContent.trim());
-  assert(storageFocus === "Manage storage in System", "Keyboard users must reach Manage storage in System", { storageFocus });
+  const technical = await frame.locator(".technical-details li").allInnerTexts();
+  assert(technical.some((line) => line.trim() === "Publisher: did:key:z6MkFixtureModelPublisher"), "Technical details must name the publisher", technical);
   await page.keyboard.press("Escape");
   const restoredFocus = await frame.evaluate(() => document.activeElement?.getAttribute("data-app") || "");
   assert(restoredFocus === `model:${modelCid}`, "Closing the model detail must return focus to its row", { restoredFocus });
@@ -737,10 +772,12 @@ async function assertModelsLayout(page, frame, { appPrimaryStyle, appRowStyle })
     footer: [...document.querySelectorAll(".modal-footer-actions button")].map((node) => node.textContent.trim()),
   }));
   assert(
-    JSON.stringify(shared) === JSON.stringify({ developer: "From Owner Home", footer: ["Close", "Open in Assistant"] }),
+    JSON.stringify(shared) === JSON.stringify({ developer: "Shared by Owner Home", footer: ["Close", "Open in Assistant"] }),
     "A shared model must open the same detail with Open in Assistant next to Close",
     shared,
   );
+  const sharedDetailShape = await frame.evaluate(detailShape);
+  assert(JSON.stringify(sharedDetailShape) === JSON.stringify(appDetailShape), "A shared model detail must share the app detail structure", { sharedDetailShape, appDetailShape });
   await frame.locator('#detail-content [data-action="use-shared-model"]').click();
   const sharedOpen = await lastOpenTarget(page);
   assert(
