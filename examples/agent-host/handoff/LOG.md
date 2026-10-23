@@ -2,6 +2,77 @@
 
 One line per slice or review. Newest last.
 
+## Open for the autonomous lane (handover, 23 Oct 2026)
+
+From 23 Oct the Agent Host track moves to the autonomous lane (DeepSeek-V4-Flash on the local Sparks, reviewed by
+Claude Code and Codex, merging into `spike/agent-host`). Claude (cloud) stops building in `examples/agent-host` once
+#31 merges. Below are the ideas not yet built and the weak spots known today, so the lane's planner can pick them up.
+Sources are named so each item can be checked; the hard rules in `HANDOFF.md` and `PRINCIPLES.md` still apply.
+
+### Ideas not built yet
+
+From `reports/OMP-AUDIT.md` (ideas 1 and 2 are done: #24 and #31):
+
+1. **Proposal validation and terminal states** (guest, cloud; row 5). A tool call that does not parse or fails its
+   schema creates no step and records a model-visible error; a settled step never changes state; a step in a
+   cancelled turn is cancelled, not left prepared; a pending capability request is denied when its capsule stops.
+   The suggested tests and falsifiers are in the audit table.
+2. **Capability flags and honest errors in the model provider** (provider unit tests, cloud; row 11). Typed flags
+   per offer; a network failure is never reported as a bad key; an image to a text model becomes a notice.
+3. **Tool specs in the head; cut rules** (guest, cloud; rows 3 and 4 hardening). A changed tool description starts a
+   new series; compaction never splits a step from its result and keeps the newest turn; only a provider overflow
+   compacts, a payload-size error does not.
+4. **Resident interpreter in the micro-VM** (exec provider, Mac; row 7).
+5. **Browser limits in the browser capsule** (allowed domains in the grant, per-operation time limits; Mac; row 13).
+
+Grade rows that need no Runtime change (`reports/grade-rescore.md`, 42 of 70 at cee6d55, target 62):
+
+- Row 10: the idle release and the `input_tokens` refusal are pinned by source text, not by a behaviour test.
+- Row 7: `cargo` is not in the VM image (`exec-cargo-in-image`); crosvm on Linux is untested (no KVM in the cloud).
+- Row 9: re-score after #31 merges (child limits); a child is still not a separate instance (that needs Bus v2).
+
+Pending checklist items in `SLICES.md`: `prefix-phase-a-pack`, `prefix-aplus-hit`, `compact-aplus-model`,
+`exec-cargo-in-image`, `hold-usersai`, `hold-adversarial`, `sell-second-home`. Most need the Runtime, Home or the Mac.
+
+### Known weak spots
+
+Child limits (#31, `OMP2-DESIGN.md`, report "Not proven"):
+
+- The top task budget is a fixture constant (`FIXTURE_TASK_BUDGET`) until the Runtime hands the granted limits to
+  the guest. Time is not measured: `time` is recorded only when told (`note_time_refusal`); grant expiry and tree
+  revoke are `RUNTIME-BUDGET.md`, after 0.8.0.
+- A child budget is a cap, not a reservation: siblings may each get what the parent has left (every call still
+  counts against the parent).
+- Grants, a grant's scope (`grant_scope`) and a host's child (`host_of`) live in memory only, by design. After a
+  reload a host belongs to no child and every grant must be asked again.
+- Children from before idea 2 (no budget) skip the depth and parent rules on load; they load and can do nothing.
+  Dropping them needs a format decision, not a quiet change.
+- The rules are shared functions (`child_rules`, `usable_child`, `child_grant_ok`, `scope_still_granted`,
+  `host_step_ok`, `stored_rules_ok`, `may_hold_a_child`). A new path must call them, not copy them; Codex has twice
+  found a second, looser copy.
+
+Elsewhere:
+
+- Only the journal goes through `providers.invoke`; read, edit and run do not (row 5). No write through the object
+  provider yet (`EDIT-PROVIDER.md`, after 0.8.0).
+- The journal sits under `Users/self/.AppData/Agents/`, not `UsersAI` (`hold-usersai`). Its hash chain detects
+  corruption, not a hostile writer; owner-only storage does that.
+- Library's conditional write must use the locked if_revision path (see private note).
+- Home does not show a capsule's launch refusal, a budget or a stop (Home-wide gap, after 0.8.0 with the capsule
+  kit). The gateway's Runtime client has a 5 s timeout; a run waiting on grant prompts may time out (untested).
+- Mac and Linux guest hashes differ (known); the import section `/1/2` (149 bytes, `5ee6b40d46f6a045`) must not.
+- Survivors kept by design: OZ01 (final NFD in `path_key`), D09 and J14w (second guards), the Mac peer CID check.
+  Four refusals are unreachable today and kept as defence (`reports/sweep-gap-tests.md`).
+
+### Falsifier runner
+
+- `python3 -I examples/agent-host/falsify.py` runs every entry in `falsifiers.json` (229 at 6e00cb9, about 30 min).
+  It decides only by exit codes; each named test must resolve with `--exact` to exactly one test.
+- A mutation is matched by exact text. When code moves, an entry reports NO MATCH and must be re-targeted in the
+  same PR, not dropped. `verify.sh` runs `--self-test`; `--self-test --with-repo` also checks TB01 end to end.
+
+## Log
+
 - 19 Oct 2026, Cursor: merged origin/develop 3beb81643 (alpha.24) as d465df3bc; all tests green; guest hash fe9bcaa4; checklist 55 of 62. Handover written.
 - 19 Oct 2026, Claude (cloud): S0 baseline on claude/festive-wozniak-rf6shm; develop 3beb81643 already merged, behind 0; all section 10 commands green (72 host, 16 compute, 7 local_memory, 2 node); guest hash e34772d1, does not match Mac fe9bcaa4; checklist 56 of 63 (exec-cargo-in-image added). PR https://github.com/SashaMIT/elastos-agent-host-spike/pull/1.
 - 19 Oct 2026, Claude (cloud): S0b catch-up on claude/s0b-catch-up (merges S0 PR #1 first); develop 3beb81643 behind 0; all tests green; guest hash e34772d1 on two builds; PR https://github.com/SashaMIT/elastos-agent-host-spike/pull/2; Cargo 0.92.0 compilation_files.rs:792-793 hashes the host line for host units only, and it reaches the guest through proc-macro deps (lines 721-728); spike grade 37 of 70; one history mismatch (packStablePrefix not on the live path); 3 test gaps; DeepSeek 5cf7ac9c..687f282e no material change.
@@ -39,3 +110,4 @@ One line per slice or review. Newest last.
 - 22 Oct 2026, Claude (cloud): OMP idea 2 after the Codex FAIL at fe40437 (two child-host holes, both reproduced): every host action takes the parent's current journal and goes through host_step_ok (usable child, host at its depth, child granted, step inside the child's granted scope); the plain authorize, apply_inbox and dispatch refuse a host's steps; committed falsifier runner examples/agent-host/falsify.py with falsifiers.json (208 live mutations incl. HC01-HC14): 206 caught, OY19 does not build, OZ01 survives by design; 198 tests, local 1, e2e 3; guest hash d05d64dd (import list unchanged).
 - 22 Oct 2026, Claude (cloud): OMP idea 2 after an independent same-family review of 10a31e2 (no cross-family reviewer available; record reviews/31-10a31e2.md, FAIL, 10 findings, all reproduced): a child is granted only through authorize_child or the inbox, once; a scope stands only while every step above grants it; a denied, cancelled or crashed child in the chain does nothing; only a run or a child is a parent; child records survive an open compaction; prepared steps where a stop reached are refused on load; older deep child chains load; a host is bound to its child (in memory); 208 tests, local 1, e2e 3; falsify.py 225 live mutations: 223 caught, OY19 does not build, OZ01 by design; guest hash 3e25a62c (import list unchanged).
 - 23 Oct 2026, Claude (cloud): OMP idea 2 after the Codex FAIL at 355e659 (two findings, both reproduced): one parent rule, may_hold_a_child, for propose_child, every budgeted child on load (decode, reread, resume) and the scope walk, which no longer stops at a model call; falsify.py decides only by exit codes (build first, each named test listed and run alone with --exact), and verify.sh runs its self-test of Codex's fake FAILED case; 210 tests, local 1, e2e 3; falsify.py 229 entries at 6e00cb9: 227 caught (PR01-PR04 new), OY19 does not build, OZ01 by design; guest hash 39a003b2 (import list unchanged).
+- 23 Oct 2026, Claude (cloud): handover to the autonomous lane: the section "Open for the autonomous lane" above lists the ideas not yet built (OMP-AUDIT 3-7), grade rows that need no Runtime, pending checklist items, known weak spots and how to run the falsifier runner; docs only, on #31 (code unchanged since 6e00cb9).
