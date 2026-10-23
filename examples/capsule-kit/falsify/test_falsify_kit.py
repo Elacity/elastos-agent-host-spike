@@ -74,6 +74,39 @@ class Runner(unittest.TestCase):
                 kit.main([([case], None, lambda name: name == "a", None, False)], args=[])
         self.assertIn("survived", str(stop.exception))
 
+    def node_file(self, source):
+        path = pathlib.Path(self.dir.name) / "adapter.test.mjs"
+        path.write_text(source)
+        return path
+
+    def test_node_test_fails_counts_only_a_named_test_that_ran_and_failed(self):
+        tests = self.node_file(
+            'import test from "node:test";\n'
+            'test("fails", () => {\n    throw new Error("x");\n});\n'
+            'test("passes", () => {});\n'
+        )
+        self.assertTrue(kit.node_test_fails(tests, "fails"))
+        self.assertFalse(kit.node_test_fails(tests, "passes"))
+
+    def test_node_test_fails_refuses_a_name_no_test_has(self):
+        tests = self.node_file('import test from "node:test";\ntest("present", () => {});\n')
+        with self.assertRaises(SystemExit) as stop:
+            kit.node_test_fails(tests, "absent")
+        self.assertIn("no test matches", str(stop.exception))
+
+    def test_node_test_fails_refuses_a_missing_file(self):
+        missing = pathlib.Path(self.dir.name) / "missing.test.mjs"
+        with self.assertRaises(SystemExit) as stop:
+            kit.node_test_fails(missing, "anything")
+        self.assertIn("did not load", str(stop.exception))
+
+    def test_node_test_fails_refuses_a_file_that_does_not_load(self):
+        for source in ("const = ;\n", "use std::path::Path;\n"):
+            broken = self.node_file(source)
+            with self.assertRaises(SystemExit) as stop:
+                kit.node_test_fails(broken, "anything")
+            self.assertIn("did not load", str(stop.exception))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

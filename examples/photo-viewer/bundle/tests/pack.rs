@@ -375,6 +375,25 @@ fn pack_refuses_a_symlinked_destination_before_writing() {
 }
 
 #[test]
+fn pack_refuses_a_planned_listing_that_collides_before_writing() {
+    let root = tempdir();
+    let r = root.path();
+    let core = component_source(r);
+    // The entrypoint's name and the manifest's differ only by case. On a
+    // case-insensitive disk they are one file; on a case-sensitive one they
+    // are two that the same listing cannot name apart. Either way the planned
+    // listing is refused, and nothing is written.
+    let manifest_bytes = manifest("component", "CAPSULE.JSON");
+    write(&core.join("capsule.json"), &manifest_bytes);
+    write(&core.join("CAPSULE.JSON"), &manifest_bytes);
+
+    let into = r.join("collides");
+    let refusal = pack(&core, &into, &[]).unwrap_err();
+    assert_eq!(refusal.code(), "path_case_collision");
+    assert!(!into.exists(), "{} was written", into.display());
+}
+
+#[test]
 fn pack_writes_a_new_destination_at_every_level_it_names() {
     let root = tempdir();
     let r = root.path();
