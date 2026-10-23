@@ -52,9 +52,10 @@ pub enum Refusal {
     PathCaseCollision(String, String),
     /// A symlink, FIFO, socket or device file.
     SpecialFile(String),
-    /// A folder on the way to what is read is a symlink: the root itself, or
-    /// any folder between the root and a file. Nothing is read through a
-    /// link, because every check after it would describe another place.
+    /// A folder on the way to what is read or written is a symlink: the root
+    /// itself, or any folder between the root and a file. Nothing is read or
+    /// written through a link, because every check after it would describe
+    /// another place.
     SymlinkInPath(String),
     /// The closure has no `capsule.json` at its root.
     ManifestMissing,
@@ -192,7 +193,16 @@ impl Refusal {
 
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {self:?}", self.code())
+        match self {
+            // The path named is the link; the caller needs the path it stands
+            // for, which the same check accepts.
+            Refusal::SymlinkInPath(_) => write!(
+                f,
+                "{}: {self:?}; pass the physical path instead, for example /private/tmp for /tmp",
+                self.code()
+            ),
+            _ => write!(f, "{}: {self:?}", self.code()),
+        }
     }
 }
 

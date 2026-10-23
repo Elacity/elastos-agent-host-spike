@@ -15,15 +15,28 @@
 //! for byte. Symlinks and special files are refused, never followed: every
 //! component of every path is lstat'ed, from the source folder down, before
 //! anything is read or copied, so a link in the middle of a path is refused
-//! too (`symlink_in_path`). The result is checked by listing it, and its CID
-//! is returned.
+//! too (`symlink_in_path`). The destination is checked the same way, and must
+//! not exist, before the first write: a refused pack writes nothing. The
+//! result is checked by listing it, and its CID is returned.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
 use crate::admit::{check_cid_form, parse_manifest};
-use crate::listing::{check_segment, closure_cid, real_path, walk};
+use crate::listing::{check_prefixes, check_segment, closure_cid, real_path, walk};
+
+/// The destination as its parts: no trailing `/` or `.`, no `..`, no link on
+/// the way to it, and nothing there yet. The prefixes are checked by the same
+/// check as the source, before the first write, so a refused pack writes
+/// nothing and a retry with the physical path starts from a clean folder.
+fn check_destination(into: &Path) -> Result<PathBuf, Refusal> {
+    let into = check_prefixes(into)?;
+    if std::fs::symlink_metadata(&into).is_ok() {
+        return Err(Refusal::PackDestinationExists(into.display().to_string()));
+    }
+    Ok(into)
+}
 
 /// lstats `source`, then each segment below it, in order. `source` and every
 /// segment but the last must be real folders, never links: a link anywhere on
@@ -86,9 +99,7 @@ pub fn pack(
             return Err(Refusal::ClaimMalformed("a requirement with no name".into()));
         }
     }
-    if std::fs::symlink_metadata(into).is_ok() {
-        return Err(Refusal::PackDestinationExists(into.display().to_string()));
-    }
+    let into = check_destination(into)?;
 
     // What ships, as paths relative to the source.
     let mut files: Vec<String> = Vec::new();
@@ -137,7 +148,7 @@ pub fn pack(
         }
     }
 
-    std::fs::create_dir_all(into).map_err(|err| io(err, into))?;
+    std::fs::create_dir_all(&into).map_err(|err| io(err, &into))?;
     for file in &files {
         let to = into.join(file);
         if let Some(parent) = to.parent() {
@@ -166,5 +177,5 @@ pub fn pack(
     };
     let manifest_to = into.join("capsule.json");
     std::fs::write(&manifest_to, shipped).map_err(|err| io(err, &manifest_to))?;
-    closure_cid(into)
+    closure_cid(&into)
 }

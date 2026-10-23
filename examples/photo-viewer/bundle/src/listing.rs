@@ -46,16 +46,20 @@ pub(crate) fn read_closure(root: &Path) -> Result<(Vec<Entry>, Vec<u8>), Refusal
     Ok((entries, manifest))
 }
 
-/// `path` rebuilt from its parts, with every prefix lstat'ed: no part of it may
-/// be a symlink (the root itself, or a folder on the way to it). The walk
-/// lstats everything below it, so nothing is read through a link.
+/// `path` rebuilt from its parts, with every prefix that exists lstat'ed: no
+/// part of it may be a symlink (the root itself, or a folder on the way to
+/// it). The walk lstats everything below it, so nothing is read through a
+/// link.
 ///
 /// The path is rebuilt from `Path::components()` before any lstat, because on
 /// POSIX lstat of `link/` or `link/.` follows the link: trailing `/` and `.`
 /// parts go. A `..` part and an empty path are refused. A path through a
 /// system link (macOS `/tmp` or `/var`) is refused too; give its real path.
-/// Returns the rebuilt path and its metadata.
-pub(crate) fn real_path(path: &Path) -> Result<(PathBuf, std::fs::Metadata), Refusal> {
+///
+/// Parts that do not exist yet are kept as written, so this is also how `pack`
+/// checks the folder it is about to create: the caller decides whether the
+/// whole path must exist.
+pub(crate) fn check_prefixes(path: &Path) -> Result<PathBuf, Refusal> {
     if path.as_os_str().is_empty() {
         return Err(Refusal::PathInvalid("an empty path".to_string()));
     }
@@ -72,9 +76,13 @@ pub(crate) fn real_path(path: &Path) -> Result<(PathBuf, std::fs::Metadata), Ref
             }
             Component::Normal(name) => {
                 rebuilt.push(name);
-                let meta = std::fs::symlink_metadata(&rebuilt).map_err(|err| io(err, &rebuilt))?;
-                if meta.file_type().is_symlink() {
-                    return Err(Refusal::SymlinkInPath(rebuilt.display().to_string()));
+                match std::fs::symlink_metadata(&rebuilt) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        return Err(Refusal::SymlinkInPath(rebuilt.display().to_string()))
+                    }
+                    Ok(_) => {}
+                    // Not there yet, so nothing below it is either.
+                    Err(_) => return Ok(rebuilt),
                 }
             }
         }
@@ -83,6 +91,13 @@ pub(crate) fn real_path(path: &Path) -> Result<(PathBuf, std::fs::Metadata), Ref
         // Only `.` parts: the current folder, which lstat reports as itself.
         rebuilt.push(".");
     }
+    Ok(rebuilt)
+}
+
+/// [`check_prefixes`] for a path that must exist: the rebuilt path and its
+/// metadata.
+pub(crate) fn real_path(path: &Path) -> Result<(PathBuf, std::fs::Metadata), Refusal> {
+    let rebuilt = check_prefixes(path)?;
     let meta = std::fs::symlink_metadata(&rebuilt).map_err(|err| io(err, &rebuilt))?;
     Ok((rebuilt, meta))
 }

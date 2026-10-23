@@ -337,3 +337,39 @@ fn a_symlinked_root_is_refused_however_its_path_is_written() {
     assert_eq!(parent, "path_invalid");
     assert_eq!(empty, "path_invalid");
 }
+
+#[test]
+fn pack_refuses_a_symlinked_destination_before_writing() {
+    let root = tempdir();
+    let r = root.path();
+    let core = component_source(r);
+    std::fs::create_dir_all(r.join("real")).unwrap();
+    symlink(r.join("real"), r.join("alias")).unwrap();
+
+    // The destination's parent is a link: refused before the first write, so
+    // the folder is not made either here (through the link) or at its target.
+    let through_link = r.join("alias/out");
+    let refusal = pack(&core, &through_link, &[]).unwrap_err();
+    assert_eq!(refusal.code(), "symlink_in_path");
+    assert!(
+        !through_link.exists(),
+        "{} was written",
+        through_link.display()
+    );
+    assert!(
+        !r.join("real/out").exists(),
+        "{} was written",
+        r.join("real/out").display()
+    );
+    // The refusal says how to recover: give the physical path, not the link.
+    let message = refusal.to_string();
+    assert!(message.starts_with("symlink_in_path: "), "{message}");
+    assert!(message.contains("physical path"), "{message}");
+
+    // The same pack into the physical folder works, so the retry after the
+    // refusal is not `pack_destination_exists`.
+    let into = r.join("real/out");
+    let (cid, entries) = pack(&core, &into, &[]).unwrap();
+    assert_eq!(paths(&entries), ["capsule.json", "x.component.wasm"]);
+    assert_eq!(closure_cid(&into).unwrap().0, cid);
+}

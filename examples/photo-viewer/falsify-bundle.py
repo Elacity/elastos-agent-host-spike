@@ -207,12 +207,12 @@ CASES = [
      [("            Some(meta) if meta.file_type().is_symlink() => {", "            Some(meta) if false && meta.file_type().is_symlink() => {")],
      ["pack_refuses_a_symlinked_folder_anywhere_on_the_path"]),
     ("the listing follows a symlinked root", "listing.rs",
-     [("                if meta.file_type().is_symlink() {\n                    return Err(Refusal::SymlinkInPath(rebuilt.display().to_string()));",
-       "                if false && meta.file_type().is_symlink() {\n                    return Err(Refusal::SymlinkInPath(rebuilt.display().to_string()));")],
+     [("                    Ok(meta) if meta.file_type().is_symlink() => {",
+       "                    Ok(meta) if false && meta.file_type().is_symlink() => {")],
      ["the_listing_refuses_symlinks_and_special_files", "a_symlinked_root_is_refused_however_its_path_is_written"]),
     ("the old root lookup comes back (lstat of the path as written)", "listing.rs",
      [("    let mut rebuilt = PathBuf::new();\n    for part in path.components() {",
-       "    if let Ok(meta) = std::fs::symlink_metadata(path) {\n        if !meta.file_type().is_symlink() {\n            return Ok((path.to_path_buf(), meta));\n        }\n    }\n    let mut rebuilt = PathBuf::new();\n    for part in path.components() {")],
+       "    if let Ok(meta) = std::fs::symlink_metadata(path) {\n        if !meta.file_type().is_symlink() {\n            return Ok(path.to_path_buf());\n        }\n    }\n    let mut rebuilt = PathBuf::new();\n    for part in path.components() {")],
      ["a_symlinked_root_is_refused_however_its_path_is_written"]),
     ("a .. part is taken", "listing.rs",
      [("            Component::Prefix(_) | Component::RootDir => rebuilt.push(part.as_os_str()),",
@@ -222,7 +222,7 @@ CASES = [
      [("    if path.as_os_str().is_empty() {", "    if false && path.as_os_str().is_empty() {")],
      ["a_symlinked_root_is_refused_however_its_path_is_written"]),
     ("pack writes into a folder that exists", "pack.rs",
-     [("    if std::fs::symlink_metadata(into).is_ok() {", "    if false {")],
+     [("    if std::fs::symlink_metadata(&into).is_ok() {", "    if false {")],
      ["pack_refuses_what_it_cannot_ship_as_it_is"]),
     ("pack takes a core named by something that is not a CID", "pack.rs",
      [("        check_cid_form(cid)?;", "        let _ = cid;")],
@@ -236,6 +236,11 @@ CASES = [
     ("pack ships the whole source of a page", "pack.rs",
      [("        let folder = segments[..segments.len() - 1].join(\"/\");", "        let folder = segments[..segments.len() - 1].join(\"/\") + \"/..\";")],
      ["a_page_ships_its_manifest_and_its_entrypoint_folder"]),
+    # The destination is checked before the first write (#32).
+    ("pack checks its destination after the writes", "pack.rs",
+     [("    let into = check_destination(into)?;\n", "    let into = into.to_path_buf();\n"),
+      ("    closure_cid(&into)\n}", "    let into = check_destination(&into)?;\n    closure_cid(&into)\n}")],
+     ["pack_refuses_a_symlinked_destination_before_writing"]),
 ]
 
 
