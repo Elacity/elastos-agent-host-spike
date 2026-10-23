@@ -3848,8 +3848,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if !matches!(parent.kind, ProposalKind::Run | ProposalKind::Child) {",
-     "new": "    if false {"
+     "old": "    if !may_hold_a_child(parent) {\n        return Err(\"not a parent\");",
+     "new": "    if false {\n        return Err(\"not a parent\");"
     }
    ],
    "tests": [
@@ -3985,6 +3985,74 @@
     "tests::a_child_host_gets_nothing_once_its_child_stops",
     "tests::a_child_host_is_bound_to_its_child",
     "tests::a_child_host_touches_only_what_its_child_was_granted"
+   ]
+  },
+  {
+   "id": "PR01",
+   "title": "the load path drops the parent rule (Codex at 355e659)",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if step.budget.is_some() && !may_hold_a_child(parent) {\n        return Err(\"not a parent\");",
+     "new": "    if false && step.budget.is_some() && !may_hold_a_child(parent) {\n        return Err(\"not a parent\");"
+    }
+   ],
+   "tests": [
+    "tests::a_stored_child_below_a_model_call_is_refused",
+    "tests::an_older_deep_child_chain_still_loads"
+   ]
+  },
+  {
+   "id": "PR02",
+   "title": "the scope walk stops at a step that cannot hold a child",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if !may_hold_a_child(above) {\n            return None;\n        }\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::the_scope_walk_does_not_stop_at_a_model_call"
+   ]
+  },
+  {
+   "id": "PR03",
+   "title": "may_hold_a_child lets any step hold a child",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    matches!(parent.kind, ProposalKind::Run | ProposalKind::Child)",
+     "new": "    let _ = parent;\n    true"
+    }
+   ],
+   "tests": [
+    "tests::a_model_call_is_not_a_parent",
+    "tests::a_stored_child_below_a_model_call_is_refused",
+    "tests::an_older_deep_child_chain_still_loads",
+    "tests::the_scope_walk_does_not_stop_at_a_model_call"
+   ]
+  },
+  {
+   "id": "PR04",
+   "title": "the parent rule also refuses children from before idea 2",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if step.budget.is_some() && !may_hold_a_child(parent) {",
+     "new": "    if !may_hold_a_child(parent) {"
+    }
+   ],
+   "tests": [
+    "tests::an_older_deep_child_chain_still_loads"
    ]
   }
  ]

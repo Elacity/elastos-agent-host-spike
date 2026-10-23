@@ -19503,6 +19503,29 @@ mod tests {
             ask_model(&mut back, Some(ids[2]), HOSTED_MODEL),
             Err(TASK_BUDGET_REASON)
         );
+        // An older child could also sit under a step that cannot hold a child
+        // today; it still loads. A budgeted one there is refused.
+        let mut under_read = two_turns();
+        let read = propose_read(&mut under_read, DEMO);
+        let old = propose_step(&mut under_read);
+        step_mut(&mut under_read, old).kind = ProposalKind::Child;
+        step_mut(&mut under_read, old).resource = DEMO_SRC.to_string();
+        step_mut(&mut under_read, old).parent_id = Some(read);
+        assert!(decode_journal(&encode_journal(&under_read, &[0; 32]).unwrap()).is_ok());
+        assert!(record_task_budget(&mut under_read, budget(8, 600)));
+        set_budget(&mut under_read, old, Some(budget(1, 10)));
+        under_read.events.push(node(
+            Role::User,
+            NodeSource::ChildBudget {
+                child: old,
+                budget: budget(1, 10),
+            },
+            "",
+        ));
+        assert_eq!(
+            decode_journal(&encode_journal(&under_read, &[0; 32]).unwrap()).map(|_| ()),
+            Err("not a parent")
+        );
         // A budgeted child that deep is still refused.
         step_mut(&mut journal, ids[2]).budget = Some(budget(1, 10));
         assert_eq!(
