@@ -241,6 +241,9 @@ CASES = [
      [("    let into = check_destination(into)?;\n", "    let into = into.to_path_buf();\n"),
       ("    closure_cid(&into)\n}", "    let into = check_destination(&into)?;\n    closure_cid(&into)\n}")],
      ["pack_refuses_a_symlinked_destination_before_writing"]),
+    ("a new destination is cut at its first missing folder", "listing.rs",
+     [("                    Err(_) => exists = false,", "                    Err(_) => return Ok(rebuilt),")],
+     ["pack_writes_a_new_destination_at_every_level_it_names"]),
 ]
 
 

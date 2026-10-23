@@ -63,6 +63,9 @@ pub(crate) fn check_prefixes(path: &Path) -> Result<PathBuf, Refusal> {
     if path.as_os_str().is_empty() {
         return Err(Refusal::PathInvalid("an empty path".to_string()));
     }
+    // Below the first part that is not there, nothing is: the rest is kept,
+    // never lstat'ed.
+    let mut exists = true;
     let mut rebuilt = PathBuf::new();
     for part in path.components() {
         match part {
@@ -76,13 +79,15 @@ pub(crate) fn check_prefixes(path: &Path) -> Result<PathBuf, Refusal> {
             }
             Component::Normal(name) => {
                 rebuilt.push(name);
+                if !exists {
+                    continue;
+                }
                 match std::fs::symlink_metadata(&rebuilt) {
                     Ok(meta) if meta.file_type().is_symlink() => {
                         return Err(Refusal::SymlinkInPath(rebuilt.display().to_string()))
                     }
                     Ok(_) => {}
-                    // Not there yet, so nothing below it is either.
-                    Err(_) => return Ok(rebuilt),
+                    Err(_) => exists = false,
                 }
             }
         }

@@ -373,3 +373,29 @@ fn pack_refuses_a_symlinked_destination_before_writing() {
     assert_eq!(paths(&entries), ["capsule.json", "x.component.wasm"]);
     assert_eq!(closure_cid(&into).unwrap().0, cid);
 }
+
+#[test]
+fn pack_writes_a_new_destination_at_every_level_it_names() {
+    let root = tempdir();
+    let r = root.path();
+    let core = component_source(r);
+    std::fs::create_dir_all(r.join("existing")).unwrap();
+
+    // Two new levels below an existing folder: the destination is the whole
+    // path, not the part up to its first missing folder.
+    let into = r.join("existing/a/b");
+    let (cid, entries) = pack(&core, &into, &[]).unwrap();
+    assert_eq!(paths(&entries), ["capsule.json", "x.component.wasm"]);
+    assert!(
+        into.join("capsule.json").is_file(),
+        "{} has no manifest",
+        into.display()
+    );
+    assert!(into.join("x.component.wasm").is_file());
+    assert!(
+        !r.join("existing/a/capsule.json").exists(),
+        "{} was written",
+        r.join("existing/a").display()
+    );
+    assert_eq!(closure_cid(&into).unwrap().0, cid);
+}
