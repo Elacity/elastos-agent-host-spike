@@ -11,13 +11,16 @@ line, rebuilds the crate's tests (a mutant that does not compile proves
 nothing, so the run stops), runs the named tests from
 `api::gateway::gateway_tests::photos`, and requires them to FAIL. The file is
 restored from its saved bytes afterwards, also on error or Ctrl-C. Each
-mutant recompiles elastos-server, so a full run takes a while.
+mutant recompiles elastos-server, so a full run takes a while. The runner is
+the capsule kit's (examples/capsule-kit/falsify).
 """
-import os
 import pathlib
-import subprocess
+import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "examples" / "capsule-kit" / "falsify"))
+import falsify_kit as kit  # noqa: E402
+
 ELASTOS = REPO / "elastos"
 API = "crates/elastos-server/src/api"
 VIEWER = f"{API}/viewer_gateway.rs"
@@ -175,62 +178,20 @@ CASES = [
 ]
 
 
-def env():
-    environment = dict(os.environ)
-    environment.setdefault("RUST_TEST_THREADS", "2")
-    return environment
+ARGS = ["-p", "elastos-server", "--lib"]
 
 
-def cargo(*args):
-    return subprocess.run(
-        ["cargo", "test", "-p", "elastos-server", "--lib", *args],
-        cwd=ELASTOS,
-        env=env(),
-        capture_output=True,
-        text=True,
-    )
+def build():
+    kit.cargo_compiles(ELASTOS, ARGS)
 
 
-def tests_fail(filters):
-    build = cargo("--no-run")
-    if build.returncode != 0:
-        print(build.stderr[-3000:])
-        raise SystemExit("a falsifier does not compile")
-    for name in filters:
-        result = cargo("--", "--exact", TESTS + name)
-        if result.returncode == 0:
-            return False
-    return True
+def test_fails(name):
+    return kit.cargo_test_fails(ELASTOS, ARGS, TESTS + name)
 
 
 def main():
-    import sys
-    args = sys.argv[1:]
-    check_only = "--check" in args
-    parts = [arg for arg in args if arg != "--check"]
-    missed = []
-    for name, relative, old, new, filters in CASES:
-        path = ELASTOS / relative
-        saved = path.read_bytes()
-        text = saved.decode()
-        if text.count(old) != 1:
-            raise SystemExit(f"{name}: expected the line once in {relative}, found {text.count(old)}")
-        if check_only or (parts and not any(part in name for part in parts)):
-            continue
-        try:
-            path.write_text(text.replace(old, new))
-            caught = tests_fail(filters)
-        finally:
-            path.write_bytes(saved)
-        print(f"{'caught' if caught else 'MISSED'}: {name} -> {', '.join(filters)}", flush=True)
-        if not caught:
-            missed.append(name)
-    if missed:
-        raise SystemExit(f"{len(missed)} falsifier(s) not caught: {missed}")
-    if check_only:
-        print(f"all {len(CASES)} anchors found once")
-    else:
-        print("all selected seam falsifiers caught")
+    cases = [(name, ELASTOS / relative, [(old, new)], tests) for name, relative, old, new, tests in CASES]
+    kit.main([(cases, build, test_fails, None, True)], done="all selected seam falsifiers caught")
 
 
 if __name__ == "__main__":

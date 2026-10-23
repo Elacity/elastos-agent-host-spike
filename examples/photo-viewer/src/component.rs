@@ -1,0 +1,1 @@
+../../capsule-kit/v1-guest/component.rs

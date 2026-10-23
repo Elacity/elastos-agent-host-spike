@@ -7,7 +7,9 @@ bytes for the same commit.
 examples/photo-viewer/repro/build-in-container.sh
 ```
 
-It needs Docker, and nothing else on the host. The last line is the sha256
+It needs Docker, and nothing else on the host. The recipe itself is the capsule kit's
+(`examples/capsule-kit/repro/build-in-container.sh`, shared with the documents viewer); this script runs it for
+this folder. The last line is the sha256
 and the artifact, written to `examples/photo-viewer/photo-viewer.component.wasm`.
 
 ## What is pinned

@@ -250,7 +250,17 @@ pub fn effective_policy(
             latest: now.saturating_add(MAX_POLICY_LIFETIME_SECS),
         });
     }
-    // Only a genuine, current, bounded policy moves the floor.
+    // One entry per publisher: a second entry for the same DID would be
+    // ignored at admission (the first one counts), so it is refused here.
+    for (index, entry) in policy.publishers.iter().enumerate() {
+        if policy.publishers[..index]
+            .iter()
+            .any(|earlier| earlier.did == entry.did)
+        {
+            return Err(Refusal::PublisherListedTwice(entry.did.clone()));
+        }
+    }
+    // Only a genuine, current, bounded, well-formed policy moves the floor.
     let sha256 = hex::encode(Sha256::digest(canonical(policy)));
     let lock = floor.lock()?;
     match floor.seen()? {

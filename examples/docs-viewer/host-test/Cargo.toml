@@ -9,13 +9,11 @@ publish = false
 # own ComponentProvider (Wasmtime, fuel and memory limits) with a fake bridge.
 
 [dev-dependencies]
+# The shared harness: bridge, ComponentProvider run, admission check, fuel runner.
+capsule-v1-host-test = { path = "../../capsule-kit/v1-host-test" }
 elastos-common = { path = "../../../elastos/crates/elastos-common" }
-elastos-compute = { path = "../../../elastos/crates/elastos-compute" }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-wasmtime = "36"
-# Same pin as elastos-server, for the copied admission validator.
-wasmparser = "=0.236.1"
 
 # Keep this harness outside the main ElastOS Cargo workspace.
 [workspace]

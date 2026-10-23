@@ -1,8 +1,8 @@
 // The Documents surface against a fake fetch and a fake document.
 // Run: node --test examples/docs-viewer/surface/reader.test.mjs
 //
-// The fake window, document and response follow
-// examples/photo-viewer/surface/photos.test.mjs.
+// The fake elements, document and responses are the capsule kit's
+// (examples/capsule-kit/surface/test-kit.mjs).
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -17,50 +17,14 @@ import {
   mountReader,
   readPages,
 } from "./browser/reader.js";
+import { fakeDocument as kitDocument, response } from "../../capsule-kit/surface/test-kit.mjs";
 
 const TOKEN = "launch-token-for-this-frame";
 const HOSTILE = '<img src=x onerror="fetch(\'/api/apps/home/state\')">';
 const source = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 
-function element(tag = "div") {
-  return {
-    tag,
-    textContent: "",
-    hidden: false,
-    type: "",
-    ariaCurrent: null,
-    children: [],
-    listeners: {},
-    appendChild(child) {
-      this.children.push(child);
-      return child;
-    },
-    replaceChildren(...children) {
-      this.children = children;
-    },
-    addEventListener(type, listener) {
-      this.listeners[type] = listener;
-    },
-  };
-}
-
-function fakeDocument() {
-  const ids = ["titles", "article", "status", "skipped", "skipped-title"];
-  const elements = Object.fromEntries(ids.map((id) => [id, element()]));
-  return {
-    elements,
-    listeners: {},
-    getElementById: (id) => elements[id] ?? null,
-    createElement: (tag) => element(tag),
-    addEventListener(type, listener) {
-      this.listeners[type] = listener;
-    },
-  };
-}
-
-function response(status, body) {
-  return { ok: status >= 200 && status < 300, status, json: async () => body };
-}
+const IDS = ["titles", "article", "status", "skipped", "skipped-title"];
+const fakeDocument = () => kitDocument(IDS);
 
 /** A window with a fake fetch that serves `routes` and records each request. */
 function world({ hash = `#home_token=${TOKEN}`, routes = {} } = {}) {

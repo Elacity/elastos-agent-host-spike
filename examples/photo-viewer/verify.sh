@@ -7,36 +7,7 @@ MANIFEST="${VIEWER_DIR}/capsule.json"
 WIT="${REPO_ROOT}/elastos/wit/elastos-bus-v1.wit"
 export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
 
-python3 - "${MANIFEST}" "${WIT}" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-
-manifest_path = pathlib.Path(sys.argv[1])
-wit_path = pathlib.Path(sys.argv[2])
-manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-
-expected = {
-    "schema": "elastos.capsule/v1",
-    "name": "photo-viewer",
-    "role": "app",
-    "type": "wasm",
-    "runtime_abi": "elastos.component/v1",
-    "bus_contract": "elastos:bus@v1",
-    "execution": "component",
-    "entrypoint": "photo-viewer.component.wasm",
-}
-
-for key, value in expected.items():
-    actual = manifest.get(key)
-    if actual != value:
-        raise SystemExit(f"{manifest_path}: expected {key}={value!r}, got {actual!r}")
-
-wit_hash = hashlib.sha256(wit_path.read_bytes()).hexdigest()
-if manifest.get("wit_world_sha256") != wit_hash:
-    raise SystemExit(f"{manifest_path}: wit_world_sha256 does not match {wit_path}")
-PY
+python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" "${MANIFEST}" "${WIT}" photo-viewer
 
 # Guest: logic and refusals against a fake Runtime.
 cargo fmt --manifest-path "${VIEWER_DIR}/Cargo.toml" -- --check
@@ -53,6 +24,8 @@ cargo clippy --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" --all
 cargo test --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" -- --nocapture
 
 # Every refusal: break it, see its test fail, restore it.
+# The runner itself: a case is caught only when every named test fails.
+python3 -I "${VIEWER_DIR}/../capsule-kit/falsify/test_falsify_kit.py"
 python3 -I "${VIEWER_DIR}/falsify.py" --runtime
 
 echo "photo-viewer capsule verification: OK"

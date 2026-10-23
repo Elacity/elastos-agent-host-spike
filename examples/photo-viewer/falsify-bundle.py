@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Break each check of the P4b bundle tool, see its test fail, restore it.
 
-Usage: RUST_TEST_THREADS=2 python3 -I falsify-bundle.py
+Usage: RUST_TEST_THREADS=2 python3 -I falsify-bundle.py [--check] [name-part ...]
 
 Each falsifier replaces exact text in one file under bundle/src (every piece
 must occur once), rebuilds the tests (a mutant that does not compile proves
 nothing, so the run stops), runs the named tests, and requires them to FAIL.
 The file is restored from its saved bytes afterwards, also on error or Ctrl-C.
+The runner is the capsule kit's (examples/capsule-kit/falsify).
 """
-import os
 import pathlib
-import subprocess
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "capsule-kit" / "falsify"))
+import falsify_kit as kit  # noqa: E402
 
 BUNDLE = pathlib.Path(__file__).resolve().parent / "bundle"
 
@@ -24,10 +27,10 @@ CASES = [
      [("folded.insert(caseless::default_case_fold_str(path), path)", "folded.insert(path.to_lowercase(), path)")],
      ["names_must_be_unique_under_case_folding"]),
     ("the walk follows symlinks", "listing.rs",
-     [("let meta = std::fs::symlink_metadata(&path)", "let meta = std::fs::metadata(&path)")],
+     [("            libc::AT_SYMLINK_NOFOLLOW,", "            0,")],
      ["the_listing_refuses_symlinks_and_special_files"]),
     ("special files are skipped, not refused", "listing.rs",
-     [("return Err(Refusal::SpecialFile(relative));", "continue;")],
+     [("            _ => return Err(Refusal::SpecialFile(relative)),", "            _ => continue,")],
      ["the_listing_refuses_symlinks_and_special_files"]),
     ("control characters and backslashes are allowed", "listing.rs",
      [("if name.contains(['/', '\\\\']) || name.chars().any(char::is_control) {", "if name.contains('/') {")],
@@ -184,56 +187,115 @@ CASES = [
     ("provenance for another CID verifies", "provenance.rs",
      [("if self.provenance.cid != cid {", "if false && self.provenance.cid != cid {")],
      ["provenance_is_a_separate_record_that_names_the_cid"]),
+    # Capsule kit item 5: one entry per publisher.
+    ("a publisher listed twice is merged", "policy.rs",
+     [("            return Err(Refusal::PublisherListedTwice(entry.did.clone()));", "            continue;")],
+     ["a_policy_that_lists_a_publisher_twice_is_refused"]),
+    # Capsule kit item 3: pack.
+    ("pack follows a symlinked entrypoint", "pack.rs",
+     [("        meta = match std::fs::symlink_metadata(&path) {", "        meta = match std::fs::metadata(&path) {")],
+     ["pack_refuses_what_it_cannot_ship_as_it_is"]),
+    ("pack follows a symlinked folder on the path", "pack.rs",
+     [("        if meta.file_type().is_symlink() {\n            return Err(Refusal::SymlinkInPath(shown));",
+       "        if false && meta.file_type().is_symlink() {\n            return Err(Refusal::SymlinkInPath(shown));")],
+     ["pack_refuses_a_symlinked_folder_anywhere_on_the_path"]),
+    ("pack checks only the first folders of a path for links", "pack.rs",
+     [("        if meta.file_type().is_symlink() {\n            return Err(Refusal::SymlinkInPath(shown));",
+       "        if path.components().count() <= source.components().count() + 1 && meta.file_type().is_symlink() {\n            return Err(Refusal::SymlinkInPath(shown));")],
+     ["pack_refuses_a_symlinked_folder_anywhere_on_the_path"]),
+    ("pack walks a linked page folder", "pack.rs",
+     [("            Some(meta) if meta.file_type().is_symlink() => {", "            Some(meta) if false && meta.file_type().is_symlink() => {")],
+     ["pack_refuses_a_symlinked_folder_anywhere_on_the_path"]),
+    ("the listing follows a symlinked root", "listing.rs",
+     [("                    Ok(meta) if meta.file_type().is_symlink() => {",
+       "                    Ok(meta) if false && meta.file_type().is_symlink() => {")],
+     ["the_listing_refuses_symlinks_and_special_files", "a_symlinked_root_is_refused_however_its_path_is_written"]),
+    ("the old root lookup comes back (lstat of the path as written)", "listing.rs",
+     [("    let mut rebuilt = PathBuf::new();\n    for part in path.components() {",
+       "    if let Ok(meta) = std::fs::symlink_metadata(path) {\n        if !meta.file_type().is_symlink() {\n            return Ok(path.to_path_buf());\n        }\n    }\n    let mut rebuilt = PathBuf::new();\n    for part in path.components() {")],
+     ["a_symlinked_root_is_refused_however_its_path_is_written"]),
+    ("a .. part is taken", "listing.rs",
+     [("            Component::Prefix(_) | Component::RootDir => rebuilt.push(part.as_os_str()),",
+       "            Component::Prefix(_) | Component::RootDir | Component::ParentDir => rebuilt.push(part.as_os_str()),")],
+     ["a_symlinked_root_is_refused_however_its_path_is_written"]),
+    ("an empty path is the current folder", "listing.rs",
+     [("    if path.as_os_str().is_empty() {", "    if false && path.as_os_str().is_empty() {")],
+     ["a_symlinked_root_is_refused_however_its_path_is_written"]),
+    ("pack accepts a destination that already exists", "pack.rs",
+     [("            if last && err.raw_os_error() == Some(libc::EEXIST) {",
+       "            if false && last && err.raw_os_error() == Some(libc::EEXIST) {")],
+     ["pack_refuses_what_it_cannot_ship_as_it_is",
+      "pack::tests::pack_refuses_a_destination_created_after_validation"]),
+    ("pack takes a core named by something that is not a CID", "pack.rs",
+     [("        check_cid_form(cid)?;", "        let _ = cid;")],
+     ["pack_refuses_what_it_cannot_ship_as_it_is"]),
+    ("pack adds a second requirement of the same name", "pack.rs",
+     [("            list.retain(|requirement| {", "            list.retain(|requirement| true || {")],
+     ["a_page_names_its_core_by_cid_and_keeps_its_other_requirements"]),
+    ("pack rewrites a manifest it has nothing to add to", "pack.rs",
+     [("    let shipped = if requires.is_empty() {", "    let shipped = if false {")],
+     ["a_component_ships_its_manifest_and_its_entrypoint_only"]),
+    ("pack ships the whole source of a page", "pack.rs",
+     [("    for file in &files {",
+       "    let whole_dir = crate::listing::open_dir(source)?;\n    let mut whole = Vec::new();\n    crate::listing::walk_regular_files(\n        &whole_dir,\n        \"\",\n        &source.display().to_string(),\n        &mut |_, _, relative, _| {\n            whole.push(relative.to_string());\n            Ok(())\n        },\n    )?;\n    files = whole;\n    for file in &files {")],
+     ["a_page_ships_its_manifest_and_its_entrypoint_folder"]),
+    # The destination is checked before the first write (#32).
+    ("pack takes a link on the way to its destination", "pack.rs",
+     [("fn check_destination(into: &Path) -> Result<PathBuf, Refusal> {\n    let rebuilt = check_prefixes(into)?;\n    let names_a_folder = rebuilt\n        .components()\n        .any(|part| matches!(part, Component::Normal(_)));\n    if !names_a_folder {\n        return Err(Refusal::PackDestinationExists(\n            rebuilt.display().to_string(),\n        ));\n    }\n    Ok(rebuilt)\n}",
+       "fn check_destination(into: &Path) -> Result<PathBuf, Refusal> {\n    Ok(into.to_path_buf())\n}"),
+      ("            if err.raw_os_error() != Some(libc::EEXIST) {\n                return Err(io(err, Path::new(&shown)));\n            }\n        }\n        dir = open_at(&dir, name, libc::O_RDONLY | libc::O_DIRECTORY, &shown)?;",
+       "            if err.raw_os_error() != Some(libc::EEXIST) {\n                return Err(io(err, Path::new(&shown)));\n            }\n        }\n        dir = std::fs::File::open(&shown).map_err(|err| io(err, Path::new(&shown)))?;")],
+     ["pack_refuses_a_symlinked_destination_before_writing"]),
+    ("pack opens its files without refusing a link at open time", "listing.rs",
+     [("            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,", "            flags | libc::O_CLOEXEC,")],
+     ["pack::tests::pack_refuses_a_source_folder_swapped_for_a_link_after_checking",
+      "pack::tests::pack_refuses_a_page_folder_swapped_for_a_link_during_planning"]),
+    ("pack reads its manifest by path after the check", "pack.rs",
+     [("            hook(Hook::Manifest);\n            read_manifest(&source_dir, &source.display().to_string())?",
+       "            hook(Hook::Manifest);\n            std::fs::read(source.join(\"capsule.json\")).map_err(|err| io(err, &source.join(\"capsule.json\")))?")],
+     ["pack::tests::pack_refuses_a_manifest_swapped_for_a_link_after_checking"]),
+    ("pack creates its destination before it opens every source", "pack.rs",
+     [("    let mut sources = Vec::with_capacity(files.len());\n    for file in &files {",
+       "    let destination = create_destination(&into)?;\n    let mut sources = Vec::with_capacity(files.len());\n    for file in &files {"),
+      ("    let destination = create_destination(&into)?;\n    for (file, mut from) in sources {",
+       "    for (file, mut from) in sources {")],
+     ["pack::tests::pack_refuses_a_later_link_without_leaving_partial_output"]),
+    ("pack plans a page by path after the check", "pack.rs",
+     [("        let folder_dir = open_in(\n            &source_dir,\n            &folder,\n            libc::O_RDONLY | libc::O_DIRECTORY,\n            false,\n            &source.display().to_string(),\n        )?;\n        walk_regular_files(\n            &folder_dir,\n            &folder,\n            &root.display().to_string(),\n            &mut |_, _, relative, _| {\n                files.push(relative.to_string());\n                Ok(())\n            },\n        )?;",
+       "        fn path_walk(root: &Path, dir: &Path, files: &mut Vec<String>) -> Result<(), Refusal> {\n            for child in std::fs::read_dir(dir).map_err(|err| io(err, dir))? {\n                let child = child.map_err(|err| io(err, dir))?;\n                let path = child.path();\n                let relative = path.strip_prefix(root).unwrap().to_string_lossy().to_string();\n                let meta = std::fs::symlink_metadata(&path).map_err(|err| io(err, &path))?;\n                if meta.is_dir() {\n                    path_walk(root, &path, files)?;\n                } else if meta.is_file() {\n                    files.push(relative);\n                } else {\n                    return Err(Refusal::SpecialFile(relative));\n                }\n            }\n            Ok(())\n        }\n        path_walk(&root, &root, &mut files)?;\n        let _ = folder;")],
+     ["pack::tests::pack_refuses_a_page_folder_swapped_for_a_link_during_planning"]),
+    ("pack takes a destination that names no new folder", "pack.rs",
+     [("    let names_a_folder = rebuilt\n        .components()\n        .any(|part| matches!(part, Component::Normal(_)));\n    if !names_a_folder {\n        return Err(Refusal::PackDestinationExists(\n            rebuilt.display().to_string(),\n        ));\n    }\n", "")],
+     ["pack::tests::pack_refuses_a_destination_that_names_no_new_folder"]),
+    ("pack accepts a folder or FIFO as a source file", "listing.rs",
+     [("    let file = open_at(dir, name, libc::O_RDONLY | libc::O_NONBLOCK, shown)?;\n    let mut stat: libc::stat = unsafe { std::mem::zeroed() };\n    if unsafe { libc::fstat(file.as_raw_fd(), &mut stat) } < 0 {\n        return Err(io(std::io::Error::last_os_error(), Path::new(shown)));\n    }\n    if (stat.st_mode as u32) & (libc::S_IFMT as u32) != libc::S_IFREG as u32 {\n        return Err(Refusal::SpecialFile(shown.to_string()));\n    }\n    Ok(file)",
+       "    open_at(dir, name, libc::O_RDONLY | libc::O_NONBLOCK, shown)")],
+     ["pack::tests::pack_refuses_a_source_file_replaced_by_a_folder_after_planning",
+      "pack::tests::pack_refuses_a_source_file_replaced_by_a_fifo_after_planning"]),
+    ("a folder read error is the end of the folder", "listing.rs",
+     [("        if entry.is_null() {\n            let error = std::io::Error::last_os_error();\n            return match error.raw_os_error() {\n                Some(0) | None => Ok(names),\n                Some(_) => Err(io(error, Path::new(shown))),\n            };\n        }",
+       "        if entry.is_null() {\n            return Ok(names);\n        }")],
+     ["pack::tests::pack_refuses_a_folder_read_error_instead_of_sending_part_of_it"]),
+    ("pack checks the planned listing after the writes", "pack.rs",
+     [("    check_unique_under_case_folding(planned)?;\n    hook(Hook::Plan);", "    hook(Hook::Plan);")],
+     ["pack_refuses_a_planned_listing_that_collides_before_writing"]),
+    ("a new destination is cut at its first missing folder", "listing.rs",
+     [("                    Err(_) => exists = false,", "                    Err(_) => return Ok(rebuilt),")],
+     ["pack_writes_a_new_destination_at_every_level_it_names"]),
 ]
 
 
-def env():
-    environment = dict(os.environ)
-    environment.setdefault("RUST_TEST_THREADS", "2")
-    return environment
+def build():
+    kit.cargo_compiles(BUNDLE, ["-q"])
 
 
-def cargo(*args):
-    return subprocess.run(["cargo", "test", "-q", *args], cwd=BUNDLE, env=env(), capture_output=True, text=True)
-
-
-def tests_fail(filters):
-    build = cargo("--no-run")
-    if build.returncode != 0:
-        print(build.stderr[-3000:])
-        raise SystemExit("a falsifier does not compile")
-    for name in filters:
-        result = cargo("--", "--exact", name)
-        ran = "1 passed" in result.stdout or "1 failed" in result.stdout
-        if not ran:
-            raise SystemExit(f"no test named {name}")
-        if result.returncode == 0:
-            return False
-    return True
+def test_fails(name):
+    return kit.cargo_test_fails(BUNDLE, ["-q"], name)
 
 
 def main():
-    missed = []
-    for name, relative, replacements, filters in CASES:
-        path = BUNDLE / "src" / relative
-        saved = path.read_bytes()
-        text = saved.decode()
-        for old, _ in replacements:
-            if text.count(old) != 1:
-                raise SystemExit(f"{name}: expected the text once in {relative}, found {text.count(old)}")
-        try:
-            for old, new in replacements:
-                text = text.replace(old, new)
-            path.write_text(text)
-            caught = tests_fail(filters)
-        finally:
-            path.write_bytes(saved)
-        print(f"{'caught' if caught else 'MISSED'}: {name} -> {', '.join(filters)}", flush=True)
-        if not caught:
-            missed.append(name)
-    if missed:
-        raise SystemExit(f"{len(missed)} falsifier(s) not caught: {missed}")
-    print(f"all {len(CASES)} bundle falsifiers caught")
+    cases = [(name, BUNDLE / "src" / relative, replacements, tests) for name, relative, replacements, tests in CASES]
+    kit.main([(cases, build, test_fails, None, True)], done=f"all {len(CASES)} bundle falsifiers caught")
 
 
 if __name__ == "__main__":
