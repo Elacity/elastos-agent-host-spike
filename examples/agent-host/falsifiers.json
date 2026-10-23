@@ -1,5 +1,5 @@
 {
- "about": "Agent host falsifiers: each entry breaks one check (exact text, replaced once), and every named test must then FAIL. Run with falsify.py. expect: caught (all named tests fail), compile_error (the mutation must not build), survives (known survivor, by design). Files are relative to examples/agent-host. command: host (cargo test of the guest) or e2e (run-e2e.sh: the guest in a test Runtime).",
+ "about": "Agent host falsifiers: each entry breaks one check (exact text, replaced once), and every named test must then FAIL. Run with falsify.py. expect: caught (all named tests fail), compile_error (the mutation must not build), survives (known survivor, by design). Files are relative to examples/agent-host. command: host (cargo test of the guest) or e2e (run-e2e.sh: the guest in a test Runtime) or selftest (this runner's own self-test, for a change to falsify.py).",
  "retired": {
   "CL02": "a child host's depth is its child's; CF10 covers it",
   "CL23": "chain_stopped no longer looks at a cancelled task; the code is gone",
@@ -56,7 +56,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        if !child_grant_ok(journal, id, grant, &resource) {\n            return false;\n        }\n",
+     "old": "        if let Err(reason) = child_grant_ok(journal, id, grant, &resource) {\n            refuse_child_grant(journal, id, &resource, reason);\n            return false;\n        }\n",
      "new": ""
     }
    ],
@@ -123,8 +123,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    scope_still_granted(journal, parent).is_some_and(|scope| resource_covers(scope, grant_resource))\n",
-     "new": "    scope_still_granted(journal, parent).is_some()\n"
+     "old": "    if !resource_covers(scope, grant_resource) {\n        return Err(\"not in the parent's grant\");\n    }\n",
+     "new": ""
     }
    ],
    "tests": [
@@ -1668,8 +1668,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if path_refusal(grant_resource).is_some() || !resource_covers(&child.resource, grant_resource) {",
-     "new": "    if !resource_covers(&child.resource, grant_resource) {"
+     "old": "    if let Some(refusal) = path_refusal(grant_resource) {\n        return Err(refusal.reason());\n    }",
+     "new": "    let _ = path_refusal(grant_resource);"
     }
    ],
    "tests": [
@@ -1684,8 +1684,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if path_refusal(grant_resource).is_some() || !resource_covers(&child.resource, grant_resource) {",
-     "new": "    if path_refusal(grant_resource).is_some() {"
+     "old": "    if !resource_covers(&child.resource, grant_resource) {\n        return Err(\"not in the child's resource\");\n    }",
+     "new": ""
     }
    ],
    "tests": [
@@ -1734,8 +1734,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        && parent.grant.as_deref() != Some(grant)",
-     "new": "        && true"
+     "old": "    if parent.grant.as_deref() == Some(grant) {\n        return Err(\"the parent's grant\");\n    }",
+     "new": "    if false && parent.grant.as_deref() == Some(grant) {\n        return Err(\"the parent's grant\");\n    }"
     }
    ],
    "tests": [
@@ -1787,12 +1787,13 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        || result.len() > CHILD_RESULT_CAP\n",
-     "new": "\n"
+     "old": "        && result.len() <= CHILD_RESULT_CAP\n",
+     "new": "        && true\n"
     }
    ],
    "tests": [
-    "tests::a_long_inline_child_result_is_refused"
+    "tests::a_long_inline_child_result_is_refused",
+    "tests::both_child_result_paths_keep_the_child_result_rules"
    ]
   },
   {
@@ -1803,12 +1804,13 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "            admit_tool_result(parent, &format!(\"partial ({}): {result}\", reason.name()))",
-     "new": "            { let _ = reason; admit_tool_result(parent, result) }"
+     "old": "        match journal.steps[index].stop {\n            Some(reason) => format!(\"partial ({}): {text}\", reason.name()),\n            None => text.to_string(),\n        }",
+     "new": "        match journal.steps[index].stop {\n            Some(reason) => { let _ = reason; text.to_string() }\n            None => text.to_string(),\n        }"
     }
    ],
    "tests": [
-    "tests::cancelling_a_parent_stops_started_children_at_their_next_model_call"
+    "tests::cancelling_a_parent_stops_started_children_at_their_next_model_call",
+    "tests::both_child_result_paths_keep_the_child_result_rules"
    ]
   },
   {
@@ -1819,8 +1821,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        .find(|step| step.id == child_id && step.kind == ProposalKind::Child)\n        .map(|step| step.stop)",
-     "new": "        .find(|step| step.id == child_id)\n        .map(|step| step.stop)"
+     "old": "        .any(|step| step.id == child_id && step.kind == ProposalKind::Child)",
+     "new": "        .any(|step| step.id == child_id)"
     }
    ],
    "tests": [
@@ -3490,8 +3492,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    let child = usable_child(parent, child_id)?;\n    if host.host_of != Some(child_id)",
-     "new": "    let child = parent.steps.iter().find(|step| step.id == child_id).ok_or(\"not a child\")?;\n    if host.host_of != Some(child_id)"
+     "old": "    let child = usable_child(parent, child_id)?;\n    let Some(bound) = host.host_of.as_ref() else {",
+     "new": "    let child = parent.steps.iter().find(|step| step.id == child_id).ok_or(\"not a child\")?;\n    let Some(bound) = host.host_of.as_ref() else {"
     }
    ],
    "tests": [
@@ -3554,8 +3556,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if host.host_of != Some(child_id)\n        || usize::from(host.depth) != depth_under(parent, child.parent_id)\n    {",
-     "new": "    if host.host_of != Some(child_id) {"
+     "old": "    if bound.child != child_id\n        || !bound.task.is(&parent.task)\n        || usize::from(host.depth) != depth_under(parent, child.parent_id)\n    {",
+     "new": "    if bound.child != child_id || !bound.task.is(&parent.task) {"
     }
    ],
    "tests": [
@@ -3784,8 +3786,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if child.grant.is_some() {\n        return false;\n    }",
-     "new": "    if false {\n        return false;\n    }"
+     "old": "    if child.grant.is_some() {\n        return Err(\"a child is granted once\");\n    }",
+     "new": "    if false {\n        return Err(\"a child is granted once\");\n    }"
     }
    ],
    "tests": [
@@ -3816,8 +3818,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    scope_still_granted(journal, parent).is_some_and(|scope| resource_covers(scope, grant_resource))",
-     "new": "    granted_scope(parent).is_some_and(|scope| resource_covers(scope, grant_resource))"
+     "old": "    let Some(scope) = scope_still_granted(journal, parent) else {",
+     "new": "    let Some(scope) = granted_scope(parent) else {"
     }
    ],
    "tests": [
@@ -3960,7 +3962,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if host.host_of != Some(child_id)\n        ||",
+     "old": "    if bound.child != child_id\n        ||",
      "new": "    if false\n        ||"
     }
    ],
@@ -3976,7 +3978,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    host.host_of = Some(child_id);\n",
+     "old": "    host.host_of = Some(ChildHost {\n        task: parent.task.clone(),\n        child: child_id,\n    });\n",
      "new": ""
     }
    ],
@@ -4053,6 +4055,134 @@
    ],
    "tests": [
     "tests::an_older_deep_child_chain_still_loads"
+   ]
+  },
+  {
+   "id": "PX01",
+   "title": "authorize records a grant for a pending call under a dead child",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let authorizing = grant.is_some_and(|grant| !grant.is_empty());\n    if step.state != StepState::Prepared || (authorizing && !call_parent_usable(journal, step)) {",
+     "new": "    if step.state != StepState::Prepared {"
+    }
+   ],
+   "tests": [
+    "tests::a_pending_model_call_under_a_denied_child_does_nothing"
+   ]
+  },
+  {
+   "id": "PX02",
+   "title": "dispatch runs a pending call under a dead child",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if !call_parent_usable(journal, prepared) {",
+     "new": "    if false && !call_parent_usable(journal, prepared) {"
+    }
+   ],
+   "tests": [
+    "tests::a_pending_model_call_under_a_denied_child_does_nothing"
+   ]
+  },
+  {
+   "id": "PX03",
+   "title": "a host is not bound to its owning task",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if bound.child != child_id\n        || !bound.task.is(&parent.task)\n        || usize::from(host.depth) != depth_under(parent, child.parent_id)",
+     "new": "    if bound.child != child_id\n        || usize::from(host.depth) != depth_under(parent, child.parent_id)"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_belongs_to_one_task"
+   ]
+  },
+  {
+   "id": "PX04",
+   "title": "the generic result path skips the child-result rules and stop label",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let text = if journal.steps[index].kind == ProposalKind::Child {\n        if !child_result_ok(journal.steps.iter(), text) {\n            return false;\n        }\n        match journal.steps[index].stop {\n            Some(reason) => format!(\"partial ({}): {text}\", reason.name()),\n            None => text.to_string(),\n        }\n    } else {\n        text.to_string()\n    };",
+     "new": "    let text = text.to_string();"
+    }
+   ],
+   "tests": [
+    "tests::both_child_result_paths_keep_the_child_result_rules"
+   ]
+  },
+  {
+   "id": "PX05",
+   "title": "authorize_child drops the refusal record and its reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if let Err(reason) = child_grant_ok(journal, child_id, grant, grant_resource) {\n        refuse_child_grant(journal, child_id, grant_resource, reason);\n        return false;\n    }",
+     "new": "    if child_grant_ok(journal, child_id, grant, grant_resource).is_err() {\n        return false;\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_grant_refused_for_an_unbudgeted_child_says_why"
+   ]
+  },
+  {
+   "id": "PX06",
+   "title": "an inbox answer drops the refusal record and its reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if let Err(reason) = child_grant_ok(journal, id, grant, &resource) {\n            refuse_child_grant(journal, id, &resource, reason);\n            return false;\n        }",
+     "new": "        if child_grant_ok(journal, id, grant, &resource).is_err() {\n            return false;\n        }"
+    }
+   ],
+   "tests": [
+    "tests::a_grant_refused_for_an_unbudgeted_child_says_why"
+   ]
+  },
+  {
+   "id": "PX07",
+   "title": "child_grant_ok replaces usable_child's reason with a generic one",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let child = usable_child(journal, child_id)?;",
+     "new": "    let child = usable_child(journal, child_id).map_err(|_| \"no grant\")?;"
+    }
+   ],
+   "tests": [
+    "tests::a_grant_refused_for_an_unbudgeted_child_says_why"
+   ]
+  },
+  {
+   "id": "PX08",
+   "title": "falsify.py keeps the mutated bytes after an interruption during replacement",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "        except BaseException as error:",
+     "new": "        except OSError as error:"
+    }
+   ],
+   "tests": [
+    "interruption during replacement"
    ]
   }
  ]

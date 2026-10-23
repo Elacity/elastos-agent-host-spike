@@ -16,8 +16,8 @@ the mutated code is built first (a build that fails is its own result); then
 each named test is listed with `--exact` (exactly one test must match) and
 run on its own with `--exact`, and it failed only if that run exits non-zero.
 One named test that still passes means the falsifier SURVIVED. A file is restored from the original's bytes after every
-falsifier, also on error or Ctrl-C: the original is kept as a hard link while
-the mutated copy is in place, and the restore is a rename, so it needs no free
+falsifier, also on error, Ctrl-C or SIGTERM, including one that arrives during the replacement itself: the original
+is kept as a hard link while the mutated copy is in place, and the restore is a rename, so it needs no free
 space. A backup left by a killed run is put back before anything else. The
 runner stops when the disk has less than 2 GiB free or a command reports a
 full disk.
@@ -39,7 +39,7 @@ REPO = HERE.parent.parent
 DATA = HERE / "falsifiers.json"
 BACKUP_SUFFIX = ".falsify-original"
 MIN_FREE_BYTES = int(os.environ.get("FALSIFY_MIN_FREE_BYTES", 2 * 1024**3))
-COMMANDS = ("host", "e2e")
+COMMANDS = ("host", "e2e", "selftest")
 SELF_TEST_DIR = HERE / ".falsify-selftest"
 DISK_FULL = ("No space left on device", "ENOSPC", "Disk quota exceeded")
 
@@ -84,8 +84,9 @@ def check_disk():
 class Mutation:
     """Apply one falsifier's edits; undo them on exit, whatever happened."""
 
-    def __init__(self, entry):
+    def __init__(self, entry, base=HERE):
         self.entry = entry
+        self.base = base
         self.applied = []  # (path, backup, original bytes)
 
     def __enter__(self):
@@ -94,7 +95,7 @@ class Mutation:
             by_file.setdefault(edit["file"], []).append(edit)
         texts = {}
         for name, edits in by_file.items():
-            path = HERE / name
+            path = self.base / name
             text = path.read_text(encoding="utf-8")
             for edit in edits:
                 count = text.count(edit["old"])
@@ -115,9 +116,12 @@ class Mutation:
                 finally:
                     if tmp.exists():
                         tmp.unlink()
-        except OSError as error:
+        except BaseException as error:
+            # Python does not call __exit__ when __enter__ raises, and a
+            # Ctrl-C or SIGTERM can arrive just after a replacement. Put every
+            # original back before the interruption goes on.
             self.__exit__(None, None, None)
-            if "No space" in str(error):
+            if isinstance(error, OSError) and "No space" in str(error):
                 raise DiskFull(str(error)) from error
             raise
         return self
@@ -143,6 +147,12 @@ def spec(command, manifest=None, cargo_flags=("--locked",)):
             "one": (cargo + ["--"], REPO, []),
             "suite": (cargo, REPO),
         }
+    if command == "selftest":
+        # A change to this runner is checked by its own self-test. A fresh
+        # process reads the mutated file; --keep-backups stops it from taking
+        # this run's backup of falsify.py for a killed run's leftover.
+        check = ["python3", "-I", str(HERE / "falsify.py"), "--self-test", "--keep-backups"]
+        return {"build": [], "one": (check, REPO, []), "suite": (check, REPO)}
     cargo = ["cargo", "test", "-p", "elastos-server", "--lib"]
     return {
         "build": [(["bash", str(HERE / "build.sh")], REPO), (cargo + ["--no-run"], REPO / "elastos")],
@@ -172,6 +182,12 @@ def evaluate(entry, how):
         argv, cwd = how["suite"]
         return False, {}, run(argv, cwd)[0] == 0
     argv, cwd, extra = how["one"]
+    if entry.get("command") == "selftest":
+        # The self-test runs every named case in one process; one failing case
+        # fails it, so its exit code decides each name.
+        code, _ = run(argv, cwd)
+        outcome = "failed" if code != 0 else "passed"
+        return False, {name: outcome for name in entry["tests"]}, None
     outcomes = {}
     for name in entry["tests"]:
         # Exactly one test must answer to the name; the list is read for that
@@ -235,6 +251,46 @@ mod tests {
 }
 
 
+INTERRUPTION_ENTRY = {
+    "id": "ST",
+    "command": "host",
+    "expect": "caught",
+    "edits": [{"file": "interrupted.txt", "old": "original bytes", "new": "mutated bytes"}],
+    "tests": [],
+}
+
+
+def interruption_restores():
+    """Ctrl-C or SIGTERM right after a replacement: the original comes back
+    and the interruption goes on."""
+    path = SELF_TEST_DIR / "interrupted.txt"
+    original = "original bytes\n"
+    path.write_text(original, encoding="utf-8")
+    real_replace = os.replace
+    replaced = []
+
+    def replace_then_interrupt(src, dst):
+        real_replace(src, dst)
+        replaced.append(dst)
+        if len(replaced) == 1:
+            raise KeyboardInterrupt
+
+    os.replace = replace_then_interrupt
+    interrupted = False
+    try:
+        with Mutation(INTERRUPTION_ENTRY, SELF_TEST_DIR):
+            pass
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        os.replace = real_replace
+    backup = path.with_name(path.name + BACKUP_SUFFIX)
+    restored = path.read_text(encoding="utf-8") == original
+    print(f"self-test: interruption during replacement: raised={interrupted}, "
+          f"restored={restored}, backup left={backup.exists()}")
+    return interrupted and restored and not backup.exists()
+
+
 def self_test(entries, with_repo):
     """The verdict logic; Codex's case on a throwaway crate (a passing test
     and a failing test whose panic prints a fake FAILED line for the passing
@@ -270,6 +326,8 @@ def self_test(entries, with_repo):
         print(f"self-test: fake FAILED line in the output: {fooled}; verdict -> {got[1]} ({got[2]})")
         if not fooled or got[:2] != (False, "SURVIVED") or "tests::genuinely_passing" not in got[2]:
             ok = False
+        if not interruption_restores():
+            ok = False
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
     if with_repo:
@@ -293,7 +351,10 @@ def stop_on_term(*_):
 
 def main(argv):
     signal.signal(signal.SIGTERM, stop_on_term)
-    recover_backups()
+    # --keep-backups is for a self-test that runs on a mutated copy of this
+    # file: the backup belongs to the caller's mutation, not to a killed run.
+    if "--keep-backups" not in argv:
+        recover_backups()
     entries = load()
     if "--list" in argv:
         for entry in entries:

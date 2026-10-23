@@ -40,7 +40,12 @@ child step (the parent's journal), never from a child host's own journal.
 - `usable_child`: `child_rules`, plus a budget (`TASK_BUDGET_REASON` for a child from before idea 2), not stopped,
   task not cancelled. It is used by `propose_child` (for a child parent), `ask_model` (every child in the chain),
   `child_grant_ok` and `open_child_host`.
-- `child_grant_ok`: the one check for giving a child a grant, used by `authorize_child` and by an inbox answer.
+- `child_grant_ok`: the one check for giving a child a grant, used by `authorize_child` and by an inbox answer. It
+  returns the exact reason a refusal has, so `usable_child`'s own words (`TASK_BUDGET_REASON` for a child from before
+  idea 2) are kept, not replaced with a bare false; each refused grant leaves one refusal record with that reason.
+- `call_parent_usable`: a model call already proposed under a child is authorized and dispatched only while
+  `usable_child` still passes for that child, so a deny, stop or cancel after the proposal takes the pending call
+  with it.
 
 ### Depth (R1)
 
@@ -70,8 +75,9 @@ child step (the parent's journal), never from a child host's own journal.
 
   The plain `authorize`, `apply_inbox` and `dispatch` refuse a host's steps, so there is no second path. A person's
   deny is still recorded.
-- A host is bound to the child it was opened for (`host_of`, held in memory only, so no format change); a sibling's
-  scope does not fit it, and a reloaded host belongs to no child until it is opened again.
+- A host is bound to its owning task and to the child it was opened for (`host_of`: the task's in-memory mark and the
+  child id; held in memory only, so no format change). Another task's journal with the same child id is not this
+  host's parent; a sibling's scope does not fit it, and a reloaded host belongs to no child until it is opened again.
 
 ### After an independent review of 10a31e2
 
@@ -134,9 +140,9 @@ child step (the parent's journal), never from a child host's own journal.
 
 ### Result cap (R4)
 
-- `record_child_result` refuses a result longer than `CHILD_RESULT_CAP`; it is never cut. A long result goes as a
-  spill pointer (`spill_pointer`, today's rules).
-- A stopped child's result is kept and marked: `partial (<reason>): <result>`.
+- `record_child_result` and `record_tool_result` on a child step both use `child_result_ok`: a result longer than
+  `CHILD_RESULT_CAP` is refused, never cut. A long result goes as a spill pointer (`spill_pointer`, today's rules).
+- A stopped child's result is kept and marked `partial (<reason>): <result>` on both entry points.
 
 ### Cancel (R5)
 
