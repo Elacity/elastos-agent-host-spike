@@ -57,11 +57,20 @@ fn paths(entries: &[Entry]) -> Vec<&str> {
     entries.iter().map(|entry| entry.path.as_str()).collect()
 }
 
+/// A temp base at its real path: on macOS the default temp folder sits under
+/// /var and /tmp, which are themselves links, and every prefix of a path is
+/// checked for links, so the real path keeps a temp folder valid.
+fn temp_base() -> (tempfile::TempDir, PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().canonicalize().unwrap();
+    (root, real)
+}
+
 #[test]
 fn a_component_ships_its_manifest_and_its_entrypoint_only() {
-    let root = tempfile::tempdir().unwrap();
-    let source = component_source(root.path());
-    let into = root.path().join("packed");
+    let (_root, root) = temp_base();
+    let source = component_source(&root);
+    let into = root.join("packed");
     let (cid, entries) = pack(&source, &into, &[]).unwrap();
     assert_eq!(paths(&entries), ["capsule.json", "x.component.wasm"]);
     assert_eq!(closure_cid(&into).unwrap().0, cid);
@@ -74,8 +83,8 @@ fn a_component_ships_its_manifest_and_its_entrypoint_only() {
 
 #[test]
 fn a_page_ships_its_manifest_and_its_entrypoint_folder() {
-    let root = tempfile::tempdir().unwrap();
-    let (_, entries) = pack(&page_source(root.path()), &root.path().join("packed"), &[]).unwrap();
+    let (_root, root) = temp_base();
+    let (_, entries) = pack(&page_source(&root), &root.join("packed"), &[]).unwrap();
     assert_eq!(
         paths(&entries),
         [
@@ -89,26 +98,26 @@ fn a_page_ships_its_manifest_and_its_entrypoint_folder() {
 
 #[test]
 fn the_cid_does_not_change_when_a_test_source_or_fixture_does() {
-    let root = tempfile::tempdir().unwrap();
-    let page = page_source(root.path());
-    let (first, _) = pack(&page, &root.path().join("one"), &[]).unwrap();
+    let (_root, root) = temp_base();
+    let page = page_source(&root);
+    let (first, _) = pack(&page, &root.join("one"), &[]).unwrap();
     write(&page.join("page.test.mjs"), b"// other tests");
     write(&page.join("fixtures/out.json"), b"{\"other\":1}");
-    let (second, _) = pack(&page, &root.path().join("two"), &[]).unwrap();
+    let (second, _) = pack(&page, &root.join("two"), &[]).unwrap();
     assert_eq!(first, second);
     // What ships does change it.
     write(&page.join("browser/main.js"), b"// other main");
-    let (third, _) = pack(&page, &root.path().join("three"), &[]).unwrap();
+    let (third, _) = pack(&page, &root.join("three"), &[]).unwrap();
     assert_ne!(first, third);
 }
 
 #[test]
 fn a_page_names_its_core_by_cid_and_keeps_its_other_requirements() {
-    let root = tempfile::tempdir().unwrap();
-    let core = component_source(root.path());
-    let (core_cid, _) = pack(&core, &root.path().join("core-packed"), &[]).unwrap();
-    let page = page_source(root.path());
-    let into = root.path().join("page-packed");
+    let (_root, root) = temp_base();
+    let core = component_source(&root);
+    let (core_cid, _) = pack(&core, &root.join("core-packed"), &[]).unwrap();
+    let page = page_source(&root);
+    let into = root.join("page-packed");
     pack(&page, &into, &[("x-core".to_string(), core_cid.clone())]).unwrap();
     let shipped: serde_json::Value =
         serde_json::from_slice(&std::fs::read(into.join("capsule.json")).unwrap()).unwrap();
@@ -126,7 +135,7 @@ fn a_page_names_its_core_by_cid_and_keeps_its_other_requirements() {
     }];
     assert_eq!(resolve_requires(&shipped, &installed).unwrap(), installed);
     // A second pack with another core replaces the requirement, never adds one.
-    let again = root.path().join("page-again");
+    let again = root.join("page-again");
     let other = format!("b{}", "a".repeat(58));
     pack(&into, &again, &[("x-core".to_string(), other.clone())]).unwrap();
     let shipped: serde_json::Value =
@@ -137,8 +146,8 @@ fn a_page_names_its_core_by_cid_and_keeps_its_other_requirements() {
 
 #[test]
 fn pack_refuses_what_it_cannot_ship_as_it_is() {
-    let root = tempfile::tempdir().unwrap();
-    let r = root.path();
+    let (_root, root) = temp_base();
+    let r = &root;
 
     // No manifest; no entrypoint; an entrypoint that is not built.
     std::fs::create_dir_all(r.join("empty")).unwrap();
@@ -202,8 +211,8 @@ fn pack_refuses_what_it_cannot_ship_as_it_is() {
 
 #[test]
 fn pack_refuses_a_symlinked_folder_anywhere_on_the_path() {
-    let root = tempfile::tempdir().unwrap();
-    let r = root.path();
+    let (_root, root) = temp_base();
+    let r = &root;
     // Bytes outside the source that a followed link would ship.
     write(&r.join("outside/payload.component.wasm"), b"\0asm outside");
     write(
@@ -269,4 +278,75 @@ fn pack_refuses_a_symlinked_folder_anywhere_on_the_path() {
     );
     let (_, entries) = pack(&core, &r.join("o6"), &[]).unwrap();
     assert_eq!(paths(&entries), ["a/b/c/x.component.wasm", "capsule.json"]);
+}
+
+/// A trailing "/" or "/." in the source path must not let lstat follow a
+/// symlinked root: on POSIX, lstat of "link/" or "link/." follows the link,
+/// so a first lookup on the raw path never sees it. Every spelling is refused
+/// with `symlink_in_path` before anything is written, and the same folder
+/// without the link still packs.
+#[test]
+fn pack_refuses_a_symlinked_root_named_with_a_slash_or_dot() {
+    let (_root, root) = temp_base();
+    let r = &root;
+    let shipped_nothing = |into: &Path| assert!(!into.exists(), "{} was written", into.display());
+
+    // Bytes outside the source that a followed link would ship.
+    write(
+        &r.join("outside/browser/index.html"),
+        b"<!doctype html> outside",
+    );
+
+    let page = page_source(r);
+    std::os::unix::fs::symlink(&page, r.join("root-link")).unwrap();
+
+    // Each spelling of the link (trailing slash, dot, double slash, leading
+    // "./") must be refused, and nothing written.
+    for (i, spelling) in ["root-link/", "root-link/.", "root-link//", "./root-link/"]
+        .iter()
+        .enumerate()
+    {
+        let into = r.join(format!("o{i}"));
+        assert_eq!(
+            refused(pack(&r.join(spelling), &into, &[])),
+            "symlink_in_path",
+            "{spelling}"
+        );
+        shipped_nothing(&into);
+    }
+
+    // A link in the middle of the path, hidden behind a "./" of its own:
+    // a is real and a/link is a link, so the source is only reachable through
+    // it. Refused before anything is read.
+    let core = component_source(&r.join("c1"));
+    std::fs::create_dir_all(core.join("a")).unwrap();
+    std::os::unix::fs::symlink(r.join("outside"), core.join("a/link")).unwrap();
+    let into = r.join("omid");
+    assert_eq!(
+        refused(pack(&core.join("a/./link/deep"), &into, &[])),
+        "symlink_in_path"
+    );
+    shipped_nothing(&into);
+
+    // A ".." part and an empty path are refused, not taken as the current
+    // folder.
+    let into = r.join("odot");
+    assert_eq!(
+        refused(pack(&r.join("page/.."), &into, &[])),
+        "path_invalid"
+    );
+    let into = r.join("oempty");
+    assert_eq!(refused(pack(Path::new(""), &into, &[])), "path_invalid");
+
+    // The same folder without a link still packs.
+    let (_, entries) = pack(&r.join("page"), &r.join("packed"), &[]).unwrap();
+    assert_eq!(
+        paths(&entries),
+        [
+            "browser/index.html",
+            "browser/main.js",
+            "browser/styles/page.css",
+            "capsule.json"
+        ]
+    );
 }

@@ -14,6 +14,10 @@ const HOUR: u64 = 3600;
 
 struct World {
     root: tempfile::TempDir,
+    /// The temp folder at its real path: on macOS the default temp folder
+    /// sits under /var and /tmp, which are themselves links, and every prefix
+    /// of a path is checked for links, so the real path keeps it valid.
+    base: PathBuf,
     floors: std::cell::Cell<u32>,
     release_root: SigningKey,
     publisher: SigningKey,
@@ -21,22 +25,29 @@ struct World {
 
 impl World {
     fn new() -> World {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().canonicalize().unwrap();
         World {
-            root: tempfile::tempdir().unwrap(),
+            root,
+            base,
             floors: std::cell::Cell::new(0),
             release_root: sign::generate(),
             publisher: sign::generate(),
         }
     }
 
+    fn base(&self) -> &Path {
+        &self.base
+    }
+
     fn dir(&self, name: &str) -> PathBuf {
-        let dir = self.root.path().join(name);
+        let dir = self.base().join(name);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
     fn store(&self) -> PathBuf {
-        self.root.path().join("store")
+        self.base().join("store")
     }
 
     /// A small photo-viewer closure at `name`.
@@ -101,7 +112,7 @@ impl World {
 impl Drop for World {
     /// The store is sealed read-only; open it again so the temp dir goes.
     fn drop(&mut self) {
-        unseal(self.root.path());
+        unseal(self.base());
     }
 }
 
@@ -366,6 +377,36 @@ fn the_listing_refuses_symlinks_and_special_files() {
     assert_eq!(refused(list_closure(&fifo)), "special_file");
 }
 
+/// A trailing "/" or "/." in the root path must not let lstat follow a
+/// symlinked root: on POSIX, lstat of "link/" or "link/." follows the link.
+/// Every spelling is refused with `symlink_in_path`, and the real folder
+/// still lists.
+#[test]
+fn the_listing_refuses_a_symlinked_root_named_with_a_slash_or_dot() {
+    let world = World::new();
+    let real = world.capsule("link-root", "0.1.0");
+    let alias = world.dir("aliases").join("root-link");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+
+    for spelling in ["root-link/", "root-link/.", "root-link//", "./root-link/"] {
+        let dir = world.dir("aliases");
+        assert_eq!(
+            refused(list_closure(&dir.join(spelling))),
+            "symlink_in_path",
+            "{spelling}"
+        );
+    }
+
+    // A ".." part and an empty path are refused, not taken as the current
+    // folder.
+    let dir = world.dir("aliases");
+    assert_eq!(refused(list_closure(&dir.join(".."))), "path_invalid");
+    assert_eq!(refused(list_closure(Path::new(""))), "path_invalid");
+
+    // Without the link, the same folder lists.
+    assert!(list_closure(&real).is_ok());
+}
+
 // ---- The detached claim ----
 
 #[test]
@@ -601,7 +642,7 @@ fn an_older_policy_cannot_be_replayed_after_a_revocation() {
     let world = World::new();
     let root_did = sign::did(&world.release_root);
     let local = LocalConfig::default();
-    let floor_path = world.root.path().join("device-floor");
+    let floor_path = world.base().join("device-floor");
     let floor = PolicyFloor::at(&floor_path);
     let dir = world.capsule("source", "0.1.0");
     let claim = world.claim(&dir, "0.1.0");
@@ -663,7 +704,7 @@ fn two_policies_loaded_at_once_never_lower_the_floor() {
     second.sequence = 2;
     let second = second.sign(&world.release_root);
     for round in 0..200 {
-        let path = world.root.path().join(format!("race-{round}"));
+        let path = world.base().join(format!("race-{round}"));
         let barrier = std::sync::Barrier::new(2);
         std::thread::scope(|scope| {
             for release in [&first, &second] {
@@ -742,7 +783,7 @@ fn a_policy_held_from_before_a_revocation_does_not_admit() {
     assert!(!world.store().exists(), "nothing was staged");
 
     // A floor that is gone is not "nothing newer".
-    std::fs::remove_file(world.root.path().join("floor-1")).unwrap();
+    std::fs::remove_file(world.base().join("floor-1")).unwrap();
     assert_eq!(
         refused(admit(&dir, &claim, &current, &[], &world.store(), NOW)),
         "policy_stale"
@@ -865,7 +906,7 @@ fn an_expired_policy_is_refused_at_load_and_at_admission() {
 #[test]
 fn a_policy_floor_that_does_not_parse_is_refused() {
     let world = World::new();
-    let path = world.root.path().join("broken-floor");
+    let path = world.base().join("broken-floor");
     std::fs::write(&path, b"sequence 0").unwrap();
     let release = world.release().sign(&world.release_root);
     assert_eq!(

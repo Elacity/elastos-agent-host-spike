@@ -23,7 +23,7 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 use crate::admit::{check_cid_form, parse_manifest};
-use crate::listing::{check_segment, closure_cid, walk};
+use crate::listing::{check_no_link_in_path, check_segment, closure_cid, walk};
 
 /// lstats `source`, then each segment below it, in order. `source` and every
 /// segment but the last must be real folders, never links: a link anywhere on
@@ -32,6 +32,9 @@ use crate::listing::{check_segment, closure_cid, walk};
 /// followed either). `None` when a segment does not exist, or a file stands
 /// where a folder should.
 fn lstat_each(source: &Path, segments: &[&str]) -> Result<Option<std::fs::Metadata>, Refusal> {
+    // Before any lookup, drop a trailing "/" or "." and refuse a ".." or empty
+    // path: with a trailing slash lstat would follow a symlinked root.
+    check_no_link_in_path(source)?;
     let mut path = source.to_path_buf();
     let mut shown = source.display().to_string();
     let mut meta = std::fs::symlink_metadata(&path).map_err(|err| io(err, &path))?;

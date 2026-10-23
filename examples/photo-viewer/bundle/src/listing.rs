@@ -6,7 +6,7 @@
 //! (JCS) form of the document.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -48,9 +48,39 @@ pub(crate) fn read_closure(root: &Path) -> Result<(Vec<Entry>, Vec<u8>), Refusal
 /// The root is not followed either: a link there would list another folder.
 /// The walk below lstats every entry, so no folder under the root is a link.
 pub(crate) fn check_root(root: &Path) -> Result<(), Refusal> {
-    let meta = std::fs::symlink_metadata(root).map_err(|err| io(err, root))?;
-    if meta.file_type().is_symlink() {
-        return Err(Refusal::SymlinkInPath(root.display().to_string()));
+    check_no_link_in_path(root)?;
+    Ok(())
+}
+
+/// Refuses a path that would make pack or the listing read through a link.
+///
+/// On POSIX, `link/` and `link/.` name the same place as `link`: lstat of a
+/// trailing slash or dot follows the link, so a first lookup on the raw path
+/// never sees it. The path is therefore rebuilt from `Path::components()`
+/// before any lookup, which drops a trailing "/" or "." and a leading "./",
+/// refuses a ".." part and an empty path, then lstats every prefix: a link
+/// anywhere on the way is refused without ever being followed. One function
+/// for both the listing and pack's source folder.
+pub(crate) fn check_no_link_in_path(path: &Path) -> Result<(), Refusal> {
+    let mut built = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::Normal(name) => built.push(name),
+            std::path::Component::CurDir => {}
+            std::path::Component::RootDir => built.push(part.as_os_str()),
+            _ => return Err(Refusal::PathInvalid(path.display().to_string())),
+        }
+    }
+    if built.as_os_str().is_empty() {
+        return Err(Refusal::PathInvalid(path.display().to_string()));
+    }
+    let mut prefix = PathBuf::new();
+    for part in built.components() {
+        prefix.push(part.as_os_str());
+        let meta = std::fs::symlink_metadata(&prefix).map_err(|err| io(err, &prefix))?;
+        if meta.file_type().is_symlink() {
+            return Err(Refusal::SymlinkInPath(prefix.display().to_string()));
+        }
     }
     Ok(())
 }

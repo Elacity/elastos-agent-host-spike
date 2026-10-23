@@ -21,7 +21,13 @@ const NOW: u64 = 1_800_000_000;
 const DAY: u64 = 24 * 3600;
 
 fn viewer_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+    // The real path: on macOS the default temp folders and /tmp are links, and
+    // a path is refused if any prefix after normalization is a link or holds a
+    // ".." component, so CARGO_MANIFEST_DIR/.. is resolved to its target.
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .canonicalize()
+        .unwrap()
 }
 
 fn manifest_of(dir: &Path) -> Value {
@@ -30,21 +36,32 @@ fn manifest_of(dir: &Path) -> Value {
 
 struct World {
     root: tempfile::TempDir,
+    /// The temp folder at its real path: on macOS the default temp folder
+    /// sits under /var and /tmp, which are themselves links, and every prefix
+    /// of a path is checked for links, so the real path keeps it valid.
+    base: PathBuf,
     release_root: SigningKey,
     publisher: SigningKey,
 }
 
 impl World {
     fn new() -> World {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().canonicalize().unwrap();
         World {
-            root: tempfile::tempdir().unwrap(),
+            root,
+            base,
             release_root: sign::generate(),
             publisher: sign::generate(),
         }
     }
 
+    fn base(&self) -> &Path {
+        &self.base
+    }
+
     fn path(&self, name: &str) -> PathBuf {
-        self.root.path().join(name)
+        self.base().join(name)
     }
 
     fn store(&self) -> PathBuf {
