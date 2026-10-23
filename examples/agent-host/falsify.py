@@ -8,6 +8,7 @@ Usage (from anywhere):
   python3 -I examples/agent-host/falsify.py --list       # ids, commands, expectations
   python3 -I examples/agent-host/falsify.py --self-test  # the runner checks itself
   python3 -I examples/agent-host/falsify.py --self-test --with-repo  # and one real falsifier
+  python3 -I examples/agent-host/falsify.py --self-test-case NAME  # one named case
 
 The falsifiers are data, in falsifiers.json next to this file. Each one
 replaces exact text (found exactly once) in a file and requires every named
@@ -15,6 +16,8 @@ test to FAIL. The verdict comes only from exit codes, never from test output:
 the mutated code is built first (a build that fails is its own result); then
 each named test is listed with `--exact` (exactly one test must match) and
 run on its own with `--exact`, and it failed only if that run exits non-zero.
+A self-test falsifier names self-test cases instead; each case runs in its own
+process (`--self-test-case NAME`), and a name no case answers to is not run.
 One named test that still passes means the falsifier SURVIVED. A file is restored from the original's bytes after every
 falsifier, also on error, Ctrl-C or SIGTERM, including one that arrives during the replacement itself: the original
 is kept as a hard link while the mutated copy is in place, and the restore is a rename, so it needs no free
@@ -150,9 +153,10 @@ def spec(command, manifest=None, cargo_flags=("--locked",)):
     if command == "selftest":
         # A change to this runner is checked by its own self-test. A fresh
         # process reads the mutated file; --keep-backups stops it from taking
-        # this run's backup of falsify.py for a killed run's leftover.
-        check = ["python3", "-I", str(HERE / "falsify.py"), "--self-test", "--keep-backups"]
-        return {"build": [], "one": (check, REPO, []), "suite": (check, REPO)}
+        # this run's backup of falsify.py for a killed run's leftover. Each
+        # named case runs in its own process, as each named test does.
+        base = ["python3", "-I", str(HERE / "falsify.py"), "--keep-backups"]
+        return {"build": [], "one": (base, REPO, []), "suite": (base + ["--self-test"], REPO)}
     cargo = ["cargo", "test", "-p", "elastos-server", "--lib"]
     return {
         "build": [(["bash", str(HERE / "build.sh")], REPO), (cargo + ["--no-run"], REPO / "elastos")],
@@ -183,11 +187,13 @@ def evaluate(entry, how):
         return False, {}, run(argv, cwd)[0] == 0
     argv, cwd, extra = how["one"]
     if entry.get("command") == "selftest":
-        # The self-test runs every named case in one process; one failing case
-        # fails it, so its exit code decides each name.
-        code, _ = run(argv, cwd)
-        outcome = "failed" if code != 0 else "passed"
-        return False, {name: outcome for name in entry["tests"]}, None
+        # Each named case is its own process, so one case cannot carry a
+        # verdict for another. Exit 2 means no case answers to the name.
+        outcomes = {}
+        for name in entry["tests"]:
+            code, _ = run(argv + extra + ["--self-test-case", name], cwd)
+            outcomes[name] = "not run" if code == 2 else "failed" if code != 0 else "passed"
+        return False, outcomes, None
     outcomes = {}
     for name in entry["tests"]:
         # Exactly one test must answer to the name; the list is read for that
@@ -214,7 +220,7 @@ def verdict(entry, build_failed, outcomes, suite_passed):
         return True, "CAUGHT (listed as a survivor)", ""
     missing = [name for name in entry["tests"] if outcomes.get(name) == "not run"]
     if missing:
-        return False, "NOT RUN", "not exactly one test by this name: " + ", ".join(missing)
+        return False, "NOT RUN", "not exactly one test or case by this name: " + ", ".join(missing)
     passing = [name for name in entry["tests"] if outcomes.get(name) != "failed"]
     if passing:
         return False, "SURVIVED", "still pass: " + ", ".join(passing)
@@ -263,6 +269,8 @@ INTERRUPTION_ENTRY = {
 def interruption_restores():
     """Ctrl-C or SIGTERM right after a replacement: the original comes back
     and the interruption goes on."""
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
     path = SELF_TEST_DIR / "interrupted.txt"
     original = "original bytes\n"
     path.write_text(original, encoding="utf-8")
@@ -291,10 +299,8 @@ def interruption_restores():
     return interrupted and restored and not backup.exists()
 
 
-def self_test(entries, with_repo):
-    """The verdict logic; Codex's case on a throwaway crate (a passing test
-    and a failing test whose panic prints a fake FAILED line for the passing
-    one); and, with the repo, one real falsifier with a passing name added."""
+def verdict_cases():
+    """The verdict logic truth table."""
     ok = True
     two = {"id": "ST", "expect": "caught", "tests": ["a", "b"]}
     cases = [
@@ -310,6 +316,13 @@ def self_test(entries, with_repo):
         if got != want:
             print(f"self-test: verdict {args[1:]} -> {got}, want {want}")
             ok = False
+    return ok
+
+
+def fake_line_verdict():
+    """Codex's case on a throwaway crate: a passing test and a failing test
+    whose panic prints a fake FAILED line for the passing one."""
+    ok = True
     shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
     try:
         for name, text in FAKE_LINE_CRATE.items():
@@ -326,11 +339,68 @@ def self_test(entries, with_repo):
         print(f"self-test: fake FAILED line in the output: {fooled}; verdict -> {got[1]} ({got[2]})")
         if not fooled or got[:2] != (False, "SURVIVED") or "tests::genuinely_passing" not in got[2]:
             ok = False
-        if not interruption_restores():
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def case_attribution():
+    """A name the runner does not run is never credited: two named cases,
+    one failing, one passing, and an unknown name are each decided on their
+    own process (Codex at 11dd10e)."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        stub = SELF_TEST_DIR / "stub.py"
+        stub.write_text(
+            "import sys\n"
+            "at = sys.argv.index('--self-test-case')\n"
+            "name = sys.argv[at + 1]\n"
+            "raise SystemExit({'fails': 1, 'passes': 0}.get(name, 2))\n",
+            encoding="utf-8")
+        how = {"build": [], "one": (["python3", "-I", str(stub)], SELF_TEST_DIR, [])}
+        entry = {"id": "ST", "command": "selftest", "expect": "caught",
+                 "tests": ["fails", "passes"]}
+        got = verdict(entry, *evaluate(entry, how))
+        print(f"self-test: a passing name beside a failing one: {got[1]} ({got[2]})")
+        if got[:2] != (False, "SURVIVED") or "passes" not in got[2]:
+            ok = False
+        unknown = dict(entry, tests=["no-such-case"])
+        got = verdict(unknown, *evaluate(unknown, how))
+        print(f"self-test: an unknown case name: {got[1]} ({got[2]})")
+        if got[:2] != (False, "NOT RUN"):
             ok = False
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
-    if with_repo:
+    return ok
+
+
+# Each self-test case is named, so a falsifier names one and the runner runs
+# it on its own. A name not listed here is not a case: the runner reports it
+# as not run, never as caught.
+SELF_TEST_CASES = {
+    "verdict cases": verdict_cases,
+    "fake FAILED line in the output": fake_line_verdict,
+    "interruption during replacement": interruption_restores,
+    "named case attribution": case_attribution,
+}
+
+
+def self_test(entries, with_repo, only=None):
+    """Run the named self-test cases, or only `only`; with the repo, also one
+    real falsifier with a passing name added and as listed."""
+    ok = True
+    try:
+        for name, case in SELF_TEST_CASES.items():
+            if only is not None and name != only:
+                continue
+            if not case():
+                print(f"self-test: {name}: FAILED")
+                ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    if with_repo and only is None:
         real = next(entry for entry in entries if entry["id"] == "TB01")
         still_passing = "tests::a_child_without_a_budget_is_refused"
         got = falsify(dict(real, tests=real["tests"] + [still_passing]))
@@ -341,6 +411,9 @@ def self_test(entries, with_repo):
         print(f"self-test: TB01 as listed -> {got[1]}")
         if got[:2] != (True, "CAUGHT"):
             ok = False
+    if only is not None:
+        print(f"self-test case {only!r}: {'OK' if ok else 'FAILED'}")
+        return ok
     print("self-test:", "OK" if ok else "FAILED")
     return ok
 
@@ -360,6 +433,20 @@ def main(argv):
         for entry in entries:
             print(f"{entry['id']:6} {entry['command']:4} {entry['expect']:13} {entry['title']}")
         return 0
+    if "--self-test-cases" in argv:
+        for name in SELF_TEST_CASES:
+            print(name)
+        return 0
+    if "--self-test-case" in argv:
+        at = argv.index("--self-test-case")
+        if at + 1 >= len(argv):
+            print("--self-test-case needs a name")
+            return 2
+        name = argv[at + 1]
+        if name not in SELF_TEST_CASES:
+            print(f"no self-test case named {name}")
+            return 2
+        return 0 if self_test(entries, False, only=name) else 1
     if "--self-test" in argv:
         return 0 if self_test(entries, "--with-repo" in argv) else 1
     chosen = [entry for entry in entries if not argv or any(

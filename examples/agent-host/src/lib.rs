@@ -2687,19 +2687,22 @@ fn record_tool_result(
         return false;
     }
     let text = if journal.steps[index].kind == ProposalKind::Child {
+        // The label is part of what is stored, so the cap bounds the final
+        // text, not the bytes before the label.
+        let marked = match journal.steps[index].stop {
+            Some(reason) => format!("partial ({}): {text}", reason.name()),
+            None => text.to_string(),
+        };
         if !child_result_ok(
             journal
                 .steps
                 .iter()
                 .chain(child.into_iter().flat_map(|child| child.steps.iter())),
-            text,
+            &marked,
         ) {
             return false;
         }
-        match journal.steps[index].stop {
-            Some(reason) => format!("partial ({}): {text}", reason.name()),
-            None => text.to_string(),
-        }
+        marked
     } else {
         text.to_string()
     };
@@ -4314,23 +4317,30 @@ fn record_child_result(parent: &mut Journal, child_id: u64, child: &Journal, res
     record_tool_result(parent, child_id, result, Some(child))
 }
 
-/// A call or a child is authorized or dispatched only while its parent is
-/// live and still in scope (`usable_child`, `scope_still_granted`): a model
-/// call under a child is taken with that child when it is denied, stopped,
-/// cancelled or loses its budget, and a granted child is taken with the
-/// grant above it when that grant is withdrawn. A call of the top task, a
-/// child being granted (it has no grant yet), and a step with no parent have
-/// nothing to check.
+/// A call or a child is authorized or dispatched only while its owner is
+/// live and in scope (`usable_child`, `scope_still_granted`): a model call
+/// under a child is taken with that child when it is denied, stopped,
+/// cancelled or loses its budget, a model call of the top task needs the
+/// task budget (`TASK_BUDGET_REASON` when none was recorded), and a granted
+/// child is taken with the grant above it when that grant is withdrawn. A
+/// child being granted (it has no grant yet) and a step with no parent have
+/// nothing else to check. The error is the check's own reason, which the
+/// caller records.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn call_parent_usable(journal: &Journal, step: &Step) -> bool {
+fn call_parent_usable(journal: &Journal, step: &Step) -> Result<(), &'static str> {
     match step.kind {
-        ProposalKind::Hosted => step
-            .parent_id
-            .is_none_or(|child| usable_child(journal, child).is_ok()),
+        ProposalKind::Hosted => match step.parent_id {
+            Some(child) => usable_child(journal, child).map(|_| ()),
+            None if journal.task_budget.is_some() => Ok(()),
+            None => Err(TASK_BUDGET_REASON),
+        },
         ProposalKind::Child if step.grant.is_some() => {
-            usable_child(journal, step.id).is_ok() && scope_still_granted(journal, step).is_some()
+            usable_child(journal, step.id)?;
+            scope_still_granted(journal, step)
+                .map(|_| ())
+                .ok_or("not granted")
         }
-        _ => true,
+        _ => Ok(()),
     }
 }
 
@@ -4353,7 +4363,17 @@ fn authorize_step(journal: &mut Journal, id: u64, grant: Option<&str>) -> bool {
         return false;
     };
     let authorizing = grant.is_some_and(|grant| !grant.is_empty());
-    if step.state != StepState::Prepared || (authorizing && !call_parent_usable(journal, step)) {
+    let prepared = step.state == StepState::Prepared;
+    let allowed = if authorizing {
+        call_parent_usable(journal, step)
+    } else {
+        Ok(())
+    };
+    if !prepared {
+        return false;
+    }
+    if let Err(reason) = allowed {
+        record_refusal_reason(journal, reason, &format!("step {id}"));
         return false;
     }
     let step = journal
@@ -4539,7 +4559,8 @@ fn dispatch_step(journal: &mut Journal, id: u64) -> bool {
     let Some(prepared) = journal.steps.iter().find(|step| step.id == id) else {
         return false;
     };
-    if !call_parent_usable(journal, prepared) {
+    if let Err(reason) = call_parent_usable(journal, prepared) {
+        record_refusal_reason(journal, reason, &format!("step {id}"));
         return false;
     }
     let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) else {
@@ -18201,6 +18222,51 @@ mod tests {
         );
     }
 
+    /// Codex at 11dd10e: the stored text, stop label included, is what
+    /// `CHILD_RESULT_CAP` bounds. Every stop reason keeps the cap at its
+    /// boundary; one byte less is stored, one byte more is refused.
+    #[test]
+    fn a_stopped_child_result_is_capped_after_its_label() {
+        for stop in ["time", "requests", "cancelled"] {
+            let (mut journal, run) = task(budget(8, 600));
+            let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(1, 60))).unwrap();
+            let host = open_child_host(&journal, child, DEMO_SRC).unwrap();
+            let stopped = match stop {
+                "time" => note_time_refusal(&mut journal, child),
+                "requests" => {
+                    assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+                    assert_eq!(
+                        ask_model(&mut journal, Some(child), HOSTED_MODEL),
+                        Err("requests")
+                    );
+                    true
+                }
+                _ => cancel_tree(&mut journal, child),
+            };
+            assert!(stopped, "{stop}");
+            let reason = step_of(&journal, child).stop.unwrap();
+            let label = format!("partial ({}): ", reason.name());
+            let exact = "x".repeat(CHILD_RESULT_CAP - label.len());
+            let before = journal.events.len();
+            assert!(
+                !record_child_result(&mut journal, child, &host, &"x".repeat(CHILD_RESULT_CAP)),
+                "{stop}: the label makes this longer than the cap"
+            );
+            assert!(
+                !record_child_result(&mut journal, child, &host, &format!("{exact}x")),
+                "{stop}: one byte over the labelled cap"
+            );
+            assert_eq!(journal.events.len(), before, "{stop}: never stored");
+            assert!(
+                record_child_result(&mut journal, child, &host, &exact),
+                "{stop}: exactly the cap once labelled"
+            );
+            let stored = &journal.events.last().unwrap().text;
+            assert_eq!(stored, &format!("{label}{exact}"), "{stop}");
+            assert_eq!(stored.len(), CHILD_RESULT_CAP, "{stop}");
+        }
+    }
+
     /// Codex at 1c0449a: the child-result rules hold at the second entry
     /// point too. `record_tool_result` on a child keeps the cap, the grant
     /// rule and the partial-result stop label, as `record_child_result` does,
@@ -19830,10 +19896,11 @@ mod tests {
 
     /// Codex at 1c0449a: a model call already proposed under a child is
     /// authorized and dispatched only while that child is still usable. A
-    /// deny or a stop after the proposal takes the pending call with it.
+    /// deny or a stop after the proposal takes the pending call with it. The
+    /// refusal keeps the shared check's exact reason (Codex at 11dd10e).
     #[test]
     fn a_pending_model_call_under_a_denied_child_does_nothing() {
-        for stop in ["deny", "time"] {
+        for (stop, reason) in [("deny", "denied"), ("time", "stopped")] {
             let (mut journal, run) = task(budget(8, 600));
             let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
             let call = ask_model(&mut journal, Some(child), HOSTED_MODEL).unwrap();
@@ -19859,12 +19926,63 @@ mod tests {
                 StepState::Cancelled
             };
             assert_eq!(step_of(&journal, call).state, expected, "{stop}");
-            assert_eq!(journal, before, "{stop}: nothing changes");
+            // Each refused path leaves one record with the shared reason; a
+            // step already cancelled with its tree records only at dispatch.
+            let records = refusal_records(&journal);
+            let expected_records = if stop == "deny" { 2 } else { 1 };
+            assert_eq!(records.len(), expected_records, "{stop}: {records:?}");
+            assert!(
+                records.iter().all(|record| record.contains(reason)),
+                "{stop}: {records:?}"
+            );
+            assert_eq!(journal.steps, before.steps, "{stop}: no step moves");
+            assert_eq!(
+                without_refusal_records(&journal.events),
+                before.events,
+                "{stop}: nothing else changes"
+            );
         }
         // Under a usable child the same call is authorized and dispatched.
         let (mut journal, run) = task(budget(8, 600));
         let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
         let call = ask_model(&mut journal, Some(child), HOSTED_MODEL).unwrap();
+        assert!(authorize(&mut journal, call, Some("model-grant")));
+        assert!(dispatch(&mut journal, call));
+    }
+
+    /// Codex at 11dd10e: a model call of the top task is authorized and
+    /// dispatched only while the task budget is recorded. A journal from
+    /// before idea 2 says exactly why on both paths, and the same call goes
+    /// through once the granted budget is recorded.
+    #[test]
+    fn a_top_level_model_call_needs_the_task_budget() {
+        let hex: String = PRE_IDEA_2_JOURNAL.concat();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect();
+        let (mut journal, _, _) = decode_journal(&bytes).unwrap();
+        let call = journal
+            .steps
+            .iter()
+            .find(|step| step.kind == ProposalKind::Hosted)
+            .unwrap()
+            .id;
+        let before = journal.clone();
+        assert!(!authorize(&mut journal, call, Some("model-grant")));
+        assert!(!dispatch(&mut journal, call));
+        assert_eq!(step_of(&journal, call).grant, None);
+        assert_eq!(step_of(&journal, call).state, StepState::Prepared);
+        assert_eq!(
+            refusal_records(&journal),
+            vec![
+                format!("refused: {TASK_BUDGET_REASON} (step {call})"),
+                format!("refused: {TASK_BUDGET_REASON} (step {call})"),
+            ]
+        );
+        assert_eq!(journal.steps, before.steps);
+        assert_eq!(without_refusal_records(&journal.events), before.events);
+        assert!(record_task_budget(&mut journal, budget(8, 600)));
         assert!(authorize(&mut journal, call, Some("model-grant")));
         assert!(dispatch(&mut journal, call));
     }

@@ -1804,8 +1804,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        match journal.steps[index].stop {\n            Some(reason) => format!(\"partial ({}): {text}\", reason.name()),\n            None => text.to_string(),\n        }",
-     "new": "        match journal.steps[index].stop {\n            Some(reason) => { let _ = reason; text.to_string() }\n            None => text.to_string(),\n        }"
+     "old": "            Some(reason) => format!(\"partial ({}): {text}\", reason.name()),",
+     "new": "            Some(reason) => { let _ = reason; text.to_string() }"
     }
    ],
    "tests": [
@@ -4065,8 +4065,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    let authorizing = grant.is_some_and(|grant| !grant.is_empty());\n    if step.state != StepState::Prepared || (authorizing && !call_parent_usable(journal, step)) {",
-     "new": "    if step.state != StepState::Prepared {"
+     "old": "    let allowed = if authorizing {\n        call_parent_usable(journal, step)\n    } else {\n        Ok(())\n    };",
+     "new": "    let allowed = if authorizing {\n        Ok(())\n    } else {\n        Ok(())\n    };"
     }
    ],
    "tests": [
@@ -4081,8 +4081,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if !call_parent_usable(journal, prepared) {",
-     "new": "    if false && !call_parent_usable(journal, prepared) {"
+     "old": "    if let Err(reason) = call_parent_usable(journal, prepared) {",
+     "new": "    if let Err(reason) = Ok::<(), &'static str>(()) {"
     }
    ],
    "tests": [
@@ -4113,7 +4113,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    let text = if journal.steps[index].kind == ProposalKind::Child {\n        if !child_result_ok(\n            journal\n                .steps\n                .iter()\n                .chain(child.into_iter().flat_map(|child| child.steps.iter())),\n            text,\n        ) {\n            return false;\n        }\n        match journal.steps[index].stop {\n            Some(reason) => format!(\"partial ({}): {text}\", reason.name()),\n            None => text.to_string(),\n        }\n    } else {\n        text.to_string()\n    };",
+     "old": "    let text = if journal.steps[index].kind == ProposalKind::Child {\n        // The label is part of what is stored, so the cap bounds the final\n        // text, not the bytes before the label.\n        let marked = match journal.steps[index].stop {\n            Some(reason) => format!(\"partial ({}): {text}\", reason.name()),\n            None => text.to_string(),\n        };\n        if !child_result_ok(\n            journal\n                .steps\n                .iter()\n                .chain(child.into_iter().flat_map(|child| child.steps.iter())),\n            &marked,\n        ) {\n            return false;\n        }\n        marked\n    } else {\n        text.to_string()\n    };",
      "new": "    let _ = child;\n    let text = text.to_string();"
     }
    ],
@@ -4193,8 +4193,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        ProposalKind::Child if step.grant.is_some() => {\n            usable_child(journal, step.id).is_ok() && scope_still_granted(journal, step).is_some()\n        }",
-     "new": "        ProposalKind::Child if step.grant.is_some() => usable_child(journal, step.id).is_ok(),"
+     "old": "        ProposalKind::Child if step.grant.is_some() => {\n            usable_child(journal, step.id)?;\n            scope_still_granted(journal, step)\n                .map(|_| ())\n                .ok_or(\"not granted\")\n        }",
+     "new": "        ProposalKind::Child if step.grant.is_some() => {\n            usable_child(journal, step.id)?;\n            Ok(())\n        }"
     }
    ],
    "tests": [
@@ -4209,8 +4209,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        if !child_result_ok(\n            journal\n                .steps\n                .iter()\n                .chain(child.into_iter().flat_map(|child| child.steps.iter())),\n            text,\n        ) {",
-     "new": "        let _ = child;\n        if !child_result_ok(journal.steps.iter(), text) {"
+     "old": "        if !child_result_ok(\n            journal\n                .steps\n                .iter()\n                .chain(child.into_iter().flat_map(|child| child.steps.iter())),\n            &marked,\n        ) {",
+     "new": "        let _ = child;\n        if !child_result_ok(journal.steps.iter(), &marked) {"
     }
    ],
    "tests": [
@@ -4265,6 +4265,88 @@
    "tests": [
     "tests::a_refused_host_action_says_why",
     "tests::a_child_host_gets_nothing_once_its_child_stops"
+   ]
+  },
+  {
+   "id": "PX14",
+   "title": "a top task model call skips the task budget",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        ProposalKind::Hosted => match step.parent_id {\n            Some(child) => usable_child(journal, child).map(|_| ()),\n            None if journal.task_budget.is_some() => Ok(()),\n            None => Err(TASK_BUDGET_REASON),\n        },",
+     "new": "        ProposalKind::Hosted => match step.parent_id {\n            Some(child) => usable_child(journal, child).map(|_| ()),\n            None => Ok(()),\n        },"
+    }
+   ],
+   "tests": [
+    "tests::a_top_level_model_call_needs_the_task_budget"
+   ]
+  },
+  {
+   "id": "PX15",
+   "title": "authorize drops a pending call's refusal reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if let Err(reason) = allowed {\n        record_refusal_reason(journal, reason, &format!(\"step {id}\"));\n        return false;\n    }",
+     "new": "    if allowed.is_err() {\n        return false;\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_pending_model_call_under_a_denied_child_does_nothing",
+    "tests::a_top_level_model_call_needs_the_task_budget"
+   ]
+  },
+  {
+   "id": "PX16",
+   "title": "dispatch drops a pending call's refusal reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if let Err(reason) = call_parent_usable(journal, prepared) {\n        record_refusal_reason(journal, reason, &format!(\"step {id}\"));\n        return false;\n    }",
+     "new": "    if call_parent_usable(journal, prepared).is_err() {\n        return false;\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_pending_model_call_under_a_denied_child_does_nothing",
+    "tests::a_top_level_model_call_needs_the_task_budget"
+   ]
+  },
+  {
+   "id": "PX17",
+   "title": "the stored partial result is checked before its label",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if !child_result_ok(\n            journal\n                .steps\n                .iter()\n                .chain(child.into_iter().flat_map(|child| child.steps.iter())),\n            &marked,\n        ) {\n            return false;\n        }\n        marked",
+     "new": "        if !child_result_ok(\n            journal\n                .steps\n                .iter()\n                .chain(child.into_iter().flat_map(|child| child.steps.iter())),\n            text,\n        ) {\n            return false;\n        }\n        marked"
+    }
+   ],
+   "tests": [
+    "tests::a_stopped_child_result_is_capped_after_its_label"
+   ]
+  },
+  {
+   "id": "PX18",
+   "title": "self-test names share one process verdict",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "        # Each named case is its own process, so one case cannot carry a\n        # verdict for another. Exit 2 means no case answers to the name.\n        outcomes = {}\n        for name in entry[\"tests\"]:\n            code, _ = run(argv + extra + [\"--self-test-case\", name], cwd)\n            outcomes[name] = \"not run\" if code == 2 else \"failed\" if code != 0 else \"passed\"\n        return False, outcomes, None",
+     "new": "        code, _ = run(argv, cwd)\n        outcome = \"failed\" if code != 0 else \"passed\"\n        return False, {name: outcome for name in entry[\"tests\"]}, None"
+    }
+   ],
+   "tests": [
+    "named case attribution"
    ]
   }
  ]
