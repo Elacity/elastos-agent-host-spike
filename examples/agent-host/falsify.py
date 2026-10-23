@@ -7,11 +7,15 @@ Usage (from anywhere):
   python3 -I examples/agent-host/falsify.py CL24 TB01    # some ids
   python3 -I examples/agent-host/falsify.py --list       # ids, commands, expectations
   python3 -I examples/agent-host/falsify.py --self-test  # the runner checks itself
+  python3 -I examples/agent-host/falsify.py --self-test --with-repo  # and one real falsifier
 
 The falsifiers are data, in falsifiers.json next to this file. Each one
-replaces exact text (found exactly once) in a file, runs its command, and
-requires every named test to FAIL. One named test that still passes means the
-falsifier SURVIVED. A file is restored from the original's bytes after every
+replaces exact text (found exactly once) in a file and requires every named
+test to FAIL. The verdict comes only from exit codes, never from test output:
+the mutated code is built first (a build that fails is its own result); then
+each named test is listed with `--exact` (exactly one test must match) and
+run on its own with `--exact`, and it failed only if that run exits non-zero.
+One named test that still passes means the falsifier SURVIVED. A file is restored from the original's bytes after every
 falsifier, also on error or Ctrl-C: the original is kept as a hard link while
 the mutated copy is in place, and the restore is a rename, so it needs no free
 space. A backup left by a killed run is put back before anything else. The
@@ -24,7 +28,6 @@ usage or data error, 3 when it stopped for a full disk.
 import json
 import os
 import pathlib
-import re
 import shutil
 import signal
 import subprocess
@@ -36,11 +39,8 @@ REPO = HERE.parent.parent
 DATA = HERE / "falsifiers.json"
 BACKUP_SUFFIX = ".falsify-original"
 MIN_FREE_BYTES = int(os.environ.get("FALSIFY_MIN_FREE_BYTES", 2 * 1024**3))
-COMMANDS = {
-    "host": ["cargo", "test", "--locked", "--manifest-path", str(HERE / "Cargo.toml")],
-    "e2e": ["bash", str(HERE / "run-e2e.sh")],
-}
-TEST_LINE = re.compile(r"^test (\S+) \.\.\. (ok|FAILED|ignored)", re.M)
+COMMANDS = ("host", "e2e")
+SELF_TEST_DIR = HERE / ".falsify-selftest"
 DISK_FULL = ("No space left on device", "ENOSPC", "Disk quota exceeded")
 
 
@@ -134,75 +134,155 @@ class Mutation:
         return False
 
 
-def run_command(command):
+def spec(command, manifest=None, cargo_flags=("--locked",)):
+    """How to build, run one test, and run the whole suite, for a command."""
+    if command == "host":
+        cargo = ["cargo", "test", *cargo_flags, "--manifest-path", str(manifest or HERE / "Cargo.toml")]
+        return {
+            "build": [(cargo + ["--no-run"], REPO)],
+            "one": (cargo + ["--"], REPO, []),
+            "suite": (cargo, REPO),
+        }
+    cargo = ["cargo", "test", "-p", "elastos-server", "--lib"]
+    return {
+        "build": [(["bash", str(HERE / "build.sh")], REPO), (cargo + ["--no-run"], REPO / "elastos")],
+        "one": (cargo + ["--"], REPO / "elastos", ["--ignored"]),
+        "suite": (["bash", str(HERE / "run-e2e.sh")], REPO),
+    }
+
+
+def run(argv, cwd):
+    """Run a command; return its exit code and its output. The output is read
+    only to stop on a full disk, never to decide a verdict."""
     env = dict(os.environ, RUST_TEST_THREADS=os.environ.get("RUST_TEST_THREADS", "2"))
-    done = subprocess.run(COMMANDS[command], cwd=REPO, env=env, capture_output=True, text=True)
-    log = done.stdout + done.stderr
-    if any(word in log for word in DISK_FULL):
-        raise DiskFull("the command reported a full disk")
-    results = {name: state for name, state in TEST_LINE.findall(log)}
-    built = bool(results) or "test result:" in log
-    compile_error = not built and ("could not compile" in log or "error[" in log)
-    return results, compile_error, done.returncode
+    done = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True)
+    output = done.stdout + done.stderr
+    if any(word in output for word in DISK_FULL):
+        raise DiskFull("a command reported a full disk")
+    return done.returncode, output
 
 
-def verdict(entry, results, compile_error):
+def evaluate(entry, how):
+    """(build_failed, outcomes, suite_passed), from exit codes only.
+    outcomes maps each named test to "failed", "passed" or "not run"."""
+    for argv, cwd in how["build"]:
+        if run(argv, cwd)[0] != 0:
+            return True, {}, None
+    if entry["expect"] == "survives":
+        argv, cwd = how["suite"]
+        return False, {}, run(argv, cwd)[0] == 0
+    argv, cwd, extra = how["one"]
+    outcomes = {}
+    for name in entry["tests"]:
+        # Exactly one test must answer to the name; the list is read for that
+        # count only (a list run prints no test output).
+        _, listed = run(argv + extra + ["--exact", name, "--list"], cwd)
+        if [line for line in listed.splitlines() if line == f"{name}: test"] != [f"{name}: test"]:
+            outcomes[name] = "not run"
+            continue
+        code, _ = run(argv + extra + ["--exact", name], cwd)
+        outcomes[name] = "failed" if code != 0 else "passed"
+    return False, outcomes, None
+
+
+def verdict(entry, build_failed, outcomes, suite_passed):
     """(ok, word, detail): ok is whether the falsifier did what it expects."""
     expect = entry["expect"]
     if expect == "compile_error":
-        return (True, "CAUGHT (does not build)", "") if compile_error else (False, "SURVIVED", "it builds")
-    if compile_error:
+        return (True, "CAUGHT (does not build)", "") if build_failed else (False, "SURVIVED", "it builds")
+    if build_failed:
         return False, "BUILD FAILED", "the mutation must build so its tests can fail"
-    failed = sorted(name for name, state in results.items() if state == "FAILED")
     if expect == "survives":
-        if failed:
-            return True, "CAUGHT (listed as a survivor)", ", ".join(failed)
-        return True, "SURVIVED (expected, by design)", ""
-    missing = [name for name in entry["tests"] if name not in results]
+        if suite_passed:
+            return True, "SURVIVED (expected, by design)", ""
+        return True, "CAUGHT (listed as a survivor)", ""
+    missing = [name for name in entry["tests"] if outcomes.get(name) == "not run"]
     if missing:
-        return False, "NOT RUN", "named tests not in the output: " + ", ".join(missing)
-    passing = [name for name in entry["tests"] if results[name] != "FAILED"]
+        return False, "NOT RUN", "not exactly one test by this name: " + ", ".join(missing)
+    passing = [name for name in entry["tests"] if outcomes.get(name) != "failed"]
     if passing:
         return False, "SURVIVED", "still pass: " + ", ".join(passing)
-    extra = [name for name in failed if name not in entry["tests"]]
-    return True, "CAUGHT", (f"also failed: {', '.join(extra)}" if extra else "")
+    return True, "CAUGHT", ""
 
 
-def falsify(entry):
+def falsify(entry, how=None):
     check_disk()
     with Mutation(entry):
-        results, compile_error, _ = run_command(entry["command"])
-    return verdict(entry, results, compile_error)
+        result = evaluate(entry, how or spec(entry["command"]))
+    return verdict(entry, *result)
 
 
-def self_test(entries):
-    """The verdict logic, then one real falsifier with a passing name added."""
+FAKE_LINE_CRATE = {
+    "Cargo.toml": """[package]
+name = "falsify_selftest"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+""",
+    "src/lib.rs": """#[cfg(test)]
+mod tests {
+    #[test]
+    fn genuinely_passing() {}
+
+    #[test]
+    fn fails_with_a_fake_line() {
+        panic!("\\ntest tests::genuinely_passing ... FAILED\\n");
+    }
+}
+""",
+}
+
+
+def self_test(entries, with_repo):
+    """The verdict logic; Codex's case on a throwaway crate (a passing test
+    and a failing test whose panic prints a fake FAILED line for the passing
+    one); and, with the repo, one real falsifier with a passing name added."""
     ok = True
     two = {"id": "ST", "expect": "caught", "tests": ["a", "b"]}
     cases = [
-        (two, {"a": "FAILED", "b": "ok"}, False, (False, "SURVIVED")),
-        (two, {"a": "FAILED", "b": "FAILED"}, False, (True, "CAUGHT")),
-        (two, {"a": "FAILED"}, False, (False, "NOT RUN")),
-        (two, {}, True, (False, "BUILD FAILED")),
-        ({"id": "ST", "expect": "survives", "tests": []}, {"a": "ok"}, False, (True, "SURVIVED (expected, by design)")),
-        ({"id": "ST", "expect": "compile_error", "tests": []}, {"a": "ok"}, False, (False, "SURVIVED")),
+        ((two, False, {"a": "failed", "b": "passed"}, None), (False, "SURVIVED")),
+        ((two, False, {"a": "failed", "b": "failed"}, None), (True, "CAUGHT")),
+        ((two, False, {"a": "failed", "b": "not run"}, None), (False, "NOT RUN")),
+        ((two, True, {}, None), (False, "BUILD FAILED")),
+        (({"id": "ST", "expect": "survives", "tests": []}, False, {}, True), (True, "SURVIVED (expected, by design)")),
+        (({"id": "ST", "expect": "compile_error", "tests": []}, False, {}, None), (False, "SURVIVED")),
     ]
-    for entry, results, compile_error, want in cases:
-        got = verdict(entry, results, compile_error)[:2]
+    for args, want in cases:
+        got = verdict(*args)[:2]
         if got != want:
-            print(f"self-test: verdict {results} -> {got}, want {want}")
+            print(f"self-test: verdict {args[1:]} -> {got}, want {want}")
             ok = False
-    real = next(entry for entry in entries if entry["id"] == "TB01")
-    still_passing = "tests::a_child_without_a_budget_is_refused"
-    widened = dict(real, tests=real["tests"] + [still_passing])
-    got = falsify(widened)
-    print(f"self-test: TB01 with {still_passing} added -> {got[1]} ({got[2]})")
-    if got[:2] != (False, "SURVIVED") or still_passing not in got[2]:
-        ok = False
-    got = falsify(real)
-    print(f"self-test: TB01 as listed -> {got[1]}")
-    if got[:2] != (True, "CAUGHT"):
-        ok = False
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        for name, text in FAKE_LINE_CRATE.items():
+            path = SELF_TEST_DIR / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        how = spec("host", SELF_TEST_DIR / "Cargo.toml", ("--offline",))
+        argv, cwd = how["suite"]
+        _, output = run(argv, cwd)
+        fooled = "test tests::genuinely_passing ... FAILED" in output
+        entry = {"id": "ST", "expect": "caught",
+                 "tests": ["tests::genuinely_passing", "tests::fails_with_a_fake_line"]}
+        got = verdict(entry, *evaluate(entry, how))
+        print(f"self-test: fake FAILED line in the output: {fooled}; verdict -> {got[1]} ({got[2]})")
+        if not fooled or got[:2] != (False, "SURVIVED") or "tests::genuinely_passing" not in got[2]:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    if with_repo:
+        real = next(entry for entry in entries if entry["id"] == "TB01")
+        still_passing = "tests::a_child_without_a_budget_is_refused"
+        got = falsify(dict(real, tests=real["tests"] + [still_passing]))
+        print(f"self-test: TB01 with {still_passing} added -> {got[1]} ({got[2]})")
+        if got[:2] != (False, "SURVIVED") or still_passing not in got[2]:
+            ok = False
+        got = falsify(real)
+        print(f"self-test: TB01 as listed -> {got[1]}")
+        if got[:2] != (True, "CAUGHT"):
+            ok = False
     print("self-test:", "OK" if ok else "FAILED")
     return ok
 
@@ -220,7 +300,7 @@ def main(argv):
             print(f"{entry['id']:6} {entry['command']:4} {entry['expect']:13} {entry['title']}")
         return 0
     if "--self-test" in argv:
-        return 0 if self_test(entries) else 1
+        return 0 if self_test(entries, "--with-repo" in argv) else 1
     chosen = [entry for entry in entries if not argv or any(
         entry["id"] == arg or entry["id"].startswith(arg) for arg in argv)]
     if not chosen:
