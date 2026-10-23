@@ -27,120 +27,35 @@
 //! output and a retry starts clean. The result is checked by listing it, and
 //! its CID is returned.
 
-use std::ffi::{CStr, CString, OsStr, OsString};
+use std::ffi::OsStr;
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::ffi::OsStrExt;
+use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
 
 use serde_json::{json, Value};
 
 use crate::admit::{check_cid_form, parse_manifest};
 use crate::listing::{
-    check_prefixes, check_segment, check_unique_under_case_folding, closure_cid, real_path,
+    c_name, check_prefixes, check_segment, check_unique_under_case_folding, closure_cid, open_at,
+    open_dir, open_in, open_regular_in, real_path, stat_at, walk_regular_files, Kind,
 };
 
 /// The destination as its parts: no trailing `/` or `.`, no `..`, no link on
-/// the way to it. The parts are checked by the same check as the source,
-/// before the first write. The last level is created exclusively, so a folder
-/// that appears after this check is refused (`pack_destination_exists`) with
-/// its contents untouched.
+/// the way to it, and at least one part that names a new folder. `.` and `/`
+/// name folders that already exist, so there is no new folder to create
+/// exclusively and nothing to pack into: they are refused
+/// (`pack_destination_exists`) with the folder and its contents untouched.
 fn check_destination(into: &Path) -> Result<PathBuf, Refusal> {
-    check_prefixes(into)
-}
-
-/// `name` for an `openat` call; a name with a NUL byte is not a path we made.
-fn c_name(name: &OsStr, shown: &str) -> Result<CString, Refusal> {
-    CString::new(name.as_bytes()).map_err(|_| Refusal::PathInvalid(shown.to_string()))
-}
-
-/// Opens `name` below `dir` with `flags` and `O_NOFOLLOW`, so a link swapped in
-/// after the planning checks is refused by the open itself, not read through.
-fn open_at(
-    dir: &std::fs::File,
-    name: &OsStr,
-    flags: i32,
-    shown: &str,
-) -> Result<std::fs::File, Refusal> {
-    let name = c_name(name, shown)?;
-    let fd = unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o644,
-        )
-    };
-    if fd < 0 {
-        let err = std::io::Error::last_os_error();
-        let is_link = err.raw_os_error() == Some(libc::ELOOP)
-            || (flags & libc::O_DIRECTORY != 0 && err.raw_os_error() == Some(libc::ENOTDIR));
-        return Err(match is_link {
-            true => Refusal::SymlinkInPath(shown.to_string()),
-            false => io(err, Path::new(shown)),
-        });
+    let rebuilt = check_prefixes(into)?;
+    let names_a_folder = rebuilt
+        .components()
+        .any(|part| matches!(part, Component::Normal(_)));
+    if !names_a_folder {
+        return Err(Refusal::PackDestinationExists(
+            rebuilt.display().to_string(),
+        ));
     }
-    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
-}
-
-/// Opens `path` itself and every folder on the way to it, one `openat` at a
-/// time from the root (or the current folder), each with `O_NOFOLLOW`.
-fn open_dir(path: &Path) -> Result<std::fs::File, Refusal> {
-    let mut dir = if path.is_absolute() {
-        std::fs::File::open("/").map_err(|err| io(err, Path::new("/")))?
-    } else {
-        std::fs::File::open(".").map_err(|err| io(err, Path::new(".")))?
-    };
-    let mut shown = if path.is_absolute() {
-        "/".to_string()
-    } else {
-        ".".to_string()
-    };
-    for part in path.components() {
-        let Component::Normal(name) = part else {
-            continue;
-        };
-        shown = format!("{shown}/{}", name.to_string_lossy());
-        dir = open_at(&dir, name, libc::O_RDONLY | libc::O_DIRECTORY, &shown)?;
-    }
-    Ok(dir)
-}
-
-/// Opens `relative` below `root`: folders on the way with `O_DIRECTORY`, the
-/// last part with `leaf_flags`. `create` makes missing folders below `root`.
-fn open_in(
-    root: &std::fs::File,
-    relative: &str,
-    leaf_flags: i32,
-    create: bool,
-    shown_root: &str,
-) -> Result<std::fs::File, Refusal> {
-    let mut dir = None;
-    let mut shown = shown_root.trim_end_matches('/').to_string();
-    let parts: Vec<&str> = relative.split('/').collect();
-    for (index, name) in parts.iter().enumerate() {
-        shown = format!("{shown}/{name}");
-        let parent = dir.as_ref().unwrap_or(root);
-        if index + 1 == parts.len() {
-            return open_at(parent, OsStr::new(name), leaf_flags, &shown);
-        }
-        if create {
-            let name_c = c_name(OsStr::new(name), &shown)?;
-            if unsafe { libc::mkdirat(parent.as_raw_fd(), name_c.as_ptr(), 0o755) } < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.raw_os_error() != Some(libc::EEXIST) {
-                    return Err(io(err, Path::new(&shown)));
-                }
-            }
-        }
-        dir = Some(open_at(
-            parent,
-            OsStr::new(name),
-            libc::O_RDONLY | libc::O_DIRECTORY,
-            &shown,
-        )?);
-    }
-    Err(Refusal::PathInvalid(relative.to_string()))
+    Ok(rebuilt)
 }
 
 /// Makes the destination folder (its parts are checked already), then opens
@@ -210,44 +125,6 @@ fn lstat_each(source: &Path, segments: &[&str]) -> Result<Option<std::fs::Metada
     }
     Ok(Some(meta))
 }
-/// What an entry below a directory handle is. The lookup is `fstatat` with
-/// `AT_SYMLINK_NOFOLLOW`, so no part of the path is looked up again by name.
-#[derive(Clone, Copy)]
-enum Kind {
-    Dir,
-    File,
-    Link,
-    Other,
-}
-
-/// The kind of `name` below `dir`, looked up relative to the handle itself.
-/// `None` when there is no such entry.
-fn stat_at(dir: &std::fs::File, name: &OsStr, shown: &str) -> Result<Option<Kind>, Refusal> {
-    let name = c_name(name, shown)?;
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    let rc = unsafe {
-        libc::fstatat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            &mut stat,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if rc < 0 {
-        let err = std::io::Error::last_os_error();
-        return match err.raw_os_error() {
-            Some(libc::ENOENT) => Ok(None),
-            _ => Err(io(err, Path::new(shown))),
-        };
-    }
-    let mode = (stat.st_mode as u32) & (libc::S_IFMT as u32);
-    Ok(Some(match mode {
-        m if m == libc::S_IFDIR as u32 => Kind::Dir,
-        m if m == libc::S_IFREG as u32 => Kind::File,
-        m if m == libc::S_IFLNK as u32 => Kind::Link,
-        _ => Kind::Other,
-    }))
-}
 
 /// Reads `capsule.json` below the opened source folder. The lookup, the type
 /// check and the read all use the directory handle, so a manifest swapped for
@@ -260,74 +137,11 @@ fn read_manifest(source_dir: &std::fs::File, shown_root: &str) -> Result<Vec<u8>
         Some(Kind::Link) => return Err(Refusal::SymlinkInPath(shown)),
         Some(_) => return Err(Refusal::SpecialFile("capsule.json".to_string())),
     }
-    let mut file = open_in(
-        source_dir,
-        "capsule.json",
-        libc::O_RDONLY,
-        false,
-        shown_root,
-    )?;
+    let mut file = open_regular_in(source_dir, "capsule.json", shown_root)?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
         .map_err(|err| io(err, Path::new(&shown)))?;
     Ok(bytes)
-}
-
-/// Lists every regular file below `dir`, which is opened already. The walk
-/// uses the directory handle for each child (`fstatat`) and opens each folder
-/// with `O_NOFOLLOW`, so a folder swapped for a link after the planning
-/// `lstat` is refused instead of walked. Paths are relative to `prefix`.
-fn list_files_below(
-    dir: &std::fs::File,
-    prefix: &str,
-    files: &mut Vec<String>,
-    shown: &str,
-) -> Result<(), Refusal> {
-    let dup = unsafe { libc::dup(dir.as_raw_fd()) };
-    if dup < 0 {
-        return Err(io(std::io::Error::last_os_error(), Path::new(shown)));
-    }
-    let stream = unsafe { libc::fdopendir(dup) };
-    if stream.is_null() {
-        unsafe { libc::close(dup) };
-        return Err(io(std::io::Error::last_os_error(), Path::new(shown)));
-    }
-    let mut names: Vec<OsString> = Vec::new();
-    loop {
-        let entry = unsafe { libc::readdir(stream) };
-        if entry.is_null() {
-            break;
-        }
-        let raw = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
-        let name = OsStr::from_bytes(raw.to_bytes()).to_os_string();
-        if name == "." || name == ".." {
-            continue;
-        }
-        names.push(name);
-    }
-    unsafe { libc::closedir(stream) };
-    names.sort();
-    for name in names {
-        let shown_child = format!("{shown}/{}", name.to_string_lossy());
-        let name_text = name
-            .to_str()
-            .ok_or_else(|| Refusal::PathInvalid(shown_child.clone()))?;
-        check_segment(name_text)?;
-        let relative = if prefix.is_empty() {
-            name_text.to_string()
-        } else {
-            format!("{prefix}/{name_text}")
-        };
-        match stat_at(dir, &name, &shown_child)? {
-            Some(Kind::Dir) => {
-                let child = open_at(dir, &name, libc::O_RDONLY | libc::O_DIRECTORY, &shown_child)?;
-                list_files_below(&child, &relative, files, &shown_child)?;
-            }
-            Some(Kind::File) => files.push(relative),
-            _ => return Err(Refusal::SpecialFile(relative)),
-        }
-    }
-    Ok(())
 }
 
 /// The points where a test can act after a check and before the work it
@@ -422,11 +236,14 @@ fn pack_inner(
             false,
             &source.display().to_string(),
         )?;
-        list_files_below(
+        walk_regular_files(
             &folder_dir,
             &folder,
-            &mut files,
             &root.display().to_string(),
+            &mut |_, _, relative, _| {
+                files.push(relative.to_string());
+                Ok(())
+            },
         )?;
         if !files.contains(&entrypoint) {
             return Err(Refusal::PackEntrypointMissing(format!(
@@ -465,13 +282,7 @@ fn pack_inner(
     for file in &files {
         sources.push((
             file,
-            open_in(
-                &source_dir,
-                file,
-                libc::O_RDONLY,
-                false,
-                &source.display().to_string(),
-            )?,
+            open_regular_in(&source_dir, file, &source.display().to_string())?,
         ));
     }
     let destination = create_destination(&into)?;
@@ -526,6 +337,7 @@ fn pack_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::refused;
 
     struct Temp(#[allow(dead_code)] tempfile::TempDir, PathBuf);
 
@@ -544,6 +356,15 @@ mod tests {
     fn write(path: &Path, bytes: &[u8]) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, bytes).unwrap();
+    }
+
+    fn component_source(dir: &Path) -> PathBuf {
+        write(
+            &dir.join("capsule.json"),
+            br#"{"schema":"elastos.capsule/v1","name":"x","version":"0.1.0","role":"app","execution":"component","entrypoint":"x.component.wasm"}"#,
+        );
+        write(&dir.join("x.component.wasm"), b"\0asm component");
+        dir.to_path_buf()
     }
 
     #[test]
@@ -705,5 +526,132 @@ mod tests {
         std::fs::rename(page.join("styles-real"), page.join("browser/styles")).unwrap();
         let (_, entries) = pack(&page, &into, &[]).unwrap();
         assert_eq!(entries.len(), 4);
+    }
+
+    /// Clears the injected folder-walk failure at the end of a test, also when
+    /// the test panics.
+    struct ReadDirFault;
+
+    impl Drop for ReadDirFault {
+        fn drop(&mut self) {
+            crate::listing::fail_readdir_after(0);
+        }
+    }
+
+    #[test]
+    fn pack_refuses_a_destination_that_names_no_new_folder() {
+        let root = tempdir();
+        let r = root.path();
+        let core = component_source(&r.join("core"));
+        std::fs::write(r.join("sentinel.txt"), b"keep").unwrap();
+
+        // Packing into `.` or `/` cannot create a new folder exclusively, so
+        // there is no destination to adopt: both are refused and the current
+        // folder keeps its contents.
+        let back = std::env::current_dir().unwrap();
+        std::env::set_current_dir(r).unwrap();
+        let dot = pack(&core, Path::new("."), &[]);
+        let slash = pack(&core, Path::new("/"), &[]);
+        std::env::set_current_dir(back).unwrap();
+
+        assert_eq!(refused(dot), "pack_destination_exists");
+        assert_eq!(refused(slash), "pack_destination_exists");
+        assert_eq!(std::fs::read(r.join("sentinel.txt")).unwrap(), b"keep");
+        assert!(!r.join("capsule.json").exists(), "the manifest was written");
+        assert!(
+            !r.join("x.component.wasm").exists(),
+            "the entrypoint was written"
+        );
+    }
+
+    #[test]
+    fn pack_refuses_a_source_file_replaced_by_a_folder_after_planning() {
+        let root = tempdir();
+        let r = root.path();
+        let core = component_source(&r.join("core"));
+        let wasm = core.join("x.component.wasm");
+        let into = r.join("packed");
+
+        // The planned listing passed with a regular file; a folder takes its
+        // place before the sources are opened. The handle must be refused as
+        // a special file, not copied into a new destination.
+        let refusal = pack_inner(&core, &into, &[], &mut |hook| {
+            if matches!(hook, Hook::Plan) {
+                std::fs::remove_file(&wasm).unwrap();
+                std::fs::create_dir(&wasm).unwrap();
+            }
+        })
+        .unwrap_err();
+        assert_eq!(refusal.code(), "special_file");
+        assert!(!into.exists(), "{} was written", into.display());
+    }
+
+    #[test]
+    fn pack_refuses_a_source_file_replaced_by_a_fifo_after_planning() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = tempdir();
+        let r = root.path();
+        let core = component_source(&r.join("core"));
+        let wasm = core.join("x.component.wasm");
+        let into = r.join("packed");
+        let (ready, opened) = std::sync::mpsc::channel();
+        let mut holder = None;
+
+        // The planned listing passed with a regular file; a FIFO takes its
+        // place before the sources are opened. A blocking open would wait for
+        // a writer forever, so the opened handle must be checked instead. The
+        // holder makes the old blocking open return when a mutant needs it to.
+        let refusal = pack_inner(&core, &into, &[], &mut |hook| {
+            if matches!(hook, Hook::Plan) {
+                std::fs::remove_file(&wasm).unwrap();
+                let name = std::ffi::CString::new(wasm.as_os_str().as_bytes()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+                let path = wasm.clone();
+                let ready = ready.clone();
+                holder = Some(std::thread::spawn(move || {
+                    let held = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&path)
+                        .unwrap();
+                    ready.send(()).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(800));
+                    drop(held);
+                }));
+            }
+        })
+        .unwrap_err();
+        assert_eq!(refusal.code(), "special_file");
+        assert!(!into.exists(), "{} was written", into.display());
+        opened
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        holder.unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn pack_refuses_a_folder_read_error_instead_of_sending_part_of_it() {
+        let _fault = ReadDirFault;
+        let root = tempdir();
+        let r = root.path();
+        let page = r.join("page");
+        write(
+            &page.join("capsule.json"),
+            br#"{"schema":"elastos.capsule/v1","name":"x","version":"0.1.0","role":"viewer","execution":"web-projection","entrypoint":"browser/index.html"}"#,
+        );
+        write(&page.join("browser/index.html"), b"<!doctype html>");
+        write(&page.join("browser/main.js"), b"// main");
+        write(&page.join("browser/page.css"), b"main {}");
+
+        // The folder walk returns index.html, then reports EIO instead of the
+        // end of the folder. Treating that as the end would ship a bundle with
+        // the remaining assets missing and report success; it must refuse and
+        // write nothing.
+        crate::listing::fail_readdir_after(3);
+        let into = r.join("packed");
+        let refusal = pack(&page, &into, &[]).unwrap_err();
+        assert_eq!(refusal.code(), "io");
+        assert!(!into.exists(), "{} was written", into.display());
     }
 }

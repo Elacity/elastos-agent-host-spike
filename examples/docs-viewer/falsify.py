@@ -272,7 +272,7 @@ BUNDLE = [
         "the page ships its whole source folder",
         "../photo-viewer/bundle/src/pack.rs",
         "    for file in &files {",
-        "    let mut whole = Vec::new();\n    let mut no_manifest = None;\n    crate::listing::walk(source, source, &mut whole, &mut no_manifest)?;\n    files = whole.into_iter().map(|entry| entry.path).collect();\n    for file in &files {",
+        "    let whole_dir = crate::listing::open_dir(source)?;\n    let mut whole = Vec::new();\n    crate::listing::walk_regular_files(\n        &whole_dir,\n        \"\",\n        &source.display().to_string(),\n        &mut |_, _, relative, _| {\n            whole.push(relative.to_string());\n            Ok(())\n        },\n    )?;\n    files = whole;\n    for file in &files {",
         ["each_capsule_ships_only_what_it_runs_from"],
     ),
     (
