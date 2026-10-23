@@ -482,17 +482,23 @@ try {
     phase = "unprepared"; kept = false;
     await refreshModels();
     await frame.getByRole("button", { name: acquire, exact: true }).waitFor();
-    // Only System keeps Refresh beside a loaded model; Marketplace reads again when the detail opens.
-    if (app === "system") {
-      let releaseCatalog;
-      const catalogReceived = new Promise(resolveCatalog => { delayCatalog = reply => { releaseCatalog = reply; resolveCatalog(); }; });
-      const beforeRefreshUses = calls.filter(c => c.method === "content.use").length;
-      await frame.locator('[data-model-control="refresh"]').click();
-      await catalogReceived;
-      assert.equal(await frame.getByRole("button", { name: acquire, exact: true }).isDisabled(), true);
-      await frame.getByRole("button", { name: acquire, exact: true }).evaluate(n => n.click());
-      assert.equal(calls.filter(c => c.method === "content.use").length, beforeRefreshUses, "catalog refresh blocks old-model mutation");
-      delayCatalog = null; releaseCatalog();
+    // System's Refresh and Marketplace's View > Refresh both read the open model again in place,
+    // and a pending read blocks the old model's Get.
+    const heldCatalogs = [];
+    const catalogReceived = new Promise(resolveCatalog => { delayCatalog = reply => { heldCatalogs.push(reply); resolveCatalog(); }; });
+    const beforeRefreshUses = calls.filter(c => c.method === "content.use").length;
+    const refreshedDetail = await frame.locator(app === "marketplace" ? "[data-model-management]" : "body").elementHandle();
+    if (app === "system") await frame.locator('[data-model-control="refresh"]').click();
+    else await frame.locator("body").evaluate(() => window.dispatchEvent(new MessageEvent("message", {
+      origin: "null", source: window.parent, data: { type: "elastos:menu-command", cmd: "refresh" },
+    })));
+    await catalogReceived;
+    assert.equal(await frame.getByRole("button", { name: acquire, exact: true }).isDisabled(), true);
+    await frame.getByRole("button", { name: acquire, exact: true }).evaluate(n => n.click());
+    assert.equal(calls.filter(c => c.method === "content.use").length, beforeRefreshUses, "catalog refresh blocks old-model mutation");
+    delayCatalog = null; heldCatalogs.splice(0).forEach(reply => reply());
+    if (app === "marketplace") {
+      assert.equal(await refreshedDetail.evaluate(node => node.isConnected), true, "View > Refresh rereads the open detail in place");
     }
     await frame.locator('[data-model-control="use"]:enabled').waitFor();
     loseUseResponse = true;

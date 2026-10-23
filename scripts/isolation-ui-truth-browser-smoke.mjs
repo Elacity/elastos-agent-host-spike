@@ -145,7 +145,7 @@ try {
   assert.equal(await frame().locator("#detail-modal.active").count(), 0);
   await frame().locator('[data-destination="models"]').first().click();
   await frame().locator('[data-action="model-detail"]').first().click();
-  assert.match(await frame().locator(".modal-developer").textContent(), /^Verified publisher · /);
+  assert.equal((await frame().locator(".modal-developer").textContent()).trim(), "Verified publisher");
   assert.match(await frame().locator("#detail-content").textContent(), /Catalog signature verified/);
   for (const [signature, state] of [["invalid", "verified"], [{ malformed: true }, "verified"], ["catalog-signature-verified", "unavailable"]]) {
     modelSignature = signature; catalogState = state; await page.reload();

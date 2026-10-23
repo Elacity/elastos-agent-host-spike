@@ -348,11 +348,14 @@ async function repairJourney(assistant, offer) {
   results.model_interrupted_get_retry = "passed";
 }
 
+// The Marketplace detail reads the model each time it opens (Refresh shows only
+// after a failed read), so reopening it is the fresh read.
 async function showModelDetail(marketplace, modelCid) {
   const close = marketplace.locator('[data-action="close-detail"]').first();
   if (await close.isVisible()) await close.click();
   await marketplace.locator(`[data-action="model-detail"][data-app="model:${modelCid}"]`).click();
-  await marketplace.locator('[data-model-control="refresh"]').click();
+  await marketplace.locator('#detail-modal.active [data-model-management] li[role="status"]:not(:has-text("Loading models…"))')
+    .waitFor({ state: "attached", timeout: 60000 });
 }
 
 async function clickModelUse(marketplace, modelCid, label) {
