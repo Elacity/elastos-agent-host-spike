@@ -1200,12 +1200,21 @@ fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// The one parent rule: only a run or a child holds a child. A child made
+/// here (`propose_child`), every budgeted child on load (`child_rules`), and
+/// the scope walk (`scope_still_granted`) all use it.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn may_hold_a_child(parent: &Step) -> bool {
+    matches!(parent.kind, ProposalKind::Run | ProposalKind::Child)
+}
+
 /// The rules every child keeps, wherever its journal comes from: made here,
 /// decoded, reread, resumed, answered in the inbox, or opened as a child
 /// host. Every path calls this one function, so none skips a rule. A child's
 /// limits come only from the journal that holds it (the parent's journal):
 /// - its parent exists (that it comes first is checked for every step on
-///   load);
+///   load), and a budgeted child's parent may hold a child
+///   (`may_hold_a_child`);
 /// - a child below a stopped child has stopped too;
 /// - its resource sits strictly under its parent's;
 /// - a budgeted child's depth is within `CHILD_DEPTH_LIMIT`;
@@ -1217,6 +1226,11 @@ fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
 fn child_rules(journal: &Journal, step: &Step) -> Result<(), &'static str> {
     let find = |id: u64| journal.steps.iter().find(|step| step.id == id);
     let parent = step.parent_id.and_then(find).ok_or("record")?;
+    // Like the depth limit, the parent rule holds for every budgeted child;
+    // children from before idea 2 could sit under any step and can do nothing.
+    if step.budget.is_some() && !may_hold_a_child(parent) {
+        return Err("not a parent");
+    }
     if step.stop.is_none()
         && child_chain(journal, step.parent_id)
             .iter()
@@ -1323,7 +1337,7 @@ fn granted_scope(step: &Step) -> Option<&str> {
 
 /// A step's granted scope, if it still stands: the step holds a grant, and
 /// every child above it, up to and including the first step that is not a
-/// child, still holds a grant whose scope covers it. A parent denied or
+/// child, may hold a child and still holds a grant whose scope covers it. A parent denied or
 /// stopped since takes the scope away from everything below it.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn scope_still_granted<'a>(journal: &'a Journal, step: &'a Step) -> Option<&'a str> {
@@ -1333,6 +1347,11 @@ fn scope_still_granted<'a>(journal: &'a Journal, step: &'a Step) -> Option<&'a s
         let above = below
             .parent_id
             .and_then(|id| journal.steps.iter().find(|step| step.id == id))?;
+        // A step that cannot hold a child stands for no scope: the walk does
+        // not stop there with the scope granted.
+        if !may_hold_a_child(above) {
+            return None;
+        }
         if !granted_scope(above).is_some_and(|wider| resource_covers(wider, scope)) {
             return None;
         }
@@ -3852,7 +3871,7 @@ fn propose_child(
     let Some(parent) = journal.steps.iter().find(|step| step.id == parent_id) else {
         return Err("no parent");
     };
-    if !matches!(parent.kind, ProposalKind::Run | ProposalKind::Child) {
+    if !may_hold_a_child(parent) {
         return Err("not a parent");
     }
     if parent.resource.is_empty() || !narrower_resource(&parent.resource, resource) {
@@ -19540,6 +19559,104 @@ mod tests {
             ask_model(&mut journal, Some(child), HOSTED_MODEL),
             Err("stopped")
         );
+    }
+
+    // Codex at 355e659, finding 1: a stored child beneath a model call
+    // escaped its ancestor's scope. These tests failed on 355e659.
+
+    /// A child moved below a model call in stored bytes, with a resource
+    /// under the call's: decode, reread and resume refuse it ("not a parent"),
+    /// and in memory it gets no grant, no host, and dispatches nothing.
+    #[test]
+    fn a_stored_child_below_a_model_call_is_refused() {
+        let (mut journal, run) = task(budget(8, 600));
+        let call = ask_model(&mut journal, None, HOSTED_MODEL).unwrap();
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let escaped = format!("{HOSTED_MODEL}/x");
+        step_mut(&mut journal, child).parent_id = Some(call);
+        step_mut(&mut journal, child).resource = escaped.clone();
+        let bytes = encode_journal(&journal, &[0; 32]).unwrap();
+        assert_eq!(decode_journal(&bytes).map(|_| ()), Err("not a parent"));
+        let (mut runtime, mut cursor) = fake_runtime();
+        runtime.stored = Some(bytes.clone());
+        assert_eq!(
+            reread_journal(&mut runtime, &mut cursor, Some(&read_grant())).map(|_| ()),
+            Err("not a parent")
+        );
+        let (mut runtime, mut cursor) = fake_runtime();
+        runtime.lose_reply = true;
+        let mut other = two_turns();
+        assert_eq!(
+            append_journal(&mut runtime, &mut other, &mut cursor, Some(&write_grant())),
+            AppendOutcome::Unknown
+        );
+        runtime.stored = Some(bytes);
+        assert_eq!(
+            resume_journal(&mut runtime, &mut other, &mut cursor, Some(&read_grant())),
+            ResumeOutcome::Refused("not a parent")
+        );
+        // In memory: nothing is granted or opened for it.
+        assert!(authorize(&mut journal, call, Some("model-grant")));
+        assert!(!authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            &escaped
+        ));
+        assert!(!apply_inbox(
+            &mut journal,
+            child,
+            InboxAnswer::AllowOnce,
+            Some("child-grant")
+        ));
+        assert_eq!(step_of(&journal, child).grant, None);
+        assert_eq!(
+            open_child_host(&journal, child, &escaped),
+            Err("not a parent")
+        );
+        assert!(!dispatch(&mut journal, child));
+    }
+
+    /// The scope walk does not stop at a step that cannot be a parent: a
+    /// granted child whose parent child was moved below a granted model call
+    /// has no scope, so its host gets no grant and nothing below it is granted.
+    #[test]
+    fn the_scope_walk_does_not_stop_at_a_model_call() {
+        let (mut journal, run) = task(budget(8, 600));
+        let call = ask_model(&mut journal, None, DEMO).unwrap();
+        assert!(authorize(&mut journal, call, Some("model-grant")));
+        let parent = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            parent,
+            Some("parent-grant"),
+            DEMO_SRC
+        ));
+        let child = propose_child(&mut journal, parent, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC_LIB
+        ));
+        let mut host = open_child_host(&journal, child, DEMO_SRC_LIB).unwrap();
+        let read = propose_read(&mut host, DEMO_SRC_LIB);
+        // Moved in memory: the run no longer stands above the parent.
+        step_mut(&mut journal, parent).parent_id = Some(call);
+        assert!(!grant_child_host(
+            &journal,
+            child,
+            &mut host,
+            Some("host-grant")
+        ));
+        assert!(!authorize_in_host(
+            &journal,
+            child,
+            &mut host,
+            read,
+            Some("read-grant")
+        ));
+        assert_eq!(step_of(&host, read).grant, None);
     }
 
     /// A step's stop byte is 0 or a known reason (CL49).
