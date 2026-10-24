@@ -589,3 +589,44 @@ Principles:   2 (no granted step above means no authority), 5 (all work stays in
               grant checker for both hosts), 11 (the same refusal reason whichever host supplied the text), 12
               (design note updated), 7 (each rule has a failing-first test and a caught falsifier).
 ```
+
+## Update: Codex FAIL at 310bcb5, three findings (24 Oct)
+
+```text
+Finding 1:    edit_request bound a change and returned the provider request with no parent context, so a
+              cancelled parent still got a batch write request.
+Fix:          one `write_context_ok` (a child host asks with its parent through `host_step_ok`; a task journal
+              with a parent asks nothing) is the admission for `provider_write_may_be_asked` and for every
+              step of `edit_request`. The change binds first, then asks the shared rule for each file and
+              records the shared reason.
+Finding 2:    `stored_children_ok` checked child-budget and child-stop records only in `journal.events`; a
+              changed record in `compact_pending` loaded, `commit_compact` installed it, and the next load
+              failed. The saved backup had the same hole through `note_crash_during_compact`.
+Fix:          one `stored_child_records_ok` checks an event list. The load calls it for the current log, for
+              pending plus the records written during the compaction, and for the saved backup plus those
+              records. `child_records_since_compaction` now yields references, so one selection feeds both
+              the load check and the install.
+Finding 3:    `child_rules` folded a missing owner budget into the over-budget condition and returned "over
+              the parent's budget"; the recovery text never appeared on load or when a host opened.
+Fix:          a missing owner budget returns `TASK_BUDGET_REASON` before the comparisons.
+Tests:        a_host_change_request_needs_its_parent_still_granting_it (cancel between the dispatch and the
+              request; a host with no parent), a_pending_compaction_record_must_match_its_child,
+              a_saved_compaction_record_must_match_its_child, and
+              a_budgeted_child_with_no_task_budget_says_start_a_new_task. The reload table's
+              missing-task-budget case expects `TASK_BUDGET_REASON`.
+              `child_records_survive_an_open_compaction` also loads the open compaction with its carried
+              records.
+Falsifiers:   PX50 (the change request skips the shared check), PX51 and PX52 (the pending and saved views
+              are skipped) and PX53 (a missing task budget says over budget) new; PX19, PX27, CL63, CL64,
+              OY15 and RV10 re-targeted to the moved code. All caught.
+Tests run:    ./examples/agent-host/verify.sh -> "234 passed", runner self-test OK, clippy clean, build OK.
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Full run:     python3 -I examples/agent-host/falsify.py: 280 CAUGHT, 1 CAUGHT (does not build: OY19), 1
+              SURVIVED (expected, by design: OZ01) of 282; no NOT RUN, no NO MATCH.
+Guest hash:   ca4dc54fa3200c8a75aa361aee0c7c5bef940edd4dc7db9f639968207fb66e08 on verify.sh.
+              wasm_sections.py: file 667799 bytes; /1/2 149 5ee6b40d46f6a045 (import list unchanged).
+Principles:   2 (a cancelled parent takes the change request), 5 (all work stays in examples/agent-host), 10
+              (one write admission for both request shapes; one record check for every restored view), 11 (a
+              budget never recorded says so), 12 (this note), 7 (each rule has a failing test and a caught
+              falsifier).
+```

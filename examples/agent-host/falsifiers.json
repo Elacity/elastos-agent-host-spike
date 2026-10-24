@@ -1440,8 +1440,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "                    budget.requests > above.requests || budget.seconds > above.seconds",
-     "new": "                    budget.seconds > above.seconds"
+     "old": "                || budget.requests > above.requests\n                || budget.seconds > above.seconds",
+     "new": "                || budget.seconds > above.seconds"
     }
    ],
    "tests": [
@@ -1456,8 +1456,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "                    budget.requests > above.requests || budget.seconds > above.seconds",
-     "new": "                    budget.requests > above.requests"
+     "old": "                || budget.requests > above.requests\n                || budget.seconds > above.seconds",
+     "new": "                || budget.requests > above.requests"
     }
    ],
    "tests": [
@@ -3335,8 +3335,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    result.map(|bound| request_body(&bound)).map_err(|refusal| {\n        record_refusal(journal, refusal, &format!(\"change {effect_id}\"));",
-     "new": "    result.map(|bound| request_body(&bound)).map_err(|refusal| {"
+     "old": "        Err(refusal) => {\n            record_refusal(journal, refusal, &format!(\"change {effect_id}\"));\n            return Err(refusal.reason());\n        }",
+     "new": "        Err(refusal) => {\n            return Err(refusal.reason());\n        }"
     }
    ],
    "tests": [
@@ -3866,7 +3866,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    replacement.extend(child_records_since_compaction(journal));\n",
+     "old": "    replacement.extend(child_records_since_compaction(journal).cloned());\n",
      "new": ""
     }
    ],
@@ -4357,8 +4357,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if journal.depth > 0 || journal.host_of.is_some() {\n        let Some((parent, child_id)) = host else {\n            refuse_host_step(journal, step_id, \"not this child's host\");\n            return false;\n        };\n        if let Err(reason) = host_step_ok(parent, child_id, journal, step_id, None) {\n            refuse_host_step(journal, step_id, reason);\n            return false;\n        }\n    } else if host.is_some() {\n        refuse_host_step(journal, step_id, \"not this child's host\");\n        return false;\n    }",
-     "new": "    let _ = host;"
+     "old": "    if let Err(reason) = write_context_ok(journal, step_id, host) {\n        refuse_host_step(journal, step_id, reason);\n        return false;\n    }\n    let Some(step) = journal.steps.iter().find(|step| step.id == step_id) else {",
+     "new": "    let _ = host;\n    let Some(step) = journal.steps.iter().find(|step| step.id == step_id) else {"
     }
    ],
    "tests": [
@@ -4485,8 +4485,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        if let Err(reason) = host_step_ok(parent, child_id, journal, step_id, None) {\n            refuse_host_step(journal, step_id, reason);\n            return false;\n        }",
-     "new": "        if host_step_ok(parent, child_id, journal, step_id, None).is_err() {\n            return false;\n        }"
+     "old": "    if let Err(reason) = write_context_ok(journal, step_id, host) {\n        refuse_host_step(journal, step_id, reason);\n        return false;\n    }",
+     "new": "    if write_context_ok(journal, step_id, host).is_err() {\n        return false;\n    }"
     }
    ],
    "tests": [
@@ -4874,6 +4874,71 @@
    ],
    "tests": [
     "tests::the_live_state_rule_is_one_shared_validator"
+   ]
+  },
+  {
+   "id": "PX50",
+   "title": "a change request asks without its parent's current grant",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    for edit in &bound {\n        if let Err(reason) = write_context_ok(journal, edit.step_id, host) {\n            refuse_host_step(journal, edit.step_id, reason);\n            return Err(reason);\n        }\n    }\n    Ok(request_body(&bound))",
+     "new": "    let _ = host;\n    Ok(request_body(&bound))"
+    }
+   ],
+   "tests": [
+    "tests::a_host_change_request_needs_its_parent_still_granting_it"
+   ]
+  },
+  {
+   "id": "PX51",
+   "title": "a load skips the child records in the pending compaction",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if let Some(pending) = &journal.compact_pending {\n        stored_child_records_ok(\n            journal,\n            pending\n                .iter()\n                .chain(child_records_since_compaction(journal)),\n        )?;\n    }\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::a_pending_compaction_record_must_match_its_child"
+   ]
+  },
+  {
+   "id": "PX52",
+   "title": "a load skips the child records in the saved compaction",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if let Some((saved, _)) = &journal.compact_backup {\n        stored_child_records_ok(\n            journal,\n            saved.iter().chain(child_records_since_compaction(journal)),\n        )?;\n    }\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::a_saved_compaction_record_must_match_its_child"
+   ]
+  },
+  {
+   "id": "PX53",
+   "title": "a missing task budget says the child is over the parent's budget",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            let Some(above) = above else {\n                return Err(TASK_BUDGET_REASON);\n            };",
+     "new": "            let Some(above) = above else {\n                return Err(\"over the parent's budget\");\n            };"
+    }
+   ],
+   "tests": [
+    "tests::a_budgeted_child_with_no_task_budget_says_start_a_new_task",
+    "tests::child_limits_are_checked_again_after_reload"
    ]
   }
  ]

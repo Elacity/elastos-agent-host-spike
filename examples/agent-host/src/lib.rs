@@ -1205,7 +1205,56 @@ fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
             return Err("record");
         }
     }
-    for node in &journal.events {
+    // Every event list a compaction can install keeps the record rules: the
+    // log now, the pending replacement, and the saved backup, each with the
+    // records written while the compaction was open.
+    stored_child_records_ok(journal, journal.events.iter())?;
+    if let Some(pending) = &journal.compact_pending {
+        stored_child_records_ok(
+            journal,
+            pending
+                .iter()
+                .chain(child_records_since_compaction(journal)),
+        )?;
+    }
+    if let Some((saved, _)) = &journal.compact_backup {
+        stored_child_records_ok(
+            journal,
+            saved.iter().chain(child_records_since_compaction(journal)),
+        )?;
+    }
+    // A stop cancels every prepared step below it, and a task cancel every
+    // prepared step it had; a prepared one there was put back by hand.
+    if journal.steps.iter().any(|step| {
+        step.state == StepState::Prepared
+            && (journal.cancelled_from.is_some_and(|last| step.id <= last)
+                || chain_stopped(journal, &child_chain(journal, step.parent_id)))
+    }) {
+        return Err("record");
+    }
+    if let Some(last) = journal.cancelled_from {
+        if journal.steps.iter().any(|step| {
+            step.kind == ProposalKind::Child && step.stop.is_none()
+                || matches!(step.kind, ProposalKind::Child | ProposalKind::Hosted) && step.id > last
+        }) {
+            return Err("record");
+        }
+    }
+    Ok(())
+}
+
+/// Every child-budget and child-stop record in `events` names the child whose
+/// step holds the same value, and each child has exactly its own records.
+/// One check for the current log and for every event list a compaction can
+/// install, so a commit or a crash restore cannot carry a record that the
+/// next load refuses.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn stored_child_records_ok<'a>(
+    journal: &Journal,
+    events: impl IntoIterator<Item = &'a SurfaceNode> + Clone,
+) -> Result<(), &'static str> {
+    let find = |id: u64| journal.steps.iter().find(|step| step.id == id);
+    for node in events.clone() {
         match &node.source {
             NodeSource::ChildBudget { child, budget } => {
                 if find(*child).is_none_or(|step| step.budget != Some(*budget)) {
@@ -1229,9 +1278,9 @@ fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
     // Per child, not in total: two records for one child and none for
     // another must not balance out.
     for step in &journal.steps {
-        let (budgets, stops) = journal
-            .events
-            .iter()
+        let (budgets, stops) = events
+            .clone()
+            .into_iter()
             .fold((0, 0), |(budgets, stops), node| match node.source {
                 NodeSource::ChildBudget { child, .. } if child == step.id => (budgets + 1, stops),
                 NodeSource::ChildStop { child, .. } if child == step.id => (budgets, stops + 1),
@@ -1240,23 +1289,6 @@ fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
         if budgets != usize::from(step.budget.is_some())
             || stops != usize::from(step.stop.is_some())
         {
-            return Err("record");
-        }
-    }
-    // A stop cancels every prepared step below it, and a task cancel every
-    // prepared step it had; a prepared one there was put back by hand.
-    if journal.steps.iter().any(|step| {
-        step.state == StepState::Prepared
-            && (journal.cancelled_from.is_some_and(|last| step.id <= last)
-                || chain_stopped(journal, &child_chain(journal, step.parent_id)))
-    }) {
-        return Err("record");
-    }
-    if let Some(last) = journal.cancelled_from {
-        if journal.steps.iter().any(|step| {
-            step.kind == ProposalKind::Child && step.stop.is_none()
-                || matches!(step.kind, ProposalKind::Child | ProposalKind::Hosted) && step.id > last
-        }) {
             return Err("record");
         }
     }
@@ -1345,12 +1377,17 @@ fn child_rules(journal: &Journal, step: &Step) -> Result<(), &'static str> {
                 Some(id) => find(id).and_then(|owner| owner.budget),
                 None => journal.task_budget,
             };
+            // An owner with no recorded budget is not an excessive budget:
+            // there is nothing to compare against, so it keeps the recovery
+            // reason every budget never recorded gives.
+            let Some(above) = above else {
+                return Err(TASK_BUDGET_REASON);
+            };
             if budget.requests == 0
                 || budget.seconds == 0
                 || !requests_fit(budget, step.requests_used, 0)
-                || above.is_none_or(|above| {
-                    budget.requests > above.requests || budget.seconds > above.seconds
-                })
+                || budget.requests > above.requests
+                || budget.seconds > above.seconds
             {
                 return Err("over the parent's budget");
             }
@@ -1934,23 +1971,17 @@ fn begin_compact(journal: &mut Journal, summary: &str) -> bool {
 /// The step already holds what they record, so they are carried into the
 /// committed or restored log, never dropped.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn child_records_since_compaction(journal: &Journal) -> Vec<SurfaceNode> {
+fn child_records_since_compaction(journal: &Journal) -> impl Iterator<Item = &SurfaceNode> + Clone {
     let from = journal
         .compact_backup
         .as_ref()
         .map_or(journal.events.len(), |(saved, _)| saved.len());
-    journal
-        .events
-        .iter()
-        .skip(from)
-        .filter(|node| {
-            matches!(
-                node.source,
-                NodeSource::ChildBudget { .. } | NodeSource::ChildStop { .. }
-            )
-        })
-        .cloned()
-        .collect()
+    journal.events.iter().skip(from).filter(|node| {
+        matches!(
+            node.source,
+            NodeSource::ChildBudget { .. } | NodeSource::ChildStop { .. }
+        )
+    })
 }
 
 /// Apply an open compaction and start the next series.
@@ -1962,7 +1993,7 @@ fn commit_compact(journal: &mut Journal) -> bool {
     let Some(mut replacement) = journal.compact_pending.take() else {
         return false;
     };
-    replacement.extend(child_records_since_compaction(journal));
+    replacement.extend(child_records_since_compaction(journal).cloned());
     journal.events = replacement;
     journal.compaction_open = false;
     journal.compact_backup = None;
@@ -1977,7 +2008,7 @@ fn note_crash_during_compact(journal: &mut Journal) -> bool {
         return false;
     }
     journal.compact_pending = None;
-    let carried = child_records_since_compaction(journal);
+    let carried: Vec<SurfaceNode> = child_records_since_compaction(journal).cloned().collect();
     let Some((mut saved, saved_epoch)) = journal.compact_backup.take() else {
         journal.compaction_open = false;
         return false;
@@ -3219,14 +3250,29 @@ fn events_show_whole(events: &[SurfaceNode], resource: &str, version: u64) -> bo
 /// The one provider request for a change: every file, each with the Runtime
 /// revision it was read at (`if_revision`), the lines it may touch, and the
 /// text to replace there. The provider applies all files or none. A change
-/// that does not bind sends nothing and writes one refusal record.
+/// that does not bind sends nothing and writes one refusal record. Every
+/// file is asked only while the parent still grants it, through
+/// `write_context_ok`, the same check as a single write.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn edit_request(journal: &mut Journal, effect_id: u64) -> Result<Vec<u8>, &'static str> {
-    let result = bind_change(journal, effect_id);
-    result.map(|bound| request_body(&bound)).map_err(|refusal| {
-        record_refusal(journal, refusal, &format!("change {effect_id}"));
-        refusal.reason()
-    })
+fn edit_request(
+    journal: &mut Journal,
+    effect_id: u64,
+    host: Option<(&Journal, u64)>,
+) -> Result<Vec<u8>, &'static str> {
+    let bound = match bind_change(journal, effect_id) {
+        Ok(bound) => bound,
+        Err(refusal) => {
+            record_refusal(journal, refusal, &format!("change {effect_id}"));
+            return Err(refusal.reason());
+        }
+    };
+    for edit in &bound {
+        if let Err(reason) = write_context_ok(journal, edit.step_id, host) {
+            refuse_host_step(journal, edit.step_id, reason);
+            return Err(reason);
+        }
+    }
+    Ok(request_body(&bound))
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -3357,8 +3403,9 @@ fn note_change_wrote_checked(
 
 /// Whether Runtime may be asked to write. A missing grant or a version that
 /// is no longer current refuses the ask. A child host's step is asked only
-/// while its parent still grants it, through `host_step_ok`, the same check
-/// as every host action; a host journal with no parent context asks nothing.
+/// while its parent still grants it, through `write_context_ok`, the same
+/// check as every write request; a host journal with no parent context asks
+/// nothing.
 /// This does not write, and a grant string in the journal is not a Runtime
 /// grant.
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -3368,17 +3415,8 @@ fn provider_write_may_be_asked(
     seen_version: u64,
     host: Option<(&Journal, u64)>,
 ) -> bool {
-    if journal.depth > 0 || journal.host_of.is_some() {
-        let Some((parent, child_id)) = host else {
-            refuse_host_step(journal, step_id, "not this child's host");
-            return false;
-        };
-        if let Err(reason) = host_step_ok(parent, child_id, journal, step_id, None) {
-            refuse_host_step(journal, step_id, reason);
-            return false;
-        }
-    } else if host.is_some() {
-        refuse_host_step(journal, step_id, "not this child's host");
+    if let Err(reason) = write_context_ok(journal, step_id, host) {
+        refuse_host_step(journal, step_id, reason);
         return false;
     }
     let Some(step) = journal.steps.iter().find(|step| step.id == step_id) else {
@@ -4399,6 +4437,29 @@ fn host_step_ok(
         return Err("the parent's grant");
     }
     Ok(())
+}
+
+/// The one host-context rule for every provider write request, one file or a
+/// change: a child host journal is asked only with its parent's current
+/// journal, through `host_step_ok` (usable child, binding, grant and scope);
+/// a task journal is asked with no parent. The error is the shared check's
+/// own words.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn write_context_ok(
+    journal: &Journal,
+    step_id: u64,
+    host: Option<(&Journal, u64)>,
+) -> Result<(), &'static str> {
+    if journal.depth > 0 || journal.host_of.is_some() {
+        let Some((parent, child_id)) = host else {
+            return Err("not this child's host");
+        };
+        host_step_ok(parent, child_id, journal, step_id, None)
+    } else if host.is_some() {
+        Err("not this child's host")
+    } else {
+        Ok(())
+    }
 }
 
 /// One refusal record for a host step, in the host's own journal: the shared
@@ -6101,7 +6162,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 ));
             }
         }
-        let request = edit_request(&mut bound, change[0])
+        let request = edit_request(&mut bound, change[0], None)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
         let revisions = request
@@ -15890,10 +15951,13 @@ mod tests {
         );
         assert!(journal.steps.is_empty());
         let ids = propose_change(&mut journal, &[spec(NOTES, "rev-1", "alpha", "one")]).unwrap();
-        assert_eq!(edit_request(&mut journal, ids[0]), Err("not dispatched"));
+        assert_eq!(
+            edit_request(&mut journal, ids[0], None),
+            Err("not dispatched")
+        );
         granted(&mut journal, &ids);
         let body: serde_json::Value =
-            serde_json::from_slice(&edit_request(&mut journal, ids[0]).unwrap()).unwrap();
+            serde_json::from_slice(&edit_request(&mut journal, ids[0], None).unwrap()).unwrap();
         assert_eq!(body["op"], "edit");
         assert_eq!(body["all_or_none"], true);
         assert_eq!(body["files"].as_array().unwrap().len(), 1);
@@ -15909,7 +15973,7 @@ mod tests {
         assert!(observe(&mut unbound, STYLE, 1, "body{}\n"));
         let legacy = propose_edit(&mut unbound, STYLE, "body", "h1", Some(1)).unwrap();
         granted(&mut unbound, &[legacy]);
-        assert_eq!(edit_request(&mut unbound, legacy), Err("no revision"));
+        assert_eq!(edit_request(&mut unbound, legacy, None), Err("no revision"));
         // A newer read arrives before the write: the change is stale, sends
         // nothing, and records nothing.
         assert!(observe_read(
@@ -15921,7 +15985,7 @@ mod tests {
             false,
             "alpha gamma\n"
         ));
-        assert_eq!(edit_request(&mut journal, ids[0]), Err("stale"));
+        assert_eq!(edit_request(&mut journal, ids[0], None), Err("stale"));
         let events = journal.events.clone();
         assert_eq!(
             note_change_wrote(&mut journal, ids[0], &[(NOTES, "rev-3")]),
@@ -16015,7 +16079,7 @@ mod tests {
         // Both written.
         let (mut journal, ids) = start();
         let body: serde_json::Value =
-            serde_json::from_slice(&edit_request(&mut journal, ids[0]).unwrap()).unwrap();
+            serde_json::from_slice(&edit_request(&mut journal, ids[0], None).unwrap()).unwrap();
         assert_eq!(body["files"].as_array().unwrap().len(), 2);
         assert_eq!(body["files"][1]["if_revision"], "rs-1");
         assert_eq!(
@@ -16185,7 +16249,7 @@ mod tests {
             propose_change(&mut journal, &[spec(NOTES, "rev-1", "eleven", "11\n11b")]).unwrap();
         granted(&mut journal, &ids);
         let body: serde_json::Value =
-            serde_json::from_slice(&edit_request(&mut journal, ids[0]).unwrap()).unwrap();
+            serde_json::from_slice(&edit_request(&mut journal, ids[0], None).unwrap()).unwrap();
         assert_eq!(body["files"][0]["first_line"], 10);
         assert_eq!(body["files"][0]["line_count"], 2);
         assert_eq!(
@@ -16975,7 +17039,10 @@ mod tests {
         ));
         let ids = propose_change(&mut journal, &[spec(NOTES, "rev-1", "alpha", "one")]).unwrap();
         let before = refusal_records(&journal).len();
-        assert_eq!(edit_request(&mut journal, ids[0]), Err("not dispatched"));
+        assert_eq!(
+            edit_request(&mut journal, ids[0], None),
+            Err("not dispatched")
+        );
         assert_eq!(refusal_records(&journal).len(), before + 1);
         granted(&mut journal, &ids);
         assert_eq!(
@@ -17037,7 +17104,7 @@ mod tests {
 
     fn request(journal: &mut Journal) -> Result<(), &'static str> {
         let effect = journal.steps.last().map_or(99, |step| step.effect_id);
-        edit_request(journal, effect).map(|_| ())
+        edit_request(journal, effect, None).map(|_| ())
     }
 
     fn result(journal: &mut Journal) -> Result<(), &'static str> {
@@ -17457,7 +17524,7 @@ mod tests {
         let first = dispatched_edit(&mut bound, a, "alpha", None);
         dispatched_edit(&mut bound, b, "alpha", Some(first));
         assert_eq!(
-            edit_request(&mut bound, first),
+            edit_request(&mut bound, first, None),
             Err("one file twice in one change")
         );
     }
@@ -18072,7 +18139,7 @@ mod tests {
             Err((0, "not observed"))
         );
         let id = dispatched_edit(&mut journal, lower, "alpha", None);
-        assert_eq!(edit_request(&mut journal, id), Err("not observed"));
+        assert_eq!(edit_request(&mut journal, id, None), Err("not observed"));
         // Version 1 of the other file is its own: another revision is fine.
         assert!(observe_read(
             &mut journal,
@@ -19170,7 +19237,7 @@ mod tests {
                 Box::new(move |j: &mut Journal| set_budget(j, idle, Some(budget(2, 0)))),
             ),
             (
-                "over the parent's budget",
+                TASK_BUDGET_REASON,
                 Box::new(|j: &mut Journal| j.task_budget = None),
             ),
             (
@@ -20036,6 +20103,28 @@ mod tests {
         );
     }
 
+    /// Codex at 310bcb5: a budgeted child whose task budget was never
+    /// recorded gets the recovery reason, not "over the parent's budget", on
+    /// every path: the load, the live child check and opening its host.
+    #[test]
+    fn a_budgeted_child_with_no_task_budget_says_start_a_new_task() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(3, 60))).unwrap();
+        journal.task_budget = None;
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err(TASK_BUDGET_REASON)
+        );
+        assert_eq!(
+            usable_child(&journal, child).map(|_| ()),
+            Err(TASK_BUDGET_REASON)
+        );
+        assert_eq!(
+            open_child_host(&journal, child, DEMO_SRC),
+            Err(TASK_BUDGET_REASON)
+        );
+    }
+
     /// A cancelled task is refused as "cancelled", not "stopped", on every
     /// live path (CF18).
     #[test]
@@ -20545,6 +20634,57 @@ mod tests {
             refusal_records(&host)
         );
         assert!(!dispatch_in_host(&parent, child, &mut host, edit));
+    }
+
+    /// Codex at 310bcb5: a change request goes through the same
+    /// `write_context_ok` as a single write. Cancelling the parent between
+    /// the dispatch and the request refuses it, and a host journal with no
+    /// parent asks nothing.
+    #[test]
+    fn a_host_change_request_needs_its_parent_still_granting_it() {
+        let (mut parent, run) = task(budget(8, 600));
+        let child = propose_child(&mut parent, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut parent,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let mut host = open_child_host(&parent, child, DEMO_SRC).unwrap();
+        let resource = "localhost://Users/self/Projects/demo/src/notes.txt";
+        assert!(observe_read(
+            &mut host, resource, 1, "rev-1", None, false, "alpha\n"
+        ));
+        let edit = propose_edit(&mut host, resource, "alpha", "beta", Some(1)).unwrap();
+        assert!(authorize_in_host(
+            &mut parent,
+            child,
+            &mut host,
+            edit,
+            Some("write-grant")
+        ));
+        assert!(dispatch_in_host(&parent, child, &mut host, edit));
+        assert!(edit_request(&mut host, edit, Some((&parent, child))).is_ok());
+        assert_eq!(
+            edit_request(&mut host, edit, None),
+            Err("not this child's host")
+        );
+        assert!(cancel_task(&mut parent));
+        assert_eq!(
+            edit_request(&mut host, edit, Some((&parent, child))),
+            Err("cancelled")
+        );
+        let records = refusal_records(&host);
+        assert!(
+            records
+                .iter()
+                .any(|record| record.contains("not this child's host")),
+            "{records:?}"
+        );
+        assert!(
+            records.iter().any(|record| record.contains("cancelled")),
+            "{records:?}"
+        );
     }
 
     /// Codex at 75ac0ae: child text comes only with a verified host journal.
@@ -21288,6 +21428,12 @@ mod tests {
             assert!(begin_compact(&mut journal, "sum"));
             let made = propose_child(&mut journal, run, DEMO_DOC, Some(budget(2, 60))).unwrap();
             assert!(note_time_refusal(&mut journal, stopped));
+            // The open compaction itself, with the records added during it,
+            // loads through both restored views.
+            assert!(
+                decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok(),
+                "open {crash}"
+            );
             if crash {
                 assert!(note_crash_during_compact(&mut journal));
             } else {
@@ -21310,6 +21456,68 @@ mod tests {
                 "crash {crash}"
             );
         }
+    }
+
+    /// A journal with a budgeted child and an open compaction.
+    fn compacting_with_a_child() -> (Journal, u64) {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        for n in 0..6 {
+            admit_user(
+                &mut journal,
+                &format!("a long line of conversation number {n} to compact away"),
+            );
+        }
+        assert!(begin_compact(&mut journal, "sum"));
+        (journal, child)
+    }
+
+    /// The budget record for `child` in one stored event list.
+    fn budget_record_in(nodes: &mut [SurfaceNode], child: u64) -> &mut SurfaceNode {
+        nodes
+            .iter_mut()
+            .find(|node| {
+                matches!(
+                    node.source,
+                    NodeSource::ChildBudget { child: id, .. } if id == child
+                )
+            })
+            .expect("the child's budget record")
+    }
+
+    /// Codex at 310bcb5: a load checks the child records in the pending
+    /// compaction as they will be installed, so a commit cannot carry a
+    /// record that the next load refuses.
+    #[test]
+    fn a_pending_compaction_record_must_match_its_child() {
+        let (mut journal, child) = compacting_with_a_child();
+        let node = budget_record_in(journal.compact_pending.as_mut().unwrap(), child);
+        let narrow = budget(1, 60);
+        if let NodeSource::ChildBudget { budget, .. } = &mut node.source {
+            *budget = narrow;
+        }
+        assert_eq!(step_of(&journal, child).budget, Some(budget(2, 60)));
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+    }
+
+    /// Codex at 310bcb5: the saved compaction keeps the same rule, because a
+    /// crash restore installs it instead.
+    #[test]
+    fn a_saved_compaction_record_must_match_its_child() {
+        let (mut journal, child) = compacting_with_a_child();
+        let node = budget_record_in(&mut journal.compact_backup.as_mut().unwrap().0, child);
+        let narrow = budget(1, 60);
+        if let NodeSource::ChildBudget { budget, .. } = &mut node.source {
+            *budget = narrow;
+        }
+        assert_eq!(step_of(&journal, child).budget, Some(budget(2, 60)));
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
     }
 
     /// R8: on load, no step is still prepared at or before a cancel point or
