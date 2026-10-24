@@ -287,9 +287,13 @@ gives as the reason for this app are proven there: a run with no grant stops
   entry (a full-period xorshift over the alphabet, so the stream is mostly
   literals) costs 9,950,533 fuel against 4,176,199 for the repeating text,
   and a test asserts it costs more.
-- `verify.sh`: manifest check, the existing guest fmt/clippy/tests/falsify
-  unchanged, then the component build, host-test fmt/clippy/tests and
-  `falsify.py --runtime`.
+- `verify.sh`: manifest check and the guest fmt/clippy/tests/falsify always;
+  the component build, host-test fmt/clippy/tests and `falsify.py --runtime`
+  only with `--runtime`. `--guest-only` and any no-argument run outside the
+  lane gate stop after the guest checks, so a machine without the component
+  build still verifies the guest. The lane gate calls the script with no
+  argument and exports `GATE_LIST`, and the script selects the full check from
+  it, so the full Mac gate runs the runtime step.
 - `falsify.py`: the `--runtime` group. F35's mutant drops the archive grant
   (`.unwrap_or_default()`); F36's mutant asks one byte a call in
   `zip::Reader::read` and copies the inflate window one byte at a time in
@@ -338,6 +342,11 @@ gives as the reason for this app are proven there: a run with no grant stops
 - The guest's read budget covers the gate archives: the largest view reads
   about 31 KiB of the 64 KiB one run may read, so the gate is a fuel
   measurement, not a budget refusal.
+- **Runtime step selection:** the lane gate runs `verify.sh` with no
+  argument, so a plain no-argument run is guest-only and the gate names itself
+  through the `GATE_LIST` environment variable that `run-lane.sh` exports,
+  which selects the component, host-test and runtime-falsifier step. Running
+  `verify.sh --runtime` directly does the same on this Mac.
 - **Remaining for task 005:** F3 (B2's streaming ratio check, in the
   component), F43 (declared totals under the 128 MiB store limit). Then the
   page (F37 to F39), and tar after ZIP on both buses.
