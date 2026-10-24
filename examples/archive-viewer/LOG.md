@@ -205,3 +205,28 @@ blocks.
   the page task draws the same shape the documents viewer uses.
 - `deflated` fixtures use `miniz_oxide`'s compressor; `crc32` is pinned to the
   standard check value (`crc32_matches_the_standard_check_value`).
+
+### Review fixes (round 2)
+
+- **The caps now count real decompressor work.** `inflate_bounded` uses
+  `miniz_oxide::inflate::core::decompress_with_limit` with a 32 KiB ring buffer
+  as both history and output, and `out_max` set to the smaller of the B1 window
+  and the run's allowance. Every inflated byte is written into counted memory,
+  so `Outcome.produced` is the actual output; the streaming wrapper's internal
+  dictionary could retain output that neither cap nor `produced` saw.
+- **A spent limit is not a corruption reason.** `HasMoreOutput` continues the
+  loop, an exhausted ask reports `inflate_budget` (or `oversize` when the
+  window is full), and the B1 check runs before the `Done`/L6 verdict.
+  `a_preview_stops_for_its_budget_before_any_corruption_reason` covers both: a
+  valid `hello` with one byte of allowance, and a stored block producing
+  16,385 bytes while declaring 16,384.
+- **F5 proves the run's own accounting.** The sweep now runs five deflated
+  14 KiB entries through `run` in three orders. Each ends in a NUL, so it is
+  not text with a correct CRC: no other rule decides whether it costs output.
+  The fifth is `inflate_budget`; under F5's mutant the fifth inflates too and
+  no entry stops for the total. F5's mutant removes
+  `previews_budget.take(&outcome)` in `run`; F5c stops the allowance countdown;
+  F1b judges the byte past the cap after the stream's verdict.
+- F1's fixture is now one 20,000-byte DEFLATE stored block, so the whole
+  payload would leave the decompressor in one call without the window.
+- 69 falsifiers, all caught and isolated.

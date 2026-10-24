@@ -21,8 +21,8 @@
 use capsule_kit_guest::text;
 use capsule_kit_guest::Refusal;
 use docs_model::{self, ModelError};
-use miniz_oxide::inflate::stream::{inflate, InflateState};
-use miniz_oxide::{DataFormat, MZFlush, MZStatus};
+use miniz_oxide::inflate::core::{decompress_with_limit, inflate_flags, DecompressorOxide};
+use miniz_oxide::inflate::TINFLStatus;
 
 use crate::zip::{Entry, ReadError, Reader, Reason};
 
@@ -215,10 +215,17 @@ fn inflate_bounded(
     declared: u64,
     allowance: u64,
 ) -> Result<(Vec<u8>, u64), (u64, Reason)> {
-    let mut state = InflateState::new(DataFormat::Raw);
+    // The decompressor's 32 KiB dictionary is also its output buffer, so
+    // every inflated byte is written into counted memory at once. The
+    // stream wrapper would produce into an internal dictionary and copy only
+    // what fits, which would hide the work the caps are meant to bound.
+    const DICTIONARY_BYTES: usize = 32 * 1024;
+    let mut state = DecompressorOxide::new();
+    let mut dictionary = vec![0u8; DICTIONARY_BYTES];
     let mut output = Vec::new();
     let mut produced = 0u64;
     let mut consumed = 0usize;
+    let mut out_pos = 0usize;
     loop {
         let room = OUTPUT_WINDOW_BYTES.saturating_sub(produced);
         let left = allowance.saturating_sub(produced);
@@ -231,20 +238,34 @@ fn inflate_bounded(
             };
             return Err((produced, reason));
         }
-        let ask = ask as usize;
-        output.resize(produced as usize + ask, 0);
+        // The decompressor does not wrap: stop at the ring's end and continue
+        // from zero next time. The ask stays inside the cap and the budget.
+        let ask = ask.min((DICTIONARY_BYTES - out_pos) as u64) as usize;
         let step_end = (consumed + INFLATE_STEP_BYTES).min(data.len());
-        let result = inflate(
+        let flags = if step_end < data.len() {
+            inflate_flags::TINFL_FLAG_HAS_MORE_INPUT
+        } else {
+            0
+        };
+        let (status, in_used, out_used) = decompress_with_limit(
             &mut state,
             &data[consumed..step_end],
-            &mut output[produced as usize..],
-            MZFlush::None,
+            &mut dictionary,
+            out_pos,
+            ask,
+            flags,
         );
-        consumed += result.bytes_consumed;
-        produced += result.bytes_written as u64;
-        output.truncate(produced as usize);
-        match result.status {
-            Ok(MZStatus::StreamEnd) => {
+        output.extend_from_slice(&dictionary[out_pos..out_pos + out_used]);
+        consumed += in_used;
+        produced += out_used as u64;
+        out_pos = (out_pos + out_used) % DICTIONARY_BYTES;
+        // B1 first: the byte past the window is oversize, whatever the stream
+        // says about itself.
+        if produced > MAX_PREVIEW_BYTES {
+            return Err((produced, "oversize"));
+        }
+        match status {
+            TINFLStatus::Done => {
                 // L6: exactly the declared compressed bytes consumed and
                 // exactly the declared uncompressed bytes produced.
                 if consumed != data.len() || produced != declared {
@@ -252,13 +273,10 @@ fn inflate_bounded(
                 }
                 return Ok((output, produced));
             }
-            Ok(_) => {}
-            Err(_) => return Err((produced, "size_mismatch")),
+            TINFLStatus::NeedsMoreInput | TINFLStatus::HasMoreOutput => {}
+            _ => return Err((produced, "size_mismatch")),
         }
-        if produced > MAX_PREVIEW_BYTES {
-            return Err((produced, "oversize"));
-        }
-        if (result.bytes_consumed == 0 && result.bytes_written == 0) || consumed == data.len() {
+        if in_used == 0 && out_used == 0 {
             return Err((produced, "size_mismatch"));
         }
     }

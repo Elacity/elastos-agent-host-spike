@@ -1704,6 +1704,17 @@ fn noise(len: usize) -> Vec<u8> {
     out
 }
 
+/// One final DEFLATE stored block: the whole payload is copied out of the
+/// decompressor in a single call unless the caps stop it first.
+fn stored_deflate_block(data: &[u8]) -> Vec<u8> {
+    let len = data.len() as u16;
+    let mut out = vec![0x01];
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(&(!len).to_le_bytes());
+    out.extend_from_slice(data);
+    out
+}
+
 /// Printable text with a moderate deflate ratio: a 200-byte run repeated to
 /// `len`. It passes B2 and stays small enough for the compressed budget.
 fn text_block(len: usize) -> Vec<u8> {
@@ -1776,7 +1787,9 @@ fn a_deflated_text_entry_is_shown() {
 fn an_entry_over_the_preview_cap_is_skipped_after_one_byte_past_it() {
     // The declared size is at the cap, but the stream inflates past it. The
     // window stops after exactly one byte past the cap.
-    let mut spec = deflated("a.bin", &noise(20_000));
+    let mut spec = Spec::file("a.bin");
+    spec.method = 8;
+    spec.data = stored_deflate_block(&noise(20_000));
     spec.uncompressed = Some(preview::MAX_PREVIEW_BYTES as u32);
     assert!(spec.data.len() as u64 <= preview::MAX_COMPRESSED_BYTES);
     let archive = build(&[spec], &[]);
@@ -1796,6 +1809,42 @@ fn an_entry_over_the_preview_cap_is_skipped_after_one_byte_past_it() {
     let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, archive);
     assert_eq!(skipped(&bus)[0]["reason"], "oversize");
     assert!(previews(&bus).is_empty());
+}
+
+#[test]
+fn a_preview_stops_for_its_budget_before_any_corruption_reason() {
+    // A valid stream longer than what the run may inflate is the budget's
+    // failure, not the stream's.
+    let archive = build(&[deflated("a.txt", b"hello")], &[]);
+    let (mut bus, grant, entries) = listing_of(archive);
+    let mut left = MAX_READ_BYTES;
+    let budget = preview::Budget {
+        inflate: 1,
+        compressed: u64::MAX,
+    };
+    let outcome = {
+        let mut reader = zip::Reader::new(&mut bus, ARCHIVE, &grant, &mut left);
+        preview::preview(&mut reader, &entries[0], &budget).unwrap()
+    };
+    assert_eq!(outcome.produced, 1);
+    assert_eq!(outcome.blocks, Err("inflate_budget"));
+
+    // Exactly one byte past the window, and the stream declares the window:
+    // B1's reason wins over L6's.
+    let mut spec = Spec::file("a.bin");
+    spec.method = 8;
+    spec.data = stored_deflate_block(&vec![b'x'; preview::MAX_PREVIEW_BYTES as usize + 1]);
+    spec.uncompressed = Some(preview::MAX_PREVIEW_BYTES as u32);
+    let archive = build(&[spec], &[]);
+    let (mut bus, grant, entries) = listing_of(archive);
+    let mut left = MAX_READ_BYTES;
+    let budget = preview::Budget::new();
+    let outcome = {
+        let mut reader = zip::Reader::new(&mut bus, ARCHIVE, &grant, &mut left);
+        preview::preview(&mut reader, &entries[0], &budget).unwrap()
+    };
+    assert_eq!(outcome.produced, preview::MAX_PREVIEW_BYTES + 1);
+    assert_eq!(outcome.blocks, Err("oversize"));
 }
 
 #[test]
@@ -1899,47 +1948,38 @@ fn a_text_entry_with_too_many_blocks_is_skipped() {
 
 #[test]
 fn no_run_inflates_more_than_its_total() {
-    // B3, a sweep: five stored entries are skipped after their bytes are
-    // counted, in every order, and the run's total stops the last one. The
-    // compressed and read caps are separate rules (F5b, F31), so they are
-    // not what this sweep measures.
-    let text = vec![b'a'; 14 * 1024];
+    // B3 through the run's own accounting: five deflated entries inflate and
+    // are then skipped, in every order, and the fifth stops at the total. A
+    // NUL at the end makes each entry not text with a correct CRC, so no
+    // other rule decides whether it costs output.
+    let mut text = text_block(14 * 1024);
+    let last = text.len() - 1;
+    text[last] = 0;
     let specs: Vec<Spec> = (0..5)
-        .map(|index| {
-            let mut spec = stored(&format!("e{index}.txt"), &text);
-            spec.crc ^= 1;
-            spec
-        })
+        .map(|index| deflated(&format!("e{index}.txt"), &text))
         .collect();
     let archive = build(&specs, &[]);
-    let (mut bus, grant, entries) = listing_of(archive);
     let orders = [[0usize, 1, 2, 3, 4], [4, 0, 1, 2, 3], [2, 3, 4, 0, 1]];
     for order in orders {
-        let mut budget = preview::Budget {
-            inflate: preview::MAX_INFLATE_BYTES,
-            compressed: u64::MAX,
-        };
-        let mut left = u64::MAX;
-        let mut produced = 0u64;
-        let mut skipped_for_total = 0;
-        for index in order {
-            let outcome = {
-                let mut reader = zip::Reader::new(&mut bus, ARCHIVE, &grant, &mut left);
-                preview::preview(&mut reader, &entries[index], &budget).unwrap()
-            };
-            produced += outcome.produced;
-            if outcome.blocks == Err("inflate_budget") {
-                skipped_for_total += 1;
-            }
-            budget.take(&outcome);
-        }
-        assert!(
-            produced <= preview::MAX_INFLATE_BYTES,
-            "produced {produced} in order {order:?}"
+        let bus = run_fixture(request(ARCHIVE, &order), ARCHIVE, archive.clone());
+        let skipped = skipped(&bus);
+        let budget_skips: Vec<&Value> = skipped
+            .iter()
+            .filter(|skip| skip["reason"] == "inflate_budget")
+            .collect();
+        assert_eq!(
+            budget_skips.len(),
+            1,
+            "one entry stops at the total: {order:?}"
         );
         assert_eq!(
-            skipped_for_total, 1,
-            "one entry stops at the run's total in order {order:?}"
+            budget_skips[0]["index"], order[4],
+            "the last entry stops at the total: {order:?}"
+        );
+        assert_eq!(
+            previews(&bus).len() + skipped.len(),
+            5,
+            "every requested entry was decided: {order:?}"
         );
     }
 }

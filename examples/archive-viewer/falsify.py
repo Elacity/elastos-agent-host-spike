@@ -365,12 +365,23 @@ CASES = [
      "    {",
      ["an_entry_declared_past_the_ratio_is_not_read"]),
     ("F5 the output of skipped entries is not counted",
-     "src/preview.rs",
-     "        self.inflate = self.inflate.saturating_sub(outcome.produced);",
-     "        if outcome.blocks.is_ok() {\n"
-     "            self.inflate = self.inflate.saturating_sub(outcome.produced);\n"
-     "        }",
+     "src/lib.rs",
+     "                        previews_budget.take(&outcome);",
+     "                        if outcome.blocks.is_ok() {\n"
+     "                            previews_budget.take(&outcome);\n"
+     "                        }",
      ["no_run_inflates_more_than_its_total"]),
+    ("F5c the remaining allowance is not counted down",
+     "src/preview.rs",
+     "        let left = allowance.saturating_sub(produced);",
+     "        let left = allowance;",
+     ["no_run_inflates_more_than_its_total",
+      "a_preview_stops_for_its_budget_before_any_corruption_reason"]),
+    ("F1b the byte past the cap is judged after the stream's own verdict",
+     "src/preview.rs",
+     "        if produced > MAX_PREVIEW_BYTES {",
+     "        if produced > OUTPUT_WINDOW_BYTES {",
+     ["a_preview_stops_for_its_budget_before_any_corruption_reason"]),
     ("F5b the compressed cap is not checked",
      "src/preview.rs",
      "    if entry.compressed_size > budget.compressed {",
