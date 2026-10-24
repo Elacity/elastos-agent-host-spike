@@ -162,18 +162,21 @@ bomb**; the caps below do, and they are counted in the inflate loop, not taken f
   over 100 is not even read. Text compresses about 7:1 here; a 16 KiB run of zeros about 800:1.
 - **B3, total inflate cap.** All entries shown in one run inflate at most 64 KiB in all, counted as it comes out,
   whether the entry is then shown or skipped (PATTERNS 1, "count before any early return").
-- **B4, overlapping entries.** Two entries whose data ranges overlap (one compressed stream reused by many
+- **B4, overlapping entries.** Two entries whose whole records overlap (one compressed stream reused by many
   directory records, the "non-recursive" bomb) refuse the archive. The directory alone cannot give a range:
   where the data starts depends on the local header's own name and extra lengths, which only that header
   holds. So the listing is accepted only after one bounded local-header check for every entry (B4a), before
   any entry is listed as safe: read the 30-byte fixed header at the directory's local offset (cap: 256 × 30
   bytes, 7,680 bytes in all, counted), check its signature, and take `name_len` and `extra_len` from it.
-  Then `data = local_offset + 30 + name_len + extra_len` and `end = data + compressed_size`. Ranges sorted by
-  `data` must not overlap (a shared local offset overlaps itself), `data` must not exceed `end`, and `end`
-  must not pass the directory offset. The name bytes are not read here; only a shown entry reads them (L5),
-  which must then agree with the lengths this check used. A local header that cannot be read inside the
-  object refuses the archive. The directory's name and extra lengths never stand in for the local ones: two
-  archives with identical directories and end records can still overlap when a local extra field grows (F6b).
+  Then `data = local_offset + 30 + name_len + extra_len` and `end = data + compressed_size`. Each entry owns
+  the whole record `[local_offset, end)`: its local header, its extra field and its compressed data. Records
+  sorted by `local_offset` must not overlap, `data` must not exceed `end`, and every `end` must not pass the
+  directory offset. The payload `[data, end)` alone is not enough: a record that starts inside another
+  entry's header or extra field overlaps it even when the two payloads are disjoint (F6c). The name bytes
+  are not read here; only a shown entry reads them (L5), which must then agree with the lengths this check
+  used. A local header that cannot be read inside the object refuses the archive. The directory's name and
+  extra lengths never stand in for the local ones: two archives with identical directories and end records
+  can still overlap when a local extra field grows (F6b).
 - **B5, declared totals are display only.** The sum of declared sizes is shown as declared. It never sizes a
   buffer and never decides that something is safe. Listing a 2 GB archive costs the same as listing a small
   one, because no entry is inflated to list it.
@@ -304,11 +307,12 @@ rebuild the component and run in `ComponentProvider`.
 |---|---|---|---|
 | F1 | B1 preview cap | the window grows to 64 KiB | `an_entry_over_the_preview_cap_is_skipped_after_one_byte_past_it` |
 | F2 | B1 declared size | the declared size is not checked first | `an_entry_declared_over_the_cap_is_not_read` |
-| F3 | B2 ratio | the ratio check is removed | `a_bomb_entry_stops_at_the_ratio_cap` (in the component: a 16 KiB entry compressed into 100 bytes, so the ratio cap sits below both B1's window and B3's total; the test asserts status `ratio` and that the counted output is at most 100 × the compressed bytes consumed + 1 KiB, so it fails on the status and the count, not on fuel) |
+| F3 | B2 ratio | the streaming ratio check is removed (the declared-ratio check stays) | `a_bomb_entry_stops_at_the_ratio_cap` (in the component: a declared 10,000-byte entry with 100 compressed bytes, so the declared ratio is exactly 100 and F4's check passes and inflation starts. A crafted stream yields about 3,100 bytes from its first 20 bytes, past 100 × 20 + 1 KiB = 3,024, and its 100 bytes end at exactly 10,000. The test asserts status `ratio`, that the stop came mid-stream, and that the output count at the stop is at least 1 KiB, so it also proves inflation ran. Without the streaming check the entry inflates to 10,000 and lists, so both the status and the count fail) |
 | F4 | B2 declared ratio | the declared ratio is not checked | `an_entry_declared_past_the_ratio_is_not_read` |
 | F5 | B3 total inflate | output of skipped entries is not counted | `no_run_inflates_more_than_its_total` (sweep) |
 | F6 | B4 overlap | the range check is removed | `entries_that_share_data_refuse_the_archive` |
-| F6b | B4 local extra | the local extra length is ignored and the data start comes from the directory (`local_offset + 30 + name_len`) | `entries_that_overlap_only_after_the_local_extra_field_refuse_the_archive` (two archives with identical directories and end records; the first local extra grows from 0 to 64 bytes so its range covers the second) |
+| F6b | B4 local extra | the local extra length is ignored and the data start comes from the directory (`local_offset + 30 + name_len`) | `entries_that_overlap_only_after_the_local_extra_field_refuse_the_archive` (two archives with identical directories and end records; the first local extra grows from 0 to 64 bytes so its record covers the second) |
+| F6c | B4 record boundary | the overlap check uses only the payload `[data, end)`, not the whole record `[local_offset, end)` | `entries_that_share_a_local_header_region_refuse_the_archive` (two records with `(local_offset, data, end)` of `(0, 95, 103)` and `(35, 66, 74)`: the second sits inside the first entry's extra field, and only the payloads are disjoint) |
 | F7 | P1 absolute | `/` and drive names pass | `absolute_names_are_blocked` |
 | F8 | P2 dot segments | `..` passes | `dot_and_empty_segments_are_blocked` |
 | F9 | P3 backslash | backslash passes | `a_backslash_is_blocked` |
@@ -342,7 +346,7 @@ rebuild the component and run in `ComponentProvider`.
 | F37 | Page | a path is drawn as markup | `an_entry_path_is_text` |
 | F38 | Page (Bus v1) | an image entry is drawn | `the_page_draws_no_image_on_bus_v1` |
 | F39 | Page | an inherited property name picks a kind | `a_kind_named_after_an_inherited_property_is_not_drawn` |
-| F40 | L9 directory | a directory's size is not checked | `a_directory_with_a_nonzero_size_is_blocked` |
+| F40 | L9 directory | a directory's size is not checked | `a_nonempty_directory_is_blocked_and_the_valid_entry_still_lists` (one archive with a nonempty directory and a valid text file: the directory is listed `blocked` with `directory_with_data`, and the text file keeps its listing and preview; the run writes a view, it does not refuse the archive) |
 | F41 | Request URI | the `.AppData/` refusal is removed | `a_request_for_an_appdata_uri_is_refused` |
 | F42 | ReaderAt authority | a denied read is folded into an `io::Error` and becomes a content skip | `a_denied_read_during_the_directory_read_stops_the_run` |
 | F43 | B5 declared totals | the sum of declared sizes sizes a buffer | `a_declared_two_gigabyte_archive_is_listed_with_the_same_reads_as_a_small_one` |
@@ -365,7 +369,7 @@ largest view. F3 is not the fuel proof.
    and the image header checks (M1 to M3), and the one photo hash change.
 3. Then this app, Bus v1 first, in `examples/archive-viewer`:
    - the core: request, end record, directory, listing, B4a and the statuses, all P and L rules, with tests and
-     falsifiers F6, F6b, F7 to F25, F29 to F31 and F40 to F43;
+     falsifiers F6, F6b, F6c, F7 to F25, F29 to F31 and F40 to F43;
    - text previews: inflate with B1 to B3, L6 to L8, the text checks; F1, F2, F4, F5, F26 to F28, F32, F33;
    - the host test in `ComponentProvider` and the fuel gate; F3 (ratio), F35 and F36;
    - the page and its smoke; F37 to F39;
@@ -420,8 +424,9 @@ Build them in these groups; each group shares fixtures and a test helper, and la
 
 | Group | Falsifiers | Shares |
 |---|---|---|
-| Directory and end record | F19 to F23 (L1 to L4), F6 and F6b (B4 overlap), F40 (L9) | the end-record and directory fixture builder; all refuse the whole archive |
+| Directory and end record | F19 to F23 (L1 to L4), F6, F6b and F6c (B4 overlap) | the end-record and directory fixture builder; all refuse the whole archive |
 | Names | F7 to F16 (P1 to P9) | one fixture with many names; a table test per rule |
+| Entry status | F40 (L9) | one archive with a nonempty directory and a valid text file; the directory is blocked and the file still lists |
 | Request | F41 | the request fixture with an `.AppData/` uri; the run stops before a grant |
 | Methods and encryption | F29, F30 | a directory-only fixture; nothing is inflated |
 | Local header and the bytes | F24, F25 (L5), F26 to F28 (L6 to L8) | an entry fixture whose local header or data is changed after the fact |
