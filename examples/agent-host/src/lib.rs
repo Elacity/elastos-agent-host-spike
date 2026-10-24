@@ -316,6 +316,37 @@ fn model_bytes(events: &[SurfaceNode]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// A packed prompt: the stable prefix and this turn's volatile tail. The
+/// prefix is the model-visible text of the journal in order, one record per
+/// line, node 0 first. The tail is the new user text of this turn and is not
+/// part of the prefix, so a server may reuse the prefix between turns. The
+/// guest does not call a model, so this packer is exercised by tests only.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PackedPrompt {
+    prefix: Vec<u8>,
+    tail: Vec<u8>,
+}
+
+/// Pack one turn. A journal whose first node is not the system head, or an
+/// empty turn, is not packed.
+#[cfg(test)]
+fn pack_prompt(journal: &Journal, turn: &str) -> Option<PackedPrompt> {
+    let head = journal.events.first()?;
+    if head.role != Role::System || head.source != NodeSource::Head || turn.is_empty() {
+        return None;
+    }
+    let mut prefix = String::new();
+    for node in derive(&journal.events) {
+        prefix.push_str(&render_record(&node));
+        prefix.push('\n');
+    }
+    Some(PackedPrompt {
+        prefix: prefix.into_bytes(),
+        tail: turn.as_bytes().to_vec(),
+    })
+}
+
 /// Copy the model bytes before an effect. The copy is not a grant.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn checkpoint(journal: &Journal) -> Option<Vec<u8>> {
@@ -8216,6 +8247,222 @@ mod tests {
             second.events[4].text,
             "Keep the first system line unchanged."
         );
+    }
+
+    // Prefix proof. Two consecutive turns share one packed prefix; only the
+    // volatile tail (the new user text) changes. Node 0 stays its first line.
+
+    #[test]
+    fn two_consecutive_turns_keep_the_packed_prefix_byte_for_byte() {
+        let mut journal = one_turn();
+        assert!(admit_snapshot(
+            &mut journal,
+            "localhost://Users/self/Projects/demo",
+            "2026-10-24T09:00:00Z",
+            "localhost://Users/self/Projects/demo/index.html",
+        ));
+        let first = pack_prompt(&journal, "read the page").unwrap();
+        let second = pack_prompt(&journal, "change the title").unwrap();
+        let expected = format!(
+            "{SYSTEM_HEAD}\nhello\nReply in one short paragraph.\n\
+             localhost://Users/self/Projects/demo\n2026-10-24T09:00:00Z\n\
+             localhost://Users/self/Projects/demo/index.html\n"
+        );
+        assert_eq!(first.prefix, expected.as_bytes());
+        assert_eq!(first.prefix, second.prefix);
+        assert_eq!(first.tail, b"read the page");
+        assert_eq!(second.tail, b"change the title");
+        assert_ne!(first.tail, second.tail);
+        let mut first_prompt = first.prefix.clone();
+        first_prompt.extend_from_slice(&first.tail);
+        let mut second_prompt = second.prefix.clone();
+        second_prompt.extend_from_slice(&second.tail);
+        assert_eq!(
+            first_prompt[..first.prefix.len()],
+            second_prompt[..second.prefix.len()]
+        );
+        assert_ne!(
+            first_prompt[first.prefix.len()..],
+            second_prompt[second.prefix.len()..]
+        );
+    }
+
+    #[test]
+    fn a_changed_prefix_line_changes_the_packed_prefix() {
+        let mut journal = one_turn();
+        let first = pack_prompt(&journal, "same question").unwrap();
+        assert!(admit_skill(&mut journal, "Use the project style."));
+        let second = pack_prompt(&journal, "same question").unwrap();
+        assert_ne!(first.prefix, second.prefix);
+        assert_eq!(first.tail, second.tail);
+    }
+
+    #[test]
+    fn a_prompt_without_node_zero_or_a_turn_text_is_not_packed() {
+        let journal = one_turn();
+        assert_eq!(pack_prompt(&journal, ""), None);
+        let mut headless = empty_journal();
+        admit_user(&mut headless, "hello");
+        assert_eq!(pack_prompt(&headless, "question"), None);
+        let mut later_system = empty_journal();
+        later_system.events.push(SurfaceNode {
+            role: Role::System,
+            text: SYSTEM_HEAD.to_string(),
+            source: NodeSource::SystemLine,
+        });
+        assert_eq!(pack_prompt(&later_system, "question"), None);
+        let mut wrong_role = empty_journal();
+        wrong_role.events.push(SurfaceNode {
+            role: Role::User,
+            text: SYSTEM_HEAD.to_string(),
+            source: NodeSource::Head,
+        });
+        assert_eq!(pack_prompt(&wrong_role, "question"), None);
+    }
+
+    // The opt-in model test records the counters this engine publishes. There
+    // is no prefix-hit counter, so nothing here reads or claims one.
+
+    fn metric_value(metrics: &str, name: &str) -> Option<f64> {
+        metrics
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .find_map(|line| {
+                let (sample, value) = line.split_once(char::is_whitespace)?;
+                let sample_name = sample.split('{').next().unwrap_or(sample);
+                if sample_name != name {
+                    return None;
+                }
+                value.trim().parse::<f64>().ok()
+            })
+    }
+
+    fn sparks_get(url: &str) -> Result<String, String> {
+        let output = std::process::Command::new("curl")
+            .args([
+                "--silent",
+                "--show-error",
+                "--fail",
+                "--max-time",
+                "30",
+                url,
+            ])
+            .output()
+            .map_err(|error| format!("curl did not run: {error}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    fn sparks_post(url: &str, body: &str) -> Result<String, String> {
+        let output = std::process::Command::new("curl")
+            .args([
+                "--silent",
+                "--show-error",
+                "--fail",
+                "--max-time",
+                "120",
+                "-X",
+                "POST",
+                "-H",
+                "content-type: application/json",
+                "--data-binary",
+                body,
+                url,
+            ])
+            .output()
+            .map_err(|error| format!("curl did not run: {error}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    #[test]
+    fn a_metric_value_is_read_by_exact_name_and_an_absent_prefix_counter_is_none() {
+        let metrics = "# TYPE tensorfold:prompt_tokens_total counter\n\
+                       tensorfold:prompt_tokens_total{model=\"deepseek-v4-flash\"} 1234\n\
+                       tensorfold:request_prefill_seconds 1.5\n";
+        assert_eq!(
+            metric_value(metrics, "tensorfold:prompt_tokens_total"),
+            Some(1234.0)
+        );
+        assert_eq!(
+            metric_value(metrics, "tensorfold:request_prefill_seconds"),
+            Some(1.5)
+        );
+        assert_eq!(
+            metric_value(metrics, "tensorfold:prompt_tokens_total_total"),
+            None
+        );
+        assert_eq!(metric_value(metrics, "vllm:prefix_cache_hits"), None);
+    }
+
+    /// Opt-in with SPARKS_MODEL_URL. Sends two turns that share one packed
+    /// prefix to the local model, and reads /metrics before and after. It
+    /// records tensorfold:prompt_tokens_total and
+    /// tensorfold:request_prefill_seconds. This engine publishes no
+    /// prefix-hit counter, so the test reads none and claims no cache hit.
+    #[test]
+    #[ignore = "sends two turns to SPARKS_MODEL_URL; not in the normal gates"]
+    fn two_turns_to_the_local_model_keep_one_packed_prefix() {
+        let Ok(base) = std::env::var("SPARKS_MODEL_URL") else {
+            return;
+        };
+        let base = base.trim_end_matches('/');
+        let journal = one_turn();
+        let first = pack_prompt(&journal, "How does the journal fold?").unwrap();
+        let second = pack_prompt(&journal, "Which grants does the guest hold?").unwrap();
+        assert_eq!(
+            first.prefix, second.prefix,
+            "the packed prefix moved between two consecutive turns"
+        );
+
+        let before = sparks_get(&format!("{base}/metrics"));
+        if let Err(error) = &before {
+            println!("metrics before: unavailable ({error})");
+        }
+        let before = before.unwrap_or_default();
+
+        for packed in [&first, &second] {
+            let mut prompt = packed.prefix.clone();
+            prompt.extend_from_slice(&packed.tail);
+            let prompt = String::from_utf8(prompt).expect("the packed prompt is UTF-8");
+            let body = serde_json::json!({
+                "model": "deepseek-v4-flash",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 1,
+                "temperature": 0
+            })
+            .to_string();
+            let reply = sparks_post(&format!("{base}/v1/chat/completions"), &body)
+                .unwrap_or_else(|error| panic!("the local model refused a turn: {error}"));
+            let reply: serde_json::Value =
+                serde_json::from_str(&reply).expect("the local model did not return JSON");
+            assert!(
+                reply.get("choices").is_some(),
+                "the local model did not return a completion: {reply}"
+            );
+        }
+
+        let after = sparks_get(&format!("{base}/metrics"));
+        if let Err(error) = &after {
+            println!("metrics after: unavailable ({error})");
+        }
+        let after = after.unwrap_or_default();
+        for name in [
+            "tensorfold:prompt_tokens_total",
+            "tensorfold:request_prefill_seconds",
+        ] {
+            let (before_value, after_value) =
+                (metric_value(&before, name), metric_value(&after, name));
+            println!("{name}: before={before_value:?} after={after_value:?}");
+            if let (Some(before_value), Some(after_value)) = (before_value, after_value) {
+                println!("{name}: delta={}", after_value - before_value);
+            }
+        }
+        println!("no prefix-hit counter is read: this engine publishes none");
     }
 
     #[test]

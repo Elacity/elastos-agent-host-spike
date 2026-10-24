@@ -1,0 +1,119 @@
+{
+ "about": "Agent host falsifiers: each entry breaks one check (exact text, replaced once), and every named test must then FAIL. Run with falsify.py. expect: caught (all named tests fail), compile_error (the mutation must not build), survives (known survivor, by design). Files are relative to examples/agent-host. command: host (cargo test of the guest) or e2e (run-e2e.sh: the guest in a test Runtime) or selftest (this runner's own self-test, for a change to falsify.py).",
+ "retired": {},
+ "falsifiers": [
+  {
+   "id": "PF01",
+   "title": "the packer moves the last prefix byte into the volatile tail",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    Some(PackedPrompt {\n        prefix: prefix.into_bytes(),\n        tail: turn.as_bytes().to_vec(),\n    })",
+     "new": "    let mut prefix = prefix.into_bytes();\n    let mut tail = turn.as_bytes().to_vec();\n    let last = prefix.len() - 1;\n    tail.insert(0, prefix.remove(last));\n    Some(PackedPrompt { prefix, tail })"
+    }
+   ],
+   "tests": [
+    "tests::two_consecutive_turns_keep_the_packed_prefix_byte_for_byte"
+   ]
+  },
+  {
+   "id": "PF02",
+   "title": "the packer moves the first volatile byte into the prefix",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    Some(PackedPrompt {\n        prefix: prefix.into_bytes(),\n        tail: turn.as_bytes().to_vec(),\n    })",
+     "new": "    let mut prefix = prefix.into_bytes();\n    let mut tail = turn.as_bytes().to_vec();\n    prefix.push(tail.remove(0));\n    Some(PackedPrompt { prefix, tail })"
+    }
+   ],
+   "tests": [
+    "tests::two_consecutive_turns_keep_the_packed_prefix_byte_for_byte"
+   ]
+  },
+  {
+   "id": "PF03",
+   "title": "the packed prefix keeps only node 0, so a changed prefix line does not reach it",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    for node in derive(&journal.events) {\n        prefix.push_str(&render_record(&node));\n        prefix.push('\\n');\n    }",
+     "new": "    for node in derive(&journal.events).iter().take(1) {\n        prefix.push_str(&render_record(node));\n        prefix.push('\\n');\n    }"
+    }
+   ],
+   "tests": [
+    "tests::two_consecutive_turns_keep_the_packed_prefix_byte_for_byte",
+    "tests::a_changed_prefix_line_changes_the_packed_prefix"
+   ]
+  },
+  {
+   "id": "PF04",
+   "title": "the packer accepts a node 0 that is not a system node",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if head.role != Role::System || head.source != NodeSource::Head || turn.is_empty() {",
+     "new": "    if head.source != NodeSource::Head || turn.is_empty() {"
+    }
+   ],
+   "tests": [
+    "tests::a_prompt_without_node_zero_or_a_turn_text_is_not_packed"
+   ]
+  },
+  {
+   "id": "PF05",
+   "title": "the packer accepts a system node 0 that is not the head",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if head.role != Role::System || head.source != NodeSource::Head || turn.is_empty() {",
+     "new": "    if head.role != Role::System || turn.is_empty() {"
+    }
+   ],
+   "tests": [
+    "tests::a_prompt_without_node_zero_or_a_turn_text_is_not_packed"
+   ]
+  },
+  {
+   "id": "PF06",
+   "title": "the packer accepts an empty turn",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if head.role != Role::System || head.source != NodeSource::Head || turn.is_empty() {",
+     "new": "    if head.role != Role::System || head.source != NodeSource::Head {"
+    }
+   ],
+   "tests": [
+    "tests::a_prompt_without_node_zero_or_a_turn_text_is_not_packed"
+   ]
+  },
+  {
+   "id": "PF07",
+   "title": "the metrics reader matches by anything but the exact name, so an absent counter reads as present",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                if sample_name != name {\n                    return None;\n                }",
+     "new": "                if sample_name == name {\n                    return None;\n                }"
+    }
+   ],
+   "tests": [
+    "tests::a_metric_value_is_read_by_exact_name_and_an_absent_prefix_counter_is_none"
+   ]
+  }
+ ]
+}
