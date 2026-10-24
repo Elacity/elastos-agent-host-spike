@@ -251,3 +251,78 @@ blocks.
   directly: the early L8 check and the returned-length check already prove the
   length, so the unreachable comparison is gone.
 - 72 falsifiers.
+
+## 2026-10-24: task 004, the host test and the fuel gate
+
+Step 3c's first half: the built component runs inside the Runtime's own
+`ComponentProvider` under the kit's fake bridge, and the two rules the roadmap
+gives as the reason for this app are proven there: a run with no grant stops
+(F35), and the worst archive within the caps uses at most 80% of the fixed
+100,000,000 fuel (F36).
+
+### What changed
+
+- `capsule.json` and `build.sh`: the manifest the Runtime validates (component
+  app, entrypoint, storage bounds `Users/self/*` and its own view folder) and
+  the repository's component builder.
+- New `host-test/` crate (layout of `examples/docs-viewer/host-test`), a
+  dev-only crate on `capsule-v1-host-test` by path. Nine tests: the manifest,
+  the happy path through `ComponentProvider` (a stored text entry shown with
+  its CRC, a directory listed, a deflated text entry), the admission import
+  check, F35, the gate archives run through the provider, the caps they are
+  built to, and F36 through the kit's `measure` runner.
+- The fixtures are built in the test (`M4`): a byte-by-byte ZIP writer, CRC-32
+  and `miniz_oxide` streams. Six gate archives, one per hostile class, at
+  their caps: the largest directory (256 × 18-byte names = exactly 16 KiB),
+  the most names at their longest (54 × 255 bytes under the 16 KiB directory),
+  the most shown entries (8 × 6 KiB text), a bomb whose declared ratio sits at
+  the cap (16 KiB of zero runs broken by one changing literal each, streamed
+  at the level closest to the 154-byte floor), a 16 KiB text entry (the worst
+  text inflate), and the largest view (256 entries and two 15 KiB previews,
+  63,432 bytes of view).
+- `verify.sh`: manifest check, the existing guest fmt/clippy/tests/falsify
+  unchanged, then the component build, host-test fmt/clippy/tests and
+  `falsify.py --runtime`.
+- `falsify.py`: the `--runtime` group. F35's mutant drops the archive grant
+  (`.unwrap_or_default()`); F36's mutant asks one byte a call in
+  `zip::Reader::read` and copies the inflate window one byte at a time in
+  `preview::inflate_bounded`.
+
+### F35 and F36 done
+
+- **F35** `no_grant_stops_the_run_through_the_runtime`: with the archive read
+  grant withheld, the run returns `BusError::Denied` naming the archive, makes
+  no read of it and writes no view. Its mutant attempts the read ungranted, so
+  the test fails on the read trace.
+- **F36** `worst_archives_stay_under_80_percent_of_the_runtime_fuel`: measured
+  on this Mac, one run each, through the kit's `measure` runner at
+  100,000,000 fuel:
+
+| Gate archive | Fuel | Share |
+|---|---|---|
+| the largest directory | 18,291,996 | 18.3% |
+| the most names at their longest | 12,845,089 | 12.8% |
+| the most shown entries | 12,638,105 | 12.6% |
+| a bomb at the ratio cap | 1,350,041 | 1.4% |
+| a worst-inflate text entry | 4,176,199 | 4.2% |
+| the largest view | 24,540,259 | 24.5% |
+
+  The highest is 24.5%, well under the 80% gate. Under F36's mutant the same
+  gate records 100.0% for the largest directory, the longest names and the
+  largest view (they spend the whole budget), 72.9% for the most shown
+  entries, so its highest is 100.0% and the test fails on the 80% assertion.
+  The gate counts an out-of-fuel run as 100%, not as a broken fixture.
+- 74 falsifiers in all: the 72 core cases and F35, F36 under `--runtime`.
+
+### Notes for the next builder
+
+- **Kit note, no kit change:** a kit falsifier case names one file, so F36's
+  second mutation (the inflate copy in `src/preview.rs`) is applied by the
+  runtime group's `prepare`, checked by `--check` and restored in a `finally`.
+  A case that names several files would fold this in.
+- The guest's read budget covers the gate archives: the largest view reads
+  about 31 KiB of the 64 KiB one run may read, so the gate is a fuel
+  measurement, not a budget refusal.
+- **Remaining for task 005:** F3 (B2's streaming ratio check, in the
+  component), F43 (declared totals under the 128 MiB store limit). Then the
+  page (F37 to F39), and tar after ZIP on both buses.

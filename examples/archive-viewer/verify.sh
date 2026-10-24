@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# The archive viewer core: fmt, clippy for the host tests and the wasm32
-# component, its tests, and every falsifier (F1, F2, F4, F5, F6, F6b, F6c,
-# F7 to F17, F19 to F28, F29 to F33, F40 to F42, plus the bound and skip-reason
-# cases F5b, F6d to F6f, F16b, F19b, F21b to F21g, F23b, F23c, F30b, F30c and
-# F41b to F41e).
+# The archive viewer: the core's fmt, clippy (host and wasm32), tests and
+# falsifiers; then the built component in the Runtime's ComponentProvider with
+# its admission check, the F35 grant stop and the F36 fuel gate (the host-test
+# crate), and their falsifiers under --runtime.
 set -euo pipefail
 
 VIEWER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${VIEWER_DIR}/../.." && pwd)"
+WIT="${REPO_ROOT}/elastos/wit/elastos-bus-v1.wit"
 export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
+
+python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" \
+    "${VIEWER_DIR}/capsule.json" "${WIT}" archive-viewer
 
 cargo fmt --manifest-path "${VIEWER_DIR}/Cargo.toml" --all -- --check
 cargo clippy --locked --manifest-path "${VIEWER_DIR}/Cargo.toml" --all-targets -- -D warnings
@@ -19,4 +23,17 @@ cargo test --locked --manifest-path "${VIEWER_DIR}/Cargo.toml"
 # Every rule: break it, see its test fail, restore it.
 python3 -I "${VIEWER_DIR}/falsify.py"
 
-echo "archive-viewer core verification: OK"
+# Component: built with the repository builder.
+"${VIEWER_DIR}/build.sh"
+test -f "${VIEWER_DIR}/archive-viewer.component.wasm"
+
+# Host: the component inside the Runtime's ComponentProvider, its import
+# admission and the fuel gate.
+cargo fmt --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" -- --check
+cargo clippy --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" --all-targets -- -D warnings
+cargo test --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" -- --nocapture
+
+# The component falsifiers: each rebuilds the component and runs the host test.
+python3 -I "${VIEWER_DIR}/falsify.py" --runtime
+
+echo "archive-viewer verification: OK"
