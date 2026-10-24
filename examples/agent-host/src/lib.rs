@@ -21587,6 +21587,22 @@ mod tests {
         assert_eq!(journal, before);
     }
 
+    /// A saved copy as long as the log at the start but not equal to it is
+    /// refused too: the boundary is the whole saved prefix, not only its length.
+    #[test]
+    fn a_saved_compaction_that_is_not_the_start_of_the_log_is_refused() {
+        let (mut journal, _child) = compacting_with_a_child();
+        let saved = &mut journal.compact_backup.as_mut().unwrap().0;
+        let last = saved.len() - 1;
+        saved[last].text.push_str(" changed");
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        assert!(!commit_compact(&mut journal.clone()));
+        assert!(!note_crash_during_compact(&mut journal));
+    }
+
     /// R8: on load, no step is still prepared at or before a cancel point or
     /// below a stopped child (a stop cancels them; one put back is forged).
     #[test]

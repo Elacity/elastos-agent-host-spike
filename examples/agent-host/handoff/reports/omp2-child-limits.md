@@ -665,3 +665,25 @@ Principles:   2 (a broken boundary installs nothing), 5 (all work stays in examp
               with "record"), 12 (this note), 7 (three failing-first tests; PX54-PX56 each remove one
               call site and are caught).
 ```
+
+## Update: Claude's merge for the Codex FAIL at 4368761, the compaction boundary (24 Oct)
+
+```text
+Context:      Claude fixed the same finding on claude/omp2-child-limits-fix (cd6d1f4b, off 4368761c) while
+              the Sparks pushed 28940a07. Both fixes are the same rule. The merge keeps the Sparks' code,
+              tests and PX54-PX56, and keeps the PX52 retirement: `stored_child_records_ok` looks only at
+              child-budget and child-stop records, and with the boundary holding the saved view has
+              exactly the log's records, so the current-log check covers it.
+Added:        a_saved_compaction_that_is_not_the_start_of_the_log_is_refused: a saved copy as long as the
+              log at the start, with one node changed, is refused on load, by a commit and by a crash
+              restore. It fails on 4368761c and passes now. PX57 (the boundary compares only the length)
+              new, caught by that test.
+Tests run:    ./examples/agent-host/verify.sh -> "238 passed", runner self-test OK, clippy clean, build OK.
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Full run:     python3 -I examples/agent-host/falsify.py: 283 CAUGHT, 1 CAUGHT (does not build: OY19), 1
+              SURVIVED (expected, by design: OZ01) of 285; no NOT RUN, no NO MATCH.
+Guest hash:   a33bd4acdf2f76cb2824efd73855bc2f1ec9de3677569813386fad8675f3ddba on verify.sh (Linux checkout).
+              wasm_sections.py: file 667923 bytes; /1/2 149 5ee6b40d46f6a045 (import list unchanged).
+Principles:   5 (a saved copy that is not the start of the log fails closed on load), 7 (the length-only
+              boundary has a test that fails first and a caught falsifier), 10 (still one boundary rule).
+```

@@ -4973,6 +4973,22 @@
    "tests": [
     "tests::a_crash_restore_refuses_a_saved_compaction_past_the_log"
    ]
+  },
+  {
+   "id": "PX57",
+   "title": "the compaction boundary checks only the saved copy's length, not that it is the start of the log",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if saved.len() > journal.events.len() || journal.events[..saved.len()] != saved[..] {",
+     "new": "    if saved.len() > journal.events.len() {"
+    }
+   ],
+   "tests": [
+    "tests::a_saved_compaction_that_is_not_the_start_of_the_log_is_refused"
+   ]
   }
  ]
 }
