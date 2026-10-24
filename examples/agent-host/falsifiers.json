@@ -521,6 +521,38 @@
    "tests": [
     "a named test that does not run is not a catch"
    ]
+  },
+  {
+   "id": "FS21",
+   "title": "a cargo launch failure is not recognized, so a fake summary counts as a catch",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "CARGO_FAILURE = re.compile(\n    r\"could not execute process|never executed\"\n    r\"|process didn't exit successfully|\\(signal: \\d+, SIG[A-Z0-9]+\\)\")",
+     "new": "CARGO_FAILURE = re.compile(\n    r\"process didn't exit successfully|\\(signal: \\d+, SIG[A-Z0-9]+\\)\")"
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
+  },
+  {
+   "id": "FS22",
+   "title": "an abnormal test-process exit is not recognized, so a fake summary counts as a catch",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "CARGO_FAILURE = re.compile(\n    r\"could not execute process|never executed\"\n    r\"|process didn't exit successfully|\\(signal: \\d+, SIG[A-Z0-9]+\\)\")",
+     "new": "CARGO_FAILURE = re.compile(\n    r\"could not execute process|never executed\")"
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
   }
  ]
 }

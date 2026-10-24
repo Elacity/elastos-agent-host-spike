@@ -73,6 +73,12 @@ HARNESS_ERROR = re.compile(
 # the line start does not carry the marker and the phrase counts anywhere.
 LOADER_ERROR = re.compile(
     r"dyld(?:\[[^\]]*\])?: |error while loading shared libraries|Library not loaded:")
+# Cargo says the test process never started, or died abnormally: that report
+# is not a failed test, and it stays evidence when the ordinary failure footer
+# is removed.
+CARGO_FAILURE = re.compile(
+    r"could not execute process|never executed"
+    r"|process didn't exit successfully|\(signal: \d+, SIG[A-Z0-9]+\)")
 # Cargo prints this footer after an ordinary failing test: the harness ran the
 # test and the test failed, so the footer itself is not a harness error. Only
 # the footer text is removed; anything after it on the same line is checked.
@@ -265,7 +271,7 @@ def harness_is_error_free(output):
     every summary in that output untrustworthy. The text keeps its separators:
     a marker may end at a line break, and only the Cargo footer text is
     removed."""
-    if LOADER_ERROR.search(output):
+    if LOADER_ERROR.search(output) or CARGO_FAILURE.search(output):
         return False
     return not HARNESS_ERROR.search(TEST_FAILED.sub("", output))
 
@@ -492,6 +498,32 @@ print("  could not load the test harness")
 raise SystemExit(101)
 """
 
+STUB_FAKE_SUMMARY_CARGO_LAUNCH_FAILURE = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+sys.stderr.write(
+    "error: test failed, to rerun pass `--lib`\\n\\n"
+    "Caused by:\\n"
+    "  could not execute process `test-bin` (never executed)\\n\\n"
+    "Caused by:\\n"
+    "    No such file or directory (os error 2)\\n")
+raise SystemExit(101)
+"""
+
+STUB_FAKE_SUMMARY_CARGO_CRASH = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+sys.stderr.write(
+    "error: test failed, to rerun pass `--lib`\\n\\n"
+    "Caused by:\\n"
+    "  process didn't exit successfully: `/tmp/test-bin` (signal: 11, SIGSEGV)\\n")
+raise SystemExit(101)
+"""
+
 STUB_SURVIVOR_RAN = """import sys
 if "--exact" in sys.argv:
     if "--list" in sys.argv:
@@ -600,7 +632,11 @@ def a_named_test_that_does_not_run_is_not_a_catch():
                             ("fake summary with an error after the cargo footer",
                              STUB_FAKE_SUMMARY_FOOTER_THEN_ERROR),
                             ("fake summary with an error split after its colon",
-                             STUB_FAKE_SUMMARY_SPLIT_ERROR)):
+                             STUB_FAKE_SUMMARY_SPLIT_ERROR),
+                            ("fake summary with a cargo launch failure",
+                             STUB_FAKE_SUMMARY_CARGO_LAUNCH_FAILURE),
+                            ("fake summary with an abnormal test-process exit",
+                             STUB_FAKE_SUMMARY_CARGO_CRASH)):
             stub = SELF_TEST_DIR / "stub.py"
             stub.write_text(text, encoding="utf-8")
             how = {"build": [], "one": (["python3", "-I", str(stub)], SELF_TEST_DIR, [])}
