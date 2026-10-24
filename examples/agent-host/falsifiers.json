@@ -198,6 +198,184 @@
    "tests": [
     "a survivor needs its named test to run"
    ]
+  },
+  {
+   "id": "FC01",
+   "title": "the shrink rule is gone: a long summary replaces the tail",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if visible_bytes(&replacement_head) >= visible_bytes(&kept) {\n        return None;\n    }",
+     "new": "    if false {\n        return None;\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_model_summary_that_does_not_shrink_is_refused",
+    "tests::compaction_refuses_a_summary_that_does_not_shrink"
+   ]
+  },
+  {
+   "id": "FC02",
+   "title": "a required fact may be dropped",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if !required\n        .iter()\n        .all(|fact| contains_whole_fact(summary, fact.as_str()))\n    {\n        return Some(\"summary drops a required fact\");\n    }",
+     "new": "    if false {\n        return Some(\"summary drops a required fact\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_model_summary_that_drops_a_required_fact_is_refused"
+   ]
+  },
+  {
+   "id": "FC03",
+   "title": "a summary may repeat the system head (node 0)",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if summary.contains(&head.text) {\n        return Some(\"summary touches node 0\");\n    }",
+     "new": "    if false {\n        return Some(\"summary touches node 0\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_model_summary_that_touches_node_zero_is_refused"
+   ]
+  },
+  {
+   "id": "FC04",
+   "title": "a model failure is recorded as a summary",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        Err(reason) => Err(reason),",
+     "new": "        Err(_) => Ok(()),"
+    }
+   ],
+   "tests": [
+    "tests::a_model_failure_leaves_the_history_unchanged"
+   ]
+  },
+  {
+   "id": "FC05",
+   "title": "a summary is recorded from a step that was never dispatched",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if step.kind != ProposalKind::Hosted || step.state != StepState::Dispatched {\n        return Err(\"summary step not dispatched\");\n    }",
+     "new": "    if step.kind != ProposalKind::Hosted {\n        return Err(\"summary step not dispatched\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_summary_from_a_step_that_was_not_dispatched_is_refused"
+   ]
+  },
+  {
+   "id": "FC06",
+   "title": "a settled summary step accepts another answer",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if step.has_result {\n        return Err(\"summary step settled\");\n    }",
+     "new": "    if false {\n        return Err(\"summary step settled\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_settled_summary_step_does_not_accept_another_answer"
+   ]
+  },
+  {
+   "id": "FC07",
+   "title": "a delayed answer erases history the request never saw",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if hex_digest(&sha256(prompt.as_bytes())) != request_digest {\n        return Err(\"summary is stale\");\n    }",
+     "new": "    if false {\n        return Err(\"summary is stale\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_summary_answer_after_new_history_is_stale"
+   ]
+  },
+  {
+   "id": "FC08",
+   "title": "compaction replaces node 0 instead of keeping the head",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let replacement_head = [\n        head.clone(),\n        SurfaceNode {\n            role: Role::User,\n            text: summary.to_string(),\n            source: NodeSource::CompactionCheckpoint,\n        },\n    ];",
+     "new": "    let replacement_head = [\n        SurfaceNode {\n            role: Role::User,\n            text: String::new(),\n            source: NodeSource::Message,\n        },\n        SurfaceNode {\n            role: Role::User,\n            text: summary.to_string(),\n            source: NodeSource::CompactionCheckpoint,\n        },\n    ];"
+    }
+   ],
+   "tests": [
+    "tests::compaction_keeps_node_zero_and_starts_a_new_series",
+    "tests::a_model_written_compaction_summary_is_recorded"
+   ]
+  },
+  {
+   "id": "FC09",
+   "title": "a model failure writes history instead of leaving it unchanged",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        Err(reason) => Err(reason),",
+     "new": "        Err(_) => {\n            journal.events.push(SurfaceNode {\n                role: Role::User,\n                text: \"model failed\".to_string(),\n                source: NodeSource::CompactionCheckpoint,\n            });\n            Ok(())\n        }"
+    }
+   ],
+   "tests": [
+    "tests::a_model_failure_leaves_the_history_unchanged"
+   ]
+  },
+  {
+   "id": "FC10",
+   "title": "a required fact may be a part of another token",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if ch.is_alphanumeric()\n        || unicode_normalization::char::is_combining_mark(ch)\n        || matches!(ch, '_' | '-' | '=')\n    {\n        return true;\n    }",
+     "new": "    if false {\n        return true;\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_model_summary_that_changes_a_required_fact_is_refused"
+   ]
+  },
+  {
+   "id": "FC11",
+   "title": "a combining mark ends a token, so a changed word still matches",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if ch.is_alphanumeric()\n        || unicode_normalization::char::is_combining_mark(ch)\n        || matches!(ch, '_' | '-' | '=')\n    {",
+     "new": "    if ch.is_alphanumeric() || matches!(ch, '_' | '-' | '=') {"
+    }
+   ],
+   "tests": [
+    "tests::a_model_summary_that_changes_a_required_fact_with_a_combining_mark_is_refused"
+   ]
   }
  ]
 }

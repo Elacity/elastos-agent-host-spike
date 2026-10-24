@@ -5,6 +5,10 @@
 //! compaction starts the next series, and compaction never replaces node 0.
 //! The summary is one user checkpoint. A crash between the start and the
 //! end of compaction restores the saved bytes and the series.
+//! A summary may come from a hosted model: the guest proposes the request
+//! through the hosted proposal path, and records the answer only when it
+//! shrinks the tail, keeps node 0, and keeps every fact the task marked as a
+//! whole token.
 //! A crash records `not started` or `settlement_unknown` and does not dispatch
 //! that step again. A read proposal with no grant stays `denied` and is not
 //! dispatched. Cancel before dispatch stays `cancelled` and does not run.
@@ -1214,26 +1218,19 @@ fn admit_skill(journal: &mut Journal, text: &str) -> bool {
         && journal.events.first().map(|node| node.text.clone()) == Some(head_text)
 }
 
-/// Open a compaction. The bytes and the series stay put until commit.
-/// A refused summary leaves the journal unchanged. Skill nodes are kept
-/// for the commit and are not part of the shrink check.
+/// The nodes compaction keeps after one summary, in order. Nothing when the
+/// summary does not shrink the shadowed range: the head plus the summary must
+/// be smaller than the nodes they replace. This is the only shrink rule;
+/// `compact_refusal` and `begin_compact` both read it. Skill nodes, file
+/// reads, workspace snapshots, and visible goals stay and are not counted.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn begin_compact(journal: &mut Journal, summary: &str) -> bool {
-    if summary.is_empty()
-        || host_path(summary)
-        || journal.events.len() < 3
-        || journal.compaction_open
-    {
-        return false;
-    }
-    let Some(head) = journal.events.first().cloned() else {
-        return false;
-    };
+fn compact_replacement(journal: &Journal, summary: &str) -> Option<Vec<SurfaceNode>> {
+    let head = journal.events.first()?;
     if head.role != Role::System || head.source != NodeSource::Head {
-        return false;
+        return None;
     }
     let replacement_head = [
-        head,
+        head.clone(),
         SurfaceNode {
             role: Role::User,
             text: summary.to_string(),
@@ -1276,13 +1273,109 @@ fn begin_compact(journal: &mut Journal, summary: &str) -> bool {
         .cloned()
         .collect();
     if visible_bytes(&replacement_head) >= visible_bytes(&kept) {
-        return false;
+        return None;
     }
     let mut replacement = replacement_head.to_vec();
     replacement.extend(skills);
     replacement.extend(observations);
     replacement.extend(snapshots);
     replacement.extend(visible);
+    Some(replacement)
+}
+
+/// A character that holds a token together: a letter, a digit, a combining
+/// mark, or one of the separators that keep an identifier or a value whole.
+/// A combining mark joins the character it follows, so `cafe` plus U+0301 is
+/// one token and does not carry the fact `cafe`. A dot holds a token only
+/// between alphanumerics, so a version number keeps its parts and a sentence
+/// period ends a token.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn token_continues(chars: &[char], index: usize) -> bool {
+    let Some(&ch) = chars.get(index) else {
+        return false;
+    };
+    if ch.is_alphanumeric()
+        || unicode_normalization::char::is_combining_mark(ch)
+        || matches!(ch, '_' | '-' | '=')
+    {
+        return true;
+    }
+    ch == '.'
+        && index > 0
+        && chars[index - 1].is_alphanumeric()
+        && chars
+            .get(index + 1)
+            .is_some_and(|next| next.is_alphanumeric())
+}
+
+/// True when `fact` occurs in `text` as a whole token: no token-continuation
+/// character touches either end. So `BUILD_ID=7F3A0` does not carry the fact
+/// `7F3A0`, and a summary that changes a required fact has no match.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn contains_whole_fact(text: &str, fact: &str) -> bool {
+    let haystack: Vec<char> = text.chars().collect();
+    let needle: Vec<char> = fact.chars().collect();
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+    (0..=haystack.len() - needle.len()).any(|start| {
+        haystack[start..start + needle.len()] == needle[..]
+            && (start == 0 || !token_continues(&haystack, start - 1))
+            && !token_continues(&haystack, start + needle.len())
+    })
+}
+
+/// Why a summary is refused, or nothing. This is the one place for every
+/// compaction rule: empty, a host path, a summary that repeats the system head
+/// (node 0), too little history, an open compaction, a required fact that is
+/// missing or changed, and a summary that does not shrink. `required` is
+/// empty when the guest wrote the summary itself; a model-written one carries
+/// the facts its task marked.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn compact_refusal(journal: &Journal, summary: &str, required: &[String]) -> Option<&'static str> {
+    if summary.is_empty() {
+        return Some("summary empty");
+    }
+    if host_path(summary) {
+        return Some("summary names a host path");
+    }
+    let Some(head) = journal.events.first() else {
+        return Some("no system head");
+    };
+    if head.role != Role::System || head.source != NodeSource::Head {
+        return Some("no system head");
+    }
+    if summary.contains(&head.text) {
+        return Some("summary touches node 0");
+    }
+    if journal.events.len() < 3 {
+        return Some("history too short");
+    }
+    if journal.compaction_open {
+        return Some("compaction is open");
+    }
+    if !required
+        .iter()
+        .all(|fact| contains_whole_fact(summary, fact.as_str()))
+    {
+        return Some("summary drops a required fact");
+    }
+    if compact_replacement(journal, summary).is_none() {
+        return Some("summary does not shrink");
+    }
+    None
+}
+
+/// Open a compaction. The bytes and the series stay put until commit.
+/// A refused summary leaves the journal unchanged.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn begin_compact(journal: &mut Journal, summary: &str) -> bool {
+    if compact_refusal(journal, summary, &[]).is_some() {
+        return false;
+    }
+    let Some(replacement) = compact_replacement(journal, summary) else {
+        return false;
+    };
     journal.compact_backup = Some((journal.events.clone(), journal.epoch));
     journal.compact_pending = Some(replacement);
     journal.compaction_open = true;
@@ -1328,6 +1421,124 @@ fn note_crash_during_compact(journal: &mut Journal) -> bool {
 #[cfg(any(test, target_arch = "wasm32"))]
 fn compact(journal: &mut Journal, summary: &str) -> bool {
     begin_compact(journal, summary) && commit_compact(journal)
+}
+
+/// Lower-case hex of a digest. A summary step keeps its request digest in
+/// `new`, so an answer can be matched to the history the request saw.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn hex_digest(bytes: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        out.push(HEX[usize::from(byte >> 4)] as char);
+        out.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    out
+}
+
+/// Record a compaction summary request through the hosted model proposal
+/// path. The resource names the model; the facts the task marks as required
+/// ride in the step's `argv` as data, and the digest of the request text rides
+/// in `new`, so a later answer is bound to the history the request saw. This
+/// calls `propose_hosted`, so there is no second proposal path, no model call,
+/// and no secret. A journal with no summarisable input creates no step.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn propose_compact_summary(
+    journal: &mut Journal,
+    model: &str,
+    required: &[&str],
+) -> Result<u64, &'static str> {
+    if required.iter().any(|fact| fact.is_empty()) {
+        return Err("empty required fact");
+    }
+    let id = propose_hosted(journal, model)?;
+    let step = journal
+        .steps
+        .iter_mut()
+        .find(|step| step.id == id)
+        .expect("just pushed");
+    step.argv = required.iter().map(|fact| (*fact).to_string()).collect();
+    let Some(prompt) = compact_summary_prompt(journal, id) else {
+        journal.steps.retain(|step| step.id != id);
+        return Err("no summary input");
+    };
+    let step = journal
+        .steps
+        .iter_mut()
+        .find(|step| step.id == id)
+        .expect("just pushed");
+    step.new = hex_digest(&sha256(prompt.as_bytes()));
+    Ok(id)
+}
+
+/// The request a summary provider receives: one instruction, the facts the
+/// task marked, and the shadowed history (the head plus the lines compaction
+/// would replace). The guest builds this text; it sends nothing itself.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn compact_summary_prompt(journal: &Journal, step_id: u64) -> Option<String> {
+    let step = journal
+        .steps
+        .iter()
+        .find(|step| step.id == step_id && step.kind == ProposalKind::Hosted)?;
+    let input = shadowed_summary_input(journal)?;
+    let mut prompt =
+        String::from("Summarise the history after the system head in one short paragraph.");
+    if !step.argv.is_empty() {
+        prompt.push_str(" Keep these facts exactly: ");
+        prompt.push_str(&step.argv.join("; "));
+        prompt.push('.');
+    }
+    prompt.push_str("\n\n");
+    prompt.push_str(&input);
+    Some(prompt)
+}
+
+/// Record the model's answer for a dispatched hosted summary step. Only a
+/// dispatched, unsettled hosted step with a matching request digest is
+/// accepted. The digest binds the answer to the history the request saw, so
+/// an instruction appended after the request makes the answer stale and it is
+/// refused. The answer is checked by `compact_refusal` against the facts the
+/// step carries; a refusal or a provider failure returns its reason and
+/// leaves the history unchanged. The step is settled either way, so the same
+/// step is not recorded twice.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn record_compact_summary(
+    journal: &mut Journal,
+    step_id: u64,
+    answer: Result<String, &'static str>,
+) -> Result<(), &'static str> {
+    let Some(step) = journal.steps.iter().find(|step| step.id == step_id) else {
+        return Err("no summary step");
+    };
+    if step.kind != ProposalKind::Hosted || step.state != StepState::Dispatched {
+        return Err("summary step not dispatched");
+    }
+    if step.has_result {
+        return Err("summary step settled");
+    }
+    let required = step.argv.clone();
+    let request_digest = step.new.clone();
+    if request_digest.is_empty() {
+        return Err("summary step has no request digest");
+    }
+    let Some(prompt) = compact_summary_prompt(journal, step_id) else {
+        return Err("summary input changed");
+    };
+    if hex_digest(&sha256(prompt.as_bytes())) != request_digest {
+        return Err("summary is stale");
+    }
+    let outcome = match answer {
+        Err(reason) => Err(reason),
+        Ok(summary) => match compact_refusal(journal, &summary, &required) {
+            Some(reason) => Err(reason),
+            None if !compact(journal, &summary) => Err("summary not recorded"),
+            None => Ok(()),
+        },
+    };
+    if let Some(step) = journal.steps.iter_mut().find(|step| step.id == step_id) {
+        step.has_result = true;
+    }
+    outcome
 }
 
 /// Shorten a tool result longer than 80 bytes to its first 40 characters
@@ -4376,6 +4587,106 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         {
             return Err(elastos::bus::types::BusError::Invalid(
                 "a crash during compaction kept the summary".to_string(),
+            ));
+        }
+        let summary_before = checkpoint(&journal).ok_or_else(|| {
+            elastos::bus::types::BusError::Invalid(
+                "the summary checkpoint could not be recorded".to_string(),
+            )
+        })?;
+        let summary_model = "localhost://Models/compaction";
+        let summary_step =
+            propose_compact_summary(&mut journal, summary_model, &["the person greeted"]).map_err(
+                |_| {
+                    elastos::bus::types::BusError::Invalid(
+                        "a compaction summary request was refused".to_string(),
+                    )
+                },
+            )?;
+        let prompt = compact_summary_prompt(&journal, summary_step).ok_or_else(|| {
+            elastos::bus::types::BusError::Invalid(
+                "the summary request text was not built".to_string(),
+            )
+        })?;
+        let summary_step_ok = journal
+            .steps
+            .iter()
+            .find(|step| step.id == summary_step)
+            .is_some_and(|step| {
+                step.kind == ProposalKind::Hosted
+                    && step.resource == summary_model
+                    && step.grant.is_none()
+                    && step.state == StepState::Prepared
+                    && step.argv == ["the person greeted".to_string()]
+            });
+        if !summary_step_ok
+            || !prompt.starts_with("Summarise the history after the system head")
+            || !prompt.contains(SYSTEM_HEAD)
+            || !prompt.contains(COMPACTION_SUMMARY)
+            || !prompt.contains("the person greeted")
+            || checkpoint(&journal).as_ref() != Some(&summary_before)
+            || authorize(&mut journal, summary_step, None)
+            || step_state(&journal, summary_step) != Some(StepState::Denied)
+            || dispatch(&mut journal, summary_step)
+            || checkpoint(&journal).as_ref() != Some(&summary_before)
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "a compaction summary did not use the hosted model path".to_string(),
+            ));
+        }
+        let mut recorded = journal.clone();
+        let recorded_model = "localhost://Models/compaction";
+        let recorded_step =
+            propose_compact_summary(&mut recorded, recorded_model, &["The person greeted"])
+                .map_err(|_| {
+                    elastos::bus::types::BusError::Invalid(
+                        "a recorded summary request was refused".to_string(),
+                    )
+                })?;
+        let recorded_before = checkpoint(&recorded).ok_or_else(|| {
+            elastos::bus::types::BusError::Invalid(
+                "the recorded summary checkpoint could not be taken".to_string(),
+            )
+        })?;
+        let recorded_epoch = recorded.epoch;
+        if !authorize(&mut recorded, recorded_step, Some("fixture-grant"))
+            || !dispatch(&mut recorded, recorded_step)
+            || record_compact_summary(
+                &mut recorded,
+                recorded_step,
+                Ok(format!("{} The person greeted", "x".repeat(10_000))),
+            ) != Err("summary does not shrink")
+            || checkpoint(&recorded).as_ref() != Some(&recorded_before)
+            || recorded.epoch != recorded_epoch
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "a non-shrinking model summary was recorded".to_string(),
+            ));
+        }
+        let good_answer = "The person greeted the reader.";
+        let good_step =
+            propose_compact_summary(&mut recorded, recorded_model, &["The person greeted"])
+                .map_err(|_| {
+                    elastos::bus::types::BusError::Invalid(
+                        "a recorded summary request was refused".to_string(),
+                    )
+                })?;
+        if !authorize(&mut recorded, good_step, Some("fixture-grant"))
+            || !dispatch(&mut recorded, good_step)
+            || record_compact_summary(&mut recorded, good_step, Ok(good_answer.to_string()))
+                .is_err()
+            || recorded.events.first() != journal.events.first()
+            || recorded.events.get(1).is_none_or(|node| {
+                node.source != NodeSource::CompactionCheckpoint || node.text != good_answer
+            })
+            || !recorded
+                .events
+                .iter()
+                .any(|node| node.source == NodeSource::Skill)
+            || recorded.epoch != recorded_epoch + 1
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "a model summary was not recorded once".to_string(),
             ));
         }
         let resource = "localhost://Users/self/Documents/note.txt";
@@ -10373,6 +10684,280 @@ mod tests {
         assert_eq!(journal, before);
         assert!(!compact(&mut journal, "localhost://Users/self/../secret"));
         assert_eq!(journal, before);
+    }
+
+    /// A journal with a long tail, so a short summary really shrinks it.
+    fn summary_journal() -> Journal {
+        let mut journal = two_turns();
+        admit_assistant(&mut journal, &"Earlier answer line. ".repeat(40));
+        admit_tool_result(&mut journal, &"BUILD_ID=7F3A ".repeat(20));
+        journal
+    }
+
+    fn dispatched_summary_step(journal: &mut Journal, required: &[&str]) -> u64 {
+        let id = propose_compact_summary(journal, "localhost://Models/hosted", required)
+            .expect("a compaction summary request");
+        assert!(authorize(journal, id, Some("fixture-grant")));
+        assert!(dispatch(journal, id));
+        id
+    }
+
+    #[test]
+    fn a_compaction_summary_request_uses_the_hosted_model_path() {
+        let mut journal = summary_journal();
+        let before = journal.events.clone();
+        let model = "localhost://Models/hosted";
+        assert_eq!(
+            propose_compact_summary(&mut journal, model, &[""]),
+            Err("empty required fact")
+        );
+        assert!(journal.steps.is_empty());
+        assert_eq!(
+            propose_compact_summary(&mut journal, "/tmp/model", &["hello"]),
+            Err("host path")
+        );
+        assert!(journal.steps.is_empty());
+        let id = propose_compact_summary(&mut journal, model, &["hello", "second turn"]).unwrap();
+        let step = journal.steps.iter().find(|step| step.id == id).unwrap();
+        assert_eq!(step.kind, ProposalKind::Hosted);
+        assert_eq!(step.resource, model);
+        assert_eq!(step.grant, None);
+        assert_eq!(step.state, StepState::Prepared);
+        assert_eq!(step.argv, ["hello".to_string(), "second turn".to_string()]);
+        assert_eq!(step.new.len(), 64);
+        assert_eq!(journal.events, before);
+        let prompt = compact_summary_prompt(&journal, id).unwrap();
+        assert!(prompt.starts_with("Summarise the history after the system head"));
+        assert!(prompt.contains("Keep these facts exactly: hello; second turn."));
+        assert!(prompt.contains(SYSTEM_HEAD));
+        assert!(prompt.contains("BUILD_ID=7F3A"));
+        assert!(!prompt.contains(COMPACTION_SUMMARY));
+        assert!(!authorize(&mut journal, id, None));
+        assert_eq!(step_state(&journal, id), Some(StepState::Denied));
+        assert!(!dispatch(&mut journal, id));
+        assert_eq!(journal.events, before);
+    }
+
+    #[test]
+    fn a_model_written_compaction_summary_is_recorded() {
+        let mut journal = summary_journal();
+        let head = journal.events[0].clone();
+        let epoch = journal.epoch;
+        let id = dispatched_summary_step(&mut journal, &["hello", "second turn"]);
+        let summary = "The person said hello, then second turn; the earlier answer and the build result were kept.";
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(summary.to_string())),
+            Ok(())
+        );
+        assert_eq!(journal.events.len(), 2);
+        assert_eq!(journal.events[0], head);
+        assert_eq!(journal.events[1].role, Role::User);
+        assert_eq!(journal.events[1].source, NodeSource::CompactionCheckpoint);
+        assert_eq!(journal.events[1].text, summary);
+        assert_eq!(journal.epoch, epoch + 1);
+        assert!(
+            journal
+                .steps
+                .iter()
+                .find(|step| step.id == id)
+                .unwrap()
+                .has_result
+        );
+        let saved = model_bytes(&journal.events).unwrap();
+        assert_eq!(replay(&saved).unwrap(), journal.events);
+    }
+
+    #[test]
+    fn a_model_summary_that_does_not_shrink_is_refused() {
+        let mut journal = summary_journal();
+        let before = journal.events.clone();
+        let epoch = journal.epoch;
+        let id = dispatched_summary_step(&mut journal, &["hello", "second turn"]);
+        let long = format!("{} hello second turn", "x".repeat(10_000));
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(long)),
+            Err("summary does not shrink")
+        );
+        assert_eq!(journal.events, before);
+        assert_eq!(journal.epoch, epoch);
+    }
+
+    #[test]
+    fn a_model_summary_that_drops_a_required_fact_is_refused() {
+        let mut journal = summary_journal();
+        let before = journal.events.clone();
+        let id = dispatched_summary_step(&mut journal, &["hello", "second turn"]);
+        let summary = "The person said hello and the build result was kept.";
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(summary.to_string())),
+            Err("summary drops a required fact")
+        );
+        assert_eq!(journal.events, before);
+    }
+
+    #[test]
+    fn a_model_summary_that_changes_a_required_fact_is_refused() {
+        let mut journal = summary_journal();
+        let before = journal.events.clone();
+        let epoch = journal.epoch;
+        let id = dispatched_summary_step(&mut journal, &["7F3A0"]);
+        let prefixed = "The build id was BUILD_ID=7F3A0, and the earlier answer was kept.";
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(prefixed.to_string())),
+            Err("summary drops a required fact")
+        );
+        assert_eq!(journal.events, before);
+        assert_eq!(journal.epoch, epoch);
+
+        let mut journal = summary_journal();
+        let before = journal.events.clone();
+        let id = dispatched_summary_step(&mut journal, &["7F3A"]);
+        let extended = "The build id was 7F3A0, and the earlier answer was kept.";
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(extended.to_string())),
+            Err("summary drops a required fact")
+        );
+        assert_eq!(journal.events, before);
+
+        let mut journal = summary_journal();
+        let head = journal.events[0].clone();
+        let epoch = journal.epoch;
+        let id = dispatched_summary_step(&mut journal, &["7F3A0"]);
+        let whole = "The build id was 7F3A0, and the earlier answer was kept.";
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(whole.to_string())),
+            Ok(())
+        );
+        assert_eq!(journal.events.len(), 2);
+        assert_eq!(journal.events[0], head);
+        assert_eq!(journal.events[1].source, NodeSource::CompactionCheckpoint);
+        assert_eq!(journal.events[1].text, whole);
+        assert_eq!(journal.epoch, epoch + 1);
+    }
+
+    #[test]
+    fn a_model_summary_that_changes_a_required_fact_with_a_combining_mark_is_refused() {
+        let mut journal = summary_journal();
+        admit_user(&mut journal, "cafe");
+        let before = journal.events.clone();
+        let epoch = journal.epoch;
+        let id = dispatched_summary_step(&mut journal, &["cafe"]);
+        let accented = "The cafe\u{301} was open, and the earlier answer was kept.";
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(accented.to_string())),
+            Err("summary drops a required fact")
+        );
+        assert_eq!(journal.events, before);
+        assert_eq!(journal.epoch, epoch);
+    }
+
+    #[test]
+    fn a_model_summary_that_touches_node_zero_is_refused() {
+        let mut journal = summary_journal();
+        let before = journal.events.clone();
+        let epoch = journal.epoch;
+        let id = dispatched_summary_step(&mut journal, &["ElastOS"]);
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(SYSTEM_HEAD.to_string())),
+            Err("summary touches node 0")
+        );
+        assert_eq!(journal.events, before);
+        assert_eq!(journal.epoch, epoch);
+    }
+
+    #[test]
+    fn a_model_failure_leaves_the_history_unchanged() {
+        let mut journal = summary_journal();
+        let before = journal.events.clone();
+        let epoch = journal.epoch;
+        let id = dispatched_summary_step(&mut journal, &["hello"]);
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Err("model offline")),
+            Err("model offline")
+        );
+        assert_eq!(journal.events, before);
+        assert_eq!(journal.epoch, epoch);
+    }
+
+    #[test]
+    fn a_summary_from_a_step_that_was_not_dispatched_is_refused() {
+        let mut journal = summary_journal();
+        let before = journal.events.clone();
+        let model = "localhost://Models/hosted";
+        let id = propose_compact_summary(&mut journal, model, &["hello"]).unwrap();
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok("hello".to_string())),
+            Err("summary step not dispatched")
+        );
+        assert_eq!(
+            record_compact_summary(&mut journal, 999, Ok("hello".to_string())),
+            Err("no summary step")
+        );
+        assert_eq!(journal.events, before);
+    }
+
+    #[test]
+    fn a_settled_summary_step_does_not_accept_another_answer() {
+        let good = "The person said hello, then second turn; the earlier answer and the build result were kept.";
+        let mut journal = summary_journal();
+        let id = dispatched_summary_step(&mut journal, &["hello", "second turn"]);
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(good.to_string())),
+            Ok(())
+        );
+        let recorded = journal.events.clone();
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(good.to_string())),
+            Err("summary step settled")
+        );
+        assert_eq!(journal.events, recorded);
+
+        let mut journal = summary_journal();
+        let before = journal.events.clone();
+        let id = dispatched_summary_step(&mut journal, &["hello", "second turn"]);
+        let long = format!("{} hello second turn", "x".repeat(10_000));
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(long)),
+            Err("summary does not shrink")
+        );
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(good.to_string())),
+            Err("summary step settled")
+        );
+        assert_eq!(journal.events, before);
+
+        let mut journal = summary_journal();
+        let before = journal.events.clone();
+        let id = dispatched_summary_step(&mut journal, &["hello"]);
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Err("model offline")),
+            Err("model offline")
+        );
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(good.to_string())),
+            Err("summary step settled")
+        );
+        assert_eq!(journal.events, before);
+    }
+
+    #[test]
+    fn a_summary_answer_after_new_history_is_stale() {
+        let mut journal = summary_journal();
+        let id = dispatched_summary_step(&mut journal, &["hello", "second turn"]);
+        admit_user(&mut journal, "a new instruction");
+        let before = journal.events.clone();
+        let epoch = journal.epoch;
+        let good = "The person said hello, then second turn; the earlier answer and the build result were kept.";
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(good.to_string())),
+            Err("summary is stale")
+        );
+        assert_eq!(journal.events, before);
+        assert_eq!(journal.epoch, epoch);
+        assert!(journal
+            .events
+            .iter()
+            .any(|node| node.text == "a new instruction"));
     }
 
     #[test]
