@@ -228,13 +228,14 @@ closed (R2, PRINCIPLES 11). They change what the guest allows, not what a stored
 
 A child host is a second journal for the same child. Its grants live in the parent journal (`host_grants`, a list of
 child id and grant) for as long as the process runs; they are not stored, so the format stays 2. `without_grants`
-clears the list, so `decode(encode(j)) == without_grants(j)` still holds. `record_result` checks the parent's list
-before it stores any child text: a caller that passes a different host journal for the same child cannot hide a
-grant given through the first, and that refusal says `granted through another host`.
+clears the list, so `decode(encode(j)) == without_grants(j)` still holds. One checker, `child_result_ok`, reads the
+result rules and every grant source (the parent's steps, the supplied host's steps, the parent's ledger) and returns
+the refusal reason. A caller that passes the original host or a different host for the same child gets the same
+refusal, `result holds a grant`.
 
 A model call under a child follows the nearest step at or above it that holds a grant (`nearest_granted`). An
 ungranted child therefore inherits the scope of the nearest granted step above it, and withdrawing that grant takes
-its call too.
+its call too. With no granted step above it, the call has no authority and is refused `no grant`.
 
 The spill pointer is the guest's own text, but its entry is narrow and its rule is in one place. `spill_ready` needs
 a dispatched, granted step with no result that covers the object, under the system head. `record_spill_result(journal,
@@ -244,8 +245,9 @@ then the entry. No caller passes arbitrary text.
 
 A refused host write records the shared check's reason, or "not this child's host" when the parent context is
 missing. A refused result host binding records one reason for the missing host, the non-child step and the binding
-failure. The budget counter records "requests". A bad spill entry records its admission reason, or "no spill
-pointer" when the record is missing. All use `record_refusal_reason`; no new record kind.
+failure; a result that holds a grant records `result holds a grant` whichever host supplied it. The budget counter
+records "requests". A bad spill entry records its admission reason, or "no spill pointer" when the record is
+missing. All use `record_refusal_reason`; no new record kind.
 
 ## Tests and falsifiers
 

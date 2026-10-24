@@ -556,3 +556,36 @@ Principles:   2 (a withdrawn ancestor grant takes the call), 5 (all work stays i
               spill admission rule), 11 (each refusal keeps its reason and denies by default), 12 (design note
               updated), 7 (each rule has a failing-first test and a caught falsifier, each condition alone).
 ```
+
+## Update: Codex FAIL at 75ac0ae, round 4 (24 Oct)
+
+```text
+Finding 1:    `nearest_granted(...) == None` succeeded, so an ungranted child under a revoked run could still
+              dispatch its model call.
+Fix:          `call_parent_usable` requires a granted step above the child (`ok_or("no grant")`) and then the
+              scope walk. The regression test adds the ungranted child with a revoked run.
+Finding 2:    grant filtering had two implementations: `child_result_ok` over steps returned a bare false, and a
+              second substring check over `host_grants` recorded a reason. The same text was silent with the
+              original host and reasoned with a substituted one.
+Fix:          one checker, `child_result_ok`, takes every grant source (parent steps, supplied host steps, parent
+              ledger) and returns the reason `result holds a grant`. `record_result` records that reason for
+              either host choice; the duplicate ledger block is gone. The lifecycle check in the guest now counts
+              stored events, since a refused result leaves a record.
+Tests:        a_model_call_under_a_granted_child_needs_the_grant_above_it (no granted ancestor, "no grant"),
+              a_child_result_needs_a_verified_host (7 reasons: 5 binding, 2 "result holds a grant", one per host
+              choice), a_child_grant_is_narrower_and_does_not_inherit_the_parent_grant (empty, host path and grant
+              reasons), the cap tests count stored events only.
+Falsifiers:   CL84, PX04, PX10, PX17, PX24, PX25, PX31 and PX33 re-targeted to the one checker, the required
+              ancestor grant and the recorded reasons. PX25 removes the ledger from the checker; PX31 removes the
+              shared reason; PX33 restores the immediate-child-only conditional.
+Full run:     python3 -I examples/agent-host/falsify.py: 260 CAUGHT, 1 CAUGHT (does not build: OY19), 1
+              SURVIVED (expected, by design: OZ01) of 262; no NOT RUN, no NO MATCH.
+Tests run:    ./examples/agent-host/verify.sh -> "223 passed", runner self-test OK, clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Guest hash:   787fd6c605366b2961fa62e83cf396999946dabc9d184182e31020c6b68cf25c on verify.sh.
+              Import set unchanged (capabilities, identity, providers, runtime; types is type-only); the core
+              import section /1/2 is 149 bytes d5e512ac (was 5ee6b40d): same names, different linker order.
+Principles:   2 (no granted step above means no authority), 5 (all work stays in examples/agent-host), 10 (one
+              grant checker for both hosts), 11 (the same refusal reason whichever host supplied the text), 12
+              (design note updated), 7 (each rule has a failing-first test and a caught falsifier).
+```

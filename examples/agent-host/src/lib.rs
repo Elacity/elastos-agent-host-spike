@@ -2779,27 +2779,16 @@ fn record_result(
                 return false;
             }
         }
-        if !child_result_ok(
+        if let Err(reason) = child_result_ok(
             journal
                 .steps
                 .iter()
                 .chain(child.into_iter().flat_map(|child| child.steps.iter())),
+            &journal.host_grants,
+            step_id,
             &marked,
         ) {
-            return false;
-        }
-        // Every grant given to this child's hosts counts, not only the grant
-        // strings in the journal the caller happened to supply.
-        if journal
-            .host_grants
-            .iter()
-            .any(|(child, grant)| *child == step_id && marked.contains(grant))
-        {
-            record_refusal_reason(
-                journal,
-                "granted through another host",
-                &format!("child result {step_id}"),
-            );
+            record_refusal_reason(journal, reason, &format!("child result {step_id}"));
             return false;
         }
         marked
@@ -4442,17 +4431,38 @@ fn dispatch_in_host(parent: &Journal, child_id: u64, host: &mut Journal, step_id
 /// (`record_child_result`, and `record_tool_result` on a child step): a
 /// result is not empty, is no longer than `CHILD_RESULT_CAP` (a spill
 /// pointer instead; never cut), has no host path, and contains no grant
-/// string held by the steps it is recorded among.
+/// string held by the steps it is recorded among or by a host of this
+/// child. The error is the caller's refusal reason.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn child_result_ok<'a>(steps: impl IntoIterator<Item = &'a Step>, result: &str) -> bool {
-    !result.is_empty()
-        && result.len() <= CHILD_RESULT_CAP
-        && !host_path(result)
-        && !steps.into_iter().any(|step| {
-            step.grant
-                .as_deref()
-                .is_some_and(|grant| !grant.is_empty() && result.contains(grant))
-        })
+fn child_result_ok<'a>(
+    steps: impl IntoIterator<Item = &'a Step>,
+    host_grants: &[(u64, String)],
+    step_id: u64,
+    result: &str,
+) -> Result<(), &'static str> {
+    if result.is_empty() {
+        return Err("empty result");
+    }
+    if result.len() > CHILD_RESULT_CAP {
+        return Err("long result");
+    }
+    if host_path(result) {
+        return Err("host path");
+    }
+    let held = steps
+        .into_iter()
+        .filter_map(|step| step.grant.as_deref())
+        .chain(
+            host_grants
+                .iter()
+                .filter(|(child, _)| *child == step_id)
+                .map(|(_, grant)| grant.as_str()),
+        )
+        .any(|grant| !grant.is_empty() && result.contains(grant));
+    if held {
+        return Err("result holds a grant");
+    }
+    Ok(())
 }
 
 /// The parent stores one result line for a child step. The child's log is
@@ -4500,11 +4510,10 @@ fn call_parent_usable(journal: &Journal, step: &Step) -> Result<(), &'static str
         ProposalKind::Hosted => match step.parent_id {
             Some(child) => {
                 let child = usable_child(journal, child)?;
-                // An ungranted child hands no scope of its own, but the
-                // nearest granted step above still governs it.
-                if let Some(granted) = nearest_granted(journal, child) {
-                    scope_still_granted(journal, granted).ok_or("not granted")?;
-                }
+                // An ungranted child inherits the scope above it. With no
+                // granted step above, the call has no authority at all.
+                let granted = nearest_granted(journal, child).ok_or("no grant")?;
+                scope_still_granted(journal, granted).ok_or("not granted")?;
                 Ok(())
             }
             None => {
@@ -6250,7 +6259,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             open_child_host(&family, child, "localhost://Users/self/Projects/demo/src").map_err(
                 |_| elastos::bus::types::BusError::Invalid("a child host was refused".to_string()),
             )?;
-        let family_before = family.events.len();
+        let family_before = without_refusal_records(&family.events).len();
         let host_run = child_host.steps.first().map_or(0, |step| step.id);
         if open_child_host(&family, child, "localhost://Users/self/Projects/other").is_ok()
             || open_child_host(&family, parent, "localhost://Users/self/Projects/demo/src").is_ok()
@@ -6265,7 +6274,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || child_host.steps[0].grant.as_deref() != Some("child-grant")
             || record_child_result(&mut family, child, &child_host, "fixture-grant")
             || !record_child_result(&mut family, child, &child_host, "child result ok")
-            || family.events.len() != family_before + 1
+            || without_refusal_records(&family.events).len() != family_before + 1
             || family
                 .events
                 .last()
@@ -10355,7 +10364,7 @@ mod tests {
             &mut child_host,
             Some("child-grant")
         ));
-        let parent_events = journal.events.len();
+        let parent_events = without_refusal_records(&journal.events).len();
         assert!(!record_child_result(&mut journal, child, &child_host, ""));
         assert!(!record_child_result(
             &mut journal,
@@ -10375,8 +10384,20 @@ mod tests {
             &child_host,
             "child result ok"
         ));
-        assert_eq!(journal.events.len(), parent_events + 1);
+        assert_eq!(
+            without_refusal_records(&journal.events).len(),
+            parent_events + 1
+        );
         assert_eq!(journal.events.last().unwrap().text, "child result ok");
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("empty result")));
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("host path")));
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("result holds a grant")));
         assert_eq!(child_host.events.len(), 2);
         let parent_bytes = model_bytes(&journal.events).unwrap();
         let child_bytes = model_bytes(&child_host.events).unwrap();
@@ -18395,7 +18416,11 @@ mod tests {
             &host,
             &"x".repeat(4_001)
         ));
-        assert_eq!(journal.events.len(), before, "never cut, never stored");
+        assert_eq!(
+            without_refusal_records(&journal.events).len(),
+            before,
+            "never cut, never stored"
+        );
         assert!(record_child_result(
             &mut journal,
             child,
@@ -18442,7 +18467,11 @@ mod tests {
                 !record_child_result(&mut journal, child, &host, &format!("{exact}x")),
                 "{stop}: one byte over the labelled cap"
             );
-            assert_eq!(journal.events.len(), before, "{stop}: never stored");
+            assert_eq!(
+                without_refusal_records(&journal.events).len(),
+                before,
+                "{stop}: never stored"
+            );
             assert!(
                 record_child_result(&mut journal, child, &host, &exact),
                 "{stop}: exactly the cap once labelled"
@@ -18516,7 +18545,11 @@ mod tests {
             &host,
             "host-only-grant"
         ));
-        assert_eq!(journal.events.len(), before, "never cut, never stored");
+        assert_eq!(
+            without_refusal_records(&journal.events).len(),
+            before,
+            "never cut, never stored"
+        );
         assert!(!step_of(&journal, first).has_result);
         // A stopped child's partial result is labelled on both paths.
         assert!(note_time_refusal(&mut journal, first));
@@ -20328,7 +20361,7 @@ mod tests {
         ));
         assert_eq!(
             refusal_records(&journal).len(),
-            6,
+            7,
             "{:?}",
             refusal_records(&journal)
         );
@@ -20341,10 +20374,12 @@ mod tests {
             "{:?}",
             refusal_records(&journal)
         );
-        assert!(
+        assert_eq!(
             refusal_records(&journal)
                 .iter()
-                .any(|record| record.contains("granted through another host")),
+                .filter(|record| record.contains("result holds a grant"))
+                .count(),
+            2,
             "{:?}",
             refusal_records(&journal)
         );
@@ -20579,6 +20614,19 @@ mod tests {
         assert!(refusal_records(&journal)
             .iter()
             .any(|record| record.contains("not granted")));
+        // With an ungranted child and no granted step above it, a revoked run
+        // leaves no authority at all.
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        assert_eq!(step_of(&journal, child).grant, None);
+        let call = ask_model(&mut journal, Some(child), HOSTED_MODEL).unwrap();
+        assert!(authorize(&mut journal, call, Some("model-grant")));
+        assert!(!authorize(&mut journal, run, None), "the run is denied");
+        assert!(!dispatch(&mut journal, call), "no granted step above");
+        assert_eq!(step_of(&journal, call).state, StepState::Prepared);
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("no grant")));
     }
 
     /// R3: the plain `cancel` on a child is a stop: recorded, with its subtree.
