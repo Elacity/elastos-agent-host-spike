@@ -331,6 +331,10 @@ struct Journal {
     /// Held in memory only, never stored: a reloaded host belongs to no child
     /// and can do nothing until it is opened again.
     host_of: Option<ChildHost>,
+    /// Every grant given to a child host's step, with its child, in memory
+    /// only and never stored. A child's result is checked against all of
+    /// them, whichever host journal the caller supplies.
+    host_grants: Vec<(u64, String)>,
 }
 
 /// Model view. Markers, a step with no result, and an empty assistant line
@@ -1513,6 +1517,7 @@ fn without_grants(journal: &Journal) -> Journal {
         step.grant = None;
         step.grant_scope = None;
     }
+    copy.host_grants.clear();
     copy
 }
 
@@ -1666,11 +1671,7 @@ fn spill_pointer(journal: &mut Journal, step_id: u64, object_resource: &str) -> 
             version,
         },
     });
-    record_spill_result(
-        journal,
-        step_id,
-        &format!("spill\n{object_resource}\n{version}"),
-    )
+    record_spill_result(journal, step_id, object_resource, version)
 }
 
 /// The text named by the newest spill pointer for this file that still has
@@ -2605,6 +2606,7 @@ fn empty_journal() -> Journal {
         cancelled_from: None,
         task: TaskMark::new(),
         host_of: None,
+        host_grants: Vec::new(),
     }
 }
 
@@ -2683,10 +2685,36 @@ fn record_tool_result(
 
 /// The guest itself generated a spill pointer (`spill_pointer` is the only
 /// entry): the short text holds no grant and names a read version. It is the
-/// one child result that needs no host journal.
+/// one child result that needs no host journal. The pointer must name the
+/// step's own resource and the version the journal last recorded as a spill.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn record_spill_result(journal: &mut Journal, step_id: u64, text: &str) -> bool {
-    record_result(journal, step_id, text, None, true)
+fn record_spill_result(
+    journal: &mut Journal,
+    step_id: u64,
+    object_resource: &str,
+    version: u64,
+) -> bool {
+    let Some(step) = journal.steps.iter().find(|step| step.id == step_id) else {
+        return false;
+    };
+    if step.state != StepState::Dispatched
+        || step.grant.as_deref().is_none_or(|grant| grant.is_empty())
+        || !resource_covers(&step.resource, object_resource)
+    {
+        return false;
+    }
+    let recorded = journal.events.last().is_some_and(|node| {
+        matches!(
+            &node.source,
+            NodeSource::Spill { resource, version: at }
+                if resource == object_resource && *at == version
+        )
+    });
+    if !recorded {
+        return false;
+    }
+    let text = format!("spill\n{object_resource}\n{version}");
+    record_result(journal, step_id, &text, None, true)
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -2702,6 +2730,11 @@ fn record_result(
     };
     // A host journal carries a child's steps; it records no step of another kind.
     if child.is_some() && journal.steps[index].kind != ProposalKind::Child {
+        record_refusal_reason(
+            journal,
+            "not this child's host",
+            &format!("child result {step_id}"),
+        );
         return false;
     }
     if journal.steps[index].has_result || earlier_write_is_open(journal, step_id) {
@@ -2718,9 +2751,15 @@ fn record_result(
         // pointer is the guest's own text and passes no host.
         if !guest_pointer {
             let Some(host) = child else {
+                record_refusal_reason(
+                    journal,
+                    "not this child's host",
+                    &format!("child result {step_id}"),
+                );
                 return false;
             };
-            if host_binding_ok(journal, &journal.steps[index], host).is_err() {
+            if let Err(reason) = host_binding_ok(journal, &journal.steps[index], host) {
+                record_refusal_reason(journal, reason, &format!("child result {step_id}"));
                 return false;
             }
         }
@@ -2731,6 +2770,15 @@ fn record_result(
                 .chain(child.into_iter().flat_map(|child| child.steps.iter())),
             &marked,
         ) {
+            return false;
+        }
+        // Every grant given to this child's hosts counts, not only the grant
+        // strings in the journal the caller happened to supply.
+        if journal
+            .host_grants
+            .iter()
+            .any(|(child, grant)| *child == step_id && marked.contains(grant))
+        {
             return false;
         }
         marked
@@ -3256,19 +3304,22 @@ fn note_change_wrote_checked(
 /// grant.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn provider_write_may_be_asked(
-    journal: &Journal,
+    journal: &mut Journal,
     step_id: u64,
     seen_version: u64,
     host: Option<(&Journal, u64)>,
 ) -> bool {
     if journal.depth > 0 || journal.host_of.is_some() {
         let Some((parent, child_id)) = host else {
+            refuse_host_step(journal, step_id, "not this child's host");
             return false;
         };
-        if host_step_ok(parent, child_id, journal, step_id, None).is_err() {
+        if let Err(reason) = host_step_ok(parent, child_id, journal, step_id, None) {
+            refuse_host_step(journal, step_id, reason);
             return false;
         }
     } else if host.is_some() {
+        refuse_host_step(journal, step_id, "not this child's host");
         return false;
     }
     let Some(step) = journal.steps.iter().find(|step| step.id == step_id) else {
@@ -3819,8 +3870,11 @@ fn record_task_budget(journal: &mut Journal, granted: Budget) -> bool {
         || journal.task_budget.is_some()
         || granted.requests == 0
         || granted.seconds == 0
-        || task_requests_used(journal) > granted.requests
     {
+        return false;
+    }
+    if task_requests_used(journal) > granted.requests {
+        record_refusal_reason(journal, "requests", "task budget");
         return false;
     }
     journal.task_budget = Some(granted);
@@ -4268,17 +4322,33 @@ fn refuse_host_step(host: &mut Journal, step_id: u64, reason: &str) {
     record_refusal_reason(host, reason, &format!("host step {step_id}"));
 }
 
+/// Keep a grant given to a child host's step in the parent's in-memory
+/// ledger, so a result is checked against every host grant for that child,
+/// not only the ones in the journal the caller happens to supply.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn record_host_grant(parent: &mut Journal, child_id: u64, grant: Option<&str>) {
+    if let Some(grant) = grant.filter(|grant| !grant.is_empty()) {
+        parent.host_grants.push((child_id, grant.to_string()));
+    }
+}
+
 /// Grant one step of a child host, through `host_step_ok`.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn authorize_in_host(
-    parent: &Journal,
+    parent: &mut Journal,
     child_id: u64,
     host: &mut Journal,
     step_id: u64,
     grant: Option<&str>,
 ) -> bool {
     match host_step_ok(parent, child_id, host, step_id, grant) {
-        Ok(()) => authorize_step(host, step_id, grant),
+        Ok(()) => {
+            let granted = authorize_step(host, step_id, grant);
+            if granted {
+                record_host_grant(parent, child_id, grant);
+            }
+            granted
+        }
         Err(reason) => {
             refuse_host_step(host, step_id, reason);
             false
@@ -4289,7 +4359,7 @@ fn authorize_in_host(
 /// Give the child host's run step its own grant, through `authorize_in_host`.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn grant_child_host(
-    parent: &Journal,
+    parent: &mut Journal,
     child_id: u64,
     host: &mut Journal,
     grant: Option<&str>,
@@ -4313,7 +4383,7 @@ fn grant_child_host(
 /// answer goes through `host_step_ok`, whose refusal is recorded.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn host_inbox(
-    parent: &Journal,
+    parent: &mut Journal,
     child_id: u64,
     host: &mut Journal,
     step_id: u64,
@@ -4326,7 +4396,11 @@ fn host_inbox(
             return false;
         }
     }
-    apply_inbox_step(host, step_id, answer, grant)
+    let granted = apply_inbox_step(host, step_id, answer, grant);
+    if granted {
+        record_host_grant(parent, child_id, grant);
+    }
+    granted
 }
 
 /// Dispatch a granted step of a child host. The parent's journal is read
@@ -5808,9 +5882,9 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         }
         let asked_events = writes.events.clone();
         let asked_text = current_observed_text(&writes.events, file);
-        if provider_write_may_be_asked(&writes, first, 1, None)
-            || provider_write_may_be_asked(&writes, second, 2, None)
-            || !provider_write_may_be_asked(&writes, second, 1, None)
+        if provider_write_may_be_asked(&mut writes, first, 1, None)
+            || provider_write_may_be_asked(&mut writes, second, 2, None)
+            || !provider_write_may_be_asked(&mut writes, second, 1, None)
             || writes.events != asked_events
             || current_observed_text(&writes.events, file) != asked_text
             || writes
@@ -6144,10 +6218,10 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || child_host.events[0].text != SYSTEM_HEAD
             || child_host.steps.len() != 1
             || child_host.steps[0].grant.is_some()
-            || grant_child_host(&family, child, &mut child_host, Some("fixture-grant"))
+            || grant_child_host(&mut family, child, &mut child_host, Some("fixture-grant"))
             || child_host.steps[0].grant.is_some()
             || authorize(&mut child_host, host_run, Some("child-grant"))
-            || !grant_child_host(&family, child, &mut child_host, Some("child-grant"))
+            || !grant_child_host(&mut family, child, &mut child_host, Some("child-grant"))
             || child_host.steps[0].grant.as_deref() != Some("child-grant")
             || record_child_result(&mut family, child, &child_host, "fixture-grant")
             || !record_child_result(&mut family, child, &child_host, "child result ok")
@@ -6170,7 +6244,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         }
         let outside = propose_read(&mut child_host, "localhost://Users/self/Projects/demo/doc");
         if host_inbox(
-            &family,
+            &mut family,
             child,
             &mut child_host,
             outside,
@@ -9143,9 +9217,9 @@ mod tests {
         assert!(observe(&mut journal, note, 1, "hello"));
         let edit = propose_edit(&mut journal, note, "hello", "hi", Some(1)).unwrap();
         journal.steps[edit as usize - 1].grant = Some("write-grant".to_string());
-        assert!(provider_write_may_be_asked(&journal, edit, 1, None));
+        assert!(provider_write_may_be_asked(&mut journal, edit, 1, None));
         journal.steps[edit as usize - 1].grant = Some(String::new());
-        assert!(!provider_write_may_be_asked(&journal, edit, 1, None));
+        assert!(!provider_write_may_be_asked(&mut journal, edit, 1, None));
     }
 
     #[test]
@@ -9900,10 +9974,10 @@ mod tests {
         assert!(observe(&mut journal, resource, 1, "alpha beta"));
         let id = propose_edit(&mut journal, resource, "alpha", "one", Some(1)).unwrap();
         let before = journal.clone();
-        assert!(!provider_write_may_be_asked(&journal, id, 1, None));
+        assert!(!provider_write_may_be_asked(&mut journal, id, 1, None));
         assert!(authorize(&mut journal, id, Some("fixture-grant")));
-        assert!(!provider_write_may_be_asked(&journal, id, 2, None));
-        assert!(provider_write_may_be_asked(&journal, id, 1, None));
+        assert!(!provider_write_may_be_asked(&mut journal, id, 2, None));
+        assert!(provider_write_may_be_asked(&mut journal, id, 1, None));
         assert_eq!(journal.events, before.events);
         assert_eq!(
             current_observed_text(&journal.events, resource).as_deref(),
@@ -9919,7 +9993,7 @@ mod tests {
         );
         let read = propose_read(&mut journal, resource);
         assert!(authorize(&mut journal, read, Some("fixture-grant")));
-        assert!(!provider_write_may_be_asked(&journal, read, 1, None));
+        assert!(!provider_write_may_be_asked(&mut journal, read, 1, None));
     }
 
     #[test]
@@ -10222,7 +10296,7 @@ mod tests {
         assert_ne!(child_host.events.as_ptr(), journal.events.as_ptr());
         assert!(child_host.steps.iter().all(|step| step.grant.is_none()));
         assert!(!grant_child_host(
-            &journal,
+            &mut journal,
             child,
             &mut child_host,
             Some("fixture-grant")
@@ -10236,7 +10310,7 @@ mod tests {
         );
         assert!(child_host.steps.iter().all(|step| step.grant.is_none()));
         assert!(grant_child_host(
-            &journal,
+            &mut journal,
             child,
             &mut child_host,
             Some("child-grant")
@@ -11775,7 +11849,12 @@ mod tests {
         assert!(dispatch(&mut journal, scaffold));
         assert!(!note_provider_wrote(&mut journal, scaffold));
         assert_eq!(step_state(&journal, scaffold), Some(StepState::Denied));
-        assert!(!provider_write_may_be_asked(&journal, scaffold, 1, None));
+        assert!(!provider_write_may_be_asked(
+            &mut journal,
+            scaffold,
+            1,
+            None
+        ));
         assert_eq!(
             current_observed_text(&journal.events, index).as_deref(),
             Some("")
@@ -18358,7 +18437,7 @@ mod tests {
             .unwrap()
             .id;
         assert!(grant_child_host(
-            &journal,
+            &mut journal,
             first,
             &mut host,
             Some("host-only-grant")
@@ -18496,7 +18575,7 @@ mod tests {
         assert!(note_time_refusal(&mut parent, child));
         let before = host.events.len();
         assert!(!grant_child_host(
-            &parent,
+            &mut parent,
             child,
             &mut host,
             Some("host-grant")
@@ -18520,7 +18599,7 @@ mod tests {
         let id = host_step(&host);
         step_mut(&mut parent, child).budget = None;
         assert!(!grant_child_host(
-            &parent,
+            &mut parent,
             child,
             &mut host,
             Some("host-grant")
@@ -18541,7 +18620,7 @@ mod tests {
         let mut host = open_child_host(&parent, child, DEMO_SRC).unwrap();
         let outside = propose_read(&mut host, DEMO_DOC);
         assert!(!authorize_in_host(
-            &parent,
+            &mut parent,
             child,
             &mut host,
             outside,
@@ -18549,7 +18628,7 @@ mod tests {
         ));
         let not_canonical = propose_read(&mut host, "/tmp/secret");
         assert!(!authorize_in_host(
-            &parent,
+            &mut parent,
             child,
             &mut host,
             not_canonical,
@@ -19737,7 +19816,7 @@ mod tests {
             let mut host = open_child_host(&parent, child, DEMO_SRC_LIB).unwrap();
             let granted = propose_read(&mut host, DEMO_SRC_LIB);
             assert!(authorize_in_host(
-                &parent,
+                &mut parent,
                 child,
                 &mut host,
                 granted,
@@ -19751,18 +19830,18 @@ mod tests {
             }
             let before = host.clone();
             assert!(
-                !grant_child_host(&parent, child, &mut host, Some("host-grant")),
+                !grant_child_host(&mut parent, child, &mut host, Some("host-grant")),
                 "{stop}"
             );
             assert!(!authorize_in_host(
-                &parent,
+                &mut parent,
                 child,
                 &mut host,
                 asked,
                 Some("read-grant")
             ));
             assert!(!host_inbox(
-                &parent,
+                &mut parent,
                 child,
                 &mut host,
                 asked,
@@ -19797,7 +19876,7 @@ mod tests {
             );
             // A person's deny is still recorded.
             assert!(!host_inbox(
-                &parent,
+                &mut parent,
                 child,
                 &mut host,
                 asked,
@@ -19823,7 +19902,7 @@ mod tests {
         // Not granted yet: the host can do nothing.
         let early = propose_read(&mut host, in_a);
         assert!(!authorize_in_host(
-            &parent,
+            &mut parent,
             child,
             &mut host,
             early,
@@ -19836,21 +19915,21 @@ mod tests {
             only_a
         ));
         assert!(!grant_child_host(
-            &parent,
+            &mut parent,
             child,
             &mut host,
             Some("host-grant")
         ));
         let outside = propose_read(&mut host, in_b);
         assert!(!authorize_in_host(
-            &parent,
+            &mut parent,
             child,
             &mut host,
             outside,
             Some("read-grant")
         ));
         assert!(!host_inbox(
-            &parent,
+            &mut parent,
             child,
             &mut host,
             outside,
@@ -19865,7 +19944,7 @@ mod tests {
             "localhost://Users/self/Projects/demo/src/a/cafe\u{301}",
         );
         assert!(!authorize_in_host(
-            &parent,
+            &mut parent,
             child,
             &mut host,
             dotted,
@@ -19883,14 +19962,14 @@ mod tests {
         // grant is refused; the plain dispatch still refuses a granted step.
         let inside = propose_read(&mut host, in_a);
         assert!(!authorize_in_host(
-            &parent,
+            &mut parent,
             child,
             &mut host,
             inside,
             Some("fixture-grant")
         ));
         assert!(authorize_in_host(
-            &parent,
+            &mut parent,
             child,
             &mut host,
             inside,
@@ -19900,7 +19979,7 @@ mod tests {
         assert!(dispatch_in_host(&parent, child, &mut host, inside));
         let answered = propose_read(&mut host, in_a);
         assert!(host_inbox(
-            &parent,
+            &mut parent,
             child,
             &mut host,
             answered,
@@ -19920,7 +19999,7 @@ mod tests {
         wrong.depth = 2;
         let step = propose_read(&mut wrong, in_a);
         assert!(!authorize_in_host(
-            &parent,
+            &mut parent,
             child,
             &mut wrong,
             step,
@@ -20088,26 +20167,40 @@ mod tests {
         assert!(observe(&mut host, resource, 1, "alpha"));
         let edit = propose_edit(&mut host, resource, "alpha", "beta", Some(1)).unwrap();
         assert!(authorize_in_host(
-            &parent,
+            &mut parent,
             child,
             &mut host,
             edit,
             Some("write-grant")
         ));
         assert!(provider_write_may_be_asked(
-            &host,
+            &mut host,
             edit,
             1,
             Some((&parent, child))
         ));
         assert!(
-            !provider_write_may_be_asked(&host, edit, 1, None),
+            !provider_write_may_be_asked(&mut host, edit, 1, None),
             "a host without its parent asks nothing"
+        );
+        assert!(
+            refusal_records(&host)
+                .iter()
+                .any(|record| record.contains("not this child's host")),
+            "{:?}",
+            refusal_records(&host)
         );
         assert!(cancel_task(&mut parent));
         assert!(
-            !provider_write_may_be_asked(&host, edit, 1, Some((&parent, child))),
+            !provider_write_may_be_asked(&mut host, edit, 1, Some((&parent, child))),
             "the cancelled task takes the write with it"
+        );
+        assert!(
+            refusal_records(&host)
+                .iter()
+                .any(|record| record.contains("cancelled")),
+            "{:?}",
+            refusal_records(&host)
         );
         assert!(!dispatch_in_host(&parent, child, &mut host, edit));
     }
@@ -20129,7 +20222,7 @@ mod tests {
         ));
         let mut host = open_child_host(&journal, child, DEMO_SRC).unwrap();
         assert!(grant_child_host(
-            &journal,
+            &mut journal,
             child,
             &mut host,
             Some("host-only-grant")
@@ -20147,6 +20240,16 @@ mod tests {
             child,
             "host-only-grant",
             Some(&host)
+        ));
+        // Another host opened for the same child is verified context too, but
+        // the grant was given to the first host: the parent's ledger has it,
+        // so the substituted host cannot hide it.
+        let substituted = open_child_host(&journal, child, DEMO_SRC).unwrap();
+        assert!(!record_tool_result(
+            &mut journal,
+            child,
+            "host-only-grant",
+            Some(&substituted)
         ));
         let (mut other, other_run) = task(budget(8, 600));
         let other_child =
@@ -20183,7 +20286,24 @@ mod tests {
             "child text",
             Some(&headless)
         ));
-        assert_eq!(journal.events.len(), before, "never stored");
+        assert_eq!(
+            refusal_records(&journal).len(),
+            5,
+            "{:?}",
+            refusal_records(&journal)
+        );
+        assert!(
+            refusal_records(&journal)
+                .iter()
+                .all(|record| record.contains("not this child's host")),
+            "{:?}",
+            refusal_records(&journal)
+        );
+        assert_eq!(
+            without_refusal_records(&journal.events).len(),
+            before,
+            "never stored"
+        );
         assert!(!step_of(&journal, child).has_result);
         assert!(record_tool_result(
             &mut journal,
@@ -20191,6 +20311,56 @@ mod tests {
             "child text",
             Some(&host)
         ));
+    }
+
+    /// Codex at 75ac0ae: the spill exception is not a text entry. It takes
+    /// the resource and version, needs the step that read it and the
+    /// journal's own pointer record, and builds the text itself.
+    #[test]
+    fn a_spill_pointer_cannot_carry_arbitrary_text() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert!(dispatch(&mut journal, child));
+        let object = "localhost://Users/self/Projects/demo/src/result.txt";
+        assert!(observe(
+            &mut journal,
+            object,
+            1,
+            &"x".repeat(CHILD_RESULT_CAP + 1)
+        ));
+        assert!(!record_spill_result(
+            &mut journal,
+            child,
+            "host-only-grant",
+            1
+        ));
+        assert!(
+            !record_spill_result(&mut journal, child, object, 1),
+            "no pointer record yet"
+        );
+        journal.events.push(SurfaceNode {
+            role: Role::User,
+            text: String::new(),
+            source: NodeSource::Spill {
+                resource: object.to_string(),
+                version: 1,
+            },
+        });
+        assert!(
+            !record_spill_result(&mut journal, child, object, 2),
+            "a version the journal did not record"
+        );
+        assert!(record_spill_result(&mut journal, child, object, 1));
+        assert_eq!(
+            journal.events.last().unwrap().text,
+            format!("spill\n{object}\n1")
+        );
     }
 
     /// Codex at 75ac0ae: the request counter applies when the budget is
@@ -20218,6 +20388,13 @@ mod tests {
         assert_eq!(task_requests_used(&journal), 2);
         assert!(!record_task_budget(&mut journal, budget(1, 600)));
         assert_eq!(journal.task_budget, None);
+        assert!(
+            refusal_records(&journal)
+                .iter()
+                .any(|record| record.contains("requests")),
+            "{:?}",
+            refusal_records(&journal)
+        );
         // The counter rule at live use: a budget in memory below the calls
         // already made refuses both calls, with the same reason the reload
         // check gives.
@@ -20339,7 +20516,7 @@ mod tests {
         // The person denies the run after granting: nothing below is granted.
         assert!(!authorize(&mut journal, run, None));
         assert!(!grant_child_host(
-            &journal,
+            &mut journal,
             below,
             &mut host,
             Some("host-grant")
@@ -20507,7 +20684,7 @@ mod tests {
         let mut host_a = open_child_host(&journal, a, DEMO_SRC).unwrap();
         let read = propose_read(&mut host_a, "localhost://Users/self/Projects/demo/doc/x");
         assert!(!authorize_in_host(
-            &journal,
+            &mut journal,
             b,
             &mut host_a,
             read,
@@ -20515,8 +20692,20 @@ mod tests {
         ));
         let own = propose_read(&mut host_a, DEMO_SRC_LIB);
         let mut back = reloaded(&host_a);
-        assert!(!authorize_in_host(&journal, a, &mut back, own, Some("h")));
-        assert!(authorize_in_host(&journal, a, &mut host_a, own, Some("h")));
+        assert!(!authorize_in_host(
+            &mut journal,
+            a,
+            &mut back,
+            own,
+            Some("h")
+        ));
+        assert!(authorize_in_host(
+            &mut journal,
+            a,
+            &mut host_a,
+            own,
+            Some("h")
+        ));
     }
 
     /// Codex at 1c0449a: a host is bound to its owning task as well as to its
@@ -20535,14 +20724,14 @@ mod tests {
         let doc_read = propose_read(&mut host, DEMO_DOC);
         // B's journal and B's child grant doc; this host is A's.
         assert!(!authorize_in_host(
-            &b,
+            &mut b,
             b_doc,
             &mut host,
             doc_read,
             Some("read-grant")
         ));
         assert!(!host_inbox(
-            &b,
+            &mut b,
             b_doc,
             &mut host,
             doc_read,
@@ -20555,7 +20744,7 @@ mod tests {
         // Its own task still works.
         let own = propose_read(&mut host, DEMO_SRC_LIB);
         assert!(authorize_in_host(
-            &a,
+            &mut a,
             a_src,
             &mut host,
             own,
@@ -20672,13 +20861,13 @@ mod tests {
         // Moved in memory: the run no longer stands above the parent.
         step_mut(&mut journal, parent).parent_id = Some(call);
         assert!(!grant_child_host(
-            &journal,
+            &mut journal,
             child,
             &mut host,
             Some("host-grant")
         ));
         assert!(!authorize_in_host(
-            &journal,
+            &mut journal,
             child,
             &mut host,
             read,

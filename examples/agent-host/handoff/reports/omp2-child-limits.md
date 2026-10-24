@@ -487,3 +487,38 @@ Principles:   3 (no new authority), 5 (all work stays in examples/agent-host), 1
               11 (each refusal keeps its reason and denies by default), 12 (design note updated), 7 (each rule has
               a failing-first test and a caught falsifier).
 ```
+
+## Update: Codex FAIL at 75ac0ae, round 2 (24 Oct)
+
+```text
+Finding 1:    record_tool_result(parent, child, "host-only-grant", Some(&second_host)) stored the grant: the
+              binding accepted any host journal for the same child, and only the supplied journal's steps were
+              scanned.
+Fix:          the parent journal keeps `host_grants` (child id, grant) for the process lifetime; `record_result`
+              refuses child text containing any of them, so a second host for the same child cannot hide a grant
+              given through the first. `without_grants` clears the list, so reload equality holds.
+Finding 2:    record_spill_result accepted arbitrary text through the guest spill exception.
+Fix:          the entry takes (journal, step_id, object_resource, version) and needs a dispatched granted step,
+              a covering resource, and the journal's last event to be a `Spill` node for that resource and
+              version; it builds the text. `spill_pointer` is its only caller.
+Finding 3:    the write gate, the result host binding and the budget counter refused without a reason.
+Fix:          the gate records `host_step_ok`'s reason or "not this child's host"; the result path records one
+              reason for the missing host, the non-child step and the binding failure; the budget counter
+              records "requests". All use `record_refusal_reason`.
+Tests:        a_child_result_needs_a_verified_host (substituted host, 5 reasons),
+              a_spill_pointer_cannot_carry_arbitrary_text,
+              a_host_write_needs_its_parent_still_granting_it ("not this child's host", "cancelled"),
+              an_older_journal_cannot_exceed_a_new_budget ("requests").
+Falsifiers:   PX25-PX29 new; PX04, PX10, PX13, PX17, PX19-PX22, CL13, CL86 and HC07 re-targeted to the moved
+              checks. PX10 now removes `child_result_ok` from the shared path; the host-step grant it used to
+              remove is covered by the parent ledger (PX25).
+Full run:     python3 -I examples/agent-host/falsify.py: 256 CAUGHT, 1 CAUGHT (does not build: OY19), 1
+              SURVIVED (expected, by design: OZ01) of 258; no NOT RUN, no NO MATCH.
+Tests run:    ./examples/agent-host/verify.sh -> "223 passed", runner self-test OK, clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Guest hash:   9dae7f24f04bca6e9269e9d15cc0b92a0f48e5889900446abd479294bc6f75ea on verify.sh.
+              wasm_sections.py: file 663717 bytes; /1/2 149 5ee6b40d46f6a045 (import list unchanged).
+Principles:   3 (no new authority), 5 (all work stays in examples/agent-host), 10 (one shared check per rule),
+              11 (each refusal keeps its reason and denies by default), 12 (design note updated), 7 (each rule has
+              a failing-first test and a caught falsifier).
+```

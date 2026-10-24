@@ -554,8 +554,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        || journal.task_budget.is_some()\n        || granted.requests == 0\n        || granted.seconds == 0\n        || task_requests_used(journal) > granted.requests",
-     "new": "        || journal.task_budget.is_some()\n        || task_requests_used(journal) > granted.requests"
+     "old": "        || journal.task_budget.is_some()\n        || granted.requests == 0\n        || granted.seconds == 0\n    {",
+     "new": "        || journal.task_budget.is_some()\n    {"
     }
    ],
    "tests": [
@@ -1821,8 +1821,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    // A host journal carries a child's steps; it records no step of another kind.\n    if child.is_some() && journal.steps[index].kind != ProposalKind::Child {\n        return false;\n    }\n",
-     "new": ""
+     "old": "    // A host journal carries a child's steps; it records no step of another kind.\n    if child.is_some() && journal.steps[index].kind != ProposalKind::Child {\n        record_refusal_reason(\n            journal,\n            \"not this child's host\",\n            &format!(\"child result {step_id}\"),\n        );\n        return false;\n    }",
+     "new": "    // no child-step guard"
     }
    ],
    "tests": [
@@ -3589,8 +3589,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    match host_step_ok(parent, child_id, host, step_id, grant) {\n        Ok(()) => authorize_step(host, step_id, grant),",
-     "new": "    match Ok::<(), &'static str>(()) {\n        Ok(()) => authorize_step(host, step_id, grant),"
+     "old": "    match host_step_ok(parent, child_id, host, step_id, grant) {\n        Ok(()) => {",
+     "new": "    match Ok::<(), &'static str>(()) {\n        Ok(()) => {"
     }
    ],
    "tests": [
@@ -4113,7 +4113,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    let text = if journal.steps[index].kind == ProposalKind::Child {\n        // The label is part of what is stored, so the cap bounds the final\n        // text, not the bytes before the label.\n        let marked = match journal.steps[index].stop {\n            Some(reason) => format!(\"partial ({}): {text}\", reason.name()),\n            None => text.to_string(),\n        };\n        // Child text comes only from a verified host journal. A spill\n        // pointer is the guest's own text and passes no host.\n        if !guest_pointer {\n            let Some(host) = child else {\n                return false;\n            };\n            if host_binding_ok(journal, &journal.steps[index], host).is_err() {\n                return false;\n            }\n        }\n        if !child_result_ok(\n            journal\n                .steps\n                .iter()\n                .chain(child.into_iter().flat_map(|child| child.steps.iter())),\n            &marked,\n        ) {\n            return false;\n        }\n        marked\n    } else {\n        text.to_string()\n    };",
+     "old": "    let text = if journal.steps[index].kind == ProposalKind::Child {\n        // The label is part of what is stored, so the cap bounds the final\n        // text, not the bytes before the label.\n        let marked = match journal.steps[index].stop {\n            Some(reason) => format!(\"partial ({}): {text}\", reason.name()),\n            None => text.to_string(),\n        };\n        // Child text comes only from a verified host journal. A spill\n        // pointer is the guest's own text and passes no host.\n        if !guest_pointer {\n            let Some(host) = child else {\n                record_refusal_reason(\n                    journal,\n                    \"not this child's host\",\n                    &format!(\"child result {step_id}\"),\n                );\n                return false;\n            };\n            if let Err(reason) = host_binding_ok(journal, &journal.steps[index], host) {\n                record_refusal_reason(journal, reason, &format!(\"child result {step_id}\"));\n                return false;\n            }\n        }\n        if !child_result_ok(\n            journal\n                .steps\n                .iter()\n                .chain(child.into_iter().flat_map(|child| child.steps.iter())),\n            &marked,\n        ) {\n            return false;\n        }\n        // Every grant given to this child's hosts counts, not only the grant\n        // strings in the journal the caller happened to supply.\n        if journal\n            .host_grants\n            .iter()\n            .any(|(child, grant)| *child == step_id && marked.contains(grant))\n        {\n            return false;\n        }\n        marked\n    } else {\n        text.to_string()\n    };",
      "new": "    let _ = (guest_pointer, child);\n    let text = text.to_string();"
     }
    ],
@@ -4203,14 +4203,14 @@
   },
   {
    "id": "PX10",
-   "title": "the generic result path checks only the parent's grants",
+   "title": "the generic result path skips child_result_ok",
    "command": "host",
    "expect": "caught",
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        if !child_result_ok(\n            journal\n                .steps\n                .iter()\n                .chain(child.into_iter().flat_map(|child| child.steps.iter())),\n            &marked,\n        ) {",
-     "new": "        let _ = child;\n        if !child_result_ok(journal.steps.iter(), &marked) {"
+     "old": "        if !child_result_ok(\n            journal\n                .steps\n                .iter()\n                .chain(child.into_iter().flat_map(|child| child.steps.iter())),\n            &marked,\n        ) {\n            return false;\n        }",
+     "new": "        // the result rules are not checked"
     }
    ],
    "tests": [
@@ -4258,8 +4258,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        Ok(()) => authorize_step(host, step_id, grant),\n        Err(reason) => {\n            refuse_host_step(host, step_id, reason);\n            false\n        }",
-     "new": "        Ok(()) => authorize_step(host, step_id, grant),\n        Err(_reason) => false,"
+     "old": "            granted\n        }\n        Err(reason) => {\n            refuse_host_step(host, step_id, reason);\n            false\n        }",
+     "new": "            granted\n        }\n        Err(_reason) => false,"
     }
    ],
    "tests": [
@@ -4325,8 +4325,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        if !child_result_ok(\n            journal\n                .steps\n                .iter()\n                .chain(child.into_iter().flat_map(|child| child.steps.iter())),\n            &marked,\n        ) {\n            return false;\n        }\n        marked",
-     "new": "        if !child_result_ok(\n            journal\n                .steps\n                .iter()\n                .chain(child.into_iter().flat_map(|child| child.steps.iter())),\n            text,\n        ) {\n            return false;\n        }\n        marked"
+     "old": "        if !child_result_ok(\n            journal\n                .steps\n                .iter()\n                .chain(child.into_iter().flat_map(|child| child.steps.iter())),\n            &marked,\n        ) {\n            return false;\n        }",
+     "new": "        if !child_result_ok(\n            journal\n                .steps\n                .iter()\n                .chain(child.into_iter().flat_map(|child| child.steps.iter())),\n            text,\n        ) {\n            return false;\n        }"
     }
    ],
    "tests": [
@@ -4357,7 +4357,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if journal.depth > 0 || journal.host_of.is_some() {\n        let Some((parent, child_id)) = host else {\n            return false;\n        };\n        if host_step_ok(parent, child_id, journal, step_id, None).is_err() {\n            return false;\n        }\n    } else if host.is_some() {\n        return false;\n    }",
+     "old": "    if journal.depth > 0 || journal.host_of.is_some() {\n        let Some((parent, child_id)) = host else {\n            refuse_host_step(journal, step_id, \"not this child's host\");\n            return false;\n        };\n        if let Err(reason) = host_step_ok(parent, child_id, journal, step_id, None) {\n            refuse_host_step(journal, step_id, reason);\n            return false;\n        }\n    } else if host.is_some() {\n        refuse_host_step(journal, step_id, \"not this child's host\");\n        return false;\n    }",
      "new": "    let _ = host;"
     }
    ],
@@ -4373,7 +4373,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        if !guest_pointer {\n            let Some(host) = child else {\n                return false;\n            };\n            if host_binding_ok(journal, &journal.steps[index], host).is_err() {\n                return false;\n            }\n        }",
+     "old": "        if !guest_pointer {\n            let Some(host) = child else {\n                record_refusal_reason(\n                    journal,\n                    \"not this child's host\",\n                    &format!(\"child result {step_id}\"),\n                );\n                return false;\n            };\n            if let Err(reason) = host_binding_ok(journal, &journal.steps[index], host) {\n                record_refusal_reason(journal, reason, &format!(\"child result {step_id}\"));\n                return false;\n            }\n        }",
      "new": "        let _ = (guest_pointer, child);"
     }
    ],
@@ -4389,7 +4389,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "            if host_binding_ok(journal, &journal.steps[index], host).is_err() {\n                return false;\n            }",
+     "old": "            if let Err(reason) = host_binding_ok(journal, &journal.steps[index], host) {\n                record_refusal_reason(journal, reason, &format!(\"child result {step_id}\"));\n                return false;\n            }",
      "new": "            let _ = host;"
     }
    ],
@@ -4405,8 +4405,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        || task_requests_used(journal) > granted.requests",
-     "new": "        || false"
+     "old": "    if task_requests_used(journal) > granted.requests {\n        record_refusal_reason(journal, \"requests\", \"task budget\");\n        return false;\n    }",
+     "new": "    // the counter rule is not recorded"
     }
    ],
    "tests": [
@@ -4443,6 +4443,86 @@
    ],
    "tests": [
     "tests::a_model_call_under_a_granted_child_needs_the_grant_above_it"
+   ]
+  },
+  {
+   "id": "PX25",
+   "title": "a result is checked against only the supplied host's grants",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if journal\n            .host_grants\n            .iter()\n            .any(|(child, grant)| *child == step_id && marked.contains(grant))\n        {\n            return false;\n        }",
+     "new": "        // the host grant ledger is not checked"
+    }
+   ],
+   "tests": [
+    "tests::a_child_result_needs_a_verified_host"
+   ]
+  },
+  {
+   "id": "PX26",
+   "title": "the spill entry accepts a pointer without the journal's record",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if step.state != StepState::Dispatched\n        || step.grant.as_deref().is_none_or(|grant| grant.is_empty())\n        || !resource_covers(&step.resource, object_resource)\n    {\n        return false;\n    }\n    let recorded = journal.events.last().is_some_and(|node| {\n        matches!(\n            &node.source,\n            NodeSource::Spill { resource, version: at }\n                if resource == object_resource && *at == version\n        )\n    });\n    if !recorded {\n        return false;\n    }",
+     "new": "    let _ = step;"
+    }
+   ],
+   "tests": [
+    "tests::a_spill_pointer_cannot_carry_arbitrary_text"
+   ]
+  },
+  {
+   "id": "PX27",
+   "title": "a refused host write records no reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if let Err(reason) = host_step_ok(parent, child_id, journal, step_id, None) {\n            refuse_host_step(journal, step_id, reason);\n            return false;\n        }",
+     "new": "        if host_step_ok(parent, child_id, journal, step_id, None).is_err() {\n            return false;\n        }"
+    }
+   ],
+   "tests": [
+    "tests::a_host_write_needs_its_parent_still_granting_it"
+   ]
+  },
+  {
+   "id": "PX28",
+   "title": "a refused result host binding records no reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            if let Err(reason) = host_binding_ok(journal, &journal.steps[index], host) {\n                record_refusal_reason(journal, reason, &format!(\"child result {step_id}\"));\n                return false;\n            }",
+     "new": "            if host_binding_ok(journal, &journal.steps[index], host).is_err() {\n                return false;\n            }"
+    }
+   ],
+   "tests": [
+    "tests::a_child_result_needs_a_verified_host"
+   ]
+  },
+  {
+   "id": "PX29",
+   "title": "a refused budget record leaves no reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if task_requests_used(journal) > granted.requests {\n        record_refusal_reason(journal, \"requests\", \"task budget\");\n        return false;\n    }",
+     "new": "    if task_requests_used(journal) > granted.requests {\n        return false;\n    }"
+    }
+   ],
+   "tests": [
+    "tests::an_older_journal_cannot_exceed_a_new_budget"
    ]
   }
  ]

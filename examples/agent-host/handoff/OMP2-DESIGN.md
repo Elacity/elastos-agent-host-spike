@@ -224,6 +224,23 @@ re-encodes it to the same bytes.
 Child step with no budget can make no model call and gets no grant, and a new child needs a budget. These fail
 closed (R2, PRINCIPLES 11). They change what the guest allows, not what a stored byte means.
 
+## Host context, spill entry and refusal reasons
+
+A child host is a second journal for the same child. Its grants live in the parent journal (`host_grants`, a list of
+child id and grant) for as long as the process runs; they are not stored, so the format stays 2. `without_grants`
+clears the list, so `decode(encode(j)) == without_grants(j)` still holds. `record_result` checks the parent's list
+before it stores any child text: a caller that passes a different host journal for the same child cannot hide a
+grant given through the first.
+
+The spill pointer is the guest's own text, but its entry is narrow. `record_spill_result(journal, step_id,
+object_resource, version)` needs a dispatched step with a non-empty grant, a resource that covers the object, and
+the journal's last event to be a `Spill` node with the same resource and version. It builds the text itself;
+`spill_pointer` is its only caller. No caller passes arbitrary text.
+
+A refused host write records the shared check's reason, or "not this child's host" when the parent context is
+missing. A refused result host binding records one reason for the missing host, the non-child step and the binding
+failure. The budget counter records "requests". All use `record_refusal_reason`; no new record kind.
+
 ## Tests and falsifiers
 
 Each rule has a test, and each check has a mutation (CL01-CL92, report omp2-child-limits.md).
@@ -243,6 +260,8 @@ Each rule has a test, and each check has a mutation (CL01-CL92, report omp2-chil
 | `cancelling_a_parent_stops_started_children_at_their_next_model_call` | partial result kept, marked |
 | `no_model_call_anywhere_in_a_cancelled_tree` | grandchild too |
 | `a_cancelled_tree_stays_cancelled_after_resume` | `cancelled_from` survives encode |
+| `a_spill_pointer_cannot_carry_arbitrary_text` | the spill entry takes a resource and the journal's own pointer |
+| `a_child_result_needs_a_verified_host` | a second host journal cannot hide a parent-side grant |
 | `every_format_2_field_round_trips` | no field dropped |
 | `child_limits_are_checked_again_after_reload` | each stored rule, broken in bytes, refuses the load |
 | `a_child_grant_is_a_subset_of_its_parent` | parent grant needed, exact paths, again after reload |
