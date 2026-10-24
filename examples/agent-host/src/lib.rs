@@ -8217,10 +8217,18 @@ mod opt_in_model {
                 }
                 "content-length" => {
                     let text = value.trim();
-                    length = Some(
-                        text.parse::<usize>()
-                            .map_err(|_| format!("invalid content-length {text:?}"))?,
-                    );
+                    let parsed = text
+                        .parse::<usize>()
+                        .map_err(|_| format!("invalid content-length {text:?}"))?;
+                    match length {
+                        Some(previous) if previous != parsed => {
+                            return Err(format!(
+                                "conflicting content-length {previous} and {parsed}"
+                            ));
+                        }
+                        Some(_) => {}
+                        None => length = Some(parsed),
+                    }
                 }
                 _ => {}
             }
@@ -8253,7 +8261,24 @@ mod opt_in_model {
                 .map_err(|_| format!("invalid chunk size {size_text:?}"))?;
             body = &body[line_end + 2..];
             if size == 0 {
-                return Ok(out);
+                // The last chunk carries no data and is followed by the
+                // trailer section and one empty line. A response that stops
+                // before that terminator is incomplete.
+                loop {
+                    let Some(trailer_end) = find(body, b"\r\n") else {
+                        return Err("a chunked response has no final empty line".to_string());
+                    };
+                    let trailer = &body[..trailer_end];
+                    body = &body[trailer_end + 2..];
+                    if trailer.is_empty() {
+                        return Ok(out);
+                    }
+                    let trailer = std::str::from_utf8(trailer)
+                        .map_err(|_| "a chunk trailer is not UTF-8".to_string())?;
+                    if trailer.split_once(':').is_none() {
+                        return Err("a chunk trailer is not a header field".to_string());
+                    }
+                }
             }
             let Some(chunk_end) = size.checked_add(2) else {
                 return Err(format!("invalid chunk size {size_text:?}"));
@@ -11260,6 +11285,60 @@ mod tests {
                 .expect_err("an invalid content-length must be refused");
         server.join().expect("the server thread");
         assert!(error.starts_with("invalid content-length"), "{error}");
+
+        // Conflicting Content-Length values are a clear transport refusal; the
+        // first value stays authoritative.
+        let conflicting_body = serde_json::json!({
+            "choices": [{ "message": { "content": "hello second turn" } }],
+        })
+        .to_string();
+        let conflicting = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{conflicting_body}",
+            conflicting_body.len()
+        );
+        let (base_url, server) = one_shot_server(conflicting);
+        let error =
+            opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, "summary prompt")
+                .expect_err("conflicting content-lengths must be refused");
+        server.join().expect("the server thread");
+        assert!(error.starts_with("conflicting content-length"), "{error}");
+
+        // A chunked response that stops after the last chunk, before the final
+        // empty line, is incomplete and must be refused.
+        let incomplete_body = serde_json::json!({
+            "choices": [{ "message": { "content": "hello second turn" } }],
+        })
+        .to_string();
+        let incomplete = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{incomplete_body}\r\n0\r\n",
+            incomplete_body.len()
+        );
+        let (base_url, server) = one_shot_server(incomplete);
+        let error =
+            opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, "summary prompt")
+                .expect_err("an incomplete chunked response must be refused");
+        server.join().expect("the server thread");
+        assert!(
+            error.starts_with("a chunked response has no final empty line"),
+            "{error}"
+        );
+
+        // A complete chunked response with a trailer is accepted: the trailer
+        // section ends at its own empty line.
+        let chunked_body = serde_json::json!({
+            "choices": [{ "message": { "content": "hello second turn" } }],
+        })
+        .to_string();
+        let chunked = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{chunked_body}\r\n0\r\nX-Model: deepseek\r\n\r\n",
+            chunked_body.len()
+        );
+        let (base_url, server) = one_shot_server(chunked);
+        let returned =
+            opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, "summary prompt")
+                .expect("a complete chunked response");
+        server.join().expect("the server thread");
+        assert_eq!(returned, "hello second turn");
     }
 
     /// Opt-in: sends the real prompt to the local model, then judges the answer

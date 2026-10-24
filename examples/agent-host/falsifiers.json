@@ -417,8 +417,40 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "                \"content-length\" => {\n                    let text = value.trim();\n                    length = Some(\n                        text.parse::<usize>()\n                            .map_err(|_| format!(\"invalid content-length {text:?}\"))?,\n                    );\n                }",
+     "old": "                \"content-length\" => {\n                    let text = value.trim();\n                    let parsed = text\n                        .parse::<usize>()\n                        .map_err(|_| format!(\"invalid content-length {text:?}\"))?;\n                    match length {\n                        Some(previous) if previous != parsed => {\n                            return Err(format!(\n                                \"conflicting content-length {previous} and {parsed}\"\n                            ));\n                        }\n                        Some(_) => {}\n                        None => length = Some(parsed),\n                    }\n                }",
      "new": "                \"content-length\" => length = value.trim().parse().ok(),"
+    }
+   ],
+   "tests": [
+    "tests::a_model_failure_leaves_the_history_unchanged"
+   ]
+  },
+  {
+   "id": "FC15",
+   "title": "a later content-length overwrites the first, so conflicting lengths are accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                \"content-length\" => {\n                    let text = value.trim();\n                    let parsed = text\n                        .parse::<usize>()\n                        .map_err(|_| format!(\"invalid content-length {text:?}\"))?;\n                    match length {\n                        Some(previous) if previous != parsed => {\n                            return Err(format!(\n                                \"conflicting content-length {previous} and {parsed}\"\n                            ));\n                        }\n                        Some(_) => {}\n                        None => length = Some(parsed),\n                    }\n                }",
+     "new": "                \"content-length\" => {\n                    let text = value.trim();\n                    length = Some(\n                        text.parse::<usize>()\n                            .map_err(|_| format!(\"invalid content-length {text:?}\"))?,\n                    );\n                }"
+    }
+   ],
+   "tests": [
+    "tests::a_model_failure_leaves_the_history_unchanged"
+   ]
+  },
+  {
+   "id": "FC16",
+   "title": "the chunked decoder accepts a response that stops before the final empty line",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            if size == 0 {\n                // The last chunk carries no data and is followed by the\n                // trailer section and one empty line. A response that stops\n                // before that terminator is incomplete.\n                loop {\n                    let Some(trailer_end) = find(body, b\"\\r\\n\") else {\n                        return Err(\"a chunked response has no final empty line\".to_string());\n                    };\n                    let trailer = &body[..trailer_end];\n                    body = &body[trailer_end + 2..];\n                    if trailer.is_empty() {\n                        return Ok(out);\n                    }\n                    let trailer = std::str::from_utf8(trailer)\n                        .map_err(|_| \"a chunk trailer is not UTF-8\".to_string())?;\n                    if trailer.split_once(':').is_none() {\n                        return Err(\"a chunk trailer is not a header field\".to_string());\n                    }\n                }\n            }",
+     "new": "            if size == 0 {\n                return Ok(out);\n            }"
     }
    ],
    "tests": [
