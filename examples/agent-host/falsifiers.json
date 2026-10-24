@@ -4950,8 +4950,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if compaction_boundary_ok(journal).is_err() {\n        return false;\n    }\n    let Some(mut replacement) = journal.compact_pending.take() else {",
-     "new": "    let Some(mut replacement) = journal.compact_pending.take() else {"
+     "old": "fn commit_compact(journal: &mut Journal) -> Result<(), &'static str> {\n    open_compaction_ok(journal)?;\n",
+     "new": "fn commit_compact(journal: &mut Journal) -> Result<(), &'static str> {\n    if !journal.compaction_open {\n        return Err(COMPACTION_NOT_OPEN_REASON);\n    }\n"
     }
    ],
    "tests": [
@@ -4966,8 +4966,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if compaction_boundary_ok(journal).is_err() {\n        return false;\n    }\n    journal.compact_pending = None;",
-     "new": "    journal.compact_pending = None;"
+     "old": "fn note_crash_during_compact(journal: &mut Journal) -> Result<(), &'static str> {\n    open_compaction_ok(journal)?;\n",
+     "new": "fn note_crash_during_compact(journal: &mut Journal) -> Result<(), &'static str> {\n    if !journal.compaction_open {\n        return Err(COMPACTION_NOT_OPEN_REASON);\n    }\n"
     }
    ],
    "tests": [
@@ -4988,6 +4988,90 @@
    ],
    "tests": [
     "tests::a_saved_compaction_that_is_not_the_start_of_the_log_is_refused"
+   ]
+  },
+  {
+   "id": "CB01",
+   "title": "pruning changes the log in place while a compaction is open",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "fn prune_tool_results(journal: &mut Journal) -> Result<usize, &'static str> {\n    log_may_change_in_place(journal)?;\n",
+     "new": "fn prune_tool_results(journal: &mut Journal) -> Result<usize, &'static str> {\n"
+    }
+   ],
+   "tests": [
+    "tests::pruning_during_an_open_compaction_keeps_the_journal_loadable",
+    "tests::a_step_that_changes_the_log_in_place_says_a_compaction_is_open"
+   ]
+  },
+  {
+   "id": "CB02",
+   "title": "the head rewrite changes node 0 while a compaction is open",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    log_may_change_in_place(journal)?;\n    journal.events[head].text = text.to_string();\n",
+     "new": "    journal.events[head].text = text.to_string();\n"
+    }
+   ],
+   "tests": [
+    "tests::a_head_rewrite_during_an_open_compaction_keeps_the_journal_loadable",
+    "tests::a_step_that_changes_the_log_in_place_says_a_compaction_is_open"
+   ]
+  },
+  {
+   "id": "CB03",
+   "title": "the in-place rule refuses nothing",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if journal.compaction_open || journal.compact_backup.is_some() {\n        return Err(COMPACTION_OPEN_REASON);",
+     "new": "    if false {\n        return Err(COMPACTION_OPEN_REASON);"
+    }
+   ],
+   "tests": [
+    "tests::pruning_during_an_open_compaction_keeps_the_journal_loadable",
+    "tests::a_head_rewrite_during_an_open_compaction_keeps_the_journal_loadable",
+    "tests::a_step_that_changes_the_log_in_place_says_a_compaction_is_open"
+   ]
+  },
+  {
+   "id": "CB04",
+   "title": "a broken compaction boundary says no compaction is open",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    compaction_boundary_ok(journal).map_err(|_| COMPACTION_BOUNDARY_REASON)\n",
+     "new": "    compaction_boundary_ok(journal).map_err(|_| COMPACTION_NOT_OPEN_REASON)\n"
+    }
+   ],
+   "tests": [
+    "tests::a_refused_commit_or_restore_says_why"
+   ]
+  },
+  {
+   "id": "CB05",
+   "title": "a commit or restore with no open compaction says the boundary is broken",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if !journal.compaction_open {\n        return Err(COMPACTION_NOT_OPEN_REASON);\n    }\n    compaction_boundary_ok",
+     "new": "    if !journal.compaction_open {\n        return Err(COMPACTION_BOUNDARY_REASON);\n    }\n    compaction_boundary_ok"
+    }
+   ],
+   "tests": [
+    "tests::a_refused_commit_or_restore_says_why"
    ]
   }
  ]
