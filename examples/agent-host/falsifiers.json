@@ -1,0 +1,87 @@
+{
+ "about": "Agent host falsifiers: each entry breaks one check (exact text, replaced once), and every named test must then FAIL. Run with falsify.py. expect: caught (all named tests fail), compile_error (the mutation must not build), survives (known survivor, by design). Files are relative to examples/agent-host. command: host (cargo test of the guest) or e2e (run-e2e.sh: the guest in a test Runtime).",
+ "retired": {},
+ "falsifiers": [
+  {
+   "id": "FC01",
+   "title": "the shrink rule is gone: a long summary replaces the tail",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if visible_bytes(&replacement_head) >= visible_bytes(&kept) {\n        return None;\n    }",
+     "new": "    if false {\n        return None;\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_model_summary_that_does_not_shrink_is_refused",
+    "tests::compaction_refuses_a_summary_that_does_not_shrink"
+   ]
+  },
+  {
+   "id": "FC02",
+   "title": "a required fact may be dropped",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if !required.iter().all(|fact| summary.contains(fact.as_str())) {\n        return Some(\"summary drops a required fact\");\n    }",
+     "new": "    if false {\n        return Some(\"summary drops a required fact\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_model_summary_that_drops_a_required_fact_is_refused"
+   ]
+  },
+  {
+   "id": "FC03",
+   "title": "a summary may repeat the system head (node 0)",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if summary.contains(&head.text) {\n        return Some(\"summary touches node 0\");\n    }",
+     "new": "    if false {\n        return Some(\"summary touches node 0\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_model_summary_that_touches_node_zero_is_refused"
+   ]
+  },
+  {
+   "id": "FC04",
+   "title": "a model failure is recorded as a summary",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        Err(reason) => Err(reason),",
+     "new": "        Err(_) => Ok(()),"
+    }
+   ],
+   "tests": [
+    "tests::a_model_failure_leaves_the_history_unchanged"
+   ]
+  },
+  {
+   "id": "FC05",
+   "title": "a summary is recorded from a step that was never dispatched",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if step.kind != ProposalKind::Hosted || step.state != StepState::Dispatched {\n        return Err(\"summary step not dispatched\");\n    }",
+     "new": "    if step.kind != ProposalKind::Hosted {\n        return Err(\"summary step not dispatched\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_summary_from_a_step_that_was_not_dispatched_is_refused"
+   ]
+  }
+ ]
+}
