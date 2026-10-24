@@ -96,7 +96,8 @@ It checks the manifest against the WIT hash, then runs:
 - the Bus v2 reader (`bus2/`, Rust 1.95.0) in the Bus v2 proof's stub host;
 - the page tests (including `the shipped renderer matches the kit owner`) and the page in real Chromium
   (`surface/`);
-- every falsifier (`falsify.py --runtime`, `falsify-surface.py`).
+- every falsifier (`falsify.py --runtime`, `falsify-surface.py`). Each surface case declares the complete set
+  of tests that must fail, and the runner fails the case if the whole test file has any other failing test.
 
 The reproducible build is separate: `repro/build-in-container.sh` (needs Docker).
 

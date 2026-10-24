@@ -1,5 +1,6 @@
 """Self-test of the mutation runner: a case is caught only when every named
-test fails, and every named test runs.
+test fails, and every named test runs. With `failing_tests`, a case is caught
+only when the whole file's failing set is exactly the declared set.
 
 Run: python3 -I examples/capsule-kit/falsify/test_falsify_kit.py
 """
@@ -38,6 +39,31 @@ class Runner(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             missed = kit.falsify([case], None, test_fails)
         return missed, out.getvalue()
+
+    def run_case_with_failures(self, outcomes, actual):
+        """One case whose named tests fail as `outcomes` says, with the whole
+        file's failures given as `actual`."""
+        case = ("the cap is not checked", self.file, [("if size > cap {", "if false {")], list(outcomes))
+
+        def test_fails(name):
+            self.ran.append(name)
+            self.assertIn("if false {", self.file.read_text())
+            return outcomes[name]
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            missed = kit.falsify([case], None, test_fails, failing_tests=lambda: set(actual))
+        return missed, out.getvalue()
+
+    def test_a_case_with_an_undeclared_failure_survives(self):
+        missed, out = self.run_case_with_failures({"first": True}, {"first", "extra"})
+        self.assertEqual(missed, ["the cap is not checked"])
+        self.assertIn("undeclared failures: extra", out)
+
+    def test_a_case_is_caught_when_the_whole_failure_set_is_declared(self):
+        missed, out = self.run_case_with_failures({"first": True, "second": True}, {"first", "second"})
+        self.assertEqual(missed, [])
+        self.assertIn("caught: the cap is not checked", out)
 
     def test_a_case_whose_second_test_passes_survives(self):
         missed, out = self.run_case({"first": True, "second": False})
@@ -87,6 +113,14 @@ class Runner(unittest.TestCase):
         )
         self.assertTrue(kit.node_test_fails(tests, "fails"))
         self.assertFalse(kit.node_test_fails(tests, "passes"))
+
+    def test_node_test_failures_returns_every_failing_name(self):
+        tests = self.node_file(
+            'import test from "node:test";\n'
+            'test("passes", () => {});\n'
+            'test("fails", () => { throw new Error("x"); });\n'
+        )
+        self.assertEqual(kit.node_test_failures(tests), {"fails"})
 
     def test_node_test_fails_refuses_a_name_no_test_has(self):
         tests = self.node_file('import test from "node:test";\ntest("present", () => {});\n')

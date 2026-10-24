@@ -47,14 +47,17 @@ def check(cases):
                 raise SystemExit(f"{name}: expected the text once in {path}, found {text.count(old)}")
 
 
-def falsify(cases, prepare, test_fails, parts=(), show_tests=False):
+def falsify(cases, prepare, test_fails, parts=(), show_tests=False, failing_tests=None):
     """Runs each case whose name holds one of `parts` (all if none).
 
     `prepare()` builds the mutant once (and stops the run if it does not
     compile); it may be None. `test_fails(test)` runs one named test and says
     whether it failed. Every named test is run, even after one has failed,
-    and the case is caught only if all of them failed. Returns the names of
-    the cases that survived."""
+    and the case is caught only if all of them failed. When `failing_tests`
+    is given, it returns the names of every test that failed in the whole
+    file while the mutant is in place: the case is caught only when that set
+    is exactly the declared set, so an undeclared failure cannot hide.
+    Returns the names of the cases that survived."""
     missed = []
     for case in cases:
         name, path, replacements, tests = case[:4]
@@ -75,17 +78,25 @@ def falsify(cases, prepare, test_fails, parts=(), show_tests=False):
             if prepare is not None:
                 prepare()
             results = [(test, test_fails(test)) for test in tests]
+            actual = set(map(str, failing_tests())) if failing_tests is not None else None
         finally:
             for each, data in saved.items():
                 each.write_bytes(data)
         survivors = [test for test, failed in results if not failed]
-        caught = bool(results) and not survivors
+        declared = set(map(str, tests))
+        unexpected = sorted(actual - declared) if actual is not None else []
+        absent = sorted(declared - actual) if actual is not None else []
+        caught = bool(results) and not survivors and not unexpected and not absent
         suffix = f" -> {', '.join(map(str, tests))}" if show_tests else ""
         if caught:
             print(f"caught: {name}{suffix}", flush=True)
         else:
             passed = ", ".join(map(str, survivors)) or "no test named"
             print(f"SURVIVED: {name}{suffix} (still passing: {passed})", flush=True)
+            if unexpected:
+                print(f"  undeclared failures: {', '.join(unexpected)}", flush=True)
+            if absent:
+                print(f"  declared failures that did not fail: {', '.join(absent)}", flush=True)
             missed.append(name)
     return missed
 
@@ -159,10 +170,35 @@ def node_test_fails(test_file, name):
     raise SystemExit(f"no test matches {name!r} in {test_file}")
 
 
+def node_test_failures(test_file):
+    """Runs every test in the file and returns the names that failed.
+
+    A file that does not load stops the run: its failure says nothing about
+    the mutant."""
+    result = subprocess.run(
+        ["node", "--test", "--test-reporter=tap", str(test_file)],
+        capture_output=True,
+        text=True,
+    )
+    out = result.stdout
+    if "TAP version 13" not in out:
+        raise SystemExit(
+            f"{test_file} did not load: {(result.stderr or out).strip()[-1500:]}"
+        )
+    failures = set()
+    for line in out.splitlines():
+        match = re.match(r"^\s*not ok \d+ - (.*?)(?:\s+#.*)?$", line)
+        if match:
+            failures.add(match.group(1))
+    return failures
+
+
 def main(groups, args=None, done="all falsifiers caught"):
-    """`groups`: [(cases, prepare, test_fails, flag or None, show_tests)]. A
-    group with a flag runs only when that flag is given. --check confirms every anchor;
-    other arguments filter cases by name."""
+    """`groups`: [(cases, prepare, test_fails, flag or None, show_tests[,
+    failing_tests])]. A group with a flag runs only when that flag is given.
+    `failing_tests` is optional: when present, the whole test file must fail
+    exactly the declared tests. --check confirms every anchor; other
+    arguments filter cases by name."""
     args = sys.argv[1:] if args is None else args
     parts = [arg for arg in args if not arg.startswith("--")]
     for cases, *_ in groups:
@@ -171,9 +207,11 @@ def main(groups, args=None, done="all falsifiers caught"):
         print(f"all {sum(len(cases) for cases, *_ in groups)} anchors found once")
         return
     missed = []
-    for cases, prepare, test_fails, flag, show_tests in groups:
+    for group in groups:
+        cases, prepare, test_fails, flag, show_tests = group[:5]
+        failing_tests = group[5] if len(group) > 5 else None
         if flag is None or flag in args:
-            missed += falsify(cases, prepare, test_fails, parts, show_tests)
+            missed += falsify(cases, prepare, test_fails, parts, show_tests, failing_tests)
     if missed:
         raise SystemExit(f"{len(missed)} falsifier(s) survived: {missed}")
     print(done)

@@ -200,7 +200,7 @@ are.
 | A1 | A Bus v1 guest crate: the `Bus` trait, read window, bounded read, string write body, reply parser, `Refusal` with its `bus-error` mapping, strict list and URI parsing, the WIT glue, and `FakeBus` | the copies of `bus.rs`, `fake.rs`, half of `lib.rs`, `shelf.rs` |
 | A2 | A host-test crate: the fake bridge, the `ComponentProvider` run, the fuel runner, and the admission check exported by Runtime instead of copied | the 63% copy of `component.rs` |
 | A3 | `scripts/` for build, verify and the pinned container, each taking a capsule folder; pins in one file; a recorded hash and a check | `build.sh`, the manifest check in `verify.sh`, `repro/` |
-| A4 | One mutation runner that reads a case list per app, knows crates, and has `--check` and filters | three `falsify*.py` runners |
+| A4 | One mutation runner that reads a case list per app, knows crates, and has `--check` and filters; a case can declare its complete failing set, and the whole file is then checked so an undeclared failing test cannot hide | three `falsify*.py` runners |
 | A5 | A page kit: `launchToken`, the client, `cut`, a typed-document renderer; the fake window for tests; the stand-in server with Runtime's app headers taken from Runtime. **Delivered:** `surface/docs-render.js` is the one owner of the typed-document renderer; each page's build copies it into its `browser/`, and a named drift test pins the copy byte for byte | half of `reader.js`, the test fakes, the smoke server |
 | A6 | `capsule-bundle pack` and test support (`World`, sealed stores) | `pack` and the helpers in `bundle.rs` |
 | A7 | The Bus v2 host as test support: `guest()`, `within()`, a busy guest, the toolchain pin | the copies in `bus2/` |

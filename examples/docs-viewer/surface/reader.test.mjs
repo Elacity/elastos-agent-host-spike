@@ -252,9 +252,11 @@ test("the page has no way to hold or reach anything else", () => {
       assert.ok(!code.includes(forbidden), `${forbidden} in the page`);
     }
   }
-  // One fetch call site, inside the client.
+  // One fetch call site, inside the client, across the whole page.
   assert.equal(page.match(/fetchFn\(/g).length, 1);
-  assert.ok(!/[^.]\bfetch\(/.test(page), "no other fetch");
+  for (const code of [page, renderer, main]) {
+    assert.ok(!/\bfetch\s*\(/.test(code), "no fetch outside the client");
+  }
   assert.equal(main.trim(), 'import { mountReader } from "./reader.js";\n\nmountReader(window);');
 
   const html = source("./browser/index.html");

@@ -11,9 +11,10 @@ build does, so the page tests see it and the copy stays pinned to the owner.
 The drift case edits only the shipped copy, and only its own test must fail.
 
 Each falsifier replaces exact text (it must occur once), runs the named node
-tests, and requires them to FAIL. The files are restored from their saved
-bytes afterwards, also on error or Ctrl-C. --check only confirms every anchor
-occurs once.
+tests, and requires them to FAIL. It also runs the whole test file and
+requires its failing set to be exactly the declared set: every other test
+passes. The files are restored from their saved bytes afterwards, also on
+error or Ctrl-C. --check only confirms every anchor occurs once.
 
 The runner is the capsule kit's (examples/capsule-kit/falsify).
 """
@@ -38,13 +39,17 @@ PAGE_CASES = [
         "a title is shown as markup",
         "        button.textContent = document.title;",
         "        button.innerHTML = document.title;",
-        ["markup in a document stays text"],
+        [
+            "markup in a document stays text",
+            "the page has no way to hold or reach anything else",
+            "the titles and the arrow keys switch documents, in shelf order",
+        ],
     ),
     (
         "a skipped message is shown as markup",
         "line.textContent = skip.order === null",
         "line.innerHTML = skip.order === null",
-        ["markup in a document stays text"],
+        ["markup in a document stays text", "the page has no way to hold or reach anything else"],
     ),
     (
         "an unreadable refusal shows no text",
@@ -56,7 +61,7 @@ PAGE_CASES = [
         "requests carry cookies",
         'credentials: "omit",',
         'credentials: "include",',
-        ["it makes one request"],
+        ["it makes one request, a GET with the launch token and nothing else"],
     ),
     (
         "requests are made without a launch token",
@@ -80,13 +85,13 @@ PAGE_CASES = [
         "any number of blocks is taken",
         "    if (!blocksIn || blocksIn.length > MAX_BLOCKS) {",
         "    if (!blocksIn) {",
-        ["a document with a block it cannot read is not shown"],
+        ["a document with a block it cannot read is not shown, and the rest are"],
     ),
     (
         "a document keeps its uri",
         "    documents.push({ order, title:",
         "    documents.push({ order, uri: document.uri, title:",
-        ["it never requests a path"],
+        ["it never requests a path: the uri fields are dropped unread"],
     ),
 ]
 
@@ -96,13 +101,23 @@ RENDER_CASES = [
         "a span is shown as markup",
         "      element.textContent = span.text;",
         "      element.innerHTML = span.text;",
-        ["markup in a document stays text", "the page has no way to hold or reach anything else"],
+        [
+            "markup in a document stays text",
+            "the page has no way to hold or reach anything else",
+            "it draws each block kind as its element, with text only",
+            "it reads the pages the core writes, every block, and shows their markup as text",
+            "the titles and the arrow keys switch documents, in shelf order",
+        ],
     ),
     (
         "code is shown as markup",
         "      code.textContent = block.text;",
         "      code.innerHTML = block.text;",
-        ["markup in a document stays text"],
+        [
+            "markup in a document stays text",
+            "the page has no way to hold or reach anything else",
+            "it draws each block kind as its element, with text only",
+        ],
     ),
     (
         "a text is not cut short",
@@ -114,13 +129,18 @@ RENDER_CASES = [
         "an unknown block kind is drawn",
         "    default:\n      return null;",
         '    default:\n      return { kind: "rule" };',
-        ["a document with a block it cannot read is not shown"],
+        ["a document with a block it cannot read is not shown, and the rest are"],
     ),
     (
         "an unknown style becomes its own element",
         '    tag: styleTag(span && span.style),',
         '    tag: (span && span.style) || "span",',
-        ["an unknown style is plain"],
+        [
+            "a style named after an inherited property is plain",
+            "an unknown style is plain and a heading level stays within 1 to 6",
+            "it draws each block kind as its element, with text only",
+            "markup in a document stays text",
+        ],
     ),
     (
         "a style is looked up through the prototype",
@@ -133,6 +153,13 @@ RENDER_CASES = [
         "level: Math.min(6, Math.max(1, block.level)),",
         "level: block.level,",
         ["an unknown style is plain and a heading level stays within 1 to 6"],
+    ),
+    (
+        "a request is made in the renderer",
+        "/** Draws one block as elements; every text goes through textContent. */",
+        'export function unexpectedRequest() { return fetch("/api/apps/home/state"); }\n\n'
+        "/** Draws one block as elements; every text goes through textContent. */",
+        ["the page has no way to hold or reach anything else"],
     ),
 ]
 
@@ -163,11 +190,12 @@ def main():
         for name, old, new, tests in RENDER_CASES
     ]
     drift = [(name, COPY, [(old, new)], tests) for name, old, new, tests in DRIFT_CASES]
+    every_failure = lambda: kit.node_test_failures(TESTS)  # noqa: E731
     kit.main(
         [
-            (page, None, test_fails, None, True),
-            (render, sync_copy, test_fails, None, True),
-            (drift, None, test_fails, None, True),
+            (page, None, test_fails, None, True, every_failure),
+            (render, sync_copy, test_fails, None, True, every_failure),
+            (drift, None, test_fails, None, True, every_failure),
         ],
         done=f"all {len(page) + len(render) + len(drift)} surface falsifiers caught",
     )
