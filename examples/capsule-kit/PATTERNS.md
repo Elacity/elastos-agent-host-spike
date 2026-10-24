@@ -69,8 +69,13 @@ What Rong described:
 **The capsule must** (when built):
 - [ ] carry the issuer keys it trusts in its bundle, so they are part of its CID;
 - [ ] take the token only as data the local ElastOS hands over, never as a decision the local ElastOS made;
-- [ ] check the token's signature against those sealed keys, and that it names this capsule (by CID or name)
-      and this user, and is within its validity;
+- [ ] check the token's signature against those sealed keys, and that it names this capsule by CID and this
+      user, and is within its validity: the token's CID must equal the CID the bundle was re-hashed to when it
+      loaded, so a name never authorizes. The name is display only;
+- [ ] bind the authorization to the hash: two bundles with one name and one issuer key but different hashes are
+      different capsules, and a token issued for the first must not run the second. Test
+      `two_bundles_with_one_name_need_two_tokens` with both bundles and each token; it must fail when the check
+      matches on the name, under the falsifier `the token matches the capsule name, not its cid`;
 - [ ] refuse to run for a user without a valid token, with a reason, before doing any work for them;
 - [ ] keep this check apart from capabilities: a valid token grants nothing on this machine, and a grant is
       not an entitlement.

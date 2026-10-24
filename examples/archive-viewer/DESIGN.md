@@ -11,8 +11,9 @@ change. The code comes after #32 merges and the kit's shared crate exists (see [
 ## In one paragraph
 
 A WASM core reads one archive object through `providers.invoke`, with a grant for that one object, using the
-offset and length read window. It never reads the whole archive. For a ZIP it reads the end record and the
-central directory, checks them against each other, and lists every entry with a status. It checks and shows
+offset and length read window. It never reads the whole archive. For a ZIP it reads the end record, the
+central directory and one bounded local-header prefix for every entry, checks them against each other, and
+lists every entry with a status. It checks and shows
 at most a few small text entries, each read through its local header, inflated through a fixed
 window, and checked against its declared size and CRC. Every cap is counted before any early return. It writes
 one bounded view object that a render-only page draws. Nothing is extracted, and a nested archive is listed,
@@ -87,6 +88,9 @@ Two capsules, as in the photo and documents viewers (principle 13):
 **Input.** The Bus v1 Component ABI has no input, so, as for the documents shelf, the archive to open is named
 in a principal-scoped request object at a fixed path (`.AppData/App/archive-viewer/open.json`, schema
 `elastos.archive-viewer.open/v1`, one `uri` under `Users/self/`, and optionally the entry indexes to show).
+The request's `uri` must also lie outside `.AppData/`: the prefix `localhost://Users/self/` alone would take
+this app's own view object and another app's AppData, so an `.AppData/` request stops the run with a `bus-error`
+that names the request, before any grant is asked for or any archive byte is read (F41).
 Who writes it is a missing piece: Home binds a launch only for `image-viewer` today (kit, "What was missing" 2).
 
 **Output.** One view object, `.AppData/App/archive-viewer/view.json` (schema `elastos.archive-viewer.view/v1`),
@@ -159,9 +163,17 @@ bomb**; the caps below do, and they are counted in the inflate loop, not taken f
 - **B3, total inflate cap.** All entries shown in one run inflate at most 64 KiB in all, counted as it comes out,
   whether the entry is then shown or skipped (PATTERNS 1, "count before any early return").
 - **B4, overlapping entries.** Two entries whose data ranges overlap (one compressed stream reused by many
-  directory records, the "non-recursive" bomb) refuse the archive. Checked from the directory alone: each
-  entry's range, from its local header offset to the end of its compressed data, must not overlap the next
-  one, and all must end before the directory starts.
+  directory records, the "non-recursive" bomb) refuse the archive. The directory alone cannot give a range:
+  where the data starts depends on the local header's own name and extra lengths, which only that header
+  holds. So the listing is accepted only after one bounded local-header check for every entry (B4a), before
+  any entry is listed as safe: read the 30-byte fixed header at the directory's local offset (cap: 256 × 30
+  bytes, 7,680 bytes in all, counted), check its signature, and take `name_len` and `extra_len` from it.
+  Then `data = local_offset + 30 + name_len + extra_len` and `end = data + compressed_size`. Ranges sorted by
+  `data` must not overlap (a shared local offset overlaps itself), `data` must not exceed `end`, and `end`
+  must not pass the directory offset. The name bytes are not read here; only a shown entry reads them (L5),
+  which must then agree with the lengths this check used. A local header that cannot be read inside the
+  object refuses the archive. The directory's name and extra lengths never stand in for the local ones: two
+  archives with identical directories and end records can still overlap when a local extra field grows (F6b).
 - **B5, declared totals are display only.** The sum of declared sizes is shown as declared. It never sizes a
   buffer and never decides that something is safe. Listing a 2 GB archive costs the same as listing a small
   one, because no entry is inflated to list it.
@@ -219,12 +231,14 @@ A name is shown as text, never used as a path. The rules decide its status:
   fit inside the directory.
 - **L5, local header.** Before an entry is shown, its local header is read: the signature, the name byte for byte,
   the method and the flags (except bit 3) must equal the directory's; without a data descriptor (bit 3), the local
-  CRC and sizes must equal the directory's too. The local extra field must fit before the data.
+  CRC and sizes must equal the directory's too. The local extra field must fit before the data, and the local
+  name and extra lengths must equal the ones B4a used to place the range, else the entry is skipped.
 - **L6, sizes from the bytes.** Inflating must end (`StreamEnd`) exactly within the declared compressed size, and
   produce exactly the declared uncompressed size: one byte more or less skips the entry `size_mismatch`.
 - **L7, CRC.** The CRC-32 of the output must equal the directory's, else the entry is skipped `crc_mismatch`.
 - **L8, stored entries.** For method 0 the compressed and uncompressed sizes must be equal.
-- **L9, directories.** A directory entry must have size 0.
+- **L9, directories.** A directory entry must have size 0; one with bytes is listed `blocked` with reason
+  `directory_with_data`, and its bytes are never read. A trailing `/` is its only name allowance (P2).
 
 A refused archive (L1 to L4, B4, P8 count) is a content failure of the whole archive: the view is written with
 the reason and no entries. Only an authority failure (no grant, a refused or failed call) stops the run without
@@ -240,13 +254,14 @@ decides); inflate 30 and CRC 8.3 a byte (measured here).
 |---|---|---|
 | End record and comment | 22 + 1,024 bytes | 0.4 M |
 | Central directory | 16 KiB, 256 entries | 6.8 M |
-| Local headers of shown entries | 8 entries, at most 350 bytes each | 1.2 M |
+| Local header prefix of every entry (B4a) | 256 × 30 bytes | 3.2 M |
+| Local headers of shown entries (L5) | 8 entries, at most 350 bytes each | 1.2 M |
 | Compressed data of shown entries | 24 KiB in all, counted on every read | 10.2 M |
 | Inflate | 64 KiB out in all (B3) | 2.0 M |
 | CRC | 64 KiB | 0.5 M |
 | Text checks, docs-model blocks | the shown entries | measure |
 | View object | 64 KiB in all: listing at most 24 KiB, previews the rest | 13 to 26 M |
-| **Total** | | **about 35 to 50 M**, under the 80 M gate with room for parsing |
+| **Total** | | **about 38 to 53 M**, under the 80 M gate with room for parsing |
 
 This budget would leave room for at most one 16 KiB image a run, which is why images wait for Bus v2
 (decision 4). Bus v2 streams remove the JSON byte arrays, so its caps are set again from measurements there,
@@ -289,10 +304,11 @@ rebuild the component and run in `ComponentProvider`.
 |---|---|---|---|
 | F1 | B1 preview cap | the window grows to 64 KiB | `an_entry_over_the_preview_cap_is_skipped_after_one_byte_past_it` |
 | F2 | B1 declared size | the declared size is not checked first | `an_entry_declared_over_the_cap_is_not_read` |
-| F3 | B2 ratio | the ratio check is removed | `a_bomb_entry_stops_at_the_ratio_cap` |
+| F3 | B2 ratio | the ratio check is removed | `a_bomb_entry_stops_at_the_ratio_cap` (in the component: a 16 KiB entry compressed into 100 bytes, so the ratio cap sits below both B1's window and B3's total; the test asserts status `ratio` and that the counted output is at most 100 × the compressed bytes consumed + 1 KiB, so it fails on the status and the count, not on fuel) |
 | F4 | B2 declared ratio | the declared ratio is not checked | `an_entry_declared_past_the_ratio_is_not_read` |
 | F5 | B3 total inflate | output of skipped entries is not counted | `no_run_inflates_more_than_its_total` (sweep) |
 | F6 | B4 overlap | the range check is removed | `entries_that_share_data_refuse_the_archive` |
+| F6b | B4 local extra | the local extra length is ignored and the data start comes from the directory (`local_offset + 30 + name_len`) | `entries_that_overlap_only_after_the_local_extra_field_refuse_the_archive` (two archives with identical directories and end records; the first local extra grows from 0 to 64 bytes so its range covers the second) |
 | F7 | P1 absolute | `/` and drive names pass | `absolute_names_are_blocked` |
 | F8 | P2 dot segments | `..` passes | `dot_and_empty_segments_are_blocked` |
 | F9 | P3 backslash | backslash passes | `a_backslash_is_blocked` |
@@ -322,14 +338,25 @@ rebuild the component and run in `ComponentProvider`.
 | F33 | Text checks | the whole-text check is removed | `a_text_entry_that_is_not_text_is_skipped` |
 | F34 | Images (Bus v2) | the header check is removed | `an_entry_named_png_that_is_not_one_is_not_drawn` |
 | F35 | Grant | the archive read uses no grant (in the component) | `no_grant_stops_the_run_through_the_runtime` |
-| F36 | Fuel | the ratio check is removed (in the component) | `worst_archives_stay_under_80_percent_of_the_runtime_fuel` |
+| F36 | Fuel | the counted reader asks for one byte per call and the inflate loop copies the window per output byte (measured fuel regressions; they change no rule and no output) | `worst_archives_stay_under_80_percent_of_the_runtime_fuel` (the gate records the highest measured fuel under the mutant and requires it above 80%) |
 | F37 | Page | a path is drawn as markup | `an_entry_path_is_text` |
 | F38 | Page (Bus v1) | an image entry is drawn | `the_page_draws_no_image_on_bus_v1` |
 | F39 | Page | an inherited property name picks a kind | `a_kind_named_after_an_inherited_property_is_not_drawn` |
+| F40 | L9 directory | a directory's size is not checked | `a_directory_with_a_nonzero_size_is_blocked` |
+| F41 | Request URI | the `.AppData/` refusal is removed | `a_request_for_an_appdata_uri_is_refused` |
+| F42 | ReaderAt authority | a denied read is folded into an `io::Error` and becomes a content skip | `a_denied_read_during_the_directory_read_stops_the_run` |
+| F43 | B5 declared totals | the sum of declared sizes sizes a buffer | `a_declared_two_gigabyte_archive_is_listed_with_the_same_reads_as_a_small_one` |
+
+F40 to F42 give the three rules the review named a mutant and a test: L9 is F40, the request's `.AppData/`
+refusal is F41, and the `ReaderAt` adapter's authority rule is F42. F43 covers B5, the last rule that had no
+row. Each mutant changes only its own rule, so each named test fails independently. F3 runs in the component
+and asserts the ratio status and the output count, so it does not depend on the fuel gate. F36's mutant adds
+fuel cost only and changes no rule: the gate's measured fuel must cross 80% under it. The Bus v2 limits (S2
+and the resident guest's S3) are tested with that proof when its guest is built.
 
 The fuel gate (F36) runs one archive per hostile class at its caps: the largest directory, the most names at
 their longest, the most shown entries, a bomb at the ratio cap, a text entry of the worst inflate cost, and the
-largest view.
+largest view. F3 is not the fuel proof.
 
 ## Order of work
 
@@ -337,10 +364,10 @@ largest view.
 2. Done in #35: the kit's guest crate (`examples/capsule-kit/guest`), with the counted reader, the text checks
    and the image header checks (M1 to M3), and the one photo hash change.
 3. Then this app, Bus v1 first, in `examples/archive-viewer`:
-   - the core: request, end record, directory, listing, statuses, all P and L rules, with tests and falsifiers
-     F7 to F25 and F29 to F31;
-   - text previews: inflate with B1 to B3, L6 to L8, the text checks; F1 to F6, F26 to F28, F32, F33;
-   - the host test in `ComponentProvider` and the fuel gate; F35 and F36;
+   - the core: request, end record, directory, listing, B4a and the statuses, all P and L rules, with tests and
+     falsifiers F6, F6b, F7 to F25, F29 to F31 and F40 to F43;
+   - text previews: inflate with B1 to B3, L6 to L8, the text checks; F1, F2, F4, F5, F26 to F28, F32, F33;
+   - the host test in `ComponentProvider` and the fuel gate; F3 (ratio), F35 and F36;
    - the page and its smoke; F37 to F39;
    - the bundle and the container build;
    - then the Bus v2 guest in the proof's host, with N2 and F18; image previews (F34) once the typed UI
@@ -374,13 +401,14 @@ Written on 23 Oct 2026, when the Photo track moved to its own lane. Read with `e
     return an error that the core turns into a content skip with its reason (a read budget spent), not a trap;
   - it must keep a `Refusal` (an authority failure) aside and return it after rawzip gives up. If the refusal
     is folded into an `io::Error`, a denied read becomes a skipped entry, which breaks the stop/skip rule.
-    Test it: a denied read during the directory read stops the run.
+    Test it: `a_denied_read_during_the_directory_read_stops_the_run` (F42).
 - **rawzip's own checks are not the design's checks.** It parses; L1 to L9 and P1 to P9 are still this app's
   to write and test. I did not check what rawzip's `try_normalize` accepts; test P1 to P4 against this app's
   own rules, not against it.
 - **The request's URI prefix.** `check_object_uri(uri, prefix)` takes one prefix. `localhost://Users/self/` alone
   would also take the app's own `.AppData/App/archive-viewer/view.json` and any other app's AppData. Refuse
-  `.AppData/` explicitly (or take a fixed list of the person's folders) and test it.
+  `.AppData/` explicitly (or take a fixed list of the person's folders) and test it:
+  `a_request_for_an_appdata_uri_is_refused` (F41).
 - **Fuel.** The kit's write is the cheap one now, but the view still costs about 200 fuel a byte on Bus v1.
   Measure the budget table in [Limits](#limits-and-the-fuel-budget) with the real gate before trusting it.
 - **Fixtures (M4).** Real zip tools refuse to write archives that lie. Build them byte by byte in a test-only
@@ -392,15 +420,17 @@ Build them in these groups; each group shares fixtures and a test helper, and la
 
 | Group | Falsifiers | Shares |
 |---|---|---|
-| Directory and end record | F19 to F23 (L1 to L4), F6 (B4 overlap) | the end-record and directory fixture builder; all refuse the whole archive |
+| Directory and end record | F19 to F23 (L1 to L4), F6 and F6b (B4 overlap), F40 (L9) | the end-record and directory fixture builder; all refuse the whole archive |
 | Names | F7 to F16 (P1 to P9) | one fixture with many names; a table test per rule |
+| Request | F41 | the request fixture with an `.AppData/` uri; the run stops before a grant |
 | Methods and encryption | F29, F30 | a directory-only fixture; nothing is inflated |
 | Local header and the bytes | F24, F25 (L5), F26 to F28 (L6 to L8) | an entry fixture whose local header or data is changed after the fact |
-| Bomb caps | F1 to F5 (B1 to B3) | the inflate loop; F5 is a sweep (many entries, every order), like the docs viewer's budget sweeps |
-| Budgets | F31 (reads), F32 (the whole view) | sweeps over shelves of mixed entries; they must also cover entries skipped after reading |
+| Authority stops | F42 | the fake Runtime denies the directory read; the run stops and writes nothing |
+| Bomb caps | F1 to F5 (B1 to B3) | the inflate loop; F5 is a sweep (many entries, every order), like the docs viewer's budget sweeps; F3 also runs in the component |
+| Budgets | F31 (reads), F32 (the whole view), F43 (declared totals) | sweeps over shelves of mixed entries; they must also cover entries skipped after reading |
 | Text | F33 | the kit's text checks through this app's run |
 | Nesting | F17 (Bus v1), F18 (Bus v2) | a stored inner ZIP fixture |
-| In the component | F35 (grant), F36 (fuel gate) | `--runtime`: the component is rebuilt for each case |
+| In the component | F3 (ratio), F35 (grant), F36 (fuel gate) | `--runtime`: the component is rebuilt for each case |
 | Page | F37 to F39 (Bus v1); F38 becomes "no image drawn" | the kit's page test kit and stand-in |
 | Bus v2 images | F34 | waits for M5 and the typed UI document (decision 4) |
 
