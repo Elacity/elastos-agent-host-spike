@@ -37,6 +37,9 @@ child step (the parent's journal), never from a child host's own journal.
 - `child_rules`: what every child keeps (parent, stopped subtree, resource, depth, count, budget). The stored loop
   (`stored_children_ok`) calls it for every child.
 - `stored_rules_ok` (paths and children) is the one load check: decode, reread and resume all call it.
+- `requests_fit`: the one request-limit rule (calls already made plus the calls about to be made), used by
+  `record_task_budget`, `stored_children_ok`, `child_rules`, `call_parent_usable` and `ask_model`, so a count below,
+  equal to and above a budget is decided the same way on recording, live use and reload.
 - `usable_child`: `child_rules`, plus a budget (`TASK_BUDGET_REASON` for a child from before idea 2), not stopped,
   task not cancelled. It is used by `propose_child` (for a child parent), `ask_model` (every child in the chain),
   `child_grant_ok` and `open_child_host`.
@@ -241,7 +244,8 @@ The spill pointer is the guest's own text, but its entry is narrow and its rule 
 a dispatched, granted step with no result that covers the object, under the system head. `record_spill_result(journal,
 step_id, object_resource, version)` calls it and then needs the journal's last event to be a `Spill` node with the
 same resource and version; it builds the text itself. `spill_pointer` calls `spill_ready` before it writes the node,
-then the entry. No caller passes arbitrary text.
+then the entry. Every refusal at that entry records its reason ("no resource", "host path", "not observed" or the
+admission rule's own words), never a bare false. No caller passes arbitrary text.
 
 A refused host write records the shared check's reason, or "not this child's host" when the parent context is
 missing. A refused result host binding records one reason for the missing host, the non-child step and the binding

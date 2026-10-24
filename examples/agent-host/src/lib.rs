@@ -1187,7 +1187,10 @@ fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
         child_rules(journal, step)?;
     }
     if let Some(task) = journal.task_budget {
-        if task.requests == 0 || task.seconds == 0 || task_requests_used(journal) > task.requests {
+        if task.requests == 0
+            || task.seconds == 0
+            || !requests_fit(task, task_requests_used(journal), 0)
+        {
             return Err("record");
         }
     }
@@ -1317,7 +1320,7 @@ fn child_rules(journal: &Journal, step: &Step) -> Result<(), &'static str> {
             };
             if budget.requests == 0
                 || budget.seconds == 0
-                || step.requests_used > budget.requests
+                || !requests_fit(budget, step.requests_used, 0)
                 || above.is_none_or(|above| {
                     budget.requests > above.requests || budget.seconds > above.seconds
                 })
@@ -1668,15 +1671,23 @@ fn spill_ready(journal: &Journal, step_id: u64, object_resource: &str) -> Result
 /// nothing. The grant string is not the pointer.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn spill_pointer(journal: &mut Journal, step_id: u64, object_resource: &str) -> bool {
-    if object_resource.is_empty() || host_path(object_resource) {
+    let what = format!("spill pointer {step_id}");
+    if object_resource.is_empty() {
+        record_refusal_reason(journal, "no resource", &what);
+        return false;
+    }
+    if host_path(object_resource) {
+        record_refusal_reason(journal, "host path", &what);
         return false;
     }
     let Some(version) =
         current_observation(&journal.events, object_resource).map(|row| row.version)
     else {
+        record_refusal_reason(journal, "not observed", &what);
         return false;
     };
-    if spill_ready(journal, step_id, object_resource).is_err() {
+    if let Err(reason) = spill_ready(journal, step_id, object_resource) {
+        record_refusal_reason(journal, reason, &what);
         return false;
     }
     journal.events.push(SurfaceNode {
@@ -3840,6 +3851,18 @@ fn task_requests_used(journal: &Journal) -> u32 {
     u32::try_from(calls).unwrap_or(u32::MAX)
 }
 
+/// The one request-limit rule: a budget allows the `used` calls the journal
+/// already holds plus `more` calls about to be made. Recording a budget and a
+/// loaded journal pass `more = 0`; authorizing or dispatching a pending call
+/// passes `more = 0` too, because that call is already counted; a new call
+/// passes `more = 1`. Every path asks this one rule, so recording, live use
+/// and reload cannot drift.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn requests_fit(budget: Budget, used: u32, more: u32) -> bool {
+    used.checked_add(more)
+        .is_some_and(|count| count <= budget.requests)
+}
+
 /// What a step may still give a new child: for a child, its budget less the
 /// calls made in its subtree; for the top task, the granted task budget less
 /// every call in the task. Nothing when there is no budget.
@@ -3883,7 +3906,7 @@ fn record_task_budget(journal: &mut Journal, granted: Budget) -> bool {
     {
         return false;
     }
-    if task_requests_used(journal) > granted.requests {
+    if !requests_fit(granted, task_requests_used(journal), 0) {
         record_refusal_reason(journal, "requests", "task budget");
         return false;
     }
@@ -3937,12 +3960,12 @@ fn ask_model(journal: &mut Journal, under: Option<u64>, model: &str) -> Result<u
             .iter()
             .find(|step| step.id == *id)
             .map_or(0, |step| step.requests_used);
-        if used >= budget.requests {
+        if !requests_fit(budget, used, 1) {
             stop_child(journal, *id, StopReason::Requests);
             return Err("requests");
         }
     }
-    if task_requests_used(journal) >= task.requests {
+    if !requests_fit(task, task_requests_used(journal), 1) {
         return Err("requests");
     }
     let id = propose_step(journal);
@@ -4518,7 +4541,7 @@ fn call_parent_usable(journal: &Journal, step: &Step) -> Result<(), &'static str
             }
             None => {
                 let budget = journal.task_budget.ok_or(TASK_BUDGET_REASON)?;
-                if task_requests_used(journal) > budget.requests {
+                if !requests_fit(budget, task_requests_used(journal), 0) {
                     return Err("requests");
                 }
                 Ok(())
@@ -9370,7 +9393,16 @@ mod tests {
         assert!(dispatch(&mut journal, id));
         let before = journal.clone();
         assert!(!spill_pointer(&mut journal, id, notes));
-        assert_eq!(journal, before);
+        assert!(!step_of(&journal, id).has_result);
+        assert_eq!(
+            without_refusal_records(&journal.events),
+            before.events,
+            "no result or pointer is stored"
+        );
+        assert_eq!(
+            refusal_records(&journal),
+            vec!["refused: no system head (spill pointer 1)".to_string()]
+        );
     }
 
     #[test]
@@ -20490,6 +20522,148 @@ mod tests {
         assert_eq!(
             journal.events.last().unwrap().text,
             format!("spill\n{OBJECT}\n1")
+        );
+    }
+
+    /// Codex at 3851b24, finding 2: the public spill entry records every
+    /// refusal with its reason, not a bare false. A prepared, granted child
+    /// is the reproduction: the entry refuses "not dispatched" and says so.
+    #[test]
+    fn the_spill_entry_records_its_refusal_reason() {
+        const OBJECT: &str = "localhost://Users/self/Projects/demo/src/result.txt";
+        const MISSING: &str = "localhost://Users/self/Projects/demo/src/missing.txt";
+        const OUTSIDE: &str = "localhost://Users/self/Projects/demo/notes.txt";
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert!(observe(&mut journal, OBJECT, 1, "short"));
+        assert_eq!(step_of(&journal, child).state, StepState::Prepared);
+        let before = without_refusal_records(&journal.events);
+        assert!(!spill_pointer(&mut journal, child, OBJECT));
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("not dispatched")));
+        assert_eq!(
+            without_refusal_records(&journal.events),
+            before,
+            "a refusal stores nothing else"
+        );
+        // Each path out of the entry explains itself.
+        let records = refusal_records(&journal).len();
+        assert!(!spill_pointer(&mut journal, child, ""));
+        assert_eq!(refusal_records(&journal).len(), records + 1);
+        assert!(refusal_records(&journal)
+            .last()
+            .unwrap()
+            .contains("no resource"));
+        assert!(!spill_pointer(&mut journal, child, "/tmp/secret"));
+        assert_eq!(refusal_records(&journal).len(), records + 2);
+        assert!(refusal_records(&journal)
+            .last()
+            .unwrap()
+            .contains("host path"));
+        assert!(!spill_pointer(&mut journal, child, MISSING));
+        assert_eq!(refusal_records(&journal).len(), records + 3);
+        assert!(refusal_records(&journal)
+            .last()
+            .unwrap()
+            .contains("not observed"));
+        // A dispatched, granted child outside the object's resource is refused
+        // by the admission rule, which the entry now reports.
+        assert!(observe(&mut journal, OUTSIDE, 1, "outside"));
+        assert!(dispatch(&mut journal, child));
+        assert!(!spill_pointer(&mut journal, child, OUTSIDE));
+        assert_eq!(refusal_records(&journal).len(), records + 4);
+        assert!(refusal_records(&journal)
+            .last()
+            .unwrap()
+            .contains("not this step's resource"));
+        // Success adds no refusal record and stores the pointer.
+        assert!(spill_pointer(&mut journal, child, OBJECT));
+        assert_eq!(refusal_records(&journal).len(), records + 4);
+        assert_eq!(
+            journal.events.last().unwrap().text,
+            format!("spill\n{OBJECT}\n1")
+        );
+    }
+
+    /// Codex at 3851b24, finding 1: one validator decides the task request
+    /// limit. Below, equal to and above the budget is checked through
+    /// recording, authorization, dispatch, a new call and reload.
+    #[test]
+    fn the_task_request_limit_is_one_rule_on_every_path() {
+        fn three_calls(journal: &mut Journal) -> Vec<u64> {
+            (0..3)
+                .map(|_| {
+                    let id = propose_step(journal);
+                    let step = journal.steps.iter_mut().find(|step| step.id == id).unwrap();
+                    step.kind = ProposalKind::Hosted;
+                    step.resource = HOSTED_MODEL.to_string();
+                    id
+                })
+                .collect()
+        }
+        // Recording: below and equal are recorded; above is refused with its
+        // reason.
+        let mut below = two_turns();
+        let below_calls = three_calls(&mut below);
+        assert!(record_task_budget(&mut below, budget(4, 600)));
+        let mut equal = two_turns();
+        let equal_calls = three_calls(&mut equal);
+        assert!(record_task_budget(&mut equal, budget(3, 600)));
+        let mut above = two_turns();
+        let above_calls = three_calls(&mut above);
+        assert!(!record_task_budget(&mut above, budget(2, 600)));
+        assert_eq!(above.task_budget, None);
+        assert!(refusal_records(&above)
+            .iter()
+            .any(|record| record.contains("requests")));
+        // A budget below the calls already made, put in memory directly, is
+        // what the live paths and the load check must refuse.
+        above.task_budget = Some(budget(2, 600));
+        // Authorization and dispatch: below and equal pass, above is refused
+        // with the same reason the load check gives.
+        for id in &below_calls {
+            assert!(authorize(&mut below, *id, Some("model-grant")));
+            assert!(dispatch(&mut below, *id));
+        }
+        for id in &equal_calls {
+            assert!(authorize(&mut equal, *id, Some("model-grant")));
+            assert!(dispatch(&mut equal, *id));
+        }
+        let before = refusal_records(&above).len();
+        let steps = above.steps.clone();
+        for id in &above_calls {
+            assert!(!authorize(&mut above, *id, Some("model-grant")));
+            assert!(!dispatch(&mut above, *id));
+        }
+        assert_eq!(above.steps, steps);
+        assert_eq!(
+            refusal_records(&above).len(),
+            before + above_calls.len() * 2
+        );
+        assert!(
+            refusal_records(&above)
+                .iter()
+                .all(|record| record.contains("requests")),
+            "{:?}",
+            refusal_records(&above)
+        );
+        // A new call fits below and at the limit; no further call fits at it.
+        assert!(ask_model(&mut below, None, HOSTED_MODEL).is_ok());
+        assert_eq!(ask_model(&mut equal, None, HOSTED_MODEL), Err("requests"));
+        assert_eq!(ask_model(&mut above, None, HOSTED_MODEL), Err("requests"));
+        // Reload asks the same rule: below and equal load, above does not.
+        assert!(decode_journal(&encode_journal(&below, &[0; 32]).unwrap()).is_ok());
+        assert!(decode_journal(&encode_journal(&equal, &[0; 32]).unwrap()).is_ok());
+        assert_eq!(
+            decode_journal(&encode_journal(&above, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
         );
     }
 

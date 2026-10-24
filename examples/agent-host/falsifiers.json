@@ -607,8 +607,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if task_requests_used(journal) >= task.requests {",
-     "new": "    if task_requests_used(journal) > task.requests {"
+     "old": "    if !requests_fit(task, task_requests_used(journal), 1) {",
+     "new": "    if !requests_fit(task, task_requests_used(journal), 0) {"
     }
    ],
    "tests": [
@@ -623,8 +623,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        if used >= budget.requests {",
-     "new": "        if used > budget.requests {"
+     "old": "        if !requests_fit(budget, used, 1) {",
+     "new": "        if !requests_fit(budget, used, 0) {"
     }
    ],
    "tests": [
@@ -1408,8 +1408,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "            if budget.requests == 0\n                || budget.seconds == 0\n                || step.requests_used",
-     "new": "            if false\n                || step.requests_used"
+     "old": "            if budget.requests == 0\n                || budget.seconds == 0\n                || !requests_fit(budget, step.requests_used, 0)",
+     "new": "            if false\n                || !requests_fit(budget, step.requests_used, 0)"
     }
    ],
    "tests": [
@@ -1424,7 +1424,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "                || step.requests_used > budget.requests\n",
+     "old": "                || !requests_fit(budget, step.requests_used, 0)\n",
      "new": "\n"
     }
    ],
@@ -1504,7 +1504,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        if task.requests == 0 || task.seconds == 0 || task_requests_used(journal) > task.requests {",
+     "old": "        if task.requests == 0\n            || task.seconds == 0\n            || !requests_fit(task, task_requests_used(journal), 0)\n        {",
      "new": "        if task.requests == 0 || task.seconds == 0 {"
     }
    ],
@@ -1520,8 +1520,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        if task.requests == 0 || task.seconds == 0 || task_requests_used(journal) > task.requests {",
-     "new": "        if task_requests_used(journal) > task.requests {"
+     "old": "        if task.requests == 0\n            || task.seconds == 0\n            || !requests_fit(task, task_requests_used(journal), 0)\n        {",
+     "new": "        if !requests_fit(task, task_requests_used(journal), 0) {"
     }
    ],
    "tests": [
@@ -4275,7 +4275,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "            None => {\n                let budget = journal.task_budget.ok_or(TASK_BUDGET_REASON)?;\n                if task_requests_used(journal) > budget.requests {\n                    return Err(\"requests\");\n                }\n                Ok(())\n            }",
+     "old": "            None => {\n                let budget = journal.task_budget.ok_or(TASK_BUDGET_REASON)?;\n                if !requests_fit(budget, task_requests_used(journal), 0) {\n                    return Err(\"requests\");\n                }\n                Ok(())\n            }",
      "new": "            None => Ok(())"
     }
    ],
@@ -4405,7 +4405,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if task_requests_used(journal) > granted.requests {\n        record_refusal_reason(journal, \"requests\", \"task budget\");\n        return false;\n    }",
+     "old": "    if !requests_fit(granted, task_requests_used(journal), 0) {\n        record_refusal_reason(journal, \"requests\", \"task budget\");\n        return false;\n    }",
      "new": "    // the counter rule is not recorded"
     }
    ],
@@ -4421,7 +4421,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "                let budget = journal.task_budget.ok_or(TASK_BUDGET_REASON)?;\n                if task_requests_used(journal) > budget.requests {\n                    return Err(\"requests\");\n                }\n                Ok(())",
+     "old": "                let budget = journal.task_budget.ok_or(TASK_BUDGET_REASON)?;\n                if !requests_fit(budget, task_requests_used(journal), 0) {\n                    return Err(\"requests\");\n                }\n                Ok(())",
      "new": "                journal.task_budget.ok_or(TASK_BUDGET_REASON)?;\n                Ok(())"
     }
    ],
@@ -4517,8 +4517,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if task_requests_used(journal) > granted.requests {\n        record_refusal_reason(journal, \"requests\", \"task budget\");\n        return false;\n    }",
-     "new": "    if task_requests_used(journal) > granted.requests {\n        return false;\n    }"
+     "old": "    if !requests_fit(granted, task_requests_used(journal), 0) {\n        record_refusal_reason(journal, \"requests\", \"task budget\");\n        return false;\n    }",
+     "new": "    if !requests_fit(granted, task_requests_used(journal), 0) {\n        return false;\n    }"
     }
    ],
    "tests": [
@@ -4587,6 +4587,102 @@
    ],
    "tests": [
     "tests::a_model_call_under_a_granted_child_needs_the_grant_above_it"
+   ]
+  },
+  {
+   "id": "PX34",
+   "title": "the live task call copies the request rule",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if !requests_fit(task, task_requests_used(journal), 1) {",
+     "new": "    if task_requests_used(journal) > task.requests {"
+    }
+   ],
+   "tests": [
+    "tests::the_task_request_limit_is_one_rule_on_every_path"
+   ]
+  },
+  {
+   "id": "PX35",
+   "title": "the recording path copies the request rule",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if !requests_fit(granted, task_requests_used(journal), 0) {",
+     "new": "    if task_requests_used(journal) >= granted.requests {"
+    }
+   ],
+   "tests": [
+    "tests::the_task_request_limit_is_one_rule_on_every_path"
+   ]
+  },
+  {
+   "id": "PX36",
+   "title": "the pending-call path copies the request rule",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                if !requests_fit(budget, task_requests_used(journal), 0) {",
+     "new": "                if task_requests_used(journal) >= budget.requests {"
+    }
+   ],
+   "tests": [
+    "tests::the_task_request_limit_is_one_rule_on_every_path"
+   ]
+  },
+  {
+   "id": "PX37",
+   "title": "the public spill entry drops the admission reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if let Err(reason) = spill_ready(journal, step_id, object_resource) {\n        record_refusal_reason(journal, reason, &what);\n        return false;\n    }",
+     "new": "    if spill_ready(journal, step_id, object_resource).is_err() {\n        return false;\n    }"
+    }
+   ],
+   "tests": [
+    "tests::the_spill_entry_records_its_refusal_reason"
+   ]
+  },
+  {
+   "id": "PX38",
+   "title": "the public spill entry drops the path and observation reasons",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if object_resource.is_empty() {\n        record_refusal_reason(journal, \"no resource\", &what);\n        return false;\n    }\n    if host_path(object_resource) {\n        record_refusal_reason(journal, \"host path\", &what);\n        return false;\n    }",
+     "new": "    if object_resource.is_empty() || host_path(object_resource) {\n        return false;\n    }"
+    }
+   ],
+   "tests": [
+    "tests::the_spill_entry_records_its_refusal_reason"
+   ]
+  },
+  {
+   "id": "PX39",
+   "title": "the public spill entry drops the observation reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let Some(version) =\n        current_observation(&journal.events, object_resource).map(|row| row.version)\n    else {\n        record_refusal_reason(journal, \"not observed\", &what);\n        return false;\n    };",
+     "new": "    let Some(version) =\n        current_observation(&journal.events, object_resource).map(|row| row.version)\n    else {\n        return false;\n    };"
+    }
+   ],
+   "tests": [
+    "tests::the_spill_entry_records_its_refusal_reason"
    ]
   }
  ]
