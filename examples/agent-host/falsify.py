@@ -14,7 +14,7 @@ The falsifiers are data, in falsifiers.json next to this file. Each one
 replaces exact text (found exactly once) in a file and requires every named
 test to FAIL. The verdict comes from exit codes: the mutated code is built
 first (a build that fails is its own result); then each named test is listed
-(exactly one test must match) and run alone with `--exact`.
+with `--exact` (exactly one test must match) and run alone with `--exact`.
 A non-zero exit alone is not a catch: the last test-harness summary line must
 say that test ran and failed, so a harness or loading error is NOT RUN and
 never a catch. Every mode uses this one proof, `survives` included: one named
@@ -269,23 +269,12 @@ def evaluate(entry, how):
                 outcomes[name] = "not run"
             continue
         # Exactly one test must answer to the name; the list is read for that
-        # count only (a list run prints no test output). The list has no
-        # `--exact`, so an ignored test is listed too; the run below still
-        # names exactly one test.
-        _, listed = run(argv + extra + ["--list"], cwd)
+        # count only (a list run prints no test output).
+        _, listed = run(argv + extra + ["--exact", name, "--list"], cwd)
         if [line for line in listed.splitlines() if line == f"{name}: test"] != [f"{name}: test"]:
             outcomes[name] = "not run"
             continue
         code, output = run(argv + extra + ["--exact", name], cwd)
-        # An ignored test is listed but does not run by default. When the run
-        # reports no test at all, run the same name once more as ignored, so a
-        # named test outside the default gate is still proved. A missing name
-        # was already refused above.
-        if code == 0 and not any(
-            passed > 0 or failed > 0
-            for _status, passed, failed in harness_results(output)
-        ):
-            code, output = run(argv + extra + ["--ignored", "--exact", name], cwd)
         if code == 0:
             ran = any(passed >= 1 for _status, passed, _failed in harness_results(output))
             outcomes[name] = "passed" if ran else "not run"
@@ -380,10 +369,10 @@ raise SystemExit(0)
 """
 
 STUB_SURVIVOR_RAN = """import sys
-if "--list" in sys.argv:
-    print("tests::planted_check: test")
-    raise SystemExit(0)
 if "--exact" in sys.argv:
+    if "--list" in sys.argv:
+        print("tests::planted_check: test")
+        raise SystemExit(0)
     print("running 1 test")
     print("test tests::planted_check ... ok")
     print()
@@ -391,20 +380,6 @@ if "--exact" in sys.argv:
     raise SystemExit(0)
 print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out")
 raise SystemExit(101)
-"""
-
-STUB_IGNORED_RAN = """import sys
-if "--list" in sys.argv:
-    print("tests::planted_check: test")
-    raise SystemExit(0)
-if "--ignored" in sys.argv:
-    print("running 1 test")
-    print("test tests::planted_check ... ok")
-    print()
-    print("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out")
-    raise SystemExit(0)
-print("test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out")
-raise SystemExit(0)
 """
 
 STUB_CASE_RAN_FAILED = """import sys
@@ -677,28 +652,6 @@ def a_survivor_is_proved_by_its_named_tests():
     return ok
 
 
-def a_survivor_whose_named_test_is_ignored_is_still_proved():
-    """An ignored test is listed but does not run by default. The runner runs
-    the same name once more as ignored, so a named test outside the default
-    gate still proves its verdict."""
-    ok = True
-    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
-    try:
-        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
-        entry = {"id": "ST", "command": "host", "expect": "survives",
-                 "tests": ["tests::planted_check"]}
-        stub = SELF_TEST_DIR / "stub.py"
-        stub.write_text(STUB_IGNORED_RAN, encoding="utf-8")
-        how = {"build": [], "one": (["python3", "-I", str(stub)], SELF_TEST_DIR, [])}
-        got = verdict(entry, *evaluate(entry, how))
-        print(f"self-test: survivor whose named test is ignored: {got[1]} ({got[2]})")
-        if got[:2] != (True, "SURVIVED (expected, by design)"):
-            ok = False
-    finally:
-        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
-    return ok
-
-
 # Each self-test case is named, so a falsifier names one and the runner runs
 # it on its own. A name not listed here is not a case: the runner reports it
 # as not run, never as caught.
@@ -711,7 +664,6 @@ SELF_TEST_CASES = {
     "a self-test case counts only when it ran": a_self_test_case_counts_only_when_it_ran,
     "a survivor needs its named test to run": a_survivor_needs_its_named_test_to_run,
     "a survivor is proved by its named tests": a_survivor_is_proved_by_its_named_tests,
-    "a survivor whose named test is ignored is still proved": a_survivor_whose_named_test_is_ignored_is_still_proved,
 }
 
 

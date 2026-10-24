@@ -9017,10 +9017,19 @@ mod tests {
     /// The opt-in probe: skip when nothing is configured, otherwise check the
     /// prefix, read /metrics, send both turns, and read /metrics again.
     fn probe_prefix_turns(configured: Option<String>) -> Result<Option<PrefixProbe>, String> {
+        probe_prefix_turns_with(configured, packed_turns())
+    }
+
+    /// The opt-in probe with its turns supplied, so the prefix refusal is
+    /// proved without a real model.
+    fn probe_prefix_turns_with(
+        configured: Option<String>,
+        turns: (Vec<u8>, String, Vec<u8>, String),
+    ) -> Result<Option<PrefixProbe>, String> {
         let Some(base_url) = configured else {
             return Ok(None);
         };
-        let (first_prefix, first_prompt, second_prefix, second_prompt) = packed_turns();
+        let (first_prefix, first_prompt, second_prefix, second_prompt) = turns;
         if first_prefix != second_prefix {
             return Err("the packed prefix moved between two consecutive turns".to_string());
         }
@@ -9121,12 +9130,13 @@ mod tests {
 
     /// A local server that records every request path and body and answers
     /// until stopped. The first `/metrics` read gets `before`; the next gets
-    /// `after`; every other request gets `completion`.
+    /// `after`; the first other request gets `completions.0` and the second
+    /// `completions.1`.
     #[allow(clippy::type_complexity)]
     fn recording_server(
         before: String,
         after: String,
-        completion: String,
+        completions: (String, String),
     ) -> (
         String,
         std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
@@ -9147,6 +9157,7 @@ mod tests {
         let stopping = Arc::clone(&stop);
         let handle = std::thread::spawn(move || {
             let mut metrics_reads = 0;
+            let mut completion_reads = 0;
             while !stopping.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
@@ -9178,7 +9189,12 @@ mod tests {
                                 after.clone()
                             }
                         } else {
-                            completion.clone()
+                            completion_reads += 1;
+                            if completion_reads == 1 {
+                                completions.0.clone()
+                            } else {
+                                completions.1.clone()
+                            }
                         };
                         stream
                             .write_all(response.as_bytes())
@@ -9220,15 +9236,40 @@ mod tests {
         )
     }
 
+    #[test]
     fn the_opt_in_probe_skips_without_a_configured_url() {
         assert!(matches!(probe_prefix_turns(None), Ok(None)));
     }
 
+    #[test]
+    fn the_opt_in_probe_refuses_a_moved_prefix() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("a free port")
+            .local_addr()
+            .expect("the free address")
+            .port();
+        let error = probe_prefix_turns_with(
+            Some(format!("http://127.0.0.1:{port}/v1")),
+            (
+                b"stable-prefix".to_vec(),
+                "first turn".to_string(),
+                b"moved-prefix".to_vec(),
+                "second turn".to_string(),
+            ),
+        )
+        .expect_err("a moved prefix must be refused");
+        assert!(
+            error.contains("the packed prefix moved between two consecutive turns"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn the_opt_in_probe_sends_two_turns_between_two_metric_reads() {
         let (base_url, requests, stop, server) = recording_server(
             metrics_response(&metrics_snapshot(100.0, 1.0, 2.0)),
             metrics_response(&metrics_snapshot(147.0, 1.5, 4.0)),
-            completion_response("ok"),
+            (completion_response("ok"), completion_response("ok")),
         );
         let report = probe_prefix_turns(Some(base_url))
             .expect("the probe runs")
@@ -9285,12 +9326,15 @@ mod tests {
         assert!(report.prefix_bytes > 0);
     }
 
+    #[test]
     fn the_opt_in_probe_refuses_a_rejected_turn() {
+        let refused =
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string();
         let (base_url, requests, stop, server) = recording_server(
             metrics_response(&metrics_snapshot(100.0, 1.0, 2.0)),
             metrics_response(&metrics_snapshot(147.0, 1.5, 4.0)),
-            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                .to_string(),
+            (refused.clone(), refused),
         );
         let error = probe_prefix_turns(Some(base_url))
             .expect_err("a refused first turn must fail the probe");
@@ -9305,22 +9349,30 @@ mod tests {
         );
     }
 
-    /// The deterministic half of the opt-in test. It runs without the Sparks
-    /// endpoint and keeps these rules provable while the default gate stays
-    /// unchanged.
-    fn deterministic_checks() {
-        a_model_response_with_an_invalid_content_length_is_refused();
-        a_model_response_with_conflicting_content_lengths_is_refused();
-        a_chunked_model_response_needs_its_final_empty_line();
-        a_chunked_model_response_refuses_an_overflowing_chunk_size();
-        a_chunked_model_response_with_a_trailer_is_accepted();
-        a_metric_value_is_read_by_its_exact_name();
-        a_prefill_histogram_is_read_from_its_sum_and_count();
-        a_scalar_prefill_has_no_fabricated_count();
-        a_metrics_snapshot_without_both_required_counters_is_refused();
-        the_opt_in_probe_skips_without_a_configured_url();
-        the_opt_in_probe_sends_two_turns_between_two_metric_reads();
-        the_opt_in_probe_refuses_a_rejected_turn();
+    #[test]
+    fn the_opt_in_probe_refuses_a_rejected_second_turn() {
+        let refused =
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string();
+        let (base_url, requests, stop, server) = recording_server(
+            metrics_response(&metrics_snapshot(100.0, 1.0, 2.0)),
+            metrics_response(&metrics_snapshot(147.0, 1.5, 4.0)),
+            (completion_response("ok"), refused),
+        );
+        let error = probe_prefix_turns(Some(base_url))
+            .expect_err("a refused second turn must fail the probe");
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        server.join().expect("the server thread");
+        let seen = requests.lock().expect("the request list").clone();
+        let paths: Vec<&str> = seen.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["/metrics", "/v1/chat/completions", "/v1/chat/completions"]
+        );
+        assert!(
+            error.contains("the local model refused the second turn"),
+            "{error}"
+        );
     }
 
     /// Opt-in: sends the two consecutive turns whose packed prefixes are
@@ -9331,7 +9383,6 @@ mod tests {
     #[test]
     #[ignore = "opt-in: set SPARKS_MODEL_URL to the local DeepSeek endpoint"]
     fn an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns() {
-        deterministic_checks();
         match probe_prefix_turns(opt_in_model::configured_url()) {
             Ok(None) => println!(
                 "SKIP: SPARKS_MODEL_URL is unset; the opt-in real-model prefix test did not run"
@@ -9365,6 +9416,7 @@ mod tests {
         result
     }
 
+    #[test]
     fn a_model_response_with_an_invalid_content_length_is_refused() {
         let response = "HTTP/1.1 200 OK\r\nContent-Length: invalid\r\n\r\n{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}".to_string();
         let error =
@@ -9372,6 +9424,7 @@ mod tests {
         assert!(error.starts_with("invalid content-length"), "{error}");
     }
 
+    #[test]
     fn a_model_response_with_conflicting_content_lengths_is_refused() {
         let body = serde_json::json!({
             "choices": [{ "message": { "content": "ok" } }],
@@ -9386,6 +9439,7 @@ mod tests {
         assert!(error.starts_with("conflicting content-length"), "{error}");
     }
 
+    #[test]
     fn a_chunked_model_response_needs_its_final_empty_line() {
         let body = serde_json::json!({
             "choices": [{ "message": { "content": "ok" } }],
@@ -9403,6 +9457,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn a_chunked_model_response_refuses_an_overflowing_chunk_size() {
         let response =
             "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\n".to_string();
@@ -9411,6 +9466,7 @@ mod tests {
         assert!(error.starts_with("invalid chunk size"), "{error}");
     }
 
+    #[test]
     fn a_chunked_model_response_with_a_trailer_is_accepted() {
         let body = serde_json::json!({
             "choices": [{ "message": { "content": "ok" } }],
@@ -9426,6 +9482,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn a_metric_value_is_read_by_its_exact_name() {
         let metrics = "# TYPE tensorfold:prompt_tokens_total counter\n\
                        tensorfold:prompt_tokens_total{model=\"deepseek-v4-flash\"} 1234\n\
@@ -9458,6 +9515,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn a_prefill_histogram_is_read_from_its_sum_and_count() {
         let metrics = "tensorfold:request_prefill_seconds_sum 1.5\n\
                        tensorfold:request_prefill_seconds_count 3\n";
@@ -9478,6 +9536,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn a_scalar_prefill_has_no_fabricated_count() {
         let scalar = prefill_seconds("tensorfold:request_prefill_seconds 0.25\n");
         assert_eq!(scalar, Some(PrefillSeconds::Scalar(0.25)));
@@ -9490,6 +9549,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn a_metrics_snapshot_without_both_required_counters_is_refused() {
         let full = "tensorfold:prompt_tokens_total 100\n\
                     tensorfold:request_prefill_seconds_sum 0.5\n\
