@@ -7,7 +7,7 @@ Built `examples/archive-viewer` as a Bus v1 guest crate on `capsule-kit-guest`
 its statuses (`src/zip.rs`), the run and the view (`src/lib.rs`), the tests
 (`src/tests.rs`), `verify.sh` and `falsify.py`.
 
-### Falsifiers done (all caught by `falsify.py`, 37 cases)
+### Falsifiers done (all caught by `falsify.py`, 45 cases)
 
 - B4 and its parts: F6, F6b, F6c.
 - Names P1 to P9: F7, F8, F9, F10, F11, F12, F13, F14, F15 (entries and names), F16 (a symlink and every other non-regular kind).
@@ -21,11 +21,12 @@ its statuses (`src/zip.rs`), the run and the view (`src/lib.rs`), the tests
 - Authority stops: F42 (a denied or failed read while listing stops the run
   and writes nothing).
 - Bound tests added for the remaining refusals: multi-disk, zip64, a directory outside the object or over its cap, a record without its signature, a local header outside the object or without its signature, and an entry record past the directory; F16 now blocks every non-regular Unix kind.
-- Extra lettered falsifiers for bounds DESIGN states but gives no row: F6d to F6f (local header readable, record inside the directory, local signature), F21b to F21d (directory inside the object, one disk, no zip64), F23b and F23c (record signature, directory cap), and F30b (a skipped entry keeps its own status reason: `encrypted` or `unsupported`).
+- Extra lettered falsifiers for bounds and comparisons DESIGN states but gives no row: F6d to F6f (local header readable, record inside the directory, local signature), F21b to F21e (directory inside the object, one disk, no zip64, object within 2^32), F23b to F23d (record signature, directory cap, short directory answer), F25b to F25f (L5 lengths, flags, CRC, sizes and bit 3), and F30b (a skipped entry keeps its own status reason: `encrypted` or `unsupported`). F32 covers the whole view's cap.
+- The whole view is capped in `run`: a view over `MAX_VIEW_BYTES` is replaced by a `view_too_large` refusal with no entries, not written past the cap (`src/lib.rs:131`). A short directory answer refuses as `directory_truncated` (`src/zip.rs:349`), and an object past 2^32 refuses as `object_too_large` (`src/zip.rs:240`).
 
 ### Falsifiers left for the next tasks
 
-- Previews and inflate: F1 to F5, F26 to F28, F32, F33.
+- Previews and inflate: F1 to F5, F26 to F28, F33.
 - Component and fuel gate: F3 in the component, F35, F36, F43.
 - Page: F37 to F39.
 - Bus v2: F18, F34.

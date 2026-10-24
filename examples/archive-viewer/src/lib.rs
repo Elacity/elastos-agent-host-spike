@@ -128,7 +128,24 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
         }
     }
 
-    let text = view_json(&request.uri, &listing, &skipped);
+    let mut text = view_json(&request.uri, &listing, &skipped);
+    let over = text.len() as u64;
+    if over > MAX_VIEW_BYTES {
+        // The view is capped as a whole (PATTERNS 1). Never serialize past
+        // the cap: write a small refusal that says why, with no entries.
+        text = view_json(
+            &request.uri,
+            &Listing {
+                size: 0,
+                entries: Vec::new(),
+                refused: Some(Refused {
+                    code: "view_too_large",
+                    message: format!("the listing is {over} bytes, the limit is {MAX_VIEW_BYTES}"),
+                }),
+            },
+            &[],
+        );
+    }
     debug_assert!(text.len() as u64 <= MAX_VIEW_BYTES, "{} bytes", text.len());
     let write_grant = grant(bus, VIEW_URI, "write", "write the checked listing")?;
     bus::write_bytes(bus, VIEW_URI, &write_grant, text.as_bytes()).map_err(|error| {

@@ -25,6 +25,11 @@ struct Spec {
     compressed: Option<u32>,
     /// The method in the local header, when it differs.
     local_method: Option<u16>,
+    /// The flags, CRC and sizes in the local header, when they differ.
+    local_flags: Option<u16>,
+    local_crc: Option<u32>,
+    local_compressed: Option<u32>,
+    local_uncompressed: Option<u32>,
     external: u32,
     /// Extra bytes in the local header (only its length matters to the checks).
     local_extra: Vec<u8>,
@@ -46,6 +51,10 @@ impl Spec {
             uncompressed: None,
             compressed: None,
             local_method: None,
+            local_flags: None,
+            local_crc: None,
+            local_compressed: None,
+            local_uncompressed: None,
             external: 0,
             local_extra: Vec::new(),
             dir_extra: Vec::new(),
@@ -80,13 +89,19 @@ fn build(specs: &[Spec], comment: &[u8]) -> Vec<u8> {
         let mut header = Vec::new();
         header.extend_from_slice(&u32b(0x0403_4b50));
         header.extend_from_slice(&u16b(20));
-        header.extend_from_slice(&u16b(spec.flags));
+        header.extend_from_slice(&u16b(spec.local_flags.unwrap_or(spec.flags)));
         header.extend_from_slice(&u16b(spec.local_method.unwrap_or(spec.method)));
         header.extend_from_slice(&u16b(0));
         header.extend_from_slice(&u16b(0));
-        header.extend_from_slice(&u32b(spec.crc));
-        header.extend_from_slice(&u32b(spec.compressed.unwrap_or(spec.data.len() as u32)));
-        header.extend_from_slice(&u32b(spec.uncompressed.unwrap_or(spec.data.len() as u32)));
+        header.extend_from_slice(&u32b(spec.local_crc.unwrap_or(spec.crc)));
+        header.extend_from_slice(&u32b(
+            spec.local_compressed
+                .unwrap_or(spec.compressed.unwrap_or(spec.data.len() as u32)),
+        ));
+        header.extend_from_slice(&u32b(
+            spec.local_uncompressed
+                .unwrap_or(spec.uncompressed.unwrap_or(spec.data.len() as u32)),
+        ));
         header.extend_from_slice(&u16b(name.len() as u16));
         header.extend_from_slice(&u16b(spec.local_extra.len() as u16));
         header.extend_from_slice(name);
@@ -210,6 +225,169 @@ fn single(name: &str) -> FakeBus {
         ARCHIVE,
         build(&[Spec::file(name)], &[]),
     )
+}
+
+/// A fake Runtime that answers the directory read short, as a provider can
+/// when the object changes after the tail read.
+struct ShortDirectoryBus {
+    inner: FakeBus,
+    archive: String,
+    at: u64,
+    keep: usize,
+}
+
+impl Bus for ShortDirectoryBus {
+    fn request(
+        &mut self,
+        resource: &str,
+        action: &str,
+        reason: &str,
+    ) -> Result<String, BusFailure> {
+        self.inner.request(resource, action, reason)
+    }
+
+    fn invoke(
+        &mut self,
+        resource: &str,
+        operation: &str,
+        body: &[u8],
+        grant: &str,
+    ) -> Result<InvokeReply, BusFailure> {
+        let reply = self.inner.invoke(resource, operation, body, grant)?;
+        if resource == self.archive && operation == "read" {
+            let ask: Value = serde_json::from_slice(body).expect("the kit sends JSON");
+            if ask["offset"].as_u64() == Some(self.at) {
+                let mut answer: Value = serde_json::from_slice(&reply.body).expect("JSON answer");
+                if let Some(content) = answer["data"]["content"].as_array_mut() {
+                    content.truncate(self.keep);
+                    let answered = content.len();
+                    answer["data"]["size"] = json!(answered);
+                }
+                return Ok(InvokeReply {
+                    status: reply.status,
+                    body: serde_json::to_vec(&answer).unwrap(),
+                });
+            }
+        }
+        Ok(reply)
+    }
+}
+
+/// A fake Runtime that changes one byte of the local header on the L5 read,
+/// as an object that changes between B4a and the show would.
+struct ChangedLocalHeaderBus {
+    inner: FakeBus,
+    archive: String,
+    at: u64,
+    byte: usize,
+    value: u8,
+}
+
+impl Bus for ChangedLocalHeaderBus {
+    fn request(
+        &mut self,
+        resource: &str,
+        action: &str,
+        reason: &str,
+    ) -> Result<String, BusFailure> {
+        self.inner.request(resource, action, reason)
+    }
+
+    fn invoke(
+        &mut self,
+        resource: &str,
+        operation: &str,
+        body: &[u8],
+        grant: &str,
+    ) -> Result<InvokeReply, BusFailure> {
+        let reply = self.inner.invoke(resource, operation, body, grant)?;
+        if resource == self.archive && operation == "read" {
+            let ask: Value = serde_json::from_slice(body).expect("the kit sends JSON");
+            // B4a reads exactly the 30-byte prefix; L5 reads the prefix and
+            // the name.
+            if ask["offset"].as_u64() == Some(self.at) && ask["length"].as_u64().unwrap_or(0) > 30 {
+                let mut answer: Value = serde_json::from_slice(&reply.body).expect("JSON answer");
+                if let Some(content) = answer["data"]["content"].as_array_mut() {
+                    content[self.byte] = json!(self.value);
+                }
+                return Ok(InvokeReply {
+                    status: reply.status,
+                    body: serde_json::to_vec(&answer).unwrap(),
+                });
+            }
+        }
+        Ok(reply)
+    }
+}
+
+/// A fake Runtime with one sparse object larger than ZIP can address: every
+/// byte in range reads as zero, with an empty-directory end record ending at
+/// 2^32.
+struct SparseObjectBus {
+    inner: FakeBus,
+    archive: String,
+    len: u64,
+    end_record_at: u64,
+    end_record: Vec<u8>,
+}
+
+impl SparseObjectBus {
+    fn content(&self, offset: u64, length: u64) -> Vec<u8> {
+        if offset >= self.len {
+            return Vec::new();
+        }
+        let end = offset.saturating_add(length).min(self.len);
+        let mut bytes = vec![0u8; (end - offset) as usize];
+        let record_end = self.end_record_at + self.end_record.len() as u64;
+        let from = offset.max(self.end_record_at);
+        let to = end.min(record_end);
+        if from < to {
+            let start = (from - self.end_record_at) as usize;
+            let at = (from - offset) as usize;
+            let count = (to - from) as usize;
+            bytes[at..at + count].copy_from_slice(&self.end_record[start..start + count]);
+        }
+        bytes
+    }
+}
+
+impl Bus for SparseObjectBus {
+    fn request(
+        &mut self,
+        resource: &str,
+        action: &str,
+        reason: &str,
+    ) -> Result<String, BusFailure> {
+        self.inner.request(resource, action, reason)
+    }
+
+    fn invoke(
+        &mut self,
+        resource: &str,
+        operation: &str,
+        body: &[u8],
+        grant: &str,
+    ) -> Result<InvokeReply, BusFailure> {
+        if resource == self.archive && operation == "read" {
+            let ask: Value = serde_json::from_slice(body).expect("the kit sends JSON");
+            let offset = ask["offset"].as_u64().unwrap();
+            let length = ask["length"].as_u64().unwrap();
+            // The grant is checked by the inner fake, so a denied read still
+            // fails exactly as it would there.
+            self.inner.invoke(resource, operation, body, grant)?;
+            let content = self.content(offset, length);
+            let answered = content.len();
+            return Ok(InvokeReply {
+                status: "ok".to_string(),
+                body: serde_json::to_vec(&json!({
+                    "status": "ok",
+                    "data": { "content": content, "size": answered },
+                }))
+                .unwrap(),
+            });
+        }
+        self.inner.invoke(resource, operation, body, grant)
+    }
 }
 
 #[test]
@@ -785,8 +963,60 @@ fn an_entry_record_that_passes_the_directory_refuses_the_archive() {
 }
 
 #[test]
+fn a_short_directory_response_refuses_the_archive() {
+    let archive = build(&[Spec::file("a.txt")], &[]);
+    let at = directory_start(&archive) as u64;
+    let inner = bus_with(request(ARCHIVE, &[]), ARCHIVE, archive);
+    let mut bus = ShortDirectoryBus {
+        inner,
+        archive: ARCHIVE.to_string(),
+        at,
+        keep: 4,
+    };
+    run(&mut bus).expect("a content refusal still writes the view");
+    let view: Value = serde_json::from_str(
+        bus.inner
+            .written
+            .get(VIEW_URI)
+            .expect("the view was written"),
+    )
+    .unwrap();
+    assert!(view["entries"].as_array().unwrap().is_empty());
+    assert_eq!(view["refused"]["code"], "directory_truncated");
+}
+
+#[test]
+fn an_object_larger_than_the_supported_size_is_refused() {
+    // A sparse 5 GiB object whose empty-directory end record ends at 2^32.
+    let len = 5 * 1024 * 1024 * 1024u64;
+    let end_record_at = (1u64 << 32) - 22;
+    let mut record = Vec::new();
+    end_record(&mut record, 0, end_record_at as u32, 0, &[]);
+    let inner = bus_with(request(ARCHIVE, &[]), ARCHIVE, Vec::new());
+    let mut bus = SparseObjectBus {
+        inner,
+        archive: ARCHIVE.to_string(),
+        len,
+        end_record_at,
+        end_record: record,
+    };
+    run(&mut bus).expect("a content refusal still writes the view");
+    let view: Value = serde_json::from_str(
+        bus.inner
+            .written
+            .get(VIEW_URI)
+            .expect("the view was written"),
+    )
+    .unwrap();
+    assert!(view["entries"].as_array().unwrap().is_empty());
+    assert_eq!(view["refused"]["code"], "object_too_large");
+}
+
+#[test]
 fn too_many_entries_refuse_the_archive() {
-    let specs: Vec<Spec> = (0..=MAX_ENTRIES)
+    // 257 entries: the directory is 13,768 bytes, under the 16 KiB cap, so
+    // only the entry-count bound can refuse this fixture.
+    let specs: Vec<Spec> = (0..257)
         .map(|index| Spec::file(&format!("e{index}.txt")))
         .collect();
     let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, build(&specs, &[]));
@@ -868,6 +1098,85 @@ fn a_consistent_local_header_is_shown() {
     let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, build(&[spec], &[]));
     assert!(skipped(&bus).is_empty());
     assert_eq!(entries(&bus)[0]["status"], "listed");
+}
+
+#[test]
+fn a_local_flag_that_differs_skips_the_entry() {
+    let mut spec = Spec::file("a.txt").data(b"hello");
+    spec.local_flags = Some(1 << 1);
+    let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, build(&[spec], &[]));
+    assert_eq!(status_of(&bus, 0), ("listed".to_string(), None));
+    assert_eq!(skipped(&bus)[0]["reason"], "local_header_flags");
+}
+
+#[test]
+fn a_data_descriptor_flag_is_ignored() {
+    // Local bit 3 set, directory clear: the flag compare ignores bit 3, and
+    // the sizes still have to agree.
+    let mut local = Spec::file("a.txt").data(b"hello");
+    local.local_flags = Some(1 << 3);
+    let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, build(&[local], &[]));
+    assert!(skipped(&bus).is_empty(), "{:?}", skipped(&bus));
+
+    // Directory bit 3 set, local sizes differ: a data descriptor means the
+    // local CRC and sizes are not compared.
+    let mut descriptor = Spec::file("a.txt").data(b"hello");
+    descriptor.flags = 1 << 3;
+    descriptor.local_flags = Some(0);
+    descriptor.local_crc = Some(0xffff_ffff);
+    descriptor.local_compressed = Some(0);
+    descriptor.local_uncompressed = Some(0);
+    let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, build(&[descriptor], &[]));
+    assert!(skipped(&bus).is_empty(), "{:?}", skipped(&bus));
+    assert_eq!(entries(&bus)[0]["status"], "listed");
+}
+
+#[test]
+fn a_local_crc_that_differs_skips_the_entry() {
+    let mut spec = Spec::file("a.txt").data(b"hello");
+    spec.local_crc = Some(0x1234_5678);
+    let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, build(&[spec], &[]));
+    assert_eq!(skipped(&bus)[0]["reason"], "local_header_crc");
+}
+
+#[test]
+fn a_local_size_that_differs_skips_the_entry() {
+    let mut compressed = Spec::file("a.txt").data(b"hello");
+    compressed.local_compressed = Some(0);
+    let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, build(&[compressed], &[]));
+    assert_eq!(skipped(&bus)[0]["reason"], "local_header_sizes");
+
+    let mut uncompressed = Spec::file("a.txt").data(b"hello");
+    uncompressed.local_uncompressed = Some(6);
+    let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, build(&[uncompressed], &[]));
+    assert_eq!(skipped(&bus)[0]["reason"], "local_header_sizes");
+}
+
+#[test]
+fn a_local_length_that_differs_skips_the_entry() {
+    let archive = build(&[Spec::file("a.txt")], &[]);
+    for (byte, value) in [(26usize, 4u8), (28, 1)] {
+        let inner = bus_with(request(ARCHIVE, &[0]), ARCHIVE, archive.clone());
+        let mut bus = ChangedLocalHeaderBus {
+            inner,
+            archive: ARCHIVE.to_string(),
+            at: 0,
+            byte,
+            value,
+        };
+        run(&mut bus).expect("a content refusal still writes the view");
+        let view: Value = serde_json::from_str(
+            bus.inner
+                .written
+                .get(VIEW_URI)
+                .expect("the view was written"),
+        )
+        .unwrap();
+        assert_eq!(
+            view["skipped"][0]["reason"], "local_header_lengths",
+            "byte {byte}"
+        );
+    }
 }
 
 #[test]
@@ -954,4 +1263,26 @@ fn no_listing_reads_more_than_the_run_may() {
             "read {read} bytes of a {len}-byte archive"
         );
     }
+}
+
+#[test]
+fn no_view_is_longer_than_its_cap() {
+    // A UTF-8-marked name of 12,000 NUL bytes fits the 16 KiB directory but
+    // escapes to 72,000 bytes of JSON. The view cap refuses it instead.
+    let mut spec = Spec::file("a");
+    spec.flags = 1 << 11;
+    spec.name = vec![0u8; 12_000];
+    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, build(&[spec], &[]));
+    let written = bus
+        .written
+        .get(VIEW_URI)
+        .expect("a refused view is still written");
+    assert!(
+        written.len() as u64 <= MAX_VIEW_BYTES,
+        "{} bytes",
+        written.len()
+    );
+    let view = view(&bus);
+    assert!(view["entries"].as_array().unwrap().is_empty());
+    assert_eq!(view["refused"]["code"], "view_too_large");
 }

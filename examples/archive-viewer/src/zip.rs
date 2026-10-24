@@ -237,6 +237,16 @@ fn object_size(reader: &mut Reader<'_>) -> Result<u64, ParseError> {
             low = middle + 1;
         }
     }
+    // The search stops at 2^32. An object at or past that boundary would be
+    // reported as exactly 2^32 bytes, so an end record there would look like
+    // the real end of a larger object; refuse instead.
+    if low > MAX_ARCHIVE_BYTES {
+        return Err(Refused::new(
+            "object_too_large",
+            format!("the object is larger than {MAX_ARCHIVE_BYTES} bytes"),
+        )
+        .into());
+    }
     Ok(low)
 }
 
@@ -337,6 +347,20 @@ fn parse(reader: &mut Reader<'_>) -> Result<(u64, Vec<Entry>), ParseError> {
     }
 
     let directory = read(reader, directory_offset, directory_size)?;
+    // A provider that answers short must not make the parser index past the
+    // bytes it holds. The end record says the directory is `directory_size`
+    // bytes and L2 proved that range inside the object, so a short answer is
+    // a content failure.
+    if directory.len() as u64 != directory_size {
+        return Err(Refused::new(
+            "directory_truncated",
+            format!(
+                "the directory answered {} of {directory_size} bytes",
+                directory.len()
+            ),
+        )
+        .into());
+    }
     let mut entries = parse_directory(&directory, directory_size)?;
     if entries.len() != usize::from(count) {
         return Err(Refused::new(
@@ -714,12 +738,17 @@ pub fn check_local_header(entry: &Entry, header: &[u8]) -> Result<(), Reason> {
     if u16_at(header, 8) != Some(entry.method) {
         return Err("local_header_method");
     }
-    if entry.flags & (1 << 3) == 0
-        && (u32_at(header, 14) != Some(entry.crc)
-            || u64::from(u32_at(header, 18).unwrap_or(0)) != entry.compressed_size
-            || u64::from(u32_at(header, 22).unwrap_or(0)) != entry.uncompressed_size)
-    {
-        return Err("local_header_sizes");
+    if entry.flags & (1 << 3) == 0 {
+        if u32_at(header, 14) != Some(entry.crc) {
+            return Err("local_header_crc");
+        }
+        let local_compressed = u64::from(u32_at(header, 18).unwrap_or(0));
+        let local_uncompressed = u64::from(u32_at(header, 22).unwrap_or(0));
+        if local_compressed != entry.compressed_size
+            || local_uncompressed != entry.uncompressed_size
+        {
+            return Err("local_header_sizes");
+        }
     }
     Ok(())
 }

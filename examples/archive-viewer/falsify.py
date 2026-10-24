@@ -10,8 +10,9 @@ The runner is the capsule kit's (`examples/capsule-kit/falsify`).
 
 F-numbers here are the design's (examples/archive-viewer/DESIGN.md, "Falsifier
 plan"); this slice's core covers F6, F6b, F6c, F7 to F17, F19 to F25, F29 to
-F31, F40 to F42. The lettered cases F6d to F6f, F21b to F21d, F23b, F23c and
-F30b cover bounds DESIGN states but gives no row. F18 (Bus v2 depth) and the
+F31, F40 to F42. The lettered cases F6d to F6f, F21b to F21e, F23b to
+F23d, F25b to F25f and F30b cover bounds and comparisons DESIGN states but
+gives no row, and F32 covers the whole view's cap. F18 (Bus v2 depth) and the
 preview falsifiers F1 to F5 and F26 to F28 wait for their slices.
 """
 import pathlib
@@ -242,6 +243,51 @@ CASES = [
      "    }",
      ["a_requested_encrypted_entry_is_skipped_with_its_status",
       "a_requested_unsupported_entry_is_skipped_with_its_status"]),
+    # The whole view's cap.
+    ("F32 a view over its cap is written",
+     "src/lib.rs",
+     "    if over > MAX_VIEW_BYTES {",
+     "    if false {",
+     ["no_view_is_longer_than_its_cap"]),
+    # Answers that do not hold what the end record promised.
+    ("F21e an object larger than 2^32 is accepted",
+     "src/zip.rs",
+     "    if low > MAX_ARCHIVE_BYTES {",
+     "    if false {",
+     ["an_object_larger_than_the_supported_size_is_refused"]),
+    ("F23d a short directory answer is parsed",
+     "src/zip.rs",
+     "    if directory.len() as u64 != directory_size {",
+     "    if false {",
+     ["a_short_directory_response_refuses_the_archive"]),
+    # L5: the remaining local-header comparisons.
+    ("F25b the local lengths compare is removed",
+     "src/zip.rs",
+     "    if name_len != entry.name_len || extra_len != entry.extra_len {",
+     "    if false {",
+     ["a_local_length_that_differs_skips_the_entry"]),
+    ("F25c the local flags compare is removed",
+     "src/zip.rs",
+     "    if flags & !(1 << 3) != entry.flags & !(1 << 3) {",
+     "    if false {",
+     ["a_local_flag_that_differs_skips_the_entry"]),
+    ("F25d the local CRC compare is removed",
+     "src/zip.rs",
+     "        if u32_at(header, 14) != Some(entry.crc) {",
+     "        if false {",
+     ["a_local_crc_that_differs_skips_the_entry"]),
+    ("F25e the local sizes compare is removed",
+     "src/zip.rs",
+     "        if local_compressed != entry.compressed_size\n"
+     "            || local_uncompressed != entry.uncompressed_size\n"
+     "        {",
+     "        if false {",
+     ["a_local_size_that_differs_skips_the_entry"]),
+    ("F25f the data-descriptor guard is ignored",
+     "src/zip.rs",
+     "    if entry.flags & (1 << 3) == 0 {",
+     "    if true {",
+     ["a_data_descriptor_flag_is_ignored"]),
 ]
 
 
