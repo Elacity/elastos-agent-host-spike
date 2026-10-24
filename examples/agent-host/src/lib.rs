@@ -8025,6 +8025,249 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
 #[cfg(target_arch = "wasm32")]
 export!(AgentHost);
 
+/// Test-only client for the opt-in real-model tests. It speaks plain HTTP to
+/// the local OpenAI-compatible endpoint that `SPARKS_MODEL_URL` names. It is
+/// not part of the guest and has no wasm build. Task 009 reuses it for its own
+/// opt-in test.
+#[cfg(test)]
+mod opt_in_model {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    /// The model every opt-in test asks for.
+    pub(crate) const MODEL_ID: &str = "deepseek-v4-flash";
+
+    /// The endpoint the operator opted into, or nothing when the variable is
+    /// unset or empty. An opt-in test skips in that case.
+    pub(crate) fn configured_url() -> Option<String> {
+        std::env::var("SPARKS_MODEL_URL")
+            .ok()
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty())
+    }
+
+    /// Send one prompt as a chat completion and return the model's text. The
+    /// base URL is the OpenAI-compatible root (`.../v1`), the full
+    /// `.../chat/completions` path, or a bare host:port.
+    pub(crate) fn chat_completion(
+        base_url: &str,
+        model: &str,
+        prompt: &str,
+    ) -> Result<String, String> {
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [{ "role": "user", "content": prompt }],
+            "temperature": 0,
+            "max_tokens": 512,
+            "stream": false,
+        })
+        .to_string();
+        let (status, reply) = post_json(base_url, &body)?;
+        if status != 200 {
+            return Err(format!("HTTP {status}: {}", excerpt(&reply)));
+        }
+        let value: serde_json::Value = serde_json::from_str(&reply)
+            .map_err(|error| format!("response is not JSON: {error}"))?;
+        let content = value
+            .get("choices")
+            .and_then(|choices| choices.get(0))
+            .and_then(|choice| choice.get("message"))
+            .and_then(|message| message.get("content"))
+            .and_then(|content| content.as_str())
+            .ok_or_else(|| format!("response has no message content: {}", excerpt(&reply)))?;
+        if content.trim().is_empty() {
+            return Err("model returned an empty summary".to_string());
+        }
+        Ok(content.to_string())
+    }
+
+    fn excerpt(text: &str) -> String {
+        text.chars().take(300).collect()
+    }
+
+    fn post_json(base_url: &str, body: &str) -> Result<(u16, String), String> {
+        let endpoint = Endpoint::parse(base_url)?;
+        let mut stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port))
+            .map_err(|error| format!("cannot connect to {}: {error}", endpoint.authority()))?;
+        stream.set_read_timeout(Some(Duration::from_secs(120))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(30))).ok();
+        let request = format!(
+            "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            endpoint.path,
+            endpoint.authority(),
+            body.len()
+        );
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|error| format!("cannot send the model request: {error}"))?;
+        let mut raw = Vec::new();
+        stream
+            .read_to_end(&mut raw)
+            .map_err(|error| format!("cannot read the model response: {error}"))?;
+        let (status, reply) = split_response(&raw)?;
+        let reply = String::from_utf8(reply)
+            .map_err(|_| "the model response body is not UTF-8".to_string())?;
+        Ok((status, reply))
+    }
+
+    /// The parsed endpoint. Only plain HTTP is supported: the std-only client
+    /// has no TLS, and the local model is an http endpoint.
+    struct Endpoint {
+        host: String,
+        port: u16,
+        path: String,
+    }
+
+    impl Endpoint {
+        fn parse(base_url: &str) -> Result<Self, String> {
+            let Some(rest) = base_url.strip_prefix("http://") else {
+                if base_url.starts_with("https://") {
+                    return Err("https is not supported by the std-only test client".to_string());
+                }
+                return Err(format!(
+                    "unsupported model URL {base_url:?}; expected http://host[:port][/path]"
+                ));
+            };
+            let (authority, path) = match rest.find('/') {
+                Some(index) => (&rest[..index], &rest[index..]),
+                None => (rest, ""),
+            };
+            if authority.is_empty() || authority.contains('@') {
+                return Err(format!("invalid model URL authority in {base_url:?}"));
+            }
+            let (host, port) = split_authority(authority)?;
+            let path = if path.is_empty() || path == "/" {
+                "/v1/chat/completions".to_string()
+            } else if path.ends_with("/chat/completions") {
+                path.to_string()
+            } else {
+                format!("{}/chat/completions", path.trim_end_matches('/'))
+            };
+            Ok(Self { host, port, path })
+        }
+
+        fn authority(&self) -> String {
+            if self.host.contains(':') {
+                format!("[{}]:{}", self.host, self.port)
+            } else if self.port == 80 {
+                self.host.clone()
+            } else {
+                format!("{}:{}", self.host, self.port)
+            }
+        }
+    }
+
+    fn split_authority(authority: &str) -> Result<(String, u16), String> {
+        if let Some(rest) = authority.strip_prefix('[') {
+            let Some((host, after)) = rest.split_once(']') else {
+                return Err(format!("invalid IPv6 authority {authority:?}"));
+            };
+            if host.is_empty() {
+                return Err(format!("invalid IPv6 authority {authority:?}"));
+            }
+            let port = match after.strip_prefix(':') {
+                Some(port) => port
+                    .parse::<u16>()
+                    .map_err(|_| format!("invalid port in {authority:?}"))?,
+                None if after.is_empty() => 80,
+                None => return Err(format!("invalid IPv6 authority {authority:?}")),
+            };
+            return Ok((host.to_string(), port));
+        }
+        match authority.rsplit_once(':') {
+            Some((host, port)) => {
+                if host.is_empty() {
+                    return Err(format!("invalid authority {authority:?}"));
+                }
+                let port = port
+                    .parse::<u16>()
+                    .map_err(|_| format!("invalid port in {authority:?}"))?;
+                Ok((host.to_string(), port))
+            }
+            None => Ok((authority.to_string(), 80)),
+        }
+    }
+
+    /// The status code and the body of one HTTP response. A chunked body is
+    /// decoded; a length-bound body is cut to that length.
+    fn split_response(raw: &[u8]) -> Result<(u16, Vec<u8>), String> {
+        let boundary = find(raw, b"\r\n\r\n")
+            .ok_or_else(|| "the model response has no header end".to_string())?;
+        let head = std::str::from_utf8(&raw[..boundary])
+            .map_err(|_| "the model response headers are not UTF-8".to_string())?;
+        let mut lines = head.split("\r\n");
+        let status_line = lines
+            .next()
+            .ok_or_else(|| "the model response has no status line".to_string())?;
+        let mut parts = status_line.split_whitespace();
+        let _version = parts.next();
+        let status: u16 = parts
+            .next()
+            .and_then(|code| code.parse().ok())
+            .ok_or_else(|| format!("the model response has no status code: {status_line:?}"))?;
+        let mut chunked = false;
+        let mut length: Option<usize> = None;
+        for line in lines {
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            match name.trim().to_ascii_lowercase().as_str() {
+                "transfer-encoding" => {
+                    chunked = value.to_ascii_lowercase().contains("chunked");
+                }
+                "content-length" => length = value.trim().parse().ok(),
+                _ => {}
+            }
+        }
+        let body = &raw[boundary + 4..];
+        if chunked {
+            return Ok((status, decode_chunked(body)?));
+        }
+        if let Some(length) = length {
+            if body.len() < length {
+                return Err(format!(
+                    "the model response body is {} bytes, expected {length}",
+                    body.len()
+                ));
+            }
+            return Ok((status, body[..length].to_vec()));
+        }
+        Ok((status, body.to_vec()))
+    }
+
+    fn decode_chunked(mut body: &[u8]) -> Result<Vec<u8>, String> {
+        let mut out = Vec::new();
+        loop {
+            let line_end =
+                find(body, b"\r\n").ok_or_else(|| "a chunk size line has no end".to_string())?;
+            let line = std::str::from_utf8(&body[..line_end])
+                .map_err(|_| "a chunk size line is not UTF-8".to_string())?;
+            let size_text = line.split(';').next().unwrap_or("").trim();
+            let size = usize::from_str_radix(size_text, 16)
+                .map_err(|_| format!("invalid chunk size {size_text:?}"))?;
+            body = &body[line_end + 2..];
+            if size == 0 {
+                return Ok(out);
+            }
+            if body.len() < size + 2 {
+                return Err("a chunk is shorter than its size".to_string());
+            }
+            out.extend_from_slice(&body[..size]);
+            if &body[size..size + 2] != b"\r\n" {
+                return Err("a chunk has no terminator".to_string());
+            }
+            body = &body[size + 2..];
+        }
+    }
+
+    fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10959,6 +11202,69 @@ mod tests {
         );
         assert_eq!(journal.events, before);
         assert_eq!(journal.epoch, epoch);
+    }
+
+    /// Opt-in: sends the real prompt to the local model, then judges the answer
+    /// with the same `record_compact_summary` path the fake-model tests use.
+    /// Ignored by default, and it skips when `SPARKS_MODEL_URL` is unset.
+    #[test]
+    #[ignore = "opt-in: set SPARKS_MODEL_URL to the local DeepSeek endpoint"]
+    fn an_opt_in_real_model_compaction_summary_passes_the_same_checks() {
+        let Some(base_url) = opt_in_model::configured_url() else {
+            println!(
+                "SKIP: SPARKS_MODEL_URL is unset; the opt-in real-model summary test did not run"
+            );
+            return;
+        };
+        let mut journal = summary_journal();
+        let head = journal.events[0].clone();
+        let epoch = journal.epoch;
+        let id = dispatched_summary_step(&mut journal, &["hello", "second turn"]);
+        let prompt = compact_summary_prompt(&journal, id).expect("a summary prompt");
+        let summary = opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, &prompt)
+            .unwrap_or_else(|reason| panic!("the real model request failed: {reason}"));
+        println!(
+            "real model: request ok, {} summary bytes, model {}",
+            summary.len(),
+            opt_in_model::MODEL_ID
+        );
+        let before = journal.events.clone();
+        match record_compact_summary(&mut journal, id, Ok(summary.clone())) {
+            Ok(()) => {
+                assert_eq!(journal.events.len(), 2);
+                assert_eq!(journal.events[0], head);
+                assert_eq!(journal.events[1].role, Role::User);
+                assert_eq!(journal.events[1].source, NodeSource::CompactionCheckpoint);
+                assert_eq!(journal.events[1].text, summary);
+                assert_eq!(journal.epoch, epoch + 1);
+                println!(
+                    "real model: check verdict recorded (shrinks, node 0 kept, required facts kept)"
+                );
+            }
+            Err(reason) => {
+                assert_eq!(journal.events, before);
+                assert_eq!(journal.epoch, epoch);
+                println!("real model: check verdict refused with {reason:?}; history unchanged");
+            }
+        }
+
+        // The same check path also refuses a summary that fails a rule. This
+        // half is deterministic, so the opt-in test proves the refusal path
+        // even when the real model answers well.
+        let mut refusing = summary_journal();
+        let before = refusing.events.clone();
+        let epoch = refusing.epoch;
+        let id = dispatched_summary_step(&mut refusing, &["hello", "second turn"]);
+        let non_shrinking = format!("{} hello second turn", "x".repeat(10_000));
+        assert_eq!(
+            record_compact_summary(&mut refusing, id, Ok(non_shrinking)),
+            Err("summary does not shrink")
+        );
+        assert_eq!(refusing.events, before);
+        assert_eq!(refusing.epoch, epoch);
+        println!(
+            "real model: check verdict refused a non-shrinking summary with the existing reason"
+        );
     }
 
     #[test]
