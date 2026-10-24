@@ -4739,7 +4739,8 @@
     }
    ],
    "tests": [
-    "tests::request_limit_is_decided_only_by_the_shared_validator"
+    "tests::request_limit_is_decided_only_by_the_shared_validator",
+    "tests::the_task_request_limit_is_one_rule_on_every_path"
    ]
   }
  ]

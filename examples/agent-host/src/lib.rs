@@ -20592,11 +20592,45 @@ mod tests {
         );
     }
 
-    /// Codex at 3851b24, finding 1: one validator decides the task request
+    /// The production request limit is decided only by `requests_fit`: no old
+    /// comparison remains and every acceptance site calls the shared rule.
+    /// The dedup itself is behavior-preserving, so this structural check is
+    /// what fails when a copy is restored.
+    fn assert_request_rule_is_shared() {
+        let source = include_str!("lib.rs");
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module follows the production code")
+            .0;
+        for old in [
+            "task_requests_used(journal) > granted.requests",
+            "task_requests_used(journal) >= task.requests",
+            "task_requests_used(journal) > task.requests",
+            "task_requests_used(journal) > budget.requests",
+            "step.requests_used > budget.requests",
+            "used >= budget.requests",
+        ] {
+            assert!(!production.contains(old), "a second request rule: {old}");
+        }
+        assert_eq!(
+            production.matches("fn requests_fit(").count(),
+            1,
+            "one validator"
+        );
+        assert_eq!(
+            production.matches("!requests_fit(").count(),
+            6,
+            "every acceptance site calls the shared rule"
+        );
+    }
+
+    /// Codex at f9badef, finding 1: one validator decides the task request
     /// limit. Below, equal to and above the budget is checked through
-    /// recording, authorization, dispatch, a new call and reload.
+    /// recording, authorization, dispatch, a new call and reload. The shared
+    /// validator is asserted here too, so this test fails on the old code.
     #[test]
     fn the_task_request_limit_is_one_rule_on_every_path() {
+        assert_request_rule_is_shared();
         fn three_calls(journal: &mut Journal) -> Vec<u64> {
             (0..3)
                 .map(|_| {
@@ -20669,35 +20703,11 @@ mod tests {
     }
 
     /// Codex at f9badef, finding 1: the dedup is behavior-preserving, so a
-    /// restored copy escapes every behavior test. The production request
-    /// limit is decided only by `requests_fit`; no old comparison remains.
+    /// restored copy escapes a behavior test. This named test keeps the
+    /// structural check separate from the boundary cases.
     #[test]
     fn request_limit_is_decided_only_by_the_shared_validator() {
-        let source = include_str!("lib.rs");
-        let production = source
-            .split_once("\n#[cfg(test)]\nmod tests {")
-            .expect("the test module follows the production code")
-            .0;
-        for old in [
-            "task_requests_used(journal) > granted.requests",
-            "task_requests_used(journal) >= task.requests",
-            "task_requests_used(journal) > task.requests",
-            "task_requests_used(journal) > budget.requests",
-            "step.requests_used > budget.requests",
-            "used >= budget.requests",
-        ] {
-            assert!(!production.contains(old), "a second request rule: {old}");
-        }
-        assert_eq!(
-            production.matches("fn requests_fit(").count(),
-            1,
-            "one validator"
-        );
-        assert_eq!(
-            production.matches("!requests_fit(").count(),
-            6,
-            "every acceptance site calls the shared rule"
-        );
+        assert_request_rule_is_shared();
     }
 
     /// Codex at 75ac0ae: the request counter applies when the budget is
