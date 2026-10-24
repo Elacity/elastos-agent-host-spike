@@ -390,7 +390,23 @@
     }
    ],
    "tests": [
-    "tests::an_empty_or_whitespace_model_answer_reaches_the_existing_refusal"
+    "tests::a_model_failure_leaves_the_history_unchanged"
+   ]
+  },
+  {
+   "id": "FC13",
+   "title": "a chunk size wraps around, so a malformed response panics instead of being refused",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            let Some(chunk_end) = size.checked_add(2) else {\n                return Err(format!(\"invalid chunk size {size_text:?}\"));\n            };\n            if body.len() < chunk_end {",
+     "new": "            let chunk_end = size + 2;\n            if body.len() < chunk_end {"
+    }
+   ],
+   "tests": [
+    "tests::a_model_failure_leaves_the_history_unchanged"
    ]
   },
   {

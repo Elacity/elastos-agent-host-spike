@@ -8249,14 +8249,17 @@ mod opt_in_model {
             if size == 0 {
                 return Ok(out);
             }
-            if body.len() < size + 2 {
+            let Some(chunk_end) = size.checked_add(2) else {
+                return Err(format!("invalid chunk size {size_text:?}"));
+            };
+            if body.len() < chunk_end {
                 return Err("a chunk is shorter than its size".to_string());
             }
             out.extend_from_slice(&body[..size]);
-            if &body[size..size + 2] != b"\r\n" {
+            if &body[size..chunk_end] != b"\r\n" {
                 return Err("a chunk has no terminator".to_string());
             }
-            body = &body[size + 2..];
+            body = &body[chunk_end..];
         }
     }
 
@@ -11201,6 +11204,46 @@ mod tests {
         );
         assert_eq!(journal.events, before);
         assert_eq!(journal.epoch, epoch);
+
+        // The transport returns the model text unchanged. Empty and
+        // whitespace answers reach the shared checker's existing refusal.
+        let required = ["hello".to_string(), "second turn".to_string()];
+        for (answer, reason) in [
+            ("", "summary empty"),
+            ("   \n", "summary drops a required fact"),
+        ] {
+            let (base_url, server) = one_shot_model_server(answer);
+            let returned =
+                opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, "summary prompt")
+                    .expect("one 200 response");
+            server.join().expect("the server thread");
+            assert_eq!(returned, answer);
+
+            let mut refused = summary_journal();
+            let before = refused.events.clone();
+            let epoch = refused.epoch;
+            let id = dispatched_summary_step(&mut refused, &["hello", "second turn"]);
+            assert_eq!(
+                compact_refusal(&refused, &returned, &required),
+                Some(reason)
+            );
+            assert_eq!(
+                record_compact_summary(&mut refused, id, Ok(returned)),
+                Err(reason)
+            );
+            assert_eq!(refused.events, before);
+            assert_eq!(refused.epoch, epoch);
+        }
+
+        // A malformed chunked response is a clear transport refusal, not a
+        // panic or a slice-bounds error.
+        let malformed = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nffffffffffffffff\r\n".to_string();
+        let (base_url, server) = one_shot_server(malformed);
+        let error =
+            opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, "summary prompt")
+                .expect_err("a malformed chunk must be refused");
+        server.join().expect("the server thread");
+        assert!(error.starts_with("invalid chunk size"), "{error}");
     }
 
     /// Opt-in: sends the real prompt to the local model, then judges the answer
@@ -11284,20 +11327,12 @@ mod tests {
         );
     }
 
-    /// A one-shot local OpenAI-compatible server. It answers one request with
-    /// a 200 whose message content is `answer`, then closes.
-    fn one_shot_model_server(answer: &str) -> (String, std::thread::JoinHandle<()>) {
+    /// A one-shot local server. It writes `response` to one connection, then
+    /// closes.
+    fn one_shot_server(response: String) -> (String, std::thread::JoinHandle<()>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local port");
         let address = listener.local_addr().expect("the local address");
-        let body = serde_json::json!({
-            "choices": [{ "message": { "content": answer } }],
-        })
-        .to_string();
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("one connection");
             stream
@@ -11332,38 +11367,17 @@ mod tests {
         (format!("http://{address}/v1"), handle)
     }
 
-    /// The transport returns the model text unchanged. An empty or whitespace
-    /// answer is refused by the shared checker with its existing reason, and
-    /// the history stays put.
-    #[test]
-    fn an_empty_or_whitespace_model_answer_reaches_the_existing_refusal() {
-        let required = ["hello".to_string(), "second turn".to_string()];
-        for (answer, reason) in [
-            ("", "summary empty"),
-            ("   \n", "summary drops a required fact"),
-        ] {
-            let (base_url, server) = one_shot_model_server(answer);
-            let returned =
-                opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, "summary prompt")
-                    .expect("one 200 response");
-            server.join().expect("the server thread");
-            assert_eq!(returned, answer);
-
-            let mut journal = summary_journal();
-            let before = journal.events.clone();
-            let epoch = journal.epoch;
-            let id = dispatched_summary_step(&mut journal, &["hello", "second turn"]);
-            assert_eq!(
-                compact_refusal(&journal, &returned, &required),
-                Some(reason)
-            );
-            assert_eq!(
-                record_compact_summary(&mut journal, id, Ok(returned)),
-                Err(reason)
-            );
-            assert_eq!(journal.events, before);
-            assert_eq!(journal.epoch, epoch);
-        }
+    /// A one-shot OpenAI-compatible server. It answers one request with a 200
+    /// whose message content is `answer`, then closes.
+    fn one_shot_model_server(answer: &str) -> (String, std::thread::JoinHandle<()>) {
+        let body = serde_json::json!({
+            "choices": [{ "message": { "content": answer } }],
+        })
+        .to_string();
+        one_shot_server(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ))
     }
 
     #[test]
