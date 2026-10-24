@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""Break each rule of the Archive surface page, see its test fail, restore it.
+
+Usage: python3 -I falsify-surface.py [--check]
+
+Each falsifier replaces exact text in surface/browser/reader.js (it must occur
+once), runs the named node tests, and requires them to FAIL. The file is
+restored from its saved bytes afterwards, also on error or Ctrl-C. --check
+only confirms every anchor occurs once.
+
+F37 is "a path is drawn as markup", F38 is "an image entry is drawn", and F39
+is "an inherited property name picks a kind"; the rest cover the page's other
+rules. The runner is the capsule kit's (examples/capsule-kit/falsify).
+"""
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "capsule-kit" / "falsify"))
+import falsify_kit as kit  # noqa: E402
+
+SURFACE = pathlib.Path(__file__).resolve().parent / "surface"
+PAGE = SURFACE / "browser" / "reader.js"
+TESTS = SURFACE / "reader.test.mjs"
+
+# (name, exact old text, new text, tests that must fail)
+CASES = [
+    # F37: a path is drawn as markup.
+    (
+        "F37 an entry path is drawn as markup",
+        "  path.textContent = entry.path;",
+        "  path.innerHTML = entry.path;",
+        ["an entry path is text", "the page has no way to hold or reach anything else"],
+    ),
+    # F38: an image entry is drawn.
+    (
+        "F38 an image entry is drawn",
+        '  const facts = doc.createElement("span");',
+        '  if (entry.path.endsWith(".png")) {\n'
+        '    const picture = doc.createElement("img");\n'
+        "    picture.src = entry.path;\n"
+        "    row.appendChild(picture);\n"
+        "  }\n"
+        '  const facts = doc.createElement("span");',
+        ["the page draws no image on bus v1", "the page has no way to hold or reach anything else"],
+    ),
+    # F39: the kind is looked up through the prototype.
+    (
+        "F39 an inherited property name picks a kind",
+        '  return typeof kind === "string" && Object.hasOwn(KINDS, kind) ? KINDS[kind] : "Other";',
+        '  return KINDS[kind] || "Other";',
+        ["a kind named after an inherited property is not drawn"],
+    ),
+    (
+        "F39b a view key is read through the prototype",
+        "  return Object.hasOwn(Object(value), key) ? value[key] : undefined;",
+        "  return key in Object(value) ? value[key] : undefined;",
+        ["a view key named after an inherited property is not read"],
+    ),
+    (
+        "a span style is looked up through the prototype",
+        '  return typeof style === "string" && Object.hasOwn(STYLES, style) ? STYLES[style] : "span";',
+        "  return STYLES[style] || \"span\";",
+        ["a style named after an inherited property is plain"],
+    ),
+    (
+        "code is shown as markup",
+        "      code.textContent = block.text;",
+        "      code.innerHTML = block.text;",
+        ["it draws the documents model's blocks with text only", "the page has no way to hold or reach anything else"],
+    ),
+    (
+        "a heading level is not kept within 1 to 6",
+        '      return { kind: "heading", level: Math.min(6, Math.max(1, level)), spans };',
+        '      return { kind: "heading", level, spans };',
+        ["an unknown style is plain and a heading level stays within 1 to 6"],
+    ),
+    (
+        "any number of preview blocks is taken",
+        "  if (!isCount(index) || !Array.isArray(blocksIn) || blocksIn.length > MAX_BLOCKS) return null;",
+        "  if (!isCount(index) || !Array.isArray(blocksIn)) return null;",
+        ["a preview with more blocks than the model allows is not shown"],
+    ),
+    (
+        "an unknown block kind is drawn",
+        "    default:\n      return null;",
+        '    default:\n      return { kind: "rule" };',
+        ["an unreadable entry or preview is not shown, and the rest are"],
+    ),
+    (
+        "the view schema is not checked",
+        '  if (!value || typeof value !== "object" || own(value, "schema") !== VIEW_SCHEMA) {',
+        '  if (!value || typeof value !== "object") {',
+        ["views that are not ones are refused", "a view that is not one is not drawn"],
+    ),
+    (
+        "any number of entries is taken",
+        "  if (Array.isArray(entriesIn) ? entriesIn.length > MAX_ENTRIES : entriesIn !== undefined) {",
+        "  if (false) {",
+        ["views that are not ones are refused"],
+    ),
+    (
+        "any number of previews is taken",
+        "  if (Array.isArray(previewsIn) ? previewsIn.length > MAX_PREVIEWS : previewsIn !== undefined) {",
+        "  if (false) {",
+        ["views that are not ones are refused"],
+    ),
+    (
+        "an unreadable entry is drawn",
+        "    if (read) entries.push(read);",
+        "    if (true) entries.push(read);",
+        ["an unreadable entry or preview is not shown, and the rest are"],
+    ),
+    (
+        "an unreadable preview is drawn",
+        "    if (read) previews.push(read);",
+        "    if (true) previews.push(read);",
+        ["an unreadable entry or preview is not shown, and the rest are"],
+    ),
+    (
+        "a refused archive's reason is not shown",
+        "      if (read.refused) setStatus(read.refused.message);",
+        "      if (false) setStatus(read.refused.message);",
+        ["a refused archive is shown with its reason and lists no entry"],
+    ),
+    (
+        "a text is not cut short",
+        "  return text.length > chars ?",
+        "  return false && text.length > chars ?",
+        ["a refusal is shown as its text"],
+    ),
+    (
+        "an unreadable refusal shows no text",
+        "cut(reason || null, MAX_MESSAGE_CHARS,",
+        "cut(reason, MAX_MESSAGE_CHARS,",
+        ["a refusal is shown as its text"],
+    ),
+    (
+        "requests carry cookies",
+        '        credentials: "omit",',
+        '        credentials: "include",',
+        ["it makes one request"],
+    ),
+    (
+        "requests are made without a launch token",
+        "  if (!token) {\n",
+        "  if (false) {\n",
+        ["without a launch token it asks for nothing"],
+    ),
+    (
+        "an entry keeps its uri",
+        '    path: cut(own(entry, "path"), MAX_TEXT_CHARS, ""),',
+        '    uri: own(entry, "uri"),\n    path: cut(own(entry, "path"), MAX_TEXT_CHARS, ""),',
+        ["it never requests an entry"],
+    ),
+]
+
+
+def test_fails(name):
+    return kit.node_test_fails(TESTS, name)
+
+
+def main():
+    cases = [(name, PAGE, [(old, new)], tests) for name, old, new, tests in CASES]
+    kit.main([(cases, None, test_fails, None, True)], done=f"all {len(CASES)} surface falsifiers caught")
+
+
+if __name__ == "__main__":
+    main()

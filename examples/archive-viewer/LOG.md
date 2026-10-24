@@ -448,3 +448,70 @@ prove.
 
 The page and its smoke (F37 to F39) are task 006. tar remains after ZIP. The
 in-component group (F3, F35, F36, F43) is complete.
+
+## 2026-10-24: task 006, the render-only page and its browser smoke
+
+Step 3d, the last Bus v1 slice of the app: `surface/` holds the `archive-reader`
+capsule (role `viewer`, `web-projection`, no capabilities) and the page that
+draws the `elastos.archive-viewer.view/v1` view the core writes.
+
+### What changed
+
+- New `surface/capsule.json`, `surface/browser/{index.html,main.js,reader.js,reader.css}`,
+  `surface/reader.test.mjs`, `surface/reader-browser-smoke.mjs` and
+  `surface/fixtures/view.json`.
+- The page holds only its launch token and makes one request,
+  `GET /api/viewers/archive-reader/view`. It draws the entries (path, kind,
+  declared compressed and uncompressed sizes, method, status, reason) and the
+  previews as the documents model's typed blocks. Every text goes through
+  `textContent`. It keeps no `uri` field, never builds a path, never fetches an
+  entry and draws no image on Bus v1.
+- `falsify-surface.py` (20 cases) and `verify.sh`: the page tests, the page
+  falsifiers and the Chromium smoke run with the guest checks. A machine
+  without Playwright's Chromium skips the smoke with a clear line; the page
+  tests and the falsifiers still run.
+- No component core, host test, capsule kit or other viewer changed.
+
+### F37 to F39 done
+
+- **F37** `an_entry_path_is_text`: a path holding `<img ... onerror=...>` is
+  drawn as literal text. The mutant writes the path with `innerHTML`; the test
+  and the page's source check both fail.
+- **F38** `the_page_draws_no_image_on_bus_v1`: an entry of kind `image` is a
+  listed row, and a preview block that names an image is not a readable block,
+  so no `<img>` is made. The mutant draws a PNG-path entry as an image; the
+  test and the source check fail.
+- **F39** `a_kind_named_after_an_inherited_property_is_not_drawn`: the kind
+  label comes from `Object.hasOwn(KINDS, kind)`, so `constructor`, `toString`,
+  `__proto__`, `hasOwnProperty` and `valueOf` draw "Other". The mutant uses
+  prototype lookup. **F39b** covers the same rule for a view key: the page
+  reads only the view's own fields, and an inherited `entries` draws nothing.
+- The other 17 page falsifiers cover the remaining page rules: the schema, the
+  entry and preview caps, unreadable entries and previews, a refused archive's
+  reason, text cutting, cookies, the token guard, uri fields and the
+  documents-model block and span rules.
+
+### Checks on this Mac
+
+- `node --test surface/reader.test.mjs`: 20 tests pass.
+- `python3 -I falsify-surface.py`: 20 falsifiers, all caught.
+- `node surface/reader-browser-smoke.mjs` (real Chromium, Home's sandbox): the
+  listing, the text preview and the hostile path appear, no image is drawn,
+  one GET, no console errors.
+- `verify.sh` (guest path) passes, including the core's 74 falsifiers.
+
+### Kit gap, recorded not edited
+
+- The kit's surface item (A5) has no shared renderer for `docs-model` blocks,
+  so this page carries its own block reader, as the documents page does. Both
+  pages draw the same six block kinds and four span styles. A shared
+  `docs-model` block renderer is a kit item for the second format, not a
+  change to make here.
+
+### Remaining
+
+The Bus v1 app is complete: core, host test, fuel gate, page and smoke.
+Remaining work is outside this lane: the bundle and the container build (a
+cloud run; the Mac has no Docker), tar after ZIP, and Bus v2 (F18, F34 and
+image previews once M5 and the typed UI document exist). The launch binding
+(M6) needs Runtime and Home.
