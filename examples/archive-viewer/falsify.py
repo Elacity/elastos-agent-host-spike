@@ -10,8 +10,8 @@ The runner is the capsule kit's (`examples/capsule-kit/falsify`).
 
 F-numbers here are the design's (examples/archive-viewer/DESIGN.md, "Falsifier
 plan"); this slice's core covers F6, F6b, F6c, F7 to F17, F19 to F25, F29 to
-F31, F40 to F42. The lettered cases F6d to F6f, F15b, F16b, F19b, F20b,
-F21b to F21g, F22b, F23b to F23d, F25b to F25g, F30b, F41b to F41f and F42b
+F31, F40 to F42. The lettered cases F6d to F6f, F15b, F16b, F17b, F19b, F20b,
+F21b to F21g, F22b, F23b to F23d, F25b to F25h, F30b, F41b to F41f and F42b
 cover bounds, comparisons and request fields DESIGN states but gives no row,
 and F32 covers the whole view's cap. F18 (Bus v2 depth) and the preview
 falsifiers F1 to F5 and F26 to F28 wait for their slices.
@@ -133,6 +133,11 @@ CASES = [
      "    }\n"
      "    let length = LOCAL_HEADER_BYTES + u64::from(entry.name_len);",
      ["a_nested_archive_is_listed_not_opened"]),
+    ("F17b a nested archive is recognised only by its name",
+     "src/zip.rs",
+     "        if head.len() as u64 == MAGIC_BYTES && u32_at(&head, 0) == Some(LOCAL_SIGNATURE) {",
+     "        if false {",
+     ["a_nested_archive_is_recognised_by_its_first_bytes"]),
     # L1 to L4.
     ("F19 the tail search reads 64 KiB",
      "src/lib.rs",
@@ -376,6 +381,11 @@ CASES = [
      "    if length > MAX_LOCAL_HEADER_BYTES {",
      "    if false {",
      ["a_local_header_over_the_read_cap_is_skipped_before_it_is_read"]),
+    ("F25h the L5 signature compare is removed",
+     "src/zip.rs",
+     "    if u32_at(header, 0) != Some(LOCAL_SIGNATURE) {",
+     "    if false {",
+     ["a_local_signature_that_changes_before_the_show_skips_the_entry"]),
 ]
 
 

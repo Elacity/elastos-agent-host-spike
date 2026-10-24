@@ -2,8 +2,8 @@
 # The archive viewer core: fmt, clippy for the host tests and the wasm32
 # component, its tests, and every falsifier (F6, F6b, F6c, F7 to F17, F19 to
 # F25, F29 to F31, F40 to F42, plus the bound and skip-reason cases F6d to F6f,
-# F16b, F19b, F20b, F21b to F21g, F23b, F23c, F25b to F25g, F30b, F41b to
-# F41f and F42b).
+# F16b, F17b, F19b, F20b, F21b to F21g, F23b, F23c, F25b to F25h, F30b, F41b
+# to F41f and F42b).
 set -euo pipefail
 
 VIEWER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

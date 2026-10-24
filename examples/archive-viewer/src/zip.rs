@@ -27,6 +27,8 @@ const DIRECTORY_SIGNATURE: u32 = 0x0201_4b50;
 const LOCAL_SIGNATURE: u32 = 0x0403_4b50;
 const DIRECTORY_RECORD_BYTES: u64 = 46;
 const LOCAL_HEADER_BYTES: u64 = 30;
+/// N1 peeks only this prefix of an entry to tell a nested ZIP by its bytes.
+const MAGIC_BYTES: u64 = 4;
 
 /// A whole-archive refusal: the view names it and lists no entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -385,7 +387,26 @@ fn parse(reader: &mut Reader<'_>) -> Result<(u64, Vec<Entry>), ParseError> {
     }
     block_duplicates(&mut entries);
     check_local_headers(reader, &mut entries, directory_offset)?;
+    classify_by_first_bytes(reader, &mut entries)?;
     Ok((size, entries))
+}
+
+/// N1: a nested ZIP can be named anything, so its first four bytes decide.
+/// Only that prefix is read: the entry is never opened.
+fn classify_by_first_bytes(
+    reader: &mut Reader<'_>,
+    entries: &mut [Entry],
+) -> Result<(), ParseError> {
+    for entry in entries.iter_mut() {
+        if entry.kind != Kind::File || entry.compressed_size < MAGIC_BYTES {
+            continue;
+        }
+        let head = read(reader, entry.data_start, MAGIC_BYTES)?;
+        if head.len() as u64 == MAGIC_BYTES && u32_at(&head, 0) == Some(LOCAL_SIGNATURE) {
+            entry.kind = Kind::Archive;
+        }
+    }
+    Ok(())
 }
 
 fn parse_directory(directory: &[u8], directory_size: u64) -> Result<Vec<Entry>, ParseError> {

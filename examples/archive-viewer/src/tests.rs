@@ -885,7 +885,8 @@ fn other_entry_kinds_are_blocked() {
     assert_eq!(entries(&bus)[1]["kind"], "other");
 }
 
-/// No read window reaches the bytes of the nested archive, in any run.
+/// No read window reaches the nested archive's body: N1 peeks at most its
+/// first four bytes to classify it, and never opens it.
 fn assert_nested_data_unread(bus: &FakeBus, data_start: u64, data_end: u64) {
     for call in bus.invokes_on(ARCHIVE) {
         if let Call::Invoke {
@@ -896,10 +897,13 @@ fn assert_nested_data_unread(bus: &FakeBus, data_start: u64, data_end: u64) {
                 let offset = body["offset"].as_u64().unwrap();
                 let length = body["length"].as_u64().unwrap();
                 let end = offset + length;
-                // The one-byte size probes may land anywhere; no other
-                // read window reaches the entry's data.
+                // The one-byte size probes may land anywhere, and the magic
+                // peek covers only the four-byte prefix.
                 assert!(
-                    length == 1 || end <= data_start || offset >= data_end,
+                    length == 1
+                        || end <= data_start
+                        || offset >= data_end
+                        || (offset >= data_start && end <= data_start + 4),
                     "a read reached the entry's data: {body}"
                 );
             }
@@ -927,6 +931,22 @@ fn a_nested_archive_is_listed_not_opened() {
         assert!(skipped(&bus).is_empty());
         assert_nested_data_unread(&bus, data_start, data_end);
     }
+}
+
+#[test]
+fn a_nested_archive_is_recognised_by_its_first_bytes() {
+    // N1: the name need not say ZIP. The first four bytes of the data do,
+    // and only those four are read.
+    let inner = build(&[Spec::file("x.txt")], &[]);
+    let spec = Spec::file("inner.bin").data(&inner);
+    let filler = Spec::file("filler.bin").data(&vec![0u8; 1000]);
+    let archive = build(&[spec, filler], &[]);
+    let data_start = 30 + 9;
+    let data_end = data_start + inner.len() as u64;
+    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
+    assert_eq!(status_of(&bus, 0), ("listed".to_string(), None));
+    assert_eq!(entries(&bus)[0]["kind"], "archive");
+    assert_nested_data_unread(&bus, data_start, data_end);
 }
 
 // --- Methods and encryption: F29, F30 --------------------------------------
@@ -1375,6 +1395,33 @@ fn a_local_name_that_differs_skips_the_entry() {
     assert_eq!(skipped.len(), 1);
     assert_eq!(skipped[0]["index"], 0);
     assert_eq!(skipped[0]["reason"], "local_header_name");
+}
+
+#[test]
+fn a_local_signature_that_changes_before_the_show_skips_the_entry() {
+    // B4a read a good signature; only the L5 reread sees byte 0 changed. The
+    // filler keeps the tail window away from the entry, so the mutation hits
+    // exactly the reread.
+    let filler = Spec::file("filler.bin").data(&vec![0u8; 1000]);
+    let archive = build(&[Spec::file("a.txt").data(b"hello"), filler], &[]);
+    let inner = bus_with(request(ARCHIVE, &[0]), ARCHIVE, archive);
+    let mut bus = ChangedLocalHeaderBus {
+        inner,
+        archive: ARCHIVE.to_string(),
+        at: 0,
+        byte: 0,
+        value: 0,
+    };
+    run(&mut bus).expect("a content skip still writes the view");
+    let view: Value = serde_json::from_str(
+        bus.inner
+            .written
+            .get(VIEW_URI)
+            .expect("the view was written"),
+    )
+    .unwrap();
+    assert_eq!(view["skipped"][0]["reason"], "local_header_signature");
+    assert_eq!(view["entries"][0]["status"], "listed");
 }
 
 #[test]

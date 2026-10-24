@@ -127,3 +127,25 @@ its statuses (`src/zip.rs`), the run and the view (`src/lib.rs`), the tests
   F43 (previews and inflate, the component and fuel gates, the page, Bus v2
   nesting and B5's declared totals).
 - No production code changed: both handlers already existed.
+
+## 2026-10-24: task 001, review fixes (round 9)
+
+- N1 classification now reads the entry's first four bytes:
+  `classify_by_first_bytes` runs after B4a and marks a regular file
+  `Kind::Archive` when its data starts with `PK\x03\x04`. Only that prefix is
+  read; the body is never touched. Test
+  `a_nested_archive_is_recognised_by_its_first_bytes` (a ZIP payload named
+  `inner.bin`), falsifier F17b disables the byte check. The N1 trace check in
+  `assert_nested_data_unread` allows only the four-byte peek past the data
+  start, so F17's full-read mutant still fails.
+- L5's own signature compare has a fixture:
+  `a_local_signature_that_changes_before_the_show_skips_the_entry` changes
+  byte 0 only during the L5 reread (B4a saw a good signature) and requires
+  `local_header_signature`. Falsifier F25h removes that guard.
+- **Done in this slice:** F6, F6b, F6c, F7 to F17, F19 to F25, F29 to F31,
+  F40 to F42, plus the lettered cases F6d to F6f, F15b, F16b, F17b, F19b,
+  F20b, F21b to F21g, F22b, F23b to F23d, F25b to F25h, F30b, F41b to F41f
+  and F42b (62 falsifiers, all caught).
+- **Remaining for the next task:** F1 to F5, F18, F26 to F28, F33 to F39 and
+  F43 (previews and inflate, the component and fuel gates, the page, Bus v2
+  nesting and B5's declared totals).
