@@ -106,7 +106,7 @@ This task closed the one acceptance point that was not yet proven: a mutant
 must change only its own rule.
 
 - `falsify.py` now runs the whole suite under every mutant and fails the run
-  when any test the case does not name also fails ("all 56 mutants leave every
+  when any test the case does not name also fails ("all 57 mutants leave every
   unnamed test passing"). The kit's runner still decides whether the named
   tests fail; this check is the app's.
 - Fixtures that mixed two rules are split, so each mutant leaks nothing:
@@ -123,8 +123,28 @@ must change only its own rule.
   F29, F30 and F40 name every same-rule test their mutant breaks, and the
   nested-archive filler now keeps that entry's data outside every tail window.
 - **Done in this slice:** F6, F6b, F6c, F7 to F17, F19 to F25, F29 to F31,
-  F40 to F42 and the lettered cases above (56 falsifiers, all caught, each one
-  isolated; F21f, F21g and F41e came with 001's last round).
+  F40 to F42 and the lettered cases above (57 falsifiers, all caught, each one
+  isolated; F21f, F21g, F30c and F41e came with the later rounds).
 - **Remaining for step 3b (text previews):** F1 to F5, F26 to F28, F32, F33,
   and later F18, F34 to F39 and F43 (the component and fuel gates, Bus v2
   nesting and images, the page, and B5's declared totals).
+
+### Review fixes (round 2)
+
+- The isolation check proves the suite completed: it parses the one
+  `test result:` summary, requires the same test names as the unmutated
+  baseline, `ignored` 0, the summary counts to match the test lines, and
+  every unnamed test to report `ok`. Empty or partial output is rejected;
+  a run with exit 101 and empty stdout now fails the check.
+- New `a_denied_read_during_the_directory_read_stops_the_run` (F42): a fake
+  bus answers the size probes and the tail, denies only the central-directory
+  read, and the run returns the authority refusal and writes nothing.
+- `encrypted_entries_are_listed_not_read` and its requested-entry test put
+  the payload before the tail window and require its bytes to stay unread.
+  New falsifier F30c reads that payload while keeping the `encrypted` status;
+  both named tests fail under it.
+- **Integration note:** N1 classification by the first four bytes (001's
+  later rounds) reads a `Kind::File` payload. It must skip entries whose
+  status is not `listed` (encrypted, unsupported, blocked), or the encrypted
+  tests above fail, as they should: F30 says an encrypted entry is listed
+  and never read.

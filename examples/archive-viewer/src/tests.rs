@@ -329,6 +329,47 @@ impl Bus for ChangedLocalHeaderBus {
     }
 }
 
+/// A fake Runtime that denies one read — the central directory's — after
+/// answering the size probes and the tail that come before it.
+struct DeniedDirectoryBus {
+    inner: FakeBus,
+    archive: String,
+    directory: (u64, u64),
+    denied: Vec<(u64, u64)>,
+}
+
+impl Bus for DeniedDirectoryBus {
+    fn request(
+        &mut self,
+        resource: &str,
+        action: &str,
+        reason: &str,
+    ) -> Result<String, BusFailure> {
+        self.inner.request(resource, action, reason)
+    }
+
+    fn invoke(
+        &mut self,
+        resource: &str,
+        operation: &str,
+        body: &[u8],
+        grant: &str,
+    ) -> Result<InvokeReply, BusFailure> {
+        if resource == self.archive && operation == "read" {
+            let ask: Value = serde_json::from_slice(body).expect("the kit sends JSON");
+            let read = (
+                ask["offset"].as_u64().unwrap_or(0),
+                ask["length"].as_u64().unwrap_or(0),
+            );
+            if read == self.directory {
+                self.denied.push(read);
+                return Err(BusFailure::Denied("the directory read is denied".into()));
+            }
+        }
+        self.inner.invoke(resource, operation, body, grant)
+    }
+}
+
 /// A fake Runtime with one sparse object larger than ZIP can address: every
 /// byte in range reads as zero, with an empty-directory end record ending at
 /// 2^32.
@@ -473,6 +514,44 @@ fn a_provider_error_while_listing_stops_the_run_and_writes_nothing() {
     let err = run(&mut bus).expect_err("an authority failure stops the run");
     assert!(matches!(err, Refusal::Call { .. }), "{err:?}");
     assert_nothing_written(&bus);
+}
+
+#[test]
+fn a_denied_read_during_the_directory_read_stops_the_run() {
+    // The probes and the tail are allowed; only the directory read is
+    // denied, as a grant can fail part-way through a run. The refusal must
+    // stop the run, not become a content skip of one entry.
+    let archive = build(&[Spec::file("a.txt").data(b"hello")], &[]);
+    let at = eocd_start(&archive);
+    let directory = (
+        u64::from(u32::from_le_bytes([
+            archive[at + 16],
+            archive[at + 17],
+            archive[at + 18],
+            archive[at + 19],
+        ])),
+        u64::from(u32::from_le_bytes([
+            archive[at + 12],
+            archive[at + 13],
+            archive[at + 14],
+            archive[at + 15],
+        ])),
+    );
+    let inner = bus_with(request(ARCHIVE, &[]), ARCHIVE, archive);
+    let mut bus = DeniedDirectoryBus {
+        inner,
+        archive: ARCHIVE.to_string(),
+        directory,
+        denied: Vec::new(),
+    };
+    let err = run(&mut bus).expect_err("a denied directory read stops the run");
+    assert!(matches!(err, Refusal::Call { .. }), "{err:?}");
+    assert_nothing_written(&bus.inner);
+    assert_eq!(bus.denied, vec![directory], "the denial is the directory's");
+    assert!(
+        !bus.inner.invokes_on(ARCHIVE).is_empty(),
+        "the probes and the tail were answered before the denial"
+    );
 }
 
 #[test]
@@ -839,8 +918,8 @@ fn other_entry_kinds_are_blocked() {
     assert_eq!(entries(&bus)[1]["kind"], "other");
 }
 
-/// No read window reaches the bytes of the nested archive, in any run.
-fn assert_nested_data_unread(bus: &FakeBus, data_start: u64, data_end: u64) {
+/// No read window reaches the bytes `[data_start, data_end)`, in any run.
+fn assert_data_unread(bus: &FakeBus, data_start: u64, data_end: u64) {
     for call in bus.invokes_on(ARCHIVE) {
         if let Call::Invoke {
             operation, body, ..
@@ -879,7 +958,7 @@ fn a_nested_archive_is_listed_not_opened() {
         assert_eq!(status_of(&bus, 0), ("listed".to_string(), None));
         assert_eq!(entries(&bus)[0]["kind"], "archive");
         assert!(skipped(&bus).is_empty());
-        assert_nested_data_unread(&bus, data_start, data_end);
+        assert_data_unread(&bus, data_start, data_end);
     }
 }
 
@@ -893,25 +972,35 @@ fn other_methods_are_listed_unsupported() {
     assert_eq!(status_of(&bus, 0), ("unsupported".to_string(), None));
 }
 
-#[test]
-fn encrypted_entries_are_listed_not_read() {
+/// An encrypted entry followed by a filler: the 6-byte payload at
+/// `[35, 41)` lies before the tail window, so a read that reaches it read
+/// the payload rather than the tail.
+fn encrypted_archive() -> (Vec<u8>, u64, u64) {
     let mut spec = Spec::file("a.txt").data(b"secret");
     spec.flags = 1;
-    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, build(&[spec], &[]));
+    let filler = Spec::file("filler.bin").data(&vec![0u8; 2000]);
+    (build(&[spec, filler], &[]), 30 + 5, 30 + 5 + 6)
+}
+
+#[test]
+fn encrypted_entries_are_listed_not_read() {
+    let (archive, data_start, data_end) = encrypted_archive();
+    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
     assert_eq!(status_of(&bus, 0), ("encrypted".to_string(), None));
     assert!(skipped(&bus).is_empty());
+    assert_data_unread(&bus, data_start, data_end);
 }
 
 #[test]
 fn a_requested_encrypted_entry_is_skipped_with_its_status() {
-    let mut spec = Spec::file("a.txt").data(b"secret");
-    spec.flags = 1;
-    let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, build(&[spec], &[]));
+    let (archive, data_start, data_end) = encrypted_archive();
+    let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, archive);
     assert_eq!(status_of(&bus, 0), ("encrypted".to_string(), None));
     let skipped = skipped(&bus);
     assert_eq!(skipped.len(), 1);
     assert_eq!(skipped[0]["index"], 0);
     assert_eq!(skipped[0]["reason"], "encrypted");
+    assert_data_unread(&bus, data_start, data_end);
 }
 
 #[test]

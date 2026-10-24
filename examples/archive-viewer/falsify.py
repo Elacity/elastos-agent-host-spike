@@ -13,9 +13,9 @@ The runner is the capsule kit's (`examples/capsule-kit/falsify`).
 F-numbers here are the design's (examples/archive-viewer/DESIGN.md, "Falsifier
 plan"); this slice's core covers F6, F6b, F6c, F7 to F17, F19 to F25, F29 to
 F31, F40 to F42. The lettered cases F6d to F6f, F15b, F16b, F19b, F21b to
-F21g, F22b, F23b to F23d, F25b to F25f, F30b and F41b to F41e cover bounds,
-comparisons and request fields DESIGN states but gives no row, and F32 covers
-the whole view's cap. F18 (Bus v2 depth) and the preview falsifiers F1 to F5
+F21g, F22b, F23b to F23d, F25b to F25f, F30b, F30c and F41b to F41e cover
+bounds, comparisons and request fields DESIGN states but gives no row, and
+F32 covers the whole view's cap. F18 (Bus v2 depth) and the preview falsifiers F1 to F5
 and F26 to F28 wait for their slices.
 """
 import pathlib
@@ -199,6 +199,15 @@ CASES = [
      "    if false {",
      ["encrypted_entries_are_listed_not_read",
       "a_requested_encrypted_entry_is_skipped_with_its_status"]),
+    ("F30c the encrypted payload is read before its status",
+     "src/zip.rs",
+     "        entry.data_start = data;",
+     "        entry.data_start = data;\n"
+     "        if entry.flags & 1 != 0 {\n"
+     "            let _ = read(reader, data, entry.compressed_size)?;\n"
+     "        }",
+     ["encrypted_entries_are_listed_not_read",
+      "a_requested_encrypted_entry_is_skipped_with_its_status"]),
     # The read budget.
     ("F31 a read is not counted",
      "src/zip.rs",
@@ -246,7 +255,8 @@ CASES = [
      "            .map_err(ReadError::Refusal)",
      "        read_counted(self.bus, self.uri, self.grant, self.left, offset, length)\n"
      "            .map_err(|_| ReadError::Budget)",
-     ["a_provider_error_while_listing_stops_the_run_and_writes_nothing"]),
+     ["a_provider_error_while_listing_stops_the_run_and_writes_nothing",
+      "a_denied_read_during_the_directory_read_stops_the_run"]),
     # Bounds DESIGN states but gives no row: an end record and a directory
     # that lie about where their bytes are must refuse the archive.
     ("F6d a local header outside the object is accepted",
@@ -368,34 +378,86 @@ CASES = [
 ]
 
 
-FAILED = []
+SUITES = []
+
+SUMMARY = re.compile(
+    r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;",
+    re.M,
+)
+RESULT = re.compile(r"^test (tests::\S+) \.\.\. (ok|FAILED)$", re.M)
+
+
+def suite():
+    """Runs the whole lib suite and returns its exit code, summary and results."""
+    result = kit.run(["cargo", "test", "--locked", "--lib"], HERE)
+    summaries = SUMMARY.findall(result.stdout)
+    results = dict(RESULT.findall(result.stdout))
+    return result.returncode, summaries, results
+
+
+def baseline():
+    """The test names the unmutated suite runs, or stop the run."""
+    code, summaries, results = suite()
+    if code != 0 or len(summaries) != 1 or summaries[0][0] != "ok":
+        raise SystemExit(f"the baseline suite did not pass cleanly:\n{summaries}\n")
+    passed = sum(1 for state in results.values() if state == "ok")
+    if len(results) != passed or int(summaries[0][1]) != passed:
+        raise SystemExit(
+            f"the baseline suite ran {len(results)} tests, summary says {summaries[0]}"
+        )
+    return set(results)
 
 
 def build():
     kit.cargo_compiles(HERE, ["--lib"])
     # A mutant must change only its own rule: the whole suite runs under it,
     # and every test the case does not name must still pass.
-    result = kit.run(["cargo", "test", "--locked", "--lib"], HERE)
-    FAILED.append(set(re.findall(r"^test (tests::\S+) \.\.\. FAILED$", result.stdout, re.M)))
+    code, summaries, results = suite()
+    SUITES.append({"code": code, "summaries": summaries, "results": results})
 
 
 def test_fails(name):
     return kit.cargo_test_fails(HERE, ["--lib"], f"tests::{name}")
 
 
-def check_isolation(cases, args):
+def check_isolation(cases, args, every_test):
     parts = [arg for arg in args if not arg.startswith("--")]
     executed = [case for case in cases if not parts or any(part in case[0] for part in parts)]
-    if len(executed) != len(FAILED):
-        raise SystemExit(f"{len(executed)} cases ran, {len(FAILED)} suites were recorded")
+    if len(executed) != len(SUITES):
+        raise SystemExit(f"{len(executed)} cases ran, {len(SUITES)} suites were recorded")
     leaked = []
-    for case, failed in zip(executed, FAILED):
-        extra = failed - {"tests::" + name for name in case[-1]}
-        if extra:
-            leaked.append((case[0], sorted(extra)))
+    for case, suite in zip(executed, SUITES):
+        named = {"tests::" + name for name in case[-1]}
+        summaries = suite["summaries"]
+        results = suite["results"]
+        problems = []
+        if len(summaries) != 1:
+            problems.append("the suite did not complete")
+        else:
+            state, passed, failed, ignored = summaries[0]
+            if state != "FAILED" or suite["code"] == 0:
+                problems.append("the mutant did not fail the suite")
+            if int(ignored) != 0:
+                problems.append(f"the suite ignored {ignored} tests")
+            if int(passed) + int(failed) != len(results):
+                problems.append(f"the summary counts {passed}+{failed} but {len(results)} ran")
+            if int(failed) != len(named):
+                problems.append(f"{failed} tests failed, {len(named)} are named")
+        if set(results) != every_test:
+            problems.append("the suite did not run every test")
+        failed = {name for name, state in results.items() if state == "FAILED"}
+        passed = {name for name, state in results.items() if state == "ok"}
+        if failed != named:
+            problems.append(f"failed {sorted(failed - named)} beyond the named tests"
+                            if failed - named else f"named tests passed: {sorted(named - failed)}")
+        unnamed_not_passed = (every_test - named) - passed
+        if unnamed_not_passed:
+            problems.append(f"unnamed tests did not pass: {sorted(unnamed_not_passed)}")
+        if problems:
+            leaked.append((case[0], problems))
     if leaked:
-        for name, extra in leaked:
-            print(f"LEAKED: {name} also fails {', '.join(extra)}", flush=True)
+        for name, problems in leaked:
+            print(f"LEAKED: {name}: {', '.join(problems)}", flush=True)
         raise SystemExit(f"{len(leaked)} falsifier(s) break a test they do not name")
     print(f"all {len(executed)} mutants leave every unnamed test passing")
 
@@ -405,9 +467,11 @@ def main():
         (case[0], HERE / case[1], case[2] if isinstance(case[2], list) else [(case[2], case[3])], case[-1])
         for case in CASES
     ]
+    check = "--check" in sys.argv[1:]
+    every_test = set() if check else baseline()
     kit.main([(cases, build, test_fails, None, True)], done=f"all {len(CASES)} archive falsifiers caught")
-    if "--check" not in sys.argv[1:]:
-        check_isolation(CASES, sys.argv[1:])
+    if not check:
+        check_isolation(CASES, sys.argv[1:], every_test)
 
 
 if __name__ == "__main__":
