@@ -230,16 +230,22 @@ A child host is a second journal for the same child. Its grants live in the pare
 child id and grant) for as long as the process runs; they are not stored, so the format stays 2. `without_grants`
 clears the list, so `decode(encode(j)) == without_grants(j)` still holds. `record_result` checks the parent's list
 before it stores any child text: a caller that passes a different host journal for the same child cannot hide a
-grant given through the first.
+grant given through the first, and that refusal says `granted through another host`.
 
-The spill pointer is the guest's own text, but its entry is narrow. `record_spill_result(journal, step_id,
-object_resource, version)` needs a dispatched step with a non-empty grant, a resource that covers the object, and
-the journal's last event to be a `Spill` node with the same resource and version. It builds the text itself;
-`spill_pointer` is its only caller. No caller passes arbitrary text.
+A model call under a child follows the nearest step at or above it that holds a grant (`nearest_granted`). An
+ungranted child therefore inherits the scope of the nearest granted step above it, and withdrawing that grant takes
+its call too.
+
+The spill pointer is the guest's own text, but its entry is narrow and its rule is in one place. `spill_ready` needs
+a dispatched, granted step with no result that covers the object, under the system head. `record_spill_result(journal,
+step_id, object_resource, version)` calls it and then needs the journal's last event to be a `Spill` node with the
+same resource and version; it builds the text itself. `spill_pointer` calls `spill_ready` before it writes the node,
+then the entry. No caller passes arbitrary text.
 
 A refused host write records the shared check's reason, or "not this child's host" when the parent context is
 missing. A refused result host binding records one reason for the missing host, the non-child step and the binding
-failure. The budget counter records "requests". All use `record_refusal_reason`; no new record kind.
+failure. The budget counter records "requests". A bad spill entry records its admission reason, or "no spill
+pointer" when the record is missing. All use `record_refusal_reason`; no new record kind.
 
 ## Tests and falsifiers
 

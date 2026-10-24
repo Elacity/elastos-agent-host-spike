@@ -1632,6 +1632,36 @@ fn record_visible(journal: &mut Journal, kind: VisibleRecord, text: &str) -> boo
     journal.epoch == epoch && journal.steps.len() == steps
 }
 
+/// The one admission rule for a spill pointer: a dispatched, granted step
+/// that has no result yet, can hold this object, and sits under the system
+/// head. A later edit does not move an older pointer.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn spill_ready(journal: &Journal, step_id: u64, object_resource: &str) -> Result<(), &'static str> {
+    let Some(step) = journal.steps.iter().find(|step| step.id == step_id) else {
+        return Err("not a step");
+    };
+    if step.state != StepState::Dispatched {
+        return Err("not dispatched");
+    }
+    if step.has_result {
+        return Err("has result");
+    }
+    if step.grant.as_deref().is_none_or(|grant| grant.is_empty()) {
+        return Err("no grant");
+    }
+    if !resource_covers(&step.resource, object_resource) {
+        return Err("not this step's resource");
+    }
+    if journal
+        .events
+        .first()
+        .is_none_or(|head| head.role != Role::System || head.source != NodeSource::Head)
+    {
+        return Err("no system head");
+    }
+    Ok(())
+}
+
 /// Record a short pointer for a granted, dispatched step. The file must
 /// already have been read. The pointer names that version, so a later edit
 /// does not move it. The file text stays where it was read. A host path adds
@@ -1646,21 +1676,7 @@ fn spill_pointer(journal: &mut Journal, step_id: u64, object_resource: &str) -> 
     else {
         return false;
     };
-    let Some(step) = journal.steps.iter().find(|step| step.id == step_id) else {
-        return false;
-    };
-    if step.state != StepState::Dispatched
-        || step.grant.as_deref().is_none_or(|grant| grant.is_empty())
-        || step.has_result
-        || !resource_covers(&step.resource, object_resource)
-    {
-        return false;
-    }
-    if journal
-        .events
-        .first()
-        .is_none_or(|head| head.role != Role::System || head.source != NodeSource::Head)
-    {
+    if spill_ready(journal, step_id, object_resource).is_err() {
         return false;
     }
     journal.events.push(SurfaceNode {
@@ -2694,13 +2710,8 @@ fn record_spill_result(
     object_resource: &str,
     version: u64,
 ) -> bool {
-    let Some(step) = journal.steps.iter().find(|step| step.id == step_id) else {
-        return false;
-    };
-    if step.state != StepState::Dispatched
-        || step.grant.as_deref().is_none_or(|grant| grant.is_empty())
-        || !resource_covers(&step.resource, object_resource)
-    {
+    if let Err(reason) = spill_ready(journal, step_id, object_resource) {
+        record_refusal_reason(journal, reason, &format!("spill result {step_id}"));
         return false;
     }
     let recorded = journal.events.last().is_some_and(|node| {
@@ -2711,6 +2722,11 @@ fn record_spill_result(
         )
     });
     if !recorded {
+        record_refusal_reason(
+            journal,
+            "no spill pointer",
+            &format!("spill result {step_id}"),
+        );
         return false;
     }
     let text = format!("spill\n{object_resource}\n{version}");
@@ -2779,6 +2795,11 @@ fn record_result(
             .iter()
             .any(|(child, grant)| *child == step_id && marked.contains(grant))
         {
+            record_refusal_reason(
+                journal,
+                "granted through another host",
+                &format!("child result {step_id}"),
+            );
             return false;
         }
         marked
@@ -4444,26 +4465,45 @@ fn record_child_result(parent: &mut Journal, child_id: u64, child: &Journal, res
     record_tool_result(parent, child_id, result, Some(child))
 }
 
+/// The nearest step at or above `step` that holds a grant, following the
+/// child links up through the run. A model call under an ungranted child
+/// inherits the scope of the nearest granted step above it.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn nearest_granted<'a>(journal: &'a Journal, step: &'a Step) -> Option<&'a Step> {
+    let mut at = step;
+    loop {
+        if granted_scope(at).is_some() {
+            return Some(at);
+        }
+        if at.kind != ProposalKind::Child {
+            return None;
+        }
+        at = at
+            .parent_id
+            .and_then(|id| journal.steps.iter().find(|step| step.id == id))?;
+    }
+}
+
 /// A call or a child is authorized or dispatched only while its owner is
 /// live and in scope (`usable_child`, `scope_still_granted`): a model call
 /// under a child is taken with that child when it is denied, stopped,
 /// cancelled or loses its budget, a model call of the top task needs the
 /// task budget and may not exceed its request count (the counter rule on
-/// load), a model call under a granted child is taken with the grant above
-/// it when that grant is withdrawn, and a granted child is taken with the
-/// grant above it when that grant is withdrawn. A child being granted (it has
-/// no grant yet) and a step with no parent have nothing else to check. The
-/// error is the check's own reason, which the caller records.
+/// load), a model call under a child follows the nearest granted step above
+/// it, so withdrawing that grant takes the call too, and a granted child is
+/// taken with the grant above it when that grant is withdrawn. A child being
+/// granted (it has no grant yet) and a step with no parent have nothing else
+/// to check. The error is the check's own reason, which the caller records.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn call_parent_usable(journal: &Journal, step: &Step) -> Result<(), &'static str> {
     match step.kind {
         ProposalKind::Hosted => match step.parent_id {
             Some(child) => {
                 let child = usable_child(journal, child)?;
-                // A child with no grant hands no granted scope downward; once
-                // it holds one, every step above must still grant it.
-                if child.grant.is_some() {
-                    scope_still_granted(journal, child).ok_or("not granted")?;
+                // An ungranted child hands no scope of its own, but the
+                // nearest granted step above still governs it.
+                if let Some(granted) = nearest_granted(journal, child) {
+                    scope_still_granted(journal, granted).ok_or("not granted")?;
                 }
                 Ok(())
             }
@@ -20288,6 +20328,15 @@ mod tests {
         ));
         assert_eq!(
             refusal_records(&journal).len(),
+            6,
+            "{:?}",
+            refusal_records(&journal)
+        );
+        assert_eq!(
+            refusal_records(&journal)
+                .iter()
+                .filter(|record| record.contains("not this child's host"))
+                .count(),
             5,
             "{:?}",
             refusal_records(&journal)
@@ -20295,7 +20344,7 @@ mod tests {
         assert!(
             refusal_records(&journal)
                 .iter()
-                .all(|record| record.contains("not this child's host")),
+                .any(|record| record.contains("granted through another host")),
             "{:?}",
             refusal_records(&journal)
         );
@@ -20313,11 +20362,68 @@ mod tests {
         ));
     }
 
-    /// Codex at 75ac0ae: the spill exception is not a text entry. It takes
-    /// the resource and version, needs the step that read it and the
-    /// journal's own pointer record, and builds the text itself.
+    /// Codex at 75ac0ae, round 3: the spill exception is not a text entry.
+    /// It takes the resource and version; admission (dispatched, granted,
+    /// no result, the step's resource, the system head) and the journal's
+    /// own pointer record are separate rules, each refused with a reason.
     #[test]
     fn a_spill_pointer_cannot_carry_arbitrary_text() {
+        const OBJECT: &str = "localhost://Users/self/Projects/demo/src/result.txt";
+        fn pointer(resource: &str, version: u64) -> SurfaceNode {
+            SurfaceNode {
+                role: Role::User,
+                text: String::new(),
+                source: NodeSource::Spill {
+                    resource: resource.to_string(),
+                    version,
+                },
+            }
+        }
+        fn dispatched() -> (Journal, u64) {
+            let (mut journal, run) = task(budget(8, 600));
+            let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+            assert!(authorize_child(
+                &mut journal,
+                child,
+                Some("child-grant"),
+                DEMO_SRC
+            ));
+            assert!(dispatch(&mut journal, child));
+            assert!(observe(
+                &mut journal,
+                OBJECT,
+                1,
+                &"x".repeat(CHILD_RESULT_CAP + 1)
+            ));
+            (journal, child)
+        }
+        // The entry takes a resource, not text: a grant string is not this
+        // step's resource.
+        let (mut journal, child) = dispatched();
+        assert!(!record_spill_result(
+            &mut journal,
+            child,
+            "host-only-grant",
+            1
+        ));
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("not this step's resource")));
+        // A matching pointer record is still needed.
+        let (mut journal, child) = dispatched();
+        assert!(!record_spill_result(&mut journal, child, OBJECT, 1));
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("no spill pointer")));
+        // A pointer for another version is not this pointer.
+        let (mut journal, child) = dispatched();
+        journal.events.push(pointer(OBJECT, 1));
+        assert!(!record_spill_result(&mut journal, child, OBJECT, 2));
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("no spill pointer")));
+        // Admission refuses a step that is not dispatched yet, even with a
+        // matching pointer.
         let (mut journal, run) = task(budget(8, 600));
         let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
         assert!(authorize_child(
@@ -20326,40 +20432,29 @@ mod tests {
             Some("child-grant"),
             DEMO_SRC
         ));
-        assert!(dispatch(&mut journal, child));
-        let object = "localhost://Users/self/Projects/demo/src/result.txt";
-        assert!(observe(
-            &mut journal,
-            object,
-            1,
-            &"x".repeat(CHILD_RESULT_CAP + 1)
-        ));
-        assert!(!record_spill_result(
-            &mut journal,
-            child,
-            "host-only-grant",
-            1
-        ));
-        assert!(
-            !record_spill_result(&mut journal, child, object, 1),
-            "no pointer record yet"
-        );
-        journal.events.push(SurfaceNode {
-            role: Role::User,
-            text: String::new(),
-            source: NodeSource::Spill {
-                resource: object.to_string(),
-                version: 1,
-            },
-        });
-        assert!(
-            !record_spill_result(&mut journal, child, object, 2),
-            "a version the journal did not record"
-        );
-        assert!(record_spill_result(&mut journal, child, object, 1));
+        assert_eq!(step_of(&journal, child).state, StepState::Prepared);
+        assert!(observe(&mut journal, OBJECT, 1, "short"));
+        journal.events.push(pointer(OBJECT, 1));
+        assert!(!record_spill_result(&mut journal, child, OBJECT, 1));
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("not dispatched")));
+        // Admission refuses a dispatched step with no grant, even with a
+        // matching pointer.
+        let (mut journal, child) = dispatched();
+        step_mut(&mut journal, child).grant = None;
+        journal.events.push(pointer(OBJECT, 1));
+        assert!(!record_spill_result(&mut journal, child, OBJECT, 1));
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("no grant")));
+        // All of them together store the pointer.
+        let (mut journal, child) = dispatched();
+        journal.events.push(pointer(OBJECT, 1));
+        assert!(record_spill_result(&mut journal, child, OBJECT, 1));
         assert_eq!(
             journal.events.last().unwrap().text,
-            format!("spill\n{object}\n1")
+            format!("spill\n{OBJECT}\n1")
         );
     }
 
@@ -20461,6 +20556,29 @@ mod tests {
         let call = ask_model(&mut journal, Some(child), HOSTED_MODEL).unwrap();
         assert!(authorize(&mut journal, call, Some("model-grant")));
         assert!(dispatch(&mut journal, call));
+        // An ungranted grandchild inherits the scope of the nearest granted
+        // step above it: withdrawing the run's grant takes its call too.
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let below = propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert_eq!(step_of(&journal, below).grant, None);
+        let call = ask_model(&mut journal, Some(below), HOSTED_MODEL).unwrap();
+        assert!(authorize(&mut journal, call, Some("model-grant")));
+        assert!(!authorize(&mut journal, run, None), "the run is denied");
+        assert!(
+            !dispatch(&mut journal, call),
+            "no grant above the ungranted child"
+        );
+        assert_eq!(step_of(&journal, call).state, StepState::Prepared);
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("not granted")));
     }
 
     /// R3: the plain `cancel` on a child is a stop: recorded, with its subtree.

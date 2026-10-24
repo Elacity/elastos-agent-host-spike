@@ -522,3 +522,37 @@ Principles:   3 (no new authority), 5 (all work stays in examples/agent-host), 1
               11 (each refusal keeps its reason and denies by default), 12 (design note updated), 7 (each rule has
               a failing-first test and a caught falsifier).
 ```
+
+## Update: Codex FAIL at 75ac0ae, round 3 (24 Oct)
+
+```text
+Finding 1:    the ancestor grant walk ran only when the immediate child held a grant. An ungranted grandchild
+              under a granted child could dispatch its model call after the run's grant was withdrawn.
+Fix:          `nearest_granted` finds the nearest step at or above the call's child that holds a grant, and
+              `call_parent_usable` runs `scope_still_granted` on it. A granted child behaves as before; an
+              ungranted child inherits the scope above it.
+Finding 2:    the parent host ledger and a missing spill pointer refused with a bare false.
+Fix:          the ledger refusal says "granted through another host"; a missing pointer says "no spill pointer".
+              Both use `record_refusal_reason` with the child-result or spill-result label.
+Finding 3:    the spill admission rule was copied in `spill_pointer` and `record_spill_result`, and PX26 removed
+              the copy and the pointer-record check together, so the named test could not see the copy alone.
+Fix:          one `spill_ready` rule (dispatched, granted, no result, the step's resource, the system head);
+              `record_spill_result` calls it, and `spill_pointer` calls it before it writes the node. The test
+              now isolates admission (not dispatched, no grant, wrong resource) and the pointer record (missing,
+              another version), each with its reason.
+Tests:        a_model_call_under_a_granted_child_needs_the_grant_above_it (ungranted grandchild, run withdrawn),
+              a_child_result_needs_a_verified_host (6 reasons, one "granted through another host"),
+              a_spill_pointer_cannot_carry_arbitrary_text (admission and record cases with reasons).
+Falsifiers:   PX30 (pointer record removed), PX31 (ledger reason removed), PX32 (spill-record reason removed) and
+              PX33 (only the immediate child's grant walked) new; PX04, PX24, PX25 and PX26 re-targeted.
+              PX26 now removes the admission rule only; PX30 removes the record check only.
+Full run:     python3 -I examples/agent-host/falsify.py: 260 CAUGHT, 1 CAUGHT (does not build: OY19), 1
+              SURVIVED (expected, by design: OZ01) of 262; no NOT RUN, no NO MATCH.
+Tests run:    ./examples/agent-host/verify.sh -> "223 passed", runner self-test OK, clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Guest hash:   e935e2921204a09a719bf6560f298c7dedb6c49075166eda37fb2af2d344ff05 on verify.sh.
+              wasm_sections.py: file 664436 bytes; /1/2 149 5ee6b40d46f6a045 (import list unchanged).
+Principles:   2 (a withdrawn ancestor grant takes the call), 5 (all work stays in examples/agent-host), 10 (one
+              spill admission rule), 11 (each refusal keeps its reason and denies by default), 12 (design note
+              updated), 7 (each rule has a failing-first test and a caught falsifier, each condition alone).
+```
