@@ -407,7 +407,7 @@
     }
    ],
    "tests": [
-    "tests::a_model_response_with_conflicting_content_lengths_is_refused"
+    "tests::the_opt_in_harness_rules_hold_without_a_model"
    ]
   },
   {
@@ -423,7 +423,7 @@
     }
    ],
    "tests": [
-    "tests::a_model_response_with_an_invalid_content_length_is_refused"
+    "tests::the_opt_in_harness_rules_hold_without_a_model"
    ]
   },
   {
@@ -439,7 +439,7 @@
     }
    ],
    "tests": [
-    "tests::a_chunked_model_response_needs_its_final_empty_line"
+    "tests::the_opt_in_harness_rules_hold_without_a_model"
    ]
   },
   {
@@ -455,7 +455,7 @@
     }
    ],
    "tests": [
-    "tests::a_chunked_model_response_refuses_an_overflowing_chunk_size"
+    "tests::the_opt_in_harness_rules_hold_without_a_model"
    ]
   },
   {
@@ -471,7 +471,7 @@
     }
    ],
    "tests": [
-    "tests::a_metric_value_is_read_by_its_exact_name"
+    "tests::the_opt_in_harness_rules_hold_without_a_model"
    ]
   },
   {
@@ -487,7 +487,7 @@
     }
    ],
    "tests": [
-    "tests::a_metrics_snapshot_without_both_required_counters_is_refused"
+    "tests::the_opt_in_harness_rules_hold_without_a_model"
    ]
   },
   {
@@ -503,7 +503,7 @@
     }
    ],
    "tests": [
-    "tests::a_prefill_histogram_is_read_from_its_sum_and_count"
+    "tests::the_opt_in_harness_rules_hold_without_a_model"
    ]
   },
   {
@@ -519,7 +519,7 @@
     }
    ],
    "tests": [
-    "tests::a_chunked_model_response_with_a_trailer_is_accepted"
+    "tests::the_opt_in_harness_rules_hold_without_a_model"
    ]
   },
   {
@@ -535,7 +535,7 @@
     }
    ],
    "tests": [
-    "tests::a_scalar_prefill_has_no_fabricated_count"
+    "tests::the_opt_in_harness_rules_hold_without_a_model"
    ]
   },
   {
@@ -551,7 +551,7 @@
     }
    ],
    "tests": [
-    "tests::the_opt_in_probe_skips_without_a_configured_url"
+    "tests::the_opt_in_harness_rules_hold_without_a_model"
    ]
   },
   {
@@ -567,7 +567,7 @@
     }
    ],
    "tests": [
-    "tests::the_opt_in_probe_sends_two_turns_between_two_metric_reads"
+    "tests::the_opt_in_harness_rules_hold_without_a_model"
    ]
   },
   {
@@ -583,7 +583,7 @@
     }
    ],
    "tests": [
-    "tests::the_opt_in_probe_sends_two_turns_between_two_metric_reads"
+    "tests::the_opt_in_harness_rules_hold_without_a_model"
    ]
   },
   {
@@ -599,7 +599,7 @@
     }
    ],
    "tests": [
-    "tests::the_opt_in_probe_sends_two_turns_between_two_metric_reads"
+    "tests::the_opt_in_harness_rules_hold_without_a_model"
    ]
   },
   {
@@ -615,7 +615,7 @@
     }
    ],
    "tests": [
-    "tests::the_opt_in_probe_sends_two_turns_between_two_metric_reads"
+    "tests::the_opt_in_harness_rules_hold_without_a_model"
    ]
   },
   {
@@ -631,7 +631,7 @@
     }
    ],
    "tests": [
-    "tests::the_opt_in_probe_refuses_a_rejected_turn"
+    "tests::the_opt_in_harness_rules_hold_without_a_model"
    ]
   },
   {
@@ -647,7 +647,7 @@
     }
    ],
    "tests": [
-    "tests::the_opt_in_probe_refuses_a_moved_prefix"
+    "tests::the_opt_in_harness_rules_hold_without_a_model"
    ]
   },
   {
@@ -663,7 +663,39 @@
     }
    ],
    "tests": [
-    "tests::the_opt_in_probe_refuses_a_rejected_second_turn"
+    "tests::the_opt_in_harness_rules_hold_without_a_model"
+   ]
+  },
+  {
+   "id": "FP19",
+   "title": "a rejected authority echoes the URL, including credentials",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                return Err(\"invalid model URL authority\".to_string());",
+     "new": "                return Err(format!(\"invalid model URL authority in {base_url:?}\"));"
+    }
+   ],
+   "tests": [
+    "tests::the_opt_in_harness_rules_hold_without_a_model"
+   ]
+  },
+  {
+   "id": "FP20",
+   "title": "an unsupported scheme echoes the URL, including credentials",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                return Err(\n                    \"unsupported model URL scheme; expected http://host[:port][/path]\".to_string(),\n                );",
+     "new": "                return Err(format!(\n                    \"unsupported model URL {base_url:?}; expected http://host[:port][/path]\"\n                ));"
+    }
+   ],
+   "tests": [
+    "tests::the_opt_in_harness_rules_hold_without_a_model"
    ]
   }
  ]

@@ -8149,16 +8149,16 @@ mod opt_in_model {
                 if base_url.starts_with("https://") {
                     return Err("https is not supported by the std-only test client".to_string());
                 }
-                return Err(format!(
-                    "unsupported model URL {base_url:?}; expected http://host[:port][/path]"
-                ));
+                return Err(
+                    "unsupported model URL scheme; expected http://host[:port][/path]".to_string(),
+                );
             };
             let (authority, path) = match rest.find('/') {
                 Some(index) => (&rest[..index], &rest[index..]),
                 None => (rest, ""),
             };
             if authority.is_empty() || authority.contains('@') {
-                return Err(format!("invalid model URL authority in {base_url:?}"));
+                return Err("invalid model URL authority".to_string());
             }
             let (host, port) = split_authority(authority)?;
             let path = if path.is_empty() || path == "/" {
@@ -9236,20 +9236,13 @@ mod tests {
         )
     }
 
-    #[test]
     fn the_opt_in_probe_skips_without_a_configured_url() {
         assert!(matches!(probe_prefix_turns(None), Ok(None)));
     }
 
-    #[test]
     fn the_opt_in_probe_refuses_a_moved_prefix() {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("a free port")
-            .local_addr()
-            .expect("the free address")
-            .port();
         let error = probe_prefix_turns_with(
-            Some(format!("http://127.0.0.1:{port}/v1")),
+            Some("http://127.0.0.1:9/v1".to_string()),
             (
                 b"stable-prefix".to_vec(),
                 "first turn".to_string(),
@@ -9264,7 +9257,23 @@ mod tests {
         );
     }
 
-    #[test]
+    /// A rejected URL must not echo credentials into an error that a log keeps.
+    fn a_rejected_model_url_does_not_disclose_credentials() {
+        let with_credentials = "http://reviewer:DUMMY_PASSWORD@127.0.0.1:9/v1";
+        let error = opt_in_model::metrics(with_credentials)
+            .expect_err("a URL with credentials must be refused");
+        assert!(!error.contains("DUMMY_PASSWORD"), "{error}");
+        assert!(!error.contains("reviewer"), "{error}");
+        assert!(!error.contains("http://"), "{error}");
+
+        let other_scheme = "ftp://reviewer:DUMMY_PASSWORD@127.0.0.1/v1";
+        let error =
+            opt_in_model::metrics(other_scheme).expect_err("an unsupported scheme must be refused");
+        assert!(!error.contains("DUMMY_PASSWORD"), "{error}");
+        assert!(!error.contains("reviewer"), "{error}");
+        assert!(!error.contains("ftp://"), "{error}");
+    }
+
     fn the_opt_in_probe_sends_two_turns_between_two_metric_reads() {
         let (base_url, requests, stop, server) = recording_server(
             metrics_response(&metrics_snapshot(100.0, 1.0, 2.0)),
@@ -9326,7 +9335,6 @@ mod tests {
         assert!(report.prefix_bytes > 0);
     }
 
-    #[test]
     fn the_opt_in_probe_refuses_a_rejected_turn() {
         let refused =
             "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -9349,7 +9357,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn the_opt_in_probe_refuses_a_rejected_second_turn() {
         let refused =
             "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -9373,6 +9380,28 @@ mod tests {
             error.contains("the local model refused the second turn"),
             "{error}"
         );
+    }
+
+    /// The offline half of the opt-in harness: every rule the real-model test
+    /// relies on is checked without an endpoint. One named test keeps the
+    /// default set to one added test.
+    #[test]
+    fn the_opt_in_harness_rules_hold_without_a_model() {
+        a_rejected_model_url_does_not_disclose_credentials();
+        a_model_response_with_an_invalid_content_length_is_refused();
+        a_model_response_with_conflicting_content_lengths_is_refused();
+        a_chunked_model_response_needs_its_final_empty_line();
+        a_chunked_model_response_refuses_an_overflowing_chunk_size();
+        a_chunked_model_response_with_a_trailer_is_accepted();
+        a_metric_value_is_read_by_its_exact_name();
+        a_prefill_histogram_is_read_from_its_sum_and_count();
+        a_scalar_prefill_has_no_fabricated_count();
+        a_metrics_snapshot_without_both_required_counters_is_refused();
+        the_opt_in_probe_skips_without_a_configured_url();
+        the_opt_in_probe_refuses_a_moved_prefix();
+        the_opt_in_probe_sends_two_turns_between_two_metric_reads();
+        the_opt_in_probe_refuses_a_rejected_turn();
+        the_opt_in_probe_refuses_a_rejected_second_turn();
     }
 
     /// Opt-in: sends the two consecutive turns whose packed prefixes are
@@ -9416,7 +9445,6 @@ mod tests {
         result
     }
 
-    #[test]
     fn a_model_response_with_an_invalid_content_length_is_refused() {
         let response = "HTTP/1.1 200 OK\r\nContent-Length: invalid\r\n\r\n{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}".to_string();
         let error =
@@ -9424,7 +9452,6 @@ mod tests {
         assert!(error.starts_with("invalid content-length"), "{error}");
     }
 
-    #[test]
     fn a_model_response_with_conflicting_content_lengths_is_refused() {
         let body = serde_json::json!({
             "choices": [{ "message": { "content": "ok" } }],
@@ -9439,7 +9466,6 @@ mod tests {
         assert!(error.starts_with("conflicting content-length"), "{error}");
     }
 
-    #[test]
     fn a_chunked_model_response_needs_its_final_empty_line() {
         let body = serde_json::json!({
             "choices": [{ "message": { "content": "ok" } }],
@@ -9457,7 +9483,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn a_chunked_model_response_refuses_an_overflowing_chunk_size() {
         let response =
             "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\n".to_string();
@@ -9466,7 +9491,6 @@ mod tests {
         assert!(error.starts_with("invalid chunk size"), "{error}");
     }
 
-    #[test]
     fn a_chunked_model_response_with_a_trailer_is_accepted() {
         let body = serde_json::json!({
             "choices": [{ "message": { "content": "ok" } }],
@@ -9482,7 +9506,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn a_metric_value_is_read_by_its_exact_name() {
         let metrics = "# TYPE tensorfold:prompt_tokens_total counter\n\
                        tensorfold:prompt_tokens_total{model=\"deepseek-v4-flash\"} 1234\n\
@@ -9515,7 +9538,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn a_prefill_histogram_is_read_from_its_sum_and_count() {
         let metrics = "tensorfold:request_prefill_seconds_sum 1.5\n\
                        tensorfold:request_prefill_seconds_count 3\n";
@@ -9536,7 +9558,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn a_scalar_prefill_has_no_fabricated_count() {
         let scalar = prefill_seconds("tensorfold:request_prefill_seconds 0.25\n");
         assert_eq!(scalar, Some(PrefillSeconds::Scalar(0.25)));
@@ -9549,7 +9570,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn a_metrics_snapshot_without_both_required_counters_is_refused() {
         let full = "tensorfold:prompt_tokens_total 100\n\
                     tensorfold:request_prefill_seconds_sum 0.5\n\
