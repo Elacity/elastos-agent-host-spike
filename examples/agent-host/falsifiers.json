@@ -90,8 +90,8 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "    mutation = Mutation(entry, base)\n    try:\n        mutation.apply()\n        return body()\n    finally:\n        pending = None\n        while True:\n            try:\n                mutation.restore()\n                break\n            except KeyboardInterrupt as error:\n                if not mutation.applied:\n                    raise\n                pending = error\n        if pending is not None:\n            raise pending",
-     "new": "    mutation = Mutation(entry, base)\n    mutation.apply()\n    return body()"
+     "old": "    try:\n        try:\n            mutation.apply()\n            return body()\n        finally:\n            pending = None\n            while True:\n                try:\n                    mutation.restore()\n                    break\n                except KeyboardInterrupt as error:\n                    if not mutation.applied:\n                        raise\n                    pending = error\n            if pending is not None:\n                raise pending\n    except KeyboardInterrupt:\n        # The interrupt landed on the way into the cleanup, before the retry\n        # took effect. Put the originals back, then let it go on.\n        mutation.restore()\n        raise",
+     "new": "    mutation.apply()\n    return body()"
     }
    ],
    "tests": [
@@ -122,8 +122,8 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "    mutation = Mutation(entry, base)\n    try:\n        mutation.apply()\n        return body()\n    finally:\n        pending = None\n        while True:\n            try:\n                mutation.restore()\n                break\n            except KeyboardInterrupt as error:\n                if not mutation.applied:\n                    raise\n                pending = error\n        if pending is not None:\n            raise pending",
-     "new": "    mutation = Mutation(entry, base)\n    mutation.apply()\n    return body()"
+     "old": "    try:\n        try:\n            mutation.apply()\n            return body()\n        finally:\n            pending = None\n            while True:\n                try:\n                    mutation.restore()\n                    break\n                except KeyboardInterrupt as error:\n                    if not mutation.applied:\n                        raise\n                    pending = error\n            if pending is not None:\n                raise pending\n    except KeyboardInterrupt:\n        # The interrupt landed on the way into the cleanup, before the retry\n        # took effect. Put the originals back, then let it go on.\n        mutation.restore()\n        raise",
+     "new": "    mutation.apply()\n    return body()"
     },
     {
      "file": "falsify.py",
@@ -185,14 +185,14 @@
   },
   {
    "id": "FS12",
-   "title": "an interrupt at the start of the restore is not retried",
+   "title": "an interrupted restore retry swallows the interrupt",
    "command": "selftest",
    "expect": "caught",
    "edits": [
     {
      "file": "falsify.py",
-     "old": "        pending = None\n        while True:\n            try:\n                mutation.restore()\n                break\n            except KeyboardInterrupt as error:\n                if not mutation.applied:\n                    raise\n                pending = error\n        if pending is not None:\n            raise pending",
-     "new": "        mutation.restore()"
+     "old": "            if pending is not None:\n                raise pending\n    except KeyboardInterrupt:",
+     "new": "            if pending is not None:\n                pending = None\n    except KeyboardInterrupt:"
     }
    ],
    "tests": [
@@ -245,6 +245,38 @@
    ],
    "tests": [
     "a named test that does not run is not a catch"
+   ]
+  },
+  {
+   "id": "FS16",
+   "title": "an empty test list proves a catch",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    if not tests:\n        return False, [], []",
+     "new": "    if not tests:\n        return True, [], []"
+    }
+   ],
+   "tests": [
+    "a survives entry is a catch only with its named tests"
+   ]
+  },
+  {
+   "id": "FS17",
+   "title": "an interrupt on the way into the cleanup is not restored",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    except KeyboardInterrupt:\n        # The interrupt landed on the way into the cleanup, before the retry\n        # took effect. Put the originals back, then let it go on.\n        mutation.restore()\n        raise",
+     "new": "    except KeyboardInterrupt:\n        raise"
+    }
+   ],
+   "tests": [
+    "an interrupt at the cleanup entry is restored"
    ]
   }
  ]

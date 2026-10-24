@@ -19,25 +19,27 @@ harness's own run must name the test, close with a summary that says it ran
 and failed, exit with its own code for that result, and report no error or
 crash of its own on stderr. A harness error, a loading error or a killed
 process is NOT RUN and never a catch. One named test that still passes means
-SURVIVED. Both modes ask one catch decision: a `survives` entry that stops
-surviving is a catch only when that proof passes, and a `compile_error` entry
-reports a failed build as its own result, never as a catch.
+SURVIVED. Both modes ask one catch decision, and it needs at least one named
+test: a `survives` entry that stops surviving is a catch only when every named
+test ran and failed, and a `compile_error` entry reports a failed build as its
+own result, never as a catch.
 
 The original file's bytes are kept as a hard link while the mutated copy is
 in place, and the restore is a rename, so it needs no free space. Every
 mutation runs inside guard_mutation, whose finally holds the restore in its
-own frame: an interrupt during the edit, at the edit's own return, or before
-the restore takes its own guard restores before the error propagates (the
-last case is retried), and signals stay blocked until every original is back.
-A backup left by a killed run is put back before anything else. The runner
-stops when the disk has less than 2 GiB free or a command reports a full
-disk.
+own frame: an interrupt during the edit, at the edit's own return, before the
+restore takes its own guard, or on the way into the cleanup restores before
+the error propagates, and signals stay blocked until every original is back.
+The top-level handler puts back any backup a late interrupt left. A backup
+left by a killed run is put back before anything else. The runner stops when
+the disk has less than 2 GiB free or a command reports a full disk.
 
 Exit status: 0 when every falsifier did what it expects, 1 otherwise, 2 for a
 usage or data error, 3 when it stopped for a full disk.
 """
 import json
 import dis
+import inspect
 import os
 import pathlib
 import re
@@ -96,12 +98,12 @@ def load():
 
 
 def recover_backups():
-    """Put back any original left by a run that was killed mid-falsifier."""
+    """Put back any original left by a run that was killed or interrupted."""
     for backup in HERE.rglob("*" + BACKUP_SUFFIX):
         target = backup.with_name(backup.name[: -len(BACKUP_SUFFIX)])
         os.replace(backup, target)
         os.utime(target)
-        print(f"recovered {target.relative_to(REPO)} from a killed run")
+        print(f"recovered {target.relative_to(REPO)} from a killed or interrupted run")
 
 
 def check_disk():
@@ -193,27 +195,34 @@ class Mutation:
 def guard_mutation(entry, body, base=HERE):
     """Apply the edits, run body(), and always put the originals back.
 
-    Every mutation goes through here. The restore loop sits in this frame's
-    finally, so an interrupt at the return boundary of apply(), in body(), at
-    the return of body(), or at the call that starts the restoration itself is
-    caught and the restoration runs again. applied empties only after every
-    original is back; the interrupt that came in goes on after that."""
+    Every mutation goes through here. The restore loop sits in the finally, so
+    an interrupt at the return boundary of apply(), in body(), at the return of
+    body(), or at the call that starts the restoration is retried there. The
+    outer handler covers the way into the cleanup, which happens before the
+    retry is active; applied empties only after every original is back, and the
+    interrupt that came in goes on after that."""
     mutation = Mutation(entry, base)
     try:
-        mutation.apply()
-        return body()
-    finally:
-        pending = None
-        while True:
-            try:
-                mutation.restore()
-                break
-            except KeyboardInterrupt as error:
-                if not mutation.applied:
-                    raise
-                pending = error
-        if pending is not None:
-            raise pending
+        try:
+            mutation.apply()
+            return body()
+        finally:
+            pending = None
+            while True:
+                try:
+                    mutation.restore()
+                    break
+                except KeyboardInterrupt as error:
+                    if not mutation.applied:
+                        raise
+                    pending = error
+            if pending is not None:
+                raise pending
+    except KeyboardInterrupt:
+        # The interrupt landed on the way into the cleanup, before the retry
+        # took effect. Put the originals back, then let it go on.
+        mutation.restore()
+        raise
 
 
 def spec(command, manifest=None, cargo_flags=("--locked",)):
@@ -373,8 +382,10 @@ def evaluate(entry, how):
 
 def catch_proof(tests, outcomes):
     """(proved, missing, passing): the one catch decision. A catch is proved
-    only when every named test ran and failed; every mode that reports one
-    asks this function."""
+    only when at least one named test was required and every named test ran
+    and failed; every mode that reports one asks this function."""
+    if not tests:
+        return False, [], []
     missing = [name for name in tests if outcomes.get(name) == "not run"]
     passing = [name for name in tests if outcomes.get(name) != "failed"]
     return not missing and not passing, missing, passing
@@ -593,6 +604,9 @@ def verdict_cases():
         ((two, False, {"a": "failed", "b": "not run"}, None), (False, "NOT RUN")),
         ((two, True, {}, None), (False, "BUILD FAILED")),
         (({"id": "ST", "expect": "survives", "tests": []}, False, {}, True), (True, "SURVIVED (expected, by design)")),
+        # An empty test list cannot prove a catch in either mode (finding 1).
+        (({"id": "ST", "expect": "survives", "tests": []}, False, {}, False),
+         (False, "SUITE FAILED (not a catch)")),
         ((survivor, False, {"a": "failed"}, False), (True, "CAUGHT")),
         ((survivor, False, {}, False), (False, "SUITE FAILED (not a catch)")),
         ((survivor, False, {"a": "not run"}, False), (False, "SUITE FAILED (not a catch)")),
@@ -613,6 +627,7 @@ def verdict_cases():
     # One catch decision serves both modes: the decision itself, then each mode
     # against it with the same outcomes.
     proofs = [
+        (((), {}), (False, [], [])),
         ((("a",), {"a": "failed"}), (True, [], [])),
         ((("a",), {"a": "not run"}), (False, ["a"], ["a"])),
         ((("a",), {"a": "passed"}), (False, [], ["a"])),
@@ -690,6 +705,17 @@ def a_survives_entry_caught_only_with_its_named_tests():
             print(f"self-test: survives entry: {title}: {got[1]} ({got[2]})")
             if got[:2] != want:
                 ok = False
+        # No named test means no proof, so a failing suite is not a catch
+        # (review finding 1).
+        stub = SELF_TEST_DIR / "stub.py"
+        stub.write_text(STUB_SUITE_ERROR, encoding="utf-8")
+        empty = {"id": "ST", "command": "host", "expect": "survives", "tests": []}
+        how = {"build": [], "one": (["python3", "-I", str(stub)], SELF_TEST_DIR, []),
+               "suite": (["python3", "-I", str(stub)], SELF_TEST_DIR)}
+        got = verdict(empty, *evaluate(empty, how))
+        print(f"self-test: survives entry with no named tests: {got[1]} ({got[2]})")
+        if got[:2] != (False, "SUITE FAILED (not a catch)") or "no named tests" not in got[2]:
+            ok = False
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
     return ok
@@ -833,6 +859,45 @@ def interruption_before_the_restore_runs():
     return bool(injected) and interrupted and restored and not backup.exists()
 
 
+def interruption_at_the_cleanup_entry():
+    """A KeyboardInterrupt on the first line of the cleanup, before the retry
+    loop is active. The outer handler puts the original back first (task 004,
+    review finding 2)."""
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+    path = SELF_TEST_DIR / "cleanup-entry.txt"
+    original = "original bytes\n"
+    path.write_text(original, encoding="utf-8")
+    lines, start = inspect.getsourcelines(guard_mutation)
+    at = next(start + offset for offset, line in enumerate(lines) if line.strip() == "pending = None")
+    injected = []
+
+    def trace(frame, event, _arg):
+        if (frame.f_code is guard_mutation.__code__ and event == "line"
+                and frame.f_lineno == at and not injected):
+            injected.append(frame)
+            raise KeyboardInterrupt
+        return trace
+
+    entry = {"id": "ST", "command": "host", "expect": "caught",
+             "edits": [{"file": "cleanup-entry.txt", "old": "original bytes", "new": "mutated bytes"}],
+             "tests": []}
+    interrupted = False
+    previous = sys.gettrace()
+    sys.settrace(trace)
+    try:
+        guard_mutation(entry, lambda: None, SELF_TEST_DIR)
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        sys.settrace(previous)
+    backup = path.with_name(path.name + BACKUP_SUFFIX)
+    restored = path.read_text(encoding="utf-8") == original
+    print(f"self-test: interruption at the cleanup entry: raised={interrupted}, "
+          f"restored={restored}, backup left={backup.exists()}")
+    return bool(injected) and interrupted and restored and not backup.exists()
+
+
 def a_self_test_case_counts_only_when_it_ran():
     """The named case ran and failed -> a catch. A loading error that exits
     non-zero, or a signal, is not run and not a catch (review finding 1)."""
@@ -871,6 +936,7 @@ SELF_TEST_CASES = {
     "an interrupted edit is restored": interruption_restores,
     "an interrupt at the end of the edit is restored": interruption_at_the_end_of_the_edit,
     "an interrupt before the restore runs is retried": interruption_before_the_restore_runs,
+    "an interrupt at the cleanup entry is restored": interruption_at_the_cleanup_entry,
     "a real catch counts": real_catch_counts,
     "a self-test case counts only when it ran": a_self_test_case_counts_only_when_it_ran,
 }
@@ -974,6 +1040,13 @@ def main(argv):
                   "the next e2e run builds before its tests")
         return 3
     except KeyboardInterrupt:
+        if "--keep-backups" in argv:
+            # The backups belong to the caller's mutation, not to this run.
+            print("stopped: interrupted")
+            return 1
+        # A last resort for an interrupt that got past the guard: the backup
+        # holds the original bytes, so the rename puts them back.
+        recover_backups()
         left = sorted(str(backup.relative_to(REPO)) for backup in HERE.rglob("*" + BACKUP_SUFFIX))
         if left:
             print("stopped: interrupted; originals left to restore: " + ", ".join(left))
