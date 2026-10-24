@@ -1157,19 +1157,34 @@ fn stored_rules_ok(journal: &Journal) -> Result<(), &'static str> {
     stored_children_ok(journal)
 }
 
-/// The compaction boundary: the saved copy is the prefix of the log it was
-/// taken from, so the events after it are exactly the records written while
-/// the compaction is open. A saved copy longer than the log, or one that
-/// differs from the log at its length, makes
-/// `child_records_since_compaction` drop records at a commit or a crash
-/// restore, and the next load refuses them. Every load and both install
-/// paths ask this one rule.
+/// The compaction boundary, the one rule for an open compaction's state:
+/// - the open flag, the saved copy and the pending replacement are there
+///   together or not at all (`begin_compact` sets all three; a commit or a
+///   crash restore clears all three);
+/// - the saved copy is the prefix of the log it was taken from, so the events
+///   after it are exactly the records written while the compaction is open;
+/// - the series is still the saved one (nothing may start a new series while
+///   a compaction is open, see `log_may_change_in_place`).
+///
+/// Without it `child_records_since_compaction` takes the records from the
+/// wrong place (a missing saved copy selects none) and a commit or a crash
+/// restore drops them; the next load refuses the result. Every load and both
+/// install paths ask this one rule.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn compaction_boundary_ok(journal: &Journal) -> Result<(), &'static str> {
-    let Some((saved, _)) = &journal.compact_backup else {
-        return Ok(());
+    let (saved, saved_epoch) = match (
+        &journal.compact_backup,
+        &journal.compact_pending,
+        journal.compaction_open,
+    ) {
+        (None, None, false) => return Ok(()),
+        (Some((saved, saved_epoch)), Some(_), true) => (saved, *saved_epoch),
+        _ => return Err("record"),
     };
     if saved.len() > journal.events.len() || journal.events[..saved.len()] != saved[..] {
+        return Err("record");
+    }
+    if saved_epoch != journal.epoch {
         return Err("record");
     }
     Ok(())
@@ -1633,8 +1648,10 @@ fn bump_epoch(journal: &mut Journal) {
     journal.epoch = journal.epoch.saturating_add(1);
 }
 
-/// `in_history` appends a later system node. The incapable path rewrites node 0,
-/// which `log_may_change_in_place` refuses while a compaction is open.
+/// `in_history` appends a later system node. The incapable path rewrites node 0.
+/// A first head is inserted at node 0. The insert and the rewrite change the
+/// log in place and start a new series, so `log_may_change_in_place` refuses
+/// both while a compaction is open.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn admit_system(journal: &mut Journal, text: &str, in_history: bool) -> Result<(), &'static str> {
     if text.is_empty() {
@@ -1645,6 +1662,7 @@ fn admit_system(journal: &mut Journal, text: &str, in_history: bool) -> Result<(
         .iter()
         .any(|event| event.role == Role::System);
     if !has_system {
+        log_may_change_in_place(journal)?;
         journal.events.insert(
             0,
             SurfaceNode {
@@ -2014,10 +2032,12 @@ fn child_records_since_compaction(journal: &Journal) -> impl Iterator<Item = &Su
     })
 }
 
-/// While a compaction is open the log only grows, so the saved copy stays its
-/// start (`compaction_boundary_ok`). Every step that would change a node
-/// already in the log asks this one rule first and changes nothing when it
-/// is refused: pruning and the head rewrite.
+/// While a compaction is open the log only grows and the series stays put, so
+/// the saved copy stays its start (`compaction_boundary_ok`). Every step that
+/// would change a node already in the log, or start a new series, asks this
+/// one rule first and changes nothing when it is refused: pruning, the head
+/// insert and the head rewrite in `admit_system`. Every other step only
+/// appends, and the commit and the crash restore have `open_compaction_ok`.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn log_may_change_in_place(journal: &Journal) -> Result<(), &'static str> {
     if journal.compaction_open || journal.compact_backup.is_some() {
@@ -2026,15 +2046,17 @@ fn log_may_change_in_place(journal: &Journal) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// The one admission for a commit and a crash restore: a compaction is open
-/// and its saved copy is the start of the log. Each refusal says why, and
-/// neither path changes the journal when refused.
+/// The one admission for a commit and a crash restore: the compaction state
+/// keeps the boundary rule, and a compaction is open. A broken state says so
+/// before "not open", so leftovers of a compaction are never read as none.
+/// Each refusal says why, and neither path changes the journal when refused.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn open_compaction_ok(journal: &Journal) -> Result<(), &'static str> {
+    compaction_boundary_ok(journal).map_err(|_| COMPACTION_BOUNDARY_REASON)?;
     if !journal.compaction_open {
         return Err(COMPACTION_NOT_OPEN_REASON);
     }
-    compaction_boundary_ok(journal).map_err(|_| COMPACTION_BOUNDARY_REASON)
+    Ok(())
 }
 
 /// Apply an open compaction and start the next series.
@@ -9626,9 +9648,15 @@ mod tests {
         journal.compact_pending = Some(vec![journal.events[0].clone()]);
         journal.compact_backup = Some((Vec::new(), 7));
         let before = journal.clone();
-        assert!(commit_compact(&mut journal).is_err());
+        assert_eq!(
+            commit_compact(&mut journal),
+            Err(COMPACTION_BOUNDARY_REASON)
+        );
         assert_eq!(journal, before);
-        assert!(note_crash_during_compact(&mut journal).is_err());
+        assert_eq!(
+            note_crash_during_compact(&mut journal),
+            Err(COMPACTION_BOUNDARY_REASON)
+        );
         assert_eq!(journal, before);
     }
 
@@ -16929,11 +16957,9 @@ mod tests {
         let first = legacy_edit(&mut journal, NOTES, None);
         legacy_edit(&mut journal, upper, Some(first));
         cases.push((journal, "one file twice in one change"));
+        // Only in the saved copy: the path rule refuses it before the boundary.
         let mut journal = empty_journal();
-        journal
-            .events
-            .push(raw_read(doubled, 1, "rev-1", None, "alpha\n"));
-        journal.compact_backup = Some((journal.events.clone(), 0));
+        journal.compact_backup = Some((vec![raw_read(doubled, 1, "rev-1", None, "alpha\n")], 0));
         cases.push((journal, "path not canonical"));
         let mut journal = empty_journal();
         journal.compact_pending = Some(vec![raw_read(nfd, 1, "rev-1", None, "alpha\n")]);
@@ -21730,6 +21756,211 @@ mod tests {
         );
         assert_eq!(journal, before);
         assert!(COMPACTION_BOUNDARY_REASON.ends_with("start a new task"));
+    }
+
+    /// Codex at 18278463f, finding 2: an open compaction with no saved copy
+    /// loaded, `child_records_since_compaction` then selected no record, and
+    /// the commit dropped a stop written during the compaction; the next load
+    /// refused it. Only operations present at 2a605c16 are asked, so this
+    /// compiles and fails there.
+    #[test]
+    fn an_open_compaction_without_its_saved_copy_keeps_its_records() {
+        let (mut journal, child) = compacting_with_a_child();
+        journal.compact_backup = None;
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        assert!(note_time_refusal(&mut journal, child));
+        let _ = commit_compact(&mut journal);
+        assert_eq!(
+            child_stops(&journal)
+                .iter()
+                .filter(|stop| stop.0 == child)
+                .count(),
+            1,
+            "the stop written during the compaction is kept"
+        );
+    }
+
+    /// Every shape of a broken compaction state: refused on load, and a
+    /// commit or a crash restore says the compaction does not match the log
+    /// and changes nothing. A consistent open compaction still loads.
+    #[test]
+    fn an_open_compaction_has_its_flag_saved_copy_and_replacement_together() {
+        let (good, _child) = compacting_with_a_child();
+        assert!(decode_journal(&encode_journal(&good, &[0; 32]).unwrap()).is_ok());
+        let mut cases: Vec<(Journal, &str)> = Vec::new();
+        let mut journal = good.clone();
+        journal.compact_backup = None;
+        cases.push((journal, "open, no saved copy"));
+        let mut journal = good.clone();
+        journal.compact_pending = None;
+        cases.push((journal, "open, no replacement"));
+        let mut journal = good.clone();
+        journal.compaction_open = false;
+        cases.push((journal, "saved copy and replacement, not open"));
+        let mut journal = good.clone();
+        journal.compaction_open = false;
+        journal.compact_backup = None;
+        cases.push((journal, "a replacement alone"));
+        let mut journal = good.clone();
+        journal.compaction_open = false;
+        journal.compact_pending = None;
+        cases.push((journal, "a saved copy alone"));
+        let mut journal = good.clone();
+        journal.epoch += 1;
+        cases.push((journal, "a new series under an open compaction"));
+        for (mut journal, case) in cases {
+            assert_eq!(
+                decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+                Err("record"),
+                "{case}"
+            );
+            let before = journal.clone();
+            assert_eq!(
+                commit_compact(&mut journal.clone()),
+                Err(COMPACTION_BOUNDARY_REASON),
+                "{case}"
+            );
+            assert_eq!(
+                note_crash_during_compact(&mut journal),
+                Err(COMPACTION_BOUNDARY_REASON),
+                "{case}"
+            );
+            assert_eq!(journal, before, "{case}");
+        }
+    }
+
+    /// The first head is inserted at node 0, which changes the log in place
+    /// and starts a new series: refused under an open compaction, either way
+    /// it is asked.
+    #[test]
+    fn a_first_head_under_an_open_compaction_is_refused() {
+        let mut journal = empty_journal();
+        for n in 0..3 {
+            admit_user(&mut journal, &format!("line {n}"));
+        }
+        journal.compact_backup = Some((journal.events.clone(), journal.epoch));
+        journal.compact_pending = Some(Vec::new());
+        journal.compaction_open = true;
+        let before = journal.clone();
+        for in_history in [false, true] {
+            assert_eq!(
+                admit_system(&mut journal, SYSTEM_HEAD, in_history),
+                Err(COMPACTION_OPEN_REASON)
+            );
+            assert_eq!(journal, before);
+        }
+    }
+
+    /// Every step that changes the journal, asked under an open compaction,
+    /// either appends or is refused, so the compaction stays loadable and
+    /// still commits and restores with the records written during it.
+    #[test]
+    fn every_step_under_an_open_compaction_keeps_it_recoverable() {
+        let (mut journal, child) = compacting_with_a_child();
+        let head = system_head(&journal.events).unwrap().to_string();
+        type Step = Box<dyn Fn(&mut Journal)>;
+        let mut steps: Vec<(&str, Step)> = Vec::new();
+        steps.push(("user", Box::new(|j| admit_user(j, "a later line"))));
+        steps.push(("assistant", Box::new(|j| admit_assistant(j, "an answer"))));
+        steps.push((
+            "tool result",
+            Box::new(|j| admit_tool_result(j, &"x".repeat(200))),
+        ));
+        steps.push((
+            "later system line",
+            Box::new(|j| {
+                let _ = admit_system(j, "A later system line.", true);
+            }),
+        ));
+        steps.push((
+            "same head",
+            Box::new(move |j| {
+                let _ = admit_system(j, &head, false);
+            }),
+        ));
+        steps.push((
+            "new head",
+            Box::new(|j| {
+                let _ = admit_system(j, "Replacement head.", false);
+            }),
+        ));
+        steps.push((
+            "prune",
+            Box::new(|j| {
+                let _ = prune_tool_results(j);
+            }),
+        ));
+        steps.push((
+            "snapshot",
+            Box::new(|j| {
+                admit_snapshot(j, "localhost://Users/self/Projects/demo", "now", "");
+            }),
+        ));
+        steps.push((
+            "skill",
+            Box::new(|j| {
+                admit_skill(j, "Prefer the Runtime grant.");
+            }),
+        ));
+        steps.push((
+            "goal",
+            Box::new(|j| {
+                record_visible(j, VisibleRecord::Goal, "finish the note");
+            }),
+        ));
+        steps.push((
+            "read",
+            Box::new(|j| {
+                observe(j, DEMO_DOC, 1, "alpha\n");
+            }),
+        ));
+        steps.push((
+            "refusal",
+            Box::new(|j| record_refusal_reason(j, TASK_BUDGET_REASON, "a child grant")),
+        ));
+        steps.push((
+            "a child out of time",
+            Box::new(move |j| {
+                note_time_refusal(j, child);
+            }),
+        ));
+        steps.push((
+            "a nested compaction",
+            Box::new(|j| {
+                begin_compact(j, "another summary");
+            }),
+        ));
+        for (name, step) in &steps {
+            step(&mut journal);
+            assert_eq!(compaction_boundary_ok(&journal), Ok(()), "{name}");
+            assert!(
+                decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok(),
+                "{name}"
+            );
+        }
+        for crash in [false, true] {
+            let mut done = journal.clone();
+            if crash {
+                assert_eq!(note_crash_during_compact(&mut done), Ok(()));
+            } else {
+                assert_eq!(commit_compact(&mut done), Ok(()));
+            }
+            assert_eq!(
+                child_stops(&done)
+                    .iter()
+                    .filter(|stop| stop.0 == child)
+                    .count(),
+                1,
+                "crash {crash}"
+            );
+            assert!(
+                decode_journal(&encode_journal(&done, &[0; 32]).unwrap()).is_ok(),
+                "crash {crash}"
+            );
+        }
     }
 
     /// R8: on load, no step is still prepared at or before a cancel point or
