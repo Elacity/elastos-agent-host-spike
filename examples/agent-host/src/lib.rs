@@ -7,7 +7,8 @@
 //! end of compaction restores the saved bytes and the series.
 //! A summary may come from a hosted model: the guest proposes the request
 //! through the hosted proposal path, and records the answer only when it
-//! shrinks the tail, keeps node 0, and keeps every fact the task marked.
+//! shrinks the tail, keeps node 0, and keeps every fact the task marked as a
+//! whole token.
 //! A crash records `not started` or `settlement_unknown` and does not dispatch
 //! that step again. A read proposal with no grant stays `denied` and is not
 //! dispatched. Cancel before dispatch stays `cancelled` and does not run.
@@ -1282,12 +1283,48 @@ fn compact_replacement(journal: &Journal, summary: &str) -> Option<Vec<SurfaceNo
     Some(replacement)
 }
 
+/// A character that holds a token together. A dot holds one only between
+/// alphanumerics, so a version number keeps its parts and a sentence period
+/// ends a token.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn token_continues(chars: &[char], index: usize) -> bool {
+    let Some(&ch) = chars.get(index) else {
+        return false;
+    };
+    if ch.is_alphanumeric() || matches!(ch, '_' | '-' | '=') {
+        return true;
+    }
+    ch == '.'
+        && index > 0
+        && chars[index - 1].is_alphanumeric()
+        && chars
+            .get(index + 1)
+            .is_some_and(|next| next.is_alphanumeric())
+}
+
+/// True when `fact` occurs in `text` as a whole token: no token-continuation
+/// character touches either end. So `BUILD_ID=7F3A0` does not carry the fact
+/// `7F3A0`, and a summary that changes a required fact has no match.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn contains_whole_fact(text: &str, fact: &str) -> bool {
+    let haystack: Vec<char> = text.chars().collect();
+    let needle: Vec<char> = fact.chars().collect();
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+    (0..=haystack.len() - needle.len()).any(|start| {
+        haystack[start..start + needle.len()] == needle[..]
+            && (start == 0 || !token_continues(&haystack, start - 1))
+            && !token_continues(&haystack, start + needle.len())
+    })
+}
+
 /// Why a summary is refused, or nothing. This is the one place for every
 /// compaction rule: empty, a host path, a summary that repeats the system head
-/// (node 0), too little history, an open compaction, a missing required fact,
-/// and a summary that does not shrink. `required` is empty when the guest
-/// wrote the summary itself; a model-written one carries the facts its task
-/// marked.
+/// (node 0), too little history, an open compaction, a required fact that is
+/// missing or changed, and a summary that does not shrink. `required` is
+/// empty when the guest wrote the summary itself; a model-written one carries
+/// the facts its task marked.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn compact_refusal(journal: &Journal, summary: &str, required: &[String]) -> Option<&'static str> {
     if summary.is_empty() {
@@ -1311,7 +1348,10 @@ fn compact_refusal(journal: &Journal, summary: &str, required: &[String]) -> Opt
     if journal.compaction_open {
         return Some("compaction is open");
     }
-    if !required.iter().all(|fact| summary.contains(fact.as_str())) {
+    if !required
+        .iter()
+        .all(|fact| contains_whole_fact(summary, fact.as_str()))
+    {
         return Some("summary drops a required fact");
     }
     if compact_replacement(journal, summary).is_none() {
@@ -10750,6 +10790,31 @@ mod tests {
     }
 
     #[test]
+    fn a_model_summary_that_changes_a_required_fact_is_refused() {
+        let mut journal = summary_journal();
+        let before = journal.events.clone();
+        let epoch = journal.epoch;
+        let id = dispatched_summary_step(&mut journal, &["7F3A0"]);
+        let prefixed = "The build id was BUILD_ID=7F3A0, and the earlier answer was kept.";
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(prefixed.to_string())),
+            Err("summary drops a required fact")
+        );
+        assert_eq!(journal.events, before);
+        assert_eq!(journal.epoch, epoch);
+
+        let mut journal = summary_journal();
+        let before = journal.events.clone();
+        let id = dispatched_summary_step(&mut journal, &["7F3A"]);
+        let extended = "The build id was 7F3A0, and the earlier answer was kept.";
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(extended.to_string())),
+            Err("summary drops a required fact")
+        );
+        assert_eq!(journal.events, before);
+    }
+
+    #[test]
     fn a_model_summary_that_touches_node_zero_is_refused() {
         let mut journal = summary_journal();
         let before = journal.events.clone();
@@ -10946,7 +11011,7 @@ mod tests {
         assert_eq!(journal.events[1].source, NodeSource::CompactionCheckpoint);
         for fact in facts {
             assert!(
-                summary.contains(fact),
+                contains_whole_fact(&summary, fact),
                 "the summary dropped {fact}: {summary}"
             );
         }

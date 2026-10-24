@@ -27,7 +27,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if !required.iter().all(|fact| summary.contains(fact.as_str())) {\n        return Some(\"summary drops a required fact\");\n    }",
+     "old": "    if !required\n        .iter()\n        .all(|fact| contains_whole_fact(summary, fact.as_str()))\n    {\n        return Some(\"summary drops a required fact\");\n    }",
      "new": "    if false {\n        return Some(\"summary drops a required fact\");\n    }"
     }
    ],
@@ -146,6 +146,22 @@
    ],
    "tests": [
     "tests::a_model_failure_leaves_the_history_unchanged"
+   ]
+  },
+  {
+   "id": "FC10",
+   "title": "a required fact may be a part of another token",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if ch.is_alphanumeric() || matches!(ch, '_' | '-' | '=') {\n        return true;\n    }",
+     "new": "    if false {\n        return true;\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_model_summary_that_changes_a_required_fact_is_refused"
    ]
   }
  ]
