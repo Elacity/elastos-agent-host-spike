@@ -472,7 +472,10 @@ fn make_entry(
 
 fn kind_of(name: &[u8], external: u32) -> Kind {
     let unix = (external >> 16) & 0o170000;
-    if unix == 0o120000 {
+    // P9: only a regular file (or an unset DOS attribute) and a directory are
+    // listed as such. A symlink, device, socket or any other kind is not.
+    let other = !matches!(unix, 0 | 0o100000 | 0o040000);
+    if other {
         return Kind::Other;
     }
     if name.ends_with(b"/") || unix == 0o040000 {
@@ -664,8 +667,14 @@ fn check_local_headers(
 /// and with the lengths B4a used. A mismatch skips that entry, never the
 /// archive.
 pub fn check_shown(reader: &mut Reader<'_>, entry: &Entry) -> Result<Result<(), Reason>, Refusal> {
-    if entry.status != Status::Listed {
-        return Ok(Err(entry.status.reason().unwrap_or("not_listed")));
+    // An entry that is not listed keeps its own status as the skip reason, so
+    // the page never has to guess why the request named an entry it cannot
+    // show.
+    match entry.status {
+        Status::Listed => {}
+        Status::Blocked(reason) => return Ok(Err(reason)),
+        Status::Unsupported => return Ok(Err("unsupported")),
+        Status::Encrypted => return Ok(Err("encrypted")),
     }
     let length = LOCAL_HEADER_BYTES + u64::from(entry.name_len);
     if length > MAX_LOCAL_HEADER_BYTES {

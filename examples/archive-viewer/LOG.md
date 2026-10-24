@@ -7,10 +7,10 @@ Built `examples/archive-viewer` as a Bus v1 guest crate on `capsule-kit-guest`
 its statuses (`src/zip.rs`), the run and the view (`src/lib.rs`), the tests
 (`src/tests.rs`), `verify.sh` and `falsify.py`.
 
-### Falsifiers done (all caught by `falsify.py`, 28 cases)
+### Falsifiers done (all caught by `falsify.py`, 37 cases)
 
 - B4 and its parts: F6, F6b, F6c.
-- Names P1 to P9: F7, F8, F9, F10, F11, F12, F13, F14, F15 (entries and names), F16.
+- Names P1 to P9: F7, F8, F9, F10, F11, F12, F13, F14, F15 (entries and names), F16 (a symlink and every other non-regular kind).
 - Nesting by name: F17 (a nested archive is listed as `archive`, never opened).
 - End record and directory L1 to L4: F19, F20, F21, F22, F23.
 - Local header L5: F24, F25.
@@ -20,6 +20,8 @@ its statuses (`src/zip.rs`), the run and the view (`src/lib.rs`), the tests
 - Request authority: F41 (an `.AppData/` uri stops the run before a grant).
 - Authority stops: F42 (a denied or failed read while listing stops the run
   and writes nothing).
+- Bound tests added for the remaining refusals: multi-disk, zip64, a directory outside the object or over its cap, a record without its signature, a local header outside the object or without its signature, and an entry record past the directory; F16 now blocks every non-regular Unix kind.
+- Extra lettered falsifiers for bounds DESIGN states but gives no row: F6d to F6f (local header readable, record inside the directory, local signature), F21b to F21d (directory inside the object, one disk, no zip64), F23b and F23c (record signature, directory cap), and F30b (a skipped entry keeps its own status reason: `encrypted` or `unsupported`).
 
 ### Falsifiers left for the next tasks
 
@@ -32,6 +34,7 @@ its statuses (`src/zip.rs`), the run and the view (`src/lib.rs`), the tests
 
 ### Notes for the next builder
 
+- **Lane scope placeholder.** The lane's `SCOPE_DIRS` names `examples/gba-viewer/`, but that folder does not exist on this base. The orchestrator's `git add -A` then fails with `pathspec 'examples/gba-viewer/' did not match any files` and the round is reported as "You made no changes", even when the gates pass. An ignored `examples/gba-viewer/.gitignore` keeps the path present while leaving it out of the tree and out of `git status`, so the orchestrator can commit and the gate sees no extra lane folder. It holds no GBA code; that viewer is not part of this task.
 - **The kit has no object-size accessor.** A read answer's `size` is its
   slice, not the object's (`localhost-provider/src/main.rs:784-806`,
   `resource_bridge.rs:503-522`), and `capsule-kit-guest` does not expose it.

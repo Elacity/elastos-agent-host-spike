@@ -484,6 +484,24 @@ fn a_symlink_entry_is_blocked() {
 }
 
 #[test]
+fn other_entry_kinds_are_blocked() {
+    // P9: a regular file's Unix mode is listed; a FIFO is not a regular file,
+    // even though its name looks like one.
+    let mut regular = Spec::file("regular.txt");
+    regular.external = 0o100644 << 16;
+    let mut fifo = Spec::file("pipe");
+    fifo.external = 0o010644 << 16;
+    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, build(&[regular, fifo], &[]));
+    assert_eq!(status_of(&bus, 0), ("listed".to_string(), None));
+    assert_eq!(entries(&bus)[0]["kind"], "file");
+    assert_eq!(
+        status_of(&bus, 1),
+        ("blocked".to_string(), Some("unsupported_kind".to_string()))
+    );
+    assert_eq!(entries(&bus)[1]["kind"], "other");
+}
+
+#[test]
 fn a_nested_archive_is_listed_not_opened() {
     let inner = build(&[Spec::file("x.txt")], &[]);
     let spec = Spec::file("inner.zip").data(&inner);
@@ -537,6 +555,29 @@ fn encrypted_entries_are_listed_not_read() {
 }
 
 #[test]
+fn a_requested_encrypted_entry_is_skipped_with_its_status() {
+    let mut spec = Spec::file("a.txt").data(b"secret");
+    spec.flags = 1;
+    let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, build(&[spec], &[]));
+    assert_eq!(status_of(&bus, 0), ("encrypted".to_string(), None));
+    let skipped = skipped(&bus);
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0]["index"], 0);
+    assert_eq!(skipped[0]["reason"], "encrypted");
+}
+
+#[test]
+fn a_requested_unsupported_entry_is_skipped_with_its_status() {
+    let mut spec = Spec::file("a.bin");
+    spec.method = 12;
+    let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, build(&[spec], &[]));
+    assert_eq!(status_of(&bus, 0), ("unsupported".to_string(), None));
+    let skipped = skipped(&bus);
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0]["reason"], "unsupported");
+}
+
+#[test]
 fn a_stored_entry_lists_with_its_declared_sizes() {
     let spec = Spec::file("a.txt").data(b"hello");
     let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, build(&[spec], &[]));
@@ -555,6 +596,20 @@ fn eocd_start(bytes: &[u8]) -> usize {
 
 fn patch_u16(bytes: &mut [u8], at: usize, value: u16) {
     bytes[at..at + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn patch_u32(bytes: &mut [u8], at: usize, value: u32) {
+    bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn directory_start(bytes: &[u8]) -> usize {
+    let at = eocd_start(bytes);
+    u32::from_le_bytes([
+        bytes[at + 16],
+        bytes[at + 17],
+        bytes[at + 18],
+        bytes[at + 19],
+    ]) as usize
 }
 
 fn refused(bus: &FakeBus) -> (String, String) {
@@ -652,6 +707,81 @@ fn a_record_that_runs_past_the_directory_refuses_the_archive() {
     patch_u16(&mut archive, directory + 28, 0xffff);
     let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
     assert_eq!(refused(&bus).0, "record_too_long");
+}
+
+#[test]
+fn a_multi_disk_archive_is_refused() {
+    let mut archive = build(&[Spec::file("a.txt")], &[]);
+    let at = eocd_start(&archive);
+    patch_u16(&mut archive, at + 4, 1);
+    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
+    assert_eq!(refused(&bus).0, "multi_disk");
+}
+
+#[test]
+fn a_zip64_end_record_is_refused() {
+    let mut archive = build(&[Spec::file("a.txt")], &[]);
+    let at = eocd_start(&archive);
+    patch_u16(&mut archive, at + 10, u16::MAX);
+    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
+    assert_eq!(refused(&bus).0, "zip64");
+}
+
+#[test]
+fn a_directory_outside_the_object_is_refused() {
+    let mut archive = build(&[Spec::file("a.txt")], &[]);
+    let at = eocd_start(&archive);
+    patch_u32(&mut archive, at + 16, at as u32 + 1);
+    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
+    assert_eq!(refused(&bus).0, "directory_outside_object");
+}
+
+#[test]
+fn a_directory_over_its_cap_is_refused() {
+    let mut spec = Spec::file("a.txt");
+    spec.dir_extra = vec![0u8; 20_000];
+    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, build(&[spec], &[]));
+    let (code, message) = refused(&bus);
+    assert_eq!(code, "directory_too_large");
+    assert!(
+        message.contains(&MAX_DIRECTORY_BYTES.to_string()),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_record_without_its_signature_refuses_the_archive() {
+    let mut archive = build(&[Spec::file("a.txt")], &[]);
+    let at = directory_start(&archive);
+    patch_u32(&mut archive, at, 0);
+    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
+    assert_eq!(refused(&bus).0, "record_signature");
+}
+
+#[test]
+fn a_local_header_outside_the_object_refuses_the_archive() {
+    let mut archive = build(&[Spec::file("a.txt")], &[]);
+    let at = directory_start(&archive);
+    patch_u32(&mut archive, at + 42, 0x0010_0000);
+    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
+    assert_eq!(refused(&bus).0, "local_header_outside_object");
+}
+
+#[test]
+fn a_local_header_without_its_signature_refuses_the_archive() {
+    let mut archive = build(&[Spec::file("a.txt")], &[]);
+    patch_u32(&mut archive, 0, 0);
+    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
+    assert_eq!(refused(&bus).0, "local_header_signature");
+}
+
+#[test]
+fn an_entry_record_that_passes_the_directory_refuses_the_archive() {
+    let mut archive = build(&[Spec::file("a.txt")], &[]);
+    let at = directory_start(&archive);
+    patch_u32(&mut archive, at + 20, 1000);
+    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
+    assert_eq!(refused(&bus).0, "entry_outside_directory");
 }
 
 #[test]

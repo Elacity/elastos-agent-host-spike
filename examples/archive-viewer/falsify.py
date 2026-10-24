@@ -10,8 +10,9 @@ The runner is the capsule kit's (`examples/capsule-kit/falsify`).
 
 F-numbers here are the design's (examples/archive-viewer/DESIGN.md, "Falsifier
 plan"); this slice's core covers F6, F6b, F6c, F7 to F17, F19 to F25, F29 to
-F31, F40 to F42. F18 (Bus v2 depth) and the preview falsifiers F1 to F5 and
-F26 to F28 wait for their slices.
+F31, F40 to F42. The lettered cases F6d to F6f, F21b to F21d, F23b, F23c and
+F30b cover bounds DESIGN states but gives no row. F18 (Bus v2 depth) and the
+preview falsifiers F1 to F5 and F26 to F28 wait for their slices.
 """
 import pathlib
 import sys
@@ -103,9 +104,9 @@ CASES = [
      ["a_name_over_its_cap_is_blocked"]),
     ("F16 the mode check is removed",
      "src/zip.rs",
-     "    if unix == 0o120000 {\n        return Kind::Other;\n    }",
-     "    if false {\n        return Kind::Other;\n    }",
-     ["a_symlink_entry_is_blocked"]),
+     "    let other = !matches!(unix, 0 | 0o100000 | 0o040000);",
+     "    let other = false && !matches!(unix, 0 | 0o100000 | 0o040000);",
+     ["a_symlink_entry_is_blocked", "other_entry_kinds_are_blocked"]),
     ("F17 a nested archive is not listed as one",
      "src/zip.rs",
      "    if archive_name(name) {",
@@ -185,6 +186,62 @@ CASES = [
      "        read_counted(self.bus, self.uri, self.grant, self.left, offset, length)\n"
      "            .map_err(|_| ReadError::Budget)",
      ["a_provider_error_while_listing_stops_the_run_and_writes_nothing"]),
+    # Bounds DESIGN states but gives no row: an end record and a directory
+    # that lie about where their bytes are must refuse the archive.
+    ("F6d a local header outside the object is accepted",
+     "src/zip.rs",
+     "        if header.len() < LOCAL_HEADER_BYTES as usize {",
+     "        if false && header.len() < LOCAL_HEADER_BYTES as usize {",
+     ["a_local_header_outside_the_object_refuses_the_archive"]),
+    ("F6e an entry record passes the directory",
+     "src/zip.rs",
+     "        if end > directory_offset {",
+     "        if false && end > directory_offset {",
+     ["an_entry_record_that_passes_the_directory_refuses_the_archive"]),
+    ("F6f a local header signature is ignored",
+     "src/zip.rs",
+     "        if u32_at(&header, 0) != Some(LOCAL_SIGNATURE) {",
+     "        if false && u32_at(&header, 0) != Some(LOCAL_SIGNATURE) {",
+     ["a_local_header_without_its_signature_refuses_the_archive"]),
+    ("F21b a directory outside the object is accepted",
+     "src/zip.rs",
+     "    if directory_offset > end_offset {",
+     "    if false && directory_offset > end_offset {",
+     ["a_directory_outside_the_object_is_refused"]),
+    ("F21c a multi-disk archive is accepted",
+     "src/zip.rs",
+     "    if disk != 0 || directory_disk != 0 {",
+     "    if false && (disk != 0 || directory_disk != 0) {",
+     ["a_multi_disk_archive_is_refused"]),
+    ("F21d a zip64 end record is accepted",
+     "src/zip.rs",
+     "    if count == u16::MAX",
+     "    if false && count == u16::MAX",
+     ["a_zip64_end_record_is_refused"]),
+    ("F23b a record signature is ignored",
+     "src/zip.rs",
+     "        if u32_at(directory, at) != Some(DIRECTORY_SIGNATURE) {",
+     "        if false && u32_at(directory, at) != Some(DIRECTORY_SIGNATURE) {",
+     ["a_record_without_its_signature_refuses_the_archive"]),
+    ("F23c the directory cap is removed",
+     "src/zip.rs",
+     "    if directory_size > MAX_DIRECTORY_BYTES {",
+     "    if false && directory_size > MAX_DIRECTORY_BYTES {",
+     ["a_directory_over_its_cap_is_refused"]),
+    # A skipped entry keeps its own status as the reason.
+    ("F30b an entry's own status is not its skip reason",
+     "src/zip.rs",
+     "    match entry.status {\n"
+     "        Status::Listed => {}\n"
+     "        Status::Blocked(reason) => return Ok(Err(reason)),\n"
+     "        Status::Unsupported => return Ok(Err(\"unsupported\")),\n"
+     "        Status::Encrypted => return Ok(Err(\"encrypted\")),\n"
+     "    }",
+     "    if entry.status != Status::Listed {\n"
+     "        return Ok(Err(entry.status.reason().unwrap_or(\"not_listed\")));\n"
+     "    }",
+     ["a_requested_encrypted_entry_is_skipped_with_its_status",
+      "a_requested_unsupported_entry_is_skipped_with_its_status"]),
 ]
 
 
