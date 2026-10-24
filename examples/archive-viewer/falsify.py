@@ -492,11 +492,12 @@ RUNTIME = [
 ]
 
 # F36 changes two files: the counted reader asks one byte a call, and the
-# inflate loop copies the window a byte at a time. Neither changes a rule or
-# the output; both cost fuel. The second mutation is applied by the group's
-# prepare, because a case names one file.
+# inflate loop copies the whole window once per output byte instead of the
+# produced slice once. Neither changes a rule or the output; both cost fuel.
+# The second mutation is applied by the group's prepare, because a case names
+# one file.
 F36 = (
-    "F36 the counted reader asks one byte per call (in the component)",
+    "F36 the reader and the inflate copy cost fuel (in the component)",
     "src/zip.rs",
     "        read_counted(self.bus, self.uri, self.grant, self.left, offset, length)\n"
     "            .map_err(ReadError::Refusal)",
@@ -507,14 +508,19 @@ F36 = (
     "            bytes.extend_from_slice(&one);\n"
     "        }\n"
     "        Ok(bytes)",
-    ["worst_archives_stay_under_80_percent_of_the_runtime_fuel"],
+    ["worst_archives_stay_under_80_percent_of_the_runtime_fuel",
+     "the_worst_archives_run_and_write_their_views",
+     "low_compressibility_text_costs_more_than_repeating_text"],
 )
 
-# The inflate loop's copy, per output byte instead of once per window.
+# The inflate loop's copy: once per produced window in the real code; the
+# mutant copies the whole window for every output byte, and keeps the output
+# identical.
 COPY_WINDOW = "        output.extend_from_slice(&dictionary[out_pos..out_pos + out_used]);"
 COPY_BYTES = (
     "        for at in 0..out_used {\n"
-    "            output.push(dictionary[out_pos + at]);\n"
+    "            let window = dictionary[out_pos..out_pos + out_used].to_vec();\n"
+    "            output.push(window[at]);\n"
     "        }"
 )
 
@@ -530,18 +536,32 @@ def build_component():
         raise SystemExit("component build failed under a falsifier")
 
 
+def apply_copy_mutant():
+    """Replaces the window copy once, keeping the original bytes."""
+    global copy_mutant_saved
+    if copy_mutant_saved is not None:
+        return
+    path = HERE / PREVIEW
+    source = path.read_text()
+    if source.count(COPY_WINDOW) != 1:
+        raise SystemExit(
+            f"expected the window copy once in {path}, found {source.count(COPY_WINDOW)}"
+        )
+    copy_mutant_saved = path.read_bytes()
+    path.write_text(source.replace(COPY_WINDOW, COPY_BYTES))
+
+
+def restore_copy_mutant():
+    """Puts the unmutated inflate copy back."""
+    global copy_mutant_saved
+    if copy_mutant_saved is not None:
+        (HERE / PREVIEW).write_bytes(copy_mutant_saved)
+        copy_mutant_saved = None
+
+
 def prepare_f36():
     """Applies F36's second mutation once, then builds the component."""
-    global copy_mutant_saved
-    if copy_mutant_saved is None:
-        path = HERE / PREVIEW
-        source = path.read_text()
-        if source.count(COPY_WINDOW) != 1:
-            raise SystemExit(
-                f"expected the window copy once in {path}, found {source.count(COPY_WINDOW)}"
-            )
-        copy_mutant_saved = path.read_bytes()
-        path.write_text(source.replace(COPY_WINDOW, COPY_BYTES))
+    apply_copy_mutant()
     build_component()
 
 
@@ -552,10 +572,7 @@ def restore_runtime(args):
     rebuilt from the restored source even when F36 did not run (an F35-only
     or filtered run) or a run was interrupted.
     """
-    global copy_mutant_saved
-    if copy_mutant_saved is not None:
-        (HERE / PREVIEW).write_bytes(copy_mutant_saved)
-        copy_mutant_saved = None
+    restore_copy_mutant()
     if "--runtime" in args:
         build_component()
 
@@ -661,8 +678,153 @@ def convert(listed):
     ]
 
 
+HOST_DIR = HERE / "host-test"
+HOST_SUMMARY = re.compile(
+    r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;",
+    re.M,
+)
+HOST_RESULT = re.compile(r"^test (\S+) \.\.\. (ok|FAILED)$", re.M)
+
+
+def host_suite():
+    """Runs the whole component host suite and returns its results."""
+    result = kit.run(["cargo", "test", "--locked", "--test", "component"], HOST_DIR)
+    summaries = HOST_SUMMARY.findall(result.stdout)
+    results = dict(HOST_RESULT.findall(result.stdout))
+    return result.returncode, summaries, results
+
+
+def host_baseline():
+    """The host tests the unmutated component runs, or stop the run."""
+    code, summaries, results = host_suite()
+    if code != 0 or len(summaries) != 1 or summaries[0][0] != "ok":
+        raise SystemExit(f"the host suite did not pass cleanly:\n{summaries}\n")
+    passed = sum(1 for state in results.values() if state == "ok")
+    if len(results) != passed or int(summaries[0][1]) != passed:
+        raise SystemExit(
+            f"the host suite ran {len(results)} tests, summary says {summaries[0]}"
+        )
+    return set(results)
+
+
+def check_runtime_isolation(args, every_test):
+    """Every host test a runtime mutant does not name must still pass.
+
+    The kit runs only the named tests for a runtime case, so the whole host
+    suite runs under each mutant here: same rule as the guest cases.
+    """
+    parts = [arg for arg in args if not arg.startswith("--")]
+    groups = [
+        (convert(RUNTIME), None, None),
+        (convert([F36]), apply_copy_mutant, restore_copy_mutant),
+    ]
+    executed = []
+    leaked = []
+    for cases, apply_extra, restore_extra in groups:
+        for case in cases:
+            if parts and not any(part in case[0] for part in parts):
+                continue
+            name, path, replacements, tests = case
+            saved = path.read_bytes()
+            problems = []
+            code, summaries, results = 1, [], {}
+            try:
+                text = saved.decode()
+                for old, new in replacements:
+                    text = text.replace(old, new)
+                path.write_text(text)
+                if apply_extra is not None:
+                    apply_extra()
+                build_component()
+                code, summaries, results = host_suite()
+            finally:
+                path.write_bytes(saved)
+                if restore_extra is not None:
+                    restore_extra()
+            executed.append(name)
+            named = set(tests)
+            failed = {test for test, state in results.items() if state == "FAILED"}
+            passed = {test for test, state in results.items() if state == "ok"}
+            if len(summaries) != 1:
+                problems.append("the suite did not complete")
+            else:
+                state, npass, nfail, ignored = summaries[0]
+                if state != "FAILED" or code == 0:
+                    problems.append("the mutant did not fail the suite")
+                if int(ignored) != 0:
+                    problems.append(f"the suite ignored {ignored} tests")
+                if int(npass) + int(nfail) != len(results):
+                    problems.append(f"the summary counts {npass}+{nfail} but {len(results)} ran")
+                if int(nfail) != len(named):
+                    problems.append(f"{nfail} tests failed, {len(named)} are named")
+            if set(results) != every_test:
+                problems.append("the suite did not run every test")
+            if failed != named:
+                problems.append(
+                    f"failed {sorted(failed - named)} beyond the named tests"
+                    if failed - named
+                    else f"named tests passed: {sorted(named - failed)}"
+                )
+            unnamed_not_passed = (every_test - named) - passed
+            if unnamed_not_passed:
+                problems.append(f"unnamed tests did not pass: {sorted(unnamed_not_passed)}")
+            if problems:
+                leaked.append((name, problems))
+    if leaked:
+        for name, problems in leaked:
+            print(f"LEAKED: {name}: {', '.join(problems)}", flush=True)
+        raise SystemExit(f"{len(leaked)} runtime falsifier(s) break a test they do not name")
+    print(f"all {len(executed)} runtime mutants leave every unnamed host test passing")
+
+
+FUEL_LINE = re.compile(r"^(.+?): (\d+) fuel \(([\d.]+)% of the Runtime budget\)$", re.M)
+
+
+def fuel_run():
+    """Runs the fuel gate once and returns its printed measurements."""
+    result = kit.run(
+        ["cargo", "test", "--locked", "--test", "component",
+         "worst_archives_stay_under_80_percent_of_the_runtime_fuel", "--", "--nocapture"],
+        HOST_DIR,
+    )
+    return FUEL_LINE.findall(result.stdout)
+
+
+def measure_variants():
+    """Measures the reader-only, inflate-only and combined F36 mutations.
+
+    The gate is the combined mutant; the two singles show that each half
+    costs fuel on its own and that the inflate copy is not masked by the
+    reader.
+    """
+    for label, reader, inflate in (
+        ("reader only", True, False),
+        ("inflate only", False, True),
+        ("combined", True, True),
+    ):
+        zip_path = HERE / F36[1]
+        saved = zip_path.read_bytes()
+        try:
+            if reader:
+                zip_path.write_text(saved.decode().replace(F36[2], F36[3]))
+            if inflate:
+                apply_copy_mutant()
+            build_component()
+            shares = fuel_run()
+        finally:
+            zip_path.write_bytes(saved)
+            restore_copy_mutant()
+        print(f"{label}:", flush=True)
+        for archive, fuel, share in shares:
+            print(f"  {archive}: {fuel} fuel ({share}%)", flush=True)
+    build_component()
+
+
 def main():
     args = sys.argv[1:]
+    if "--measure" in args:
+        measure_variants()
+        return
     check = "--check" in args
     every_test = set() if check else baseline()
     if check:
@@ -684,6 +846,12 @@ def main():
             restore_runtime(args)
     if not check:
         check_isolation(CASES, args, every_test)
+        if "--runtime" in args:
+            host_tests = host_baseline()
+            try:
+                check_runtime_isolation(args, host_tests)
+            finally:
+                restore_runtime(args)
 
 
 if __name__ == "__main__":

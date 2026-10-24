@@ -21,12 +21,16 @@ WIT="${REPO_ROOT}/elastos/wit/elastos-bus-v1.wit"
 export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
 
 RUNTIME=0
+GATE=0
+case "${GATE_LIST:-}" in
+    # run-lane.sh exports the gate commands (the substring is `gates-photo`),
+    # and older forms may carry the name; either way this is the lane gate.
+    *gates-photo* | *photo-gates*) GATE=1 ;;
+esac
 if [[ $# -eq 0 ]]; then
-    # The lane gate exports GATE_LIST and runs verify.sh without an argument
-    # (run-lane.sh, gates-photo.sh); every other no-argument run is guest-only.
-    case "${GATE_LIST:-}" in
-        *photo-gates*) RUNTIME=1 ;;
-    esac
+    # The lane gate runs verify.sh with no argument, so it selects the full
+    # check; every other no-argument run is guest-only.
+    [[ $GATE -eq 1 ]] && RUNTIME=1
 else
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -39,6 +43,11 @@ else
         esac
         shift
     done
+fi
+# Fail closed: the lane gate must never certify a guest-only run.
+if [[ $GATE -eq 1 && $RUNTIME -ne 1 ]]; then
+    echo "verify.sh: the lane gate requires the runtime step; drop --guest-only" >&2
+    exit 1
 fi
 
 python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" \
@@ -55,6 +64,10 @@ cargo test --locked --manifest-path "${VIEWER_DIR}/Cargo.toml"
 python3 -I "${VIEWER_DIR}/falsify.py"
 
 if [[ $RUNTIME -eq 1 ]]; then
+    host_log="$(mktemp)"
+    runtime_log="$(mktemp)"
+    trap 'rm -f "$host_log" "$runtime_log"' EXIT
+
     # Component: built with the repository builder.
     "${VIEWER_DIR}/build.sh"
     test -f "${VIEWER_DIR}/archive-viewer.component.wasm"
@@ -63,10 +76,19 @@ if [[ $RUNTIME -eq 1 ]]; then
     # admission and the fuel gate.
     cargo fmt --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" -- --check
     cargo clippy --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" --all-targets -- -D warnings
-    cargo test --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" -- --nocapture
+    cargo test --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" -- --nocapture \
+        2>&1 | tee "$host_log"
 
     # The component falsifiers: each rebuilds the component and runs the host test.
-    python3 -I "${VIEWER_DIR}/falsify.py" --runtime
+    python3 -I "${VIEWER_DIR}/falsify.py" --runtime 2>&1 | tee "$runtime_log"
+
+    # The lane gate certifies the runtime step only when it actually ran:
+    # the host suite passed and the component falsifiers caught F35 and F36.
+    if [[ $GATE -eq 1 ]]; then
+        grep -q '^test result: ok\. [1-9][0-9]* passed; 0 failed;' "$host_log"
+        grep -q '^caught: F35 ' "$runtime_log"
+        grep -q '^caught: F36 ' "$runtime_log"
+    fi
 else
     echo "archive-viewer: guest checks only; pass --runtime for the component, host test and F35/F36"
 fi

@@ -291,13 +291,16 @@ gives as the reason for this app are proven there: a run with no grant stops
   the component build, host-test fmt/clippy/tests and `falsify.py --runtime`
   only with `--runtime`. `--guest-only` and any no-argument run outside the
   lane gate stop after the guest checks, so a machine without the component
-  build still verifies the guest. The lane gate calls the script with no
-  argument and exports `GATE_LIST`, and the script selects the full check from
-  it, so the full Mac gate runs the runtime step.
+  build still verifies the guest. The lane gate exports `GATE_LIST` (the gate
+  command holds `gates-photo`), which selects the full check; the script then
+  fails if the gate ever selects the guest-only path, and it checks the gate
+  log for the passing host suite and the caught F35/F36 lines, so a silent
+  skip cannot certify the lane.
 - `falsify.py`: the `--runtime` group. F35's mutant drops the archive grant
   (`.unwrap_or_default()`); F36's mutant asks one byte a call in
-  `zip::Reader::read` and copies the inflate window one byte at a time in
-  `preview::inflate_bounded`.
+  `zip::Reader::read` and copies the whole inflate window once per output
+  byte in `preview::inflate_bounded`, so the copy is quadratic per step and
+  the output is unchanged.
 
 ### F35 and F36 done
 
@@ -323,11 +326,25 @@ gives as the reason for this app are proven there: a run with no grant stops
   runs: 256 listed entries, 54 names of 255 bytes, eight previews, four
   inflated 16 KiB entries and the fifth's `inflate_budget`, the bomb's
   `not_text` after inflating, the 16 KiB preview, and a view of 63,432 bytes.
-  Under F36's mutant the same gate records 100.0% for the largest directory,
-  the longest names and the largest view (they spend the whole budget), 72.9%
-  for the most shown entries, so its highest is 100.0% and the test fails on
-  the 80% assertion. The gate counts an out-of-fuel run as 100%, not as a
-  broken fixture.
+  F36 has two mutations, so `falsify.py --measure` records each alone against
+  the same gate archives:
+
+| Mutation | Largest dir | Longest names | Most shown | Full allowance | Bomb | Worst text | Largest view |
+|---|---|---|---|---|---|---|---|
+| reader only | 100.0% | 100.0% | 71.1% | 50.7% | 10.1% | 100.0% | 100.0% |
+| inflate only | 18.3% | 12.8% | 42.4% | 45.6% | 10.9% | 14.3% | 34.5% |
+| combined | 100.0% | 100.0% | 99.9% | 88.0% | 19.6% | 100.0% | 100.0% |
+
+  The inflate copy alone raises the inflate-heavy archives well above their
+  clean shares (most shown 12.6% to 42.4%, full allowance 8.3% to 45.6%,
+  largest view 24.5% to 34.5%), so the two mutations each execute and the
+  empty-entry 100% cases are not the only evidence. Under the combined mutant
+  the gate's highest is 100.0% and the test fails on the 80% assertion; the
+  gate counts an out-of-fuel run as 100%, not as a broken fixture. The mutant
+  breaks three host tests, all named by F36: the fuel gate, the worst-archive
+  run (it stops out of fuel) and the worst-text comparison. `falsify.py`
+  also runs the whole host suite under each runtime mutant and proves every
+  unnamed host test still passes.
 - 74 falsifiers in all: the 72 core cases and F35, F36 under `--runtime`.
   After every runtime run, including an F35-only or filtered one, the source is
   restored and the component is rebuilt, so the artifact on disk always
@@ -344,9 +361,12 @@ gives as the reason for this app are proven there: a run with no grant stops
   measurement, not a budget refusal.
 - **Runtime step selection:** the lane gate runs `verify.sh` with no
   argument, so a plain no-argument run is guest-only and the gate names itself
-  through the `GATE_LIST` environment variable that `run-lane.sh` exports,
-  which selects the component, host-test and runtime-falsifier step. Running
-  `verify.sh --runtime` directly does the same on this Mac.
+  through the `GATE_LIST` environment variable that `run-lane.sh` exports. Its
+  entries are `name|command`, and the command holds `gates-photo`, which the
+  script matches; under the gate the script also fails if the guest-only path
+  was selected and checks the log for the passing host suite and the caught
+  F35/F36 lines. Running `verify.sh --runtime` directly does the same on this
+  Mac.
 - **Remaining for task 005:** F3 (B2's streaming ratio check, in the
   component), F43 (declared totals under the 128 MiB store limit). Then the
   page (F37 to F39), and tar after ZIP on both buses.
