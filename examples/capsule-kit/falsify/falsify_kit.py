@@ -22,6 +22,7 @@ with `python3 -I`.
 """
 import os
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -106,13 +107,56 @@ def cargo_test_fails(cwd, args, name):
 
 
 def node_test_fails(test_file, name):
-    """Runs the node tests whose names match; at least one must exist."""
+    """Runs the node tests whose names match; the named test must run and
+    fail. A test file that does not load, or a name that no test has, stops
+    the run: a startup error proves nothing about the mutant."""
     result = subprocess.run(
-        ["node", "--test", f"--test-name-pattern={name}", str(test_file)], capture_output=True, text=True
+        [
+            "node",
+            "--test",
+            "--test-reporter=tap",
+            f"--test-name-pattern={name}",
+            str(test_file),
+        ],
+        capture_output=True,
+        text=True,
     )
-    if "# tests 0" in result.stdout:
-        raise SystemExit(f"no test matches {name!r}")
-    return result.returncode != 0
+    out = result.stdout
+    if "TAP version 13" not in out:
+        raise SystemExit(
+            f"{test_file} did not load: {(result.stderr or out).strip()[-1500:]}"
+        )
+    # The runner calls this with a name pattern, as `--test-name-pattern`
+    # does. Every test that matches must have run and failed: one that ran
+    # and passed, or no result at all, proves nothing about the mutant.
+    pattern = re.compile(name)
+    matched_subtest = False
+    results = []
+    for line in out.splitlines():
+        subtest = re.match(r"^\s*# Subtest: (.*)$", line)
+        if subtest:
+            if pattern.search(subtest.group(1)):
+                matched_subtest = True
+            continue
+        result_line = re.match(r"^\s*(not ok|ok) \d+ - (.*?)(?:\s+#.*)?$", line)
+        if result_line and pattern.search(result_line.group(2)):
+            results.append(result_line.group(1) == "not ok")
+    if results:
+        return all(results)
+    if matched_subtest:
+        raise SystemExit(f"no result for test {name!r} in {test_file}")
+    # A file that fails while loading reports itself as a failing test named
+    # after the file; anything else means the name matched nothing.
+    base = pathlib.Path(test_file).name
+    wrapper = None
+    for line in out.splitlines():
+        match = re.match(r"^\s*(not ok|ok) \d+ - (.*)$", line)
+        if match and match.group(2) in (str(test_file), base):
+            wrapper = match.group(1)
+            break
+    if wrapper == "not ok":
+        raise SystemExit(f"{test_file} did not load:\n{out.strip()[-1500:]}")
+    raise SystemExit(f"no test matches {name!r} in {test_file}")
 
 
 def main(groups, args=None, done="all falsifiers caught"):

@@ -123,6 +123,7 @@ dependencies = [
  "ed25519-dalek",
  "elastos-identity",
  "hex",
+ "libc",
  "rand",
  "semver",
  "serde",

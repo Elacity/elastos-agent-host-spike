@@ -33,6 +33,16 @@ cargo test --locked --manifest-path "${VIEWER_DIR}/bundle-test/Cargo.toml" -- --
 
 # Surface: the render-only page, against a fake fetch, then in real Chromium
 # framed in Home's sandbox against a stand-in server (Playwright's Chromium).
+# Playwright and its browser live outside this checkout (node_modules is
+# ignored); when the runner has neither, install them so the smoke runs
+# instead of failing to load a module.
+export PLAYWRIGHT_DIR="${REPO_ROOT}/elastos/tools/browser-playwright-engine"
+if ! node -e "require(process.env.PLAYWRIGHT_DIR + '/node_modules/playwright')" >/dev/null 2>&1; then
+    (cd "${PLAYWRIGHT_DIR}" && npm ci --no-audit --no-fund)
+fi
+if ! node -e "const {chromium}=require(process.env.PLAYWRIGHT_DIR+'/node_modules/playwright'); process.exit(require('node:fs').existsSync(chromium.executablePath()) ? 0 : 1)" >/dev/null 2>&1; then
+    (cd "${PLAYWRIGHT_DIR}" && npx playwright install chromium)
+fi
 node --test "${VIEWER_DIR}/surface/reader.test.mjs"
 node "${VIEWER_DIR}/surface/reader-browser-smoke.mjs"
 

@@ -236,8 +236,8 @@ BUNDLE = [
     (
         "the page ships its whole source folder",
         "../photo-viewer/bundle/src/pack.rs",
-        '        let folder = segments[..segments.len() - 1].join("/");',
-        '        let folder = segments[..segments.len() - 1].join("/") + "/..";',
+        "    for file in &files {",
+        "    let whole_dir = crate::listing::open_dir(source)?;\n    let mut whole = Vec::new();\n    crate::listing::walk_regular_files(\n        &whole_dir,\n        \"\",\n        &source.display().to_string(),\n        &mut |_, _, relative, _| {\n            whole.push(relative.to_string());\n            Ok(())\n        },\n    )?;\n    files = whole;\n    for file in &files {",
         ["each_capsule_ships_only_what_it_runs_from"],
     ),
     (

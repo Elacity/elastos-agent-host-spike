@@ -337,3 +337,84 @@ fn a_symlinked_root_is_refused_however_its_path_is_written() {
     assert_eq!(parent, "path_invalid");
     assert_eq!(empty, "path_invalid");
 }
+
+#[test]
+fn pack_refuses_a_symlinked_destination_before_writing() {
+    let root = tempdir();
+    let r = root.path();
+    let core = component_source(r);
+    std::fs::create_dir_all(r.join("real")).unwrap();
+    symlink(r.join("real"), r.join("alias")).unwrap();
+
+    // The destination's parent is a link: refused before the first write, so
+    // the folder is not made either here (through the link) or at its target.
+    let through_link = r.join("alias/out");
+    let refusal = pack(&core, &through_link, &[]).unwrap_err();
+    assert_eq!(refusal.code(), "symlink_in_path");
+    assert!(
+        !through_link.exists(),
+        "{} was written",
+        through_link.display()
+    );
+    assert!(
+        !r.join("real/out").exists(),
+        "{} was written",
+        r.join("real/out").display()
+    );
+    // The refusal says how to recover: give the physical path, not the link.
+    let message = refusal.to_string();
+    assert!(message.starts_with("symlink_in_path: "), "{message}");
+    assert!(message.contains("physical path"), "{message}");
+
+    // The same pack into the physical folder works, so the retry after the
+    // refusal is not `pack_destination_exists`.
+    let into = r.join("real/out");
+    let (cid, entries) = pack(&core, &into, &[]).unwrap();
+    assert_eq!(paths(&entries), ["capsule.json", "x.component.wasm"]);
+    assert_eq!(closure_cid(&into).unwrap().0, cid);
+}
+
+#[test]
+fn pack_refuses_a_planned_listing_that_collides_before_writing() {
+    let root = tempdir();
+    let r = root.path();
+    let core = component_source(r);
+    // The entrypoint's name and the manifest's differ only by case. On a
+    // case-insensitive disk they are one file; on a case-sensitive one they
+    // are two that the same listing cannot name apart. Either way the planned
+    // listing is refused, and nothing is written.
+    let manifest_bytes = manifest("component", "CAPSULE.JSON");
+    write(&core.join("capsule.json"), &manifest_bytes);
+    write(&core.join("CAPSULE.JSON"), &manifest_bytes);
+
+    let into = r.join("collides");
+    let refusal = pack(&core, &into, &[]).unwrap_err();
+    assert_eq!(refusal.code(), "path_case_collision");
+    assert!(!into.exists(), "{} was written", into.display());
+}
+
+#[test]
+fn pack_writes_a_new_destination_at_every_level_it_names() {
+    let root = tempdir();
+    let r = root.path();
+    let core = component_source(r);
+    std::fs::create_dir_all(r.join("existing")).unwrap();
+
+    // Two new levels below an existing folder: the destination is the whole
+    // path, not the part up to its first missing folder.
+    let into = r.join("existing/a/b");
+    let (cid, entries) = pack(&core, &into, &[]).unwrap();
+    assert_eq!(paths(&entries), ["capsule.json", "x.component.wasm"]);
+    assert!(
+        into.join("capsule.json").is_file(),
+        "{} has no manifest",
+        into.display()
+    );
+    assert!(into.join("x.component.wasm").is_file());
+    assert!(
+        !r.join("existing/a/capsule.json").exists(),
+        "{} was written",
+        r.join("existing/a").display()
+    );
+    assert_eq!(closure_cid(&into).unwrap().0, cid);
+}
