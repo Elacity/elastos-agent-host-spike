@@ -190,6 +190,7 @@ pub fn previews_for(
                         }
                         let outcome = preview::preview(&mut reader, entry, &budget)?;
                         budget.take(&outcome);
+                        let (produced, consumed) = (outcome.produced, outcome.consumed);
                         match outcome.blocks {
                             Ok(blocks) => previews.push(Preview {
                                 index: *index,
@@ -198,7 +199,7 @@ pub fn previews_for(
                             Err(reason) => skipped.push(Skipped {
                                 index: *index,
                                 reason,
-                                message: preview::message(entry, reason),
+                                message: preview::message(entry, reason, produced, consumed),
                             }),
                         }
                     }

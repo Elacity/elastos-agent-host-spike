@@ -8,9 +8,10 @@
 //! - **B1** (`MAX_PREVIEW_BYTES`): the declared uncompressed size is checked
 //!   before any read, and the output window is the cap plus one byte, so the
 //!   first byte past the cap stops the entry `oversize`.
-//! - **B2** (`MAX_RATIO`): a declared ratio past the cap is not even read. The
-//!   streaming ratio check over 16-byte steps (F3) belongs to the same rule
-//!   and runs in the component; it is deferred to the host-test task.
+//! - **B2** (`MAX_RATIO`): a declared ratio past the cap is not even read; the
+//!   inflate loop also checks, after every step of at most
+//!   [`INFLATE_STEP_BYTES`] compressed bytes, that the output stays inside 100
+//!   times the bytes consumed so far plus the slack (F3).
 //! - **B3** (`MAX_INFLATE_BYTES`): every output byte of a run is taken off
 //!   one budget, whether the entry is then shown or skipped.
 //!
@@ -41,7 +42,7 @@ pub const MAX_INFLATE_BYTES: u64 = 64 * 1024;
 /// The compressed bytes of the shown entries one run may read.
 pub const MAX_COMPRESSED_BYTES: u64 = 24 * 1024;
 /// B2: one inflate step asks for at most this many compressed bytes, so the
-/// streaming ratio check can run after every step (deferred, F3).
+/// streaming ratio check runs after every step (F3).
 pub const INFLATE_STEP_BYTES: usize = 16;
 
 /// What one run may still inflate and read. Every byte comes off as it comes
@@ -82,6 +83,9 @@ pub struct Outcome {
     pub produced: u64,
     /// Compressed bytes read, counted even when the entry is skipped.
     pub read: u64,
+    /// Compressed bytes the inflate loop used before it stopped (or the whole
+    /// stream). The B2 skip message states it, so the stop is visible.
+    pub consumed: u64,
     /// The checked text as typed blocks, or why the entry is not shown.
     pub blocks: Result<Vec<u8>, Reason>,
 }
@@ -90,14 +94,16 @@ fn skipped(reason: Reason) -> Outcome {
     Outcome {
         produced: 0,
         read: 0,
+        consumed: 0,
         blocks: Err(reason),
     }
 }
 
-fn skipped_after(produced: u64, read: u64, reason: Reason) -> Outcome {
+fn skipped_after(produced: u64, read: u64, consumed: u64, reason: Reason) -> Outcome {
     Outcome {
         produced,
         read,
+        consumed,
         blocks: Err(reason),
     }
 }
@@ -146,25 +152,27 @@ pub fn preview(
         return Ok(Outcome {
             produced: 0,
             read,
+            consumed: 0,
             blocks: Err("size_mismatch"),
         });
     }
 
-    let (output, produced, failure) = if entry.method == 0 {
+    let (output, produced, consumed, failure) = if entry.method == 0 {
         // L8 and the length check above already proved the stored bytes are
         // the declared bytes, so they are used directly.
         let produced = data.len() as u64;
-        (data, produced, None)
+        (data, produced, produced, None)
     } else {
         match inflate_bounded(&data, entry.uncompressed_size, budget.inflate) {
-            Ok((output, produced)) => (output, produced, None),
-            Err((produced, reason)) => (Vec::new(), produced, Some(reason)),
+            Ok((output, produced, consumed)) => (output, produced, consumed, None),
+            Err((produced, consumed, reason)) => (Vec::new(), produced, consumed, Some(reason)),
         }
     };
     if let Some(reason) = failure {
         return Ok(Outcome {
             produced,
             read,
+            consumed,
             blocks: Err(reason),
         });
     }
@@ -174,16 +182,17 @@ pub fn preview(
         return Ok(Outcome {
             produced,
             read,
+            consumed,
             blocks: Err("crc_mismatch"),
         });
     }
     let text = match text::check_whole(&output) {
         Ok(text) => text,
-        Err(_) => return Ok(skipped_after(produced, read, "not_text")),
+        Err(_) => return Ok(skipped_after(produced, read, consumed, "not_text")),
     };
     let blocks = match docs_model::blocks(docs_model::Kind::Text, text) {
         Ok(blocks) => blocks,
-        Err(ModelError::TooLong) => return Ok(skipped_after(produced, read, "too_long")),
+        Err(ModelError::TooLong) => return Ok(skipped_after(produced, read, consumed, "too_long")),
     };
     // One JSON array, rendered straight into the view's bytes: the same
     // blocks the documents viewer and the page draw.
@@ -199,20 +208,26 @@ pub fn preview(
     Ok(Outcome {
         produced,
         read,
+        consumed,
         blocks: Ok(rendered),
     })
 }
+
+/// The counters at which a step check stopped: output bytes, compressed
+/// bytes consumed, and why.
+type Stop = (u64, u64, Reason);
 
 /// Inflates `data` to at most the B1 window and the run's remaining output,
 /// stepping at most [`INFLATE_STEP_BYTES`] compressed bytes at a time.
 ///
 /// `Ok` is the whole stream, ended exactly at the end of `data` with exactly
-/// `declared` bytes out. `Err` carries the bytes produced before the stop.
+/// `declared` bytes out, and the bytes consumed. `Err` carries the bytes
+/// produced and consumed before the stop.
 fn inflate_bounded(
     data: &[u8],
     declared: u64,
     allowance: u64,
-) -> Result<(Vec<u8>, u64), (u64, Reason)> {
+) -> Result<(Vec<u8>, u64, u64), Stop> {
     // The decompressor's 32 KiB dictionary is also its output buffer, so
     // every inflated byte is written into counted memory at once. The
     // stream wrapper would produce into an internal dictionary and copy only
@@ -227,7 +242,7 @@ fn inflate_bounded(
     loop {
         let room = OUTPUT_WINDOW_BYTES.saturating_sub(produced);
         if room == 0 {
-            return Err((produced, "oversize"));
+            return Err((produced, consumed as u64, "oversize"));
         }
         let left = allowance.saturating_sub(produced);
         // A spent output budget can still finish the stream: the last blocks
@@ -258,24 +273,35 @@ fn inflate_bounded(
         // B1 first: the byte past the window is oversize, whatever the stream
         // says about itself.
         if produced > MAX_PREVIEW_BYTES {
-            return Err((produced, "oversize"));
+            return Err((produced, consumed as u64, "oversize"));
+        }
+        // B2 after every step: one step over the whole stream would hide an
+        // early burst, so the output is checked against the bytes consumed
+        // so far. The declared ratio (F4) checked this before the read; this
+        // is the same rule on the bytes that really came out.
+        if produced
+            > (consumed as u64)
+                .saturating_mul(MAX_RATIO)
+                .saturating_add(RATIO_SLACK_BYTES)
+        {
+            return Err((produced, consumed as u64, "ratio"));
         }
         match status {
             TINFLStatus::Done => {
                 // L6: exactly the declared compressed bytes consumed and
                 // exactly the declared uncompressed bytes produced.
                 if consumed != data.len() || produced != declared {
-                    return Err((produced, "size_mismatch"));
+                    return Err((produced, consumed as u64, "size_mismatch"));
                 }
-                return Ok((output, produced));
+                return Ok((output, produced, consumed as u64));
             }
             TINFLStatus::NeedsMoreInput => {}
             TINFLStatus::HasMoreOutput => {
                 if ask == 0 {
-                    return Err((produced, "inflate_budget"));
+                    return Err((produced, consumed as u64, "inflate_budget"));
                 }
             }
-            _ => return Err((produced, "size_mismatch")),
+            _ => return Err((produced, consumed as u64, "size_mismatch")),
         }
         if in_used == 0 && out_used == 0 {
             let reason = if ask == 0 {
@@ -283,20 +309,23 @@ fn inflate_bounded(
             } else {
                 "size_mismatch"
             };
-            return Err((produced, reason));
+            return Err((produced, consumed as u64, reason));
         }
     }
 }
 
-/// Why one entry is not shown, with the cap it passed named.
-pub fn message(entry: &Entry, reason: Reason) -> String {
+/// Why one entry is not shown, with the cap it passed named. A ratio stop
+/// states the bytes produced from the compressed bytes consumed, so the
+/// per-step stop is visible in the view.
+pub fn message(entry: &Entry, reason: Reason, produced: u64, consumed: u64) -> String {
     match reason {
         "oversize" => format!(
             "entry {} is larger than {MAX_PREVIEW_BYTES} bytes",
             entry.path
         ),
         "ratio" => format!(
-            "entry {} would inflate past {MAX_RATIO} times its compressed bytes",
+            "entry {} would inflate past {MAX_RATIO} times its compressed bytes \
+             ({produced} bytes from {consumed} compressed bytes)",
             entry.path
         ),
         "size_mismatch" => format!("entry {} does not match its declared sizes", entry.path),
