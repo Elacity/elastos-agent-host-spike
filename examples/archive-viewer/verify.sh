@@ -1,13 +1,57 @@
 #!/usr/bin/env bash
-# The archive viewer core: fmt, clippy for the host tests and the wasm32
-# component, its tests, and every falsifier (F1, F2, F4, F5, F6, F6b, F6c,
-# F7 to F17, F19 to F28, F29 to F33, F40 to F42, plus the bound and skip-reason
-# cases F5b, F6d to F6f, F16b, F19b, F21b to F21g, F23b, F23c, F30b, F30c and
-# F41b to F41e).
+# The archive viewer: the core's fmt, clippy (host and wasm32), tests and
+# falsifiers; then, with --runtime, the built component in the Runtime's
+# ComponentProvider with its admission check, the F35 grant stop and the F36
+# fuel gate (the host-test crate), and their falsifiers.
+#
+# Usage: verify.sh [--runtime | --guest-only]
+#
+# --runtime     also build the component and run the host-test crate and its
+#               runtime falsifiers (this Mac; needs wasm32 and the repository
+#               component builder).
+# --guest-only  the guest checks only, for a machine without the component
+#               build.
+# no argument   guest checks only. The lane gate runs this script with no
+#               argument, so it selects the full check through GATE_LIST.
 set -euo pipefail
 
 VIEWER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${VIEWER_DIR}/../.." && pwd)"
+WIT="${REPO_ROOT}/elastos/wit/elastos-bus-v1.wit"
 export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
+
+RUNTIME=0
+GATE=0
+case "${GATE_LIST:-}" in
+    # run-lane.sh exports the gate commands (the substring is `gates-photo`),
+    # and older forms may carry the name; either way this is the lane gate.
+    *gates-photo* | *photo-gates*) GATE=1 ;;
+esac
+if [[ $# -eq 0 ]]; then
+    # The lane gate runs verify.sh with no argument, so it selects the full
+    # check; every other no-argument run is guest-only.
+    [[ $GATE -eq 1 ]] && RUNTIME=1
+else
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --runtime) RUNTIME=1 ;;
+            --guest-only) RUNTIME=0 ;;
+            *)
+                echo "usage: $0 [--runtime | --guest-only]" >&2
+                exit 2
+                ;;
+        esac
+        shift
+    done
+fi
+# Fail closed: the lane gate must never certify a guest-only run.
+if [[ $GATE -eq 1 && $RUNTIME -ne 1 ]]; then
+    echo "verify.sh: the lane gate requires the runtime step; drop --guest-only" >&2
+    exit 1
+fi
+
+python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" \
+    "${VIEWER_DIR}/capsule.json" "${WIT}" archive-viewer
 
 cargo fmt --manifest-path "${VIEWER_DIR}/Cargo.toml" --all -- --check
 cargo clippy --locked --manifest-path "${VIEWER_DIR}/Cargo.toml" --all-targets -- -D warnings
@@ -19,4 +63,34 @@ cargo test --locked --manifest-path "${VIEWER_DIR}/Cargo.toml"
 # Every rule: break it, see its test fail, restore it.
 python3 -I "${VIEWER_DIR}/falsify.py"
 
-echo "archive-viewer core verification: OK"
+if [[ $RUNTIME -eq 1 ]]; then
+    host_log="$(mktemp)"
+    runtime_log="$(mktemp)"
+    trap 'rm -f "$host_log" "$runtime_log"' EXIT
+
+    # Component: built with the repository builder.
+    "${VIEWER_DIR}/build.sh"
+    test -f "${VIEWER_DIR}/archive-viewer.component.wasm"
+
+    # Host: the component inside the Runtime's ComponentProvider, its import
+    # admission and the fuel gate.
+    cargo fmt --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" -- --check
+    cargo clippy --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" --all-targets -- -D warnings
+    cargo test --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" -- --nocapture \
+        2>&1 | tee "$host_log"
+
+    # The component falsifiers: each rebuilds the component and runs the host test.
+    python3 -I "${VIEWER_DIR}/falsify.py" --runtime 2>&1 | tee "$runtime_log"
+
+    # The lane gate certifies the runtime step only when it actually ran:
+    # the host suite passed and the component falsifiers caught F35 and F36.
+    if [[ $GATE -eq 1 ]]; then
+        grep -q '^test result: ok\. [1-9][0-9]* passed; 0 failed;' "$host_log"
+        grep -q '^caught: F35 ' "$runtime_log"
+        grep -q '^caught: F36 ' "$runtime_log"
+    fi
+else
+    echo "archive-viewer: guest checks only; pass --runtime for the component, host test and F35/F36"
+fi
+
+echo "archive-viewer verification: OK"

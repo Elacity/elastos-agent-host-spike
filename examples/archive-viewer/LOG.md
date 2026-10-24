@@ -251,3 +251,122 @@ blocks.
   directly: the early L8 check and the returned-length check already prove the
   length, so the unreachable comparison is gone.
 - 72 falsifiers.
+
+## 2026-10-24: task 004, the host test and the fuel gate
+
+Step 3c's first half: the built component runs inside the Runtime's own
+`ComponentProvider` under the kit's fake bridge, and the two rules the roadmap
+gives as the reason for this app are proven there: a run with no grant stops
+(F35), and the worst archive within the caps uses at most 80% of the fixed
+100,000,000 fuel (F36).
+
+### What changed
+
+- `capsule.json` and `build.sh`: the manifest the Runtime validates (component
+  app, entrypoint, storage bounds `Users/self/*` and its own view folder) and
+  the repository's component builder.
+- New `host-test/` crate (layout of `examples/docs-viewer/host-test`), a
+  dev-only crate on `capsule-v1-host-test` by path. Ten tests: the manifest,
+  the happy path through `ComponentProvider` (a stored text entry shown with
+  its CRC, a directory listed, a deflated text entry), the admission import
+  check, F35, the gate archives run through the provider, the caps they are
+  built to, the chosen worst text against the repeating text, and F36 through
+  the kit's `measure` runner.
+- The fixtures are built in the test (`M4`): a byte-by-byte ZIP writer, CRC-32
+  and `miniz_oxide` streams. Seven gate archives, one per hostile class, at
+  their caps: the largest directory (256 × 18-byte names = exactly 16 KiB),
+  the most names at their longest (54 × 255 bytes under the 16 KiB directory),
+  the most shown entries (8 × 6 KiB text, the 8-entry request cap), the full
+  inflate allowance (four 16 KiB entries spend the 64 KiB B3 allowance exactly;
+  a fifth is skipped `inflate_budget` before any read), a bomb whose declared
+  ratio sits at the cap (16 KiB of zero runs broken by one changing literal
+  each, streamed at the level closest to the 154-byte floor), a 16 KiB
+  low-compressibility text entry (the worst text inflate), and the largest
+  view (256 entries and two 15 KiB previews, 63,432 bytes of view).
+- The worst text is chosen by measurement: one 16 KiB low-compressibility
+  entry (a full-period xorshift over the alphabet, so the stream is mostly
+  literals) costs 9,950,533 fuel against 4,176,199 for the repeating text,
+  and a test asserts it costs more.
+- `verify.sh`: manifest check and the guest fmt/clippy/tests/falsify always;
+  the component build, host-test fmt/clippy/tests and `falsify.py --runtime`
+  only with `--runtime`. `--guest-only` and any no-argument run outside the
+  lane gate stop after the guest checks, so a machine without the component
+  build still verifies the guest. The lane gate exports `GATE_LIST` (the gate
+  command holds `gates-photo`), which selects the full check; the script then
+  fails if the gate ever selects the guest-only path, and it checks the gate
+  log for the passing host suite and the caught F35/F36 lines, so a silent
+  skip cannot certify the lane.
+- `falsify.py`: the `--runtime` group. F35's mutant drops the archive grant
+  (`.unwrap_or_default()`); F36's mutant asks one byte a call in
+  `zip::Reader::read` and copies the whole inflate window once per output
+  byte in `preview::inflate_bounded`, so the copy is quadratic per step and
+  the output is unchanged.
+
+### F35 and F36 done
+
+- **F35** `no_grant_stops_the_run_through_the_runtime`: with the archive read
+  grant withheld, the run returns `BusError::Denied` naming the archive, makes
+  no read of it and writes no view. Its mutant attempts the read ungranted, so
+  the test fails on the read trace.
+- **F36** `worst_archives_stay_under_80_percent_of_the_runtime_fuel`: measured
+  on this Mac, one run each, through the kit's `measure` runner at
+  100,000,000 fuel:
+
+| Gate archive | Fuel | Share |
+|---|---|---|
+| the largest directory | 18,291,996 | 18.3% |
+| the most names at their longest | 12,845,089 | 12.8% |
+| the most shown entries | 12,638,105 | 12.6% |
+| the full inflate allowance | 8,330,446 | 8.3% |
+| a bomb at the ratio cap | 1,350,041 | 1.4% |
+| a worst-inflate text entry | 9,950,533 | 10.0% |
+| the largest view | 24,540,259 | 24.5% |
+
+  The highest is 24.5%, well under the 80% gate. Each case proves the work it
+  runs: 256 listed entries, 54 names of 255 bytes, eight previews, four
+  inflated 16 KiB entries and the fifth's `inflate_budget`, the bomb's
+  `not_text` after inflating, the 16 KiB preview, and a view of 63,432 bytes.
+  F36 has two mutations, so `falsify.py --measure` records each alone against
+  the same gate archives:
+
+| Mutation | Largest dir | Longest names | Most shown | Full allowance | Bomb | Worst text | Largest view |
+|---|---|---|---|---|---|---|---|
+| reader only | 100.0% | 100.0% | 71.1% | 50.7% | 10.1% | 100.0% | 100.0% |
+| inflate only | 18.3% | 12.8% | 42.4% | 45.6% | 10.9% | 14.3% | 34.5% |
+| combined | 100.0% | 100.0% | 99.9% | 88.0% | 19.6% | 100.0% | 100.0% |
+
+  The inflate copy alone raises the inflate-heavy archives well above their
+  clean shares (most shown 12.6% to 42.4%, full allowance 8.3% to 45.6%,
+  largest view 24.5% to 34.5%), so the two mutations each execute and the
+  empty-entry 100% cases are not the only evidence. Under the combined mutant
+  the gate's highest is 100.0% and the test fails on the 80% assertion; the
+  gate counts an out-of-fuel run as 100%, not as a broken fixture. The mutant
+  breaks three host tests, all named by F36: the fuel gate, the worst-archive
+  run (it stops out of fuel) and the worst-text comparison. `falsify.py`
+  also runs the whole host suite under each runtime mutant and proves every
+  unnamed host test still passes.
+- 74 falsifiers in all: the 72 core cases and F35, F36 under `--runtime`.
+  After every runtime run, including an F35-only or filtered one, the source is
+  restored and the component is rebuilt, so the artifact on disk always
+  matches the source.
+
+### Notes for the next builder
+
+- **Kit note, no kit change:** a kit falsifier case names one file, so F36's
+  second mutation (the inflate copy in `src/preview.rs`) is applied by the
+  runtime group's `prepare`, checked by `--check` and restored in a `finally`.
+  A case that names several files would fold this in.
+- The guest's read budget covers the gate archives: the largest view reads
+  about 31 KiB of the 64 KiB one run may read, so the gate is a fuel
+  measurement, not a budget refusal.
+- **Runtime step selection:** the lane gate runs `verify.sh` with no
+  argument, so a plain no-argument run is guest-only and the gate names itself
+  through the `GATE_LIST` environment variable that `run-lane.sh` exports. Its
+  entries are `name|command`, and the command holds `gates-photo`, which the
+  script matches; under the gate the script also fails if the guest-only path
+  was selected and checks the log for the passing host suite and the caught
+  F35/F36 lines. Running `verify.sh --runtime` directly does the same on this
+  Mac.
+- **Remaining for task 005:** F3 (B2's streaming ratio check, in the
+  component), F43 (declared totals under the 128 MiB store limit). Then the
+  page (F37 to F39), and tar after ZIP on both buses.
