@@ -5021,7 +5021,8 @@
    ],
    "tests": [
     "tests::a_head_rewrite_during_an_open_compaction_keeps_the_journal_loadable",
-    "tests::a_step_that_changes_the_log_in_place_says_a_compaction_is_open"
+    "tests::a_step_that_changes_the_log_in_place_says_a_compaction_is_open",
+    "tests::every_step_under_an_open_compaction_keeps_it_recoverable"
    ]
   },
   {
@@ -5039,7 +5040,8 @@
    "tests": [
     "tests::pruning_during_an_open_compaction_keeps_the_journal_loadable",
     "tests::a_head_rewrite_during_an_open_compaction_keeps_the_journal_loadable",
-    "tests::a_step_that_changes_the_log_in_place_says_a_compaction_is_open"
+    "tests::a_step_that_changes_the_log_in_place_says_a_compaction_is_open",
+    "tests::every_step_under_an_open_compaction_keeps_it_recoverable"
    ]
   },
   {
@@ -5050,12 +5052,13 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    compaction_boundary_ok(journal).map_err(|_| COMPACTION_BOUNDARY_REASON)\n",
-     "new": "    compaction_boundary_ok(journal).map_err(|_| COMPACTION_NOT_OPEN_REASON)\n"
+     "old": "    compaction_boundary_ok(journal).map_err(|_| COMPACTION_BOUNDARY_REASON)?;\n",
+     "new": "    compaction_boundary_ok(journal).map_err(|_| COMPACTION_NOT_OPEN_REASON)?;\n"
     }
    ],
    "tests": [
-    "tests::a_refused_commit_or_restore_says_why"
+    "tests::a_refused_commit_or_restore_says_why",
+    "tests::an_open_compaction_has_its_flag_saved_copy_and_replacement_together"
    ]
   },
   {
@@ -5066,12 +5069,126 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if !journal.compaction_open {\n        return Err(COMPACTION_NOT_OPEN_REASON);\n    }\n    compaction_boundary_ok",
-     "new": "    if !journal.compaction_open {\n        return Err(COMPACTION_BOUNDARY_REASON);\n    }\n    compaction_boundary_ok"
+     "old": "    compaction_boundary_ok(journal).map_err(|_| COMPACTION_BOUNDARY_REASON)?;\n    if !journal.compaction_open {\n        return Err(COMPACTION_NOT_OPEN_REASON);\n    }\n    Ok(())\n}",
+     "new": "    compaction_boundary_ok(journal).map_err(|_| COMPACTION_BOUNDARY_REASON)?;\n    if !journal.compaction_open {\n        return Err(COMPACTION_BOUNDARY_REASON);\n    }\n    Ok(())\n}"
     }
    ],
    "tests": [
     "tests::a_refused_commit_or_restore_says_why"
+   ]
+  },
+  {
+   "id": "CB06",
+   "title": "an open compaction with no saved copy loads",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        (None, None, false) => return Ok(()),\n",
+     "new": "        (None, _, _) => return Ok(()),\n"
+    }
+   ],
+   "tests": [
+    "tests::an_open_compaction_without_its_saved_copy_keeps_its_records",
+    "tests::an_open_compaction_has_its_flag_saved_copy_and_replacement_together"
+   ]
+  },
+  {
+   "id": "CB07",
+   "title": "an open compaction needs no replacement",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        (Some((saved, saved_epoch)), Some(_), true) => (saved, *saved_epoch),\n",
+     "new": "        (Some((saved, saved_epoch)), _, true) => (saved, *saved_epoch),\n"
+    }
+   ],
+   "tests": [
+    "tests::an_open_compaction_has_its_flag_saved_copy_and_replacement_together"
+   ]
+  },
+  {
+   "id": "CB08",
+   "title": "a saved copy and a replacement load with no open compaction",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        (Some((saved, saved_epoch)), Some(_), true) => (saved, *saved_epoch),\n",
+     "new": "        (Some((saved, saved_epoch)), Some(_), _) => (saved, *saved_epoch),\n"
+    }
+   ],
+   "tests": [
+    "tests::an_open_compaction_has_its_flag_saved_copy_and_replacement_together"
+   ]
+  },
+  {
+   "id": "CB09",
+   "title": "a new series under an open compaction loads",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if saved_epoch != journal.epoch {\n        return Err(\"record\");\n    }\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::an_open_compaction_has_its_flag_saved_copy_and_replacement_together"
+   ]
+  },
+  {
+   "id": "CB10",
+   "title": "leftovers of a compaction are read as no compaction",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    compaction_boundary_ok(journal).map_err(|_| COMPACTION_BOUNDARY_REASON)?;\n    if !journal.compaction_open {\n        return Err(COMPACTION_NOT_OPEN_REASON);\n    }\n    Ok(())\n}",
+     "new": "    if !journal.compaction_open {\n        return Err(COMPACTION_NOT_OPEN_REASON);\n    }\n    compaction_boundary_ok(journal).map_err(|_| COMPACTION_BOUNDARY_REASON)?;\n    Ok(())\n}"
+    }
+   ],
+   "tests": [
+    "tests::an_open_compaction_has_its_flag_saved_copy_and_replacement_together",
+    "tests::a_compaction_that_is_not_open_is_neither_committed_nor_rolled_back"
+   ]
+  },
+  {
+   "id": "CB11",
+   "title": "a first head is inserted under an open compaction",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        log_may_change_in_place(journal)?;\n        journal.events.insert(",
+     "new": "        journal.events.insert("
+    }
+   ],
+   "tests": [
+    "tests::a_first_head_under_an_open_compaction_is_refused"
+   ]
+  },
+  {
+   "id": "CB12",
+   "title": "the saved copy's paths are not checked on load",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        .chain(journal.compact_backup.iter().flat_map(|(nodes, _)| nodes))\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::a_legacy_journal_with_a_path_alias_is_refused_on_load"
    ]
   }
  ]

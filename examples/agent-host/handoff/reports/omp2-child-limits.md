@@ -734,3 +734,67 @@ Principles:   5 (no step can break the boundary of an open compaction; a refusal
               11 (each refusal says why and what to do), 12 (this note), 7 (Codex's sequence fails first on
               28940a07; each new rule and reason has a caught falsifier).
 ```
+
+## Update: Codex FAIL at 18278463f (Sparks round 3, on 28940a07), two findings (24 Oct)
+
+```text
+Base:         18278463f never reached GitHub; this round is built on the GitHub head 2a605c16, which
+              already holds the round 2 fixes below.
+Finding 1:    a head rewrite (`admit_system(.., false)`) under an open compaction changed the saved prefix;
+              the journal encoded but did not load, and commit and crash restore refused.
+Status:       fixed in 2a605c16 (round 2): `log_may_change_in_place` refuses it with
+              `COMPACTION_OPEN_REASON`. a_head_rewrite_during_an_open_compaction_keeps_the_journal_loadable
+              is Codex's exact sequence (two_turns, begin_compact, "Replacement head."), caught by CB02.
+              This round also guards the other in-place path in `admit_system`: the first-head insert at
+              node 0 (CB11).
+Finding 2:    an open compaction with no saved copy loaded (`compaction_boundary_ok` returned success with
+              no backup); `child_records_since_compaction` then selected no record and a commit dropped
+              the stop written during the compaction; the next load refused it with "record".
+Fix:          `compaction_boundary_ok` is now the one rule for the whole compaction state: the open flag,
+              the saved copy and the pending replacement are there together or not at all; the saved copy
+              is the start of the log; and the series is still the saved one (nothing can start a new
+              series while a compaction is open). The load refuses anything else with "record";
+              `open_compaction_ok` asks the same rule first, so a commit or crash restore refuses broken
+              leftovers with `COMPACTION_BOUNDARY_REASON` (never "not open") and changes nothing.
+Principles:   Codex: "the backup-only path fixture is also weakened". 28940a07 put the malformed path in the
+              log too, so the log check alone refused it, and removing the saved copy's path check went
+              unnoticed (OY07 removes both checks, and the pending case catches that). The fixture is
+              back to a path only in the saved copy; the path rule runs before the boundary, so it is
+              refused with "path not canonical". CB12 (only the saved copy's path check removed) survives
+              with the weakened fixture and is caught with the restored one.
+One guard:    every function that changes the journal was listed. Only `admit_system` (first-head insert
+              and head rewrite), `prune_tool_results`, and the commit and crash restore change nodes
+              already in the log or the series; every other step only appends. The first three ask
+              `log_may_change_in_place`; the last two ask `open_compaction_ok`. Every refusal returns its
+              reason.
+Tests:        an_open_compaction_without_its_saved_copy_keeps_its_records (Codex's sequence; asks only
+              operations present at 2a605c16, compiles there and on 28940a07 and fails on both),
+              an_open_compaction_has_its_flag_saved_copy_and_replacement_together (open with no saved copy,
+              open with no replacement, both with no flag, each alone, a new series: each refused on load
+              and by commit and crash restore with the reason, unchanged; a good one loads),
+              a_first_head_under_an_open_compaction_is_refused, and
+              every_step_under_an_open_compaction_keeps_it_recoverable (user, assistant, tool result,
+              system lines, same and new head, prune, snapshot, skill, goal, read, refusal, a child's stop
+              and a nested begin under an open compaction: after each the boundary holds and the journal
+              loads; then commit and crash restore keep the stop and load).
+              a_compaction_that_is_not_open_is_neither_committed_nor_rolled_back now expects
+              `COMPACTION_BOUNDARY_REASON`.
+All four:     pruning (round 2): pruning_during_an_open_compaction_keeps_the_journal_loadable, CB01. Bare
+              false (round 2): a_refused_commit_or_restore_says_why, CB04, CB05. Head change (round 3):
+              the head-rewrite test, the first-head test and the sweep, CB02, CB11. Missing saved copy
+              (round 3): the two state tests, CB06-CB10.
+Falsifiers:   CB06 (an open compaction with no saved copy loads), CB07 (no replacement needed), CB08 (no
+              open flag needed), CB09 (a new series loads), CB10 (leftovers read as "not open"), CB11 (the
+              first-head insert skips the guard) and CB12 (the saved copy's paths not checked) new; CB04
+              and CB05 re-targeted; CB02 and CB03 also name the sweep. All caught.
+Tests run:    ./examples/agent-host/verify.sh -> "246 passed", runner self-test OK, clippy clean, build OK.
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Full run:     python3 -I examples/agent-host/falsify.py: 295 CAUGHT, 1 CAUGHT (does not build: OY19), 1
+              SURVIVED (expected, by design: OZ01) of 297; no NOT RUN, no NO MATCH.
+Guest hash:   5b6ff6bec6ce5a70d1782426f148a972f0ecb82fda7078f1718a6c8f5a840e7f on verify.sh (Linux checkout).
+              wasm_sections.py: file 668322 bytes; /1/2 149 5ee6b40d46f6a045 (import list unchanged).
+Principles:   5 (a broken compaction state fails closed on load and in memory), 10 (one state rule for the
+              load and both install paths; one in-place guard for every step that edits the log), 11
+              (every refusal says why), 12 (this note), 7 (each sequence fails first and each rule has a
+              caught falsifier; the restored fixture makes CB12 catchable).
+```
