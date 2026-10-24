@@ -31,6 +31,7 @@ Exit status: 0 when every falsifier did what it expects, 1 otherwise, 2 for a
 usage or data error, 3 when it stopped for a full disk.
 """
 import json
+import inspect
 import os
 import pathlib
 import re
@@ -52,6 +53,17 @@ DISK_FULL = ("No space left on device", "ENOSPC", "Disk quota exceeded")
 # The test harness prints this line after every run of the binary. A panic in
 # a test body can print anything, including a fake FAILED line, before it.
 TEST_RESULT = re.compile(r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed;", re.MULTILINE)
+# A named self-test case runs in its own process. A non-zero exit alone does
+# not say the case ran: a loading error also exits non-zero. The child prints
+# one marker line only after the case returns, and the runner requires both.
+CASE_PASSED = 0
+CASE_FAILED = 1
+CASE_USAGE = 2
+CASE_ERROR = 3
+
+
+def case_marker(name, word):
+    return f"self-test case {name!r}: {word}"
 
 
 class DiskFull(Exception):
@@ -145,6 +157,9 @@ class Mutation:
                 finally:
                     if tmp.exists():
                         tmp.unlink()
+            # Inside the try: an interrupt after the last replacement but
+            # before __enter__ returns must still restore (task 004).
+            return self
         except BaseException as error:
             # Python does not call __exit__ when __enter__ raises, and a
             # Ctrl-C or SIGTERM can arrive just after a replacement. Put every
@@ -153,7 +168,6 @@ class Mutation:
             if isinstance(error, OSError) and "No space" in str(error):
                 raise DiskFull(str(error)) from error
             raise
-        return self
 
     def restore(self):
         saved = block_interruptions()
@@ -242,9 +256,17 @@ def evaluate(entry, how):
     for name in entry["tests"]:
         if entry.get("command") == "selftest":
             # Each named case is its own process, so one case cannot carry a
-            # verdict for another. Exit 2 means no case answers to the name.
-            code, _ = run(argv + extra + ["--self-test-case", name], cwd)
-            outcomes[name] = "not run" if code == 2 else "failed" if code != 0 else "passed"
+            # verdict for another. The case counts only when the child exits
+            # with its result AND prints the marker it writes after the case
+            # returns. A loading error, an unknown name, or a signal is not run.
+            code, output = run(argv + extra + ["--self-test-case", name], cwd)
+            lines = output.splitlines()
+            if code == CASE_PASSED and case_marker(name, "OK") in lines:
+                outcomes[name] = "passed"
+            elif code == CASE_FAILED and case_marker(name, "FAILED") in lines:
+                outcomes[name] = "failed"
+            else:
+                outcomes[name] = "not run"
             continue
         # Exactly one test must answer to the name; the list is read for that
         # count only (a list run prints no test output).
@@ -338,6 +360,29 @@ if "--list" in sys.argv:
     raise SystemExit(0)
 print("test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out")
 raise SystemExit(0)
+"""
+
+STUB_CASE_RAN_FAILED = """import sys
+name = sys.argv[sys.argv.index('--self-test-case') + 1]
+print(f"self-test case {name!r}: FAILED")
+raise SystemExit(1)
+"""
+
+STUB_CASE_RAN_PASSED = """import sys
+name = sys.argv[sys.argv.index('--self-test-case') + 1]
+print(f"self-test case {name!r}: OK")
+raise SystemExit(0)
+"""
+
+STUB_CASE_LOADING_ERROR = """import sys
+print("Traceback (most recent call last):")
+print("RuntimeError: the case module did not load")
+raise SystemExit(1)
+"""
+
+STUB_CASE_SIGNAL = """import os
+import signal
+os.kill(os.getpid(), signal.SIGTERM)
 """
 
 INTERRUPTION_ENTRY = {
@@ -454,6 +499,75 @@ def real_catch_counts():
     return ok
 
 
+def interruption_at_the_end_of_the_edit():
+    """An interrupt after the last replacement but before __enter__ returns:
+    the original still comes back (task 004, review finding 2)."""
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+    path = SELF_TEST_DIR / "boundary.txt"
+    original = "original bytes\n"
+    path.write_text(original, encoding="utf-8")
+    lines, start = inspect.getsourcelines(Mutation.__enter__)
+    at = next(start + offset for offset, line in enumerate(lines) if line.strip() == "return self")
+    entered = []
+
+    def trace(frame, event, _arg):
+        if frame.f_code is Mutation.__enter__.__code__:
+            if event == "call":
+                entered.append(frame)
+            elif event == "line" and frame.f_lineno == at and len(entered) == 1:
+                entered.append(frame)
+                raise KeyboardInterrupt
+        return trace
+
+    entry = {"id": "ST", "command": "host", "expect": "caught",
+             "edits": [{"file": "boundary.txt", "old": "original bytes", "new": "mutated bytes"}],
+             "tests": []}
+    interrupted = False
+    previous = sys.gettrace()
+    sys.settrace(trace)
+    try:
+        with Mutation(entry, SELF_TEST_DIR):
+            pass
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        sys.settrace(previous)
+    backup = path.with_name(path.name + BACKUP_SUFFIX)
+    restored = path.read_text(encoding="utf-8") == original
+    print(f"self-test: interruption at the end of the edit: raised={interrupted}, "
+          f"restored={restored}, backup left={backup.exists()}")
+    return interrupted and restored and not backup.exists()
+
+
+def a_self_test_case_counts_only_when_it_ran():
+    """The named case ran and failed -> a catch. A loading error that exits
+    non-zero, or a signal, is not run and not a catch (review finding 1)."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        entry = {"id": "ST", "command": "selftest", "expect": "caught",
+                 "tests": ["planted case"]}
+        cases = (
+            ("ran and failed", STUB_CASE_RAN_FAILED, (True, "CAUGHT")),
+            ("ran and passed", STUB_CASE_RAN_PASSED, (False, "SURVIVED")),
+            ("loading error", STUB_CASE_LOADING_ERROR, (False, "NOT RUN")),
+            ("signal", STUB_CASE_SIGNAL, (False, "NOT RUN")),
+        )
+        for title, text, want in cases:
+            stub = SELF_TEST_DIR / "stub.py"
+            stub.write_text(text, encoding="utf-8")
+            how = {"build": [], "one": (["python3", "-I", str(stub)], SELF_TEST_DIR, [])}
+            got = verdict(entry, *evaluate(entry, how))
+            print(f"self-test: self-test case {title}: {got[1]} ({got[2]})")
+            if got[:2] != want:
+                ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
 # Each self-test case is named, so a falsifier names one and the runner runs
 # it on its own. A name not listed here is not a case: the runner reports it
 # as not run, never as caught.
@@ -461,7 +575,9 @@ SELF_TEST_CASES = {
     "verdict cases": verdict_cases,
     "a named test that does not run is not a catch": a_named_test_that_does_not_run_is_not_a_catch,
     "an interrupted edit is restored": interruption_restores,
+    "an interrupt at the end of the edit is restored": interruption_at_the_end_of_the_edit,
     "a real catch counts": real_catch_counts,
+    "a self-test case counts only when it ran": a_self_test_case_counts_only_when_it_ran,
 }
 
 
@@ -490,7 +606,7 @@ def self_test(entries, with_repo, only=None):
         if got[:2] != (True, "CAUGHT"):
             ok = False
     if only is not None:
-        print(f"self-test case {only!r}: {'OK' if ok else 'FAILED'}")
+        print(case_marker(only, "OK" if ok else "FAILED"))
         return ok
     print("self-test:", "OK" if ok else "FAILED")
     return ok
@@ -519,12 +635,18 @@ def main(argv):
         at = argv.index("--self-test-case")
         if at + 1 >= len(argv):
             print("--self-test-case needs a name")
-            return 2
+            return CASE_USAGE
         name = argv[at + 1]
         if name not in SELF_TEST_CASES:
             print(f"no self-test case named {name}")
-            return 2
-        return 0 if self_test(entries, False, only=name) else 1
+            return CASE_USAGE
+        try:
+            ok = self_test(entries, False, only=name)
+        except BaseException as error:
+            # The case did not complete, so its name must not carry a verdict.
+            print(f"self-test case {name!r}: ERROR: {type(error).__name__}: {error}")
+            return CASE_ERROR
+        return CASE_PASSED if ok else CASE_FAILED
     if "--self-test" in argv:
         return 0 if self_test(entries, "--with-repo" in argv) else 1
     chosen = [entry for entry in entries if not argv or any(

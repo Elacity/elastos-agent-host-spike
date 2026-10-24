@@ -113,6 +113,43 @@
    "tests": [
     "a named test that does not run is not a catch"
    ]
+  },
+  {
+   "id": "FS08",
+   "title": "the return sits outside the restoration try, so an interrupt after the edit leaks",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "            return self\n        except BaseException as error:",
+     "new": "            pass\n        except BaseException as error:"
+    },
+    {
+     "file": "falsify.py",
+     "old": "                raise DiskFull(str(error)) from error\n            raise\n\n    def restore(self):",
+     "new": "                raise DiskFull(str(error)) from error\n            raise\n        return self\n\n    def restore(self):"
+    }
+   ],
+   "tests": [
+    "an interrupt at the end of the edit is restored"
+   ]
+  },
+  {
+   "id": "FS09",
+   "title": "a self-test non-zero exit is a failure without proof that the case ran",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "            code, output = run(argv + extra + [\"--self-test-case\", name], cwd)\n            lines = output.splitlines()\n            if code == CASE_PASSED and case_marker(name, \"OK\") in lines:\n                outcomes[name] = \"passed\"\n            elif code == CASE_FAILED and case_marker(name, \"FAILED\") in lines:\n                outcomes[name] = \"failed\"\n            else:\n                outcomes[name] = \"not run\"\n            continue",
+     "new": "            code, _output = run(argv + extra + [\"--self-test-case\", name], cwd)\n            outcomes[name] = \"not run\" if code == CASE_USAGE else \"failed\" if code != 0 else \"passed\"\n            continue"
+    }
+   ],
+   "tests": [
+    "a self-test case counts only when it ran"
+   ]
   }
  ]
 }
