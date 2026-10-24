@@ -304,19 +304,35 @@ def summary_at_the_end(body):
     return (match.group(1), int(match.group(2)), int(match.group(3))) if match else None
 
 
-def named_outcome(result, name):
-    """failed, passed or not run, from the run that names this test. No run
-    that names it, no closing summary for that run, or an error the harness
-    reported itself means it did not run."""
-    if harness_error(result.stderr):
-        return "not run"
-    for body in run_blocks(result.stdout):
-        if f"test {name} ... " not in body:
-            continue
+def completed_runs(stdout):
+    """The run block and its closing summary, for every run in a complete
+    harness output, or None. Complete means nothing is printed before the
+    first run and every run is closed by its own summary: a harness that stops
+    early leaves a run open, whatever a test body printed in an earlier one."""
+    first = RUN_HEADER.search(stdout)
+    if first is None or stdout[:first.start()].strip():
+        return None
+    runs = []
+    for body in run_blocks(stdout):
         summary = summary_at_the_end(body)
         if summary is None:
-            return "not run"
-        status, passed, failed = summary
+            return None
+        runs.append((body, summary))
+    return runs
+
+
+def named_outcome(result, name):
+    """failed, passed or not run, from the complete harness output. An error
+    the harness reported itself, output before the first run, a run left open,
+    or no run that names this test means it did not run."""
+    if harness_error(result.stderr):
+        return "not run"
+    runs = completed_runs(result.stdout)
+    if runs is None:
+        return "not run"
+    for body, (status, passed, failed) in runs:
+        if f"test {name} ... " not in body:
+            continue
         if status == "FAILED" and failed >= 1:
             return "failed"
         if status == "ok" and passed >= 1:
@@ -480,7 +496,7 @@ raise SystemExit(101)
 """
 
 # The same fabricated run with the error left on stdout: it ends the run, so
-# the closing-summary rule alone rejects it.
+# no closing summary follows it.
 STUB_FAKE_SUMMARY_ERROR_ON_STDOUT = """import sys
 if "--list" in sys.argv:
     print("tests::planted_check: test")
@@ -489,6 +505,32 @@ print("running 1 test")
 print("test tests::planted_check ... FAILED")
 print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
 print("error: could not load the test harness")
+raise SystemExit(101)
+"""
+
+# The fabricated run closes, then a second run header never does: the harness
+# stopped early, so the complete output is rejected (finding 4).
+STUB_FAKE_SUMMARY_OPEN_RUN = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("running 1 test")
+print("test tests::planted_check ... FAILED")
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+print("running 0 tests")
+print("error: could not load the test harness")
+raise SystemExit(101)
+"""
+
+# A harness error printed before any run header, then a fabricated run.
+STUB_OUTPUT_BEFORE_RUN = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("error: could not load the test harness")
+print("running 1 test")
+print("test tests::planted_check ... FAILED")
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
 raise SystemExit(101)
 """
 
@@ -654,8 +696,9 @@ def verdict_cases():
 
 def a_named_test_that_does_not_run_is_not_a_catch():
     """Planted failures: no test answers to the name, a harness error exits
-    non-zero without running one, and a test body prints a summary line before
-    the harness errors. None is a catch (task 004)."""
+    non-zero without running one, a test body prints a summary line before the
+    harness errors, a later run is left open, and output comes before the
+    first run. None is a catch (task 004)."""
     ok = True
     shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
     try:
@@ -665,8 +708,10 @@ def a_named_test_that_does_not_run_is_not_a_catch():
                             ("harness error", STUB_HARNESS_ERROR),
                             ("fake summary then harness error on stderr", STUB_FAKE_SUMMARY_THEN_ERROR),
                             ("fake summary then harness error on stdout", STUB_FAKE_SUMMARY_ERROR_ON_STDOUT),
+                            ("fake summary then a later run left open", STUB_FAKE_SUMMARY_OPEN_RUN),
                             ("fake summary then signal", STUB_FAKE_SUMMARY_THEN_SIGNAL),
                             ("fake summary then cargo crash block", STUB_FAKE_SUMMARY_CARGO_CRASH),
+                            ("output before the first run", STUB_OUTPUT_BEFORE_RUN),
                             ("exit 0 but no test ran", STUB_FILTERED_OUT)):
             stub = SELF_TEST_DIR / "stub.py"
             stub.write_text(text, encoding="utf-8")

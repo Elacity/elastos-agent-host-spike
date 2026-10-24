@@ -52,14 +52,14 @@
   },
   {
    "id": "FS04",
-   "title": "a harness error that exits non-zero is counted as a failed test",
+   "title": "a later run that never closes does not stop an earlier fabricated block",
    "command": "selftest",
    "expect": "caught",
    "edits": [
     {
      "file": "falsify.py",
-     "old": "        if summary is None:\n            return \"not run\"\n        status, passed, failed = summary",
-     "new": "        if summary is None:\n            return \"failed\"\n        status, passed, failed = summary"
+     "old": "        if summary is None:\n            return None\n        runs.append((body, summary))",
+     "new": "        if summary is None:\n            continue\n        runs.append((body, summary))"
     }
    ],
    "tests": [
@@ -277,6 +277,22 @@
    ],
    "tests": [
     "an interrupt at the cleanup entry is restored"
+   ]
+  },
+  {
+   "id": "FS18",
+   "title": "output before the first run does not stop a fabricated catch",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    if first is None or stdout[:first.start()].strip():",
+     "new": "    if first is None:"
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
    ]
   }
  ]
