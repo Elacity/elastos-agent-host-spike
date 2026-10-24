@@ -183,6 +183,9 @@ The surface draws the core's output and nothing else. It is not authority (princ
       `eval` or `Function`.
 - [ ] **(added)** have no parser of its own: the core turns content into a typed document (text-only blocks;
       links and images as text), and the page only draws its kinds. A kind it does not know is "not shown".
+- [ ] **(added)** draw a typed document through the kit's one renderer (`surface/docs-render.js`), shipped
+      as a byte-identical copy at its `browser/docs-render.js`: the build writes the copy, the page imports
+      it, and a named drift test fails on any byte that differs from the owner. Page glue stays in the page.
 - [ ] **(added)** be tested against what the core actually writes (a fixture the core's tests check).
 - [ ] cut every string it shows to a fixed length.
 - [ ] **(review)** look a name from the output up as an own property only (`Object.hasOwn`), never as
@@ -203,6 +206,10 @@ absent, and the real page in real Chromium framed in Home's sandbox.
 **In the photo viewer:** `surface/browser/photos.js`, `surface/photos.test.mjs`,
 `surface/photos-browser-smoke.mjs`, and the seam in
 `elastos/crates/elastos-server/src/api/viewer_gateway.rs` ("Photos surface", `image-viewer` only).
+
+**In the documents viewer:** the glue in `surface/browser/reader.js`; the kit owner's verified copy at
+`surface/browser/docs-render.js`; `surface/reader.test.mjs` (including `the shipped renderer matches the kit
+owner`); `surface/reader-browser-smoke.mjs`.
 
 ## 3. Signed bundle by CID with policy
 

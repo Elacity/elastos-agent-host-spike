@@ -9,10 +9,20 @@ Two capsules, one role each:
 | Capsule | Folder | Role | What |
 |---|---|---|---|
 | `docs-viewer` | here | `app`, a Bus v1 component | Reads a shelf of documents by grant, checks each is text, parses markdown into typed blocks in the sandbox, writes the pages |
-| `docs-reader` | `surface/` | `viewer`, a render-only page | Draws the pages with `textContent` only |
+| `docs-reader` | `surface/` | `viewer`, a render-only page | Draws the pages with `textContent` only; the block renderer is the kit's one owner, shipped as a verified copy |
 
 It stays outside the ElastOS Cargo workspace and all CI, setup, release and deployment lists, like
 `examples/photo-viewer`.
+
+## The page's one renderer
+
+The docs-model block renderer (`readBlock`, `drawBlock`, `readSpans`, `cut`, the style map and the renderer
+bounds) has one owner: `../capsule-kit/surface/docs-render.js` (kit item A5). Runtime serves a page from its
+own folder with `script-src 'self'`, so `build.sh` copies the owner to `surface/browser/docs-render.js`;
+`reader.js` imports that copy and keeps only the page glue (launch token, client, document list and page
+bounds). The surface test `the shipped renderer matches the kit owner` fails on any byte that differs, and
+its falsifier edits one byte of the copy. The archive page reuses this owner instead of carrying a second
+renderer.
 
 ## What one run does
 
@@ -84,8 +94,10 @@ It checks the manifest against the WIT hash, then runs:
   (`host-test/`): the admission import check and the fuel gate of the worst shelves;
 - the bundle tests (`bundle-test/`): both capsules packed, named by CID, claimed and admitted;
 - the Bus v2 reader (`bus2/`, Rust 1.95.0) in the Bus v2 proof's stub host;
-- the page tests and the page in real Chromium (`surface/`);
-- every falsifier (`falsify.py --runtime`, `falsify-surface.py`).
+- the page tests (including `the shipped renderer matches the kit owner`) and the page in real Chromium
+  (`surface/`);
+- every falsifier (`falsify.py --runtime`, `falsify-surface.py`). Each surface case declares the complete set
+  of tests that must fail, and the runner fails the case if the whole test file has any other failing test.
 
 The reproducible build is separate: `repro/build-in-container.sh` (needs Docker).
 
@@ -96,6 +108,9 @@ The reproducible build is separate: `repro/build-in-container.sh` (needs Docker)
 | `capsule.json` | Identity, role, Component ABI, entrypoint, storage bounds |
 | `src/lib.rs` | Run order, limits, stop and skip rules, pages |
 | `src/shelf.rs` | Shelf schema |
+| `../capsule-kit/surface/docs-render.js` | The one owner of the docs-model block renderer (kit item A5) |
+| `surface/browser/docs-render.js` | The owner's copy, written by `build.sh` and pinned byte-for-byte by `the shipped renderer matches the kit owner` |
+| `surface/browser/reader.js` | Page glue: launch token, client, document list, mount |
 | `../capsule-kit/guest/` (path dependency `capsule-kit-guest`) | The two Bus calls and answer parsing, the write, the refusals and reads (counted reads too), the URI check, the text checks, the fake Runtime and the WIT glue, shared with the photo viewer |
 | `src/tests.rs` | Guest tests |
 | `model/` | Markdown to blocks (the text checks are the kit's, re-exported); shared with the Bus v2 guest |
