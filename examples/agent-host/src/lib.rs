@@ -8940,21 +8940,29 @@ mod tests {
             })
     }
 
-    /// The prefill time this engine exposes. It is a histogram: the family
-    /// name has `_sum` and `_count` samples. A build that exposes a plain
-    /// sample with the family name is read directly.
-    fn prefill_seconds(metrics: &str) -> Option<(f64, f64)> {
+    /// The prefill value this engine publishes. A histogram has `_sum` and
+    /// `_count`; a build that publishes one scalar sample has only its value.
+    /// The shapes stay apart so no field is invented.
+    #[derive(Clone, Debug, PartialEq)]
+    enum PrefillSeconds {
+        Scalar(f64),
+        Histogram { sum: f64, count: f64 },
+    }
+
+    /// Read the prefill value without adding a field the engine did not
+    /// publish.
+    fn prefill_seconds(metrics: &str) -> Option<PrefillSeconds> {
         if let Some(value) = metric_value(metrics, "tensorfold:request_prefill_seconds") {
-            return Some((value, 1.0));
+            return Some(PrefillSeconds::Scalar(value));
         }
         let sum = metric_value(metrics, "tensorfold:request_prefill_seconds_sum")?;
         let count = metric_value(metrics, "tensorfold:request_prefill_seconds_count")?;
-        Some((sum, count))
+        Some(PrefillSeconds::Histogram { sum, count })
     }
 
     /// The counters this engine publishes for a turn. An absent counter is a
     /// refusal that names it; there is no prefix-hit counter here.
-    fn required_metrics(metrics: &str) -> Result<(f64, (f64, f64)), String> {
+    fn required_metrics(metrics: &str) -> Result<(f64, PrefillSeconds), String> {
         let prompt = metric_value(metrics, "tensorfold:prompt_tokens_total")
             .ok_or_else(|| "tensorfold:prompt_tokens_total is absent".to_string())?;
         let prefill = prefill_seconds(metrics).ok_or_else(|| {
@@ -8963,61 +8971,21 @@ mod tests {
         Ok((prompt, prefill))
     }
 
-    /// A one-shot local server. It writes `response` to one connection, then
-    /// closes.
-    fn one_shot_server(response: String) -> (String, std::thread::JoinHandle<()>) {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local port");
-        let address = listener.local_addr().expect("the local address");
-        let handle = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("one connection");
-            stream
-                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-                .ok();
-            let mut request = Vec::new();
-            let mut buffer = [0u8; 4096];
-            loop {
-                let read = stream.read(&mut buffer).expect("a request read");
-                if read == 0 {
-                    break;
-                }
-                request.extend_from_slice(&buffer[..read]);
-                let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
-                    continue;
-                };
-                let head = std::str::from_utf8(&request[..end]).expect("UTF-8 headers");
-                let length = head
-                    .split("\r\n")
-                    .filter_map(|line| line.split_once(':'))
-                    .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
-                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-                    .unwrap_or(0);
-                if request.len() >= end + 4 + length {
-                    break;
-                }
-            }
-            stream
-                .write_all(response.as_bytes())
-                .expect("the response write");
-        });
-        (format!("http://{address}/v1"), handle)
+    /// The measured result of one opt-in probe.
+    struct PrefixProbe {
+        prefix_bytes: usize,
+        before: (f64, PrefillSeconds),
+        after: (f64, PrefillSeconds),
     }
 
-    /// Opt-in: sends the two consecutive turns whose packed prefixes are
-    /// byte-identical to the local model, then records the counters the engine
-    /// publishes. Ignored by default, and it skips when `SPARKS_MODEL_URL` is
-    /// unset. This engine has no prefix-hit counter, so the test reads none
-    /// and claims no cache hit.
-    #[test]
-    #[ignore = "opt-in: set SPARKS_MODEL_URL to the local DeepSeek endpoint"]
-    fn an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns() {
-        let Some(base_url) = opt_in_model::configured_url() else {
-            println!(
-                "SKIP: SPARKS_MODEL_URL is unset; the opt-in real-model prefix test did not run"
-            );
-            return;
-        };
+    fn read_metrics(base_url: &str, when: &str) -> Result<(f64, PrefillSeconds), String> {
+        let text = opt_in_model::metrics(base_url)
+            .map_err(|error| format!("/metrics {when} the turns failed: {error}"))?;
+        required_metrics(&text).map_err(|error| format!("/metrics {when} the turns: {error}"))
+    }
 
+    /// The two consecutive turns of the prefix proof.
+    fn packed_turns() -> (Vec<u8>, String, Vec<u8>, String) {
         let mut journal = empty_journal();
         admit_system(&mut journal, SYSTEM_HEAD, true);
         admit_user(&mut journal, "hello");
@@ -9041,47 +9009,283 @@ mod tests {
         ));
         let second_prefix = prefix_bytes(&journal.events);
         let second_prompt = model_prompt(&journal.events);
-        assert_eq!(
-            first_prefix, second_prefix,
-            "the packed prefix moved between two consecutive turns"
-        );
+        (first_prefix, first_prompt, second_prefix, second_prompt)
+    }
 
-        let read = |when: &str| -> (f64, (f64, f64)) {
-            let text = opt_in_model::metrics(&base_url)
-                .unwrap_or_else(|error| panic!("/metrics {when} the turns failed: {error}"));
-            required_metrics(&text)
-                .unwrap_or_else(|error| panic!("/metrics {when} the turns: {error}"))
+    /// The opt-in probe: skip when nothing is configured, otherwise check the
+    /// prefix, read /metrics, send both turns, and read /metrics again.
+    fn probe_prefix_turns(configured: Option<String>) -> Result<Option<PrefixProbe>, String> {
+        let Some(base_url) = configured else {
+            return Ok(None);
         };
-        let before = read("before");
-
-        for prompt in [&first_prompt, &second_prompt] {
-            opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, prompt)
-                .unwrap_or_else(|error| panic!("the local model refused a turn: {error}"));
+        let (first_prefix, first_prompt, second_prefix, second_prompt) = packed_turns();
+        if first_prefix != second_prefix {
+            return Err("the packed prefix moved between two consecutive turns".to_string());
         }
+        let before = read_metrics(&base_url, "before")?;
+        opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, &first_prompt)
+            .map_err(|error| format!("the local model refused the first turn: {error}"))?;
+        opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, &second_prompt)
+            .map_err(|error| format!("the local model refused the second turn: {error}"))?;
+        let after = read_metrics(&base_url, "after")?;
+        Ok(Some(PrefixProbe {
+            prefix_bytes: first_prefix.len(),
+            before,
+            after,
+        }))
+    }
 
-        let after = read("after");
-        let prefill_before = before.1;
-        let prefill_after = after.1;
-        println!(
-            "real model: both requests ok; packed prefix {} bytes, byte-identical across the two turns",
-            first_prefix.len()
+    fn describe_prefill(value: &PrefillSeconds) -> String {
+        match value {
+            PrefillSeconds::Scalar(value) => format!("value {value}"),
+            PrefillSeconds::Histogram { sum, count } => format!("sum {sum} count {count}"),
+        }
+    }
+
+    /// Report only the fields the engine published.
+    fn prefill_report(before: &PrefillSeconds, after: &PrefillSeconds) -> String {
+        match (before, after) {
+            (PrefillSeconds::Scalar(before), PrefillSeconds::Scalar(after)) => {
+                format!("value before={before} after={after} delta={}", after - before)
+            }
+            (
+                PrefillSeconds::Histogram {
+                    sum: sum_before,
+                    count: count_before,
+                },
+                PrefillSeconds::Histogram {
+                    sum: sum_after,
+                    count: count_after,
+                },
+            ) => format!(
+                "sum before={sum_before} after={sum_after} delta={}; count before={count_before} after={count_after} delta={}",
+                sum_after - sum_before,
+                count_after - count_before
+            ),
+            _ => format!(
+                "before: {}; after: {}",
+                describe_prefill(before),
+                describe_prefill(after)
+            ),
+        }
+    }
+
+    /// Read one HTTP request from `stream`, headers and declared body.
+    fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        use std::io::Read;
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .ok();
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            let read = stream.read(&mut buffer).expect("a request read");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let head = std::str::from_utf8(&request[..end]).expect("UTF-8 headers");
+            let length = head
+                .split("\r\n")
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if request.len() >= end + 4 + length {
+                break;
+            }
+        }
+        request
+    }
+
+    /// A one-shot local server. It writes `response` to one connection, then
+    /// closes.
+    fn one_shot_server(response: String) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let address = listener.local_addr().expect("the local address");
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("one connection");
+            let _ = read_http_request(&mut stream);
+            stream
+                .write_all(response.as_bytes())
+                .expect("the response write");
+        });
+        (format!("http://{address}/v1"), handle)
+    }
+
+    /// A local server that records every request path and answers until
+    /// stopped. The first `/metrics` read gets `before`; the next gets
+    /// `after`; every other request gets `completion`.
+    #[allow(clippy::type_complexity)]
+    fn recording_server(
+        before: String,
+        after: String,
+        completion: String,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local port");
+        listener
+            .set_nonblocking(true)
+            .expect("a nonblocking listener");
+        let address = listener.local_addr().expect("the local address");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&requests);
+        let stopping = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            let mut metrics_reads = 0;
+            while !stopping.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_nonblocking(false)
+                            .expect("a blocking connection");
+                        let request = read_http_request(&mut stream);
+                        let path = std::str::from_utf8(&request)
+                            .ok()
+                            .and_then(|text| text.lines().next())
+                            .and_then(|line| line.split_whitespace().nth(1))
+                            .unwrap_or("")
+                            .to_string();
+                        seen.lock().expect("the request list").push(path.clone());
+                        let response = if path == "/metrics" {
+                            metrics_reads += 1;
+                            if metrics_reads == 1 {
+                                before.clone()
+                            } else {
+                                after.clone()
+                            }
+                        } else {
+                            completion.clone()
+                        };
+                        stream
+                            .write_all(response.as_bytes())
+                            .expect("the response write");
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (format!("http://{address}/v1"), requests, stop, handle)
+    }
+
+    fn metrics_snapshot(prompt: f64, sum: f64, count: f64) -> String {
+        format!(
+            "tensorfold:prompt_tokens_total {prompt}\n\
+             tensorfold:request_prefill_seconds_sum {sum}\n\
+             tensorfold:request_prefill_seconds_count {count}\n"
+        )
+    }
+
+    fn metrics_response(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn completion_response(text: &str) -> String {
+        let body = serde_json::json!({
+            "choices": [{ "message": { "content": text } }],
+        })
+        .to_string();
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[test]
+    fn the_opt_in_probe_skips_without_a_configured_url() {
+        assert!(matches!(probe_prefix_turns(None), Ok(None)));
+    }
+
+    #[test]
+    fn the_opt_in_probe_sends_two_turns_between_two_metric_reads() {
+        let (base_url, requests, stop, server) = recording_server(
+            metrics_response(&metrics_snapshot(100.0, 1.0, 2.0)),
+            metrics_response(&metrics_snapshot(147.0, 1.5, 4.0)),
+            completion_response("ok"),
         );
-        println!(
-            "tensorfold:prompt_tokens_total: before={} after={} delta={}",
-            before.0,
-            after.0,
-            after.0 - before.0
+        let report = probe_prefix_turns(Some(base_url))
+            .expect("the probe runs")
+            .expect("a configured endpoint is not skipped");
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        server.join().expect("the server thread");
+        let seen = requests.lock().expect("the request list").clone();
+        assert_eq!(
+            seen,
+            [
+                "/metrics",
+                "/v1/chat/completions",
+                "/v1/chat/completions",
+                "/metrics"
+            ]
         );
-        println!(
-            "tensorfold:request_prefill_seconds: sum before={} after={} delta={}; count before={} after={} delta={}",
-            prefill_before.0,
-            prefill_after.0,
-            prefill_after.0 - prefill_before.0,
-            prefill_before.1,
-            prefill_after.1,
-            prefill_after.1 - prefill_before.1
+        assert_eq!(report.before.0, 100.0);
+        assert_eq!(report.after.0, 147.0);
+        assert_eq!(
+            report.before.1,
+            PrefillSeconds::Histogram {
+                sum: 1.0,
+                count: 2.0
+            }
         );
-        println!("no prefix-hit counter is read: this engine publishes none");
+        assert_eq!(
+            report.after.1,
+            PrefillSeconds::Histogram {
+                sum: 1.5,
+                count: 4.0
+            }
+        );
+        assert!(report.prefix_bytes > 0);
+    }
+
+    /// Opt-in: sends the two consecutive turns whose packed prefixes are
+    /// byte-identical to the local model, then records the counters the engine
+    /// publishes. Ignored by default, and it skips when `SPARKS_MODEL_URL` is
+    /// unset. This engine has no prefix-hit counter, so the test reads none
+    /// and claims no cache hit.
+    #[test]
+    #[ignore = "opt-in: set SPARKS_MODEL_URL to the local DeepSeek endpoint"]
+    fn an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns() {
+        match probe_prefix_turns(opt_in_model::configured_url()) {
+            Ok(None) => println!(
+                "SKIP: SPARKS_MODEL_URL is unset; the opt-in real-model prefix test did not run"
+            ),
+            Ok(Some(report)) => {
+                println!(
+                    "real model: both requests ok; packed prefix {} bytes, byte-identical across the two turns",
+                    report.prefix_bytes
+                );
+                println!(
+                    "tensorfold:prompt_tokens_total: before={} after={} delta={}",
+                    report.before.0,
+                    report.after.0,
+                    report.after.0 - report.before.0
+                );
+                println!(
+                    "tensorfold:request_prefill_seconds: {}",
+                    prefill_report(&report.before.1, &report.after.1)
+                );
+                println!("no prefix-hit counter is read: this engine publishes none");
+            }
+            Err(reason) => panic!("{reason}"),
+        }
     }
 
     /// One request to a one-shot server that answers with `response`.
@@ -9195,10 +9399,16 @@ mod tests {
     fn a_prefill_histogram_is_read_from_its_sum_and_count() {
         let metrics = "tensorfold:request_prefill_seconds_sum 1.5\n\
                        tensorfold:request_prefill_seconds_count 3\n";
-        assert_eq!(prefill_seconds(metrics), Some((1.5, 3.0)));
+        assert_eq!(
+            prefill_seconds(metrics),
+            Some(PrefillSeconds::Histogram {
+                sum: 1.5,
+                count: 3.0
+            })
+        );
         assert_eq!(
             prefill_seconds("tensorfold:request_prefill_seconds 0.25\n"),
-            Some((0.25, 1.0))
+            Some(PrefillSeconds::Scalar(0.25))
         );
         assert_eq!(
             prefill_seconds("tensorfold:request_prefill_seconds_sum 1.5\n"),
@@ -9207,11 +9417,33 @@ mod tests {
     }
 
     #[test]
+    fn a_scalar_prefill_has_no_fabricated_count() {
+        let scalar = prefill_seconds("tensorfold:request_prefill_seconds 0.25\n");
+        assert_eq!(scalar, Some(PrefillSeconds::Scalar(0.25)));
+        assert_ne!(
+            scalar,
+            Some(PrefillSeconds::Histogram {
+                sum: 0.25,
+                count: 1.0
+            })
+        );
+    }
+
+    #[test]
     fn a_metrics_snapshot_without_both_required_counters_is_refused() {
         let full = "tensorfold:prompt_tokens_total 100\n\
                     tensorfold:request_prefill_seconds_sum 0.5\n\
                     tensorfold:request_prefill_seconds_count 2\n";
-        assert_eq!(required_metrics(full), Ok((100.0, (0.5, 2.0))));
+        assert_eq!(
+            required_metrics(full),
+            Ok((
+                100.0,
+                PrefillSeconds::Histogram {
+                    sum: 0.5,
+                    count: 2.0
+                }
+            ))
+        );
         assert_eq!(
             required_metrics("tensorfold:prompt_tokens_total 100\n").unwrap_err(),
             "tensorfold:request_prefill_seconds is absent or has no _sum and _count"

@@ -483,7 +483,7 @@
     {
      "file": "src/lib.rs",
      "old": "        let prefill = prefill_seconds(metrics).ok_or_else(|| {\n            \"tensorfold:request_prefill_seconds is absent or has no _sum and _count\".to_string()\n        })?;",
-     "new": "        let prefill = prefill_seconds(metrics).unwrap_or((0.0, 1.0));"
+     "new": "        let prefill = prefill_seconds(metrics).unwrap_or(PrefillSeconds::Scalar(0.0));"
     }
    ],
    "tests": [
@@ -498,8 +498,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        let sum = metric_value(metrics, \"tensorfold:request_prefill_seconds_sum\")?;\n        let count = metric_value(metrics, \"tensorfold:request_prefill_seconds_count\")?;\n        Some((sum, count))",
-     "new": "        let count = metric_value(metrics, \"tensorfold:request_prefill_seconds_count\")?;\n        Some((0.0, count))"
+     "old": "        let sum = metric_value(metrics, \"tensorfold:request_prefill_seconds_sum\")?;\n        let count = metric_value(metrics, \"tensorfold:request_prefill_seconds_count\")?;\n        Some(PrefillSeconds::Histogram { sum, count })",
+     "new": "        let count = metric_value(metrics, \"tensorfold:request_prefill_seconds_count\")?;\n        Some(PrefillSeconds::Histogram { sum: 0.0, count })"
     }
    ],
    "tests": [
@@ -520,6 +520,86 @@
    ],
    "tests": [
     "tests::a_chunked_model_response_with_a_trailer_is_accepted"
+   ]
+  },
+  {
+   "id": "FP10",
+   "title": "a scalar prefill sample invents a count of one",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if let Some(value) = metric_value(metrics, \"tensorfold:request_prefill_seconds\") {\n            return Some(PrefillSeconds::Scalar(value));\n        }",
+     "new": "        if let Some(value) = metric_value(metrics, \"tensorfold:request_prefill_seconds\") {\n            return Some(PrefillSeconds::Histogram {\n                sum: value,\n                count: 1.0,\n            });\n        }"
+    }
+   ],
+   "tests": [
+    "tests::a_scalar_prefill_has_no_fabricated_count"
+   ]
+  },
+  {
+   "id": "FP11",
+   "title": "the probe does not skip when no endpoint is configured",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let Some(base_url) = configured else {\n            return Ok(None);\n        };",
+     "new": "        let base_url = configured.unwrap_or_default();"
+    }
+   ],
+   "tests": [
+    "tests::the_opt_in_probe_skips_without_a_configured_url"
+   ]
+  },
+  {
+   "id": "FP12",
+   "title": "the probe skips the metric read before the two turns",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let before = read_metrics(&base_url, \"before\")?;",
+     "new": "        let before = (0.0, PrefillSeconds::Scalar(0.0));"
+    }
+   ],
+   "tests": [
+    "tests::the_opt_in_probe_sends_two_turns_between_two_metric_reads"
+   ]
+  },
+  {
+   "id": "FP13",
+   "title": "the probe sends only the first of the two turns",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, &first_prompt)\n            .map_err(|error| format!(\"the local model refused the first turn: {error}\"))?;\n        opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, &second_prompt)\n            .map_err(|error| format!(\"the local model refused the second turn: {error}\"))?;",
+     "new": "        opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, &first_prompt)\n            .map_err(|error| format!(\"the local model refused the first turn: {error}\"))?;"
+    }
+   ],
+   "tests": [
+    "tests::the_opt_in_probe_sends_two_turns_between_two_metric_reads"
+   ]
+  },
+  {
+   "id": "FP14",
+   "title": "the probe skips the metric read after the two turns",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let after = read_metrics(&base_url, \"after\")?;",
+     "new": "        let after = (before.0, before.1.clone());"
+    }
+   ],
+   "tests": [
+    "tests::the_opt_in_probe_sends_two_turns_between_two_metric_reads"
    ]
   }
  ]
