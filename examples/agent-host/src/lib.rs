@@ -8025,6 +8025,274 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
 #[cfg(target_arch = "wasm32")]
 export!(AgentHost);
 
+/// Test-only client for the opt-in real-model tests. It speaks plain HTTP to
+/// the local OpenAI-compatible endpoint that `SPARKS_MODEL_URL` names, and to
+/// the same origin's `/metrics`. It is not part of the guest and has no wasm
+/// build.
+#[cfg(test)]
+mod opt_in_model {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    /// The model every opt-in test asks for.
+    pub(crate) const MODEL_ID: &str = "deepseek-v4-flash";
+
+    /// The endpoint the operator opted into, or nothing when the variable is
+    /// unset or empty. An opt-in test skips in that case.
+    pub(crate) fn configured_url() -> Option<String> {
+        std::env::var("SPARKS_MODEL_URL")
+            .ok()
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty())
+    }
+
+    /// Send one prompt as a chat completion and return the model's text. The
+    /// base URL is the OpenAI-compatible root (`.../v1`), the full
+    /// `.../chat/completions` path, or a bare host:port.
+    pub(crate) fn chat_completion(
+        base_url: &str,
+        model: &str,
+        prompt: &str,
+    ) -> Result<String, String> {
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [{ "role": "user", "content": prompt }],
+            "temperature": 0,
+            "max_tokens": 512,
+            "stream": false,
+        })
+        .to_string();
+        let (status, reply) = post_json(base_url, &body)?;
+        if status != 200 {
+            return Err(format!("HTTP {status}: {}", excerpt(&reply)));
+        }
+        let value: serde_json::Value = serde_json::from_str(&reply)
+            .map_err(|error| format!("response is not JSON: {error}"))?;
+        let content = value
+            .get("choices")
+            .and_then(|choices| choices.get(0))
+            .and_then(|choice| choice.get("message"))
+            .and_then(|message| message.get("content"))
+            .and_then(|content| content.as_str())
+            .ok_or_else(|| format!("response has no message content: {}", excerpt(&reply)))?;
+        if content.trim().is_empty() {
+            return Err("model returned an empty reply".to_string());
+        }
+        Ok(content.to_string())
+    }
+
+    /// Read the engine's `/metrics` text. It is at the origin root, whatever
+    /// path the model base URL carries, and it uses this same client.
+    pub(crate) fn metrics(base_url: &str) -> Result<String, String> {
+        let (status, body) = exchange(base_url, "GET", Some("/metrics"), None)?;
+        if status != 200 {
+            return Err(format!("HTTP {status}: {}", excerpt(&body)));
+        }
+        Ok(body)
+    }
+
+    fn excerpt(text: &str) -> String {
+        text.chars().take(300).collect()
+    }
+
+    fn post_json(base_url: &str, body: &str) -> Result<(u16, String), String> {
+        exchange(base_url, "POST", None, Some(body))
+    }
+
+    fn exchange(
+        base_url: &str,
+        method: &str,
+        path: Option<&str>,
+        body: Option<&str>,
+    ) -> Result<(u16, String), String> {
+        let endpoint = Endpoint::parse(base_url)?;
+        let mut stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port))
+            .map_err(|error| format!("cannot connect to {}: {error}", endpoint.authority()))?;
+        stream.set_read_timeout(Some(Duration::from_secs(120))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(30))).ok();
+        let path = path.unwrap_or(&endpoint.path);
+        let body = body.unwrap_or("");
+        let headers = if method == "POST" {
+            "Content-Type: application/json\r\nAccept: application/json\r\n"
+        } else {
+            "Accept: text/plain\r\n"
+        };
+        let request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            endpoint.authority(),
+            body.len()
+        );
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|error| format!("cannot send the model request: {error}"))?;
+        let mut raw = Vec::new();
+        stream
+            .read_to_end(&mut raw)
+            .map_err(|error| format!("cannot read the model response: {error}"))?;
+        let (status, reply) = split_response(&raw)?;
+        let reply = String::from_utf8(reply)
+            .map_err(|_| "the model response body is not UTF-8".to_string())?;
+        Ok((status, reply))
+    }
+
+    /// The parsed endpoint. Only plain HTTP is supported: the std-only client
+    /// has no TLS, and the local model is an http endpoint.
+    struct Endpoint {
+        host: String,
+        port: u16,
+        path: String,
+    }
+
+    impl Endpoint {
+        fn parse(base_url: &str) -> Result<Self, String> {
+            let Some(rest) = base_url.strip_prefix("http://") else {
+                if base_url.starts_with("https://") {
+                    return Err("https is not supported by the std-only test client".to_string());
+                }
+                return Err(format!(
+                    "unsupported model URL {base_url:?}; expected http://host[:port][/path]"
+                ));
+            };
+            let (authority, path) = match rest.find('/') {
+                Some(index) => (&rest[..index], &rest[index..]),
+                None => (rest, ""),
+            };
+            if authority.is_empty() || authority.contains('@') {
+                return Err(format!("invalid model URL authority in {base_url:?}"));
+            }
+            let (host, port) = split_authority(authority)?;
+            let path = if path.is_empty() || path == "/" {
+                "/v1/chat/completions".to_string()
+            } else if path.ends_with("/chat/completions") {
+                path.to_string()
+            } else {
+                format!("{}/chat/completions", path.trim_end_matches('/'))
+            };
+            Ok(Self { host, port, path })
+        }
+
+        fn authority(&self) -> String {
+            if self.host.contains(':') {
+                format!("[{}]:{}", self.host, self.port)
+            } else if self.port == 80 {
+                self.host.clone()
+            } else {
+                format!("{}:{}", self.host, self.port)
+            }
+        }
+    }
+
+    fn split_authority(authority: &str) -> Result<(String, u16), String> {
+        if let Some(rest) = authority.strip_prefix('[') {
+            let Some((host, after)) = rest.split_once(']') else {
+                return Err(format!("invalid IPv6 authority {authority:?}"));
+            };
+            if host.is_empty() {
+                return Err(format!("invalid IPv6 authority {authority:?}"));
+            }
+            let port = match after.strip_prefix(':') {
+                Some(port) => port
+                    .parse::<u16>()
+                    .map_err(|_| format!("invalid port in {authority:?}"))?,
+                None if after.is_empty() => 80,
+                None => return Err(format!("invalid IPv6 authority {authority:?}")),
+            };
+            return Ok((host.to_string(), port));
+        }
+        match authority.rsplit_once(':') {
+            Some((host, port)) => {
+                if host.is_empty() {
+                    return Err(format!("invalid authority {authority:?}"));
+                }
+                let port = port
+                    .parse::<u16>()
+                    .map_err(|_| format!("invalid port in {authority:?}"))?;
+                Ok((host.to_string(), port))
+            }
+            None => Ok((authority.to_string(), 80)),
+        }
+    }
+
+    /// The status code and the body of one HTTP response. A chunked body is
+    /// decoded; a length-bound body is cut to that length.
+    fn split_response(raw: &[u8]) -> Result<(u16, Vec<u8>), String> {
+        let boundary = find(raw, b"\r\n\r\n")
+            .ok_or_else(|| "the model response has no header end".to_string())?;
+        let head = std::str::from_utf8(&raw[..boundary])
+            .map_err(|_| "the model response headers are not UTF-8".to_string())?;
+        let mut lines = head.split("\r\n");
+        let status_line = lines
+            .next()
+            .ok_or_else(|| "the model response has no status line".to_string())?;
+        let mut parts = status_line.split_whitespace();
+        let _version = parts.next();
+        let status: u16 = parts
+            .next()
+            .and_then(|code| code.parse().ok())
+            .ok_or_else(|| format!("the model response has no status code: {status_line:?}"))?;
+        let mut chunked = false;
+        let mut length: Option<usize> = None;
+        for line in lines {
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            match name.trim().to_ascii_lowercase().as_str() {
+                "transfer-encoding" => {
+                    chunked = value.to_ascii_lowercase().contains("chunked");
+                }
+                "content-length" => length = value.trim().parse().ok(),
+                _ => {}
+            }
+        }
+        let body = &raw[boundary + 4..];
+        if chunked {
+            return Ok((status, decode_chunked(body)?));
+        }
+        if let Some(length) = length {
+            if body.len() < length {
+                return Err(format!(
+                    "the model response body is {} bytes, expected {length}",
+                    body.len()
+                ));
+            }
+            return Ok((status, body[..length].to_vec()));
+        }
+        Ok((status, body.to_vec()))
+    }
+
+    fn decode_chunked(mut body: &[u8]) -> Result<Vec<u8>, String> {
+        let mut out = Vec::new();
+        loop {
+            let line_end =
+                find(body, b"\r\n").ok_or_else(|| "a chunk size line has no end".to_string())?;
+            let line = std::str::from_utf8(&body[..line_end])
+                .map_err(|_| "a chunk size line is not UTF-8".to_string())?;
+            let size_text = line.split(';').next().unwrap_or("").trim();
+            let size = usize::from_str_radix(size_text, 16)
+                .map_err(|_| format!("invalid chunk size {size_text:?}"))?;
+            body = &body[line_end + 2..];
+            if size == 0 {
+                return Ok(out);
+            }
+            if body.len() < size + 2 {
+                return Err("a chunk is shorter than its size".to_string());
+            }
+            out.extend_from_slice(&body[..size]);
+            if &body[size..size + 2] != b"\r\n" {
+                return Err("a chunk has no terminator".to_string());
+            }
+            body = &body[size + 2..];
+        }
+    }
+
+    fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8609,6 +8877,116 @@ mod tests {
             base
         );
         assert_ne!(build(SYSTEM_HEAD, "Reply in two short paragraphs."), base);
+    }
+
+    /// The model-visible text of one whole turn: the same rendering the packer
+    /// hands the model, one record per line. Prefix identity is measured on
+    /// `prefix_bytes`, not here.
+    fn model_prompt(events: &[SurfaceNode]) -> String {
+        let mut prompt = String::new();
+        for node in derive(events) {
+            prompt.push_str(&render_record(&node));
+            prompt.push('\n');
+        }
+        prompt
+    }
+
+    /// The value of one exact Prometheus sample name. A label set after the
+    /// name is ignored; a longer name is not this metric.
+    fn metric_value(metrics: &str, name: &str) -> Option<f64> {
+        metrics
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .find_map(|line| {
+                let (sample, value) = line.split_once(char::is_whitespace)?;
+                let sample_name = sample.split('{').next().unwrap_or(sample);
+                if sample_name != name {
+                    return None;
+                }
+                value.trim().parse::<f64>().ok()
+            })
+    }
+
+    /// The two counters this engine publishes for a turn. An absent counter is
+    /// a refusal that names it; there is no prefix-hit counter here.
+    fn required_metrics(metrics: &str) -> Result<(f64, f64), String> {
+        let prompt = metric_value(metrics, "tensorfold:prompt_tokens_total")
+            .ok_or_else(|| "tensorfold:prompt_tokens_total is absent".to_string())?;
+        let prefill = metric_value(metrics, "tensorfold:request_prefill_seconds")
+            .ok_or_else(|| "tensorfold:request_prefill_seconds is absent".to_string())?;
+        Ok((prompt, prefill))
+    }
+
+    /// Opt-in: sends the two consecutive turns whose packed prefixes are
+    /// byte-identical to the local model, then records the counters the engine
+    /// publishes. Ignored by default, and it skips when `SPARKS_MODEL_URL` is
+    /// unset. This engine has no prefix-hit counter, so the test reads none
+    /// and claims no cache hit.
+    #[test]
+    #[ignore = "opt-in: set SPARKS_MODEL_URL to the local DeepSeek endpoint"]
+    fn an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns() {
+        let Some(base_url) = opt_in_model::configured_url() else {
+            println!(
+                "SKIP: SPARKS_MODEL_URL is unset; the opt-in real-model prefix test did not run"
+            );
+            return;
+        };
+
+        let mut journal = empty_journal();
+        admit_system(&mut journal, SYSTEM_HEAD, true);
+        admit_user(&mut journal, "hello");
+        admit_system(&mut journal, "Reply in one short paragraph.", true);
+        assert!(admit_snapshot(
+            &mut journal,
+            "localhost://Users/self",
+            "2026-10-12T13:44:00Z",
+            "localhost://Users/self/Documents/note.txt",
+        ));
+        let first_prefix = prefix_bytes(&journal.events);
+        let first_prompt = model_prompt(&journal.events);
+
+        admit_user(&mut journal, "second turn");
+        admit_system(&mut journal, "Keep the first system line unchanged.", true);
+        assert!(admit_snapshot(
+            &mut journal,
+            "localhost://Users/self/Documents",
+            "2026-10-13T01:29:00Z",
+            "localhost://Users/self/Documents/other.txt",
+        ));
+        let second_prefix = prefix_bytes(&journal.events);
+        let second_prompt = model_prompt(&journal.events);
+        assert_eq!(
+            first_prefix, second_prefix,
+            "the packed prefix moved between two consecutive turns"
+        );
+
+        let read = |when: &str| -> (f64, f64) {
+            let text = opt_in_model::metrics(&base_url)
+                .unwrap_or_else(|error| panic!("/metrics {when} the turns failed: {error}"));
+            required_metrics(&text)
+                .unwrap_or_else(|error| panic!("/metrics {when} the turns: {error}"))
+        };
+        let before = read("before");
+
+        for prompt in [&first_prompt, &second_prompt] {
+            opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, prompt)
+                .unwrap_or_else(|error| panic!("the local model refused a turn: {error}"));
+        }
+
+        let after = read("after");
+        println!(
+            "tensorfold:prompt_tokens_total: before={} after={} delta={}",
+            before.0,
+            after.0,
+            after.0 - before.0
+        );
+        println!(
+            "tensorfold:request_prefill_seconds: before={} after={} delta={}",
+            before.1,
+            after.1,
+            after.1 - before.1
+        );
+        println!("no prefix-hit counter is read: this engine publishes none");
     }
 
     #[test]
