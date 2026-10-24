@@ -5190,6 +5190,38 @@
    "tests": [
     "tests::a_legacy_journal_with_a_path_alias_is_refused_on_load"
    ]
+  },
+  {
+   "id": "PX58",
+   "title": "a stale parent clone keeps acting for the cancelled task",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            task: TaskMark::new(),\n            // A host journal's binding belongs to the task it was opened from,",
+     "new": "            task: self.task.clone(),\n            // A host journal's binding belongs to the task it was opened from,"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_gets_nothing_once_its_child_stops"
+   ]
+  },
+  {
+   "id": "PX59",
+   "title": "the runner rebuilds the guest after a full disk stop",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "        if ran_e2e and not stopped_for_disk:",
+     "new": "        if ran_e2e:"
+    }
+   ],
+   "tests": [
+    "no rebuild after a full disk"
+   ]
   }
  ]
 }

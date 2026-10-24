@@ -265,11 +265,13 @@ struct Turn {
     steps: Vec<u64>,
 }
 
-/// The in-memory identity of one task journal. A journal and its clones share
-/// it; a loaded journal is a new task object. It is not stored, and it is not
+/// The in-memory identity of one task journal. A loaded journal, and a clone
+/// of one (`Journal::clone`), is a new task object; a child host keeps the
+/// mark of the journal it was opened from. It is not stored, and it is not
 /// compared as data: the format has no field for it, so a reloaded journal
-/// still equals the one it came from. A child host keeps its task's mark, so
-/// another task's journal with the same child id is not its parent.
+/// still equals the one it came from. A child host must name its task's mark,
+/// so another task's journal with the same child id, and a snapshot taken
+/// before a cancellation, are not its parent.
 #[cfg(any(test, target_arch = "wasm32"))]
 #[derive(Clone, Debug)]
 struct TaskMark(std::rc::Rc<()>);
@@ -309,7 +311,7 @@ struct ChildHost {
 
 /// Append-only model history plus the cache epoch. Epoch 0 means no series yet.
 #[cfg(any(test, target_arch = "wasm32"))]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 struct Journal {
     events: Vec<SurfaceNode>,
     epoch: u64,
@@ -338,6 +340,35 @@ struct Journal {
     /// only and never stored. A child's result is checked against all of
     /// them, whichever host journal the caller supplies.
     host_grants: Vec<(u64, String)>,
+}
+
+/// A clone is a snapshot, not the task: it keeps the data but takes a new
+/// task mark. Every host action reads its parent's authority from the journal
+/// that opened the host (`host_binding_ok`), so a copy taken before a cancel,
+/// stop or grant change cannot act for it. A reload is a new task object for
+/// the same reason.
+#[cfg(any(test, target_arch = "wasm32"))]
+impl Clone for Journal {
+    fn clone(&self) -> Self {
+        Self {
+            events: self.events.clone(),
+            epoch: self.epoch,
+            steps: self.steps.clone(),
+            turns: self.turns.clone(),
+            markers: self.markers.clone(),
+            compaction_open: self.compaction_open,
+            compact_backup: self.compact_backup.clone(),
+            compact_pending: self.compact_pending.clone(),
+            depth: self.depth,
+            task_budget: self.task_budget,
+            cancelled_from: self.cancelled_from,
+            task: TaskMark::new(),
+            // A host journal's binding belongs to the task it was opened from,
+            // not to this copy.
+            host_of: self.host_of.clone(),
+            host_grants: self.host_grants.clone(),
+        }
+    }
 }
 
 /// Model view. Markers, a step with no result, and an empty assistant line
@@ -20361,6 +20392,84 @@ mod tests {
             assert_eq!(step_of(&host, asked).inbox, "deny", "{stop}");
             assert_eq!(step_of(&host, asked).state, StepState::Denied, "{stop}");
         }
+
+        // Codex at 914948067: a clone of the parent is a snapshot, not the
+        // task. A dispatch, a grant and a write request made through it after
+        // the real parent was cancelled do nothing.
+        let (mut parent, run) = task(budget(8, 600));
+        let child = propose_child(&mut parent, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut parent,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let mut host = open_child_host(&parent, child, DEMO_SRC).unwrap();
+        let granted = propose_read(&mut host, DEMO_SRC);
+        assert!(authorize_in_host(
+            &mut parent,
+            child,
+            &mut host,
+            granted,
+            Some("read-grant")
+        ));
+        let asked = propose_read(&mut host, DEMO_SRC);
+        let resource = "localhost://Users/self/Projects/demo/src/notes.txt";
+        assert!(observe(&mut host, resource, 1, "alpha"));
+        let edit = propose_edit(&mut host, resource, "alpha", "beta", Some(1)).unwrap();
+        assert!(authorize_in_host(
+            &mut parent,
+            child,
+            &mut host,
+            edit,
+            Some("write-grant")
+        ));
+        assert!(provider_write_may_be_asked(
+            &mut host,
+            edit,
+            1,
+            Some((&parent, child))
+        ));
+        let mut stale = parent.clone();
+        assert!(cancel_task(&mut parent));
+        let before = host.clone();
+        assert!(
+            !dispatch_in_host(&stale, child, &mut host, granted),
+            "a stale parent dispatches nothing"
+        );
+        assert!(
+            !authorize_in_host(&mut stale, child, &mut host, asked, Some("read-grant")),
+            "a stale parent grants nothing"
+        );
+        assert!(
+            !host_inbox(
+                &mut stale,
+                child,
+                &mut host,
+                asked,
+                InboxAnswer::AllowOnce,
+                Some("read-grant")
+            ),
+            "a stale parent answers nothing"
+        );
+        assert!(
+            !grant_child_host(&mut stale, child, &mut host, Some("host-grant")),
+            "a stale parent gives no host grant"
+        );
+        assert!(
+            !provider_write_may_be_asked(&mut host, edit, 1, Some((&stale, child))),
+            "a stale parent asks for no write"
+        );
+        let added = &host.events[before.events.len()..];
+        assert_eq!(added.len(), 5);
+        assert!(
+            added.iter().all(|node| matches!(
+                &node.source,
+                NodeSource::Refused { reason, .. } if reason == "not this child's host"
+            )),
+            "{added:?}"
+        );
+        assert_eq!(host.steps, before.steps);
     }
 
     /// Hole 2: a host touches only what the parent granted its child. Every

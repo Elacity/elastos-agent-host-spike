@@ -376,6 +376,44 @@ def case_attribution():
     return ok
 
 
+def no_rebuild_after_disk_full():
+    """A full disk ends the run; the guest rebuild is deferred, not started.
+    The mutation in PX58 removes the stop condition, and this case fails."""
+    real_run = subprocess.run
+    real_load = globals()["load"]
+    real_falsify = globals()["falsify"]
+    entries = [
+        {"id": "S1", "command": "e2e", "expect": "caught", "edits": [],
+         "tests": ["a"], "title": "one e2e entry"},
+        {"id": "S2", "command": "e2e", "expect": "caught", "edits": [],
+         "tests": ["a"], "title": "the entry that reports a full disk"},
+    ]
+    calls = []
+
+    def fake_falsify(entry):
+        if entry["id"] == "S2":
+            raise DiskFull("a command reported a full disk")
+        return True, "CAUGHT", ""
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+    globals()["load"] = lambda: entries
+    globals()["falsify"] = fake_falsify
+    subprocess.run = fake_run
+    try:
+        # --keep-backups: the outer process holds this file's mutation backup.
+        code = main(["--keep-backups", "S"])
+    finally:
+        subprocess.run = real_run
+        globals()["load"] = real_load
+        globals()["falsify"] = real_falsify
+    rebuilt = [argv for argv in calls if any("build.sh" in part for part in argv)]
+    print(f"self-test: disk-full stop: exit={code}, guest rebuilds={len(rebuilt)}")
+    return code == 3 and not rebuilt
+
+
 # Each self-test case is named, so a falsifier names one and the runner runs
 # it on its own. A name not listed here is not a case: the runner reports it
 # as not run, never as caught.
@@ -384,6 +422,7 @@ SELF_TEST_CASES = {
     "fake FAILED line in the output": fake_line_verdict,
     "interruption during replacement": interruption_restores,
     "named case attribution": case_attribution,
+    "no rebuild after a full disk": no_rebuild_after_disk_full,
 }
 
 
@@ -457,6 +496,7 @@ def main(argv):
     counts = {}
     bad = []
     ran_e2e = False
+    stopped_for_disk = False
     try:
         for entry in chosen:
             start = time.monotonic()
@@ -471,14 +511,19 @@ def main(argv):
             print(f"{entry['id']:6} {word:30} {time.monotonic() - start:5.0f}s  {entry['title']}"
                   + (f"\n       {detail}" if detail else ""), flush=True)
     except DiskFull as error:
+        stopped_for_disk = True
         print(f"stopped: disk full ({error}); every file is restored")
+        if ran_e2e:
+            print("the guest rebuild is deferred until there is free space; "
+                  "the next e2e run builds before its tests")
         return 3
     except KeyboardInterrupt:
         print("stopped: interrupted; every file is restored")
         return 1
     finally:
-        if ran_e2e:
+        if ran_e2e and not stopped_for_disk:
             # run-e2e.sh rebuilt the guest from a mutated source; build it again.
+            # A full disk cannot build, so that rebuild waits for free space.
             subprocess.run(["bash", str(HERE / "build.sh")], cwd=REPO, capture_output=True)
     print("summary:", ", ".join(f"{count} {word}" for word, count in sorted(counts.items())),
           f"of {len(chosen)}")
