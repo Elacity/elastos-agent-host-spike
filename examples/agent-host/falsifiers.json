@@ -5254,6 +5254,22 @@
    "tests": [
     "tests::a_child_host_gets_nothing_once_its_child_stops"
    ]
+  },
+  {
+   "id": "PX62",
+   "title": "the ownership rule is not asked, so a snapshot dispatches and asks for model calls",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if journal.task.is_live() {\n        Ok(())\n    } else {\n        Err(\"stale parent\")\n    }",
+     "new": "    if true {\n        Ok(())\n    } else {\n        Err(\"stale parent\")\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_stale_parent_dispatches_no_call_and_asks_for_none"
+   ]
   }
  ]
 }

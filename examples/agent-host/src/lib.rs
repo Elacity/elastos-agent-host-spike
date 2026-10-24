@@ -4124,6 +4124,7 @@ fn record_task_budget(journal: &mut Journal, granted: Budget) -> bool {
 /// Each accepted call counts against every child above it and the task.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn ask_model(journal: &mut Journal, under: Option<u64>, model: &str) -> Result<u64, &'static str> {
+    live_task(journal)?;
     if !model.starts_with("localhost://")
         || model.chars().any(char::is_whitespace)
         || host_path(model)
@@ -4457,6 +4458,20 @@ fn authorize_child(
     true
 }
 
+/// The one ownership rule for a journal used as a task: only the journal that
+/// owns the task opens a host, asks for a model call, or takes a plain
+/// authorize, inbox answer or dispatch. A snapshot (`Journal::clone`) keeps
+/// copied data, grants and budgets but no authority, so every such path
+/// refuses it with the same reason.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn live_task(journal: &Journal) -> Result<(), &'static str> {
+    if journal.task.is_live() {
+        Ok(())
+    } else {
+        Err("stale parent")
+    }
+}
+
 /// A child host is a second journal for one child step. It keeps the system
 /// head and does not copy the parent's log or the parent's grant. Its limits
 /// stay in the parent's journal, the one source of truth: the child must be
@@ -4473,9 +4488,7 @@ fn open_child_host(
     // Only the journal that owns the task opens a host. A snapshot keeps the
     // task's data but not its authority, so copied grants, budgets and an
     // uncancelled state act for nothing.
-    if !parent.task.is_live() {
-        return Err("stale parent");
-    }
+    live_task(parent)?;
     let child = usable_child(parent, child_id)?;
     if path_refusal(resource).is_some() || !resource_covers(&child.resource, resource) {
         return Err("not a subset");
@@ -4574,8 +4587,8 @@ fn host_step_ok(
 /// The one host-context rule for every provider write request, one file or a
 /// change: a child host journal is asked only with its parent's current
 /// journal, through `host_step_ok` (usable child, binding, grant and scope);
-/// a task journal is asked with no parent. The error is the shared check's
-/// own words.
+/// a task journal is asked with no parent, and only while it owns its task
+/// (`live_task`). The error is the shared check's own words.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn write_context_ok(
     journal: &Journal,
@@ -4590,7 +4603,7 @@ fn write_context_ok(
     } else if host.is_some() {
         Err("not this child's host")
     } else {
-        Ok(())
+        live_task(journal)
     }
 }
 
@@ -4805,13 +4818,17 @@ fn call_parent_usable(journal: &Journal, step: &Step) -> Result<(), &'static str
 }
 
 /// A plain entry point acts only in the task's own journal: a host journal's
-/// steps take `authorize_in_host`, `host_inbox`, and `dispatch_in_host`.
-/// Every plain entry asks this one guard, so a host step is refused once with
-/// its reason recorded.
+/// steps take `authorize_in_host`, `host_inbox`, and `dispatch_in_host`, and
+/// a snapshot copy takes nothing. Every plain entry asks this one guard, so a
+/// host step or a stale copy is refused once with its reason recorded.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn plain_entry_ok(journal: &mut Journal, step_id: u64) -> bool {
     if journal.depth != 0 {
         record_refusal_reason(journal, "child host", &format!("host step {step_id}"));
+        return false;
+    }
+    if let Err(reason) = live_task(journal) {
+        record_refusal_reason(journal, reason, &format!("step {step_id}"));
         return false;
     }
     true
@@ -20545,6 +20562,54 @@ mod tests {
         assert_eq!(step_of(&host, read).state, StepState::Dispatched);
     }
 
+    /// Codex at 914948067: a snapshot's copied grants and budget take no
+    /// pending model call and ask for no new one after the owning task is
+    /// cancelled.
+    #[test]
+    fn a_stale_parent_dispatches_no_call_and_asks_for_none() {
+        let (mut parent, run) = task(budget(8, 600));
+        let child = propose_child(&mut parent, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        assert!(authorize_child(
+            &mut parent,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let call = ask_model(&mut parent, Some(child), HOSTED_MODEL).unwrap();
+        assert!(authorize(&mut parent, call, Some("model-grant")));
+        let resource = "localhost://Users/self/Projects/demo/notes.txt";
+        assert!(observe(&mut parent, resource, 1, "alpha"));
+        let edit = propose_edit(&mut parent, resource, "alpha", "beta", Some(1)).unwrap();
+        assert!(authorize(&mut parent, edit, Some("write-grant")));
+        assert!(provider_write_may_be_asked(&mut parent, edit, 1, None));
+        let mut stale = parent.clone();
+        assert!(cancel_task(&mut parent));
+        let before = stale.clone();
+        assert!(
+            !dispatch(&mut stale, call),
+            "a stale parent dispatches no call"
+        );
+        assert_eq!(stale.steps, before.steps);
+        assert_eq!(step_of(&stale, call).state, StepState::Prepared);
+        assert!(
+            !provider_write_may_be_asked(&mut stale, edit, 1, None),
+            "a stale parent asks for no write"
+        );
+        assert!(
+            refusal_records(&stale)
+                .iter()
+                .any(|record| record.contains("stale parent")),
+            "{:?}",
+            refusal_records(&stale)
+        );
+        let steps = stale.steps.len();
+        assert_eq!(
+            ask_model(&mut stale, Some(child), HOSTED_MODEL),
+            Err("stale parent")
+        );
+        assert_eq!(stale.steps.len(), steps);
+    }
+
     /// Hole 2: a host touches only what the parent granted its child. Every
     /// step it grants, answers or dispatches sits in the child's granted
     /// scope, not only in the child's resource.
@@ -21467,7 +21532,9 @@ mod tests {
         // The counter rule at live use: a budget in memory below the calls
         // already made refuses both calls, with the same reason the reload
         // check gives.
-        let mut forced = journal.clone();
+        let mut forced = decode_journal(&encode_journal(&journal, &[0; 32]).unwrap())
+            .unwrap()
+            .0;
         forced.task_budget = Some(budget(1, 600));
         let before = forced.clone();
         assert!(!authorize(&mut forced, first, Some("model-grant")));
