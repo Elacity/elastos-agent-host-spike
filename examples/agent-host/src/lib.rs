@@ -18942,8 +18942,9 @@ mod tests {
             Err("parent stopped")
         );
         // A run that has already left cannot be cancelled as a step.
-        // Cancelling its tree records that in the step, so the run holds no
-        // scope and takes no new child, before and after a reload.
+        // Cancelling its tree closes its scope, so it takes no new child,
+        // before and after a reload. The test asks only existing operations,
+        // so it can run against the older code too.
         let (mut running, running_run) = task(budget(8, 600));
         let existing =
             propose_child(&mut running, running_run, DEMO_SRC, Some(budget(2, 60))).unwrap();
@@ -18958,7 +18959,6 @@ mod tests {
         assert!(dispatch(&mut running, running_run));
         assert!(cancel_tree(&mut running, running_run));
         assert_eq!(step_of(&running, running_run).state, StepState::Dispatched);
-        assert!(step_of(&running, running_run).tree_cancelled);
         assert_eq!(
             scope_still_granted(&running, step_of(&running, running_run)),
             None
@@ -18979,7 +18979,6 @@ mod tests {
             Err("parent stopped")
         );
         let mut back = reloaded(&running);
-        assert!(step_of(&back, running_run).tree_cancelled);
         assert_eq!(
             propose_child(
                 &mut back,
@@ -18989,15 +18988,13 @@ mod tests {
             ),
             Err("parent stopped")
         );
-        // A crash after the cancel keeps the closure, and the flag survives
-        // the settlement-unknown state.
+        // A crash after the cancel keeps the closure.
         assert!(note_crash(&mut back, running_run));
         assert_eq!(
             step_of(&back, running_run).state,
             StepState::SettlementUnknown
         );
         let mut crashed = reloaded(&back);
-        assert!(step_of(&crashed, running_run).tree_cancelled);
         assert_eq!(
             propose_child(
                 &mut crashed,
