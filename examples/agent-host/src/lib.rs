@@ -9394,11 +9394,11 @@ mod tests {
         let before = journal.clone();
         assert!(!spill_pointer(&mut journal, id, notes));
         assert!(!step_of(&journal, id).has_result);
-        assert_eq!(
-            without_refusal_records(&journal.events),
-            before.events,
-            "no result or pointer is stored"
-        );
+        // The whole journal is unchanged but for the one expected record:
+        // grants, step state, counters and epoch included.
+        let mut after = journal.clone();
+        after.events = without_refusal_records(&journal.events);
+        assert_eq!(after, before, "a refusal changes nothing but its record");
         assert_eq!(
             refusal_records(&journal),
             vec!["refused: no system head (spill pointer 1)".to_string()]
@@ -20654,16 +20654,49 @@ mod tests {
             "{:?}",
             refusal_records(&above)
         );
-        // A new call fits below and at the limit; no further call fits at it.
-        assert!(ask_model(&mut below, None, HOSTED_MODEL).is_ok());
-        assert_eq!(ask_model(&mut equal, None, HOSTED_MODEL), Err("requests"));
-        assert_eq!(ask_model(&mut above, None, HOSTED_MODEL), Err("requests"));
-        // Reload asks the same rule: below and equal load, above does not.
+        // Reload asks the same rule before a new call takes the remainder:
+        // below is under its budget, equal is at it, above is over.
         assert!(decode_journal(&encode_journal(&below, &[0; 32]).unwrap()).is_ok());
         assert!(decode_journal(&encode_journal(&equal, &[0; 32]).unwrap()).is_ok());
         assert_eq!(
             decode_journal(&encode_journal(&above, &[0; 32]).unwrap()).map(|_| ()),
             Err("record")
+        );
+        // A new call fits below and at the limit; no further call fits at it.
+        assert!(ask_model(&mut below, None, HOSTED_MODEL).is_ok());
+        assert_eq!(ask_model(&mut equal, None, HOSTED_MODEL), Err("requests"));
+        assert_eq!(ask_model(&mut above, None, HOSTED_MODEL), Err("requests"));
+    }
+
+    /// Codex at f9badef, finding 1: the dedup is behavior-preserving, so a
+    /// restored copy escapes every behavior test. The production request
+    /// limit is decided only by `requests_fit`; no old comparison remains.
+    #[test]
+    fn request_limit_is_decided_only_by_the_shared_validator() {
+        let source = include_str!("lib.rs");
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module follows the production code")
+            .0;
+        for old in [
+            "task_requests_used(journal) > granted.requests",
+            "task_requests_used(journal) >= task.requests",
+            "task_requests_used(journal) > task.requests",
+            "task_requests_used(journal) > budget.requests",
+            "step.requests_used > budget.requests",
+            "used >= budget.requests",
+        ] {
+            assert!(!production.contains(old), "a second request rule: {old}");
+        }
+        assert_eq!(
+            production.matches("fn requests_fit(").count(),
+            1,
+            "one validator"
+        );
+        assert_eq!(
+            production.matches("!requests_fit(").count(),
+            6,
+            "every acceptance site calls the shared rule"
         );
     }
 

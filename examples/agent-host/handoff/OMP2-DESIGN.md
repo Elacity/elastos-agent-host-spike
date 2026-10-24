@@ -277,6 +277,9 @@ Each rule has a test, and each check has a mutation (CL01-CL92, report omp2-chil
 | `every_format_2_field_round_trips` | no field dropped |
 | `child_limits_are_checked_again_after_reload` | each stored rule, broken in bytes, refuses the load |
 | `a_child_grant_is_a_subset_of_its_parent` | parent grant needed, exact paths, again after reload |
+| `the_task_request_limit_is_one_rule_on_every_path` | below, equal to and above the budget through recording, authorization, dispatch, a new call and reload |
+| `request_limit_is_decided_only_by_the_shared_validator` | no production path copies the old request comparison |
+| `the_spill_entry_records_its_refusal_reason` | every public spill-entry refusal records its reason |
 | `a_journal_written_before_idea_2_still_loads` | format stays 2 |
 | `the_child_records_render_byte_for_byte_and_are_pinned` | kinds 17 and 18 rendering |
 

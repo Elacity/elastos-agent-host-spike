@@ -4684,6 +4684,63 @@
    "tests": [
     "tests::the_spill_entry_records_its_refusal_reason"
    ]
+  },
+  {
+   "id": "PX40",
+   "title": "a refused headless spill changes the journal's epoch",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if let Err(reason) = spill_ready(journal, step_id, object_resource) {\n        record_refusal_reason(journal, reason, &what);\n        return false;\n    }",
+     "new": "    if let Err(reason) = spill_ready(journal, step_id, object_resource) {\n        record_refusal_reason(journal, reason, &what);\n        journal.epoch += 1;\n        return false;\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_spill_pointer_on_a_headless_journal_records_no_result"
+   ]
+  },
+  {
+   "id": "PX41",
+   "title": "the original request comparisons are copied back",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        if task.requests == 0\n            || task.seconds == 0\n            || !requests_fit(task, task_requests_used(journal), 0)\n        {",
+     "new": "        if task.requests == 0 || task.seconds == 0 || task_requests_used(journal) > task.requests {"
+    },
+    {
+     "file": "src/lib.rs",
+     "old": "                || !requests_fit(budget, step.requests_used, 0)",
+     "new": "                || step.requests_used > budget.requests"
+    },
+    {
+     "file": "src/lib.rs",
+     "old": "    if !requests_fit(granted, task_requests_used(journal), 0) {",
+     "new": "    if task_requests_used(journal) > granted.requests {"
+    },
+    {
+     "file": "src/lib.rs",
+     "old": "        if !requests_fit(budget, used, 1) {",
+     "new": "        if used >= budget.requests {"
+    },
+    {
+     "file": "src/lib.rs",
+     "old": "    if !requests_fit(task, task_requests_used(journal), 1) {",
+     "new": "    if task_requests_used(journal) >= task.requests {"
+    },
+    {
+     "file": "src/lib.rs",
+     "old": "                if !requests_fit(budget, task_requests_used(journal), 0) {",
+     "new": "                if task_requests_used(journal) > budget.requests {"
+    }
+   ],
+   "tests": [
+    "tests::request_limit_is_decided_only_by_the_shared_validator"
+   ]
   }
  ]
 }
