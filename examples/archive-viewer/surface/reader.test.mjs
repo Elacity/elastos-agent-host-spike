@@ -20,7 +20,12 @@ import {
   mountReader,
   readView,
 } from "./browser/reader.js";
-import { PAGES_SCHEMA, readPages } from "../../docs-viewer/surface/browser/reader.js";
+import {
+  PAGES_ROUTE,
+  PAGES_SCHEMA,
+  readPages,
+  mountReader as mountDocsReader,
+} from "../../docs-viewer/surface/browser/reader.js";
 import { fakeDocument as kitDocument, response } from "../../capsule-kit/surface/test-kit.mjs";
 
 const TOKEN = "launch-token-for-this-frame";
@@ -356,6 +361,33 @@ test("an unreadable entry or preview is not shown, and the rest are", async () =
   ]);
 });
 
+test("a malformed refusal field rejects the view", async () => {
+  const withRefused = (refused) => ({ ...view({ entries: [entry(0)], previews: [{ index: 0, blocks: [{ kind: "paragraph", spans: [span("not drawn")] }] }] }), refused });
+  for (const malformed of [true, false, "denied", [], 1]) {
+    assert.throws(() => readView(withRefused(malformed)), /not Archive views/, String(malformed));
+  }
+  const { view: drawn } = await mounted({ [VIEW_ROUTE]: response(200, withRefused("denied")) });
+  assert.equal(drawn.status.textContent, "These are not Archive views.");
+  assert.equal(drawn.entries.children.length, 0);
+  assert.equal(drawn.previews.children.length, 0);
+});
+
+test("a refused archive with a blank reason still says why", async () => {
+  const { view: drawn } = await mounted({
+    [VIEW_ROUTE]: response(
+      200,
+      view({
+        entries: [entry(0)],
+        previews: [{ index: 0, blocks: [{ kind: "paragraph", spans: [span("not drawn")] }] }],
+        refused: { code: "ambiguous_end", message: "   " },
+      }),
+    ),
+  });
+  assert.equal(drawn.status.textContent, "This archive could not be read.");
+  assert.equal(drawn.entries.children.length, 0);
+  assert.equal(drawn.previews.children.length, 0);
+});
+
 test("a refused archive is shown with its reason and lists no entry", async () => {
   // Content beside a refusal is not drawn: the refusal is the whole view.
   const { view: drawn, reader } = await mounted({
@@ -418,7 +450,28 @@ test("the page has no way to hold or reach anything else", () => {
   assert.deepEqual(manifest.requires ?? [], []);
 });
 
-test("the previews follow the documents page rules", () => {
+const DOC_IDS = ["titles", "article", "status", "skipped", "skipped-title"];
+
+/** The documents page's rendered blocks for one block list. */
+async function documentsBlocks(blocks) {
+  const document = kitDocument(DOC_IDS);
+  const pages = {
+    schema: PAGES_SCHEMA,
+    shelf: "localhost://Users/self/.AppData/App/docs-viewer/shelf.json",
+    documents: [{ order: 0, title: "t", blocks }],
+    skipped: [],
+  };
+  const env = {
+    document,
+    location: { hash: `#home_token=${TOKEN}` },
+    fetch: async () => response(200, pages),
+  };
+  const reader = mountDocsReader(env);
+  await reader.ready();
+  return document.elements.article.children;
+}
+
+test("the previews follow the documents page rules", async () => {
   // One block format, two pages: every block rule of this page is compared
   // with the documents page's, so a change in either is caught here.
   const blocks = [
@@ -438,6 +491,15 @@ test("the previews follow the documents page rules", () => {
     [{ kind: "paragraph", spans: ["constructor", "__proto__", "toString", "hasOwnProperty"].map((style) => span(style, style)) }],
     [{ kind: "code", text: "x".repeat(20001) }],
     Array.from({ length: MAX_BLOCKS + 1 }, () => ({ kind: "rule" })),
+    // Fields read through the prototype: both pages treat these the same.
+    [Object.create({ kind: "paragraph", spans: [span("inherited")] })],
+    [Object.assign(Object.create({ spans: [span("inherited")] }), { kind: "paragraph" })],
+    [{ kind: "paragraph", spans: [Object.create({ style: "strong", text: "x" })] }],
+    [Object.create({ kind: "code", text: "x" })],
+    [Object.create({ kind: "script", text: "x" })],
+    [null],
+    ["not a block"],
+    [42],
   ];
   for (const [at, each] of blocks.entries()) {
     const pages = {
@@ -451,6 +513,13 @@ test("the previews follow the documents page rules", () => {
     assert.equal(previews.length > 0, shown.documents.length > 0, `case ${at}: one page keeps it, the other does not`);
     if (previews.length > 0 && shown.documents.length > 0) {
       assert.deepEqual(previews[0].blocks, shown.documents[0].blocks, `case ${at}: the block rules differ`);
+      // The drawing is one rule too: the same elements and text.
+      const { view: drawn } = await mounted({
+        [VIEW_ROUTE]: response(200, view({ entries: [entry(0)], previews: [{ index: 0, blocks: each }] })),
+      });
+      const archive = drawn.previews.children[0].children.slice(1).map(tree);
+      const documents = (await documentsBlocks(each)).map(tree);
+      assert.deepEqual(archive, documents, `case ${at}: the block drawing differs`);
     }
   }
 });

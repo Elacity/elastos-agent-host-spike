@@ -70,9 +70,37 @@ CASES = [
     ),
     (
         "a heading level is not kept within 1 to 6",
-        '      return { kind: "heading", level: Math.min(6, Math.max(1, level)), spans };',
-        '      return { kind: "heading", level, spans };',
+        '      return { kind: "heading", level: Math.min(6, Math.max(1, block.level)), spans };',
+        '      return { kind: "heading", level: block.level, spans };',
         ["an unknown style is plain and a heading level stays within 1 to 6"],
+    ),
+    (
+        "a heading is drawn at a fixed level",
+        '      return spansInto(doc.createElement(`h${block.level}`), block.spans);',
+        '      return spansInto(doc.createElement("h2"), block.spans);',
+        ["the previews follow the documents page rules"],
+    ),
+    (
+        "the block kind is own-property only",
+        "  switch (block && block.kind) {",
+        '  switch (own(block, "kind")) {',
+        ["the previews follow the documents page rules"],
+    ),
+    (
+        "a span style is own-property only",
+        "    tag: styleTag(span && span.style),",
+        '    tag: styleTag(own(span, "style")),',
+        ["the previews follow the documents page rules"],
+    ),
+    (
+        "a malformed refusal field is ignored",
+        "    if (!refusedIn || typeof refusedIn !== \"object\" || Array.isArray(refusedIn)) {\n"
+        '      throw new Error("These are not Archive views.");\n'
+        "    }",
+        "    if (false) {\n"
+        '      throw new Error("These are not Archive views.");\n'
+        "    }",
+        ["a malformed refusal field rejects the view"],
     ),
     (
         "any number of preview blocks is taken",
@@ -88,8 +116,8 @@ CASES = [
     ),
     (
         "the list item cap is not checked",
-        "      if (!Array.isArray(items) || items.length > MAX_ITEMS) return null;",
-        "      if (!Array.isArray(items)) return null;",
+        "      if (!Array.isArray(block.items) || block.items.length > MAX_ITEMS) return null;",
+        "      if (!Array.isArray(block.items)) return null;",
         ["a preview with more list items than the model allows is not shown", "the previews follow the documents page rules"],
     ),
     (
@@ -111,10 +139,10 @@ CASES = [
     ),
     (
         "an empty refusal reason stays empty",
-        "          cut(own(refusedIn, \"message\"), MAX_MESSAGE_CHARS, \"This archive could not be read.\") ||\n"
-        "          \"This archive could not be read.\",",
-        "          cut(own(refusedIn, \"message\"), MAX_MESSAGE_CHARS, \"This archive could not be read.\"),",
-        ["a refused archive without a reason still says why"],
+        '    refused = { message: reason.trim() ? reason : "This archive could not be read." };',
+        "    refused = { message: reason };",
+        ["a refused archive without a reason still says why",
+         "a refused archive with a blank reason still says why"],
     ),
     (
         "an unknown block kind is drawn",

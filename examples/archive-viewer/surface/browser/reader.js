@@ -62,37 +62,37 @@ function cut(value, chars, fallback) {
   return text.length > chars ? `${text.slice(0, chars)}…` : text;
 }
 
+// The block rules are the documents page's, character for character
+// (examples/docs-viewer/surface/browser/reader.js): one format, one rule.
 function readSpans(spans) {
   if (!Array.isArray(spans) || spans.length > MAX_SPANS) return null;
   return spans.map((span) => ({
-    tag: styleTag(own(span, "style")),
-    text: cut(own(span, "text"), MAX_TEXT_CHARS, ""),
+    tag: styleTag(span && span.style),
+    text: cut(span && span.text, MAX_TEXT_CHARS, ""),
   }));
 }
 
 /** One block of a preview, or null when it is not one of the six kinds. */
 function readBlock(block) {
-  switch (own(block, "kind")) {
+  switch (block && block.kind) {
     case "heading": {
-      const spans = readSpans(own(block, "spans"));
-      const level = own(block, "level");
-      if (!spans || !Number.isSafeInteger(level)) return null;
-      return { kind: "heading", level: Math.min(6, Math.max(1, level)), spans };
+      const spans = readSpans(block.spans);
+      if (!spans || !Number.isSafeInteger(block.level)) return null;
+      return { kind: "heading", level: Math.min(6, Math.max(1, block.level)), spans };
     }
     case "paragraph":
     case "quote": {
-      const spans = readSpans(own(block, "spans"));
-      return spans && { kind: own(block, "kind"), spans };
+      const spans = readSpans(block.spans);
+      return spans && { kind: block.kind, spans };
     }
     case "list": {
-      const items = own(block, "items");
-      if (!Array.isArray(items) || items.length > MAX_ITEMS) return null;
-      const read = items.map(readSpans);
-      if (read.some((item) => !item)) return null;
-      return { kind: "list", ordered: own(block, "ordered") === true, items: read };
+      if (!Array.isArray(block.items) || block.items.length > MAX_ITEMS) return null;
+      const items = block.items.map(readSpans);
+      if (items.some((item) => !item)) return null;
+      return { kind: "list", ordered: block.ordered === true, items };
     }
     case "code":
-      return { kind: "code", text: cut(own(block, "text"), MAX_TEXT_CHARS, "") };
+      return { kind: "code", text: cut(block.text, MAX_TEXT_CHARS, "") };
     case "rule":
       return { kind: "rule" };
     default:
@@ -180,13 +180,16 @@ export function readView(value) {
   }
 
   const refusedIn = own(value, "refused");
-  const refused = refusedIn && typeof refusedIn === "object"
-    ? {
-        message:
-          cut(own(refusedIn, "message"), MAX_MESSAGE_CHARS, "This archive could not be read.") ||
-          "This archive could not be read.",
-      }
-    : null;
+  let refused = null;
+  if (refusedIn !== undefined) {
+    // A refusal field is either absent or an object: anything else is not a
+    // view this page can read, and a view is not drawn on a guess.
+    if (!refusedIn || typeof refusedIn !== "object" || Array.isArray(refusedIn)) {
+      throw new Error("These are not Archive views.");
+    }
+    const reason = cut(own(refusedIn, "message"), MAX_MESSAGE_CHARS, "This archive could not be read.");
+    refused = { message: reason.trim() ? reason : "This archive could not be read." };
+  }
   return { archive, entries, previews, skipped, refused };
 }
 
