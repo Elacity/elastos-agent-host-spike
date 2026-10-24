@@ -1260,6 +1260,16 @@ fn may_hold_a_child(parent: &Step) -> bool {
     matches!(parent.kind, ProposalKind::Run | ProposalKind::Child)
 }
 
+/// The one live-state rule for a parent: it is prepared or dispatched, so it
+/// has not been denied, cancelled or crashed since. `propose_child` asks it of
+/// the parent, and `scope_still_granted` asks it of every step that carries a
+/// scope. A stored child of a cancelled task still loads: `child_rules` checks
+/// the kind only, because the cancel already stopped its children.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn live_step(step: &Step) -> bool {
+    matches!(step.state, StepState::Prepared | StepState::Dispatched)
+}
+
 /// The rules every child keeps, wherever its journal comes from: made here,
 /// decoded, reread, resumed, answered in the inbox, or opened as a child
 /// host. Every path calls this one function, so none skips a rule. A child's
@@ -1394,14 +1404,20 @@ fn granted_scope(step: &Step) -> Option<&str> {
 #[cfg(any(test, target_arch = "wasm32"))]
 fn scope_still_granted<'a>(journal: &'a Journal, step: &'a Step) -> Option<&'a str> {
     let scope = granted_scope(step)?;
+    // A step that is denied, cancelled or crashed carries no scope, and
+    // neither does one under such a step.
+    if !live_step(step) {
+        return None;
+    }
     let mut below = step;
     while below.kind == ProposalKind::Child {
         let above = below
             .parent_id
             .and_then(|id| journal.steps.iter().find(|step| step.id == id))?;
-        // A step that cannot hold a child stands for no scope: the walk does
-        // not stop there with the scope granted.
-        if !may_hold_a_child(above) {
+        // A step that cannot hold a child, or that has been denied, cancelled
+        // or crashed since, stands for no scope: the walk does not stop there
+        // with the scope granted.
+        if !may_hold_a_child(above) || !live_step(above) {
             return None;
         }
         if !granted_scope(above).is_some_and(|wider| resource_covers(wider, scope)) {
@@ -1636,8 +1652,9 @@ fn record_visible(journal: &mut Journal, kind: VisibleRecord, text: &str) -> boo
 }
 
 /// The one admission rule for a spill pointer: a dispatched, granted step
-/// that has no result yet, can hold this object, and sits under the system
-/// head. A later edit does not move an older pointer.
+/// that has no result yet, can hold this object, sits in the scope the step
+/// still holds (and every step above it still grants), and sits under the
+/// system head. A later edit does not move an older pointer.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn spill_ready(journal: &Journal, step_id: u64, object_resource: &str) -> Result<(), &'static str> {
     let Some(step) = journal.steps.iter().find(|step| step.id == step_id) else {
@@ -1654,6 +1671,15 @@ fn spill_ready(journal: &Journal, step_id: u64, object_resource: &str) -> Result
     }
     if !resource_covers(&step.resource, object_resource) {
         return Err("not this step's resource");
+    }
+    // The step's own resource is not enough: the object must also sit inside
+    // the scope the step was granted, and every step above it must still
+    // grant that scope.
+    let Some(scope) = scope_still_granted(journal, step) else {
+        return Err("not granted");
+    };
+    if !resource_covers(scope, object_resource) {
+        return Err("not in the grant");
     }
     if journal
         .events
@@ -4124,14 +4150,15 @@ fn propose_child(
         return Err("not a subset");
     }
     // A child parent goes through the one live child check; any parent is
-    // refused once the task is cancelled.
+    // refused once the task is cancelled or the parent itself is no longer
+    // live (a granted run whose tree was cancelled).
     if parent.kind == ProposalKind::Child {
         match usable_child(journal, parent_id) {
             Ok(_) => {}
             Err("stopped" | "cancelled") => return Err("parent stopped"),
             Err(reason) => return Err(reason),
         }
-    } else if journal.cancelled_from.is_some() {
+    } else if journal.cancelled_from.is_some() || !live_step(parent) {
         return Err("parent stopped");
     }
     let chain = child_chain(journal, Some(parent_id));
@@ -4557,17 +4584,36 @@ fn call_parent_usable(journal: &Journal, step: &Step) -> Result<(), &'static str
     }
 }
 
+/// A plain entry point acts only in the task's own journal: a host journal's
+/// steps take `authorize_in_host`, `host_inbox`, and `dispatch_in_host`.
+/// Every plain entry asks this one guard, so a host step is refused once with
+/// its reason recorded.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn plain_entry_ok(journal: &mut Journal, step_id: u64) -> bool {
+    if journal.depth != 0 {
+        record_refusal_reason(journal, "child host", &format!("host step {step_id}"));
+        return false;
+    }
+    true
+}
+
 /// A missing grant denies the step. A grant id is recorded and does not run it.
 /// A child host's steps are granted only through `authorize_in_host`, and a
 /// child only through `authorize_child` or an inbox answer.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn authorize(journal: &mut Journal, id: u64, grant: Option<&str>) -> bool {
-    journal.depth == 0
-        && !journal
-            .steps
-            .iter()
-            .any(|step| step.id == id && step.kind == ProposalKind::Child)
-        && authorize_step(journal, id, grant)
+    if !plain_entry_ok(journal, id) {
+        return false;
+    }
+    if journal
+        .steps
+        .iter()
+        .any(|step| step.id == id && step.kind == ProposalKind::Child)
+    {
+        record_refusal_reason(journal, "child grant", &format!("step {id}"));
+        return false;
+    }
+    authorize_step(journal, id, grant)
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -4657,7 +4703,7 @@ impl InboxAnswer {
 /// A child host's steps are answered only through `host_inbox`.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn apply_inbox(journal: &mut Journal, id: u64, answer: InboxAnswer, grant: Option<&str>) -> bool {
-    journal.depth == 0 && apply_inbox_step(journal, id, answer, grant)
+    plain_entry_ok(journal, id) && apply_inbox_step(journal, id, answer, grant)
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -4761,7 +4807,7 @@ fn same_run_is_open(journal: &Journal, id: u64) -> bool {
 /// A child host's steps are dispatched only through `dispatch_in_host`.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn dispatch(journal: &mut Journal, id: u64) -> bool {
-    journal.depth == 0 && dispatch_step(journal, id)
+    plain_entry_ok(journal, id) && dispatch_step(journal, id)
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -6302,11 +6348,17 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 .events
                 .last()
                 .is_none_or(|node| node.role != Role::ToolResult || node.text != "child result ok")
-            || child_host.events.len() != 2
+            || child_host.events.len() != 3
+            || !child_host.events.iter().any(|node| {
+                matches!(
+                    &node.source,
+                    NodeSource::Refused { reason, .. } if reason == "the parent's grant"
+                )
+            })
             || child_host.events.last().is_none_or(|node| {
                 !matches!(
                     &node.source,
-                    NodeSource::Refused { reason, .. } if reason == "the parent's grant"
+                    NodeSource::Refused { reason, .. } if reason == "child host"
                 )
             })
         {
@@ -12078,7 +12130,6 @@ mod tests {
             ],
         )
         .unwrap();
-        apply_inbox(&mut journal, run, InboxAnswer::Deny, None);
         propose_child(
             &mut journal,
             run,
@@ -12086,6 +12137,7 @@ mod tests {
             Some(FIXTURE_CHILD_BUDGET),
         )
         .unwrap();
+        apply_inbox(&mut journal, run, InboxAnswer::Deny, None);
         let mut cursor = journal_cursor("demo-agent", "task-1").unwrap();
         cursor.revision = Some("fixture-revision".to_string());
         let append = propose_journal_append(&mut journal, &cursor).unwrap();
@@ -18808,6 +18860,61 @@ mod tests {
         );
     }
 
+    /// A cancelled run holds no scope: `cancel_tree` leaves its grant in
+    /// place, and the shared scope walk no longer accepts it, so no child is
+    /// proposed or granted beneath it. The plain `cancel` primitive (which
+    /// `cancel_tree` calls on a run) leaves the children untouched, so the
+    /// scope walk itself is what refuses the grant.
+    #[test]
+    fn a_cancelled_parent_holds_no_scope_and_no_new_child() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let other = propose_child(&mut journal, run, DEMO_DOC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert!(cancel(&mut journal, run));
+        assert_eq!(step_of(&journal, run).state, StepState::Cancelled);
+        assert_eq!(
+            step_of(&journal, run).grant.as_deref(),
+            Some("fixture-grant")
+        );
+        assert_eq!(scope_still_granted(&journal, step_of(&journal, run)), None);
+        assert_eq!(
+            scope_still_granted(&journal, step_of(&journal, child)),
+            None
+        );
+        let steps = journal.steps.clone();
+        assert!(!authorize_child(
+            &mut journal,
+            other,
+            Some("other-grant"),
+            DEMO_DOC
+        ));
+        assert_eq!(journal.steps, steps);
+        assert_eq!(
+            propose_child(
+                &mut journal,
+                run,
+                "localhost://Users/self/Projects/demo/x",
+                Some(budget(1, 60))
+            ),
+            Err("parent stopped")
+        );
+        // The reproduction: a granted run, its tree cancelled, then a new
+        // child proposed beneath it.
+        let (mut tree, tree_run) = task(budget(8, 600));
+        assert!(cancel_tree(&mut tree, tree_run));
+        assert_eq!(step_of(&tree, tree_run).state, StepState::Cancelled);
+        assert_eq!(
+            propose_child(&mut tree, tree_run, DEMO_SRC, Some(budget(1, 60))),
+            Err("parent stopped")
+        );
+    }
+
     #[test]
     fn no_model_call_anywhere_in_a_cancelled_tree() {
         let (mut journal, run) = task(budget(8, 600));
@@ -20127,6 +20234,45 @@ mod tests {
         assert_eq!(step_of(&journal, child).state, StepState::Prepared);
     }
 
+    /// Every plain entry point records one clear refusal when it refuses a
+    /// host's step, and the plain `authorize` records one when it refuses a
+    /// child: the caller sees why nothing happened.
+    #[test]
+    fn a_plain_entry_point_that_refuses_a_child_or_host_says_why() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(!authorize(&mut journal, child, Some("child-grant")));
+        assert_eq!(
+            refusal_records(&journal),
+            vec![format!("refused: child grant (step {child})")]
+        );
+        assert_eq!(step_of(&journal, child).grant, None);
+        assert_eq!(step_of(&journal, child).state, StepState::Prepared);
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let mut host = open_child_host(&journal, child, DEMO_SRC).unwrap();
+        let read = propose_read(&mut host, DEMO_SRC);
+        let steps = host.steps.clone();
+        let refusal = format!("refused: child host (host step {read})");
+        assert!(!authorize(&mut host, read, Some("read-grant")));
+        assert!(!apply_inbox(
+            &mut host,
+            read,
+            InboxAnswer::AllowOnce,
+            Some("read-grant")
+        ));
+        assert!(!dispatch(&mut host, read));
+        assert_eq!(
+            refusal_records(&host),
+            vec![refusal.clone(), refusal.clone(), refusal]
+        );
+        assert_eq!(host.steps, steps);
+    }
+
     /// R2: a denied child, or one below a denied child, does nothing more.
     #[test]
     fn a_denied_child_does_nothing_more() {
@@ -20592,6 +20738,41 @@ mod tests {
         );
     }
 
+    /// A child's spill result stays inside the scope it was granted, not only
+    /// inside its own resource: a child with resource `demo/src` but a grant
+    /// of `demo/src/a` cannot spill `demo/src/b`.
+    #[test]
+    fn a_spill_pointer_stays_inside_the_childs_granted_scope() {
+        const IN_A: &str = "localhost://Users/self/Projects/demo/src/a";
+        const IN_B: &str = "localhost://Users/self/Projects/demo/src/b";
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            IN_A
+        ));
+        assert!(dispatch(&mut journal, child));
+        assert!(observe(&mut journal, IN_B, 1, "b"));
+        assert!(observe(&mut journal, IN_A, 2, "a"));
+        let before = without_refusal_records(&journal.events);
+        assert!(!spill_pointer(&mut journal, child, IN_B));
+        assert!(refusal_records(&journal)
+            .last()
+            .unwrap()
+            .contains("not in the grant"));
+        assert_eq!(
+            without_refusal_records(&journal.events),
+            before,
+            "a refusal stores nothing else"
+        );
+        assert_eq!(text_at_spill(&journal.events, IN_B), None);
+        // Inside the granted scope it still spills.
+        assert!(spill_pointer(&mut journal, child, IN_A));
+        assert_eq!(text_at_spill(&journal.events, IN_A).as_deref(), Some("a"));
+    }
+
     /// The production request limit is decided only by `requests_fit`: no old
     /// comparison remains and every acceptance site calls the shared rule.
     /// The dedup itself is behavior-preserving, so this structural check is
@@ -20910,6 +21091,32 @@ mod tests {
             Some("other-grant"),
             DEMO_SRC_LIB
         ));
+        // A live ancestor whose grant was withdrawn gives no scope either:
+        // the run keeps its state but not its grant string.
+        let (mut withdrawn, run) = task(budget(8, 600));
+        let child = propose_child(&mut withdrawn, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        assert!(authorize_child(
+            &mut withdrawn,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let mut host = open_child_host(&withdrawn, child, DEMO_SRC).unwrap();
+        let read = propose_read(&mut host, DEMO_SRC);
+        assert!(dispatch(&mut withdrawn, run));
+        step_mut(&mut withdrawn, run).grant = None;
+        assert_eq!(
+            scope_still_granted(&withdrawn, step_of(&withdrawn, child)),
+            None
+        );
+        assert!(!authorize_in_host(
+            &mut withdrawn,
+            child,
+            &mut host,
+            read,
+            Some("read-grant")
+        ));
+        assert_eq!(step_of(&host, read).grant, None);
     }
 
     /// R5: only a run or a child is a parent; a model call is not.

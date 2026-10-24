@@ -274,7 +274,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    } else if journal.cancelled_from.is_some() {\n        return Err(\"parent stopped\");",
+     "old": "    } else if journal.cancelled_from.is_some() || !live_step(parent) {\n        return Err(\"parent stopped\");",
      "new": "    } else if false {\n        return Err(\"parent stopped\");"
     }
    ],
@@ -3674,8 +3674,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    journal.depth == 0\n        && !journal\n            .steps",
-     "new": "    true\n        && !journal\n            .steps"
+     "old": "    if !plain_entry_ok(journal, id) {\n        return false;\n    }\n",
+     "new": ""
     }
    ],
    "tests": [
@@ -3690,7 +3690,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    journal.depth == 0 && apply_inbox_step(journal, id, answer, grant)",
+     "old": "    plain_entry_ok(journal, id) && apply_inbox_step(journal, id, answer, grant)",
      "new": "    apply_inbox_step(journal, id, answer, grant)"
     }
    ],
@@ -3706,7 +3706,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    journal.depth == 0 && dispatch_step(journal, id)",
+     "old": "    plain_entry_ok(journal, id) && dispatch_step(journal, id)",
      "new": "    dispatch_step(journal, id)"
     }
    ],
@@ -3722,8 +3722,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "            .any(|step| step.id == id && step.kind == ProposalKind::Child)\n        && authorize_step(journal, id, grant)",
-     "new": "            .any(|step| step.id == id && false)\n        && authorize_step(journal, id, grant)"
+     "old": "        .any(|step| step.id == id && step.kind == ProposalKind::Child)\n    {\n        record_refusal_reason(journal, \"child grant\", &format!(\"step {id}\"));\n        return false;\n    }",
+     "new": "        .any(|step| step.id == id && false)\n    {\n        record_refusal_reason(journal, \"child grant\", &format!(\"step {id}\"));\n        return false;\n    }"
     }
    ],
    "tests": [
@@ -4014,7 +4014,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        if !may_hold_a_child(above) {\n            return None;\n        }\n",
+     "old": "        if !may_hold_a_child(above) || !live_step(above) {\n            return None;\n        }\n",
      "new": ""
     }
    ],
@@ -4741,6 +4741,91 @@
    "tests": [
     "tests::request_limit_is_decided_only_by_the_shared_validator",
     "tests::the_task_request_limit_is_one_rule_on_every_path"
+   ]
+  },
+  {
+   "id": "PX42",
+   "title": "a denied or cancelled step still carries a scope",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let scope = granted_scope(step)?;\n    // A step that is denied, cancelled or crashed carries no scope, and\n    // neither does one under such a step.\n    if !live_step(step) {\n        return None;\n    }\n",
+     "new": "    let scope = granted_scope(step)?;\n"
+    },
+    {
+     "file": "src/lib.rs",
+     "old": "        // A step that cannot hold a child, or that has been denied, cancelled\n        // or crashed since, stands for no scope: the walk does not stop there\n        // with the scope granted.\n        if !may_hold_a_child(above) || !live_step(above) {\n",
+     "new": "        if !may_hold_a_child(above) {\n"
+    }
+   ],
+   "tests": [
+    "tests::a_cancelled_parent_holds_no_scope_and_no_new_child"
+   ]
+  },
+  {
+   "id": "PX43",
+   "title": "propose_child ignores a cancelled parent's state",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    } else if journal.cancelled_from.is_some() || !live_step(parent) {\n        return Err(\"parent stopped\");\n    }",
+     "new": "    } else if journal.cancelled_from.is_some() {\n        return Err(\"parent stopped\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_cancelled_parent_holds_no_scope_and_no_new_child"
+   ]
+  },
+  {
+   "id": "PX44",
+   "title": "spill admission skips the child's granted scope",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    // The step's own resource is not enough: the object must also sit inside\n    // the scope the step was granted, and every step above it must still\n    // grant that scope.\n    let Some(scope) = scope_still_granted(journal, step) else {\n        return Err(\"not granted\");\n    };\n    if !resource_covers(scope, object_resource) {\n        return Err(\"not in the grant\");\n    }\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::a_spill_pointer_stays_inside_the_childs_granted_scope"
+   ]
+  },
+  {
+   "id": "PX45",
+   "title": "a plain entry refuses a host step without a reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if journal.depth != 0 {\n        record_refusal_reason(journal, \"child host\", &format!(\"host step {step_id}\"));\n        return false;\n    }\n",
+     "new": "    if journal.depth != 0 {\n        return false;\n    }\n"
+    }
+   ],
+   "tests": [
+    "tests::a_plain_entry_point_that_refuses_a_child_or_host_says_why"
+   ]
+  },
+  {
+   "id": "PX46",
+   "title": "the plain authorize refuses a child without a reason",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    {\n        record_refusal_reason(journal, \"child grant\", &format!(\"step {id}\"));\n        return false;\n    }\n",
+     "new": "    {\n        return false;\n    }\n"
+    }
+   ],
+   "tests": [
+    "tests::a_plain_entry_point_that_refuses_a_child_or_host_says_why"
    ]
   }
  ]
