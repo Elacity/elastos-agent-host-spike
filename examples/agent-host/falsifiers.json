@@ -378,6 +378,22 @@
    ]
   },
   {
+   "id": "FC12",
+   "title": "the transport refuses an empty summary itself instead of returning it to the shared checker",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        // Return the text unchanged. Whether it is empty, whitespace or too\n        // long is the shared checker's decision, not this transport's.\n        Ok(content.to_string())",
+     "new": "        if content.trim().is_empty() {\n            return Err(\"model returned an empty summary\".to_string());\n        }\n        Ok(content.to_string())"
+    }
+   ],
+   "tests": [
+    "tests::an_empty_or_whitespace_model_answer_reaches_the_existing_refusal"
+   ]
+  },
+  {
    "id": "FP01",
    "title": "a snapshot overwrites the last history node, so volatile bytes enter the prefix",
    "command": "host",
