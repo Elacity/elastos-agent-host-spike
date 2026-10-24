@@ -15,10 +15,12 @@ replaces exact text (found exactly once) in a file and requires every named
 test to FAIL. The verdict comes from exit codes: the mutated code is built
 first (a build that fails is its own result); then each named test is listed
 with `--exact` (exactly one test must match) and run alone with `--exact`.
-A non-zero exit alone is not a catch: the last test-harness summary line must
-say that test ran and failed, so a harness or loading error is NOT RUN and
-never a catch. Every mode uses this one proof, `survives` included: one named
-test that still passes means the falsifier SURVIVED, and a survivor counts
+A non-zero exit alone is not a catch: the harness evidence must be error-free
+(a harness or loader error marker at any position on a line, on either
+stream, after terminal formatting is stripped, is NOT RUN and never a catch)
+and a summary must say that test ran and failed. Every mode uses this one
+proof, `survives` included: one named test that still passes means the
+falsifier SURVIVED, and a survivor counts
 only when at least one of its named tests ran and none reported failed. A
 survivor whose named test did not run is NOT RUN.
 
@@ -56,6 +58,31 @@ DISK_FULL = ("No space left on device", "ENOSPC", "Disk quota exceeded")
 # The test harness prints this line after every run of the binary. A panic in
 # a test body can print anything, including a fake FAILED line, before it.
 TEST_RESULT = re.compile(r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed;", re.MULTILINE)
+# Terminal formatting is not evidence: a colored label reads as its plain
+# text, so a marker cannot hide behind a color escape.
+ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+# A harness error marker is the `error:` label with a message after it, and it
+# counts anywhere on a line: a prefixed message such as
+# `test-bin: error: ...` carries the same marker. Identifiers such as
+# `BusError::Denied` do not match: no word boundary precedes `error` inside a
+# longer word, and a space must follow the colon.
+HARNESS_ERROR = re.compile(
+    r"\b(?:error|Error)(?:\[[^\]]*\])?:\s|Traceback \(most recent call last\)")
+# A loader reports these with a prefix, for example `/test-bin: error while
+# loading shared libraries: ...` or `dyld[1234]: Library not loaded: ...`, so
+# the line start does not carry the marker and the phrase counts anywhere.
+LOADER_ERROR = re.compile(
+    r"dyld(?:\[[^\]]*\])?: |error while loading shared libraries|Library not loaded:")
+# Cargo says the test process never started, or died abnormally: that report
+# is not a failed test, and it stays evidence when the ordinary failure footer
+# is removed.
+CARGO_FAILURE = re.compile(
+    r"could not execute process|never executed"
+    r"|process didn't exit successfully|\(signal: \d+, SIG[A-Z0-9]+\)")
+# Cargo prints this footer after an ordinary failing test: the harness ran the
+# test and the test failed, so the footer itself is not a harness error. Only
+# the footer text is removed; anything after it on the same line is checked.
+TEST_FAILED = re.compile(r"^[ \t]*error: test failed, to rerun pass", re.MULTILINE)
 # A named self-test case runs in its own process. A non-zero exit alone does
 # not say the case ran: a loading error also exits non-zero. The child prints
 # one marker line only after the case returns, and the runner requires both.
@@ -221,7 +248,12 @@ def run(argv, cwd):
     never to decide that a test passed."""
     env = dict(os.environ, RUST_TEST_THREADS=os.environ.get("RUST_TEST_THREADS", "2"))
     done = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True)
-    output = done.stdout + done.stderr
+    # Keep each stream's line structure: a marker at the start of stderr is
+    # still at the start of a line when stdout ends without a newline. Joining
+    # the bytes directly would fuse the last stdout line with the first stderr
+    # line and hide the marker. Terminal formatting is stripped here, once,
+    # so every reader sees the plain text.
+    output = ANSI.sub("", done.stdout + "\n" + done.stderr)
     if any(word in output for word in DISK_FULL):
         raise DiskFull("a command reported a full disk")
     return done.returncode, output
@@ -232,15 +264,28 @@ def harness_results(output):
             for status, passed, failed in TEST_RESULT.findall(output)]
 
 
+def harness_is_error_free(output):
+    """True only when no harness or loader error marker is in the output. A
+    test body can print a fake FAILED summary, and a harness that fails to
+    load the test prints no summary of its own, so any error marker makes
+    every summary in that output untrustworthy. The text keeps its separators:
+    a marker may end at a line break, and only the Cargo footer text is
+    removed."""
+    if LOADER_ERROR.search(output) or CARGO_FAILURE.search(output):
+        return False
+    return not HARNESS_ERROR.search(TEST_FAILED.sub("", output))
+
+
 def ran_and_failed(output):
-    """True only when a harness summary says one test ran and failed, and no
-    other summary says a test ran and passed. A test body can print a fake
-    summary; the harness prints the real one after it."""
+    """True only when the harness evidence is error-free and a summary says
+    one test ran and failed, with no other summary saying a test ran and
+    passed. A test body can print a fake summary; the harness prints the real
+    one after it, and a harness or loader error is never a catch."""
     results = harness_results(output)
     failed = any(status == "FAILED" and failed >= 1 and passed == 0
                  for status, passed, failed in results)
     returned = any(passed >= 1 for _status, passed, _failed in results)
-    return failed and not returned
+    return failed and not returned and harness_is_error_free(output)
 
 
 def evaluate(entry, how):
@@ -368,6 +413,117 @@ print("test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered ou
 raise SystemExit(0)
 """
 
+STUB_FAKE_SUMMARY_INDENTED_ERROR = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+print("  error: could not load the test harness")
+raise SystemExit(101)
+"""
+
+STUB_FAKE_SUMMARY_STDOUT_ERROR = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("running 1 test")
+print("test tests::planted_check ... FAILED")
+print("error: could not load the test harness")
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+raise SystemExit(101)
+"""
+
+STUB_FAKE_SUMMARY_SPLIT_STREAMS = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+sys.stdout.write("partial output: ")
+sys.stderr.write("error: could not load the test harness")
+raise SystemExit(101)
+"""
+
+STUB_FAKE_SUMMARY_DYLD_PID = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+print("dyld[1234]: Library not loaded: libmissing.dylib")
+raise SystemExit(101)
+"""
+
+STUB_FAKE_SUMMARY_PREFIXED_LOADER = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+print("/test-bin: error while loading shared libraries: libmissing.so: cannot open shared object file")
+raise SystemExit(101)
+"""
+
+STUB_FAKE_SUMMARY_PREFIXED_HARNESS = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+print("test-bin: error: could not load the test harness")
+raise SystemExit(101)
+"""
+
+STUB_FAKE_SUMMARY_COLORED_ERROR = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+print("\\x1b[31merror\\x1b[0m: could not load the test harness")
+raise SystemExit(101)
+"""
+
+STUB_FAKE_SUMMARY_FOOTER_THEN_ERROR = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+print("error: test failed, to rerun pass `--lib` error: could not load the test harness")
+raise SystemExit(101)
+"""
+
+STUB_FAKE_SUMMARY_SPLIT_ERROR = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+print("error:")
+print("  could not load the test harness")
+raise SystemExit(101)
+"""
+
+STUB_FAKE_SUMMARY_CARGO_LAUNCH_FAILURE = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+sys.stderr.write(
+    "error: test failed, to rerun pass `--lib`\\n\\n"
+    "Caused by:\\n"
+    "  could not execute process `test-bin` (never executed)\\n\\n"
+    "Caused by:\\n"
+    "    No such file or directory (os error 2)\\n")
+raise SystemExit(101)
+"""
+
+STUB_FAKE_SUMMARY_CARGO_CRASH = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+sys.stderr.write(
+    "error: test failed, to rerun pass `--lib`\\n\\n"
+    "Caused by:\\n"
+    "  process didn't exit successfully: `/tmp/test-bin` (signal: 11, SIGSEGV)\\n")
+raise SystemExit(101)
+"""
+
 STUB_SURVIVOR_RAN = """import sys
 if "--exact" in sys.argv:
     if "--list" in sys.argv:
@@ -379,6 +535,12 @@ if "--exact" in sys.argv:
     print("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out")
     raise SystemExit(0)
 print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out")
+raise SystemExit(101)
+"""
+
+STUB_SPLIT_STREAMS = """import sys
+sys.stdout.write("partial output: ")
+sys.stderr.write("error: could not load the test harness")
 raise SystemExit(101)
 """
 
@@ -452,7 +614,29 @@ def a_named_test_that_does_not_run_is_not_a_catch():
         entry = {"id": "ST", "command": "host", "expect": "caught", "tests": ["tests::planted_check"]}
         for title, text in (("name is not listed", STUB_LIST_MISSING),
                             ("harness error", STUB_HARNESS_ERROR),
-                            ("exit 0 but no test ran", STUB_FILTERED_OUT)):
+                            ("exit 0 but no test ran", STUB_FILTERED_OUT),
+                            ("fake summary with an indented error",
+                             STUB_FAKE_SUMMARY_INDENTED_ERROR),
+                            ("fake summary with an error on stdout",
+                             STUB_FAKE_SUMMARY_STDOUT_ERROR),
+                            ("fake summary then an error across the stream boundary",
+                             STUB_FAKE_SUMMARY_SPLIT_STREAMS),
+                            ("fake summary with a dyld process id error",
+                             STUB_FAKE_SUMMARY_DYLD_PID),
+                            ("fake summary with a prefixed loader error",
+                             STUB_FAKE_SUMMARY_PREFIXED_LOADER),
+                            ("fake summary with a prefixed harness error",
+                             STUB_FAKE_SUMMARY_PREFIXED_HARNESS),
+                            ("fake summary with a colored error label",
+                             STUB_FAKE_SUMMARY_COLORED_ERROR),
+                            ("fake summary with an error after the cargo footer",
+                             STUB_FAKE_SUMMARY_FOOTER_THEN_ERROR),
+                            ("fake summary with an error split after its colon",
+                             STUB_FAKE_SUMMARY_SPLIT_ERROR),
+                            ("fake summary with a cargo launch failure",
+                             STUB_FAKE_SUMMARY_CARGO_LAUNCH_FAILURE),
+                            ("fake summary with an abnormal test-process exit",
+                             STUB_FAKE_SUMMARY_CARGO_CRASH)):
             stub = SELF_TEST_DIR / "stub.py"
             stub.write_text(text, encoding="utf-8")
             how = {"build": [], "one": (["python3", "-I", str(stub)], SELF_TEST_DIR, [])}
@@ -568,6 +752,23 @@ def interruption_at_the_end_of_the_edit():
     return interrupted and restored and not backup.exists()
 
 
+def the_streams_keep_their_own_lines():
+    """stdout and stderr are joined at a line boundary, so a marker at the
+    start of stderr is still at the start of a line when stdout ends without
+    a newline (task 010 review finding 1)."""
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        stub = SELF_TEST_DIR / "stub.py"
+        stub.write_text(STUB_SPLIT_STREAMS, encoding="utf-8")
+        _, output = run(["python3", "-I", str(stub)], SELF_TEST_DIR)
+        kept = "error: could not load the test harness" in output.splitlines()
+        print(f"self-test: the streams keep their own lines: kept={kept}")
+        return kept
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+
+
 def a_self_test_case_counts_only_when_it_ran():
     """The named case ran and failed -> a catch. A loading error that exits
     non-zero, or a signal, is not run and not a catch (review finding 1)."""
@@ -660,6 +861,7 @@ SELF_TEST_CASES = {
     "a named test that does not run is not a catch": a_named_test_that_does_not_run_is_not_a_catch,
     "an interrupted edit is restored": interruption_restores,
     "an interrupt at the end of the edit is restored": interruption_at_the_end_of_the_edit,
+    "the streams keep their own lines": the_streams_keep_their_own_lines,
     "a real catch counts": real_catch_counts,
     "a self-test case counts only when it ran": a_self_test_case_counts_only_when_it_ran,
     "a survivor needs its named test to run": a_survivor_needs_its_named_test_to_run,

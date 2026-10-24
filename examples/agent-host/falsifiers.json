@@ -393,6 +393,166 @@
     "tests::the_prompt_prefix_is_byte_identical_across_two_turns",
     "tests::changing_a_prefix_node_changes_the_prefix_bytes"
    ]
+  },
+  {
+   "id": "FS13",
+   "title": "a harness error is ignored, so a fake summary counts as a catch",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    return failed and not returned and harness_is_error_free(output)",
+     "new": "    return failed and not returned"
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
+  },
+  {
+   "id": "FS14",
+   "title": "a harness error is found at column zero only",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "HARNESS_ERROR = re.compile(\n    r\"\\b(?:error|Error)(?:\\[[^\\]]*\\])?:\\s|Traceback \\(most recent call last\\)\")",
+     "new": "HARNESS_ERROR = re.compile(\n    r\"^(?:error|Error)(?:\\[[^\\]]*\\])?:\\s|Traceback \\(most recent call last\\)\")"
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
+  },
+  {
+   "id": "FS15",
+   "title": "only a bare dyld marker counts as a loader error",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "LOADER_ERROR = re.compile(\n    r\"dyld(?:\\[[^\\]]*\\])?: |error while loading shared libraries|Library not loaded:\")",
+     "new": "LOADER_ERROR = re.compile(\n    r\"dyld: \")"
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
+  },
+  {
+   "id": "FS16",
+   "title": "the streams are joined without a line boundary",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    output = ANSI.sub(\"\", done.stdout + \"\\n\" + done.stderr)",
+     "new": "    output = ANSI.sub(\"\", done.stdout + done.stderr)"
+    }
+   ],
+   "tests": [
+    "the streams keep their own lines"
+   ]
+  },
+  {
+   "id": "FS17",
+   "title": "a harness error after a prefix is not a marker",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "HARNESS_ERROR = re.compile(\n    r\"\\b(?:error|Error)(?:\\[[^\\]]*\\])?:\\s|Traceback \\(most recent call last\\)\")",
+     "new": "HARNESS_ERROR = re.compile(\n    r\"^[ \\t]*(?:error|Error)(?:\\[[^\\]]*\\])?:\\s|Traceback \\(most recent call last\\)\")"
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
+  },
+  {
+   "id": "FS18",
+   "title": "terminal formatting is not stripped, so a colored marker is missed",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    output = ANSI.sub(\"\", done.stdout + \"\\n\" + done.stderr)",
+     "new": "    output = done.stdout + \"\\n\" + done.stderr"
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
+  },
+  {
+   "id": "FS19",
+   "title": "the whole cargo footer line is exempt, so a later error on it is missed",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    return not HARNESS_ERROR.search(TEST_FAILED.sub(\"\", output))",
+     "new": "    dropped = [line for line in output.splitlines()\n               if not line.strip().startswith(\"error: test failed, to rerun pass\")]\n    return not HARNESS_ERROR.search(\"\\n\".join(dropped))"
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
+  },
+  {
+   "id": "FS20",
+   "title": "line separators are dropped, so an error split after its colon is missed",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    return not HARNESS_ERROR.search(TEST_FAILED.sub(\"\", output))",
+     "new": "    return not [line for line in TEST_FAILED.sub(\"\", output).splitlines()\n                if HARNESS_ERROR.search(line)]"
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
+  },
+  {
+   "id": "FS21",
+   "title": "a cargo launch failure is not recognized, so a fake summary counts as a catch",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "CARGO_FAILURE = re.compile(\n    r\"could not execute process|never executed\"\n    r\"|process didn't exit successfully|\\(signal: \\d+, SIG[A-Z0-9]+\\)\")",
+     "new": "CARGO_FAILURE = re.compile(\n    r\"process didn't exit successfully|\\(signal: \\d+, SIG[A-Z0-9]+\\)\")"
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
+  },
+  {
+   "id": "FS22",
+   "title": "an abnormal test-process exit is not recognized, so a fake summary counts as a catch",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "CARGO_FAILURE = re.compile(\n    r\"could not execute process|never executed\"\n    r\"|process didn't exit successfully|\\(signal: \\d+, SIG[A-Z0-9]+\\)\")",
+     "new": "CARGO_FAILURE = re.compile(\n    r\"could not execute process|never executed\")"
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
   }
  ]
 }
