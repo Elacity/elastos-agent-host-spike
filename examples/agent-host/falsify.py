@@ -15,9 +15,10 @@ replaces exact text (found exactly once) in a file and requires every named
 test to FAIL. The verdict comes from exit codes: the mutated code is built
 first (a build that fails is its own result); then each named test is listed
 with `--exact` (exactly one test must match) and run alone with `--exact`.
-A non-zero exit alone is not a catch: the last test-harness summary line must
-say that test ran and failed, so a harness or loading error is NOT RUN and
-never a catch. Every mode uses this one proof, `survives` included: one named
+A non-zero exit alone is not a catch: the harness evidence must be error-free
+(a harness or loader error marker anywhere, at any indentation, on either
+stream, is NOT RUN and never a catch) and a summary must say that test ran
+and failed. Every mode uses this one proof, `survives` included: one named
 test that still passes means the falsifier SURVIVED, and a survivor counts
 only when at least one of its named tests ran and none reported failed. A
 survivor whose named test did not run is NOT RUN.
@@ -56,6 +57,17 @@ DISK_FULL = ("No space left on device", "ENOSPC", "Disk quota exceeded")
 # The test harness prints this line after every run of the binary. A panic in
 # a test body can print anything, including a fake FAILED line, before it.
 TEST_RESULT = re.compile(r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed;", re.MULTILINE)
+# A test harness or loader error means the named test's own evidence is
+# missing: the harness could not run the test the name asks for. A test body
+# prints to both streams, so the marker is found anywhere in the joined
+# output, at any indentation, never at column zero only.
+HARNESS_ERROR = re.compile(
+    r"^[ \t]*(?:error(?:\[[^\]]*\])?:|Error:|Traceback \(most recent call last\)"
+    r"|dyld: |error while loading)",
+    re.MULTILINE)
+# Cargo prints this line after an ordinary failing test: the harness ran the
+# test and the test failed, so it is not a harness error.
+TEST_FAILED = "error: test failed, to rerun pass"
 # A named self-test case runs in its own process. A non-zero exit alone does
 # not say the case ran: a loading error also exits non-zero. The child prints
 # one marker line only after the case returns, and the runner requires both.
@@ -232,15 +244,25 @@ def harness_results(output):
             for status, passed, failed in TEST_RESULT.findall(output)]
 
 
+def harness_is_error_free(output):
+    """True only when no harness or loader error marker is in the output. A
+    test body can print a fake FAILED summary, and a harness that fails to
+    load the test prints no summary of its own, so any error marker makes
+    every summary in that output untrustworthy."""
+    return not [line for line in output.splitlines()
+                if HARNESS_ERROR.match(line) and not line.strip().startswith(TEST_FAILED)]
+
+
 def ran_and_failed(output):
-    """True only when a harness summary says one test ran and failed, and no
-    other summary says a test ran and passed. A test body can print a fake
-    summary; the harness prints the real one after it."""
+    """True only when the harness evidence is error-free and a summary says
+    one test ran and failed, with no other summary saying a test ran and
+    passed. A test body can print a fake summary; the harness prints the real
+    one after it, and a harness or loader error is never a catch."""
     results = harness_results(output)
     failed = any(status == "FAILED" and failed >= 1 and passed == 0
                  for status, passed, failed in results)
     returned = any(passed >= 1 for _status, passed, _failed in results)
-    return failed and not returned
+    return failed and not returned and harness_is_error_free(output)
 
 
 def evaluate(entry, how):
@@ -368,6 +390,26 @@ print("test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered ou
 raise SystemExit(0)
 """
 
+STUB_FAKE_SUMMARY_INDENTED_ERROR = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+print("  error: could not load the test harness")
+raise SystemExit(101)
+"""
+
+STUB_FAKE_SUMMARY_STDOUT_ERROR = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("running 1 test")
+print("test tests::planted_check ... FAILED")
+print("error: could not load the test harness")
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+raise SystemExit(101)
+"""
+
 STUB_SURVIVOR_RAN = """import sys
 if "--exact" in sys.argv:
     if "--list" in sys.argv:
@@ -452,7 +494,11 @@ def a_named_test_that_does_not_run_is_not_a_catch():
         entry = {"id": "ST", "command": "host", "expect": "caught", "tests": ["tests::planted_check"]}
         for title, text in (("name is not listed", STUB_LIST_MISSING),
                             ("harness error", STUB_HARNESS_ERROR),
-                            ("exit 0 but no test ran", STUB_FILTERED_OUT)):
+                            ("exit 0 but no test ran", STUB_FILTERED_OUT),
+                            ("fake summary with an indented error",
+                             STUB_FAKE_SUMMARY_INDENTED_ERROR),
+                            ("fake summary with an error on stdout",
+                             STUB_FAKE_SUMMARY_STDOUT_ERROR)):
             stub = SELF_TEST_DIR / "stub.py"
             stub.write_text(text, encoding="utf-8")
             how = {"build": [], "one": (["python3", "-I", str(stub)], SELF_TEST_DIR, [])}
