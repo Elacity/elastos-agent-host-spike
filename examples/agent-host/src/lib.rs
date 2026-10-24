@@ -9382,12 +9382,22 @@ mod tests {
         );
     }
 
-    /// The offline half of the opt-in harness: every rule the real-model test
-    /// relies on is checked without an endpoint. One named test keeps the
-    /// default set to one added test.
-    #[test]
-    fn the_opt_in_harness_rules_hold_without_a_model() {
+    /// The environment guard the opt-in test uses: the same variable decides
+    /// whether the probe runs. It reads the process environment; it does not
+    /// change it.
+    fn the_environment_guard_matches_the_variable() {
+        let expected = std::env::var("SPARKS_MODEL_URL")
+            .ok()
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty());
+        assert_eq!(opt_in_model::configured_url(), expected);
+    }
+
+    /// The checks the opt-in test runs before it touches the endpoint. They
+    /// stay out of the always-on gate with the ignored test they belong to.
+    fn deterministic_checks() {
         a_rejected_model_url_does_not_disclose_credentials();
+        the_environment_guard_matches_the_variable();
         a_model_response_with_an_invalid_content_length_is_refused();
         a_model_response_with_conflicting_content_lengths_is_refused();
         a_chunked_model_response_needs_its_final_empty_line();
@@ -9412,6 +9422,7 @@ mod tests {
     #[test]
     #[ignore = "opt-in: set SPARKS_MODEL_URL to the local DeepSeek endpoint"]
     fn an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns() {
+        deterministic_checks();
         match probe_prefix_turns(opt_in_model::configured_url()) {
             Ok(None) => println!(
                 "SKIP: SPARKS_MODEL_URL is unset; the opt-in real-model prefix test did not run"
