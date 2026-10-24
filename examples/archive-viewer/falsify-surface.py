@@ -78,19 +78,31 @@ CASES = [
         "a heading is drawn at a fixed level",
         '      return spansInto(doc.createElement(`h${block.level}`), block.spans);',
         '      return spansInto(doc.createElement("h2"), block.spans);',
-        ["the previews follow the documents page rules"],
+        ["the previews follow the documents page rules", "the block functions are the documents page's own"],
+    ),
+    (
+        "a heading level is normalized differently",
+        '      return { kind: "heading", level: Math.min(6, Math.max(1, block.level)), spans };',
+        '      return { kind: "heading", level: Math.min(6, Math.max(1, block.level === 3 ? 4 : block.level)), spans };',
+        ["the previews follow the documents page rules", "the block functions are the documents page's own"],
+    ),
+    (
+        "a blank refusal reason is kept",
+        "        const error = new Error(cut(reason.trim() || null, MAX_MESSAGE_CHARS,",
+        "        const error = new Error(cut(reason || null, MAX_MESSAGE_CHARS,",
+        ["a blank refusal reason is not shown as blank"],
     ),
     (
         "the block kind is own-property only",
         "  switch (block && block.kind) {",
         '  switch (own(block, "kind")) {',
-        ["the previews follow the documents page rules"],
+        ["the previews follow the documents page rules", "the block functions are the documents page's own"],
     ),
     (
         "a span style is own-property only",
         "    tag: styleTag(span && span.style),",
         '    tag: styleTag(own(span, "style")),',
-        ["the previews follow the documents page rules"],
+        ["the previews follow the documents page rules", "the block functions are the documents page's own"],
     ),
     (
         "a malformed refusal field is ignored",
@@ -188,7 +200,7 @@ CASES = [
     ),
     (
         "an unreadable refusal shows no text",
-        "cut(reason || null, MAX_MESSAGE_CHARS,",
+        "cut(reason.trim() || null, MAX_MESSAGE_CHARS,",
         "cut(reason, MAX_MESSAGE_CHARS,",
         ["a refusal is shown as its text"],
     ),

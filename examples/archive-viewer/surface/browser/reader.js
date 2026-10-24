@@ -212,7 +212,7 @@ export function readerClient(fetchFn, token) {
         } catch {
           reason = "";
         }
-        const error = new Error(cut(reason || null, MAX_MESSAGE_CHARS, `Archive could not read this (${response.status}).`));
+        const error = new Error(cut(reason.trim() || null, MAX_MESSAGE_CHARS, `Archive could not read this (${response.status}).`));
         error.status = response.status;
         throw error;
       }

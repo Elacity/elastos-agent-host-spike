@@ -295,6 +295,13 @@ test("a refusal is shown as its text", async () => {
   assert.equal(long.view.status.textContent.length, 201);
 });
 
+test("a blank refusal reason is not shown as blank", async () => {
+  for (const error of ["   ", "\t\n", ""]) {
+    const refused = await mounted({ [VIEW_ROUTE]: response(403, { error }) });
+    assert.equal(refused.view.status.textContent, "Archive could not read this (403).", JSON.stringify(error));
+  }
+});
+
 test("views that are not ones are refused", () => {
   assert.throws(() => readView(null), /not Archive views/);
   assert.throws(() => readView({ ...view(), schema: "elastos.archive-viewer.open/v1" }), /not Archive views/);
@@ -471,10 +478,52 @@ async function documentsBlocks(blocks) {
   return document.elements.article.children;
 }
 
+/** One function's exact text in a source file. */
+function functionSource(file, name) {
+  const text = source(file);
+  const start = text.indexOf(`function ${name}`);
+  const open = text.indexOf("{", start);
+  let depth = 0;
+  for (let at = open; at < text.length; at += 1) {
+    if (text[at] === "{") depth += 1;
+    else if (text[at] === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, at + 1);
+    }
+  }
+  throw new Error(`${name} not found in ${file}`);
+}
+
+test("the block functions are the documents page's own", () => {
+  // One text owns the rules: the copies are the documents page's functions,
+  // character for character, and any edit to one is caught here.
+  for (const name of ["styleTag", "readSpans", "readBlock", "drawBlock"]) {
+    assert.equal(
+      functionSource("./browser/reader.js", name),
+      functionSource("../../docs-viewer/surface/browser/reader.js", name),
+      name,
+    );
+  }
+});
+
 test("the previews follow the documents page rules", async () => {
   // One block format, two pages: every block rule of this page is compared
   // with the documents page's, so a change in either is caught here.
+  const levels = [-1, 0, 1, 2, 3, 4, 5, 6, 7, 9, 3.5, "3"];
+  const styleNames = ["plain", "strong", "em", "code", "script", "constructor", "__proto__", "toString", undefined, 1];
+  const texts = ["", "x", HOSTILE, "x".repeat(20000), "x".repeat(20001)];
+  // A seeded generator, so the comparison covers inputs no one listed.
+  let seed = 12345;
+  const random = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 2 ** 32;
+  };
+  const pick = (list) => list[Math.floor(random() * list.length)];
+  const kinds = ["heading", "paragraph", "quote", "list", "code", "rule", "script", undefined];
   const blocks = [
+    ...levels.map((level) => [{ kind: "heading", level, spans: [span("Title")] }]),
+    ...styleNames.map((style) => [{ kind: "paragraph", spans: [{ style, text: String(style) }] }]),
+    ...texts.map((text) => [{ kind: "code", text }]),
     [{ kind: "heading", level: 2, spans: [span("Title")] }],
     [{ kind: "paragraph", spans: [span("a "), span("b", "strong"), span("c", "em"), span("d", "code")] }],
     [{ kind: "list", ordered: false, items: [[span("one")], [span("two")]] }],
@@ -500,6 +549,20 @@ test("the previews follow the documents page rules", async () => {
     [null],
     ["not a block"],
     [42],
+    ...Array.from({ length: 80 }, () => {
+      const block = { kind: pick(kinds) };
+      if (random() < 0.6) {
+        block.spans = Array.from({ length: Math.floor(random() * 4) }, () => ({
+          style: pick(styleNames),
+          text: pick(texts),
+        }));
+      }
+      if (random() < 0.4) block.level = pick(levels);
+      if (random() < 0.3) block.items = Array.from({ length: Math.floor(random() * 4) }, () => [span("x")]);
+      if (random() < 0.3) block.ordered = random() < 0.5;
+      if (random() < 0.4) block.text = pick(texts);
+      return [block];
+    }),
   ];
   for (const [at, each] of blocks.entries()) {
     const pages = {

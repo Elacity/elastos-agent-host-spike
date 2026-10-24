@@ -466,7 +466,7 @@ draws the `elastos.archive-viewer.view/v1` view the core writes.
   previews as the documents model's typed blocks. Every text goes through
   `textContent`. It keeps no `uri` field, never builds a path, never fetches an
   entry and draws no image on Bus v1.
-- `falsify-surface.py` (27 cases) and `verify.sh`: the page tests, the page
+- `falsify-surface.py` (29 cases) and `verify.sh`: the page tests, the page
   falsifiers and the Chromium smoke run with the guest checks. A machine
   without Playwright's Chromium skips the smoke with a clear line; the page
   tests and the falsifiers still run.
@@ -486,15 +486,15 @@ draws the `elastos.archive-viewer.view/v1` view the core writes.
   `__proto__`, `hasOwnProperty` and `valueOf` draw "Other". The mutant uses
   prototype lookup. **F39b** covers the same rule for a view key: the page
   reads only the view's own fields, and an inherited `entries` draws nothing.
-- The other 24 page falsifiers cover the remaining page rules: the schema, the
+- The other 26 page falsifiers cover the remaining page rules: the schema, the
   entry and preview caps, unreadable entries and previews, a refused archive's
   reason, text cutting, cookies, the token guard, uri fields and the
   documents-model block and span rules.
 
 ### Checks on this Mac
 
-- `node --test surface/reader.test.mjs`: 26 tests pass.
-- `python3 -I falsify-surface.py`: 27 falsifiers, all caught.
+- `node --test surface/reader.test.mjs`: 28 tests pass.
+- `python3 -I falsify-surface.py`: 29 falsifiers, all caught.
 - `node surface/reader-browser-smoke.mjs` (real Chromium, Home's sandbox): the
   listing, the text preview and the hostile path appear, no image is drawn,
   one GET, no console errors.
@@ -549,6 +549,31 @@ draws the `elastos.archive-viewer.view/v1` view the core writes.
   folder, so the kit cannot be imported at run time; the parity test is the
   gate that keeps the two copies one behavior until A5 lands. Editing the kit
   or the documents viewer is outside this task.
+
+### Review fixes (round 4)
+
+- **The parity gate now covers the whole normalization domain, not examples.**
+  `readSpans`, `readBlock`, `drawBlock` and `styleTag` are byte-identical to
+  the documents page's, and `the block functions are the documents page's own`
+  compares the four function texts in both files, so one rule has one text and
+  any edit to one copy fails a named test. The parity test drives both pages
+  over every heading level (-1, 0 to
+  7, 9, 3.5, "3"), every style name (the four styles and the inherited names
+  and non-strings), the text boundaries (0, 1, 20,000, 20,001), the span and
+  item caps, prototype-read fields, `null`, strings, numbers, and 80 seeded
+  random blocks. For every kept case it also mounts both pages and compares
+  the rendered element trees. The review's mutation (level 3 normalized to 4)
+  is now `a heading level is normalized differently`, and the parity test
+  fails under it.
+- **A blank HTTP refusal reason is not shown as blank.** The client trims the
+  reason before choosing the fallback, so `{error: "   "}` and `{error: ""}`
+  both show "Archive could not read this (403).". Test `a blank refusal reason
+  is not shown as blank`; falsifier `a blank refusal reason is kept` removes
+  the trim.
+- **Ownership dependency.** The kit still has no typed-document renderer
+  (A5), so the page carries its copy; the byte-identical functions and the
+  parity gate keep it one behavior until A5 lands. This remains the recorded
+  dependency.
 
 ### Kit gap, recorded not edited
 
