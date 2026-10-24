@@ -8529,6 +8529,88 @@ mod tests {
         );
     }
 
+    /// The stable prompt prefix of a turn: every node before the first
+    /// snapshot, in the same canonical bytes the model sees. The snapshot is
+    /// the volatile tail, so it never enters these bytes.
+    fn prefix_bytes(events: &[SurfaceNode]) -> Vec<u8> {
+        let end = events
+            .iter()
+            .position(|node| node.source == NodeSource::Snapshot)
+            .expect("a built turn has a snapshot");
+        model_bytes(&events[..end]).expect("prefix nodes encode")
+    }
+
+    /// The volatile tail: the snapshot nodes from the first one to the end.
+    fn tail_bytes(events: &[SurfaceNode]) -> Vec<u8> {
+        let start = events
+            .iter()
+            .position(|node| node.source == NodeSource::Snapshot)
+            .expect("a built turn has a snapshot");
+        model_bytes(&events[start..]).expect("tail nodes encode")
+    }
+
+    /// Two consecutive turns differ in the snapshot, not in the prefix, so the
+    /// model server can reuse the cached prefix. Node 0 stays first and
+    /// unchanged.
+    #[test]
+    fn the_prompt_prefix_is_byte_identical_across_two_turns() {
+        let mut journal = empty_journal();
+        admit_system(&mut journal, SYSTEM_HEAD, true);
+        admit_user(&mut journal, "hello");
+        admit_system(&mut journal, "Reply in one short paragraph.", true);
+        assert!(admit_snapshot(
+            &mut journal,
+            "localhost://Users/self",
+            "2026-10-12T13:44:00Z",
+            "localhost://Users/self/Documents/note.txt",
+        ));
+        let first_prefix = prefix_bytes(&journal.events);
+        let first_tail = tail_bytes(&journal.events);
+        let first_head = journal.events[0].clone();
+
+        admit_user(&mut journal, "second turn");
+        admit_system(&mut journal, "Keep the first system line unchanged.", true);
+        assert!(admit_snapshot(
+            &mut journal,
+            "localhost://Users/self/Documents",
+            "2026-10-13T01:29:00Z",
+            "localhost://Users/self/Documents/other.txt",
+        ));
+        let second_prefix = prefix_bytes(&journal.events);
+        let second_tail = tail_bytes(&journal.events);
+
+        assert_eq!(first_prefix, second_prefix);
+        assert_ne!(first_tail, second_tail, "the test varies the volatile tail");
+        assert_eq!(journal.events[0], first_head);
+        assert_eq!(journal.events[0].text.as_bytes(), SYSTEM_HEAD.as_bytes());
+        assert_eq!(journal.events[0].source, NodeSource::Head);
+    }
+
+    /// A change to a node in the prefix changes the prefix bytes, so the test
+    /// above is not asserting a constant.
+    #[test]
+    fn changing_a_prefix_node_changes_the_prefix_bytes() {
+        let build = |head: &str, reply: &str| {
+            let mut journal = empty_journal();
+            admit_system(&mut journal, head, true);
+            admit_user(&mut journal, "hello");
+            admit_system(&mut journal, reply, true);
+            assert!(admit_snapshot(
+                &mut journal,
+                "localhost://Users/self",
+                "2026-10-12T13:44:00Z",
+                "localhost://Users/self/Documents/note.txt",
+            ));
+            prefix_bytes(&journal.events)
+        };
+        let base = build(SYSTEM_HEAD, "Reply in one short paragraph.");
+        assert_ne!(
+            build("A different head.", "Reply in one short paragraph."),
+            base
+        );
+        assert_ne!(build(SYSTEM_HEAD, "Reply in two short paragraphs."), base);
+    }
+
     #[test]
     fn the_same_head_text_does_not_start_a_new_series() {
         let mut journal = one_turn();

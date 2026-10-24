@@ -376,6 +376,23 @@
    "tests": [
     "tests::a_model_summary_that_changes_a_required_fact_with_a_combining_mark_is_refused"
    ]
+  },
+  {
+   "id": "FP01",
+   "title": "a snapshot overwrites the last history node, so volatile bytes enter the prefix",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        journal.events.push(SurfaceNode {\n            role: Role::User,\n            text: text.to_string(),\n            source: NodeSource::Snapshot,\n        });",
+     "new": "        if let Some(last) = journal.events.last_mut() {\n            last.text = text.to_string();\n        }"
+    }
+   ],
+   "tests": [
+    "tests::the_prompt_prefix_is_byte_identical_across_two_turns",
+    "tests::changing_a_prefix_node_changes_the_prefix_bytes"
+   ]
   }
  ]
 }
