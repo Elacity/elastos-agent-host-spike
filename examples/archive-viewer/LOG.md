@@ -448,3 +448,77 @@ prove.
 
 The page and its smoke (F37 to F39) are task 006. tar remains after ZIP. The
 in-component group (F3, F35, F36, F43) is complete.
+
+## 2026-10-24: task 008, the page on the shared renderer, and its smoke
+
+Step 3d's fourth bullet, as the retry of task 006. The page owns the listing
+rows and the view checks; the documents model's blocks are drawn by the kit's
+one renderer, shipped beside the page, and are not copied into it.
+
+### What changed
+
+- New `surface/`: `browser/reader.js` (listing rows, view checks, mount),
+  `browser/main.js`, `browser/index.html`, `browser/reader.css`,
+  `browser/docs-render.js` (the shipped copy), `capsule.json` (`archive-reader`,
+  role `viewer`), `fixtures/view.json`, `reader.test.mjs`,
+  `reader-browser-smoke.mjs` and `README.md`.
+- `browser/reader.js` imports `MAX_BLOCKS`, `cut`, `drawBlock` and `readBlock`
+  from `./docs-render.js`. It defines no block rule, no span rule and no style
+  table; it reads the previews through the renderer and draws the `entries`
+  listing itself, with `textContent` only. A kind label comes from the `KINDS`
+  table's own names only.
+- `examples/capsule-kit/surface/docs-render.js` is the renderer's one owner.
+  This base did not yet carry task 007's file, so this slice adds the same
+  bytes; `reader.test.mjs` compares the shipped `browser/docs-render.js` to the
+  owner byte for byte, and `build.sh` refreshes the copy from the owner. If the
+  owner's bytes change, the drift test fails until the copy follows, so the
+  page never ships a second version of a rule.
+- `build.sh` copies the owner into `surface/browser/docs-render.js` before it
+  builds the component, as the documents viewer does.
+- `verify.sh` now runs the page tests and the page falsifiers after the core
+  falsifiers, and runs the Chromium smoke when Playwright's Chromium is
+  present. A machine without it prints why it skipped; the page tests and
+  falsifiers still run.
+- New `falsify-surface.py`: 23 page cases and the drift case (24 in all, every
+  one caught).
+
+### F37 to F39 done
+
+- **F37** `an_entry_path_is_text`: a path that contains
+  `<img src=x onerror=…>` reaches the row as literal text. Its mutant writes the
+  path with `innerHTML`, and both the F37 test and the forbidden-token scan
+  fail.
+- **F38** `the_page_draws_no_image_on_bus_v1`: an entry of kind `image` is a
+  listed row with the `Other` label, and a preview whose first block is of kind
+  `image` is not shown at all. No element with the `img` tag is made. Its
+  mutant adds an image element for a `.png` path, and the test and the scan
+  fail.
+- **F39** `a_kind_named_after_an_inherited_property_is_not_drawn`: `constructor`,
+  `toString`, `__proto__`, `hasOwnProperty` and `valueOf` all draw as `Other`,
+  because `Object.hasOwn` guards the table. Its mutant uses `KINDS[kind]`, so
+  the inherited name picks an object and the test fails. F39b does the same for
+  a view key read through the prototype.
+
+### Measurements
+
+- `node --test surface/reader.test.mjs`: 25 tests pass.
+- `falsify-surface.py`: 24 falsifiers, all caught; the files are restored.
+- `reader-browser-smoke.mjs`: passes in Chromium; the requests are the page's
+  files and `GET`/`OPTIONS /api/viewers/archive-reader/view` only, with no
+  console errors.
+
+### Notes
+
+- **Bus v1 is complete.** F37 to F39 close the page group; F1 to F5, F26 to
+  F28, F32, F33, F3, F35, F36, F40 to F43 are done; F6 to F31 cover the core.
+  What remains outside this lane is the bundle and the container build (a cloud
+  run; the Mac has no Docker), tar after ZIP, and Bus v2 (F18 nesting, F34
+  images, and the resident page).
+- The launch binding (M6) still needs Runtime and Home. The page's one route
+  exists only in the stand-in server.
+- No kit change is needed for this page: the renderer's block kinds already
+  cover the previews, and an image has no block kind on Bus v1. That is the
+  intended gap for F34, not a renderer omission.
+- **Supersedes task 006**, whose page reimplemented the block rules and failed
+  review on P10. Nothing of that page remains; the listing and view checks are
+  rebuilt here against the shared import.

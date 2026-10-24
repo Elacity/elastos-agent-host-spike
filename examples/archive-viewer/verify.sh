@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The archive viewer: the core's fmt, clippy (host and wasm32), tests and
-# falsifiers; then, with --runtime, the built component in the Runtime's
+# falsifiers; the render-only page's tests, its falsifiers and its Chromium
+# smoke; then, with --runtime, the built component in the Runtime's
 # ComponentProvider with its admission check, the F35 grant stop and the F36
 # fuel gate (the host-test crate), and their falsifiers.
 #
@@ -62,6 +63,21 @@ cargo test --locked --manifest-path "${VIEWER_DIR}/Cargo.toml"
 
 # Every rule: break it, see its test fail, restore it.
 python3 -I "${VIEWER_DIR}/falsify.py"
+
+# Surface: the render-only page against a fake fetch, then its page
+# falsifiers (F37 to F39, the shipped renderer's drift from its kit owner and
+# the rest), then the real page in real Chromium, framed in Home's sandbox
+# against the kit's stand-in server. A machine without Playwright's Chromium
+# skips the smoke with a clear line; the page tests and the falsifiers still
+# run.
+node --test "${VIEWER_DIR}/surface/reader.test.mjs"
+python3 -I "${VIEWER_DIR}/falsify-surface.py"
+export PLAYWRIGHT_DIR="${REPO_ROOT}/elastos/tools/browser-playwright-engine"
+if node -e "const {chromium}=require(process.env.PLAYWRIGHT_DIR+'/node_modules/playwright'); process.exit(require('node:fs').existsSync(chromium.executablePath()) ? 0 : 1)" >/dev/null 2>&1; then
+    node "${VIEWER_DIR}/surface/reader-browser-smoke.mjs"
+else
+    echo "archive-viewer: Chromium smoke skipped: no Playwright Chromium at ${PLAYWRIGHT_DIR}"
+fi
 
 if [[ $RUNTIME -eq 1 ]]; then
     host_log="$(mktemp)"
