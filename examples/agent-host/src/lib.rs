@@ -108,6 +108,17 @@ enum NodeSource {
     /// A later system line (`admit_system` with `in_history`). Only the host
     /// writes it; no person's, model's or tool's text becomes this kind.
     SystemLine,
+    /// OMP idea 2: the budget a child was given.
+    ChildBudget {
+        child: u64,
+        budget: Budget,
+    },
+    /// OMP idea 2: why a child stopped, and the model calls it had used.
+    ChildStop {
+        child: u64,
+        reason: StopReason,
+        requests_used: u32,
+    },
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -161,7 +172,90 @@ struct Step {
     seat: String,
     seen_version: Option<u64>,
     inbox: String,
+    /// OMP idea 2: a child's budget (Child steps only).
+    budget: Option<Budget>,
+    /// Model calls made in this child's subtree (Child steps only).
+    requests_used: u32,
+    /// Why this child stopped; the first reason is kept (Child steps only).
+    stop: Option<StopReason>,
+    /// A dispatched run whose tree was cancelled: it keeps its state and its
+    /// result, holds no scope and takes no new child.
+    tree_cancelled: bool,
+    /// What a granted child may hand on: the resource it was granted, which
+    /// may be narrower than its own. Held in memory with the grant, never
+    /// stored; a reload grants again through the same checks.
+    grant_scope: Option<String>,
 }
+
+/// A budget: model calls (hosted or local, one counter) and wall time.
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Budget {
+    requests: u32,
+    seconds: u64,
+}
+
+/// Why a child stopped.
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StopReason {
+    Requests,
+    Time,
+    Cancelled,
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+impl StopReason {
+    fn name(self) -> &'static str {
+        match self {
+            StopReason::Requests => "requests",
+            StopReason::Time => "time",
+            StopReason::Cancelled => "cancelled",
+        }
+    }
+
+    fn tag(self) -> u8 {
+        match self {
+            StopReason::Requests => 1,
+            StopReason::Time => 2,
+            StopReason::Cancelled => 3,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Option<StopReason> {
+        match tag {
+            1 => Some(StopReason::Requests),
+            2 => Some(StopReason::Time),
+            3 => Some(StopReason::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+/// How deep children may nest: the top task is depth 0, so a grandchild (2)
+/// is the deepest; it cannot propose a child.
+#[cfg(any(test, target_arch = "wasm32"))]
+const CHILD_DEPTH_LIMIT: u8 = 2;
+
+/// A child result longer than this is not stored inline; it must be a spill
+/// pointer.
+#[cfg(any(test, target_arch = "wasm32"))]
+const CHILD_RESULT_CAP: usize = 4_000;
+
+/// The task budget the tests and the self-test record as if the Runtime had
+/// granted it. Not a default: a task with no granted budget has none.
+#[cfg(any(test, target_arch = "wasm32"))]
+const FIXTURE_TASK_BUDGET: Budget = Budget {
+    requests: 8,
+    seconds: 600,
+};
+
+/// The child budget the tests and the self-test propose.
+#[cfg(any(test, target_arch = "wasm32"))]
+const FIXTURE_CHILD_BUDGET: Budget = Budget {
+    requests: 2,
+    seconds: 60,
+};
 
 /// One turn. The id is the turn's own number. It is not the series epoch.
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -171,9 +265,75 @@ struct Turn {
     steps: Vec<u64>,
 }
 
-/// Append-only model history plus the cache epoch. Epoch 0 means no series yet.
+/// The in-memory identity of one task journal. A loaded journal owns its
+/// task; a clone of one (`Journal::clone`) is a snapshot of the same task,
+/// and only the owning journal may open a child host (`open_child_host`).
+/// A child host keeps the mark of the journal it was opened from. The mark is
+/// not stored, and it is not compared as data: the format has no field for
+/// it, so a reloaded journal still equals the one it came from. A child host
+/// must name its task's mark, so another task's journal with the same child
+/// id, and a snapshot taken before a cancellation, are not its parent.
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Clone, Debug)]
+struct TaskMark {
+    /// Shared with every snapshot of this task and with its child hosts.
+    id: std::rc::Rc<()>,
+    /// True only on the journal that owns the task. A snapshot keeps the
+    /// data but holds no authority: it opens no host and is no parent.
+    live: bool,
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+impl TaskMark {
+    fn new() -> Self {
+        Self {
+            id: std::rc::Rc::new(()),
+            live: true,
+        }
+    }
+
+    /// A snapshot of this task: new identity, no authority of its own.
+    fn snapshot(&self) -> Self {
+        Self {
+            id: std::rc::Rc::new(()),
+            live: false,
+        }
+    }
+
+    fn is(&self, other: &TaskMark) -> bool {
+        std::rc::Rc::ptr_eq(&self.id, &other.id)
+    }
+
+    fn is_live(&self) -> bool {
+        self.live
+    }
+}
+
+/// Identity is not journal data: every pair compares equal, so `assert_eq!`
+/// on a journal before and after a reload keeps its meaning.
+#[cfg(any(test, target_arch = "wasm32"))]
+impl PartialEq for TaskMark {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+impl Eq for TaskMark {}
+
+/// What a child host is bound to: the task journal it was opened from and the
+/// child step in that journal. Held in memory only, never stored: a reloaded
+/// host belongs to no child and can do nothing until it is opened again.
 #[cfg(any(test, target_arch = "wasm32"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct ChildHost {
+    task: TaskMark,
+    child: u64,
+}
+
+/// Append-only model history plus the cache epoch. Epoch 0 means no series yet.
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Debug, PartialEq, Eq)]
 struct Journal {
     events: Vec<SurfaceNode>,
     epoch: u64,
@@ -183,6 +343,55 @@ struct Journal {
     compaction_open: bool,
     compact_backup: Option<(Vec<SurfaceNode>, u64)>,
     compact_pending: Option<Vec<SurfaceNode>>,
+    /// OMP idea 2: the depth of this task (0 for the top task; a child host
+    /// journal is its child's depth).
+    depth: u8,
+    /// The budget the Runtime granted this task, recorded as data. The guest
+    /// never sets or raises it (`record_task_budget`).
+    task_budget: Option<Budget>,
+    /// Set when the whole task was cancelled: the last step id at that time.
+    cancelled_from: Option<u64>,
+    /// The task object this journal belongs to, in memory only. A child host
+    /// must name the same task as the parent journal it acts on.
+    task: TaskMark,
+    /// A child host's owning task and child step, in the parent's journal.
+    /// Held in memory only, never stored: a reloaded host belongs to no child
+    /// and can do nothing until it is opened again.
+    host_of: Option<ChildHost>,
+    /// Every grant given to a child host's step, with its child, in memory
+    /// only and never stored. A child's result is checked against all of
+    /// them, whichever host journal the caller supplies.
+    host_grants: Vec<(u64, String)>,
+}
+
+/// A clone is a snapshot, not the task: it keeps the data but takes a new,
+/// non-live task mark. Every host action reads its parent's authority from
+/// the journal that opened the host (`host_binding_ok`), and only an owning
+/// journal opens a host (`open_child_host`), so a copy taken before a cancel,
+/// stop or grant change cannot act for it. A reloaded journal owns its task
+/// object for the same reason.
+#[cfg(any(test, target_arch = "wasm32"))]
+impl Clone for Journal {
+    fn clone(&self) -> Self {
+        Self {
+            events: self.events.clone(),
+            epoch: self.epoch,
+            steps: self.steps.clone(),
+            turns: self.turns.clone(),
+            markers: self.markers.clone(),
+            compaction_open: self.compaction_open,
+            compact_backup: self.compact_backup.clone(),
+            compact_pending: self.compact_pending.clone(),
+            depth: self.depth,
+            task_budget: self.task_budget,
+            cancelled_from: self.cancelled_from,
+            task: self.task.snapshot(),
+            // A host journal's binding belongs to the task it was opened from,
+            // not to this copy.
+            host_of: self.host_of.clone(),
+            host_grants: self.host_grants.clone(),
+        }
+    }
 }
 
 /// Model view. Markers, a step with no result, and an empty assistant line
@@ -202,9 +411,8 @@ fn derive(events: &[SurfaceNode]) -> Vec<SurfaceNode> {
         .collect()
 }
 
-/// The kind byte of journal format 2. 17 and 18 are kept for OMP idea 2
-/// (child budget, child stop) and are refused until it is built. A later
-/// system line is 19.
+/// The kind byte of journal format 2. 17 and 18 are OMP idea 2's child
+/// budget and child stop. A later system line is 19.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn source_tag(source: &NodeSource) -> u8 {
     match source {
@@ -224,6 +432,8 @@ fn source_tag(source: &NodeSource) -> u8 {
         NodeSource::Spill { .. } => 14,
         NodeSource::Inbox(_) => 15,
         NodeSource::Refused { .. } => 16,
+        NodeSource::ChildBudget { .. } => 17,
+        NodeSource::ChildStop { .. } => 18,
         NodeSource::SystemLine => 19,
     }
 }
@@ -250,6 +460,8 @@ fn kind_has_text(source: &NodeSource) -> bool {
             | NodeSource::Spill { .. }
             | NodeSource::Inbox(_)
             | NodeSource::Refused { .. }
+            | NodeSource::ChildBudget { .. }
+            | NodeSource::ChildStop { .. }
     )
 }
 
@@ -278,6 +490,18 @@ fn render_record(node: &SurfaceNode) -> String {
         NodeSource::Spill { resource, version } => format!("spill: {resource} version {version}"),
         NodeSource::Inbox(answer) => format!("inbox: {}", answer.name()),
         NodeSource::Refused { reason, what } => format!("refused: {reason} ({what})"),
+        NodeSource::ChildBudget { child, budget } => format!(
+            "child {child} budget: {} requests, {} s",
+            budget.requests, budget.seconds
+        ),
+        NodeSource::ChildStop {
+            child,
+            reason,
+            requests_used,
+        } => format!(
+            "child {child} stopped: {} ({requests_used} requests used)",
+            reason.name()
+        ),
     }
 }
 
@@ -354,6 +578,23 @@ const JOURNAL_FORMAT: u16 = 2;
 /// The reason a stored format 1 journal is refused, shown to the person.
 #[cfg(any(test, target_arch = "wasm32"))]
 const FORMAT_1_REASON: &str = "journal format 1 not supported; start a new task";
+/// The reason a task with no recorded budget is refused, shown to the person.
+/// Like the format 1 reason, it says what to do.
+#[cfg(any(test, target_arch = "wasm32"))]
+const TASK_BUDGET_REASON: &str = "the task budget was not recorded; start a new task";
+/// Why a step that would change a node already in the log is refused while a
+/// compaction is open (`log_may_change_in_place`).
+#[cfg(any(test, target_arch = "wasm32"))]
+const COMPACTION_OPEN_REASON: &str = "a compaction is open; commit or restore it first";
+/// Why a commit or a crash restore is refused when no compaction is open.
+#[cfg(any(test, target_arch = "wasm32"))]
+const COMPACTION_NOT_OPEN_REASON: &str = "no compaction is open";
+/// Why a commit or a crash restore is refused when the open compaction does
+/// not match the log (`compaction_boundary_ok`). Like the format 1 reason, it
+/// says what to do.
+#[cfg(any(test, target_arch = "wasm32"))]
+const COMPACTION_BOUNDARY_REASON: &str =
+    "the open compaction does not match the log; start a new task";
 /// Bytes cross the Runtime bridge as a JSON number array, up to four characters
 /// per byte ("255,"), inside a 1 MiB frame. 192 KiB of 0xFF fits; 256 KiB does not.
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -415,6 +656,20 @@ fn node_payload(node: &SurfaceNode) -> Option<Vec<u8>> {
             put_str(&mut out, reason)?;
             put_str(&mut out, what)?;
         }
+        NodeSource::ChildBudget { child, budget } => {
+            out.extend_from_slice(&child.to_le_bytes());
+            out.extend_from_slice(&budget.requests.to_le_bytes());
+            out.extend_from_slice(&budget.seconds.to_le_bytes());
+        }
+        NodeSource::ChildStop {
+            child,
+            reason,
+            requests_used,
+        } => {
+            out.extend_from_slice(&child.to_le_bytes());
+            out.push(reason.tag());
+            out.extend_from_slice(&requests_used.to_le_bytes());
+        }
         _ => put_str(&mut out, &node.text)?,
     }
     Some(out)
@@ -466,13 +721,27 @@ fn step_payload(step: &Step) -> Option<Vec<u8>> {
     put_str(&mut out, &step.seat)?;
     put_opt(&mut out, step.seen_version);
     put_str(&mut out, &step.inbox)?;
-    // Room for OMP idea 2, empty until it is built: depth, budget (flag,
-    // requests, seconds), requests_used, stop.
-    out.push(0);
-    out.extend_from_slice(&[0; 1 + 4 + 8]);
-    out.extend_from_slice(&0_u32.to_le_bytes());
-    out.push(0);
+    // OMP idea 2: depth is always 0 (a child's depth is derived from its
+    // parent_id links and the header depth, never stored per step); the flag
+    // byte is 1 for a dispatched run whose tree was cancelled, else 0; budget
+    // (flag, requests, seconds), requests_used, stop (0 none, else the reason).
+    out.push(u8::from(step.tree_cancelled));
+    put_budget(&mut out, step.budget);
+    out.extend_from_slice(&step.requests_used.to_le_bytes());
+    out.push(step.stop.map_or(0, StopReason::tag));
     Some(out)
+}
+
+/// A flag and a budget; with no budget, the flag and the values are zero.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn put_budget(out: &mut Vec<u8>, budget: Option<Budget>) {
+    out.push(u8::from(budget.is_some()));
+    let budget = budget.unwrap_or(Budget {
+        requests: 0,
+        seconds: 0,
+    });
+    out.extend_from_slice(&budget.requests.to_le_bytes());
+    out.extend_from_slice(&budget.seconds.to_le_bytes());
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -526,11 +795,11 @@ fn encode_journal(journal: &Journal, prev_head: &[u8; 32]) -> Option<Vec<u8>> {
         journal.compact_backup.as_ref().map(|(_, epoch)| *epoch),
     );
     out.push(u8::from(journal.compact_pending.is_some()));
-    // Room for OMP idea 2, empty until it is built: cancelled_from (flag and
-    // step id), task_budget (flag, requests, seconds), depth.
-    out.extend_from_slice(&[0; 1 + 8]);
-    out.extend_from_slice(&[0; 1 + 4 + 8]);
-    out.push(0);
+    // OMP idea 2: cancelled_from (flag and step id), task_budget (flag,
+    // requests, seconds), depth.
+    put_opt(&mut out, journal.cancelled_from);
+    put_budget(&mut out, journal.task_budget);
+    out.push(journal.depth);
     out.extend_from_slice(prev_head);
     out.extend_from_slice(&u32::try_from(records.len()).ok()?.to_le_bytes());
     let mut link = sha256(&out);
@@ -611,12 +880,26 @@ impl<'a> JournalReader<'a> {
         }
     }
 
+    /// A flag and a budget. With the flag off, the values must be zero.
+    fn budget(&mut self) -> Result<Option<Budget>, &'static str> {
+        let present = self.flag()?;
+        let budget = Budget {
+            requests: self.u32()?,
+            seconds: self.u64()?,
+        };
+        match (present, budget.requests, budget.seconds) {
+            (true, _, _) => Ok(Some(budget)),
+            (false, 0, 0) => Ok(None),
+            (false, _, _) => Err("record"),
+        }
+    }
+
     fn done(&self) -> Result<(), &'static str> {
         (self.at == self.bytes.len()).then_some(()).ok_or("record")
     }
 }
 
-/// One format 2 node. An unknown kind (17 and 18 included, until OMP idea 2),
+/// One format 2 node. An unknown kind (0, or 20 and above),
 /// a kind with the wrong role, a read whose fields do not fit its text, or an
 /// unknown inbox answer is `record`.
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -692,6 +975,18 @@ fn decode_node(payload: &[u8]) -> Result<SurfaceNode, &'static str> {
             reason: reader.text()?,
             what: reader.text()?,
         },
+        17 => NodeSource::ChildBudget {
+            child: reader.u64().map_err(fail)?,
+            budget: Budget {
+                requests: reader.u32().map_err(fail)?,
+                seconds: reader.u64().map_err(fail)?,
+            },
+        },
+        18 => NodeSource::ChildStop {
+            child: reader.u64().map_err(fail)?,
+            reason: StopReason::from_tag(reader.byte().map_err(fail)?).ok_or("record")?,
+            requests_used: reader.u32().map_err(fail)?,
+        },
         _ => return Err("record"),
     };
     reader.done()?;
@@ -744,14 +1039,23 @@ fn decode_step(payload: &[u8]) -> Result<Step, &'static str> {
     let seat = reader.text()?;
     let seen_version = reader.opt().map_err(fail)?;
     let inbox = reader.text()?;
-    // OMP idea 2's fields must be empty until it is built.
-    let depth = reader.byte().map_err(fail)?;
-    let budget = reader.take(1 + 4 + 8).map_err(fail)?;
+    // OMP idea 2: depth is derived, so this byte is a tree-cancelled flag.
+    // Only a run that had left can carry it; every other step has 0.
+    let tree_cancelled = match reader.byte().map_err(fail)? {
+        0 => false,
+        1 if kind == ProposalKind::Run
+            && matches!(state, StepState::Dispatched | StepState::SettlementUnknown) =>
+        {
+            true
+        }
+        _ => return Err("record"),
+    };
+    let budget = reader.budget().map_err(fail)?;
     let requests_used = reader.u32().map_err(fail)?;
-    let stop = reader.byte().map_err(fail)?;
-    if depth != 0 || budget.iter().any(|byte| *byte != 0) || requests_used != 0 || stop != 0 {
-        return Err("record");
-    }
+    let stop = match reader.byte().map_err(fail)? {
+        0 => None,
+        tag => Some(StopReason::from_tag(tag).ok_or("record")?),
+    };
     reader.done()?;
     Ok(Step {
         id,
@@ -768,6 +1072,11 @@ fn decode_step(payload: &[u8]) -> Result<Step, &'static str> {
         seat,
         seen_version,
         inbox,
+        budget,
+        requests_used,
+        stop,
+        tree_cancelled,
+        grant_scope: None,
     })
 }
 
@@ -818,14 +1127,11 @@ fn decode_bytes(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static 
     let backup_flag = fields.byte()?;
     let backup_epoch = fields.u64()?;
     let pending_flag = fields.byte()?;
-    // OMP idea 2's header fields must be empty until it is built.
-    if fields
-        .take(1 + 8 + 1 + 4 + 8 + 1)?
-        .iter()
-        .any(|byte| *byte != 0)
-    {
-        return Err("record");
-    }
+    // OMP idea 2: cancelled_from, task_budget, depth. Their rules are
+    // checked once the records are read (`stored_children_ok`).
+    let cancelled_from = fields.opt().map_err(|_| "record")?;
+    let task_budget = fields.budget().map_err(|_| "record")?;
+    let depth = fields.byte()?;
     let prev_head = fields.hash()?;
     let count = fields.u32()?;
     let mut link = sha256(header);
@@ -880,16 +1186,448 @@ fn decode_bytes(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static 
     }
     journal.compact_backup = backup.then_some((backup_nodes, backup_epoch));
     journal.compact_pending = pending.then_some(pending_nodes);
+    journal.cancelled_from = cancelled_from;
+    journal.task_budget = task_budget;
+    journal.depth = depth;
     Ok((journal, prev_head, link))
 }
 
 /// Decode format 2 (see `decode_bytes`), then check the stored paths (see
-/// `stored_paths_ok`). Every stored journal loads through here.
+/// `stored_paths_ok`) and the children (see `stored_children_ok`). Every
+/// stored journal loads through here.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn decode_journal(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'static str> {
     let (journal, prev_head, head) = decode_bytes(bytes)?;
-    stored_paths_ok(&journal)?;
+    stored_rules_ok(&journal)?;
     Ok((journal, prev_head, head))
+}
+
+/// Every rule a stored journal must keep, for every path that loads one:
+/// decode, reread and resume. One function, so no load path skips a rule.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn stored_rules_ok(journal: &Journal) -> Result<(), &'static str> {
+    stored_paths_ok(journal)?;
+    compaction_boundary_ok(journal)?;
+    stored_children_ok(journal)
+}
+
+/// The compaction boundary, the one rule for an open compaction's state:
+/// - the open flag, the saved copy and the pending replacement are there
+///   together or not at all (`begin_compact` sets all three; a commit or a
+///   crash restore clears all three);
+/// - the saved copy is the prefix of the log it was taken from, so the events
+///   after it are exactly the records written while the compaction is open;
+/// - the series is still the saved one (nothing may start a new series while
+///   a compaction is open, see `log_may_change_in_place`).
+///
+/// Without it `child_records_since_compaction` takes the records from the
+/// wrong place (a missing saved copy selects none) and a commit or a crash
+/// restore drops them; the next load refuses the result. Every load and both
+/// install paths ask this one rule.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn compaction_boundary_ok(journal: &Journal) -> Result<(), &'static str> {
+    let (saved, saved_epoch) = match (
+        &journal.compact_backup,
+        &journal.compact_pending,
+        journal.compaction_open,
+    ) {
+        (None, None, false) => return Ok(()),
+        (Some((saved, saved_epoch)), Some(_), true) => (saved, *saved_epoch),
+        _ => return Err("record"),
+    };
+    if saved.len() > journal.events.len() || journal.events[..saved.len()] != saved[..] {
+        return Err("record");
+    }
+    if saved_epoch != journal.epoch {
+        return Err("record");
+    }
+    Ok(())
+}
+
+/// A stored journal keeps every child rule a live one does (OMP idea 2):
+/// - the journal's depth is within `CHILD_DEPTH_LIMIT`;
+/// - a parent link points at an earlier step; only children and model calls
+///   have one, and a model call's parent is a child;
+/// - a child host journal (depth above 0) holds no budget and no model call;
+/// - a step that is not a child has no budget, no count and no stop;
+/// - every child keeps `child_rules`;
+/// - each child budget and each stop has exactly one record for that child,
+///   which says the same;
+/// - a cancelled task has every child stopped and no child or model call
+///   after it;
+/// - no step is still prepared below a stopped child or at or before the
+///   cancel point.
+///
+/// Old format 2 journals (before idea 2) pass: all these fields are empty.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
+    if journal.depth > CHILD_DEPTH_LIMIT {
+        return Err("depth limit");
+    }
+    // A child host spends its parent's budget, kept in the parent's journal:
+    // it never holds a budget or a model call of its own.
+    if journal.depth > 0
+        && (journal.task_budget.is_some()
+            || journal
+                .steps
+                .iter()
+                .any(|step| step.kind == ProposalKind::Hosted))
+    {
+        return Err("record");
+    }
+    let find = |id: u64| journal.steps.iter().find(|step| step.id == id);
+    for step in &journal.steps {
+        if let Some(parent_id) = step.parent_id {
+            let parent = find(parent_id)
+                .filter(|_| parent_id < step.id)
+                .ok_or("record")?;
+            let allowed = match step.kind {
+                ProposalKind::Child => true,
+                ProposalKind::Hosted => parent.kind == ProposalKind::Child,
+                _ => false,
+            };
+            if !allowed {
+                return Err("record");
+            }
+        }
+        if step.kind != ProposalKind::Child {
+            if step.budget.is_some() || step.requests_used != 0 || step.stop.is_some() {
+                return Err("record");
+            }
+            continue;
+        }
+        child_rules(journal, step)?;
+    }
+    if let Some(task) = journal.task_budget {
+        if task.requests == 0
+            || task.seconds == 0
+            || !requests_fit(task, task_requests_used(journal), 0)
+        {
+            return Err("record");
+        }
+    }
+    // The current log covers the crash restore: the boundary rule makes the
+    // saved copy its prefix, and the carried records are its suffix. The
+    // pending replacement is its own list, so it needs its own check.
+    stored_child_records_ok(journal, journal.events.iter())?;
+    if let Some(pending) = &journal.compact_pending {
+        stored_child_records_ok(
+            journal,
+            pending
+                .iter()
+                .chain(child_records_since_compaction(journal)),
+        )?;
+    }
+    // A stop cancels every prepared step below it, and a task cancel every
+    // prepared step it had; a prepared one there was put back by hand.
+    if journal.steps.iter().any(|step| {
+        step.state == StepState::Prepared
+            && (journal.cancelled_from.is_some_and(|last| step.id <= last)
+                || chain_stopped(journal, &child_chain(journal, step.parent_id)))
+    }) {
+        return Err("record");
+    }
+    if let Some(last) = journal.cancelled_from {
+        if journal.steps.iter().any(|step| {
+            step.kind == ProposalKind::Child && step.stop.is_none()
+                || matches!(step.kind, ProposalKind::Child | ProposalKind::Hosted) && step.id > last
+        }) {
+            return Err("record");
+        }
+    }
+    Ok(())
+}
+
+/// Every child-budget and child-stop record in `events` names the child whose
+/// step holds the same value, and each child has exactly its own records.
+/// One check for the current log and for every event list a compaction can
+/// install, so a commit or a crash restore cannot carry a record that the
+/// next load refuses.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn stored_child_records_ok<'a>(
+    journal: &Journal,
+    events: impl IntoIterator<Item = &'a SurfaceNode> + Clone,
+) -> Result<(), &'static str> {
+    let find = |id: u64| journal.steps.iter().find(|step| step.id == id);
+    for node in events.clone() {
+        match &node.source {
+            NodeSource::ChildBudget { child, budget } => {
+                if find(*child).is_none_or(|step| step.budget != Some(*budget)) {
+                    return Err("record");
+                }
+            }
+            NodeSource::ChildStop {
+                child,
+                reason,
+                requests_used,
+            } => {
+                if find(*child).is_none_or(|step| {
+                    step.stop != Some(*reason) || step.requests_used != *requests_used
+                }) {
+                    return Err("record");
+                }
+            }
+            _ => {}
+        }
+    }
+    // Per child, not in total: two records for one child and none for
+    // another must not balance out.
+    for step in &journal.steps {
+        let (budgets, stops) = events
+            .clone()
+            .into_iter()
+            .fold((0, 0), |(budgets, stops), node| match node.source {
+                NodeSource::ChildBudget { child, .. } if child == step.id => (budgets + 1, stops),
+                NodeSource::ChildStop { child, .. } if child == step.id => (budgets, stops + 1),
+                _ => (budgets, stops),
+            });
+        if budgets != usize::from(step.budget.is_some())
+            || stops != usize::from(step.stop.is_some())
+        {
+            return Err("record");
+        }
+    }
+    Ok(())
+}
+
+/// The one parent rule: only a run or a child holds a child. A child made
+/// here (`propose_child`), every budgeted child on load (`child_rules`), and
+/// the scope walk (`scope_still_granted`) all use it.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn may_hold_a_child(parent: &Step) -> bool {
+    matches!(parent.kind, ProposalKind::Run | ProposalKind::Child)
+}
+
+/// The one live-state rule: a step is prepared or dispatched, and a
+/// dispatched run's tree has not been cancelled. `propose_child` asks it of a
+/// run parent, `scope_still_granted` asks it of every step that carries a
+/// scope, and `usable_child` asks it of every child above. The error is the
+/// step's own reason. A stored child of a cancelled task still loads:
+/// `child_rules` checks the kind only, because the cancel already stopped its
+/// children.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn live_step(step: &Step) -> Result<(), &'static str> {
+    match step.state {
+        StepState::Prepared | StepState::Dispatched if !step.tree_cancelled => Ok(()),
+        StepState::Denied => Err("denied"),
+        _ => Err("stopped"),
+    }
+}
+
+/// The rules every child keeps, wherever its journal comes from: made here,
+/// decoded, reread, resumed, answered in the inbox, or opened as a child
+/// host. Every path calls this one function, so none skips a rule. A child's
+/// limits come only from the journal that holds it (the parent's journal):
+/// - its parent exists (that it comes first is checked for every step on
+///   load), and a budgeted child's parent may hold a child
+///   (`may_hold_a_child`);
+/// - a child below a stopped child has stopped too;
+/// - its resource sits strictly under its parent's;
+/// - a budgeted child's depth is within `CHILD_DEPTH_LIMIT`;
+/// - its count is exactly the model calls made in its subtree;
+/// - a budget is non-zero, no less than its count, and no larger than its
+///   owner's (the nearest budgeted child above, or the task); a child with no
+///   budget (from before idea 2) has no count.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn child_rules(journal: &Journal, step: &Step) -> Result<(), &'static str> {
+    let find = |id: u64| journal.steps.iter().find(|step| step.id == id);
+    let parent = step.parent_id.and_then(find).ok_or("record")?;
+    // Like the depth limit, the parent rule holds for every budgeted child;
+    // children from before idea 2 could sit under any step and can do nothing.
+    if step.budget.is_some() && !may_hold_a_child(parent) {
+        return Err("not a parent");
+    }
+    if step.stop.is_none()
+        && child_chain(journal, step.parent_id)
+            .iter()
+            .any(|id| find(*id).is_some_and(|above| above.stop.is_some()))
+    {
+        return Err("record");
+    }
+    if !narrower_resource(&parent.resource, &step.resource) {
+        return Err("not a subset");
+    }
+    // Children from before idea 2 (no budget) had no depth limit and can do
+    // nothing now; the limit holds for every budgeted child.
+    if step.budget.is_some()
+        && depth_under(journal, step.parent_id) > usize::from(CHILD_DEPTH_LIMIT)
+    {
+        return Err("depth limit");
+    }
+    let calls = journal
+        .steps
+        .iter()
+        .filter(|call| {
+            call.kind == ProposalKind::Hosted
+                && child_chain(journal, call.parent_id).contains(&step.id)
+        })
+        .count();
+    if u32::try_from(calls).ok() != Some(step.requests_used) {
+        return Err("record");
+    }
+    match step.budget {
+        Some(budget) => {
+            let owner = child_chain(journal, step.parent_id).first().copied();
+            let above = match owner {
+                Some(id) => find(id).and_then(|owner| owner.budget),
+                None => journal.task_budget,
+            };
+            // An owner with no recorded budget is not an excessive budget:
+            // there is nothing to compare against, so it keeps the recovery
+            // reason every budget never recorded gives.
+            let Some(above) = above else {
+                return Err(TASK_BUDGET_REASON);
+            };
+            if budget.requests == 0
+                || budget.seconds == 0
+                || !requests_fit(budget, step.requests_used, 0)
+                || budget.requests > above.requests
+                || budget.seconds > above.seconds
+            {
+                return Err("over the parent's budget");
+            }
+        }
+        None if step.requests_used != 0 => return Err("record"),
+        None => {}
+    }
+    Ok(())
+}
+
+/// A child a live step may act on (a model call, a new child below it, a
+/// grant, an inbox answer, a child host): it keeps `child_rules`, has a
+/// budget (a child from before idea 2 has none: `TASK_BUDGET_REASON`), and
+/// neither it nor anything above it has stopped ("stopped"), nor is the task
+/// cancelled ("cancelled"); every child in its chain is prepared or
+/// dispatched (a denied one: "denied"; cancelled or crashed: "stopped").
+#[cfg(any(test, target_arch = "wasm32"))]
+fn usable_child(journal: &Journal, id: u64) -> Result<&Step, &'static str> {
+    let step = journal
+        .steps
+        .iter()
+        .find(|step| step.id == id && step.kind == ProposalKind::Child)
+        .ok_or("not a child")?;
+    child_rules(journal, step)?;
+    if step.budget.is_none() {
+        return Err(TASK_BUDGET_REASON);
+    }
+    if journal.cancelled_from.is_some() {
+        return Err("cancelled");
+    }
+    let chain = child_chain(journal, Some(id));
+    if chain_stopped(journal, &chain) {
+        return Err("stopped");
+    }
+    // A child denied, cancelled, or crashed, here or above, does nothing more.
+    for above in &chain {
+        let Some(step) = journal.steps.iter().find(|step| step.id == *above) else {
+            return Err("stopped");
+        };
+        live_step(step)?;
+    }
+    Ok(step)
+}
+
+/// What a granted step may hand on to a child: a child, the scope it was
+/// granted; any other step, its own resource. Nothing without a grant.
+/// Use `scope_still_granted`, which also checks every step above.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn granted_scope(step: &Step) -> Option<&str> {
+    step.grant.as_deref().filter(|grant| !grant.is_empty())?;
+    if step.kind == ProposalKind::Child {
+        step.grant_scope.as_deref()
+    } else {
+        Some(&step.resource)
+    }
+}
+
+/// A step's granted scope, if it still stands: the step holds a grant, and
+/// every child above it, up to and including the first step that is not a
+/// child, may hold a child and still holds a grant whose scope covers it. A parent denied or
+/// stopped since takes the scope away from everything below it.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn scope_still_granted<'a>(journal: &'a Journal, step: &'a Step) -> Option<&'a str> {
+    let scope = granted_scope(step)?;
+    // A step that is denied, cancelled or crashed carries no scope, and
+    // neither does one under such a step.
+    if live_step(step).is_err() {
+        return None;
+    }
+    let mut below = step;
+    while below.kind == ProposalKind::Child {
+        let above = below
+            .parent_id
+            .and_then(|id| journal.steps.iter().find(|step| step.id == id))?;
+        // A step that cannot hold a child, or that has been denied, cancelled
+        // or crashed since, stands for no scope: the walk does not stop there
+        // with the scope granted.
+        if !may_hold_a_child(above) || live_step(above).is_err() {
+            return None;
+        }
+        if !granted_scope(above).is_some_and(|wider| resource_covers(wider, scope)) {
+            return None;
+        }
+        below = above;
+    }
+    Some(scope)
+}
+
+/// The one check for giving a child a grant, used by `authorize_child` and
+/// by an inbox answer: a usable child; a grant that is not empty and not the
+/// parent's; a grant resource that passes the path rule (exact canonical
+/// path), sits in the child's resource, and sits in what the parent itself
+/// was granted (`granted_scope`). The returned error is the explanation the
+/// caller records: `usable_child`'s own reason, `TASK_BUDGET_REASON` among
+/// them, is never replaced with a bare false.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn child_grant_ok(
+    journal: &Journal,
+    child_id: u64,
+    grant: Option<&str>,
+    grant_resource: &str,
+) -> Result<(), &'static str> {
+    let child = usable_child(journal, child_id)?;
+    // A child is granted once; a second grant could change its scope under
+    // its children and hosts.
+    if child.grant.is_some() {
+        return Err("a child is granted once");
+    }
+    let Some(grant) = grant.filter(|grant| !grant.is_empty()) else {
+        return Err("no grant");
+    };
+    if let Some(refusal) = path_refusal(grant_resource) {
+        return Err(refusal.reason());
+    }
+    if !resource_covers(&child.resource, grant_resource) {
+        return Err("not in the child's resource");
+    }
+    let Some(parent) = child
+        .parent_id
+        .and_then(|parent_id| journal.steps.iter().find(|step| step.id == parent_id))
+    else {
+        return Err("record");
+    };
+    let Some(scope) = scope_still_granted(journal, parent) else {
+        return Err("not granted");
+    };
+    if !resource_covers(scope, grant_resource) {
+        return Err("not in the parent's grant");
+    }
+    if parent.grant.as_deref() == Some(grant) {
+        return Err("the parent's grant");
+    }
+    Ok(())
+}
+
+/// One refusal record for a child grant, from `authorize_child` or an inbox
+/// answer: the exact reason the one check gave, and the child and resource it
+/// refused.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn refuse_child_grant(journal: &mut Journal, child_id: u64, grant_resource: &str, reason: &str) {
+    record_refusal_reason(
+        journal,
+        reason,
+        &format!("child {child_id}: {}", refused_path(grant_resource)),
+    );
 }
 
 /// A stored journal, of any age, passes the path rule a live one does. Every
@@ -939,7 +1677,9 @@ fn without_grants(journal: &Journal) -> Journal {
     let mut copy = journal.clone();
     for step in &mut copy.steps {
         step.grant = None;
+        step.grant_scope = None;
     }
+    copy.host_grants.clear();
     copy
 }
 
@@ -963,16 +1703,20 @@ fn bump_epoch(journal: &mut Journal) {
 }
 
 /// `in_history` appends a later system node. The incapable path rewrites node 0.
+/// A first head is inserted at node 0. The insert and the rewrite change the
+/// log in place and start a new series, so `log_may_change_in_place` refuses
+/// both while a compaction is open.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn admit_system(journal: &mut Journal, text: &str, in_history: bool) {
+fn admit_system(journal: &mut Journal, text: &str, in_history: bool) -> Result<(), &'static str> {
     if text.is_empty() {
-        return;
+        return Ok(());
     }
     let has_system = journal
         .events
         .iter()
         .any(|event| event.role == Role::System);
     if !has_system {
+        log_may_change_in_place(journal)?;
         journal.events.insert(
             0,
             SurfaceNode {
@@ -982,7 +1726,7 @@ fn admit_system(journal: &mut Journal, text: &str, in_history: bool) {
             },
         );
         bump_epoch(journal);
-        return;
+        return Ok(());
     }
     if in_history {
         journal.events.push(SurfaceNode {
@@ -990,19 +1734,22 @@ fn admit_system(journal: &mut Journal, text: &str, in_history: bool) {
             text: text.to_string(),
             source: NodeSource::SystemLine,
         });
-        return;
+        return Ok(());
     }
-    if let Some(head) = journal
+    let Some(head) = journal
         .events
-        .iter_mut()
-        .find(|event| event.role == Role::System)
-    {
-        if head.text == text {
-            return;
-        }
-        head.text = text.to_string();
-        bump_epoch(journal);
+        .iter()
+        .position(|event| event.role == Role::System)
+    else {
+        return Ok(());
+    };
+    if journal.events[head].text == text {
+        return Ok(());
     }
+    log_may_change_in_place(journal)?;
+    journal.events[head].text = text.to_string();
+    bump_epoch(journal);
+    Ok(())
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -1054,35 +1801,69 @@ fn record_visible(journal: &mut Journal, kind: VisibleRecord, text: &str) -> boo
     journal.epoch == epoch && journal.steps.len() == steps
 }
 
-/// Record a short pointer for a granted, dispatched step. The file must
-/// already have been read. The pointer names that version, so a later edit
-/// does not move it. The file text stays where it was read. A host path adds
-/// nothing. The grant string is not the pointer.
+/// The one admission rule for a spill pointer: a dispatched, granted step
+/// that has no result yet, can hold this object, sits in the scope the step
+/// still holds (and every step above it still grants), and sits under the
+/// system head. A later edit does not move an older pointer.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn spill_pointer(journal: &mut Journal, step_id: u64, object_resource: &str) -> bool {
-    if object_resource.is_empty() || host_path(object_resource) {
-        return false;
-    }
-    let Some(version) =
-        current_observation(&journal.events, object_resource).map(|row| row.version)
-    else {
-        return false;
-    };
+fn spill_ready(journal: &Journal, step_id: u64, object_resource: &str) -> Result<(), &'static str> {
     let Some(step) = journal.steps.iter().find(|step| step.id == step_id) else {
-        return false;
+        return Err("not a step");
     };
-    if step.state != StepState::Dispatched
-        || step.grant.as_deref().is_none_or(|grant| grant.is_empty())
-        || step.has_result
-        || !resource_covers(&step.resource, object_resource)
-    {
-        return false;
+    if step.state != StepState::Dispatched {
+        return Err("not dispatched");
+    }
+    if step.has_result {
+        return Err("has result");
+    }
+    if step.grant.as_deref().is_none_or(|grant| grant.is_empty()) {
+        return Err("no grant");
+    }
+    if !resource_covers(&step.resource, object_resource) {
+        return Err("not this step's resource");
+    }
+    // The step's own resource is not enough: the object must also sit inside
+    // the scope the step was granted, and every step above it must still
+    // grant that scope.
+    let Some(scope) = scope_still_granted(journal, step) else {
+        return Err("not granted");
+    };
+    if !resource_covers(scope, object_resource) {
+        return Err("not in the grant");
     }
     if journal
         .events
         .first()
         .is_none_or(|head| head.role != Role::System || head.source != NodeSource::Head)
     {
+        return Err("no system head");
+    }
+    Ok(())
+}
+
+/// Record a short pointer for a granted, dispatched step. The file must
+/// already have been read. The pointer names that version, so a later edit
+/// does not move it. The file text stays where it was read. A host path adds
+/// nothing. The grant string is not the pointer.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn spill_pointer(journal: &mut Journal, step_id: u64, object_resource: &str) -> bool {
+    let what = format!("spill pointer {step_id}");
+    if object_resource.is_empty() {
+        record_refusal_reason(journal, "no resource", &what);
+        return false;
+    }
+    if host_path(object_resource) {
+        record_refusal_reason(journal, "host path", &what);
+        return false;
+    }
+    let Some(version) =
+        current_observation(&journal.events, object_resource).map(|row| row.version)
+    else {
+        record_refusal_reason(journal, "not observed", &what);
+        return false;
+    };
+    if let Err(reason) = spill_ready(journal, step_id, object_resource) {
+        record_refusal_reason(journal, reason, &what);
         return false;
     }
     journal.events.push(SurfaceNode {
@@ -1093,11 +1874,7 @@ fn spill_pointer(journal: &mut Journal, step_id: u64, object_resource: &str) -> 
             version,
         },
     });
-    record_tool_result(
-        journal,
-        step_id,
-        &format!("spill\n{object_resource}\n{version}"),
-    )
+    record_spill_result(journal, step_id, object_resource, version)
 }
 
 /// The text named by the newest spill pointer for this file that still has
@@ -1118,7 +1895,8 @@ fn text_at_spill(events: &[SurfaceNode], object_resource: &str) -> Option<String
 }
 
 /// The records compaction keeps after the summary: a list, a plan, a goal, a
-/// spill pointer, and an inbox answer. Matched on the kind, never on text.
+/// spill pointer, an inbox answer, and a child's budget and stop. Matched on
+/// the kind, never on text.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn is_durable_visible(node: &SurfaceNode) -> bool {
     matches!(
@@ -1129,6 +1907,8 @@ fn is_durable_visible(node: &SurfaceNode) -> bool {
             | NodeSource::Goal
             | NodeSource::Spill { .. }
             | NodeSource::Inbox(_)
+            | NodeSource::ChildBudget { .. }
+            | NodeSource::ChildStop { .. }
     )
 }
 
@@ -1289,37 +2069,79 @@ fn begin_compact(journal: &mut Journal, summary: &str) -> bool {
     true
 }
 
+/// Child-budget and child-stop records written while a compaction is open.
+/// The step already holds what they record, so they are carried into the
+/// committed or restored log, never dropped.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn child_records_since_compaction(journal: &Journal) -> impl Iterator<Item = &SurfaceNode> + Clone {
+    let from = journal
+        .compact_backup
+        .as_ref()
+        .map_or(journal.events.len(), |(saved, _)| saved.len());
+    journal.events.iter().skip(from).filter(|node| {
+        matches!(
+            node.source,
+            NodeSource::ChildBudget { .. } | NodeSource::ChildStop { .. }
+        )
+    })
+}
+
+/// While a compaction is open the log only grows and the series stays put, so
+/// the saved copy stays its start (`compaction_boundary_ok`). Every step that
+/// would change a node already in the log, or start a new series, asks this
+/// one rule first and changes nothing when it is refused: pruning, the head
+/// insert and the head rewrite in `admit_system`. Every other step only
+/// appends, and the commit and the crash restore have `open_compaction_ok`.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn log_may_change_in_place(journal: &Journal) -> Result<(), &'static str> {
+    if journal.compaction_open || journal.compact_backup.is_some() {
+        return Err(COMPACTION_OPEN_REASON);
+    }
+    Ok(())
+}
+
+/// The one admission for a commit and a crash restore: the compaction state
+/// keeps the boundary rule, and a compaction is open. A broken state says so
+/// before "not open", so leftovers of a compaction are never read as none.
+/// Each refusal says why, and neither path changes the journal when refused.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn open_compaction_ok(journal: &Journal) -> Result<(), &'static str> {
+    compaction_boundary_ok(journal).map_err(|_| COMPACTION_BOUNDARY_REASON)?;
+    if !journal.compaction_open {
+        return Err(COMPACTION_NOT_OPEN_REASON);
+    }
+    Ok(())
+}
+
 /// Apply an open compaction and start the next series.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn commit_compact(journal: &mut Journal) -> bool {
-    if !journal.compaction_open {
-        return false;
-    }
-    let Some(replacement) = journal.compact_pending.take() else {
-        return false;
+fn commit_compact(journal: &mut Journal) -> Result<(), &'static str> {
+    open_compaction_ok(journal)?;
+    let Some(mut replacement) = journal.compact_pending.take() else {
+        return Err(COMPACTION_BOUNDARY_REASON);
     };
+    replacement.extend(child_records_since_compaction(journal).cloned());
     journal.events = replacement;
     journal.compaction_open = false;
     journal.compact_backup = None;
     bump_epoch(journal);
-    true
+    Ok(())
 }
 
 /// A crash while compaction is open restores the saved bytes and series.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn note_crash_during_compact(journal: &mut Journal) -> bool {
-    if !journal.compaction_open {
-        return false;
-    }
-    journal.compact_pending = None;
-    let Some((saved, saved_epoch)) = journal.compact_backup.take() else {
-        journal.compaction_open = false;
-        return false;
+fn note_crash_during_compact(journal: &mut Journal) -> Result<(), &'static str> {
+    open_compaction_ok(journal)?;
+    let carried: Vec<SurfaceNode> = child_records_since_compaction(journal).cloned().collect();
+    let Some((mut saved, saved_epoch)) = journal.compact_backup.take() else {
+        return Err(COMPACTION_BOUNDARY_REASON);
     };
+    journal.compact_pending = None;
+    saved.extend(carried);
     journal.events = saved;
     journal.epoch = saved_epoch;
     journal.compaction_open = false;
-    true
+    Ok(())
 }
 
 /// Keep node 0. Replace the conversation tail with one summary only when that
@@ -1327,14 +2149,16 @@ fn note_crash_during_compact(journal: &mut Journal) -> bool {
 /// stay after the summary. A refused compaction leaves the journal unchanged.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn compact(journal: &mut Journal, summary: &str) -> bool {
-    begin_compact(journal, summary) && commit_compact(journal)
+    begin_compact(journal, summary) && commit_compact(journal).is_ok()
 }
 
 /// Shorten a tool result longer than 80 bytes to its first 40 characters
 /// plus an ellipsis. The series and the system head stay put. This does not
-/// call a model and does not write the summary.
+/// call a model and does not write the summary. It changes nodes in place, so
+/// it is refused while a compaction is open (`log_may_change_in_place`).
 #[cfg(any(test, target_arch = "wasm32"))]
-fn prune_tool_results(journal: &mut Journal) -> usize {
+fn prune_tool_results(journal: &mut Journal) -> Result<usize, &'static str> {
+    log_may_change_in_place(journal)?;
     let mut pruned = 0;
     for node in &mut journal.events {
         if node.role != Role::ToolResult || node.text.len() <= 80 {
@@ -1345,7 +2169,7 @@ fn prune_tool_results(journal: &mut Journal) -> usize {
         node.text = kept;
         pruned += 1;
     }
-    pruned
+    Ok(pruned)
 }
 
 /// Text a summary model would read after pruning: the system head, then the
@@ -1998,6 +2822,12 @@ fn empty_journal() -> Journal {
         compaction_open: false,
         compact_backup: None,
         compact_pending: None,
+        depth: 0,
+        task_budget: None,
+        cancelled_from: None,
+        task: TaskMark::new(),
+        host_of: None,
+        host_grants: Vec::new(),
     }
 }
 
@@ -2058,20 +2888,122 @@ fn earlier_write_is_open(journal: &Journal, step_id: u64) -> bool {
 }
 
 /// Append one tool result for a step. A missing step, a second result, or a
-/// later write that is still waiting leaves the journal unchanged. This does
-/// not run a tool and does not start a series.
+/// later write that is still waiting leaves the journal unchanged. A child
+/// step's result needs verified host context (`host_binding_ok`) and keeps
+/// `child_result_ok` over the parent's steps and the child host's steps, and
+/// the stop label, so this path has the same grant context as
+/// `record_child_result`. This does not run a tool and does not start a
+/// series.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn record_tool_result(journal: &mut Journal, step_id: u64, text: &str) -> bool {
+fn record_tool_result(
+    journal: &mut Journal,
+    step_id: u64,
+    text: &str,
+    child: Option<&Journal>,
+) -> bool {
+    record_result(journal, step_id, text, child, false)
+}
+
+/// The guest itself generated a spill pointer (`spill_pointer` is the only
+/// entry): the short text holds no grant and names a read version. It is the
+/// one child result that needs no host journal. The pointer must name the
+/// step's own resource and the version the journal last recorded as a spill.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn record_spill_result(
+    journal: &mut Journal,
+    step_id: u64,
+    object_resource: &str,
+    version: u64,
+) -> bool {
+    if let Err(reason) = spill_ready(journal, step_id, object_resource) {
+        record_refusal_reason(journal, reason, &format!("spill result {step_id}"));
+        return false;
+    }
+    let recorded = journal.events.last().is_some_and(|node| {
+        matches!(
+            &node.source,
+            NodeSource::Spill { resource, version: at }
+                if resource == object_resource && *at == version
+        )
+    });
+    if !recorded {
+        record_refusal_reason(
+            journal,
+            "no spill pointer",
+            &format!("spill result {step_id}"),
+        );
+        return false;
+    }
+    let text = format!("spill\n{object_resource}\n{version}");
+    record_result(journal, step_id, &text, None, true)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn record_result(
+    journal: &mut Journal,
+    step_id: u64,
+    text: &str,
+    child: Option<&Journal>,
+    guest_pointer: bool,
+) -> bool {
     let Some(index) = journal.steps.iter().position(|step| step.id == step_id) else {
         return false;
     };
+    // A host journal carries a child's steps; it records no step of another kind.
+    if child.is_some() && journal.steps[index].kind != ProposalKind::Child {
+        record_refusal_reason(
+            journal,
+            "not this child's host",
+            &format!("child result {step_id}"),
+        );
+        return false;
+    }
     if journal.steps[index].has_result || earlier_write_is_open(journal, step_id) {
         return false;
     }
+    let text = if journal.steps[index].kind == ProposalKind::Child {
+        // The label is part of what is stored, so the cap bounds the final
+        // text, not the bytes before the label.
+        let marked = match journal.steps[index].stop {
+            Some(reason) => format!("partial ({}): {text}", reason.name()),
+            None => text.to_string(),
+        };
+        // Child text comes only from a verified host journal. A spill
+        // pointer is the guest's own text and passes no host.
+        if !guest_pointer {
+            let Some(host) = child else {
+                record_refusal_reason(
+                    journal,
+                    "not this child's host",
+                    &format!("child result {step_id}"),
+                );
+                return false;
+            };
+            if let Err(reason) = host_binding_ok(journal, &journal.steps[index], host) {
+                record_refusal_reason(journal, reason, &format!("child result {step_id}"));
+                return false;
+            }
+        }
+        if let Err(reason) = child_result_ok(
+            journal
+                .steps
+                .iter()
+                .chain(child.into_iter().flat_map(|child| child.steps.iter())),
+            &journal.host_grants,
+            step_id,
+            &marked,
+        ) {
+            record_refusal_reason(journal, reason, &format!("child result {step_id}"));
+            return false;
+        }
+        marked
+    } else {
+        text.to_string()
+    };
     journal.steps[index].has_result = true;
     journal.events.push(SurfaceNode {
         role: Role::ToolResult,
-        text: text.to_string(),
+        text,
         source: NodeSource::InHistory,
     });
     true
@@ -2097,6 +3029,11 @@ fn propose_step(journal: &mut Journal) -> u64 {
         seat: String::new(),
         seen_version: None,
         inbox: String::new(),
+        budget: None,
+        requests_used: 0,
+        stop: None,
+        tree_cancelled: false,
+        grant_scope: None,
     });
     id
 }
@@ -2178,11 +3115,19 @@ fn is_refusal_record(node: &SurfaceNode) -> bool {
 /// does not grant.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn record_refusal(journal: &mut Journal, refusal: Refusal, what: &str) {
+    record_refusal_reason(journal, refusal.reason(), what);
+}
+
+/// The same record for a reason that is not an edit `Refusal`, such as a
+/// child grant's `TASK_BUDGET_REASON`: the check's exact words are recorded,
+/// never a generic "refused".
+#[cfg(any(test, target_arch = "wasm32"))]
+fn record_refusal_reason(journal: &mut Journal, reason: &str, what: &str) {
     journal.events.push(SurfaceNode {
         role: Role::User,
         text: String::new(),
         source: NodeSource::Refused {
-            reason: refusal.reason().to_string(),
+            reason: reason.to_string(),
             what: what.to_string(),
         },
     });
@@ -2431,14 +3376,29 @@ fn events_show_whole(events: &[SurfaceNode], resource: &str, version: u64) -> bo
 /// The one provider request for a change: every file, each with the Runtime
 /// revision it was read at (`if_revision`), the lines it may touch, and the
 /// text to replace there. The provider applies all files or none. A change
-/// that does not bind sends nothing and writes one refusal record.
+/// that does not bind sends nothing and writes one refusal record. Every
+/// file is asked only while the parent still grants it, through
+/// `write_context_ok`, the same check as a single write.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn edit_request(journal: &mut Journal, effect_id: u64) -> Result<Vec<u8>, &'static str> {
-    let result = bind_change(journal, effect_id);
-    result.map(|bound| request_body(&bound)).map_err(|refusal| {
-        record_refusal(journal, refusal, &format!("change {effect_id}"));
-        refusal.reason()
-    })
+fn edit_request(
+    journal: &mut Journal,
+    effect_id: u64,
+    host: Option<(&Journal, u64)>,
+) -> Result<Vec<u8>, &'static str> {
+    let bound = match bind_change(journal, effect_id) {
+        Ok(bound) => bound,
+        Err(refusal) => {
+            record_refusal(journal, refusal, &format!("change {effect_id}"));
+            return Err(refusal.reason());
+        }
+    };
+    for edit in &bound {
+        if let Err(reason) = write_context_ok(journal, edit.step_id, host) {
+            refuse_host_step(journal, edit.step_id, reason);
+            return Err(reason);
+        }
+    }
+    Ok(request_body(&bound))
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -2568,10 +3528,23 @@ fn note_change_wrote_checked(
 }
 
 /// Whether Runtime may be asked to write. A missing grant or a version that
-/// is no longer current refuses the ask. This does not write, and a grant
-/// string in the journal is not a Runtime grant.
+/// is no longer current refuses the ask. A child host's step is asked only
+/// while its parent still grants it, through `write_context_ok`, the same
+/// check as every write request; a host journal with no parent context asks
+/// nothing.
+/// This does not write, and a grant string in the journal is not a Runtime
+/// grant.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn provider_write_may_be_asked(journal: &Journal, step_id: u64, seen_version: u64) -> bool {
+fn provider_write_may_be_asked(
+    journal: &mut Journal,
+    step_id: u64,
+    seen_version: u64,
+    host: Option<(&Journal, u64)>,
+) -> bool {
+    if let Err(reason) = write_context_ok(journal, step_id, host) {
+        refuse_host_step(journal, step_id, reason);
+        return false;
+    }
     let Some(step) = journal.steps.iter().find(|step| step.id == step_id) else {
         return false;
     };
@@ -3033,15 +4006,170 @@ fn propose_restore(
     Ok(id)
 }
 
-/// Record a hosted model proposal. The resource names the model. There is
-/// no secret field. This does not call a provider.
+/// Record a hosted model proposal for the top task (see `ask_model`). The
+/// resource names the model. There is no secret field. This does not call a
+/// provider.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn propose_hosted(journal: &mut Journal, resource: &str) -> Result<u64, &'static str> {
-    if !resource.starts_with("localhost://")
-        || resource.chars().any(char::is_whitespace)
-        || host_path(resource)
+    ask_model(journal, None, resource)
+}
+
+/// The child steps above a step, nearest first: the step itself when it is a
+/// child, then each child on its `parent_id` links. Empty means the step
+/// belongs to the top task. Parent ids are always smaller than the step's own
+/// id (checked on load), so this ends.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn child_chain(journal: &Journal, from: Option<u64>) -> Vec<u64> {
+    let mut chain = Vec::new();
+    let mut at = from;
+    while let Some(id) = at {
+        let Some(step) = journal.steps.iter().find(|step| step.id == id) else {
+            break;
+        };
+        if step.kind == ProposalKind::Child {
+            chain.push(id);
+        }
+        at = step.parent_id.filter(|parent| *parent < id);
+    }
+    chain
+}
+
+/// The depth a new child under `parent` would have: this journal's depth,
+/// plus the children above it, plus one.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn depth_under(journal: &Journal, parent: Option<u64>) -> usize {
+    usize::from(journal.depth) + child_chain(journal, parent).len() + 1
+}
+
+/// Model calls made anywhere in the task: every model call is one `Hosted`
+/// step, hosted or local, so this is the one counter.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn task_requests_used(journal: &Journal) -> u32 {
+    let calls = journal
+        .steps
+        .iter()
+        .filter(|step| step.kind == ProposalKind::Hosted)
+        .count();
+    u32::try_from(calls).unwrap_or(u32::MAX)
+}
+
+/// The one request-limit rule: a budget allows the `used` calls the journal
+/// already holds plus `more` calls about to be made. Recording a budget and a
+/// loaded journal pass `more = 0`; authorizing or dispatching a pending call
+/// passes `more = 0` too, because that call is already counted; a new call
+/// passes `more = 1`. Every path asks this one rule, so recording, live use
+/// and reload cannot drift.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn requests_fit(budget: Budget, used: u32, more: u32) -> bool {
+    used.checked_add(more)
+        .is_some_and(|count| count <= budget.requests)
+}
+
+/// What a step may still give a new child: for a child, its budget less the
+/// calls made in its subtree; for the top task, the granted task budget less
+/// every call in the task. Nothing when there is no budget.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn remaining_budget(journal: &Journal, owner: Option<u64>) -> Option<Budget> {
+    let (budget, used) = match owner {
+        Some(id) => {
+            let step = journal.steps.iter().find(|step| step.id == id)?;
+            (step.budget?, step.requests_used)
+        }
+        None => (journal.task_budget?, task_requests_used(journal)),
+    };
+    Some(Budget {
+        requests: budget.requests.saturating_sub(used),
+        seconds: budget.seconds,
+    })
+}
+
+/// A child in the chain has stopped: no model call and no new child below it.
+/// A cancelled task is checked on its own (`usable_child`, `ask_model`), so
+/// the person sees "cancelled", not "stopped".
+#[cfg(any(test, target_arch = "wasm32"))]
+fn chain_stopped(journal: &Journal, chain: &[u64]) -> bool {
+    chain.iter().any(|id| {
+        journal
+            .steps
+            .iter()
+            .any(|step| step.id == *id && step.stop.is_some())
+    })
+}
+
+/// Record the budget the Runtime granted this task, as data. The guest never
+/// sets or raises it: a second call, an empty budget, or a request count below
+/// the model calls already made changes nothing.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn record_task_budget(journal: &mut Journal, granted: Budget) -> bool {
+    if journal.depth > 0
+        || journal.task_budget.is_some()
+        || granted.requests == 0
+        || granted.seconds == 0
+    {
+        return false;
+    }
+    if !requests_fit(granted, task_requests_used(journal), 0) {
+        record_refusal_reason(journal, "requests", "task budget");
+        return false;
+    }
+    journal.task_budget = Some(granted);
+    true
+}
+
+/// Ask one model call, hosted or local: both are one `Hosted` step and one
+/// counter. `under` is the child the call is made for, or nothing for the top
+/// task. The call is refused before anything is asked when the task was
+/// cancelled, a child above it has stopped, there is no budget, or a budget is
+/// used up; a used-up child stops with `requests`, and its subtree with it.
+/// Each accepted call counts against every child above it and the task.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn ask_model(journal: &mut Journal, under: Option<u64>, model: &str) -> Result<u64, &'static str> {
+    live_task(journal)?;
+    if !model.starts_with("localhost://")
+        || model.chars().any(char::is_whitespace)
+        || host_path(model)
     {
         return Err("host path");
+    }
+    // A child host asks through its parent's journal, which holds its budget.
+    if journal.depth > 0 {
+        return Err("child host");
+    }
+    if let Some(id) = under {
+        if !journal
+            .steps
+            .iter()
+            .any(|step| step.id == id && step.kind == ProposalKind::Child)
+        {
+            return Err("not a child");
+        }
+    }
+    let chain = child_chain(journal, under);
+    if journal.cancelled_from.is_some() {
+        return Err("cancelled");
+    }
+    let Some(task) = journal.task_budget else {
+        return Err(TASK_BUDGET_REASON);
+    };
+    // Top-most first, so the widest used-up child is the one that stops. The
+    // children are checked before the task, so a child that runs out together
+    // with the task still stops, with its subtree.
+    for id in chain.iter().rev() {
+        let budget = usable_child(journal, *id)?
+            .budget
+            .ok_or(TASK_BUDGET_REASON)?;
+        let used = journal
+            .steps
+            .iter()
+            .find(|step| step.id == *id)
+            .map_or(0, |step| step.requests_used);
+        if !requests_fit(budget, used, 1) {
+            stop_child(journal, *id, StopReason::Requests);
+            return Err("requests");
+        }
+    }
+    if !requests_fit(task, task_requests_used(journal), 1) {
+        return Err("requests");
     }
     let id = propose_step(journal);
     let step = journal
@@ -3050,23 +4178,193 @@ fn propose_hosted(journal: &mut Journal, resource: &str) -> Result<u64, &'static
         .find(|step| step.id == id)
         .expect("just pushed");
     step.kind = ProposalKind::Hosted;
-    step.resource = resource.to_string();
+    step.resource = model.to_string();
+    step.parent_id = under;
+    for child in &chain {
+        if let Some(step) = journal.steps.iter_mut().find(|step| step.id == *child) {
+            step.requests_used = step.requests_used.saturating_add(1);
+        }
+    }
     Ok(id)
 }
 
-/// A child is a separate step. Its resource must sit under the parent's
-/// resource. It does not copy the parent's grant.
+/// Every step whose `parent_id` links pass through `id`.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn descendants(journal: &Journal, id: u64) -> Vec<u64> {
+    journal
+        .steps
+        .iter()
+        .filter(|step| {
+            let mut at = step.parent_id.filter(|parent| *parent < step.id);
+            while let Some(parent) = at {
+                if parent == id {
+                    return true;
+                }
+                at = journal
+                    .steps
+                    .iter()
+                    .find(|other| other.id == parent)
+                    .and_then(|other| other.parent_id.filter(|above| *above < parent));
+            }
+            false
+        })
+        .map(|step| step.id)
+        .collect()
+}
+
+/// Stop one child and everything below it. The child keeps its first reason
+/// (a later one does not replace it) and every child below that has not
+/// stopped stops with `cancelled`. Each stop writes one child-stop record.
+/// A step still prepared becomes cancelled; a started one keeps its state and
+/// its partial result, and its next model call is refused.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn stop_child(journal: &mut Journal, id: u64, reason: StopReason) -> bool {
+    let first = stop_one(journal, id, reason);
+    for below in descendants(journal, id) {
+        stop_one(journal, below, StopReason::Cancelled);
+    }
+    first
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn stop_one(journal: &mut Journal, id: u64, reason: StopReason) -> bool {
+    let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) else {
+        return false;
+    };
+    if step.state == StepState::Prepared {
+        step.state = StepState::Cancelled;
+    }
+    if step.kind != ProposalKind::Child || step.stop.is_some() {
+        return false;
+    }
+    step.stop = Some(reason);
+    let requests_used = step.requests_used;
+    journal.events.push(SurfaceNode {
+        role: Role::User,
+        text: String::new(),
+        source: NodeSource::ChildStop {
+            child: id,
+            reason,
+            requests_used,
+        },
+    });
+    true
+}
+
+/// A model call for a child was refused because its grant expired: the
+/// child stops with `time`, unless it already stopped. The guest has no
+/// clock; the code that runs the child calls this.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn note_time_refusal(journal: &mut Journal, child: u64) -> bool {
+    journal
+        .steps
+        .iter()
+        .any(|step| step.id == child && step.kind == ProposalKind::Child)
+        && stop_child(journal, child, StopReason::Time)
+}
+
+/// Cancel a step and its whole subtree: a child stops with `cancelled`, its
+/// children too, and prepared steps below become cancelled. A step that is
+/// not a child is cancelled as before (only from prepared), and the children
+/// below it stop.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn cancel_tree(journal: &mut Journal, id: u64) -> bool {
+    let Some((kind, state)) = journal
+        .steps
+        .iter()
+        .find(|step| step.id == id)
+        .map(|step| (step.kind, step.state))
+    else {
+        return false;
+    };
+    if kind == ProposalKind::Child {
+        return stop_child(journal, id, StopReason::Cancelled);
+    }
+    let cancelled = cancel(journal, id);
+    let mut stopped = false;
+    for below in descendants(journal, id) {
+        stopped |= stop_one(journal, below, StopReason::Cancelled);
+    }
+    // A dispatched run cannot be cancelled as a step, but cancelling its tree
+    // still closes its authority: it holds no scope and takes no new child.
+    // The flag is stored, so the closure survives a reload.
+    let revoked = !cancelled
+        && kind == ProposalKind::Run
+        && state == StepState::Dispatched
+        && journal
+            .steps
+            .iter_mut()
+            .find(|step| step.id == id)
+            .is_some_and(|step| {
+                let first = !step.tree_cancelled;
+                step.tree_cancelled = true;
+                first
+            });
+    cancelled || stopped || revoked
+}
+
+/// Cancel the whole task: no model call anywhere in it from now on, every
+/// child stops with `cancelled`, and prepared steps become cancelled. The
+/// header keeps the last step id at that time, so a reload stays cancelled.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn cancel_task(journal: &mut Journal) -> bool {
+    if journal.cancelled_from.is_some() {
+        return false;
+    }
+    let ids: Vec<u64> = journal.steps.iter().map(|step| step.id).collect();
+    journal.cancelled_from = Some(ids.iter().copied().max().unwrap_or(0));
+    for id in ids {
+        stop_one(journal, id, StopReason::Cancelled);
+    }
+    true
+}
+
+/// A child is a separate step. It never gets more than its parent: its
+/// resource sits under the parent's resource, its budget is explicit and no
+/// larger than what the parent has left (`remaining_budget`), and it does not
+/// copy the parent's grant. No child below a stopped child or a cancelled
+/// task, and none past `CHILD_DEPTH_LIMIT`. The budget is written as one
+/// child-budget record.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn propose_child(
     journal: &mut Journal,
     parent_id: u64,
     resource: &str,
+    budget: Option<Budget>,
 ) -> Result<u64, &'static str> {
     let Some(parent) = journal.steps.iter().find(|step| step.id == parent_id) else {
         return Err("no parent");
     };
+    if !may_hold_a_child(parent) {
+        return Err("not a parent");
+    }
     if parent.resource.is_empty() || !narrower_resource(&parent.resource, resource) {
         return Err("not a subset");
+    }
+    // A child parent goes through the one live child check; any parent is
+    // refused once the task is cancelled or the parent itself is no longer
+    // live (a granted run whose tree was cancelled).
+    if parent.kind == ProposalKind::Child {
+        match usable_child(journal, parent_id) {
+            Ok(_) => {}
+            Err("stopped" | "cancelled") => return Err("parent stopped"),
+            Err(reason) => return Err(reason),
+        }
+    } else if journal.cancelled_from.is_some() || live_step(parent).is_err() {
+        return Err("parent stopped");
+    }
+    let chain = child_chain(journal, Some(parent_id));
+    if depth_under(journal, Some(parent_id)) > usize::from(CHILD_DEPTH_LIMIT) {
+        return Err("depth limit");
+    }
+    let Some(budget) = budget.filter(|budget| budget.requests > 0 && budget.seconds > 0) else {
+        return Err("no budget");
+    };
+    let Some(left) = remaining_budget(journal, chain.first().copied()) else {
+        return Err(TASK_BUDGET_REASON);
+    };
+    if budget.requests > left.requests || budget.seconds > left.seconds {
+        return Err("over the parent's budget");
     }
     let id = propose_step(journal);
     let step = journal
@@ -3078,6 +4376,12 @@ fn propose_child(
     step.resource = resource.to_string();
     step.parent_id = Some(parent_id);
     step.grant = None;
+    step.budget = Some(budget);
+    journal.events.push(SurfaceNode {
+        role: Role::User,
+        text: String::new(),
+        source: NodeSource::ChildBudget { child: id, budget },
+    });
     Ok(id)
 }
 
@@ -3127,60 +4431,233 @@ fn narrower_resource(parent: &str, child: &str) -> bool {
     rest.starts_with('/') && rest.len() > 1 && !host_path(child)
 }
 
-/// Give a child its own grant. The parent's grant string is refused, and the
-/// child stays prepared. This does not start a process.
+/// Give a child its own grant. Its grant is never more than its parent's:
+/// the parent must hold a grant itself, the child's grant is not the
+/// parent's, and the Runtime granted it for the child's resource or a part of
+/// it (`grant_resource`, exact canonical paths). A child with no budget, a
+/// stopped child, or one below a cancelled task gets nothing. Grants are
+/// never stored, so after a reload every child is granted again through
+/// here. The child stays prepared. This does not start a process.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn authorize_child(journal: &mut Journal, child_id: u64, grant: Option<&str>) -> bool {
-    let Some(child) = journal.steps.iter().find(|step| step.id == child_id) else {
-        return false;
-    };
-    if child.kind != ProposalKind::Child {
-        return false;
-    }
-    let parent_grant = child.parent_id.and_then(|parent_id| {
-        journal
-            .steps
-            .iter()
-            .find(|step| step.id == parent_id)
-            .and_then(|step| step.grant.clone())
-    });
-    if grant.is_none() || grant == Some("") || parent_grant.as_deref() == grant {
+fn authorize_child(
+    journal: &mut Journal,
+    child_id: u64,
+    grant: Option<&str>,
+    grant_resource: &str,
+) -> bool {
+    if let Err(reason) = child_grant_ok(journal, child_id, grant, grant_resource) {
+        refuse_child_grant(journal, child_id, grant_resource, reason);
         return false;
     }
-    authorize(journal, child_id, grant)
+    if !authorize_step(journal, child_id, grant) {
+        return false;
+    }
+    if let Some(step) = journal.steps.iter_mut().find(|step| step.id == child_id) {
+        step.grant_scope = Some(grant_resource.to_string());
+    }
+    true
 }
 
-/// A child host is a second journal. It keeps the system head and does not
-/// copy the parent's log or the parent's grant. This is not a second loaded
-/// component, and it does not start a process.
+/// The one ownership rule for a journal used as a task: only the journal that
+/// owns the task opens a host, asks for a model call, or takes a plain
+/// authorize, inbox answer or dispatch. A snapshot (`Journal::clone`) keeps
+/// copied data, grants and budgets but no authority, so every such path
+/// refuses it with the same reason.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn live_task(journal: &Journal) -> Result<(), &'static str> {
+    if journal.task.is_live() {
+        Ok(())
+    } else {
+        Err("stale parent")
+    }
+}
+
+/// A child host is a second journal for one child step. It keeps the system
+/// head and does not copy the parent's log or the parent's grant. Its limits
+/// stay in the parent's journal, the one source of truth: the child must be
+/// usable there (`usable_child`), the host's resource sits in the child's,
+/// and the host never holds a budget or makes a model call of its own (its
+/// calls are `ask_model(parent, Some(child), ..)`). Its depth is the child's.
+/// This is not a second loaded component, and it does not start a process.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn open_child_host(
     parent: &Journal,
-    parent_id: u64,
+    child_id: u64,
     resource: &str,
 ) -> Result<Journal, &'static str> {
-    let Some(parent_step) = parent.steps.iter().find(|step| step.id == parent_id) else {
-        return Err("no parent");
-    };
-    if parent_step.resource.is_empty() || !narrower_resource(&parent_step.resource, resource) {
+    // Only the journal that owns the task opens a host. A snapshot keeps the
+    // task's data but not its authority, so copied grants, budgets and an
+    // uncancelled state act for nothing.
+    live_task(parent)?;
+    let child = usable_child(parent, child_id)?;
+    if path_refusal(resource).is_some() || !resource_covers(&child.resource, resource) {
         return Err("not a subset");
     }
-    let mut child = empty_journal();
-    admit_system(&mut child, SYSTEM_HEAD, true);
-    propose_run(&mut child, resource, &["true".to_string()])?;
-    if child.steps.iter().any(|step| step.grant.is_some()) {
+    let depth = depth_under(parent, child.parent_id);
+    let mut host = empty_journal();
+    host.depth = u8::try_from(depth).map_err(|_| "depth limit")?;
+    host.host_of = Some(ChildHost {
+        task: parent.task.clone(),
+        child: child_id,
+    });
+    admit_system(&mut host, SYSTEM_HEAD, true)?;
+    propose_run(&mut host, resource, &["true".to_string()])?;
+    if host.steps.iter().any(|step| step.grant.is_some()) {
         return Err("inherited");
     }
-    Ok(child)
+    Ok(host)
 }
 
-/// Give the child host its own grant. The parent's grant is refused.
+/// The binding every child host journal must keep, read from the parent's
+/// current journal on every use: it names this task and this child step, sits
+/// at the child's depth, and keeps the system head. A reloaded host belongs
+/// to no child. One check, used by every host action and by a child's result.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn grant_child_host(child: &mut Journal, parent_grant: Option<&str>, grant: Option<&str>) -> bool {
-    if grant.is_none() || grant == Some("") || grant == parent_grant {
-        return false;
+fn host_binding_ok(parent: &Journal, child: &Step, host: &Journal) -> Result<(), &'static str> {
+    let Some(bound) = host.host_of.as_ref() else {
+        return Err("not this child's host");
+    };
+    if bound.child != child.id
+        || !bound.task.is(&parent.task)
+        || usize::from(host.depth) != depth_under(parent, child.parent_id)
+        || host
+            .events
+            .first()
+            .is_none_or(|node| node.text != SYSTEM_HEAD)
+    {
+        return Err("not this child's host");
     }
-    let Some(id) = child
+    Ok(())
+}
+
+/// What a child host may touch, read again from the parent's current
+/// journal on every host action, never kept from when the host was opened:
+/// the child must be usable there (`usable_child`: not stopped, task not
+/// cancelled, a budget), the host must keep its binding (`host_binding_ok`),
+/// and the child must hold a grant; the scope is what the parent granted that
+/// child (`granted_scope`).
+#[cfg(any(test, target_arch = "wasm32"))]
+fn host_scope<'a>(
+    parent: &'a Journal,
+    child_id: u64,
+    host: &Journal,
+) -> Result<&'a str, &'static str> {
+    let child = usable_child(parent, child_id)?;
+    host_binding_ok(parent, child, host)?;
+    scope_still_granted(parent, child).ok_or("not granted")
+}
+
+/// The one check for a child host's step (a grant, an inbox answer, a
+/// dispatch): `host_scope`, and the step's resource passes the path rule and
+/// sits in that scope (exact canonical paths). A grant, when one is given, is
+/// not the parent step's grant (an empty or missing grant denies the step, as
+/// `authorize` does). The error is the shared check's own words, which the
+/// caller records: `TASK_BUDGET_REASON` from `usable_child` among them.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn host_step_ok(
+    parent: &Journal,
+    child_id: u64,
+    host: &Journal,
+    step_id: u64,
+    grant: Option<&str>,
+) -> Result<(), &'static str> {
+    let scope = host_scope(parent, child_id, host)?;
+    let Some(step) = host.steps.iter().find(|step| step.id == step_id) else {
+        return Err("not a step");
+    };
+    if let Some(refusal) = path_refusal(&step.resource) {
+        return Err(refusal.reason());
+    }
+    if !resource_covers(scope, &step.resource) {
+        return Err("not in the parent's grant");
+    }
+    let parent_grant = parent
+        .steps
+        .iter()
+        .find(|step| step.id == child_id)
+        .and_then(|child| child.parent_id)
+        .and_then(|id| parent.steps.iter().find(|step| step.id == id))
+        .and_then(|step| step.grant.as_deref());
+    if grant.is_some_and(|grant| Some(grant) == parent_grant) {
+        return Err("the parent's grant");
+    }
+    Ok(())
+}
+
+/// The one host-context rule for every provider write request, one file or a
+/// change: a child host journal is asked only with its parent's current
+/// journal, through `host_step_ok` (usable child, binding, grant and scope);
+/// a task journal is asked with no parent, and only while it owns its task
+/// (`live_task`). The error is the shared check's own words.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn write_context_ok(
+    journal: &Journal,
+    step_id: u64,
+    host: Option<(&Journal, u64)>,
+) -> Result<(), &'static str> {
+    if journal.depth > 0 || journal.host_of.is_some() {
+        let Some((parent, child_id)) = host else {
+            return Err("not this child's host");
+        };
+        host_step_ok(parent, child_id, journal, step_id, None)
+    } else if host.is_some() {
+        Err("not this child's host")
+    } else {
+        live_task(journal)
+    }
+}
+
+/// One refusal record for a host step, in the host's own journal: the shared
+/// check's exact reason and the step it refused. A host's steps stay in the
+/// host; the parent's log keeps no host action.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn refuse_host_step(host: &mut Journal, step_id: u64, reason: &str) {
+    record_refusal_reason(host, reason, &format!("host step {step_id}"));
+}
+
+/// Keep a grant given to a child host's step in the parent's in-memory
+/// ledger, so a result is checked against every host grant for that child,
+/// not only the ones in the journal the caller happens to supply.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn record_host_grant(parent: &mut Journal, child_id: u64, grant: Option<&str>) {
+    if let Some(grant) = grant.filter(|grant| !grant.is_empty()) {
+        parent.host_grants.push((child_id, grant.to_string()));
+    }
+}
+
+/// Grant one step of a child host, through `host_step_ok`.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn authorize_in_host(
+    parent: &mut Journal,
+    child_id: u64,
+    host: &mut Journal,
+    step_id: u64,
+    grant: Option<&str>,
+) -> bool {
+    match host_step_ok(parent, child_id, host, step_id, grant) {
+        Ok(()) => {
+            let granted = authorize_step(host, step_id, grant);
+            if granted {
+                record_host_grant(parent, child_id, grant);
+            }
+            granted
+        }
+        Err(reason) => {
+            refuse_host_step(host, step_id, reason);
+            false
+        }
+    }
+}
+
+/// Give the child host's run step its own grant, through `authorize_in_host`.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn grant_child_host(
+    parent: &mut Journal,
+    child_id: u64,
+    host: &mut Journal,
+    grant: Option<&str>,
+) -> bool {
+    let Some(id) = host
         .steps
         .iter()
         .find(|step| {
@@ -3192,48 +4669,219 @@ fn grant_child_host(child: &mut Journal, parent_grant: Option<&str>, grant: Opti
     else {
         return false;
     };
-    authorize(child, id, grant)
+    authorize_in_host(parent, child_id, host, id, grant)
 }
 
-/// The parent stores one result line. The child's log is not copied in.
-/// A grant string in the result is refused.
+/// Answer a child host's step in the inbox. A deny needs no check; any other
+/// answer goes through `host_step_ok`, whose refusal is recorded.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn record_child_result(parent: &mut Journal, child: &Journal, result: &str) -> bool {
-    if result.is_empty()
-        || host_path(result)
-        || child
-            .events
-            .first()
-            .is_none_or(|node| node.text != SYSTEM_HEAD)
-    {
+fn host_inbox(
+    parent: &mut Journal,
+    child_id: u64,
+    host: &mut Journal,
+    step_id: u64,
+    answer: InboxAnswer,
+    grant: Option<&str>,
+) -> bool {
+    if answer != InboxAnswer::Deny {
+        if let Err(reason) = host_step_ok(parent, child_id, host, step_id, grant) {
+            refuse_host_step(host, step_id, reason);
+            return false;
+        }
+    }
+    let granted = apply_inbox_step(host, step_id, answer, grant);
+    if granted {
+        record_host_grant(parent, child_id, grant);
+    }
+    granted
+}
+
+/// Dispatch a granted step of a child host. The parent's journal is read
+/// again here: a child stopped, or a task cancelled, since the grant
+/// dispatches nothing, and the refusal keeps the shared check's reason.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn dispatch_in_host(parent: &Journal, child_id: u64, host: &mut Journal, step_id: u64) -> bool {
+    match host_step_ok(parent, child_id, host, step_id, None) {
+        Ok(()) => dispatch_step(host, step_id),
+        Err(reason) => {
+            refuse_host_step(host, step_id, reason);
+            false
+        }
+    }
+}
+
+/// The one set of child-result rules, used by both entry points
+/// (`record_child_result`, and `record_tool_result` on a child step): a
+/// result is not empty, is no longer than `CHILD_RESULT_CAP` (a spill
+/// pointer instead; never cut), has no host path, and contains no grant
+/// string held by the steps it is recorded among or by a host of this
+/// child. The error is the caller's refusal reason.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn child_result_ok<'a>(
+    steps: impl IntoIterator<Item = &'a Step>,
+    host_grants: &[(u64, String)],
+    step_id: u64,
+    result: &str,
+) -> Result<(), &'static str> {
+    if result.is_empty() {
+        return Err("empty result");
+    }
+    if result.len() > CHILD_RESULT_CAP {
+        return Err("long result");
+    }
+    if host_path(result) {
+        return Err("host path");
+    }
+    let held = steps
+        .into_iter()
+        .filter_map(|step| step.grant.as_deref())
+        .chain(
+            host_grants
+                .iter()
+                .filter(|(child, _)| *child == step_id)
+                .map(|(_, grant)| grant.as_str()),
+        )
+        .any(|grant| !grant.is_empty() && result.contains(grant));
+    if held {
+        return Err("result holds a grant");
+    }
+    Ok(())
+}
+
+/// The parent stores one result line for a child step. The child's log is
+/// not copied in. The child step and the verified host context (`host_binding_ok`:
+/// this task, this child, its depth, the system head) are the one check in
+/// `record_tool_result`, and its steps take part in the grant rule. A stopped
+/// child's partial result is marked with its stop reason there.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn record_child_result(parent: &mut Journal, child_id: u64, child: &Journal, result: &str) -> bool {
+    record_tool_result(parent, child_id, result, Some(child))
+}
+
+/// The nearest step at or above `step` that holds a grant, following the
+/// child links up through the run. A model call under an ungranted child
+/// inherits the scope of the nearest granted step above it.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn nearest_granted<'a>(journal: &'a Journal, step: &'a Step) -> Option<&'a Step> {
+    let mut at = step;
+    loop {
+        if granted_scope(at).is_some() {
+            return Some(at);
+        }
+        if at.kind != ProposalKind::Child {
+            return None;
+        }
+        at = at
+            .parent_id
+            .and_then(|id| journal.steps.iter().find(|step| step.id == id))?;
+    }
+}
+
+/// A call or a child is authorized or dispatched only while its owner is
+/// live and in scope (`usable_child`, `scope_still_granted`): a model call
+/// under a child is taken with that child when it is denied, stopped,
+/// cancelled or loses its budget, a model call of the top task needs the
+/// task budget and may not exceed its request count (the counter rule on
+/// load), a model call under a child follows the nearest granted step above
+/// it, so withdrawing that grant takes the call too, and a granted child is
+/// taken with the grant above it when that grant is withdrawn. A child being
+/// granted (it has no grant yet) and a step with no parent have nothing else
+/// to check. The error is the check's own reason, which the caller records.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn call_parent_usable(journal: &Journal, step: &Step) -> Result<(), &'static str> {
+    match step.kind {
+        ProposalKind::Hosted => match step.parent_id {
+            Some(child) => {
+                let child = usable_child(journal, child)?;
+                // An ungranted child inherits the scope above it. With no
+                // granted step above, the call has no authority at all.
+                let granted = nearest_granted(journal, child).ok_or("no grant")?;
+                scope_still_granted(journal, granted).ok_or("not granted")?;
+                Ok(())
+            }
+            None => {
+                let budget = journal.task_budget.ok_or(TASK_BUDGET_REASON)?;
+                if !requests_fit(budget, task_requests_used(journal), 0) {
+                    return Err("requests");
+                }
+                Ok(())
+            }
+        },
+        ProposalKind::Child if step.grant.is_some() => {
+            usable_child(journal, step.id)?;
+            scope_still_granted(journal, step)
+                .map(|_| ())
+                .ok_or("not granted")
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A plain entry point acts only in the task's own journal: a host journal's
+/// steps take `authorize_in_host`, `host_inbox`, and `dispatch_in_host`, and
+/// a snapshot copy takes nothing. Every plain entry asks this one guard, so a
+/// host step or a stale copy is refused once with its reason recorded.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn plain_entry_ok(journal: &mut Journal, step_id: u64) -> bool {
+    if journal.depth != 0 {
+        record_refusal_reason(journal, "child host", &format!("host step {step_id}"));
         return false;
     }
-    if parent.steps.iter().chain(child.steps.iter()).any(|step| {
-        step.grant
-            .as_deref()
-            .is_some_and(|grant| !grant.is_empty() && result.contains(grant))
-    }) {
+    if let Err(reason) = live_task(journal) {
+        record_refusal_reason(journal, reason, &format!("step {step_id}"));
         return false;
     }
-    let epoch = parent.epoch;
-    let before = parent.events.len();
-    admit_tool_result(parent, result);
-    parent.epoch == epoch && parent.events.len() == before + 1
+    true
 }
 
 /// A missing grant denies the step. A grant id is recorded and does not run it.
+/// A child host's steps are granted only through `authorize_in_host`, and a
+/// child only through `authorize_child` or an inbox answer.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn authorize(journal: &mut Journal, id: u64, grant: Option<&str>) -> bool {
-    let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) else {
-        return false;
-    };
-    if step.state != StepState::Prepared {
+    if !plain_entry_ok(journal, id) {
         return false;
     }
+    if journal
+        .steps
+        .iter()
+        .any(|step| step.id == id && step.kind == ProposalKind::Child)
+    {
+        record_refusal_reason(journal, "child grant", &format!("step {id}"));
+        return false;
+    }
+    authorize_step(journal, id, grant)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn authorize_step(journal: &mut Journal, id: u64, grant: Option<&str>) -> bool {
+    let Some(step) = journal.steps.iter().find(|step| step.id == id) else {
+        return false;
+    };
+    let authorizing = grant.is_some_and(|grant| !grant.is_empty());
+    let prepared = step.state == StepState::Prepared;
+    let allowed = if authorizing {
+        call_parent_usable(journal, step)
+    } else {
+        Ok(())
+    };
+    if !prepared {
+        return false;
+    }
+    if let Err(reason) = allowed {
+        record_refusal_reason(journal, reason, &format!("step {id}"));
+        return false;
+    }
+    let step = journal
+        .steps
+        .iter_mut()
+        .find(|step| step.id == id)
+        .expect("just found");
     match grant {
         None | Some("") => {
             step.state = StepState::Denied;
             step.grant = None;
+            step.grant_scope = None;
             false
         }
         Some(grant_id) => {
@@ -3289,37 +4937,52 @@ impl InboxAnswer {
     }
 }
 
+/// A child host's steps are answered only through `host_inbox`.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn apply_inbox(journal: &mut Journal, id: u64, answer: InboxAnswer, grant: Option<&str>) -> bool {
+    plain_entry_ok(journal, id) && apply_inbox_step(journal, id, answer, grant)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn apply_inbox_step(
+    journal: &mut Journal,
+    id: u64,
+    answer: InboxAnswer,
+    grant: Option<&str>,
+) -> bool {
     let name = answer.name();
     let grant = match answer {
         InboxAnswer::Deny => None,
         _ => grant.filter(|grant| !grant.is_empty()),
     };
-    let (kind, parent_id) = {
+    let kind = {
         let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) else {
             return false;
         };
         if step.state != StepState::Prepared || !step.inbox.is_empty() || step.grant.is_some() {
             return false;
         }
-        (step.kind, step.parent_id)
+        step.kind
     };
-    if kind == ProposalKind::Child {
-        let parent_grant = parent_id.and_then(|parent_id| {
-            journal
-                .steps
-                .iter()
-                .find(|parent| parent.id == parent_id)
-                .and_then(|parent| parent.grant.clone())
-        });
-        if parent_grant
-            .as_deref()
-            .is_some_and(|parent| grant == Some(parent))
-        {
+    // A child's grant goes through the same check as `authorize_child`, for
+    // the child's whole resource. A deny needs no check.
+    let child_scope = if kind == ProposalKind::Child && grant.is_some() {
+        let Some(resource) = journal
+            .steps
+            .iter()
+            .find(|step| step.id == id)
+            .map(|step| step.resource.clone())
+        else {
+            return false;
+        };
+        if let Err(reason) = child_grant_ok(journal, id, grant, &resource) {
+            refuse_child_grant(journal, id, &resource, reason);
             return false;
         }
-    }
+        Some(resource)
+    } else {
+        None
+    };
     if let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) {
         step.inbox = name.to_string();
     }
@@ -3334,7 +4997,13 @@ fn apply_inbox(journal: &mut Journal, id: u64, answer: InboxAnswer, grant: Optio
             source: NodeSource::Inbox(answer),
         });
     }
-    authorize(journal, id, grant)
+    let granted = authorize_step(journal, id, grant);
+    if granted && child_scope.is_some() {
+        if let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) {
+            step.grant_scope = child_scope;
+        }
+    }
+    granted
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -3372,9 +5041,22 @@ fn same_run_is_open(journal: &Journal, id: u64) -> bool {
     })
 }
 
+/// A child host's steps are dispatched only through `dispatch_in_host`.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn dispatch(journal: &mut Journal, id: u64) -> bool {
+    plain_entry_ok(journal, id) && dispatch_step(journal, id)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn dispatch_step(journal: &mut Journal, id: u64) -> bool {
     if earlier_write_is_open(journal, id) || same_run_is_open(journal, id) {
+        return false;
+    }
+    let Some(prepared) = journal.steps.iter().find(|step| step.id == id) else {
+        return false;
+    };
+    if let Err(reason) = call_parent_usable(journal, prepared) {
+        record_refusal_reason(journal, reason, &format!("step {id}"));
         return false;
     }
     let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) else {
@@ -3393,6 +5075,12 @@ fn dispatch(journal: &mut Journal, id: u64) -> bool {
 /// Cancel only from `Prepared`. A step that already left is not rewritten.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn cancel(journal: &mut Journal, id: u64) -> bool {
+    // A child is cancelled as a stop, with its record and its subtree.
+    if journal.steps.iter().any(|step| {
+        step.id == id && step.kind == ProposalKind::Child && step.state == StepState::Prepared
+    }) {
+        return stop_child(journal, id, StopReason::Cancelled);
+    }
     let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) else {
         return false;
     };
@@ -3705,6 +5393,7 @@ fn reply_revision(data: &serde_json::Value) -> Option<String> {
 fn drop_step_grant(journal: &mut Journal, step_id: u64) {
     if let Some(step) = journal.steps.iter_mut().find(|step| step.id == step_id) {
         step.grant = None;
+        step.grant_scope = None;
     }
 }
 
@@ -3737,6 +5426,9 @@ fn append_journal(
         return AppendOutcome::Denied;
     };
     let mut sent = journal.clone();
+    // Staging is internal: the sent copy keeps this journal's task identity
+    // and liveness, so hosts opened before the append stay bound to it.
+    sent.task = journal.task.clone();
     if !dispatch(&mut sent, id) {
         *journal = sent;
         drop_step_grant(journal, id);
@@ -3824,8 +5516,8 @@ fn resume_journal(
 
 /// Read and decode the stored journal: the journal, its head, and its
 /// revision. `Err(Some(reason))`: the stored journal is format 1
-/// (`FORMAT_1_REASON`) or breaks the path rule (`stored_paths_ok`), for that
-/// reason. `Err(None)`: anything else (no usable reply, or bytes that do not
+/// (`FORMAT_1_REASON`) or breaks a stored rule (`stored_rules_ok`: paths and
+/// children), for that reason. `Err(None)`: anything else (no usable reply, or bytes that do not
 /// decode).
 #[cfg(any(test, target_arch = "wasm32"))]
 fn read_stored_journal(
@@ -3846,7 +5538,7 @@ fn read_stored_journal(
     let revision = reply_revision(&data).ok_or(None)?;
     let (stored, _, head) =
         decode_bytes(&content).map_err(|reason| (reason == FORMAT_1_REASON).then_some(reason))?;
-    stored_paths_ok(&stored).map_err(Some)?;
+    stored_rules_ok(&stored).map_err(Some)?;
     Ok((stored, head, revision))
 }
 
@@ -3940,9 +5632,11 @@ impl ResourceBus for WasmBus {
 #[cfg(any(test, target_arch = "wasm32"))]
 fn one_turn() -> Journal {
     let mut journal = empty_journal();
-    admit_system(&mut journal, SYSTEM_HEAD, true);
+    admit_system(&mut journal, SYSTEM_HEAD, true)
+        .expect("a journal with no open compaction takes a system line");
     admit_user(&mut journal, "hello");
-    admit_system(&mut journal, "Reply in one short paragraph.", true);
+    admit_system(&mut journal, "Reply in one short paragraph.", true)
+        .expect("a journal with no open compaction takes a system line");
     journal
 }
 
@@ -3951,7 +5645,8 @@ fn one_turn() -> Journal {
 fn two_turns() -> Journal {
     let mut journal = one_turn();
     admit_user(&mut journal, "second turn");
-    admit_system(&mut journal, "Keep the first system line unchanged.", true);
+    admit_system(&mut journal, "Keep the first system line unchanged.", true)
+        .expect("a journal with no open compaction takes a system line");
     journal
 }
 
@@ -3987,7 +5682,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         admit_tool_result(&mut journal, &"x".repeat(200));
         admit_tool_result(&mut journal, "ok");
         let summary_input = shadowed_summary_input(&journal);
-        let long_result_shortened = prune_tool_results(&mut journal) == 1
+        let long_result_shortened = prune_tool_results(&mut journal) == Ok(1)
             && journal.epoch == 1
             && journal.events[0].text == head
             && journal.events.iter().any(|node| {
@@ -4305,9 +6000,13 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             ));
         }
         let waiting = second_step;
-        if !record_tool_result(&mut journal, first_step, "The step result is recorded.")
-            || record_tool_result(&mut journal, first_step, "a second result")
-            || record_tool_result(&mut journal, 0, "a missing step")
+        if !record_tool_result(
+            &mut journal,
+            first_step,
+            "The step result is recorded.",
+            None,
+        ) || record_tool_result(&mut journal, first_step, "a second result", None)
+            || record_tool_result(&mut journal, 0, "a missing step", None)
             || journal
                 .steps
                 .iter()
@@ -4358,21 +6057,21 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || !open.compaction_open
             || open.events != saved_events
             || open.epoch != saved_epoch
-            || !note_crash_during_compact(&mut open)
+            || note_crash_during_compact(&mut open).is_err()
             || open.compaction_open
             || open.compact_backup.is_some()
             || open.compact_pending.is_some()
             || open.events != saved_events
             || open.epoch != saved_epoch
-            || note_crash_during_compact(&mut open)
-            || commit_compact(&mut open)
+            || note_crash_during_compact(&mut open).is_ok()
+            || commit_compact(&mut open).is_ok()
             || !begin_compact(&mut open, COMPACTION_SUMMARY)
-            || !commit_compact(&mut open)
+            || commit_compact(&mut open).is_err()
             || open.compaction_open
             || open.epoch != saved_epoch + 1
             || open.events.get(1).map(|node| node.source.clone())
                 != Some(NodeSource::CompactionCheckpoint)
-            || commit_compact(&mut open)
+            || commit_compact(&mut open).is_ok()
         {
             return Err(elastos::bus::types::BusError::Invalid(
                 "a crash during compaction kept the summary".to_string(),
@@ -4532,9 +6231,9 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || !authorize(&mut writes, second, Some("fixture-grant"))
             || dispatch(&mut writes, second)
             || step_state(&writes, second) != Some(StepState::Prepared)
-            || record_tool_result(&mut writes, second, "beta replaced")
+            || record_tool_result(&mut writes, second, "beta replaced", None)
             || writes.events != events_before
-            || !record_tool_result(&mut writes, first, "alpha replaced")
+            || !record_tool_result(&mut writes, first, "alpha replaced", None)
             || !dispatch(&mut writes, second)
             || step_state(&writes, second) != Some(StepState::Dispatched)
         {
@@ -4544,9 +6243,9 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         }
         let asked_events = writes.events.clone();
         let asked_text = current_observed_text(&writes.events, file);
-        if provider_write_may_be_asked(&writes, first, 1)
-            || provider_write_may_be_asked(&writes, second, 2)
-            || !provider_write_may_be_asked(&writes, second, 1)
+        if provider_write_may_be_asked(&mut writes, first, 1, None)
+            || provider_write_may_be_asked(&mut writes, second, 2, None)
+            || !provider_write_may_be_asked(&mut writes, second, 1, None)
             || writes.events != asked_events
             || current_observed_text(&writes.events, file) != asked_text
             || writes
@@ -4618,7 +6317,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 ));
             }
         }
-        let request = edit_request(&mut bound, change[0])
+        let request = edit_request(&mut bound, change[0], None)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
         let revisions = request
@@ -4764,6 +6463,11 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             ));
         }
         let mut hosted = empty_journal();
+        if !record_task_budget(&mut hosted, FIXTURE_TASK_BUDGET) {
+            return Err(elastos::bus::types::BusError::Invalid(
+                TASK_BUDGET_REASON.to_string(),
+            ));
+        }
         let model = "localhost://Models/hosted";
         let hosted_id = propose_hosted(&mut hosted, model).map_err(|_| {
             elastos::bus::types::BusError::Invalid("a hosted proposal was refused".to_string())
@@ -4784,6 +6488,11 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             ));
         }
         let mut family = empty_journal();
+        if !record_task_budget(&mut family, FIXTURE_TASK_BUDGET) {
+            return Err(elastos::bus::types::BusError::Invalid(
+                TASK_BUDGET_REASON.to_string(),
+            ));
+        }
         let parent = propose_run(
             &mut family,
             "localhost://Users/self/Projects/demo",
@@ -4796,7 +6505,13 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             elastos::bus::types::BusError::Invalid("the parent run was refused".to_string())
         })?;
         if !authorize(&mut family, parent, Some("fixture-grant"))
-            || propose_child(&mut family, parent, "localhost://Users/self/Projects/other").is_ok()
+            || propose_child(
+                &mut family,
+                parent,
+                "localhost://Users/self/Projects/other",
+                Some(FIXTURE_CHILD_BUDGET),
+            )
+            .is_ok()
             || family.steps.len() != 1
         {
             return Err(elastos::bus::types::BusError::Invalid(
@@ -4807,6 +6522,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             &mut family,
             parent,
             "localhost://Users/self/Projects/demo/src",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .map_err(|_| {
             elastos::bus::types::BusError::Invalid("a narrower child was refused".to_string())
@@ -4824,13 +6540,23 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || child_step.grant.is_some()
             || child_step.parent_id != Some(parent)
             || child_step.effect_id == parent
-            || authorize_child(&mut family, child, Some("fixture-grant"))
+            || authorize_child(
+                &mut family,
+                child,
+                Some("fixture-grant"),
+                "localhost://Users/self/Projects/demo/src",
+            )
             || family
                 .steps
                 .iter()
                 .find(|step| step.id == child)
                 .is_none_or(|step| step.grant.is_some() || step.state != StepState::Prepared)
-            || !authorize_child(&mut family, child, Some("child-grant"))
+            || !authorize_child(
+                &mut family,
+                child,
+                Some("child-grant"),
+                "localhost://Users/self/Projects/demo/src",
+            )
             || family
                 .steps
                 .iter()
@@ -4842,34 +6568,122 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             ));
         }
         let mut child_host =
-            open_child_host(&family, parent, "localhost://Users/self/Projects/demo/src").map_err(
+            open_child_host(&family, child, "localhost://Users/self/Projects/demo/src").map_err(
                 |_| elastos::bus::types::BusError::Invalid("a child host was refused".to_string()),
             )?;
-        let family_before = family.events.len();
-        if open_child_host(&family, parent, "localhost://Users/self/Projects/other").is_ok()
+        let family_before = without_refusal_records(&family.events).len();
+        let host_run = child_host.steps.first().map_or(0, |step| step.id);
+        if open_child_host(&family, child, "localhost://Users/self/Projects/other").is_ok()
+            || open_child_host(&family, parent, "localhost://Users/self/Projects/demo/src").is_ok()
             || child_host.events.len() != 1
             || child_host.events[0].text != SYSTEM_HEAD
             || child_host.steps.len() != 1
             || child_host.steps[0].grant.is_some()
-            || grant_child_host(
-                &mut child_host,
-                Some("fixture-grant"),
-                Some("fixture-grant"),
-            )
+            || grant_child_host(&mut family, child, &mut child_host, Some("fixture-grant"))
             || child_host.steps[0].grant.is_some()
-            || !grant_child_host(&mut child_host, Some("fixture-grant"), Some("child-grant"))
+            || authorize(&mut child_host, host_run, Some("child-grant"))
+            || !grant_child_host(&mut family, child, &mut child_host, Some("child-grant"))
             || child_host.steps[0].grant.as_deref() != Some("child-grant")
-            || record_child_result(&mut family, &child_host, "fixture-grant")
-            || !record_child_result(&mut family, &child_host, "child result ok")
-            || family.events.len() != family_before + 1
+            || record_child_result(&mut family, child, &child_host, "fixture-grant")
+            || !record_child_result(&mut family, child, &child_host, "child result ok")
+            || without_refusal_records(&family.events).len() != family_before + 1
             || family
                 .events
                 .last()
                 .is_none_or(|node| node.role != Role::ToolResult || node.text != "child result ok")
-            || child_host.events.len() != 1
+            || child_host.events.len() != 3
+            || !child_host.events.iter().any(|node| {
+                matches!(
+                    &node.source,
+                    NodeSource::Refused { reason, .. } if reason == "the parent's grant"
+                )
+            })
+            || child_host.events.last().is_none_or(|node| {
+                !matches!(
+                    &node.source,
+                    NodeSource::Refused { reason, .. } if reason == "child host"
+                )
+            })
         {
             return Err(elastos::bus::types::BusError::Invalid(
                 "a child host shared the parent log".to_string(),
+            ));
+        }
+        let outside = propose_read(&mut child_host, "localhost://Users/self/Projects/demo/doc");
+        if host_inbox(
+            &mut family,
+            child,
+            &mut child_host,
+            outside,
+            InboxAnswer::AllowOnce,
+            Some("read-grant"),
+        ) || !dispatch_in_host(&family, child, &mut child_host, host_run)
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "a child host went past its child's grant".to_string(),
+            ));
+        }
+        let spent = |journal: &Journal, id: u64| {
+            journal
+                .steps
+                .iter()
+                .find(|step| step.id == id)
+                .and_then(|step| step.stop)
+        };
+        if ask_model(&mut family, Some(child), "localhost://Models/hosted").is_err()
+            || ask_model(&mut family, Some(child), "localhost://Models/local").is_err()
+            || ask_model(&mut family, Some(child), "localhost://Models/hosted") != Err("requests")
+            || spent(&family, child) != Some(StopReason::Requests)
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "a child went past its request budget".to_string(),
+            ));
+        }
+        let timed = propose_child(
+            &mut family,
+            parent,
+            "localhost://Users/self/Projects/demo/src",
+            Some(FIXTURE_CHILD_BUDGET),
+        )
+        .map_err(|_| {
+            elastos::bus::types::BusError::Invalid("a second child was refused".to_string())
+        })?;
+        let live = propose_child(
+            &mut family,
+            parent,
+            "localhost://Users/self/Projects/demo/src",
+            Some(FIXTURE_CHILD_BUDGET),
+        )
+        .map_err(|_| {
+            elastos::bus::types::BusError::Invalid("a third child was refused".to_string())
+        })?;
+        if !note_time_refusal(&mut family, timed)
+            || note_time_refusal(&mut family, timed)
+            || spent(&family, timed) != Some(StopReason::Time)
+            || cancel_tree(&mut family, timed)
+            || !cancel_task(&mut family)
+            || cancel_task(&mut family)
+            || spent(&family, live) != Some(StopReason::Cancelled)
+            || ask_model(&mut family, Some(live), "localhost://Models/hosted") != Err("cancelled")
+            || ask_model(&mut family, None, "localhost://Models/hosted") != Err("cancelled")
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "a stop did not reach the child tree".to_string(),
+            ));
+        }
+        let family_bytes = encode_journal(&family, &[0; 32]).ok_or_else(|| {
+            elastos::bus::types::BusError::Invalid("the child tree did not encode".to_string())
+        })?;
+        if decode_journal(&family_bytes)
+            .ok()
+            .is_none_or(|(reloaded, _, _)| {
+                reloaded.cancelled_from.is_none()
+                    || spent(&reloaded, child) != Some(StopReason::Requests)
+                    || spent(&reloaded, timed) != Some(StopReason::Time)
+            })
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "the child limits did not survive a reload".to_string(),
             ));
         }
         let mut project = empty_journal();
@@ -5551,9 +7365,9 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         }
         let mut crashed = folded.clone();
         if !begin_compact(&mut crashed, COMPACTION_SUMMARY)
-            || !note_crash_during_compact(&mut crashed)
+            || note_crash_during_compact(&mut crashed).is_err()
             || crashed.compaction_open
-            || commit_compact(&mut crashed)
+            || commit_compact(&mut crashed).is_ok()
             || current_observed_text(
                 &crashed.events,
                 "localhost://Users/self/Projects/demo/notes.txt",
@@ -5952,6 +7766,11 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             ));
         }
         let mut family = two_turns();
+        if !record_task_budget(&mut family, FIXTURE_TASK_BUDGET) {
+            return Err(elastos::bus::types::BusError::Invalid(
+                TASK_BUDGET_REASON.to_string(),
+            ));
+        }
         let parent = propose_run(
             &mut family,
             "localhost://Users/self/Projects/demo",
@@ -5964,6 +7783,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             &mut family,
             parent,
             "localhost://Users/self/Projects/demo/src",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .map_err(|_| {
             elastos::bus::types::BusError::Invalid("a child took the parent grant".to_string())
@@ -6030,6 +7850,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             &mut family,
             parent,
             "localhost://Users/self/Projects/demo/lib",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .map_err(|_| {
             elastos::bus::types::BusError::Invalid(
@@ -6057,6 +7878,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             &mut family,
             parent,
             "localhost://Users/self/Projects/demo/tests",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .map_err(|_| {
             elastos::bus::types::BusError::Invalid(
@@ -7502,8 +9324,9 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             ));
         }
         let epoch_before = repeats.epoch;
-        admit_system(&mut repeats, SYSTEM_HEAD, false);
-        if system_head(&repeats.events) != Some(SYSTEM_HEAD)
+        let rewritten = admit_system(&mut repeats, SYSTEM_HEAD, false);
+        if rewritten.is_err()
+            || system_head(&repeats.events) != Some(SYSTEM_HEAD)
             || repeats
                 .events
                 .first()
@@ -7724,10 +9547,20 @@ mod tests {
     fn a_child_grant_needs_a_child_step() {
         let mut journal = two_turns();
         let read = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
-        assert!(!authorize_child(&mut journal, read, Some("child-grant")));
+        assert!(!authorize_child(
+            &mut journal,
+            read,
+            Some("child-grant"),
+            "localhost://Users/self/Documents/note.txt"
+        ));
         assert_eq!(step_state(&journal, read), Some(StepState::Prepared));
         assert!(journal.steps.iter().all(|step| step.grant.is_none()));
-        assert!(!authorize_child(&mut journal, 99, Some("child-grant")));
+        assert!(!authorize_child(
+            &mut journal,
+            99,
+            Some("child-grant"),
+            "localhost://Users/self/Documents/note.txt"
+        ));
     }
 
     #[test]
@@ -7752,9 +9585,9 @@ mod tests {
         assert!(observe(&mut journal, note, 1, "hello"));
         let edit = propose_edit(&mut journal, note, "hello", "hi", Some(1)).unwrap();
         journal.steps[edit as usize - 1].grant = Some("write-grant".to_string());
-        assert!(provider_write_may_be_asked(&journal, edit, 1));
+        assert!(provider_write_may_be_asked(&mut journal, edit, 1, None));
         journal.steps[edit as usize - 1].grant = Some(String::new());
-        assert!(!provider_write_may_be_asked(&journal, edit, 1));
+        assert!(!provider_write_may_be_asked(&mut journal, edit, 1, None));
     }
 
     #[test]
@@ -7856,7 +9689,16 @@ mod tests {
         assert!(dispatch(&mut journal, id));
         let before = journal.clone();
         assert!(!spill_pointer(&mut journal, id, notes));
-        assert_eq!(journal, before);
+        assert!(!step_of(&journal, id).has_result);
+        // The whole journal is unchanged but for the one expected record:
+        // grants, step state, counters and epoch included.
+        let mut after = journal.clone();
+        after.events = without_refusal_records(&journal.events);
+        assert_eq!(after, before, "a refusal changes nothing but its record");
+        assert_eq!(
+            refusal_records(&journal),
+            vec!["refused: no system head (spill pointer 1)".to_string()]
+        );
     }
 
     #[test]
@@ -7886,9 +9728,15 @@ mod tests {
         journal.compact_pending = Some(vec![journal.events[0].clone()]);
         journal.compact_backup = Some((Vec::new(), 7));
         let before = journal.clone();
-        assert!(!commit_compact(&mut journal));
+        assert_eq!(
+            commit_compact(&mut journal),
+            Err(COMPACTION_BOUNDARY_REASON)
+        );
         assert_eq!(journal, before);
-        assert!(!note_crash_during_compact(&mut journal));
+        assert_eq!(
+            note_crash_during_compact(&mut journal),
+            Err(COMPACTION_BOUNDARY_REASON)
+        );
         assert_eq!(journal, before);
     }
 
@@ -8118,11 +9966,17 @@ mod tests {
         assert!(record_tool_result(
             &mut journal,
             done,
-            "note.txt has one line."
+            "note.txt has one line.",
+            None
         ));
         let after_one = journal.events.clone();
-        assert!(!record_tool_result(&mut journal, done, "a second result"));
-        assert!(!record_tool_result(&mut journal, 0, "a missing step"));
+        assert!(!record_tool_result(
+            &mut journal,
+            done,
+            "a second result",
+            None
+        ));
+        assert!(!record_tool_result(&mut journal, 0, "a missing step", None));
         assert_eq!(journal.events, after_one);
         assert_eq!(journal.epoch, epoch);
         assert!(journal
@@ -8221,7 +10075,7 @@ mod tests {
     #[test]
     fn the_same_head_text_does_not_start_a_new_series() {
         let mut journal = one_turn();
-        admit_system(&mut journal, SYSTEM_HEAD, false);
+        admit_system(&mut journal, SYSTEM_HEAD, false).unwrap();
         assert_eq!(journal.epoch, 1);
         assert_eq!(journal.events.len(), 3);
         assert_eq!(system_head(&journal.events), Some(SYSTEM_HEAD));
@@ -8230,7 +10084,7 @@ mod tests {
     #[test]
     fn an_incapable_prompt_rewrites_the_head_and_starts_a_series() {
         let mut journal = one_turn();
-        admit_system(&mut journal, "Replacement head.", false);
+        admit_system(&mut journal, "Replacement head.", false).unwrap();
         assert_eq!(system_head(&journal.events), Some("Replacement head."));
         assert_eq!(journal.epoch, 2);
         assert_eq!(
@@ -8286,18 +10140,18 @@ mod tests {
         assert_eq!(journal.epoch, before.epoch);
         assert!(!begin_compact(&mut journal, COMPACTION_SUMMARY));
         assert_eq!(journal.events, before.events);
-        assert!(note_crash_during_compact(&mut journal));
+        assert!(note_crash_during_compact(&mut journal).is_ok());
         assert!(!journal.compaction_open);
         assert!(journal.compact_backup.is_none());
         assert!(journal.compact_pending.is_none());
         assert_eq!(journal.events, before.events);
         assert_eq!(journal.epoch, before.epoch);
-        assert!(!note_crash_during_compact(&mut journal));
-        assert!(!commit_compact(&mut journal));
+        assert!(note_crash_during_compact(&mut journal).is_err());
+        assert!(commit_compact(&mut journal).is_err());
         assert_eq!(journal.events, before.events);
 
         assert!(begin_compact(&mut journal, COMPACTION_SUMMARY));
-        assert!(commit_compact(&mut journal));
+        assert!(commit_compact(&mut journal).is_ok());
         assert!(!journal.compaction_open);
         assert_eq!(journal.epoch, before.epoch + 1);
         assert_eq!(journal.events[0], before.events[0]);
@@ -8306,7 +10160,7 @@ mod tests {
             .events
             .iter()
             .any(|node| { node.source == NodeSource::Skill && node.text == skill }));
-        assert!(!commit_compact(&mut journal));
+        assert!(commit_compact(&mut journal).is_err());
     }
 
     #[test]
@@ -8479,9 +10333,19 @@ mod tests {
         assert!(authorize(&mut journal, second, Some("fixture-grant")));
         assert!(!dispatch(&mut journal, second));
         assert_eq!(step_state(&journal, second), Some(StepState::Prepared));
-        assert!(!record_tool_result(&mut journal, second, "beta replaced"));
+        assert!(!record_tool_result(
+            &mut journal,
+            second,
+            "beta replaced",
+            None
+        ));
         assert_eq!(journal.events, events);
-        assert!(record_tool_result(&mut journal, first, "alpha replaced"));
+        assert!(record_tool_result(
+            &mut journal,
+            first,
+            "alpha replaced",
+            None
+        ));
         assert!(dispatch(&mut journal, second));
         assert_eq!(step_state(&journal, second), Some(StepState::Dispatched));
     }
@@ -8493,10 +10357,10 @@ mod tests {
         assert!(observe(&mut journal, resource, 1, "alpha beta"));
         let id = propose_edit(&mut journal, resource, "alpha", "one", Some(1)).unwrap();
         let before = journal.clone();
-        assert!(!provider_write_may_be_asked(&journal, id, 1));
+        assert!(!provider_write_may_be_asked(&mut journal, id, 1, None));
         assert!(authorize(&mut journal, id, Some("fixture-grant")));
-        assert!(!provider_write_may_be_asked(&journal, id, 2));
-        assert!(provider_write_may_be_asked(&journal, id, 1));
+        assert!(!provider_write_may_be_asked(&mut journal, id, 2, None));
+        assert!(provider_write_may_be_asked(&mut journal, id, 1, None));
         assert_eq!(journal.events, before.events);
         assert_eq!(
             current_observed_text(&journal.events, resource).as_deref(),
@@ -8512,7 +10376,7 @@ mod tests {
         );
         let read = propose_read(&mut journal, resource);
         assert!(authorize(&mut journal, read, Some("fixture-grant")));
-        assert!(!provider_write_may_be_asked(&journal, read, 1));
+        assert!(!provider_write_may_be_asked(&mut journal, read, 1, None));
     }
 
     #[test]
@@ -8609,6 +10473,7 @@ mod tests {
     #[test]
     fn a_hosted_proposal_must_name_a_localhost_resource() {
         let mut journal = two_turns();
+        assert!(record_task_budget(&mut journal, FIXTURE_TASK_BUDGET));
         let before = journal.clone();
         for refused in ["https://api.example.com/v1/model", "qwen2.5-1.5b"] {
             assert_eq!(propose_hosted(&mut journal, refused), Err("host path"));
@@ -8623,6 +10488,7 @@ mod tests {
     fn a_hosted_proposal_has_no_secret_and_a_missing_grant_is_denied() {
         let model = "localhost://Models/hosted";
         let mut journal = empty_journal();
+        assert!(record_task_budget(&mut journal, FIXTURE_TASK_BUDGET));
         assert_eq!(propose_hosted(&mut journal, "/tmp/model"), Err("host path"));
         assert!(journal.steps.is_empty());
         let id = propose_hosted(&mut journal, model).unwrap();
@@ -8637,6 +10503,7 @@ mod tests {
         assert!(!dispatch(&mut journal, id));
         assert_eq!(journal.events, events);
         let mut shared = two_turns();
+        assert!(record_task_budget(&mut shared, FIXTURE_TASK_BUDGET));
         let project = "localhost://Users/self/Projects/demo";
         let argv = [
             "vm-smoke".to_string(),
@@ -8742,6 +10609,7 @@ mod tests {
     #[test]
     fn a_child_grant_is_narrower_and_does_not_inherit_the_parent_grant() {
         let mut journal = empty_journal();
+        assert!(record_task_budget(&mut journal, FIXTURE_TASK_BUDGET));
         let parent = propose_run(
             &mut journal,
             "localhost://Users/self/Projects/demo",
@@ -8756,7 +10624,8 @@ mod tests {
             propose_child(
                 &mut journal,
                 parent,
-                "localhost://Users/self/Projects/other"
+                "localhost://Users/self/Projects/other",
+                Some(FIXTURE_CHILD_BUDGET)
             ),
             Err("not a subset")
         );
@@ -8765,6 +10634,7 @@ mod tests {
             &mut journal,
             parent,
             "localhost://Users/self/Projects/demo/src",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .unwrap();
         let child_step = journal.steps.iter().find(|step| step.id == child).unwrap();
@@ -8772,7 +10642,12 @@ mod tests {
         assert_eq!(child_step.parent_id, Some(parent));
         assert_eq!(child_step.grant, None);
         assert_ne!(child_step.effect_id, parent);
-        assert!(!authorize_child(&mut journal, child, Some("fixture-grant")));
+        assert!(!authorize_child(
+            &mut journal,
+            child,
+            Some("fixture-grant"),
+            "localhost://Users/self/Projects/demo/src"
+        ));
         assert_eq!(
             journal
                 .steps
@@ -8783,44 +10658,81 @@ mod tests {
             None
         );
         assert_eq!(step_state(&journal, child), Some(StepState::Prepared));
-        assert!(authorize_child(&mut journal, child, Some("child-grant")));
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            "localhost://Users/self/Projects/demo/src"
+        ));
         let mut child_host =
-            open_child_host(&journal, parent, "localhost://Users/self/Projects/demo/src").unwrap();
+            open_child_host(&journal, child, "localhost://Users/self/Projects/demo/src").unwrap();
         assert_eq!(
-            open_child_host(&journal, parent, "localhost://Users/self/Projects/other"),
+            open_child_host(&journal, child, "localhost://Users/self/Projects/other"),
             Err("not a subset")
+        );
+        assert_eq!(
+            open_child_host(&journal, parent, "localhost://Users/self/Projects/demo/src"),
+            Err("not a child")
         );
         assert_eq!(child_host.events.len(), 1);
         assert_eq!(child_host.events[0].text, SYSTEM_HEAD);
         assert_ne!(child_host.events.as_ptr(), journal.events.as_ptr());
         assert!(child_host.steps.iter().all(|step| step.grant.is_none()));
         assert!(!grant_child_host(
+            &mut journal,
+            child,
             &mut child_host,
-            Some("fixture-grant"),
             Some("fixture-grant")
         ));
+        assert_eq!(
+            child_host.events.last().unwrap().source,
+            NodeSource::Refused {
+                reason: "the parent's grant".to_string(),
+                what: format!("host step {}", child_host.steps[0].id),
+            }
+        );
         assert!(child_host.steps.iter().all(|step| step.grant.is_none()));
         assert!(grant_child_host(
+            &mut journal,
+            child,
             &mut child_host,
-            Some("fixture-grant"),
             Some("child-grant")
         ));
-        let parent_events = journal.events.len();
-        assert!(!record_child_result(&mut journal, &child_host, ""));
-        assert!(!record_child_result(&mut journal, &child_host, "/tmp/out"));
+        let parent_events = without_refusal_records(&journal.events).len();
+        assert!(!record_child_result(&mut journal, child, &child_host, ""));
         assert!(!record_child_result(
             &mut journal,
+            child,
+            &child_host,
+            "/tmp/out"
+        ));
+        assert!(!record_child_result(
+            &mut journal,
+            child,
             &child_host,
             "saw fixture-grant"
         ));
         assert!(record_child_result(
             &mut journal,
+            child,
             &child_host,
             "child result ok"
         ));
-        assert_eq!(journal.events.len(), parent_events + 1);
+        assert_eq!(
+            without_refusal_records(&journal.events).len(),
+            parent_events + 1
+        );
         assert_eq!(journal.events.last().unwrap().text, "child result ok");
-        assert_eq!(child_host.events.len(), 1);
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("empty result")));
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("host path")));
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("result holds a grant")));
+        assert_eq!(child_host.events.len(), 2);
         let parent_bytes = model_bytes(&journal.events).unwrap();
         let child_bytes = model_bytes(&child_host.events).unwrap();
         assert!(!parent_bytes
@@ -8847,6 +10759,7 @@ mod tests {
             &mut journal,
             parent,
             "localhost://Users/self/Projects/demo/notes.txt",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .unwrap();
         assert!(!apply_inbox(
@@ -8879,6 +10792,7 @@ mod tests {
             .find(|step| step.id == parent)
             .is_some_and(|step| step.grant.as_deref() == Some("fixture-grant")));
         let mut logged = two_turns();
+        assert!(record_task_budget(&mut logged, FIXTURE_TASK_BUDGET));
         let logged_parent = propose_run(
             &mut logged,
             "localhost://Users/self/Projects/demo",
@@ -8889,6 +10803,7 @@ mod tests {
             &mut logged,
             logged_parent,
             "localhost://Users/self/Projects/demo/src",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .unwrap();
         let standing_lines = |events: &[SurfaceNode]| {
@@ -8927,6 +10842,7 @@ mod tests {
             &mut logged,
             logged_parent,
             "localhost://Users/self/Projects/demo/lib",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .unwrap();
         assert!(apply_inbox(
@@ -8952,6 +10868,7 @@ mod tests {
             &mut logged,
             logged_parent,
             "localhost://Users/self/Projects/demo/tests",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .unwrap();
         assert!(apply_inbox(
@@ -9006,6 +10923,7 @@ mod tests {
             "localhost://Users/self/Projects/demo/x"
         ));
         let mut journal = empty_journal();
+        assert!(record_task_budget(&mut journal, FIXTURE_TASK_BUDGET));
         let parent = propose_run(&mut journal, demo, &["true".to_string()]).unwrap();
         for refused in [
             "localhost://Users/self/Projects/demo2",
@@ -9014,7 +10932,7 @@ mod tests {
             "localhost://Users/self/Projects/demo/",
         ] {
             assert_eq!(
-                propose_child(&mut journal, parent, refused),
+                propose_child(&mut journal, parent, refused, Some(FIXTURE_CHILD_BUDGET)),
                 Err("not a subset")
             );
             assert!(open_child_host(&journal, parent, refused).is_err());
@@ -9024,6 +10942,7 @@ mod tests {
             &mut journal,
             parent,
             "localhost://Users/self/Projects/demo/x",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .unwrap();
         let child_step = journal.steps.iter().find(|step| step.id == child).unwrap();
@@ -10325,7 +12244,12 @@ mod tests {
         assert!(dispatch(&mut journal, scaffold));
         assert!(!note_provider_wrote(&mut journal, scaffold));
         assert_eq!(step_state(&journal, scaffold), Some(StepState::Denied));
-        assert!(!provider_write_may_be_asked(&journal, scaffold, 1));
+        assert!(!provider_write_may_be_asked(
+            &mut journal,
+            scaffold,
+            1,
+            None
+        ));
         assert_eq!(
             current_observed_text(&journal.events, index).as_deref(),
             Some("")
@@ -10429,6 +12353,7 @@ mod tests {
     /// and an open compaction with its backup and pending copies.
     fn a_rich_journal() -> Journal {
         let mut journal = two_turns();
+        assert!(record_task_budget(&mut journal, FIXTURE_TASK_BUDGET));
         admit_user(&mut journal, &"a long person line ".repeat(20));
         assert!(admit_snapshot(
             &mut journal,
@@ -10455,13 +12380,14 @@ mod tests {
             ],
         )
         .unwrap();
-        apply_inbox(&mut journal, run, InboxAnswer::Deny, None);
         propose_child(
             &mut journal,
             run,
             "localhost://Users/self/Projects/demo/src",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .unwrap();
+        apply_inbox(&mut journal, run, InboxAnswer::Deny, None);
         let mut cursor = journal_cursor("demo-agent", "task-1").unwrap();
         cursor.revision = Some("fixture-revision".to_string());
         let append = propose_journal_append(&mut journal, &cursor).unwrap();
@@ -10485,7 +12411,7 @@ mod tests {
         assert_eq!(head[..], bytes[bytes.len() - 32..]);
         assert_eq!(encode_journal(&back, &[0; 32]).unwrap(), bytes);
         let mut committed = journal.clone();
-        assert!(commit_compact(&mut committed));
+        assert!(commit_compact(&mut committed).is_ok());
         assert!(committed.compact_backup.is_none() && committed.compact_pending.is_none());
         let bytes = encode_journal(&committed, &[0; 32]).unwrap();
         assert_eq!(decode_journal(&bytes).unwrap().0, committed);
@@ -10556,7 +12482,7 @@ mod tests {
         assert_eq!(back.events[0], journal.events[0]);
         assert_eq!(back.events[0].text, SYSTEM_HEAD);
         let mut compacted = a_rich_journal();
-        assert!(commit_compact(&mut compacted));
+        assert!(commit_compact(&mut compacted).is_ok());
         assert_eq!(compacted.epoch, 2);
         let back = decode_journal(&encode_journal(&compacted, &[0; 32]).unwrap())
             .unwrap()
@@ -10733,7 +12659,7 @@ mod tests {
         let journal = two_turns();
         let original = model_bytes(&journal.events).unwrap();
         let mut rewritten = journal.clone();
-        admit_system(&mut rewritten, "Replacement head.", false);
+        admit_system(&mut rewritten, "Replacement head.", false).unwrap();
         assert_ne!(model_bytes(&rewritten.events).unwrap(), original);
         let mut with_step = journal.clone();
         let _id = propose_step(&mut with_step);
@@ -11078,9 +13004,9 @@ mod tests {
         );
         let mut crashed = journal.clone();
         assert!(begin_compact(&mut crashed, COMPACTION_SUMMARY));
-        assert!(note_crash_during_compact(&mut crashed));
+        assert!(note_crash_during_compact(&mut crashed).is_ok());
         assert!(!crashed.compaction_open);
-        assert!(!commit_compact(&mut crashed));
+        assert!(commit_compact(&mut crashed).is_err());
         assert_eq!(
             current_observed_text(&crashed.events, notes).as_deref(),
             Some("hello once more")
@@ -11342,6 +13268,7 @@ mod tests {
     #[test]
     fn a_spill_pointer_keeps_the_file_text() {
         let mut journal = two_turns();
+        assert!(record_task_budget(&mut journal, FIXTURE_TASK_BUDGET));
         let notes = "localhost://Users/self/Projects/demo/notes.txt";
         assert!(observe(&mut journal, notes, 1, "hello from the project"));
         let id = propose_run(
@@ -11468,9 +13395,15 @@ mod tests {
             &mut journal,
             parent,
             "localhost://Users/self/Projects/demo/src",
+            Some(FIXTURE_CHILD_BUDGET),
         )
         .unwrap();
-        assert!(authorize(&mut journal, child, Some("child-grant")));
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            "localhost://Users/self/Projects/demo/src"
+        ));
         assert!(dispatch(&mut journal, child));
         assert!(!spill_pointer(&mut journal, child, notes));
         assert!(spill_pointer(&mut journal, child, main));
@@ -12904,7 +14837,7 @@ mod tests {
             .windows(b"/tmp".len())
             .any(|window| window == b"/tmp"));
         let epoch_before = journal.epoch;
-        admit_system(&mut journal, SYSTEM_HEAD, false);
+        admit_system(&mut journal, SYSTEM_HEAD, false).unwrap();
         assert_eq!(system_head(&journal.events), Some(SYSTEM_HEAD));
         assert!(journal
             .events
@@ -13077,7 +15010,7 @@ mod tests {
         assert!(before.starts_with(SYSTEM_HEAD));
         assert!(before.contains(&"x".repeat(200)));
         assert!(!before.contains("Prefer the Runtime grant."));
-        assert_eq!(prune_tool_results(&mut journal), 1);
+        assert_eq!(prune_tool_results(&mut journal), Ok(1));
         assert_eq!(journal.epoch, epoch);
         assert_eq!(journal.events[0].text, head);
         assert!(journal.events.iter().any(|node| {
@@ -14180,10 +16113,13 @@ mod tests {
         );
         assert!(journal.steps.is_empty());
         let ids = propose_change(&mut journal, &[spec(NOTES, "rev-1", "alpha", "one")]).unwrap();
-        assert_eq!(edit_request(&mut journal, ids[0]), Err("not dispatched"));
+        assert_eq!(
+            edit_request(&mut journal, ids[0], None),
+            Err("not dispatched")
+        );
         granted(&mut journal, &ids);
         let body: serde_json::Value =
-            serde_json::from_slice(&edit_request(&mut journal, ids[0]).unwrap()).unwrap();
+            serde_json::from_slice(&edit_request(&mut journal, ids[0], None).unwrap()).unwrap();
         assert_eq!(body["op"], "edit");
         assert_eq!(body["all_or_none"], true);
         assert_eq!(body["files"].as_array().unwrap().len(), 1);
@@ -14199,7 +16135,7 @@ mod tests {
         assert!(observe(&mut unbound, STYLE, 1, "body{}\n"));
         let legacy = propose_edit(&mut unbound, STYLE, "body", "h1", Some(1)).unwrap();
         granted(&mut unbound, &[legacy]);
-        assert_eq!(edit_request(&mut unbound, legacy), Err("no revision"));
+        assert_eq!(edit_request(&mut unbound, legacy, None), Err("no revision"));
         // A newer read arrives before the write: the change is stale, sends
         // nothing, and records nothing.
         assert!(observe_read(
@@ -14211,7 +16147,7 @@ mod tests {
             false,
             "alpha gamma\n"
         ));
-        assert_eq!(edit_request(&mut journal, ids[0]), Err("stale"));
+        assert_eq!(edit_request(&mut journal, ids[0], None), Err("stale"));
         let events = journal.events.clone();
         assert_eq!(
             note_change_wrote(&mut journal, ids[0], &[(NOTES, "rev-3")]),
@@ -14305,7 +16241,7 @@ mod tests {
         // Both written.
         let (mut journal, ids) = start();
         let body: serde_json::Value =
-            serde_json::from_slice(&edit_request(&mut journal, ids[0]).unwrap()).unwrap();
+            serde_json::from_slice(&edit_request(&mut journal, ids[0], None).unwrap()).unwrap();
         assert_eq!(body["files"].as_array().unwrap().len(), 2);
         assert_eq!(body["files"][1]["if_revision"], "rs-1");
         assert_eq!(
@@ -14475,7 +16411,7 @@ mod tests {
             propose_change(&mut journal, &[spec(NOTES, "rev-1", "eleven", "11\n11b")]).unwrap();
         granted(&mut journal, &ids);
         let body: serde_json::Value =
-            serde_json::from_slice(&edit_request(&mut journal, ids[0]).unwrap()).unwrap();
+            serde_json::from_slice(&edit_request(&mut journal, ids[0], None).unwrap()).unwrap();
         assert_eq!(body["files"][0]["first_line"], 10);
         assert_eq!(body["files"][0]["line_count"], 2);
         assert_eq!(
@@ -15101,6 +17037,7 @@ mod tests {
         let first = legacy_edit(&mut journal, NOTES, None);
         legacy_edit(&mut journal, upper, Some(first));
         cases.push((journal, "one file twice in one change"));
+        // Only in the saved copy: the path rule refuses it before the boundary.
         let mut journal = empty_journal();
         journal.compact_backup = Some((vec![raw_read(doubled, 1, "rev-1", None, "alpha\n")], 0));
         cases.push((journal, "path not canonical"));
@@ -15265,7 +17202,10 @@ mod tests {
         ));
         let ids = propose_change(&mut journal, &[spec(NOTES, "rev-1", "alpha", "one")]).unwrap();
         let before = refusal_records(&journal).len();
-        assert_eq!(edit_request(&mut journal, ids[0]), Err("not dispatched"));
+        assert_eq!(
+            edit_request(&mut journal, ids[0], None),
+            Err("not dispatched")
+        );
         assert_eq!(refusal_records(&journal).len(), before + 1);
         granted(&mut journal, &ids);
         assert_eq!(
@@ -15327,7 +17267,7 @@ mod tests {
 
     fn request(journal: &mut Journal) -> Result<(), &'static str> {
         let effect = journal.steps.last().map_or(99, |step| step.effect_id);
-        edit_request(journal, effect).map(|_| ())
+        edit_request(journal, effect, None).map(|_| ())
     }
 
     fn result(journal: &mut Journal) -> Result<(), &'static str> {
@@ -15747,7 +17687,7 @@ mod tests {
         let first = dispatched_edit(&mut bound, a, "alpha", None);
         dispatched_edit(&mut bound, b, "alpha", Some(first));
         assert_eq!(
-            edit_request(&mut bound, first),
+            edit_request(&mut bound, first, None),
             Err("one file twice in one change")
         );
     }
@@ -15883,14 +17823,13 @@ mod tests {
 
     #[test]
     fn each_kind_renders_byte_for_byte() {
-        let golden = golden();
+        let golden: Vec<_> = golden().into_iter().chain(golden_idea_2()).collect();
         let mut tags: Vec<u8> = golden
             .iter()
             .map(|(node, _)| source_tag(&node.source))
             .collect();
         tags.sort_unstable();
-        let mut kinds: Vec<u8> = (1..=16).collect();
-        kinds.push(19);
+        let kinds: Vec<u8> = (1..=19).collect();
         assert_eq!(tags, kinds, "one example per kind");
         for (node, expected) in golden {
             assert_eq!(
@@ -16090,7 +18029,7 @@ mod tests {
     #[test]
     fn an_unknown_kind_is_refused() {
         let (header, records) = journal_with(node(Role::User, NodeSource::Message, "hello"));
-        for tag in [0_u8, 17, 18, 20, 255] {
+        for tag in [0_u8, 20, 21, 255] {
             let mut bad = records.clone();
             bad[0].1[1] = tag;
             assert_eq!(
@@ -16100,25 +18039,30 @@ mod tests {
             );
         }
         // A bare unknown kind, with nothing after it, is refused by its tag.
-        for tag in [0_u8, 17, 18, 20, 255] {
+        for tag in [0_u8, 20, 21, 255] {
             assert_eq!(
                 decode_node(&[2, tag]).unwrap_err(),
                 "record",
                 "bare kind {tag}"
             );
         }
-        // Kinds 17 and 18 with plausible fields are refused too.
-        for payload in [
-            [vec![2, 17], 3_u64.to_le_bytes().to_vec(), vec![0; 12]].concat(),
+        // A child stop with an unknown reason is refused; a known one decodes.
+        let stop = |reason: u8| {
             [
                 vec![2, 18],
                 3_u64.to_le_bytes().to_vec(),
-                vec![1, 0, 0, 0, 0],
+                vec![reason, 1, 0, 0, 0],
             ]
-            .concat(),
-        ] {
-            assert_eq!(decode_node(&payload).unwrap_err(), "record");
+            .concat()
+        };
+        for reason in [0_u8, 4, 255] {
+            assert_eq!(
+                decode_node(&stop(reason)).unwrap_err(),
+                "record",
+                "reason {reason}"
+            );
         }
+        assert!(decode_node(&stop(1)).is_ok());
     }
 
     #[test]
@@ -16256,32 +18200,48 @@ mod tests {
     }
 
     #[test]
-    fn idea_2_fields_must_be_empty_until_built() {
+    fn idea_2_fields_follow_their_rules() {
         let mut journal = two_turns();
         propose_step(&mut journal);
         let bytes = encode_journal(&journal, &[0; 32]).unwrap();
         let (header, records) = journal_records(&bytes);
         // Header: cancelled_from (25..34), task_budget (34..47), depth (47).
         assert!(header[25..48].iter().all(|byte| *byte == 0));
-        for offset in 25..48 {
+        for (offset, value, reason) in [
+            (26, 1_u8, "record"),
+            (25, 2, "record"),
+            (35, 1, "record"),
+            (34, 2, "record"),
+            (47, CHILD_DEPTH_LIMIT + 1, "depth limit"),
+        ] {
             let mut bad = header.clone();
-            bad[offset] = 1;
+            bad[offset] = value;
             assert_eq!(
                 decode_journal(&relinked(bad, &records)).unwrap_err(),
-                "record",
+                reason,
                 "header offset {offset}"
             );
         }
-        // Step: the last 19 bytes are depth, budget, requests_used and stop.
+        // Step: the last 19 bytes are the tree-cancelled flag (1 only on a
+        // dispatched run), budget, requests_used and stop. A step that is not
+        // a run holds none of them.
         let step_at = records.iter().position(|(tag, _)| *tag == 3).unwrap();
         let len = records[step_at].1.len();
-        for offset in len - 19..len {
+        for (offset, value) in [
+            (len - 19, 1_u8),
+            (len - 18, 2),
+            (len - 17, 1),
+            (len - 18, 1),
+            (len - 5, 1),
+            (len - 1, 1),
+            (len - 1, 4),
+        ] {
             let mut bad = records.clone();
-            bad[step_at].1[offset] = 1;
+            bad[step_at].1[offset] = value;
             assert_eq!(
                 decode_journal(&relinked(header.clone(), &bad)).unwrap_err(),
                 "record",
-                "step offset {offset}"
+                "step offset {offset} value {value}"
             );
         }
     }
@@ -16342,7 +18302,7 @@ mod tests {
             Err((0, "not observed"))
         );
         let id = dispatched_edit(&mut journal, lower, "alpha", None);
-        assert_eq!(edit_request(&mut journal, id), Err("not observed"));
+        assert_eq!(edit_request(&mut journal, id, None), Err("not observed"));
         // Version 1 of the other file is its own: another revision is fine.
         assert!(observe_read(
             &mut journal,
@@ -16387,7 +18347,7 @@ mod tests {
     #[test]
     fn only_the_host_writes_a_later_system_line() {
         let mut journal = two_turns();
-        admit_system(&mut journal, "Reply in one short paragraph.", true);
+        admit_system(&mut journal, "Reply in one short paragraph.", true).unwrap();
         let line = journal.events.last().unwrap().clone();
         assert_eq!(
             (line.role, &line.source),
@@ -16410,7 +18370,7 @@ mod tests {
             admit_assistant(&mut journal, text);
             admit_tool_result(&mut journal, text);
             let id = propose_step(&mut journal);
-            assert!(record_tool_result(&mut journal, id, text));
+            assert!(record_tool_result(&mut journal, id, text, None));
             let back = decode_journal(&encode_journal(&journal, &[0; 32]).unwrap())
                 .unwrap()
                 .0;
@@ -16445,5 +18405,4122 @@ mod tests {
             decode_journal(&relinked(header, &records)).unwrap_err(),
             "record"
         );
+    }
+
+    // OMP idea 2: child limits (handoff/OMP2-DESIGN.md).
+
+    /// Kinds 17 and 18, with the exact bytes the model sees. Pinned on their
+    /// own, so the format 2 table above (and its pin) stays as it shipped.
+    fn golden_idea_2() -> Vec<(SurfaceNode, &'static [u8])> {
+        vec![
+            (
+                node(
+                    Role::User,
+                    NodeSource::ChildBudget {
+                        child: 7,
+                        budget: Budget {
+                            requests: 8,
+                            seconds: 600,
+                        },
+                    },
+                    "",
+                ),
+                b"child 7 budget: 8 requests, 600 s",
+            ),
+            (
+                node(
+                    Role::User,
+                    NodeSource::ChildStop {
+                        child: 7,
+                        reason: StopReason::Requests,
+                        requests_used: 8,
+                    },
+                    "",
+                ),
+                b"child 7 stopped: requests (8 requests used)",
+            ),
+        ]
+    }
+
+    const IDEA_2_RENDERING_PIN: (u16, &str) = (
+        2,
+        "b103247016a82aa2dac7a9d8b54072e663d1079b85a96b7927cd77c6b588450f",
+    );
+
+    #[test]
+    fn the_child_records_render_byte_for_byte_and_are_pinned() {
+        let mut table = Vec::new();
+        for (node, expected) in golden_idea_2() {
+            let rendered = render_record(&node);
+            assert_eq!(rendered.as_bytes(), expected);
+            table.push(source_tag(&node.source));
+            table.extend_from_slice(&(rendered.len() as u32).to_le_bytes());
+            table.extend_from_slice(rendered.as_bytes());
+        }
+        for (reason, name) in [
+            (StopReason::Requests, "requests"),
+            (StopReason::Time, "time"),
+            (StopReason::Cancelled, "cancelled"),
+        ] {
+            assert_eq!(reason.name(), name);
+            assert_eq!(StopReason::from_tag(reason.tag()), Some(reason));
+        }
+        let hex: String = sha256(&table)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(IDEA_2_RENDERING_PIN.0, JOURNAL_FORMAT);
+        assert_eq!(hex, IDEA_2_RENDERING_PIN.1);
+    }
+
+    const DEMO: &str = "localhost://Users/self/Projects/demo";
+    const DEMO_SRC: &str = "localhost://Users/self/Projects/demo/src";
+    const DEMO_SRC_LIB: &str = "localhost://Users/self/Projects/demo/src/lib";
+    const DEMO_DOC: &str = "localhost://Users/self/Projects/demo/doc";
+    const HOSTED_MODEL: &str = "localhost://Models/hosted";
+    const LOCAL_MODEL: &str = "localhost://Users/self/.AppData/Models/local";
+
+    fn budget(requests: u32, seconds: u64) -> Budget {
+        Budget { requests, seconds }
+    }
+
+    /// A task with a granted budget and one granted run step to hang
+    /// children under.
+    fn task(granted: Budget) -> (Journal, u64) {
+        let mut journal = two_turns();
+        assert!(record_task_budget(&mut journal, granted));
+        let run = propose_run(&mut journal, DEMO, &["true".to_string()]).unwrap();
+        assert!(authorize(&mut journal, run, Some("fixture-grant")));
+        (journal, run)
+    }
+
+    fn step_of(journal: &Journal, id: u64) -> &Step {
+        journal.steps.iter().find(|step| step.id == id).unwrap()
+    }
+
+    fn step_mut(journal: &mut Journal, id: u64) -> &mut Step {
+        journal.steps.iter_mut().find(|step| step.id == id).unwrap()
+    }
+
+    fn child_stops(journal: &Journal) -> Vec<(u64, StopReason, u32)> {
+        journal
+            .events
+            .iter()
+            .filter_map(|node| match node.source {
+                NodeSource::ChildStop {
+                    child,
+                    reason,
+                    requests_used,
+                } => Some((child, reason, requests_used)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn reloaded(journal: &Journal) -> Journal {
+        decode_journal(&encode_journal(journal, &[0; 32]).unwrap())
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn a_child_at_the_depth_limit_cannot_propose_a_child() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let grandchild =
+            propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        let before = journal.clone();
+        let deeper = "localhost://Users/self/Projects/demo/src/lib/a";
+        assert_eq!(
+            propose_child(&mut journal, grandchild, deeper, Some(budget(1, 10))),
+            Err("depth limit")
+        );
+        assert_eq!(journal, before);
+        // A child host's depth is its child's; inside one at the limit, no
+        // child can be proposed.
+        assert_eq!(
+            open_child_host(&journal, child, DEMO_SRC_LIB)
+                .unwrap()
+                .depth,
+            1
+        );
+        let mut deep = open_child_host(&journal, grandchild, DEMO_SRC_LIB).unwrap();
+        assert_eq!(deep.depth, 2);
+        let inner = deep.steps[0].id;
+        assert_eq!(
+            propose_child(&mut deep, inner, deeper, Some(budget(1, 10))),
+            Err("depth limit")
+        );
+    }
+
+    #[test]
+    fn a_child_without_a_budget_is_refused() {
+        let (mut journal, run) = task(budget(8, 600));
+        let before = journal.clone();
+        for refused in [None, Some(budget(0, 60)), Some(budget(2, 0))] {
+            assert_eq!(
+                propose_child(&mut journal, run, DEMO_SRC, refused),
+                Err("no budget"),
+                "{refused:?}"
+            );
+            assert_eq!(journal, before);
+        }
+    }
+
+    #[test]
+    fn a_child_budget_larger_than_the_parent_remaining_is_refused() {
+        let (mut journal, run) = task(budget(4, 600));
+        assert!(ask_model(&mut journal, None, HOSTED_MODEL).is_ok());
+        // The task has 3 requests and 600 s left.
+        for over in [budget(4, 60), budget(3, 601)] {
+            assert_eq!(
+                propose_child(&mut journal, run, DEMO_SRC, Some(over)),
+                Err("over the parent's budget"),
+                "{over:?}"
+            );
+        }
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(3, 600))).unwrap();
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        // The child has 2 requests and 600 s left: a grandchild gets no more.
+        assert_eq!(
+            propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(3, 60))),
+            Err("over the parent's budget")
+        );
+        assert_eq!(
+            propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 601))),
+            Err("over the parent's budget")
+        );
+        assert!(propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 600))).is_ok());
+        assert_eq!(
+            journal
+                .events
+                .iter()
+                .filter(|node| matches!(node.source, NodeSource::ChildBudget { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn the_guest_never_sets_the_top_task_budget() {
+        assert_eq!(
+            TASK_BUDGET_REASON,
+            "the task budget was not recorded; start a new task"
+        );
+        let mut journal = two_turns();
+        let run = propose_run(&mut journal, DEMO, &["true".to_string()]).unwrap();
+        assert!(authorize(&mut journal, run, Some("fixture-grant")));
+        // No granted budget: no model call and no child, whatever is asked.
+        assert_eq!(
+            ask_model(&mut journal, None, HOSTED_MODEL),
+            Err(TASK_BUDGET_REASON)
+        );
+        assert_eq!(
+            propose_child(&mut journal, run, DEMO_SRC, Some(budget(1, 1))),
+            Err(TASK_BUDGET_REASON)
+        );
+        assert_eq!(journal.task_budget, None);
+        assert!(!record_task_budget(&mut journal, budget(0, 60)));
+        assert!(!record_task_budget(&mut journal, budget(5, 0)));
+        assert!(record_task_budget(&mut journal, budget(5, 60)));
+        // Recorded once: never raised or changed.
+        assert!(!record_task_budget(&mut journal, budget(50, 600)));
+        assert_eq!(journal.task_budget, Some(budget(5, 60)));
+    }
+
+    #[test]
+    fn hosted_and_local_model_calls_share_one_counter() {
+        let (mut journal, run) = task(budget(3, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        assert!(ask_model(&mut journal, Some(child), LOCAL_MODEL).is_ok());
+        assert_eq!(step_of(&journal, child).requests_used, 2);
+        assert_eq!(
+            ask_model(&mut journal, Some(child), LOCAL_MODEL),
+            Err("requests")
+        );
+        assert!(ask_model(&mut journal, None, LOCAL_MODEL).is_ok());
+        assert_eq!(task_requests_used(&journal), 3);
+        assert_eq!(ask_model(&mut journal, None, HOSTED_MODEL), Err("requests"));
+    }
+
+    #[test]
+    fn a_child_over_its_request_budget_stops_with_requests() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        let steps = journal.steps.len();
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("requests")
+        );
+        assert_eq!(journal.steps.len(), steps, "nothing asked after the limit");
+        assert_eq!(step_of(&journal, child).stop, Some(StopReason::Requests));
+        assert_eq!(
+            child_stops(&journal),
+            vec![(child, StopReason::Requests, 2)]
+        );
+        assert_eq!(
+            render_record(journal.events.last().unwrap()),
+            format!("child {child} stopped: requests (2 requests used)")
+        );
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("stopped")
+        );
+        assert_eq!(child_stops(&journal).len(), 1);
+    }
+
+    /// Stopping a parent stops its children, each with a recorded reason.
+    #[test]
+    fn a_stopped_child_stops_its_children() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let grandchild =
+            propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(ask_model(&mut journal, Some(grandchild), HOSTED_MODEL).is_ok());
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        // The child's budget is used up by the two calls in its subtree.
+        assert_eq!(
+            ask_model(&mut journal, Some(grandchild), HOSTED_MODEL),
+            Err("requests")
+        );
+        assert_eq!(
+            child_stops(&journal),
+            vec![
+                (child, StopReason::Requests, 2),
+                (grandchild, StopReason::Cancelled, 1)
+            ]
+        );
+        assert_eq!(step_of(&journal, grandchild).state, StepState::Cancelled);
+        assert_eq!(
+            propose_child(
+                &mut journal,
+                grandchild,
+                "localhost://Users/self/Projects/demo/src/lib/a",
+                Some(budget(1, 10))
+            ),
+            Err("parent stopped")
+        );
+    }
+
+    #[test]
+    fn a_time_refusal_stops_the_child_with_time() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(
+            !note_time_refusal(&mut journal, run),
+            "only a child stops with time"
+        );
+        assert!(note_time_refusal(&mut journal, child));
+        assert_eq!(step_of(&journal, child).stop, Some(StopReason::Time));
+        assert_eq!(child_stops(&journal), vec![(child, StopReason::Time, 0)]);
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("stopped")
+        );
+    }
+
+    #[test]
+    fn the_first_stop_reason_is_kept() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(1, 60))).unwrap();
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("requests")
+        );
+        assert!(!note_time_refusal(&mut journal, child));
+        assert!(!cancel_tree(&mut journal, child));
+        assert_eq!(step_of(&journal, child).stop, Some(StopReason::Requests));
+        assert_eq!(
+            child_stops(&journal),
+            vec![(child, StopReason::Requests, 1)]
+        );
+        let other = propose_child(&mut journal, run, DEMO_DOC, Some(budget(1, 60))).unwrap();
+        assert!(note_time_refusal(&mut journal, other));
+        assert!(cancel_task(&mut journal));
+        assert_eq!(step_of(&journal, other).stop, Some(StopReason::Time));
+        assert_eq!(step_of(&journal, child).stop, Some(StopReason::Requests));
+        assert_eq!(child_stops(&journal).len(), 2);
+    }
+
+    #[test]
+    fn a_long_inline_child_result_is_refused() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let host = open_child_host(&journal, child, DEMO_SRC).unwrap();
+        let before = journal.events.len();
+        assert!(!record_child_result(
+            &mut journal,
+            child,
+            &host,
+            &"x".repeat(4_001)
+        ));
+        assert_eq!(
+            without_refusal_records(&journal.events).len(),
+            before,
+            "never cut, never stored"
+        );
+        assert!(record_child_result(
+            &mut journal,
+            child,
+            &host,
+            &"x".repeat(4_000)
+        ));
+        assert!(
+            !record_child_result(&mut journal, run, &host, "ok"),
+            "only for a child step"
+        );
+    }
+
+    /// Codex at 11dd10e: the stored text, stop label included, is what
+    /// `CHILD_RESULT_CAP` bounds. Every stop reason keeps the cap at its
+    /// boundary; one byte less is stored, one byte more is refused.
+    #[test]
+    fn a_stopped_child_result_is_capped_after_its_label() {
+        for stop in ["time", "requests", "cancelled"] {
+            let (mut journal, run) = task(budget(8, 600));
+            let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(1, 60))).unwrap();
+            let host = open_child_host(&journal, child, DEMO_SRC).unwrap();
+            let stopped = match stop {
+                "time" => note_time_refusal(&mut journal, child),
+                "requests" => {
+                    assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+                    assert_eq!(
+                        ask_model(&mut journal, Some(child), HOSTED_MODEL),
+                        Err("requests")
+                    );
+                    true
+                }
+                _ => cancel_tree(&mut journal, child),
+            };
+            assert!(stopped, "{stop}");
+            let reason = step_of(&journal, child).stop.unwrap();
+            let label = format!("partial ({}): ", reason.name());
+            let exact = "x".repeat(CHILD_RESULT_CAP - label.len());
+            let before = journal.events.len();
+            assert!(
+                !record_child_result(&mut journal, child, &host, &"x".repeat(CHILD_RESULT_CAP)),
+                "{stop}: the label makes this longer than the cap"
+            );
+            assert!(
+                !record_child_result(&mut journal, child, &host, &format!("{exact}x")),
+                "{stop}: one byte over the labelled cap"
+            );
+            assert_eq!(
+                without_refusal_records(&journal.events).len(),
+                before,
+                "{stop}: never stored"
+            );
+            assert!(
+                record_child_result(&mut journal, child, &host, &exact),
+                "{stop}: exactly the cap once labelled"
+            );
+            let stored = &journal.events.last().unwrap().text;
+            assert_eq!(stored, &format!("{label}{exact}"), "{stop}");
+            assert_eq!(stored.len(), CHILD_RESULT_CAP, "{stop}");
+        }
+    }
+
+    /// Codex at 1c0449a: the child-result rules hold at the second entry
+    /// point too. `record_tool_result` on a child keeps the cap, the grant
+    /// rule and the partial-result stop label, as `record_child_result` does,
+    /// and it checks the same grants: the parent's steps and the child
+    /// host's steps (Codex at b5fa55d).
+    #[test]
+    fn both_child_result_paths_keep_the_child_result_rules() {
+        let (mut journal, run) = task(budget(8, 600));
+        let first = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let second = propose_child(&mut journal, run, DEMO_DOC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            first,
+            Some("first-grant"),
+            DEMO_SRC
+        ));
+        let mut host = open_child_host(&journal, first, DEMO_SRC).unwrap();
+        let host_step = host
+            .steps
+            .iter()
+            .find(|step| step.kind == ProposalKind::Run)
+            .unwrap()
+            .id;
+        assert!(grant_child_host(
+            &mut journal,
+            first,
+            &mut host,
+            Some("host-only-grant")
+        ));
+        assert_eq!(
+            step_of(&host, host_step).grant.as_deref(),
+            Some("host-only-grant")
+        );
+        let before = journal.events.len();
+        let long = "x".repeat(CHILD_RESULT_CAP + 1);
+        // Both paths refuse the same oversize and the same grant string,
+        // including a grant the host holds and the parent does not.
+        assert!(!record_tool_result(&mut journal, first, &long, Some(&host)));
+        assert!(!record_child_result(&mut journal, first, &host, &long));
+        assert!(!record_tool_result(
+            &mut journal,
+            first,
+            "first-grant",
+            Some(&host)
+        ));
+        assert!(!record_tool_result(
+            &mut journal,
+            first,
+            "host-only-grant",
+            Some(&host)
+        ));
+        assert!(!record_child_result(
+            &mut journal,
+            first,
+            &host,
+            "first-grant"
+        ));
+        assert!(!record_child_result(
+            &mut journal,
+            first,
+            &host,
+            "host-only-grant"
+        ));
+        assert_eq!(
+            without_refusal_records(&journal.events).len(),
+            before,
+            "never cut, never stored"
+        );
+        assert!(!step_of(&journal, first).has_result);
+        // A stopped child's partial result is labelled on both paths.
+        assert!(note_time_refusal(&mut journal, first));
+        assert!(record_tool_result(
+            &mut journal,
+            first,
+            "half done",
+            Some(&host)
+        ));
+        assert_eq!(
+            journal.events.last().unwrap().text,
+            "partial (time): half done"
+        );
+        // The second child needs its own host: another child's host is not
+        // verified context for it.
+        assert!(authorize_child(
+            &mut journal,
+            second,
+            Some("second-grant"),
+            DEMO_DOC
+        ));
+        let second_host = open_child_host(&journal, second, DEMO_DOC).unwrap();
+        assert!(!record_child_result(
+            &mut journal,
+            second,
+            &host,
+            "the wrong child's host"
+        ));
+        assert!(note_time_refusal(&mut journal, second));
+        assert!(record_child_result(
+            &mut journal,
+            second,
+            &second_host,
+            "half done"
+        ));
+        assert_eq!(
+            journal.events.last().unwrap().text,
+            "partial (time): half done"
+        );
+    }
+
+    /// Codex at b5fa55d: a granted child is dispatched only while the grant
+    /// above it still stands. A run denied after its child was granted takes
+    /// the child's dispatch with it.
+    #[test]
+    fn a_child_dispatch_needs_the_grant_above_it() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        // The person denies the run after granting the child.
+        assert!(!authorize(&mut journal, run, None));
+        assert_eq!(step_of(&journal, child).state, StepState::Prepared);
+        assert!(!dispatch(&mut journal, child), "no grant above it");
+        assert_eq!(step_of(&journal, child).state, StepState::Prepared);
+        // With the run's grant still standing, the same child dispatches.
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert!(dispatch(&mut journal, child));
+    }
+
+    /// Codex at b5fa55d: a refused host action keeps the shared check's exact
+    /// reason, in one record in the host's own journal: a stop, the required
+    /// missing-budget message, a step outside the child's granted scope, and a
+    /// path that is not canonical.
+    #[test]
+    fn a_refused_host_action_says_why() {
+        let host_step = |host: &Journal| {
+            host.steps
+                .iter()
+                .find(|step| step.kind == ProposalKind::Run)
+                .unwrap()
+                .id
+        };
+        // A stopped child: `usable_child`'s own word.
+        let (mut parent, run) = task(budget(8, 600));
+        let child = propose_child(&mut parent, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut parent,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let mut host = open_child_host(&parent, child, DEMO_SRC).unwrap();
+        let id = host_step(&host);
+        assert!(note_time_refusal(&mut parent, child));
+        let before = host.events.len();
+        assert!(!grant_child_host(
+            &mut parent,
+            child,
+            &mut host,
+            Some("host-grant")
+        ));
+        assert_eq!(host.events.len(), before + 1);
+        assert_eq!(
+            refusal_records(&host),
+            vec![format!("refused: stopped (host step {id})")]
+        );
+        assert_eq!(step_of(&host, id).grant, None);
+        // A child from before idea 2: the required budget message is kept.
+        let (mut parent, run) = task(budget(8, 600));
+        let child = propose_child(&mut parent, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut parent,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let mut host = open_child_host(&parent, child, DEMO_SRC).unwrap();
+        let id = host_step(&host);
+        step_mut(&mut parent, child).budget = None;
+        assert!(!grant_child_host(
+            &mut parent,
+            child,
+            &mut host,
+            Some("host-grant")
+        ));
+        assert_eq!(
+            refusal_records(&host),
+            vec![format!("refused: {TASK_BUDGET_REASON} (host step {id})")]
+        );
+        // Outside the granted scope, and a path that is not canonical.
+        let (mut parent, run) = task(budget(8, 600));
+        let child = propose_child(&mut parent, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut parent,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let mut host = open_child_host(&parent, child, DEMO_SRC).unwrap();
+        let outside = propose_read(&mut host, DEMO_DOC);
+        assert!(!authorize_in_host(
+            &mut parent,
+            child,
+            &mut host,
+            outside,
+            Some("read-grant")
+        ));
+        let not_canonical = propose_read(&mut host, "/tmp/secret");
+        assert!(!authorize_in_host(
+            &mut parent,
+            child,
+            &mut host,
+            not_canonical,
+            Some("read-grant")
+        ));
+        assert_eq!(
+            refusal_records(&host),
+            vec![
+                format!("refused: not in the parent's grant (host step {outside})"),
+                format!("refused: path not canonical (host step {not_canonical})"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_long_child_result_is_a_spill_pointer() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert!(dispatch(&mut journal, child));
+        let object = "localhost://Users/self/Projects/demo/src/result.txt";
+        let long = "y".repeat(CHILD_RESULT_CAP + 1);
+        assert!(observe(&mut journal, object, 1, &long));
+        assert!(spill_pointer(&mut journal, child, object));
+        assert_eq!(
+            text_at_spill(&journal.events, object).as_deref(),
+            Some(long.as_str())
+        );
+        assert!(journal
+            .events
+            .iter()
+            .all(|node| node.text != long || matches!(node.source, NodeSource::Observation(_))));
+    }
+
+    #[test]
+    fn cancelling_a_parent_stops_started_children_at_their_next_model_call() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert!(dispatch(&mut journal, child));
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        let host = open_child_host(&journal, child, DEMO_SRC).unwrap();
+        assert!(cancel_tree(&mut journal, run));
+        // Started: it keeps its state; its next call is refused, nothing asked.
+        assert_eq!(step_of(&journal, child).state, StepState::Dispatched);
+        assert_eq!(step_of(&journal, child).stop, Some(StopReason::Cancelled));
+        let steps = journal.steps.len();
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("stopped")
+        );
+        assert_eq!(journal.steps.len(), steps);
+        // Its partial result is kept, marked with the reason.
+        assert!(record_child_result(&mut journal, child, &host, "half done"));
+        assert_eq!(
+            journal.events.last().unwrap().text,
+            "partial (cancelled): half done"
+        );
+        assert_eq!(
+            child_stops(&journal),
+            vec![(child, StopReason::Cancelled, 1)]
+        );
+    }
+
+    /// A cancelled run holds no scope: `cancel_tree` leaves its grant in
+    /// place, and the shared scope walk no longer accepts it, so no child is
+    /// proposed or granted beneath it. The plain `cancel` primitive (which
+    /// `cancel_tree` calls on a run) leaves the children untouched, so the
+    /// scope walk itself is what refuses the grant.
+    #[test]
+    fn a_cancelled_parent_holds_no_scope_and_no_new_child() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let other = propose_child(&mut journal, run, DEMO_DOC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert!(cancel(&mut journal, run));
+        assert_eq!(step_of(&journal, run).state, StepState::Cancelled);
+        assert_eq!(
+            step_of(&journal, run).grant.as_deref(),
+            Some("fixture-grant")
+        );
+        assert_eq!(scope_still_granted(&journal, step_of(&journal, run)), None);
+        assert_eq!(
+            scope_still_granted(&journal, step_of(&journal, child)),
+            None
+        );
+        let steps = journal.steps.clone();
+        assert!(!authorize_child(
+            &mut journal,
+            other,
+            Some("other-grant"),
+            DEMO_DOC
+        ));
+        assert_eq!(journal.steps, steps);
+        assert_eq!(
+            propose_child(
+                &mut journal,
+                run,
+                "localhost://Users/self/Projects/demo/x",
+                Some(budget(1, 60))
+            ),
+            Err("parent stopped")
+        );
+        // The reproduction: a granted run, its tree cancelled, then a new
+        // child proposed beneath it.
+        let (mut tree, tree_run) = task(budget(8, 600));
+        assert!(cancel_tree(&mut tree, tree_run));
+        assert_eq!(step_of(&tree, tree_run).state, StepState::Cancelled);
+        assert_eq!(
+            propose_child(&mut tree, tree_run, DEMO_SRC, Some(budget(1, 60))),
+            Err("parent stopped")
+        );
+        // A run that has already left cannot be cancelled as a step.
+        // Cancelling its tree closes its scope, so it takes no new child,
+        // before and after a reload. The test asks only existing operations,
+        // so it can run against the older code too.
+        let (mut running, running_run) = task(budget(8, 600));
+        let existing =
+            propose_child(&mut running, running_run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let other =
+            propose_child(&mut running, running_run, DEMO_DOC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut running,
+            existing,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert!(dispatch(&mut running, running_run));
+        assert!(cancel_tree(&mut running, running_run));
+        assert_eq!(step_of(&running, running_run).state, StepState::Dispatched);
+        assert_eq!(
+            scope_still_granted(&running, step_of(&running, running_run)),
+            None
+        );
+        assert!(!authorize_child(
+            &mut running,
+            other,
+            Some("other-grant"),
+            DEMO_DOC
+        ));
+        assert_eq!(
+            propose_child(
+                &mut running,
+                running_run,
+                "localhost://Users/self/Projects/demo/x",
+                Some(budget(1, 60))
+            ),
+            Err("parent stopped")
+        );
+        let mut back = reloaded(&running);
+        assert_eq!(
+            propose_child(
+                &mut back,
+                running_run,
+                "localhost://Users/self/Projects/demo/x",
+                Some(budget(1, 60))
+            ),
+            Err("parent stopped")
+        );
+        // A crash after the cancel keeps the closure.
+        assert!(note_crash(&mut back, running_run));
+        assert_eq!(
+            step_of(&back, running_run).state,
+            StepState::SettlementUnknown
+        );
+        let mut crashed = reloaded(&back);
+        assert_eq!(
+            propose_child(
+                &mut crashed,
+                running_run,
+                "localhost://Users/self/Projects/demo/x",
+                Some(budget(1, 60))
+            ),
+            Err("parent stopped")
+        );
+    }
+
+    #[test]
+    fn no_model_call_anywhere_in_a_cancelled_tree() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let grandchild =
+            propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        let held = ask_model(&mut journal, Some(grandchild), HOSTED_MODEL).unwrap();
+        assert!(cancel_tree(&mut journal, child));
+        assert_eq!(
+            ask_model(&mut journal, Some(grandchild), HOSTED_MODEL),
+            Err("stopped")
+        );
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("stopped")
+        );
+        assert_eq!(
+            step_of(&journal, held).state,
+            StepState::Cancelled,
+            "a prepared call below is cancelled"
+        );
+        assert_eq!(
+            child_stops(&journal),
+            vec![
+                (child, StopReason::Cancelled, 1),
+                (grandchild, StopReason::Cancelled, 1)
+            ]
+        );
+        // The rest of the task still runs until the task itself is cancelled.
+        assert!(ask_model(&mut journal, None, HOSTED_MODEL).is_ok());
+        let other = propose_child(&mut journal, run, DEMO_DOC, Some(budget(1, 60))).unwrap();
+        assert!(cancel_task(&mut journal));
+        assert!(!cancel_task(&mut journal));
+        assert_eq!(
+            ask_model(&mut journal, None, HOSTED_MODEL),
+            Err("cancelled")
+        );
+        assert_eq!(
+            ask_model(&mut journal, Some(other), HOSTED_MODEL),
+            Err("cancelled")
+        );
+        assert_eq!(step_of(&journal, other).stop, Some(StopReason::Cancelled));
+        assert_eq!(
+            propose_child(
+                &mut journal,
+                run,
+                "localhost://Users/self/Projects/demo/x",
+                Some(budget(1, 60))
+            ),
+            Err("parent stopped")
+        );
+    }
+
+    #[test]
+    fn a_cancelled_tree_stays_cancelled_after_resume() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        assert!(cancel_task(&mut journal));
+        let mut back = reloaded(&journal);
+        assert_eq!(back, without_grants(&journal));
+        assert!(back.cancelled_from.is_some());
+        assert_eq!(ask_model(&mut back, None, HOSTED_MODEL), Err("cancelled"));
+        assert_eq!(
+            ask_model(&mut back, Some(child), HOSTED_MODEL),
+            Err("cancelled")
+        );
+        assert_eq!(step_of(&back, child).stop, Some(StopReason::Cancelled));
+    }
+
+    #[test]
+    fn every_format_2_field_round_trips() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(3, 60))).unwrap();
+        // The header depth is a child host's; it round-trips there.
+        let host = open_child_host(&journal, child, DEMO_SRC).unwrap();
+        assert_eq!(reloaded(&host).depth, 1);
+        assert!(ask_model(&mut journal, Some(child), LOCAL_MODEL).is_ok());
+        assert!(note_time_refusal(&mut journal, child));
+        let other = propose_child(&mut journal, run, DEMO_DOC, Some(budget(1, 60))).unwrap();
+        assert!(cancel_task(&mut journal));
+        let back = reloaded(&journal);
+        assert_eq!(back, without_grants(&journal));
+        assert_eq!((back.depth, back.task_budget), (0, Some(budget(8, 600))));
+        assert_eq!(back.cancelled_from, Some(other));
+        let step = step_of(&back, child);
+        assert_eq!(
+            (step.budget, step.requests_used, step.stop),
+            (Some(budget(3, 60)), 1, Some(StopReason::Time))
+        );
+        assert_eq!(step_of(&back, other).stop, Some(StopReason::Cancelled));
+        assert_eq!(
+            replay(&model_bytes(&journal.events).unwrap()).unwrap(),
+            journal.events
+        );
+    }
+
+    /// Re-record one child's budget, in its step and in its child-budget record.
+    fn set_budget(journal: &mut Journal, id: u64, to: Option<Budget>) {
+        step_mut(journal, id).budget = to;
+        match to {
+            Some(to) => {
+                for node in &mut journal.events {
+                    if let NodeSource::ChildBudget { child, budget } = &mut node.source {
+                        if *child == id {
+                            *budget = to;
+                        }
+                    }
+                }
+            }
+            None => journal.events.retain(
+                |node| !matches!(node.source, NodeSource::ChildBudget { child, .. } if child == id),
+            ),
+        }
+    }
+
+    /// A child never gets more than its parent, checked again on every load:
+    /// each rule broken in stored bytes refuses the load. Each case breaks one
+    /// rule and keeps every other rule true, so no other check can catch it.
+    #[test]
+    fn child_limits_are_checked_again_after_reload() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(3, 60))).unwrap();
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        assert!(ask_model(&mut journal, Some(child), LOCAL_MODEL).is_ok());
+        assert!(ask_model(&mut journal, None, HOSTED_MODEL).is_ok());
+        assert!(ask_model(&mut journal, None, LOCAL_MODEL).is_ok());
+        let idle = propose_child(&mut journal, run, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        let spare = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let timed = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(note_time_refusal(&mut journal, timed));
+        let later = propose_run(&mut journal, DEMO, &["true".to_string()]).unwrap();
+        let last = journal.steps.iter().map(|step| step.id).max().unwrap();
+        let good = journal.clone();
+        assert!(decode_journal(&encode_journal(&good, &[0; 32]).unwrap()).is_ok());
+        type Tamper = Box<dyn Fn(&mut Journal)>;
+        let cases: Vec<(&str, Tamper)> = vec![
+            (
+                "not a subset",
+                Box::new(move |j: &mut Journal| {
+                    step_mut(j, child).resource = "localhost://Users/self/Projects/other".into();
+                }),
+            ),
+            (
+                "over the parent's budget",
+                Box::new(move |j: &mut Journal| set_budget(j, child, Some(budget(9, 60)))),
+            ),
+            (
+                "over the parent's budget",
+                Box::new(move |j: &mut Journal| set_budget(j, child, Some(budget(3, 601)))),
+            ),
+            (
+                "over the parent's budget",
+                Box::new(move |j: &mut Journal| set_budget(j, child, Some(budget(1, 60)))),
+            ),
+            (
+                "over the parent's budget",
+                Box::new(move |j: &mut Journal| set_budget(j, idle, Some(budget(0, 60)))),
+            ),
+            (
+                "over the parent's budget",
+                Box::new(move |j: &mut Journal| set_budget(j, idle, Some(budget(2, 0)))),
+            ),
+            (
+                TASK_BUDGET_REASON,
+                Box::new(|j: &mut Journal| j.task_budget = None),
+            ),
+            (
+                "over the parent's budget",
+                Box::new(|j: &mut Journal| j.task_budget = Some(budget(2, 600))),
+            ),
+            (
+                "record",
+                Box::new(|j: &mut Journal| j.task_budget = Some(budget(3, 600))),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| set_budget(j, child, None)),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| step_mut(j, child).requests_used = 1),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| {
+                    j.events.retain(|node| {
+                        !matches!(node.source, NodeSource::ChildBudget { child: id, .. } if id == idle)
+                    });
+                }),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| {
+                    for node in &mut j.events {
+                        if let NodeSource::ChildBudget { child: id, budget } = &mut node.source {
+                            if *id == child {
+                                *budget = Budget {
+                                    requests: 2,
+                                    seconds: 60,
+                                };
+                            }
+                        }
+                    }
+                }),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| {
+                    for node in &mut j.events {
+                        if let NodeSource::ChildStop { reason, .. } = &mut node.source {
+                            *reason = StopReason::Requests;
+                        }
+                    }
+                }),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| {
+                    for node in &mut j.events {
+                        if let NodeSource::ChildStop { requests_used, .. } = &mut node.source {
+                            *requests_used = 5;
+                        }
+                    }
+                }),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| {
+                    j.events.push(node(
+                        Role::User,
+                        NodeSource::ChildStop {
+                            child,
+                            reason: StopReason::Time,
+                            requests_used: 2,
+                        },
+                        "",
+                    ));
+                }),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| step_mut(j, child).stop = Some(StopReason::Time)),
+            ),
+            // A journal with a depth is a child host: it holds no budget.
+            ("record", Box::new(|j: &mut Journal| j.depth = 2)),
+            (
+                "depth limit",
+                Box::new(|j: &mut Journal| j.depth = CHILD_DEPTH_LIMIT + 1),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| step_mut(j, run).budget = Some(budget(1, 1))),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| {
+                    step_mut(j, run).budget = Some(budget(1, 1));
+                    j.events.push(node(
+                        Role::User,
+                        NodeSource::ChildBudget {
+                            child: run,
+                            budget: budget(1, 1),
+                        },
+                        "",
+                    ));
+                }),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| {
+                    step_mut(j, run).stop = Some(StopReason::Time);
+                    j.events.push(node(
+                        Role::User,
+                        NodeSource::ChildStop {
+                            child: run,
+                            reason: StopReason::Time,
+                            requests_used: 0,
+                        },
+                        "",
+                    ));
+                }),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| step_mut(j, child).parent_id = Some(9_999)),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| step_mut(j, idle).parent_id = Some(spare)),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| step_mut(j, later).parent_id = Some(run)),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| {
+                    let call = j
+                        .steps
+                        .iter_mut()
+                        .find(|step| {
+                            step.kind == ProposalKind::Hosted && step.parent_id == Some(child)
+                        })
+                        .unwrap();
+                    call.parent_id = Some(run);
+                    step_mut(j, child).requests_used = 1;
+                }),
+            ),
+            (
+                "record",
+                Box::new(move |j: &mut Journal| j.cancelled_from = Some(last)),
+            ),
+        ];
+        for (index, (reason, change)) in cases.iter().enumerate() {
+            let mut bad = good.clone();
+            change(&mut bad);
+            let bytes = encode_journal(&bad, &[0; 32]).unwrap();
+            assert_eq!(
+                decode_journal(&bytes).map(|_| ()),
+                Err(*reason),
+                "case {index}"
+            );
+        }
+        // A cancelled task gains no child or call after its cancel point.
+        let mut cancelled = good.clone();
+        assert!(cancel_task(&mut cancelled));
+        assert!(decode_journal(&encode_journal(&cancelled, &[0; 32]).unwrap()).is_ok());
+        cancelled.cancelled_from = Some(run);
+        assert_eq!(
+            decode_journal(&encode_journal(&cancelled, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        // In a cancelled task every child has stopped: one that has not (and
+        // has nothing prepared below it) is refused on its own rule.
+        let mut running = good.clone();
+        assert!(cancel_task(&mut running));
+        step_mut(&mut running, idle).stop = None;
+        running.events.retain(
+            |node| !matches!(node.source, NodeSource::ChildStop { child, .. } if child == idle),
+        );
+        assert_eq!(
+            decode_journal(&encode_journal(&running, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        // A stop with no record, on a child with nothing below it, is refused
+        // by the per-child record count alone.
+        let mut unrecorded = good.clone();
+        step_mut(&mut unrecorded, idle).stop = Some(StopReason::Time);
+        assert_eq!(
+            decode_journal(&encode_journal(&unrecorded, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        // A task budget is never zero, even with nothing asked.
+        for zero in [budget(0, 600), budget(8, 0)] {
+            let mut bare = two_turns();
+            assert!(record_task_budget(&mut bare, budget(8, 600)));
+            bare.task_budget = Some(zero);
+            assert_eq!(
+                decode_journal(&encode_journal(&bare, &[0; 32]).unwrap()).map(|_| ()),
+                Err("record"),
+                "{zero:?}"
+            );
+        }
+        // A child past the depth limit, inside a child host at the limit.
+        let (mut top, run) = task(budget(8, 600));
+        let child = propose_child(&mut top, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let grandchild = propose_child(&mut top, child, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        let mut deep = open_child_host(&top, grandchild, DEMO_SRC_LIB).unwrap();
+        assert!(decode_journal(&encode_journal(&deep, &[0; 32]).unwrap()).is_ok());
+        let inner = deep.steps[0].id;
+        let past = propose_step(&mut deep);
+        step_mut(&mut deep, past).kind = ProposalKind::Child;
+        step_mut(&mut deep, past).resource =
+            "localhost://Users/self/Projects/demo/src/lib/a".into();
+        step_mut(&mut deep, past).parent_id = Some(inner);
+        step_mut(&mut deep, past).budget = Some(budget(1, 10));
+        assert_eq!(
+            decode_journal(&encode_journal(&deep, &[0; 32]).unwrap()).map(|_| ()),
+            Err("depth limit")
+        );
+        // A stopped child's children are stopped.
+        let (mut tree, run) = task(budget(8, 600));
+        let parent = propose_child(&mut tree, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let below = propose_child(&mut tree, parent, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(note_time_refusal(&mut tree, parent));
+        assert!(decode_journal(&encode_journal(&tree, &[0; 32]).unwrap()).is_ok());
+        step_mut(&mut tree, below).stop = None;
+        tree.events.retain(
+            |node| !matches!(node.source, NodeSource::ChildStop { child, .. } if child == below),
+        );
+        assert_eq!(
+            decode_journal(&encode_journal(&tree, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+    }
+
+    /// A child's grant is never more than its parent's.
+    #[test]
+    fn a_child_grant_is_a_subset_of_its_parent() {
+        let mut journal = two_turns();
+        assert!(record_task_budget(&mut journal, budget(8, 600)));
+        let run = propose_run(&mut journal, DEMO, &["true".to_string()]).unwrap();
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        // A parent with no grant has none to give.
+        assert!(!authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert!(authorize(&mut journal, run, Some("fixture-grant")));
+        for wider in [
+            DEMO,
+            DEMO_DOC,
+            "localhost://Users/self/Projects/demo/SRC",
+            "localhost://Users/self/Projects/demo//src",
+            "localhost://Users/self/Projects/demo/src/../../other",
+            "localhost://Users/self/Projects/demo/src/cafe\u{301}",
+        ] {
+            assert!(
+                !authorize_child(&mut journal, child, Some("child-grant"), wider),
+                "{wider}"
+            );
+        }
+        assert!(!authorize_child(
+            &mut journal,
+            child,
+            Some("fixture-grant"),
+            DEMO_SRC
+        ));
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC_LIB
+        ));
+        // After a reload no grant is left; the same checks run again.
+        let mut back = reloaded(&journal);
+        assert_eq!(step_of(&back, child).grant, None);
+        assert!(
+            !authorize_child(&mut back, child, Some("child-grant"), DEMO_SRC),
+            "the parent has no grant either"
+        );
+        assert!(authorize(&mut back, run, Some("fixture-grant-2")));
+        assert!(authorize_child(
+            &mut back,
+            child,
+            Some("child-grant-2"),
+            DEMO_SRC
+        ));
+        // A stopped child gets nothing.
+        let (mut stopped, run) = task(budget(8, 600));
+        let child = propose_child(&mut stopped, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(note_time_refusal(&mut stopped, child));
+        assert!(!authorize_child(
+            &mut stopped,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+    }
+
+    /// A format 2 journal written before idea 2 (at cee6d55: a child with no
+    /// budget and a model call with no task budget) still loads and means the
+    /// same; under idea 2 its unbudgeted child and task make no model call.
+    const PRE_IDEA_2_JOURNAL: &[&str] = &[
+        "4541484a020001000000000000000000000000000000000000000000000000000000000000000000",
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "08000000012500000001011f000000596f75206172652074686520456c6173744f53206167656e74",
+        "20686f73742e29b5994e5fb22cb34f2927d069f40e9c95ba8018443d6847d80a80cbab4eb991010b",
+        "00000002030500000068656c6c6fd41e10bf57633e67561ec4e2132eb6cd3cbb7aae7419643a7ec9",
+        "9aea21e549ab012300000001131d0000005265706c7920696e206f6e652073686f72742070617261",
+        "67726170682e7f7601038fca3a126a5ac8c033ee56c3c59eb31b82c4d8970637592c4012ba200111",
+        "00000002030b0000007365636f6e64207475726e28538fd7f9dda927f4010533b7aeaf715ae9e4b6",
+        "349dde9aa423ffcbdbc0aef3012b0000000113250000004b65657020746865206669727374207379",
+        "7374656d206c696e6520756e6368616e6765642ef04853d3523062922e8c0ff93f929e0bdea995d8",
+        "1c1ff52079d3cd55a22add61038300000001000000000000000104240000006c6f63616c686f7374",
+        "3a2f2f55736572732f73656c662f50726f6a656374732f64656d6f01000000000000000000000000",
+        "00000000010000000400000074727565000000000000000000070000006d6963726f766d00000000",
+        "00000000000000000000000000000000000000000000000000000000e91b55f29b52bd7266c87ca3",
+        "cc1b9ab75d85ac39602df48ac54f032efef04e54037800000002000000000000000107280000006c",
+        "6f63616c686f73743a2f2f55736572732f73656c662f50726f6a656374732f64656d6f2f73726302",
+        "00000000000000000000000000000000000000000101000000000000000000000000000000000000",
+        "0000000000000000000000000000000000000000000000000023861ee70bad241c58cb9ea30c2472",
+        "2e736a1dee1ac6eb932b9f99cd21f41248036900000003000000000000000106190000006c6f6361",
+        "6c686f73743a2f2f4d6f64656c732f686f7374656403000000000000000000000000000000000000",
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "00000000000000c3169f72f843afd94ba022be99f8ade78ab5cef7af649f8786af11346e690b37c3",
+        "169f72f843afd94ba022be99f8ade78ab5cef7af649f8786af11346e690b37",
+    ];
+
+    #[test]
+    fn a_journal_written_before_idea_2_still_loads() {
+        let hex: String = PRE_IDEA_2_JOURNAL.concat();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect();
+        let (mut journal, prev, _) = decode_journal(&bytes).unwrap();
+        assert_eq!(
+            (journal.depth, journal.task_budget, journal.cancelled_from),
+            (0, None, None)
+        );
+        let child = journal
+            .steps
+            .iter()
+            .find(|step| step.kind == ProposalKind::Child)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (child.budget, child.requests_used, child.stop),
+            (None, 0, None)
+        );
+        assert_eq!(encode_journal(&journal, &prev).unwrap(), bytes);
+        assert_eq!(
+            ask_model(&mut journal, Some(child.id), HOSTED_MODEL),
+            Err(TASK_BUDGET_REASON)
+        );
+        assert_eq!(
+            ask_model(&mut journal, None, HOSTED_MODEL),
+            Err(TASK_BUDGET_REASON)
+        );
+    }
+
+    /// A grandchild's budget is measured against its parent child's, not the
+    /// task's (the first falsifier run found this untested: CL10).
+    #[test]
+    fn a_grandchild_budget_is_a_subset_of_its_parent_child() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let before = journal.clone();
+        for over in [budget(3, 60), budget(2, 61)] {
+            assert_eq!(
+                propose_child(&mut journal, child, DEMO_SRC_LIB, Some(over)),
+                Err("over the parent's budget"),
+                "{over:?}"
+            );
+            assert_eq!(journal, before);
+        }
+        assert!(propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 60))).is_ok());
+    }
+
+    /// When a child and its child are both used up, the wider one stops with
+    /// `requests` and the one below it with `cancelled` (CL18).
+    #[test]
+    fn the_widest_used_up_child_stops_with_requests() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let grandchild =
+            propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(ask_model(&mut journal, Some(grandchild), HOSTED_MODEL).is_ok());
+        assert!(ask_model(&mut journal, Some(grandchild), LOCAL_MODEL).is_ok());
+        assert_eq!(
+            ask_model(&mut journal, Some(grandchild), HOSTED_MODEL),
+            Err("requests")
+        );
+        assert_eq!(step_of(&journal, child).stop, Some(StopReason::Requests));
+        assert_eq!(
+            step_of(&journal, grandchild).stop,
+            Some(StopReason::Cancelled)
+        );
+    }
+
+    /// A model call is asked only for a child with a budget: an older child
+    /// with none is refused even when the task has a budget (CL20), and a step
+    /// that is not a child is not something to ask under (CL26).
+    #[test]
+    fn a_model_call_is_asked_only_for_a_budgeted_child() {
+        let hex: String = PRE_IDEA_2_JOURNAL.concat();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect();
+        let (mut journal, _, _) = decode_journal(&bytes).unwrap();
+        assert!(record_task_budget(&mut journal, budget(8, 600)));
+        let old_child = journal
+            .steps
+            .iter()
+            .find(|step| step.kind == ProposalKind::Child)
+            .unwrap()
+            .id;
+        let not_child = journal
+            .steps
+            .iter()
+            .find(|step| step.kind != ProposalKind::Child)
+            .unwrap()
+            .id;
+        let before = journal.clone();
+        assert_eq!(
+            ask_model(&mut journal, Some(old_child), HOSTED_MODEL),
+            Err(TASK_BUDGET_REASON)
+        );
+        assert_eq!(
+            ask_model(&mut journal, Some(not_child), HOSTED_MODEL),
+            Err("not a child")
+        );
+        assert_eq!(
+            ask_model(&mut journal, Some(9_999), HOSTED_MODEL),
+            Err("not a child")
+        );
+        assert_eq!(journal, before);
+        assert!(ask_model(&mut journal, None, HOSTED_MODEL).is_ok());
+    }
+
+    /// Only a budgeted child gets a child grant: not an older child with no
+    /// budget (CL76), and not a step that is not a child even if it carries a
+    /// budget and a parent (CL82).
+    #[test]
+    fn an_unbudgeted_child_or_a_non_child_gets_no_child_grant() {
+        let hex: String = PRE_IDEA_2_JOURNAL.concat();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect();
+        let (mut journal, _, _) = decode_journal(&bytes).unwrap();
+        let old_child = journal
+            .steps
+            .iter()
+            .find(|step| step.kind == ProposalKind::Child)
+            .unwrap()
+            .clone();
+        let parent = old_child.parent_id.unwrap();
+        assert!(authorize(&mut journal, parent, Some("fixture-grant")));
+        assert!(!authorize_child(
+            &mut journal,
+            old_child.id,
+            Some("child-grant"),
+            &old_child.resource
+        ));
+        let (mut journal, run) = task(budget(8, 600));
+        assert!(authorize(&mut journal, run, Some("fixture-grant")));
+        let later = propose_run(&mut journal, DEMO, &["true".to_string()]).unwrap();
+        step_mut(&mut journal, later).parent_id = Some(run);
+        step_mut(&mut journal, later).budget = Some(budget(1, 10));
+        assert!(!authorize_child(
+            &mut journal,
+            later,
+            Some("child-grant"),
+            DEMO
+        ));
+        assert_eq!(step_of(&journal, later).grant, None);
+    }
+
+    /// Codex at 1c0449a: a child grant refused for a budget that was never
+    /// recorded says exactly why, through `authorize_child` and through a
+    /// granting inbox answer. The explanation is the same `TASK_BUDGET_REASON`
+    /// the other paths give, and each refusal leaves one record.
+    #[test]
+    fn a_grant_refused_for_an_unbudgeted_child_says_why() {
+        let hex: String = PRE_IDEA_2_JOURNAL.concat();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect();
+        let (mut journal, _, _) = decode_journal(&bytes).unwrap();
+        let old_child = journal
+            .steps
+            .iter()
+            .find(|step| step.kind == ProposalKind::Child)
+            .unwrap()
+            .clone();
+        let parent = old_child.parent_id.unwrap();
+        assert!(authorize(&mut journal, parent, Some("fixture-grant")));
+        let what = format!("child {}: {}", old_child.id, old_child.resource);
+        for path in ["authorize_child", "inbox"] {
+            let before = journal.events.len();
+            let granted = if path == "authorize_child" {
+                authorize_child(
+                    &mut journal,
+                    old_child.id,
+                    Some("child-grant"),
+                    &old_child.resource,
+                )
+            } else {
+                apply_inbox(
+                    &mut journal,
+                    old_child.id,
+                    InboxAnswer::AllowOnce,
+                    Some("child-grant"),
+                )
+            };
+            assert!(!granted, "{path}");
+            assert_eq!(journal.events.len(), before + 1, "{path}: one record");
+            assert_eq!(
+                journal.events.last().unwrap().source,
+                NodeSource::Refused {
+                    reason: TASK_BUDGET_REASON.to_string(),
+                    what: what.clone(),
+                },
+                "{path}"
+            );
+            assert_eq!(step_of(&journal, old_child.id).grant, None, "{path}");
+        }
+    }
+
+    /// A child below a stopped child gets no grant and asks no model, even
+    /// when its own stop is missing (CL79).
+    #[test]
+    fn a_child_below_a_stopped_child_gets_nothing() {
+        let (mut journal, run) = task(budget(8, 600));
+        let parent = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let below = propose_child(&mut journal, parent, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(note_time_refusal(&mut journal, parent));
+        // Remove the cascade by hand: the chain check alone must hold.
+        step_mut(&mut journal, parent).grant = Some("parent-grant".into());
+        step_mut(&mut journal, below).stop = None;
+        step_mut(&mut journal, below).state = StepState::Prepared;
+        assert!(!authorize_child(
+            &mut journal,
+            below,
+            Some("child-grant"),
+            DEMO_SRC_LIB
+        ));
+        assert_eq!(step_of(&journal, below).grant, None);
+        assert_eq!(
+            ask_model(&mut journal, Some(below), HOSTED_MODEL),
+            Err("stopped")
+        );
+    }
+
+    // Codex review of 206da0d: seven findings, one test each (each failed on
+    // 206da0d).
+
+    /// Finding 1: reread and resume load through the same rules as decode,
+    /// child rules included.
+    #[test]
+    fn a_reread_or_resume_refuses_a_journal_that_breaks_a_child_rule() {
+        let (mut tree, run) = task(budget(8, 600));
+        let parent = propose_child(&mut tree, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let below = propose_child(&mut tree, parent, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(note_time_refusal(&mut tree, parent));
+        let mut running_below = tree.clone();
+        step_mut(&mut running_below, below).stop = None;
+        running_below.events.retain(
+            |node| !matches!(node.source, NodeSource::ChildStop { child, .. } if child == below),
+        );
+        let mut wider = tree.clone();
+        step_mut(&mut wider, parent).resource = "localhost://Users/self/Projects/other".into();
+        for (bad, reason) in [(running_below, "record"), (wider, "not a subset")] {
+            let (mut runtime, mut cursor) = fake_runtime();
+            runtime.stored = Some(encode_journal(&bad, &[0; 32]).unwrap());
+            assert_eq!(
+                reread_journal(&mut runtime, &mut cursor, Some(&read_grant())).map(|_| ()),
+                Err(reason)
+            );
+            let (mut runtime, mut cursor) = fake_runtime();
+            runtime.lose_reply = true;
+            let mut journal = two_turns();
+            assert_eq!(
+                append_journal(
+                    &mut runtime,
+                    &mut journal,
+                    &mut cursor,
+                    Some(&write_grant())
+                ),
+                AppendOutcome::Unknown
+            );
+            let waiting = cursor.clone();
+            runtime.stored = Some(encode_journal(&bad, &[0; 32]).unwrap());
+            assert_eq!(
+                resume_journal(&mut runtime, &mut journal, &mut cursor, Some(&read_grant())),
+                ResumeOutcome::Refused(reason)
+            );
+            assert_eq!(cursor, waiting);
+        }
+    }
+
+    /// Finding 2: an inbox answer for a child goes through the same child
+    /// checks as `authorize_child`.
+    #[test]
+    fn an_inbox_answer_grants_only_a_usable_child_under_a_granted_parent() {
+        // A legacy child with no budget.
+        let hex: String = PRE_IDEA_2_JOURNAL.concat();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect();
+        let (mut legacy, _, _) = decode_journal(&bytes).unwrap();
+        let old_child = legacy
+            .steps
+            .iter()
+            .find(|step| step.kind == ProposalKind::Child)
+            .unwrap()
+            .clone();
+        assert!(authorize(
+            &mut legacy,
+            old_child.parent_id.unwrap(),
+            Some("fixture-grant")
+        ));
+        let before = legacy.clone();
+        assert!(!apply_inbox(
+            &mut legacy,
+            old_child.id,
+            InboxAnswer::AllowOnce,
+            Some("child-grant")
+        ));
+        assert_eq!(without_refusal_records(&legacy.events), before.events);
+        assert_eq!(legacy.steps, before.steps);
+        assert_eq!(legacy.events.len(), before.events.len() + 1);
+        assert!(is_refusal_record(legacy.events.last().unwrap()));
+        // A budgeted child whose parent holds no grant.
+        let mut journal = two_turns();
+        assert!(record_task_budget(&mut journal, budget(8, 600)));
+        let run = propose_run(&mut journal, DEMO, &["true".to_string()]).unwrap();
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let before = journal.clone();
+        assert!(!apply_inbox(
+            &mut journal,
+            child,
+            InboxAnswer::Standing,
+            Some("child-grant")
+        ));
+        assert_eq!(without_refusal_records(&journal.events), before.events);
+        assert_eq!(journal.steps, before.steps);
+        assert_eq!(journal.events.len(), before.events.len() + 1);
+        assert!(is_refusal_record(journal.events.last().unwrap()));
+        // A stopped child.
+        assert!(authorize(&mut journal, run, Some("fixture-grant")));
+        let stopped = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(note_time_refusal(&mut journal, stopped));
+        assert!(!apply_inbox(
+            &mut journal,
+            stopped,
+            InboxAnswer::AllowOnce,
+            Some("child-grant")
+        ));
+        assert_eq!(step_of(&journal, stopped).grant, None);
+        // Control: a usable child under a granted parent.
+        assert!(apply_inbox(
+            &mut journal,
+            child,
+            InboxAnswer::AllowOnce,
+            Some("child-grant")
+        ));
+        assert_eq!(
+            step_of(&journal, child).grant.as_deref(),
+            Some("child-grant")
+        );
+    }
+
+    /// Finding 3: a child host never has its own budget or makes its own
+    /// model call; its calls are counted in the parent's journal, so a
+    /// one-request child allows one request, also after reload.
+    #[test]
+    fn a_child_host_spends_the_parent_budget_and_keeps_its_stop() {
+        let (mut parent, run) = task(budget(8, 600));
+        assert!(authorize(&mut parent, run, Some("fixture-grant")));
+        let child = propose_child(&mut parent, run, DEMO_SRC, Some(budget(1, 60))).unwrap();
+        let mut host = open_child_host(&parent, child, DEMO_SRC).unwrap();
+        assert_eq!(host.depth, 1);
+        assert!(!record_task_budget(&mut host, budget(8, 600)));
+        assert_eq!(host.task_budget, None);
+        assert_eq!(ask_model(&mut host, None, HOSTED_MODEL), Err("child host"));
+        assert!(ask_model(&mut parent, Some(child), HOSTED_MODEL).is_ok());
+        assert_eq!(
+            ask_model(&mut parent, Some(child), LOCAL_MODEL),
+            Err("requests")
+        );
+        let mut back = reloaded(&parent);
+        assert_eq!(
+            ask_model(&mut back, Some(child), HOSTED_MODEL),
+            Err("stopped")
+        );
+        assert_eq!(open_child_host(&back, child, DEMO_SRC), Err("stopped"));
+        assert_eq!(open_child_host(&back, run, DEMO_SRC), Err("not a child"));
+        // A stored child host that holds a budget or a model call is refused.
+        let mut forged = host.clone();
+        forged.task_budget = Some(budget(8, 600));
+        assert_eq!(
+            decode_journal(&encode_journal(&forged, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        let mut forged = host.clone();
+        let call = propose_step(&mut forged);
+        step_mut(&mut forged, call).kind = ProposalKind::Hosted;
+        step_mut(&mut forged, call).resource = HOSTED_MODEL.into();
+        assert_eq!(
+            decode_journal(&encode_journal(&forged, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+    }
+
+    /// Finding 4: a child's grant keeps its scope; a grandchild is granted
+    /// only inside it.
+    #[test]
+    fn a_child_grant_scope_bounds_its_children() {
+        let (mut journal, run) = task(budget(8, 600));
+        assert!(authorize(&mut journal, run, Some("fixture-grant")));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let only_a = "localhost://Users/self/Projects/demo/src/a";
+        let in_a = "localhost://Users/self/Projects/demo/src/a/x";
+        let in_b = "localhost://Users/self/Projects/demo/src/b";
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            only_a
+        ));
+        let outside = propose_child(&mut journal, child, in_b, Some(budget(1, 10))).unwrap();
+        assert!(!authorize_child(
+            &mut journal,
+            outside,
+            Some("grandchild-grant"),
+            in_b
+        ));
+        assert!(!apply_inbox(
+            &mut journal,
+            outside,
+            InboxAnswer::AllowOnce,
+            Some("grandchild-grant")
+        ));
+        assert_eq!(step_of(&journal, outside).grant, None);
+        let inside = propose_child(&mut journal, child, in_a, Some(budget(1, 10))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            inside,
+            Some("grandchild-grant"),
+            in_a
+        ));
+        // A child granted through the inbox is granted its whole resource,
+        // and hands that scope on.
+        let other = propose_child(&mut journal, run, DEMO_DOC, Some(budget(2, 60))).unwrap();
+        assert!(apply_inbox(
+            &mut journal,
+            other,
+            InboxAnswer::AllowOnce,
+            Some("other-grant")
+        ));
+        let doc_part = "localhost://Users/self/Projects/demo/doc/part";
+        let below = propose_child(&mut journal, other, doc_part, Some(budget(1, 10))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            below,
+            Some("below-grant"),
+            doc_part
+        ));
+    }
+
+    /// Finding 5: the records are counted per child, not in total.
+    #[test]
+    fn each_child_has_exactly_its_own_records() {
+        let (mut journal, run) = task(budget(8, 600));
+        let a = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let b = propose_child(&mut journal, run, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(note_time_refusal(&mut journal, a));
+        assert!(note_time_refusal(&mut journal, b));
+        assert!(decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok());
+        for kind in ["budget", "stop"] {
+            let mut bad = journal.clone();
+            for node in &mut bad.events {
+                match (&mut node.source, kind) {
+                    (NodeSource::ChildBudget { child, .. }, "budget")
+                    | (NodeSource::ChildStop { child, .. }, "stop")
+                        if *child == b =>
+                    {
+                        *child = a;
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                decode_journal(&encode_journal(&bad, &[0; 32]).unwrap()).map(|_| ()),
+                Err("record"),
+                "{kind}"
+            );
+        }
+    }
+
+    /// Finding 6: when the task and a child run out together, the child
+    /// still stops with `requests`, and its subtree with it.
+    #[test]
+    fn the_task_and_a_child_running_out_together_stops_the_child() {
+        let (mut journal, run) = task(budget(2, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let below = propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(1, 60))).unwrap();
+        assert!(ask_model(&mut journal, Some(child), HOSTED_MODEL).is_ok());
+        assert!(ask_model(&mut journal, Some(child), LOCAL_MODEL).is_ok());
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("requests")
+        );
+        assert_eq!(step_of(&journal, child).stop, Some(StopReason::Requests));
+        assert_eq!(step_of(&journal, below).stop, Some(StopReason::Cancelled));
+        assert!(decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok());
+    }
+
+    /// Finding 7: every refusal for a budget that was never recorded says
+    /// what to do, with `TASK_BUDGET_REASON`, asserted on the refusal itself.
+    #[test]
+    fn a_missing_budget_is_refused_with_the_task_budget_reason() {
+        let mut bare = two_turns();
+        let run = propose_run(&mut bare, DEMO, &["true".to_string()]).unwrap();
+        assert_eq!(
+            ask_model(&mut bare, None, HOSTED_MODEL),
+            Err(TASK_BUDGET_REASON)
+        );
+        assert_eq!(
+            propose_child(&mut bare, run, DEMO_SRC, Some(budget(2, 60))),
+            Err(TASK_BUDGET_REASON)
+        );
+        let hex: String = PRE_IDEA_2_JOURNAL.concat();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect();
+        let (mut legacy, _, _) = decode_journal(&bytes).unwrap();
+        assert!(record_task_budget(&mut legacy, budget(8, 600)));
+        let old_child = legacy
+            .steps
+            .iter()
+            .find(|step| step.kind == ProposalKind::Child)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            ask_model(&mut legacy, Some(old_child.id), HOSTED_MODEL),
+            Err(TASK_BUDGET_REASON)
+        );
+        let grand = "localhost://Users/self/Projects/demo/src/x";
+        assert_eq!(
+            propose_child(&mut legacy, old_child.id, grand, Some(budget(1, 10))),
+            Err(TASK_BUDGET_REASON)
+        );
+        assert_eq!(
+            propose_child(&mut legacy, old_child.id, grand, None),
+            Err(TASK_BUDGET_REASON),
+            "the parent is refused first"
+        );
+    }
+
+    /// Codex at 310bcb5: a budgeted child whose task budget was never
+    /// recorded gets the recovery reason, not "over the parent's budget", on
+    /// every path: the load, the live child check and opening its host.
+    #[test]
+    fn a_budgeted_child_with_no_task_budget_says_start_a_new_task() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(3, 60))).unwrap();
+        journal.task_budget = None;
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err(TASK_BUDGET_REASON)
+        );
+        assert_eq!(
+            usable_child(&journal, child).map(|_| ()),
+            Err(TASK_BUDGET_REASON)
+        );
+        assert_eq!(
+            open_child_host(&journal, child, DEMO_SRC),
+            Err(TASK_BUDGET_REASON)
+        );
+    }
+
+    /// A cancelled task is refused as "cancelled", not "stopped", on every
+    /// live path (CF18).
+    #[test]
+    fn a_cancelled_task_says_cancelled_on_every_live_path() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(cancel_task(&mut journal));
+        assert_eq!(open_child_host(&journal, child, DEMO_SRC), Err("cancelled"));
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("cancelled")
+        );
+        assert_eq!(
+            propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(1, 10))),
+            Err("parent stopped")
+        );
+    }
+
+    /// A child that breaks a child rule in memory is refused on every live
+    /// path, through `usable_child` (CF19): the same rules as on load.
+    #[test]
+    fn a_child_that_breaks_a_rule_is_refused_on_every_live_path() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        step_mut(&mut journal, child).requests_used = 1;
+        let before = journal.clone();
+        assert_eq!(open_child_host(&journal, child, DEMO_SRC), Err("record"));
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("record")
+        );
+        assert_eq!(
+            propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(1, 10))),
+            Err("record")
+        );
+        assert!(!authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert!(!apply_inbox(
+            &mut journal,
+            child,
+            InboxAnswer::AllowOnce,
+            Some("child-grant")
+        ));
+        // Each refused grant changes no step and leaves one refusal record.
+        assert_eq!(without_refusal_records(&journal.events), before.events);
+        assert_eq!(journal.steps, before.steps);
+        assert_eq!(journal.events.len(), before.events.len() + 2);
+        assert!(journal.events[before.events.len()..]
+            .iter()
+            .all(is_refusal_record));
+    }
+
+    // Codex at fe40437: two holes in child hosts (each test failed there,
+    // written against that API).
+
+    /// Hole 1: a child host kept open after its child stops gets nothing:
+    /// every host action reads the parent's current journal again.
+    #[test]
+    fn a_child_host_gets_nothing_once_its_child_stops() {
+        for stop in ["time", "parent", "cancel"] {
+            let (mut parent, run) = task(budget(8, 600));
+            let above = propose_child(&mut parent, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+            assert!(authorize_child(
+                &mut parent,
+                above,
+                Some("above-grant"),
+                DEMO_SRC
+            ));
+            let child =
+                propose_child(&mut parent, above, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+            assert!(authorize_child(
+                &mut parent,
+                child,
+                Some("child-grant"),
+                DEMO_SRC_LIB
+            ));
+            let mut host = open_child_host(&parent, child, DEMO_SRC_LIB).unwrap();
+            let granted = propose_read(&mut host, DEMO_SRC_LIB);
+            assert!(authorize_in_host(
+                &mut parent,
+                child,
+                &mut host,
+                granted,
+                Some("read-grant")
+            ));
+            let asked = propose_read(&mut host, DEMO_SRC_LIB);
+            match stop {
+                "time" => assert!(note_time_refusal(&mut parent, child)),
+                "parent" => assert!(note_time_refusal(&mut parent, above)),
+                _ => assert!(cancel_task(&mut parent)),
+            }
+            let before = host.clone();
+            assert!(
+                !grant_child_host(&mut parent, child, &mut host, Some("host-grant")),
+                "{stop}"
+            );
+            assert!(!authorize_in_host(
+                &mut parent,
+                child,
+                &mut host,
+                asked,
+                Some("read-grant")
+            ));
+            assert!(!host_inbox(
+                &mut parent,
+                child,
+                &mut host,
+                asked,
+                InboxAnswer::AllowOnce,
+                Some("read-grant")
+            ));
+            assert!(
+                !dispatch_in_host(&parent, child, &mut host, granted),
+                "{stop}"
+            );
+            // Each refused action leaves one record with the shared reason;
+            // no step moves.
+            let reason = if stop == "cancel" {
+                "cancelled"
+            } else {
+                "stopped"
+            };
+            let added = &host.events[before.events.len()..];
+            assert_eq!(added.len(), 4, "{stop}");
+            assert!(
+                added.iter().all(|node| matches!(
+                    &node.source,
+                    NodeSource::Refused { reason: why, .. } if why == reason
+                )),
+                "{stop}: {added:?}"
+            );
+            assert_eq!(host.steps, before.steps, "{stop}");
+            assert_eq!(
+                without_refusal_records(&host.events),
+                before.events,
+                "{stop}"
+            );
+            // A person's deny is still recorded.
+            assert!(!host_inbox(
+                &mut parent,
+                child,
+                &mut host,
+                asked,
+                InboxAnswer::Deny,
+                None
+            ));
+            assert_eq!(step_of(&host, asked).inbox, "deny", "{stop}");
+            assert_eq!(step_of(&host, asked).state, StepState::Denied, "{stop}");
+        }
+
+        // Codex at 914948067: a clone of the parent is a snapshot, not the
+        // task. A dispatch, a grant and a write request made through it after
+        // the real parent was cancelled do nothing.
+        let (mut parent, run) = task(budget(8, 600));
+        let child = propose_child(&mut parent, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut parent,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let mut host = open_child_host(&parent, child, DEMO_SRC).unwrap();
+        let granted = propose_read(&mut host, DEMO_SRC);
+        assert!(authorize_in_host(
+            &mut parent,
+            child,
+            &mut host,
+            granted,
+            Some("read-grant")
+        ));
+        let asked = propose_read(&mut host, DEMO_SRC);
+        let resource = "localhost://Users/self/Projects/demo/src/notes.txt";
+        assert!(observe(&mut host, resource, 1, "alpha"));
+        let edit = propose_edit(&mut host, resource, "alpha", "beta", Some(1)).unwrap();
+        assert!(authorize_in_host(
+            &mut parent,
+            child,
+            &mut host,
+            edit,
+            Some("write-grant")
+        ));
+        assert!(provider_write_may_be_asked(
+            &mut host,
+            edit,
+            1,
+            Some((&parent, child))
+        ));
+        let mut stale = parent.clone();
+        assert!(cancel_task(&mut parent));
+        // A snapshot owns no authority: it cannot open a host and then spend
+        // the copied grants and budget of the cancelled task.
+        assert_eq!(
+            open_child_host(&stale, child, DEMO_SRC),
+            Err("stale parent"),
+            "a stale parent opens no host"
+        );
+        let before = host.clone();
+        assert!(
+            !dispatch_in_host(&stale, child, &mut host, granted),
+            "a stale parent dispatches nothing"
+        );
+        assert!(
+            !authorize_in_host(&mut stale, child, &mut host, asked, Some("read-grant")),
+            "a stale parent grants nothing"
+        );
+        assert!(
+            !host_inbox(
+                &mut stale,
+                child,
+                &mut host,
+                asked,
+                InboxAnswer::AllowOnce,
+                Some("read-grant")
+            ),
+            "a stale parent answers nothing"
+        );
+        assert!(
+            !grant_child_host(&mut stale, child, &mut host, Some("host-grant")),
+            "a stale parent gives no host grant"
+        );
+        assert!(
+            !provider_write_may_be_asked(&mut host, edit, 1, Some((&stale, child))),
+            "a stale parent asks for no write"
+        );
+        let added = &host.events[before.events.len()..];
+        assert_eq!(added.len(), 5);
+        assert!(
+            added.iter().all(|node| matches!(
+                &node.source,
+                NodeSource::Refused { reason, .. } if reason == "not this child's host"
+            )),
+            "{added:?}"
+        );
+        assert_eq!(host.steps, before.steps);
+    }
+
+    /// Codex at 914948067: saving the journal stages a copy and swaps it in.
+    /// That staging keeps the journal's task identity, so a host opened
+    /// before the append is still its child's host after it.
+    #[test]
+    fn a_child_host_stays_bound_across_an_append() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        let (mut parent, run) = task(budget(8, 600));
+        let child = propose_child(&mut parent, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut parent,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let mut host = open_child_host(&parent, child, DEMO_SRC).unwrap();
+        let read = propose_read(&mut host, DEMO_SRC);
+        assert!(authorize_in_host(
+            &mut parent,
+            child,
+            &mut host,
+            read,
+            Some("read-grant")
+        ));
+        assert_eq!(
+            append_journal(&mut runtime, &mut parent, &mut cursor, Some(&write_grant())),
+            AppendOutcome::Written
+        );
+        assert!(
+            dispatch_in_host(&parent, child, &mut host, read),
+            "the append keeps the host bound"
+        );
+        assert_eq!(step_of(&host, read).state, StepState::Dispatched);
+    }
+
+    /// Codex at 914948067: a snapshot's copied grants and budget take no
+    /// pending model call and ask for no new one after the owning task is
+    /// cancelled.
+    #[test]
+    fn a_stale_parent_dispatches_no_call_and_asks_for_none() {
+        let (mut parent, run) = task(budget(8, 600));
+        let child = propose_child(&mut parent, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        assert!(authorize_child(
+            &mut parent,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let call = ask_model(&mut parent, Some(child), HOSTED_MODEL).unwrap();
+        assert!(authorize(&mut parent, call, Some("model-grant")));
+        let resource = "localhost://Users/self/Projects/demo/notes.txt";
+        assert!(observe(&mut parent, resource, 1, "alpha"));
+        let edit = propose_edit(&mut parent, resource, "alpha", "beta", Some(1)).unwrap();
+        assert!(authorize(&mut parent, edit, Some("write-grant")));
+        assert!(provider_write_may_be_asked(&mut parent, edit, 1, None));
+        let mut stale = parent.clone();
+        assert!(cancel_task(&mut parent));
+        let before = stale.clone();
+        assert!(
+            !dispatch(&mut stale, call),
+            "a stale parent dispatches no call"
+        );
+        assert_eq!(stale.steps, before.steps);
+        assert_eq!(step_of(&stale, call).state, StepState::Prepared);
+        assert!(
+            !provider_write_may_be_asked(&mut stale, edit, 1, None),
+            "a stale parent asks for no write"
+        );
+        assert!(
+            refusal_records(&stale)
+                .iter()
+                .any(|record| record.contains("stale parent")),
+            "{:?}",
+            refusal_records(&stale)
+        );
+        let steps = stale.steps.len();
+        assert_eq!(
+            ask_model(&mut stale, Some(child), HOSTED_MODEL),
+            Err("stale parent")
+        );
+        assert_eq!(stale.steps.len(), steps);
+    }
+
+    /// Hole 2: a host touches only what the parent granted its child. Every
+    /// step it grants, answers or dispatches sits in the child's granted
+    /// scope, not only in the child's resource.
+    #[test]
+    fn a_child_host_touches_only_what_its_child_was_granted() {
+        let (mut parent, run) = task(budget(8, 600));
+        let child = propose_child(&mut parent, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let only_a = "localhost://Users/self/Projects/demo/src/a";
+        let in_a = "localhost://Users/self/Projects/demo/src/a/x";
+        let in_b = "localhost://Users/self/Projects/demo/src/b";
+        let mut host = open_child_host(&parent, child, DEMO_SRC).unwrap();
+        // Not granted yet: the host can do nothing.
+        let early = propose_read(&mut host, in_a);
+        assert!(!authorize_in_host(
+            &mut parent,
+            child,
+            &mut host,
+            early,
+            Some("read-grant")
+        ));
+        assert!(authorize_child(
+            &mut parent,
+            child,
+            Some("child-grant"),
+            only_a
+        ));
+        assert!(!grant_child_host(
+            &mut parent,
+            child,
+            &mut host,
+            Some("host-grant")
+        ));
+        let outside = propose_read(&mut host, in_b);
+        assert!(!authorize_in_host(
+            &mut parent,
+            child,
+            &mut host,
+            outside,
+            Some("read-grant")
+        ));
+        assert!(!host_inbox(
+            &mut parent,
+            child,
+            &mut host,
+            outside,
+            InboxAnswer::Standing,
+            Some("read-grant")
+        ));
+        assert_eq!(step_of(&host, outside).grant, None);
+        // An NFD spelling inside the scope is refused by the path rule (it is
+        // another file's name), not by the prefix.
+        let dotted = propose_read(
+            &mut host,
+            "localhost://Users/self/Projects/demo/src/a/cafe\u{301}",
+        );
+        assert!(!authorize_in_host(
+            &mut parent,
+            child,
+            &mut host,
+            dotted,
+            Some("read-grant")
+        ));
+        // The plain functions refuse a host's steps outright.
+        assert!(!authorize(&mut host, outside, Some("read-grant")));
+        assert!(!apply_inbox(
+            &mut host,
+            outside,
+            InboxAnswer::AllowOnce,
+            Some("read-grant")
+        ));
+        // Inside the granted scope: granted and dispatched; the parent's own
+        // grant is refused; the plain dispatch still refuses a granted step.
+        let inside = propose_read(&mut host, in_a);
+        assert!(!authorize_in_host(
+            &mut parent,
+            child,
+            &mut host,
+            inside,
+            Some("fixture-grant")
+        ));
+        assert!(authorize_in_host(
+            &mut parent,
+            child,
+            &mut host,
+            inside,
+            Some("read-grant")
+        ));
+        assert!(!dispatch(&mut host, inside));
+        assert!(dispatch_in_host(&parent, child, &mut host, inside));
+        let answered = propose_read(&mut host, in_a);
+        assert!(host_inbox(
+            &mut parent,
+            child,
+            &mut host,
+            answered,
+            InboxAnswer::AllowOnce,
+            Some("read-grant")
+        ));
+        // A host opened for another child, or at another depth, is not this
+        // child's host.
+        let other = propose_child(&mut parent, run, DEMO_DOC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut parent,
+            other,
+            Some("other-grant"),
+            DEMO_DOC
+        ));
+        let mut wrong = host.clone();
+        wrong.depth = 2;
+        let step = propose_read(&mut wrong, in_a);
+        assert!(!authorize_in_host(
+            &mut parent,
+            child,
+            &mut wrong,
+            step,
+            Some("read-grant")
+        ));
+    }
+
+    // Independent review of 10a31e2 (same AI family, not a cross-family
+    // review): ten findings, one test each; each failed on 10a31e2.
+
+    /// R1: the plain `authorize` never grants a child; only `authorize_child`
+    /// or an inbox answer do, through `child_grant_ok`.
+    #[test]
+    fn the_plain_authorize_never_grants_a_child() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(!authorize(&mut journal, child, Some("fixture-grant")));
+        assert!(!authorize(&mut journal, child, Some("child-grant")));
+        assert_eq!(step_of(&journal, child).grant, None);
+        assert_eq!(step_of(&journal, child).state, StepState::Prepared);
+    }
+
+    /// Every plain entry point records one clear refusal when it refuses a
+    /// host's step, and the plain `authorize` records one when it refuses a
+    /// child: the caller sees why nothing happened.
+    #[test]
+    fn a_plain_entry_point_that_refuses_a_child_or_host_says_why() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(!authorize(&mut journal, child, Some("child-grant")));
+        assert_eq!(
+            refusal_records(&journal),
+            vec![format!("refused: child grant (step {child})")]
+        );
+        assert_eq!(step_of(&journal, child).grant, None);
+        assert_eq!(step_of(&journal, child).state, StepState::Prepared);
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let mut host = open_child_host(&journal, child, DEMO_SRC).unwrap();
+        let read = propose_read(&mut host, DEMO_SRC);
+        let steps = host.steps.clone();
+        let refusal = format!("refused: child host (host step {read})");
+        assert!(!authorize(&mut host, read, Some("read-grant")));
+        assert!(!apply_inbox(
+            &mut host,
+            read,
+            InboxAnswer::AllowOnce,
+            Some("read-grant")
+        ));
+        assert!(!dispatch(&mut host, read));
+        assert_eq!(
+            refusal_records(&host),
+            vec![refusal.clone(), refusal.clone(), refusal]
+        );
+        assert_eq!(host.steps, steps);
+    }
+
+    /// R2: a denied child, or one below a denied child, does nothing more.
+    #[test]
+    fn a_denied_child_does_nothing_more() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let below = propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(!apply_inbox(&mut journal, child, InboxAnswer::Deny, None));
+        assert_eq!(step_of(&journal, child).state, StepState::Denied);
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("denied")
+        );
+        assert_eq!(
+            ask_model(&mut journal, Some(below), HOSTED_MODEL),
+            Err("denied")
+        );
+        let deeper = "localhost://Users/self/Projects/demo/src/lib/a";
+        assert_eq!(
+            propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(1, 10))),
+            Err("denied")
+        );
+        assert!(!authorize_child(
+            &mut journal,
+            below,
+            Some("below-grant"),
+            deeper
+        ));
+        assert_eq!(
+            open_child_host(&journal, below, DEMO_SRC_LIB),
+            Err("denied")
+        );
+    }
+
+    /// Codex at 1c0449a: a model call already proposed under a child is
+    /// authorized and dispatched only while that child is still usable. A
+    /// deny or a stop after the proposal takes the pending call with it. The
+    /// refusal keeps the shared check's exact reason (Codex at 11dd10e).
+    #[test]
+    fn a_pending_model_call_under_a_denied_child_does_nothing() {
+        for (stop, reason) in [("deny", "denied"), ("time", "stopped")] {
+            let (mut journal, run) = task(budget(8, 600));
+            let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+            let call = ask_model(&mut journal, Some(child), HOSTED_MODEL).unwrap();
+            if stop == "deny" {
+                assert!(!apply_inbox(&mut journal, child, InboxAnswer::Deny, None));
+            } else {
+                assert!(note_time_refusal(&mut journal, child));
+            }
+            let before = journal.clone();
+            assert!(
+                !authorize(&mut journal, call, Some("model-grant")),
+                "{stop}: a grant is not recorded"
+            );
+            assert_eq!(step_of(&journal, call).grant, None, "{stop}");
+            assert!(
+                !dispatch(&mut journal, call),
+                "{stop}: the call does not leave"
+            );
+            // A deny leaves the call prepared; a stop cancels it with the tree.
+            let expected = if stop == "deny" {
+                StepState::Prepared
+            } else {
+                StepState::Cancelled
+            };
+            assert_eq!(step_of(&journal, call).state, expected, "{stop}");
+            // Each refused path leaves one record with the shared reason; a
+            // step already cancelled with its tree records only at dispatch.
+            let records = refusal_records(&journal);
+            let expected_records = if stop == "deny" { 2 } else { 1 };
+            assert_eq!(records.len(), expected_records, "{stop}: {records:?}");
+            assert!(
+                records.iter().all(|record| record.contains(reason)),
+                "{stop}: {records:?}"
+            );
+            assert_eq!(journal.steps, before.steps, "{stop}: no step moves");
+            assert_eq!(
+                without_refusal_records(&journal.events),
+                before.events,
+                "{stop}: nothing else changes"
+            );
+        }
+        // Under a usable child the same call is authorized and dispatched.
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let call = ask_model(&mut journal, Some(child), HOSTED_MODEL).unwrap();
+        assert!(authorize(&mut journal, call, Some("model-grant")));
+        assert!(dispatch(&mut journal, call));
+    }
+
+    /// Codex at 11dd10e: a model call of the top task is authorized and
+    /// dispatched only while the task budget is recorded. A journal from
+    /// before idea 2 says exactly why on both paths, and the same call goes
+    /// through once the granted budget is recorded.
+    #[test]
+    fn a_top_level_model_call_needs_the_task_budget() {
+        let hex: String = PRE_IDEA_2_JOURNAL.concat();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect();
+        let (mut journal, _, _) = decode_journal(&bytes).unwrap();
+        let call = journal
+            .steps
+            .iter()
+            .find(|step| step.kind == ProposalKind::Hosted)
+            .unwrap()
+            .id;
+        let before = journal.clone();
+        assert!(!authorize(&mut journal, call, Some("model-grant")));
+        assert!(!dispatch(&mut journal, call));
+        assert_eq!(step_of(&journal, call).grant, None);
+        assert_eq!(step_of(&journal, call).state, StepState::Prepared);
+        assert_eq!(
+            refusal_records(&journal),
+            vec![
+                format!("refused: {TASK_BUDGET_REASON} (step {call})"),
+                format!("refused: {TASK_BUDGET_REASON} (step {call})"),
+            ]
+        );
+        assert_eq!(journal.steps, before.steps);
+        assert_eq!(without_refusal_records(&journal.events), before.events);
+        assert!(record_task_budget(&mut journal, budget(8, 600)));
+        assert!(authorize(&mut journal, call, Some("model-grant")));
+        assert!(dispatch(&mut journal, call));
+    }
+
+    /// Codex at 75ac0ae: a child host's write is asked only while its parent
+    /// still grants the child and the step. The same `host_step_ok` that
+    /// refuses a dispatch refuses the provider write, and a host journal
+    /// without its parent asks nothing.
+    #[test]
+    fn a_host_write_needs_its_parent_still_granting_it() {
+        let (mut parent, run) = task(budget(8, 600));
+        let child = propose_child(&mut parent, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut parent,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let mut host = open_child_host(&parent, child, DEMO_SRC).unwrap();
+        let resource = "localhost://Users/self/Projects/demo/src/notes.txt";
+        assert!(observe(&mut host, resource, 1, "alpha"));
+        let edit = propose_edit(&mut host, resource, "alpha", "beta", Some(1)).unwrap();
+        assert!(authorize_in_host(
+            &mut parent,
+            child,
+            &mut host,
+            edit,
+            Some("write-grant")
+        ));
+        assert!(provider_write_may_be_asked(
+            &mut host,
+            edit,
+            1,
+            Some((&parent, child))
+        ));
+        assert!(
+            !provider_write_may_be_asked(&mut host, edit, 1, None),
+            "a host without its parent asks nothing"
+        );
+        assert!(
+            refusal_records(&host)
+                .iter()
+                .any(|record| record.contains("not this child's host")),
+            "{:?}",
+            refusal_records(&host)
+        );
+        assert!(cancel_task(&mut parent));
+        assert!(
+            !provider_write_may_be_asked(&mut host, edit, 1, Some((&parent, child))),
+            "the cancelled task takes the write with it"
+        );
+        assert!(
+            refusal_records(&host)
+                .iter()
+                .any(|record| record.contains("cancelled")),
+            "{:?}",
+            refusal_records(&host)
+        );
+        assert!(!dispatch_in_host(&parent, child, &mut host, edit));
+    }
+
+    /// Codex at 310bcb5: a change request goes through the same
+    /// `write_context_ok` as a single write. Cancelling the parent between
+    /// the dispatch and the request refuses it, and a host journal with no
+    /// parent asks nothing.
+    #[test]
+    fn a_host_change_request_needs_its_parent_still_granting_it() {
+        let (mut parent, run) = task(budget(8, 600));
+        let child = propose_child(&mut parent, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut parent,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let mut host = open_child_host(&parent, child, DEMO_SRC).unwrap();
+        let resource = "localhost://Users/self/Projects/demo/src/notes.txt";
+        assert!(observe_read(
+            &mut host, resource, 1, "rev-1", None, false, "alpha\n"
+        ));
+        let edit = propose_edit(&mut host, resource, "alpha", "beta", Some(1)).unwrap();
+        assert!(authorize_in_host(
+            &mut parent,
+            child,
+            &mut host,
+            edit,
+            Some("write-grant")
+        ));
+        assert!(dispatch_in_host(&parent, child, &mut host, edit));
+        assert!(edit_request(&mut host, edit, Some((&parent, child))).is_ok());
+        assert_eq!(
+            edit_request(&mut host, edit, None),
+            Err("not this child's host")
+        );
+        assert!(cancel_task(&mut parent));
+        assert_eq!(
+            edit_request(&mut host, edit, Some((&parent, child))),
+            Err("cancelled")
+        );
+        let records = refusal_records(&host);
+        assert!(
+            records
+                .iter()
+                .any(|record| record.contains("not this child's host")),
+            "{records:?}"
+        );
+        assert!(
+            records.iter().any(|record| record.contains("cancelled")),
+            "{records:?}"
+        );
+    }
+
+    /// Codex at 75ac0ae: child text comes only with a verified host journal.
+    /// A caller that passes no host cannot store a host's grant string, and a
+    /// host from another task, another child, or without the system head is
+    /// not verified context. The guest's own spill pointer is the one
+    /// exception (`spill_pointer`).
+    #[test]
+    fn a_child_result_needs_a_verified_host() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("first-grant"),
+            DEMO_SRC
+        ));
+        let mut host = open_child_host(&journal, child, DEMO_SRC).unwrap();
+        assert!(grant_child_host(
+            &mut journal,
+            child,
+            &mut host,
+            Some("host-only-grant")
+        ));
+        let before = journal.events.len();
+        assert!(!record_tool_result(
+            &mut journal,
+            child,
+            "host-only-grant",
+            None
+        ));
+        assert!(!record_tool_result(&mut journal, child, "child text", None));
+        assert!(!record_tool_result(
+            &mut journal,
+            child,
+            "host-only-grant",
+            Some(&host)
+        ));
+        // Another host opened for the same child is verified context too, but
+        // the grant was given to the first host: the parent's ledger has it,
+        // so the substituted host cannot hide it.
+        let substituted = open_child_host(&journal, child, DEMO_SRC).unwrap();
+        assert!(!record_tool_result(
+            &mut journal,
+            child,
+            "host-only-grant",
+            Some(&substituted)
+        ));
+        let (mut other, other_run) = task(budget(8, 600));
+        let other_child =
+            propose_child(&mut other, other_run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut other,
+            other_child,
+            Some("other-grant"),
+            DEMO_SRC
+        ));
+        let other_host = open_child_host(&other, other_child, DEMO_SRC).unwrap();
+        assert!(!record_tool_result(
+            &mut journal,
+            child,
+            "child text",
+            Some(&other_host)
+        ));
+        let mut wrong_child = host.clone();
+        wrong_child.host_of = Some(ChildHost {
+            task: wrong_child.task.clone(),
+            child: other_child,
+        });
+        assert!(!record_tool_result(
+            &mut journal,
+            child,
+            "child text",
+            Some(&wrong_child)
+        ));
+        let mut headless = host.clone();
+        headless.events[0].text = "not the head".to_string();
+        assert!(!record_tool_result(
+            &mut journal,
+            child,
+            "child text",
+            Some(&headless)
+        ));
+        assert_eq!(
+            refusal_records(&journal).len(),
+            7,
+            "{:?}",
+            refusal_records(&journal)
+        );
+        assert_eq!(
+            refusal_records(&journal)
+                .iter()
+                .filter(|record| record.contains("not this child's host"))
+                .count(),
+            5,
+            "{:?}",
+            refusal_records(&journal)
+        );
+        assert_eq!(
+            refusal_records(&journal)
+                .iter()
+                .filter(|record| record.contains("result holds a grant"))
+                .count(),
+            2,
+            "{:?}",
+            refusal_records(&journal)
+        );
+        assert_eq!(
+            without_refusal_records(&journal.events).len(),
+            before,
+            "never stored"
+        );
+        assert!(!step_of(&journal, child).has_result);
+        assert!(record_tool_result(
+            &mut journal,
+            child,
+            "child text",
+            Some(&host)
+        ));
+    }
+
+    /// Codex at 75ac0ae, round 3: the spill exception is not a text entry.
+    /// It takes the resource and version; admission (dispatched, granted,
+    /// no result, the step's resource, the system head) and the journal's
+    /// own pointer record are separate rules, each refused with a reason.
+    #[test]
+    fn a_spill_pointer_cannot_carry_arbitrary_text() {
+        const OBJECT: &str = "localhost://Users/self/Projects/demo/src/result.txt";
+        fn pointer(resource: &str, version: u64) -> SurfaceNode {
+            SurfaceNode {
+                role: Role::User,
+                text: String::new(),
+                source: NodeSource::Spill {
+                    resource: resource.to_string(),
+                    version,
+                },
+            }
+        }
+        fn dispatched() -> (Journal, u64) {
+            let (mut journal, run) = task(budget(8, 600));
+            let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+            assert!(authorize_child(
+                &mut journal,
+                child,
+                Some("child-grant"),
+                DEMO_SRC
+            ));
+            assert!(dispatch(&mut journal, child));
+            assert!(observe(
+                &mut journal,
+                OBJECT,
+                1,
+                &"x".repeat(CHILD_RESULT_CAP + 1)
+            ));
+            (journal, child)
+        }
+        // The entry takes a resource, not text: a grant string is not this
+        // step's resource.
+        let (mut journal, child) = dispatched();
+        assert!(!record_spill_result(
+            &mut journal,
+            child,
+            "host-only-grant",
+            1
+        ));
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("not this step's resource")));
+        // A matching pointer record is still needed.
+        let (mut journal, child) = dispatched();
+        assert!(!record_spill_result(&mut journal, child, OBJECT, 1));
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("no spill pointer")));
+        // A pointer for another version is not this pointer.
+        let (mut journal, child) = dispatched();
+        journal.events.push(pointer(OBJECT, 1));
+        assert!(!record_spill_result(&mut journal, child, OBJECT, 2));
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("no spill pointer")));
+        // Admission refuses a step that is not dispatched yet, even with a
+        // matching pointer.
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert_eq!(step_of(&journal, child).state, StepState::Prepared);
+        assert!(observe(&mut journal, OBJECT, 1, "short"));
+        journal.events.push(pointer(OBJECT, 1));
+        assert!(!record_spill_result(&mut journal, child, OBJECT, 1));
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("not dispatched")));
+        // Admission refuses a dispatched step with no grant, even with a
+        // matching pointer.
+        let (mut journal, child) = dispatched();
+        step_mut(&mut journal, child).grant = None;
+        journal.events.push(pointer(OBJECT, 1));
+        assert!(!record_spill_result(&mut journal, child, OBJECT, 1));
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("no grant")));
+        // All of them together store the pointer.
+        let (mut journal, child) = dispatched();
+        journal.events.push(pointer(OBJECT, 1));
+        assert!(record_spill_result(&mut journal, child, OBJECT, 1));
+        assert_eq!(
+            journal.events.last().unwrap().text,
+            format!("spill\n{OBJECT}\n1")
+        );
+    }
+
+    /// Codex at 3851b24, finding 2: the public spill entry records every
+    /// refusal with its reason, not a bare false. A prepared, granted child
+    /// is the reproduction: the entry refuses "not dispatched" and says so.
+    #[test]
+    fn the_spill_entry_records_its_refusal_reason() {
+        const OBJECT: &str = "localhost://Users/self/Projects/demo/src/result.txt";
+        const MISSING: &str = "localhost://Users/self/Projects/demo/src/missing.txt";
+        const OUTSIDE: &str = "localhost://Users/self/Projects/demo/notes.txt";
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert!(observe(&mut journal, OBJECT, 1, "short"));
+        assert_eq!(step_of(&journal, child).state, StepState::Prepared);
+        let before = without_refusal_records(&journal.events);
+        assert!(!spill_pointer(&mut journal, child, OBJECT));
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("not dispatched")));
+        assert_eq!(
+            without_refusal_records(&journal.events),
+            before,
+            "a refusal stores nothing else"
+        );
+        // Each path out of the entry explains itself.
+        let records = refusal_records(&journal).len();
+        assert!(!spill_pointer(&mut journal, child, ""));
+        assert_eq!(refusal_records(&journal).len(), records + 1);
+        assert!(refusal_records(&journal)
+            .last()
+            .unwrap()
+            .contains("no resource"));
+        assert!(!spill_pointer(&mut journal, child, "/tmp/secret"));
+        assert_eq!(refusal_records(&journal).len(), records + 2);
+        assert!(refusal_records(&journal)
+            .last()
+            .unwrap()
+            .contains("host path"));
+        assert!(!spill_pointer(&mut journal, child, MISSING));
+        assert_eq!(refusal_records(&journal).len(), records + 3);
+        assert!(refusal_records(&journal)
+            .last()
+            .unwrap()
+            .contains("not observed"));
+        // A dispatched, granted child outside the object's resource is refused
+        // by the admission rule, which the entry now reports.
+        assert!(observe(&mut journal, OUTSIDE, 1, "outside"));
+        assert!(dispatch(&mut journal, child));
+        assert!(!spill_pointer(&mut journal, child, OUTSIDE));
+        assert_eq!(refusal_records(&journal).len(), records + 4);
+        assert!(refusal_records(&journal)
+            .last()
+            .unwrap()
+            .contains("not this step's resource"));
+        // Success adds no refusal record and stores the pointer.
+        assert!(spill_pointer(&mut journal, child, OBJECT));
+        assert_eq!(refusal_records(&journal).len(), records + 4);
+        assert_eq!(
+            journal.events.last().unwrap().text,
+            format!("spill\n{OBJECT}\n1")
+        );
+    }
+
+    /// A child's spill result stays inside the scope it was granted, not only
+    /// inside its own resource: a child with resource `demo/src` but a grant
+    /// of `demo/src/a` cannot spill `demo/src/b`.
+    #[test]
+    fn a_spill_pointer_stays_inside_the_childs_granted_scope() {
+        const IN_A: &str = "localhost://Users/self/Projects/demo/src/a";
+        const IN_B: &str = "localhost://Users/self/Projects/demo/src/b";
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            IN_A
+        ));
+        assert!(dispatch(&mut journal, child));
+        assert!(observe(&mut journal, IN_B, 1, "b"));
+        assert!(observe(&mut journal, IN_A, 2, "a"));
+        let before = without_refusal_records(&journal.events);
+        assert!(!spill_pointer(&mut journal, child, IN_B));
+        assert!(refusal_records(&journal)
+            .last()
+            .unwrap()
+            .contains("not in the grant"));
+        assert_eq!(
+            without_refusal_records(&journal.events),
+            before,
+            "a refusal stores nothing else"
+        );
+        assert_eq!(text_at_spill(&journal.events, IN_B), None);
+        // Inside the granted scope it still spills.
+        assert!(spill_pointer(&mut journal, child, IN_A));
+        assert_eq!(text_at_spill(&journal.events, IN_A).as_deref(), Some("a"));
+    }
+
+    /// The production request limit is decided only by `requests_fit`: no old
+    /// comparison remains and every acceptance site calls the shared rule.
+    /// The dedup itself is behavior-preserving, so this structural check is
+    /// what fails when a copy is restored.
+    fn assert_request_rule_is_shared() {
+        let source = include_str!("lib.rs");
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module follows the production code")
+            .0;
+        for old in [
+            "task_requests_used(journal) > granted.requests",
+            "task_requests_used(journal) >= task.requests",
+            "task_requests_used(journal) > task.requests",
+            "task_requests_used(journal) > budget.requests",
+            "step.requests_used > budget.requests",
+            "used >= budget.requests",
+        ] {
+            assert!(!production.contains(old), "a second request rule: {old}");
+        }
+        assert_eq!(
+            production.matches("fn requests_fit(").count(),
+            1,
+            "one validator"
+        );
+        assert_eq!(
+            production.matches("!requests_fit(").count(),
+            6,
+            "every acceptance site calls the shared rule"
+        );
+    }
+
+    /// The live-state rule has one implementation: `live_step` accepts
+    /// `Prepared | Dispatched` (and nothing whose tree was cancelled), and
+    /// `usable_child` asks it instead of matching the states itself.
+    fn assert_live_state_rule_is_shared() {
+        let source = include_str!("lib.rs");
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module follows the production code")
+            .0;
+        assert!(
+            !production.contains("Some(StepState::Prepared | StepState::Dispatched) => {}"),
+            "usable_child keeps its own live-state rule"
+        );
+        assert_eq!(
+            production.matches("fn live_step(").count(),
+            1,
+            "one validator"
+        );
+        let body = |name: &str| {
+            production
+                .split_once(name)
+                .and_then(|(_, rest)| rest.split_once("\n}\n"))
+                .map(|(body, _)| body)
+                .unwrap_or_else(|| panic!("{name} is in the production code"))
+        };
+        assert!(
+            body("fn live_step(").contains("StepState::Prepared | StepState::Dispatched"),
+            "live_step does not accept the live states"
+        );
+        let usable = body("fn usable_child");
+        assert!(
+            !usable.contains("StepState::"),
+            "usable_child matches states itself"
+        );
+        assert!(
+            usable.contains("live_step("),
+            "usable_child does not ask the shared rule"
+        );
+    }
+
+    #[test]
+    fn the_live_state_rule_is_one_shared_validator() {
+        assert_live_state_rule_is_shared();
+    }
+
+    /// Codex at f9badef, finding 1: one validator decides the task request
+    /// limit. Below, equal to and above the budget is checked through
+    /// recording, authorization, dispatch, a new call and reload. The shared
+    /// validator is asserted here too, so this test fails on the old code.
+    #[test]
+    fn the_task_request_limit_is_one_rule_on_every_path() {
+        assert_request_rule_is_shared();
+        fn three_calls(journal: &mut Journal) -> Vec<u64> {
+            (0..3)
+                .map(|_| {
+                    let id = propose_step(journal);
+                    let step = journal.steps.iter_mut().find(|step| step.id == id).unwrap();
+                    step.kind = ProposalKind::Hosted;
+                    step.resource = HOSTED_MODEL.to_string();
+                    id
+                })
+                .collect()
+        }
+        // Recording: below and equal are recorded; above is refused with its
+        // reason.
+        let mut below = two_turns();
+        let below_calls = three_calls(&mut below);
+        assert!(record_task_budget(&mut below, budget(4, 600)));
+        let mut equal = two_turns();
+        let equal_calls = three_calls(&mut equal);
+        assert!(record_task_budget(&mut equal, budget(3, 600)));
+        let mut above = two_turns();
+        let above_calls = three_calls(&mut above);
+        assert!(!record_task_budget(&mut above, budget(2, 600)));
+        assert_eq!(above.task_budget, None);
+        assert!(refusal_records(&above)
+            .iter()
+            .any(|record| record.contains("requests")));
+        // A budget below the calls already made, put in memory directly, is
+        // what the live paths and the load check must refuse.
+        above.task_budget = Some(budget(2, 600));
+        // Authorization and dispatch: below and equal pass, above is refused
+        // with the same reason the load check gives.
+        for id in &below_calls {
+            assert!(authorize(&mut below, *id, Some("model-grant")));
+            assert!(dispatch(&mut below, *id));
+        }
+        for id in &equal_calls {
+            assert!(authorize(&mut equal, *id, Some("model-grant")));
+            assert!(dispatch(&mut equal, *id));
+        }
+        let before = refusal_records(&above).len();
+        let steps = above.steps.clone();
+        for id in &above_calls {
+            assert!(!authorize(&mut above, *id, Some("model-grant")));
+            assert!(!dispatch(&mut above, *id));
+        }
+        assert_eq!(above.steps, steps);
+        assert_eq!(
+            refusal_records(&above).len(),
+            before + above_calls.len() * 2
+        );
+        assert!(
+            refusal_records(&above)
+                .iter()
+                .all(|record| record.contains("requests")),
+            "{:?}",
+            refusal_records(&above)
+        );
+        // Reload asks the same rule before a new call takes the remainder:
+        // below is under its budget, equal is at it, above is over.
+        assert!(decode_journal(&encode_journal(&below, &[0; 32]).unwrap()).is_ok());
+        assert!(decode_journal(&encode_journal(&equal, &[0; 32]).unwrap()).is_ok());
+        assert_eq!(
+            decode_journal(&encode_journal(&above, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        // A new call fits below and at the limit; no further call fits at it.
+        assert!(ask_model(&mut below, None, HOSTED_MODEL).is_ok());
+        assert_eq!(ask_model(&mut equal, None, HOSTED_MODEL), Err("requests"));
+        assert_eq!(ask_model(&mut above, None, HOSTED_MODEL), Err("requests"));
+    }
+
+    /// Codex at f9badef, finding 1: the dedup is behavior-preserving, so a
+    /// restored copy escapes a behavior test. This named test keeps the
+    /// structural check separate from the boundary cases.
+    #[test]
+    fn request_limit_is_decided_only_by_the_shared_validator() {
+        assert_request_rule_is_shared();
+    }
+
+    /// Codex at 75ac0ae: the request counter applies when the budget is
+    /// recorded and before a pending call is used. A pre-idea-2 journal may
+    /// hold calls already; a one-request budget is not recorded, and a budget
+    /// put in memory directly still refuses the calls on both paths, as the
+    /// reload rule says.
+    #[test]
+    fn an_older_journal_cannot_exceed_a_new_budget() {
+        let hex: String = PRE_IDEA_2_JOURNAL.concat();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect();
+        let (mut journal, _, _) = decode_journal(&bytes).unwrap();
+        let first = journal
+            .steps
+            .iter()
+            .find(|step| step.kind == ProposalKind::Hosted)
+            .unwrap()
+            .id;
+        let second = propose_step(&mut journal);
+        step_mut(&mut journal, second).kind = ProposalKind::Hosted;
+        step_mut(&mut journal, second).resource = HOSTED_MODEL.to_string();
+        assert_eq!(task_requests_used(&journal), 2);
+        assert!(!record_task_budget(&mut journal, budget(1, 600)));
+        assert_eq!(journal.task_budget, None);
+        assert!(
+            refusal_records(&journal)
+                .iter()
+                .any(|record| record.contains("requests")),
+            "{:?}",
+            refusal_records(&journal)
+        );
+        // The counter rule at live use: a budget in memory below the calls
+        // already made refuses both calls, with the same reason the reload
+        // check gives.
+        let mut forced = decode_journal(&encode_journal(&journal, &[0; 32]).unwrap())
+            .unwrap()
+            .0;
+        forced.task_budget = Some(budget(1, 600));
+        let before = forced.clone();
+        assert!(!authorize(&mut forced, first, Some("model-grant")));
+        assert!(!authorize(&mut forced, second, Some("model-grant")));
+        assert!(!dispatch(&mut forced, first));
+        assert!(!dispatch(&mut forced, second));
+        assert_eq!(forced.steps, before.steps);
+        assert!(
+            refusal_records(&forced)
+                .iter()
+                .all(|record| record.contains("requests")),
+            "{:?}",
+            refusal_records(&forced)
+        );
+        assert_eq!(
+            decode_journal(&encode_journal(&forced, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        // A budget equal to the calls already made is recorded and lets the
+        // pending calls through; no further call fits.
+        assert!(record_task_budget(&mut journal, budget(2, 600)));
+        assert!(authorize(&mut journal, first, Some("model-grant")));
+        assert!(dispatch(&mut journal, first));
+        assert!(authorize(&mut journal, second, Some("model-grant")));
+        assert!(dispatch(&mut journal, second));
+        assert_eq!(ask_model(&mut journal, None, HOSTED_MODEL), Err("requests"));
+    }
+
+    /// Codex at 75ac0ae: a model call under a granted child is authorized and
+    /// dispatched only while the grant above it still stands. A run denied
+    /// after the call was authorized takes the call with it, as it takes the
+    /// child's dispatch.
+    #[test]
+    fn a_model_call_under_a_granted_child_needs_the_grant_above_it() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let call = ask_model(&mut journal, Some(child), HOSTED_MODEL).unwrap();
+        assert!(authorize(&mut journal, call, Some("model-grant")));
+        assert!(!authorize(&mut journal, run, None), "the run is denied");
+        assert!(!dispatch(&mut journal, call), "no grant above the child");
+        assert_eq!(step_of(&journal, call).state, StepState::Prepared);
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("not granted")));
+        // With the run's grant still standing, the same call dispatches.
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let call = ask_model(&mut journal, Some(child), HOSTED_MODEL).unwrap();
+        assert!(authorize(&mut journal, call, Some("model-grant")));
+        assert!(dispatch(&mut journal, call));
+        // An ungranted grandchild inherits the scope of the nearest granted
+        // step above it: withdrawing the run's grant takes its call too.
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let below = propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert_eq!(step_of(&journal, below).grant, None);
+        let call = ask_model(&mut journal, Some(below), HOSTED_MODEL).unwrap();
+        assert!(authorize(&mut journal, call, Some("model-grant")));
+        assert!(!authorize(&mut journal, run, None), "the run is denied");
+        assert!(
+            !dispatch(&mut journal, call),
+            "no grant above the ungranted child"
+        );
+        assert_eq!(step_of(&journal, call).state, StepState::Prepared);
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("not granted")));
+        // With an ungranted child and no granted step above it, a revoked run
+        // leaves no authority at all.
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        assert_eq!(step_of(&journal, child).grant, None);
+        let call = ask_model(&mut journal, Some(child), HOSTED_MODEL).unwrap();
+        assert!(authorize(&mut journal, call, Some("model-grant")));
+        assert!(!authorize(&mut journal, run, None), "the run is denied");
+        assert!(!dispatch(&mut journal, call), "no granted step above");
+        assert_eq!(step_of(&journal, call).state, StepState::Prepared);
+        assert!(refusal_records(&journal)
+            .iter()
+            .any(|record| record.contains("no grant")));
+    }
+
+    /// R3: the plain `cancel` on a child is a stop: recorded, with its subtree.
+    #[test]
+    fn the_plain_cancel_on_a_child_stops_it() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let below = propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(cancel(&mut journal, child));
+        assert_eq!(step_of(&journal, child).state, StepState::Cancelled);
+        assert_eq!(step_of(&journal, child).stop, Some(StopReason::Cancelled));
+        assert_eq!(step_of(&journal, below).stop, Some(StopReason::Cancelled));
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("stopped")
+        );
+        assert!(decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok());
+    }
+
+    /// R4: a child is granted once, and a scope stands only while every step
+    /// above it still grants it: a re-grant is refused, and a run denied after
+    /// its children were granted takes the scope from them and their hosts.
+    #[test]
+    fn a_granted_scope_stands_only_while_every_step_above_grants_it() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let narrower = "localhost://Users/self/Projects/demo/src/doc";
+        assert!(!authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant-2"),
+            narrower
+        ));
+        assert_eq!(
+            step_of(&journal, child).grant_scope.as_deref(),
+            Some(DEMO_SRC)
+        );
+        let below = propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            below,
+            Some("below-grant"),
+            DEMO_SRC_LIB
+        ));
+        let mut host = open_child_host(&journal, below, DEMO_SRC_LIB).unwrap();
+        let other = propose_child(&mut journal, child, DEMO_SRC_LIB, Some(budget(1, 10))).unwrap();
+        // The person denies the run after granting: nothing below is granted.
+        assert!(!authorize(&mut journal, run, None));
+        assert!(!grant_child_host(
+            &mut journal,
+            below,
+            &mut host,
+            Some("host-grant")
+        ));
+        assert!(!authorize_child(
+            &mut journal,
+            other,
+            Some("other-grant"),
+            DEMO_SRC_LIB
+        ));
+        // A live ancestor whose grant was withdrawn gives no scope either:
+        // the run keeps its state but not its grant string.
+        let (mut withdrawn, run) = task(budget(8, 600));
+        let child = propose_child(&mut withdrawn, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        assert!(authorize_child(
+            &mut withdrawn,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let mut host = open_child_host(&withdrawn, child, DEMO_SRC).unwrap();
+        let read = propose_read(&mut host, DEMO_SRC);
+        assert!(dispatch(&mut withdrawn, run));
+        step_mut(&mut withdrawn, run).grant = None;
+        assert_eq!(
+            scope_still_granted(&withdrawn, step_of(&withdrawn, child)),
+            None
+        );
+        assert!(!authorize_in_host(
+            &mut withdrawn,
+            child,
+            &mut host,
+            read,
+            Some("read-grant")
+        ));
+        assert_eq!(step_of(&host, read).grant, None);
+    }
+
+    /// R5: only a run or a child is a parent; a model call is not.
+    #[test]
+    fn a_model_call_is_not_a_parent() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let call = ask_model(&mut journal, Some(child), HOSTED_MODEL).unwrap();
+        assert!(note_time_refusal(&mut journal, child));
+        let before = journal.clone();
+        let under = format!("{HOSTED_MODEL}/x");
+        assert_eq!(
+            propose_child(&mut journal, call, &under, Some(budget(1, 10))),
+            Err("not a parent")
+        );
+        assert_eq!(journal, before);
+        assert!(decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok());
+    }
+
+    /// R6, R7: child records written while a compaction is open are carried
+    /// into the committed log and into a crash restore, so the task loads.
+    #[test]
+    fn child_records_survive_an_open_compaction() {
+        for crash in [false, true] {
+            let (mut journal, run) = task(budget(8, 600));
+            let stopped = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+            for n in 0..6 {
+                admit_user(
+                    &mut journal,
+                    &format!("a long line of conversation number {n} to compact away"),
+                );
+            }
+            assert!(begin_compact(&mut journal, "sum"));
+            let made = propose_child(&mut journal, run, DEMO_DOC, Some(budget(2, 60))).unwrap();
+            assert!(note_time_refusal(&mut journal, stopped));
+            // The open compaction itself, with the records added during it,
+            // loads through both restored views.
+            assert!(
+                decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok(),
+                "open {crash}"
+            );
+            if crash {
+                assert!(note_crash_during_compact(&mut journal).is_ok());
+            } else {
+                assert!(commit_compact(&mut journal).is_ok());
+            }
+            assert_eq!(
+                child_stops(&journal)
+                    .iter()
+                    .filter(|stop| stop.0 == stopped)
+                    .count(),
+                1,
+                "crash {crash}"
+            );
+            assert!(journal.events.iter().any(|node| matches!(
+                node.source,
+                NodeSource::ChildBudget { child, .. } if child == made
+            )));
+            assert!(
+                decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok(),
+                "crash {crash}"
+            );
+        }
+    }
+
+    /// A journal with a budgeted child and an open compaction.
+    fn compacting_with_a_child() -> (Journal, u64) {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        for n in 0..6 {
+            admit_user(
+                &mut journal,
+                &format!("a long line of conversation number {n} to compact away"),
+            );
+        }
+        assert!(begin_compact(&mut journal, "sum"));
+        (journal, child)
+    }
+
+    /// The budget record for `child` in one stored event list.
+    fn budget_record_in(nodes: &mut [SurfaceNode], child: u64) -> &mut SurfaceNode {
+        nodes
+            .iter_mut()
+            .find(|node| {
+                matches!(
+                    node.source,
+                    NodeSource::ChildBudget { child: id, .. } if id == child
+                )
+            })
+            .expect("the child's budget record")
+    }
+
+    /// Codex at 310bcb5: a load checks the child records in the pending
+    /// compaction as they will be installed, so a commit cannot carry a
+    /// record that the next load refuses.
+    #[test]
+    fn a_pending_compaction_record_must_match_its_child() {
+        let (mut journal, child) = compacting_with_a_child();
+        let node = budget_record_in(journal.compact_pending.as_mut().unwrap(), child);
+        let narrow = budget(1, 60);
+        if let NodeSource::ChildBudget { budget, .. } = &mut node.source {
+            *budget = narrow;
+        }
+        assert_eq!(step_of(&journal, child).budget, Some(budget(2, 60)));
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+    }
+
+    /// Codex at 310bcb5: the saved compaction keeps the same rule, because a
+    /// crash restore installs it instead.
+    #[test]
+    fn a_saved_compaction_record_must_match_its_child() {
+        let (mut journal, child) = compacting_with_a_child();
+        let node = budget_record_in(&mut journal.compact_backup.as_mut().unwrap().0, child);
+        let narrow = budget(1, 60);
+        if let NodeSource::ChildBudget { budget, .. } = &mut node.source {
+            *budget = narrow;
+        }
+        assert_eq!(step_of(&journal, child).budget, Some(budget(2, 60)));
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+    }
+
+    /// One ordinary node appended to the saved compaction only.
+    fn saved_past_the_log(journal: &mut Journal) {
+        journal.compact_backup.as_mut().unwrap().0.push(node(
+            Role::Assistant,
+            NodeSource::InHistory,
+            "a line saved past the log",
+        ));
+    }
+
+    /// Codex at 4368761: the saved copy is the boundary of the events the
+    /// compaction replaces. One saved node past the log is refused on load,
+    /// so no install can take the records after it from the wrong offset.
+    #[test]
+    fn a_saved_compaction_past_the_log_is_refused_on_load() {
+        let (mut journal, _child) = compacting_with_a_child();
+        saved_past_the_log(&mut journal);
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+    }
+
+    /// The same boundary at commit: a record written after a saved copy that
+    /// is past the log is not dropped; the commit installs nothing.
+    #[test]
+    fn a_commit_refuses_a_saved_compaction_past_the_log() {
+        let (mut journal, child) = compacting_with_a_child();
+        saved_past_the_log(&mut journal);
+        assert!(note_time_refusal(&mut journal, child));
+        let before = journal.clone();
+        assert_eq!(
+            commit_compact(&mut journal),
+            Err(COMPACTION_BOUNDARY_REASON)
+        );
+        assert_eq!(journal, before);
+    }
+
+    /// And at a crash restore.
+    #[test]
+    fn a_crash_restore_refuses_a_saved_compaction_past_the_log() {
+        let (mut journal, child) = compacting_with_a_child();
+        saved_past_the_log(&mut journal);
+        assert!(note_time_refusal(&mut journal, child));
+        let before = journal.clone();
+        assert_eq!(
+            note_crash_during_compact(&mut journal),
+            Err(COMPACTION_BOUNDARY_REASON)
+        );
+        assert_eq!(journal, before);
+    }
+
+    /// A saved copy as long as the log at the start but not equal to it is
+    /// refused too: the boundary is the whole saved prefix, not only its length.
+    #[test]
+    fn a_saved_compaction_that_is_not_the_start_of_the_log_is_refused() {
+        let (mut journal, _child) = compacting_with_a_child();
+        let saved = &mut journal.compact_backup.as_mut().unwrap().0;
+        let last = saved.len() - 1;
+        saved[last].text.push_str(" changed");
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        assert_eq!(
+            commit_compact(&mut journal.clone()),
+            Err(COMPACTION_BOUNDARY_REASON)
+        );
+        assert_eq!(
+            note_crash_during_compact(&mut journal),
+            Err(COMPACTION_BOUNDARY_REASON)
+        );
+    }
+
+    /// Codex at 28940a07, finding 1: a 200-character tool result, an open
+    /// compaction, then a prune. Pruning changed the saved start of the log in
+    /// place, so the journal encoded but no longer loaded. Only operations
+    /// present at 28940a07 are asked, so this compiles and fails there.
+    #[test]
+    fn pruning_during_an_open_compaction_keeps_the_journal_loadable() {
+        let mut journal = two_turns();
+        admit_tool_result(&mut journal, &"x".repeat(200));
+        assert!(begin_compact(&mut journal, COMPACTION_SUMMARY));
+        let before = journal.clone();
+        let _ = prune_tool_results(&mut journal);
+        assert!(decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok());
+        assert_eq!(journal, before, "a refused prune changes nothing");
+    }
+
+    /// The same hole through the head rewrite (`admit_system` on the incapable
+    /// path): node 0 changed in place under an open compaction.
+    #[test]
+    fn a_head_rewrite_during_an_open_compaction_keeps_the_journal_loadable() {
+        let mut journal = two_turns();
+        assert!(begin_compact(&mut journal, COMPACTION_SUMMARY));
+        let before = journal.clone();
+        let _ = admit_system(&mut journal, "Replacement head.", false);
+        assert!(decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok());
+        assert_eq!(journal, before, "a refused rewrite changes nothing");
+    }
+
+    /// Both in-place steps say a compaction is open, and the compaction still
+    /// commits or restores afterwards. Once it is restored they run again.
+    #[test]
+    fn a_step_that_changes_the_log_in_place_says_a_compaction_is_open() {
+        let mut journal = two_turns();
+        admit_tool_result(&mut journal, &"x".repeat(200));
+        assert!(begin_compact(&mut journal, COMPACTION_SUMMARY));
+        assert_eq!(
+            prune_tool_results(&mut journal),
+            Err(COMPACTION_OPEN_REASON)
+        );
+        assert_eq!(
+            admit_system(&mut journal, "Replacement head.", false),
+            Err(COMPACTION_OPEN_REASON)
+        );
+        // The same head changes nothing, so it is not refused.
+        assert_eq!(admit_system(&mut journal, SYSTEM_HEAD, false), Ok(()));
+        assert_eq!(commit_compact(&mut journal.clone()), Ok(()));
+        assert_eq!(note_crash_during_compact(&mut journal), Ok(()));
+        assert_eq!(prune_tool_results(&mut journal), Ok(1));
+        assert_eq!(
+            admit_system(&mut journal, "Replacement head.", false),
+            Ok(())
+        );
+        assert_eq!(system_head(&journal.events), Some("Replacement head."));
+    }
+
+    /// Codex at 28940a07, finding 2: a refused commit or crash restore says
+    /// why, so a caller tells a broken compaction from one never opened.
+    #[test]
+    fn a_refused_commit_or_restore_says_why() {
+        let mut closed = two_turns();
+        let before = closed.clone();
+        assert_eq!(commit_compact(&mut closed), Err(COMPACTION_NOT_OPEN_REASON));
+        assert_eq!(
+            note_crash_during_compact(&mut closed),
+            Err(COMPACTION_NOT_OPEN_REASON)
+        );
+        assert_eq!(closed, before);
+
+        let (mut journal, _child) = compacting_with_a_child();
+        saved_past_the_log(&mut journal);
+        let before = journal.clone();
+        assert_eq!(
+            commit_compact(&mut journal),
+            Err(COMPACTION_BOUNDARY_REASON)
+        );
+        assert_eq!(
+            note_crash_during_compact(&mut journal),
+            Err(COMPACTION_BOUNDARY_REASON)
+        );
+        assert_eq!(journal, before);
+        assert!(COMPACTION_BOUNDARY_REASON.ends_with("start a new task"));
+    }
+
+    /// Codex at 18278463f, finding 2: an open compaction with no saved copy
+    /// loaded, `child_records_since_compaction` then selected no record, and
+    /// the commit dropped a stop written during the compaction; the next load
+    /// refused it. Only operations present at 2a605c16 are asked, so this
+    /// compiles and fails there.
+    #[test]
+    fn an_open_compaction_without_its_saved_copy_keeps_its_records() {
+        let (mut journal, child) = compacting_with_a_child();
+        journal.compact_backup = None;
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        assert!(note_time_refusal(&mut journal, child));
+        let _ = commit_compact(&mut journal);
+        assert_eq!(
+            child_stops(&journal)
+                .iter()
+                .filter(|stop| stop.0 == child)
+                .count(),
+            1,
+            "the stop written during the compaction is kept"
+        );
+    }
+
+    /// Every shape of a broken compaction state: refused on load, and a
+    /// commit or a crash restore says the compaction does not match the log
+    /// and changes nothing. A consistent open compaction still loads.
+    #[test]
+    fn an_open_compaction_has_its_flag_saved_copy_and_replacement_together() {
+        let (good, _child) = compacting_with_a_child();
+        assert!(decode_journal(&encode_journal(&good, &[0; 32]).unwrap()).is_ok());
+        let mut cases: Vec<(Journal, &str)> = Vec::new();
+        let mut journal = good.clone();
+        journal.compact_backup = None;
+        cases.push((journal, "open, no saved copy"));
+        let mut journal = good.clone();
+        journal.compact_pending = None;
+        cases.push((journal, "open, no replacement"));
+        let mut journal = good.clone();
+        journal.compaction_open = false;
+        cases.push((journal, "saved copy and replacement, not open"));
+        let mut journal = good.clone();
+        journal.compaction_open = false;
+        journal.compact_backup = None;
+        cases.push((journal, "a replacement alone"));
+        let mut journal = good.clone();
+        journal.compaction_open = false;
+        journal.compact_pending = None;
+        cases.push((journal, "a saved copy alone"));
+        let mut journal = good.clone();
+        journal.epoch += 1;
+        cases.push((journal, "a new series under an open compaction"));
+        for (mut journal, case) in cases {
+            assert_eq!(
+                decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+                Err("record"),
+                "{case}"
+            );
+            let before = journal.clone();
+            assert_eq!(
+                commit_compact(&mut journal.clone()),
+                Err(COMPACTION_BOUNDARY_REASON),
+                "{case}"
+            );
+            assert_eq!(
+                note_crash_during_compact(&mut journal),
+                Err(COMPACTION_BOUNDARY_REASON),
+                "{case}"
+            );
+            assert_eq!(journal, before, "{case}");
+        }
+    }
+
+    /// The first head is inserted at node 0, which changes the log in place
+    /// and starts a new series: refused under an open compaction, either way
+    /// it is asked.
+    #[test]
+    fn a_first_head_under_an_open_compaction_is_refused() {
+        let mut journal = empty_journal();
+        for n in 0..3 {
+            admit_user(&mut journal, &format!("line {n}"));
+        }
+        journal.compact_backup = Some((journal.events.clone(), journal.epoch));
+        journal.compact_pending = Some(Vec::new());
+        journal.compaction_open = true;
+        let before = journal.clone();
+        for in_history in [false, true] {
+            assert_eq!(
+                admit_system(&mut journal, SYSTEM_HEAD, in_history),
+                Err(COMPACTION_OPEN_REASON)
+            );
+            assert_eq!(journal, before);
+        }
+    }
+
+    /// Every step that changes the journal, asked under an open compaction,
+    /// either appends or is refused, so the compaction stays loadable and
+    /// still commits and restores with the records written during it.
+    #[test]
+    fn every_step_under_an_open_compaction_keeps_it_recoverable() {
+        let (mut journal, child) = compacting_with_a_child();
+        let head = system_head(&journal.events).unwrap().to_string();
+        type Step = Box<dyn Fn(&mut Journal)>;
+        let mut steps: Vec<(&str, Step)> = Vec::new();
+        steps.push(("user", Box::new(|j| admit_user(j, "a later line"))));
+        steps.push(("assistant", Box::new(|j| admit_assistant(j, "an answer"))));
+        steps.push((
+            "tool result",
+            Box::new(|j| admit_tool_result(j, &"x".repeat(200))),
+        ));
+        steps.push((
+            "later system line",
+            Box::new(|j| {
+                let _ = admit_system(j, "A later system line.", true);
+            }),
+        ));
+        steps.push((
+            "same head",
+            Box::new(move |j| {
+                let _ = admit_system(j, &head, false);
+            }),
+        ));
+        steps.push((
+            "new head",
+            Box::new(|j| {
+                let _ = admit_system(j, "Replacement head.", false);
+            }),
+        ));
+        steps.push((
+            "prune",
+            Box::new(|j| {
+                let _ = prune_tool_results(j);
+            }),
+        ));
+        steps.push((
+            "snapshot",
+            Box::new(|j| {
+                admit_snapshot(j, "localhost://Users/self/Projects/demo", "now", "");
+            }),
+        ));
+        steps.push((
+            "skill",
+            Box::new(|j| {
+                admit_skill(j, "Prefer the Runtime grant.");
+            }),
+        ));
+        steps.push((
+            "goal",
+            Box::new(|j| {
+                record_visible(j, VisibleRecord::Goal, "finish the note");
+            }),
+        ));
+        steps.push((
+            "read",
+            Box::new(|j| {
+                observe(j, DEMO_DOC, 1, "alpha\n");
+            }),
+        ));
+        steps.push((
+            "refusal",
+            Box::new(|j| record_refusal_reason(j, TASK_BUDGET_REASON, "a child grant")),
+        ));
+        steps.push((
+            "a child out of time",
+            Box::new(move |j| {
+                note_time_refusal(j, child);
+            }),
+        ));
+        steps.push((
+            "a nested compaction",
+            Box::new(|j| {
+                begin_compact(j, "another summary");
+            }),
+        ));
+        for (name, step) in &steps {
+            step(&mut journal);
+            assert_eq!(compaction_boundary_ok(&journal), Ok(()), "{name}");
+            assert!(
+                decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok(),
+                "{name}"
+            );
+        }
+        for crash in [false, true] {
+            let mut done = journal.clone();
+            if crash {
+                assert_eq!(note_crash_during_compact(&mut done), Ok(()));
+            } else {
+                assert_eq!(commit_compact(&mut done), Ok(()));
+            }
+            assert_eq!(
+                child_stops(&done)
+                    .iter()
+                    .filter(|stop| stop.0 == child)
+                    .count(),
+                1,
+                "crash {crash}"
+            );
+            assert!(
+                decode_journal(&encode_journal(&done, &[0; 32]).unwrap()).is_ok(),
+                "crash {crash}"
+            );
+        }
+    }
+
+    /// R8: on load, no step is still prepared at or before a cancel point or
+    /// below a stopped child (a stop cancels them; one put back is forged).
+    #[test]
+    fn a_prepared_step_where_a_stop_reached_is_refused_on_load() {
+        let (mut journal, _run) = task(budget(8, 600));
+        let call = ask_model(&mut journal, None, HOSTED_MODEL).unwrap();
+        assert!(cancel_task(&mut journal));
+        step_mut(&mut journal, call).state = StepState::Prepared;
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        let call = ask_model(&mut journal, Some(child), HOSTED_MODEL).unwrap();
+        assert!(note_time_refusal(&mut journal, child));
+        assert_eq!(step_of(&journal, call).state, StepState::Cancelled);
+        step_mut(&mut journal, call).state = StepState::Prepared;
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        // A step proposed after the cancel point may still be prepared.
+        let (mut journal, _run) = task(budget(8, 600));
+        assert!(cancel_task(&mut journal));
+        propose_read(&mut journal, DEMO_SRC_LIB);
+        assert!(decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok());
+    }
+
+    /// R9: a journal from before idea 2 with children three deep still loads
+    /// (they had no depth limit and, with no budget, can do nothing now).
+    #[test]
+    fn an_older_deep_child_chain_still_loads() {
+        let mut journal = two_turns();
+        let run = propose_run(&mut journal, DEMO, &["true".to_string()]).unwrap();
+        let mut parent = run;
+        let mut resource = DEMO.to_string();
+        let mut ids = Vec::new();
+        for part in ["a", "b", "c"] {
+            resource = format!("{resource}/{part}");
+            let id = propose_step(&mut journal);
+            let step = step_mut(&mut journal, id);
+            step.kind = ProposalKind::Child;
+            step.resource = resource.clone();
+            step.parent_id = Some(parent);
+            parent = id;
+            ids.push(id);
+        }
+        let mut back = reloaded(&journal);
+        assert_eq!(back, journal);
+        assert!(record_task_budget(&mut back, budget(8, 600)));
+        assert_eq!(
+            ask_model(&mut back, Some(ids[2]), HOSTED_MODEL),
+            Err(TASK_BUDGET_REASON)
+        );
+        // An older child could also sit under a step that cannot hold a child
+        // today; it still loads. A budgeted one there is refused.
+        let mut under_read = two_turns();
+        let read = propose_read(&mut under_read, DEMO);
+        let old = propose_step(&mut under_read);
+        step_mut(&mut under_read, old).kind = ProposalKind::Child;
+        step_mut(&mut under_read, old).resource = DEMO_SRC.to_string();
+        step_mut(&mut under_read, old).parent_id = Some(read);
+        assert!(decode_journal(&encode_journal(&under_read, &[0; 32]).unwrap()).is_ok());
+        assert!(record_task_budget(&mut under_read, budget(8, 600)));
+        set_budget(&mut under_read, old, Some(budget(1, 10)));
+        under_read.events.push(node(
+            Role::User,
+            NodeSource::ChildBudget {
+                child: old,
+                budget: budget(1, 10),
+            },
+            "",
+        ));
+        assert_eq!(
+            decode_journal(&encode_journal(&under_read, &[0; 32]).unwrap()).map(|_| ()),
+            Err("not a parent")
+        );
+        // A budgeted child that deep is still refused.
+        step_mut(&mut journal, ids[2]).budget = Some(budget(1, 10));
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err("depth limit")
+        );
+    }
+
+    /// R10: a host is bound to the child it was opened for; a sibling's
+    /// scope does not fit it, and a reloaded host belongs to no child.
+    #[test]
+    fn a_child_host_is_bound_to_its_child() {
+        let (mut journal, run) = task(budget(8, 600));
+        let a = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let b = propose_child(&mut journal, run, DEMO_DOC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(&mut journal, a, Some("a-grant"), DEMO_SRC));
+        assert!(authorize_child(&mut journal, b, Some("b-grant"), DEMO_DOC));
+        let mut host_a = open_child_host(&journal, a, DEMO_SRC).unwrap();
+        let read = propose_read(&mut host_a, "localhost://Users/self/Projects/demo/doc/x");
+        assert!(!authorize_in_host(
+            &mut journal,
+            b,
+            &mut host_a,
+            read,
+            Some("h")
+        ));
+        let own = propose_read(&mut host_a, DEMO_SRC_LIB);
+        let mut back = reloaded(&host_a);
+        assert!(!authorize_in_host(
+            &mut journal,
+            a,
+            &mut back,
+            own,
+            Some("h")
+        ));
+        assert!(authorize_in_host(
+            &mut journal,
+            a,
+            &mut host_a,
+            own,
+            Some("h")
+        ));
+    }
+
+    /// Codex at 1c0449a: a host is bound to its owning task as well as to its
+    /// child. Two tasks can hold a child with the same id; the other task's
+    /// journal and child do not lend their wider scope to this host.
+    #[test]
+    fn a_child_host_belongs_to_one_task() {
+        let (mut a, run_a) = task(budget(8, 600));
+        let (mut b, run_b) = task(budget(8, 600));
+        let a_src = propose_child(&mut a, run_a, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let b_doc = propose_child(&mut b, run_b, DEMO_DOC, Some(budget(2, 60))).unwrap();
+        assert_eq!(a_src, b_doc, "the child ids collide across tasks");
+        assert!(authorize_child(&mut a, a_src, Some("a-grant"), DEMO_SRC));
+        assert!(authorize_child(&mut b, b_doc, Some("b-grant"), DEMO_DOC));
+        let mut host = open_child_host(&a, a_src, DEMO_SRC).unwrap();
+        let doc_read = propose_read(&mut host, DEMO_DOC);
+        // B's journal and B's child grant doc; this host is A's.
+        assert!(!authorize_in_host(
+            &mut b,
+            b_doc,
+            &mut host,
+            doc_read,
+            Some("read-grant")
+        ));
+        assert!(!host_inbox(
+            &mut b,
+            b_doc,
+            &mut host,
+            doc_read,
+            InboxAnswer::AllowOnce,
+            Some("read-grant")
+        ));
+        assert!(!dispatch_in_host(&b, b_doc, &mut host, doc_read));
+        assert_eq!(step_of(&host, doc_read).grant, None);
+        assert_eq!(step_of(&host, doc_read).state, StepState::Prepared);
+        // Its own task still works.
+        let own = propose_read(&mut host, DEMO_SRC_LIB);
+        assert!(authorize_in_host(
+            &mut a,
+            a_src,
+            &mut host,
+            own,
+            Some("read-grant")
+        ));
+    }
+
+    /// `cancel_tree` on a child that already started stops it (a plain
+    /// cancel only moves a prepared step) (CL37).
+    #[test]
+    fn cancelling_a_started_child_stops_it() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert!(dispatch(&mut journal, child));
+        assert!(
+            !cancel(&mut journal, child),
+            "a started step is not cancelled"
+        );
+        assert!(cancel_tree(&mut journal, child));
+        assert_eq!(step_of(&journal, child).state, StepState::Dispatched);
+        assert_eq!(step_of(&journal, child).stop, Some(StopReason::Cancelled));
+        assert_eq!(
+            ask_model(&mut journal, Some(child), HOSTED_MODEL),
+            Err("stopped")
+        );
+    }
+
+    // Codex at 355e659, finding 1: a stored child beneath a model call
+    // escaped its ancestor's scope. These tests failed on 355e659.
+
+    /// A child moved below a model call in stored bytes, with a resource
+    /// under the call's: decode, reread and resume refuse it ("not a parent"),
+    /// and in memory it gets no grant, no host, and dispatches nothing.
+    #[test]
+    fn a_stored_child_below_a_model_call_is_refused() {
+        let (mut journal, run) = task(budget(8, 600));
+        let call = ask_model(&mut journal, None, HOSTED_MODEL).unwrap();
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let escaped = format!("{HOSTED_MODEL}/x");
+        step_mut(&mut journal, child).parent_id = Some(call);
+        step_mut(&mut journal, child).resource = escaped.clone();
+        let bytes = encode_journal(&journal, &[0; 32]).unwrap();
+        assert_eq!(decode_journal(&bytes).map(|_| ()), Err("not a parent"));
+        let (mut runtime, mut cursor) = fake_runtime();
+        runtime.stored = Some(bytes.clone());
+        assert_eq!(
+            reread_journal(&mut runtime, &mut cursor, Some(&read_grant())).map(|_| ()),
+            Err("not a parent")
+        );
+        let (mut runtime, mut cursor) = fake_runtime();
+        runtime.lose_reply = true;
+        let mut other = two_turns();
+        assert_eq!(
+            append_journal(&mut runtime, &mut other, &mut cursor, Some(&write_grant())),
+            AppendOutcome::Unknown
+        );
+        runtime.stored = Some(bytes);
+        assert_eq!(
+            resume_journal(&mut runtime, &mut other, &mut cursor, Some(&read_grant())),
+            ResumeOutcome::Refused("not a parent")
+        );
+        // In memory: nothing is granted or opened for it.
+        assert!(authorize(&mut journal, call, Some("model-grant")));
+        assert!(!authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            &escaped
+        ));
+        assert!(!apply_inbox(
+            &mut journal,
+            child,
+            InboxAnswer::AllowOnce,
+            Some("child-grant")
+        ));
+        assert_eq!(step_of(&journal, child).grant, None);
+        assert_eq!(
+            open_child_host(&journal, child, &escaped),
+            Err("not a parent")
+        );
+        assert!(!dispatch(&mut journal, child));
+    }
+
+    /// The scope walk does not stop at a step that cannot be a parent: a
+    /// granted child whose parent child was moved below a granted model call
+    /// has no scope, so its host gets no grant and nothing below it is granted.
+    #[test]
+    fn the_scope_walk_does_not_stop_at_a_model_call() {
+        let (mut journal, run) = task(budget(8, 600));
+        let call = ask_model(&mut journal, None, DEMO).unwrap();
+        assert!(authorize(&mut journal, call, Some("model-grant")));
+        let parent = propose_child(&mut journal, run, DEMO_SRC, Some(budget(4, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            parent,
+            Some("parent-grant"),
+            DEMO_SRC
+        ));
+        let child = propose_child(&mut journal, parent, DEMO_SRC_LIB, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut journal,
+            child,
+            Some("child-grant"),
+            DEMO_SRC_LIB
+        ));
+        let mut host = open_child_host(&journal, child, DEMO_SRC_LIB).unwrap();
+        let read = propose_read(&mut host, DEMO_SRC_LIB);
+        // Moved in memory: the run no longer stands above the parent.
+        step_mut(&mut journal, parent).parent_id = Some(call);
+        assert!(!grant_child_host(
+            &mut journal,
+            child,
+            &mut host,
+            Some("host-grant")
+        ));
+        assert!(!authorize_in_host(
+            &mut journal,
+            child,
+            &mut host,
+            read,
+            Some("read-grant")
+        ));
+        assert_eq!(step_of(&host, read).grant, None);
+    }
+
+    /// A step's stop byte is 0 or a known reason (CL49).
+    #[test]
+    fn an_unknown_step_stop_reason_is_refused() {
+        let (mut journal, run) = task(budget(8, 600));
+        let child = propose_child(&mut journal, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(note_time_refusal(&mut journal, child));
+        let mut payload = step_payload(step_of(&journal, child)).unwrap();
+        assert_eq!(payload.last(), Some(&2));
+        assert_eq!(
+            decode_step(&payload).map(|step| step.stop),
+            Ok(Some(StopReason::Time))
+        );
+        for unknown in [4u8, 9, 255] {
+            *payload.last_mut().unwrap() = unknown;
+            assert_eq!(
+                decode_step(&payload).map(|_| ()),
+                Err("record"),
+                "{unknown}"
+            );
+        }
     }
 }

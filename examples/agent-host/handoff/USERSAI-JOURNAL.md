@@ -117,10 +117,22 @@ records  tag u8 | len u32 | payload | link [32]       (same chain and the same t
 trailer  head [32]
 ```
 
-- `cancelled_from`, `task_budget` and `depth` are room for OMP idea 2. Until it is built they are written as zeros, and
-  decode refuses anything else (`record`).
-- **Step payload:** format 1's fields, then `depth u8 | budget (u8 flag + requests u32 + seconds u64) | requests_used u32
-  | stop u8`, all zero until idea 2 (decode refuses anything else). No existing field changes meaning.
+- `cancelled_from`, `task_budget` and `depth` are OMP idea 2's (since 22 Oct, OMP2-DESIGN.md). `cancelled_from` is
+  the last step id when the task was cancelled; `task_budget` is the budget the Runtime granted, recorded as data;
+  `depth` is a child host journal's depth (0 for a top task). Zero still means none, no budget, depth 0. A child
+  host never holds a task budget or a model call: its calls are counted in the parent's journal.
+- **One load check.** Decode, reread and resume all apply the same stored rules (`stored_rules_ok`: the path rule
+  and the child rules), so no load path accepts what another refuses.
+- **Compaction keeps child records.** A child-budget or child-stop record written while a compaction is open is
+  carried into the committed log, and into the restored log after a crash.
+- **Depth on load** holds for budgeted children; children from before idea 2 (no budget) keep loading.
+- **Step payload:** format 1's fields, then `tree_cancelled u8 | budget (u8 flag + requests u32 + seconds u64) |
+  requests_used u32 | stop u8`. The tree-cancelled byte is 0, or 1 only on a run that had left (dispatched or
+  settlement unknown) and whose tree was cancelled (depth is derived from the `parent_id` chain). The budget is a
+  Child step's; `requests_used` counts the model calls in its subtree; stop is 0 none, 1 requests, 2 time,
+  3 cancelled. Steps that are not Child steps keep the budget, count and stop zero. A budget flag of 0 with non-zero
+  values is `record`. No existing field changes meaning: a journal written before idea 2 decodes and re-encodes to
+  the same bytes.
 - **Turn payload:** unchanged.
 - **Node payload:** `role u8 | kind u8 | fields`. Each kind fixes its role; any other pairing is `record`, and the
   encoder gives nothing. Kinds without free text keep the node's text empty (the encoder refuses otherwise).
@@ -143,9 +155,13 @@ trailer  head [32]
 | spill | 14 | user | resource, version u64 | `spill: <resource> version <n>` |
 | inbox answer | 15 | user | answer u8 (1 allow-once, 2 allow-session, 3 standing, 4 deny) | `inbox: <answer name>` |
 | refused | 16 | user | reason, what | `refused: <reason> (<what>)` |
+| child budget | 17 | user | child step id u64, requests u32, seconds u64 | `child <id> budget: <requests> requests, <seconds> s` |
+| child stop | 18 | user | child step id u64, reason u8 (1 requests, 2 time, 3 cancelled), requests_used u32 | `child <id> stopped: <reason> (<used> requests used)` |
 | system line | 19 | system | text | text |
 
-- Tags 17 (child budget) and 18 (child stop) are kept for OMP idea 2 and refused until it is built.
+- **Child records (17, 18), OMP idea 2.** Written only by the host: one child-budget record when a child is made, and
+  one child-stop record when it first stops. Their rendering has its own pin (`IDEA_2_RENDERING_PIN`), so the 17
+  earlier kinds and `RENDERING_PIN` are unchanged. Compaction keeps them, like the other visible records.
 - **System line (19).** A later system line (`admit_system(.., in_history = true)`) is its own kind, written only by the
   host (Sasha, 22 Oct). No person's, model's or tool's text becomes it, and history no longer allows the system role.
 - An observation's fields must fit its text: the hash, a revision that is one token, a cut only with a window, a window
@@ -182,10 +198,15 @@ grants). A spill pointer's resource follows the path rule on load, like a read's
 | --- | --- |
 | format 1 | `journal format 1 not supported; start a new task` |
 | a format other than 1 or 2 | `format version` |
-| an unknown kind (17 and 18 included), or a kind with the wrong role | `record` |
+| an unknown kind (0, or 20 and above), or a kind with the wrong role | `record` |
 | an observation whose fields do not fit its text, or an absent revision or window with a value | `record` |
 | an unknown inbox answer | `record` |
-| a non-zero idea 2 field in the header or a step | `record` |
+| a tree-cancelled byte on a step that is not a run that had left, an unknown stop reason, or a budget flag of 0 with values | `record` |
+| a journal past the depth limit, or a budgeted child past it in its chain | `depth limit` |
+| a budgeted child whose parent is not a run or a child | `not a parent` |
+| a child resource not strictly under its parent's | `not a subset` |
+| a child budget of zero, below its count, or larger than its owner's (or the task's) | `over the parent's budget` |
+| a parent that is missing or later than its child; a parent on a step other than a child or a call under a child; a budget, count or stop on a step that is not a child; a count that is not the calls below it; a zero task budget or more calls than it; child records that do not match the steps one for one, counted per child; a child host journal (depth above 0) holding a task budget or a model call; a child below a stopped child that has not stopped; a step still prepared below a stopped child or at or before the cancel point; a cancelled task with a running child or a later child or call | `record` |
 
 ## Not in S2
 

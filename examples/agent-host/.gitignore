@@ -1,2 +1,5 @@
-/target/
-/agent-host.component.wasm
+# falsify.py: the original kept while a mutation is in place, and its temporary file
+*.falsify-original
+*.falsify-tmp
+# falsify.py --self-test: a throwaway crate, removed after the run
+.falsify-selftest/

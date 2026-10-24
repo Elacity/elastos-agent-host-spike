@@ -40,6 +40,9 @@ PY
 cargo fmt --manifest-path "${HOST_DIR}/Cargo.toml" -- --check
 cargo test --locked --manifest-path "${HOST_DIR}/Cargo.toml"
 cargo clippy --locked --manifest-path "${HOST_DIR}/Cargo.toml" --all-targets -- -D warnings
+# The falsifier runner checks itself: a named test that passes is never
+# counted as failed, whatever another test prints.
+python3 -I "${HOST_DIR}/falsify.py" --self-test
 "${REPO_ROOT}/scripts/build-component-capsule.sh" "${HOST_DIR}"
 test -f "${HOST_DIR}/agent-host.component.wasm"
 

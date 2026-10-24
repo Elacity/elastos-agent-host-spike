@@ -1,0 +1,304 @@
+# OMP idea 2: child limits
+
+Written 21 Oct 2026 as a design draft (PR #25). Revised 22 Oct 2026 to match what was built on
+`claude/omp2-child-limits` (guest only, `examples/agent-host/src/lib.rs`). This file replaces PR #25's draft; #25 is
+superseded by the idea 2 PR. No omp or DeepSeek code.
+
+Source: OMP.md section 3 and reports/OMP-AUDIT.md row 2 (omp at `2220e58`):
+- depth 2, after which the child loses the `task` tool (`src/task/settings.ts:328-344`);
+- a soft request budget, then a forced stop (`executor.ts:1576-1583`);
+- results over 5000 characters become an `agent://` artifact (`result-summary.ts:1-16`);
+- cancel stops new siblings and lets started ones clean up (`parallel.ts`).
+
+## Decided (Sasha, 21 and 22 Oct)
+
+- A budget has two limits: model requests and wall time. The child stops at whichever runs out first, and the
+  reason is recorded.
+- `CHILD_DEPTH_LIMIT = 2` and `CHILD_RESULT_CAP = 4,000` bytes.
+- **A model request is every model call, hosted or local: one counter.**
+- **The top task** gets a default budget that the person can see and raise. The host writes it into the grant, and
+  the guest never chooses its own budget. **Children** always need an explicit budget; no budget means refused.
+- **Cancel** stops the whole tree: no more model requests anywhere in it. Started children stop at their next model
+  request; their partial results are kept and marked `cancelled`.
+- **Storage:** journal format 2 (PR #30), using the reserved kinds 17 (child budget) and 18 (child stop). The format
+  stays 2 only if nothing already written changes meaning (22 Oct). See "Format stays 2" below.
+- **A child never gets more than its parent** (22 Oct): budget, grants and resources are each a subset, checked when
+  the child is created and again after every reload.
+- **Path rule** (22 Oct): `path_key` wherever it makes a limit stricter; the exact canonical path wherever it decides
+  which file.
+
+## What was built
+
+### One set of checks on every path (after the Codex review of 206da0d)
+
+Codex found paths that skipped checks: reread and resume, inbox answers, and child host journals. Now there is one
+function per kind of check, and every path calls it. A child's limits come only from the journal that holds the
+child step (the parent's journal), never from a child host's own journal.
+- `child_rules`: what every child keeps (parent, stopped subtree, resource, depth, count, budget). The stored loop
+  (`stored_children_ok`) calls it for every child.
+- `stored_rules_ok` (paths and children) is the one load check: decode, reread and resume all call it.
+- `requests_fit`: the one request-limit rule (calls already made plus the calls about to be made), used by
+  `record_task_budget`, `stored_children_ok`, `child_rules`, `call_parent_usable` and `ask_model`, so a count below,
+  equal to and above a budget is decided the same way on recording, live use and reload.
+- `usable_child`: `child_rules`, plus a budget (`TASK_BUDGET_REASON` for a child from before idea 2), not stopped,
+  task not cancelled. It is used by `propose_child` (for a child parent), `ask_model` (every child in the chain),
+  `child_grant_ok` and `open_child_host`.
+- `child_grant_ok`: the one check for giving a child a grant, used by `authorize_child` and by an inbox answer. It
+  returns the exact reason a refusal has, so `usable_child`'s own words (`TASK_BUDGET_REASON` for a child from before
+  idea 2) are kept, not replaced with a bare false; each refused grant leaves one refusal record with that reason.
+- `call_parent_usable`: a model call already proposed under a child is authorized and dispatched only while
+  `usable_child` still passes for that child, so a deny, stop or cancel after the proposal takes the pending call
+  with it. A model call under a granted child also needs `scope_still_granted`, so a run denied after the call was
+  authorized takes it with the child. A model call of the top task needs the task budget and may not exceed its
+  request count. A granted child is authorized and dispatched only while `usable_child` and `scope_still_granted`
+  both pass, so a run denied after granting its child takes the child's dispatch with it.
+- `host_step_ok` returns the reason it refused, and `authorize_in_host`, `host_inbox`, `dispatch_in_host` and the
+  provider-write gate `provider_write_may_be_asked` each check the parent's current journal with it; the host
+  actions write one refusal record in the host's journal with that reason (a stop, the missing-budget
+  `TASK_BUDGET_REASON`, a path or scope miss), so a host refusal keeps the shared check's words.
+
+### Depth (R1)
+
+- Depth is derived, not stored per step: a step's depth is the number of Child steps up its `parent_id` chain
+  (`child_chain`), plus the journal's own `depth`. A child host journal stores `depth` in its header (the depth of
+  its child step). The step's flag byte is 0, or 1 for a run that had left whose tree was cancelled.
+- `propose_child` refuses anything past `CHILD_DEPTH_LIMIT` with "depth limit", and no step is made. A child at the
+  limit cannot propose a child, and neither can a child host at the limit.
+
+### Child hosts
+
+- `open_child_host(parent, child, resource)` opens a second journal for one child step. The child must be usable in
+  the parent's journal, and `resource` must sit in the child's resource (exact path). The host gets the system head
+  and one run step, and nothing else from the parent.
+- A child host never holds a budget and never asks a model itself. `record_task_budget` refuses in it, `ask_model`
+  refuses with "child host", and a stored host with a budget or a model call is refused on load ("record"). Its
+  model calls are `ask_model(parent, Some(child), ..)`, so they count only in the parent's journal: a one-request
+  child allows one request, also after reload.
+- Every host action reads the parent's current journal again (after the Codex review of fe40437): a host keeps no
+  copy of its child's state. `authorize_in_host`, `grant_child_host`, `host_inbox` and `dispatch_in_host` take the
+  parent's journal and the child, and go through one check, `host_step_ok`:
+  - `host_scope`: the child is usable in the parent's journal now (not stopped, task not cancelled, a budget), the
+    host is at the child's depth, and the child holds a grant;
+  - the step's resource passes the path rule and sits in the scope the parent granted that child (not only in the
+    child's resource);
+  - a grant is not the parent step's grant.
+
+  The plain `authorize`, `apply_inbox` and `dispatch` refuse a host's steps, so there is no second path. A person's
+  deny is still recorded.
+- A host is bound to its owning task and to the child it was opened for (`host_of`: the task's in-memory mark and the
+  child id; held in memory only, so no format change). Another task's journal with the same child id is not this
+  host's parent; a sibling's scope does not fit it, and a reloaded host belongs to no child until it is opened again.
+
+### After an independent review of 10a31e2
+
+- A child is granted only through `authorize_child` or an inbox answer, once. The plain `authorize` refuses a child.
+- A granted scope stands only while every step above still grants it (`scope_still_granted`): a run denied after
+  its children were granted takes the scope from them, their children and their hosts.
+- `usable_child` needs every child in the chain prepared or dispatched: a denied one refuses with "denied", a
+  cancelled or crashed one with "stopped". The plain `cancel` on a child is a stop (record and subtree).
+- Only a run or a child is a parent ("not a parent"): no child below a model call. After the Codex review of
+  355e659 this is one function, `may_hold_a_child`, used by `propose_child`, by every budgeted child on load
+  (`child_rules`: decode, reread, resume) and by the scope walk, which gives no scope at a step that cannot hold a
+  child. Children from before idea 2 could sit under any step; like the depth limit, the rule holds for budgeted
+  children, and the older ones load and can do nothing.
+- Child-budget and child-stop records written while a compaction is open are carried into the committed log and into
+  a crash restore, so a compaction never leaves a task that does not load.
+- On load, no step may still be prepared below a stopped child or at or before the cancel point.
+
+### Budget (R2)
+
+- `Budget { requests, seconds }`. Zero in either part is never a budget.
+- **Top task:** `record_task_budget` records the budget the Runtime granted, once, as data. It does not record a
+  budget whose request count is below the model calls the journal already holds, so an older journal cannot
+  exceed a new budget; the same counter rule is checked again when a pending call is authorized or dispatched.
+  When it was not recorded, the run refuses with `the task budget was not recorded; start a new task`
+  (`TASK_BUDGET_REASON`). A second call, or a zero budget, changes nothing. No guest code path picks a value. Until
+  the Runtime hands it over (RUNTIME-BUDGET.md), the guest fixture and the tests use `FIXTURE_TASK_BUDGET` and
+  `FIXTURE_CHILD_BUDGET`; both are documented as never defaults.
+- **Child:** `propose_child(journal, parent, resource, budget)` refuses, in this order:
+  - "no parent";
+  - "not a subset" (the resource is not strictly under the parent's);
+  - "parent stopped" (the task is cancelled, or a child above has stopped);
+  - "depth limit";
+  - "no budget" (none, or a zero part);
+  - "parent has no budget" (the nearest budgeted owner, or the task, has none);
+  - "over the parent's budget" (more requests than the owner has left, or more seconds than the owner has).
+- A budget is a cap, not a reservation: two siblings may each get what their owner has left. Their calls together
+  stay bounded, because every call also counts against the owner.
+- On success the Child step carries its budget, and one child-budget record (kind 17) is written:
+  `child <id> budget: <requests> requests, <seconds> s`.
+
+### Model calls (R2, R3)
+
+- `ask_model(journal, under, model)`: every model call, hosted or local, is one `Hosted` step, so there is one
+  counter. `under` is the child the call is asked for (stored as the step's `parent_id`), or none for the top task.
+- It refuses before anything is asked: "host path", "child host", "not a child", "cancelled", "stopped",
+  `TASK_BUDGET_REASON` (no task budget, or a chain child from before idea 2 with none), "requests" (a child in the
+  chain, or the task, has used its requests).
+- The children are checked before the task. When a child in the chain is used up, the top-most such child stops with
+  `requests`, and its subtree with it, even when the task runs out at the same call.
+- An accepted call counts once against every child in its chain and once against the task.
+
+### Stop and time (R3)
+
+- Reasons: `requests`, `time`, `cancelled` (`StopReason`). A crash keeps today's states.
+- `stop_child` stops one child with its reason and every child below it with `cancelled`. Each stop writes one
+  child-stop record (kind 18): `child <id> stopped: <reason> (<used> requests used)`. The draft's example
+  `(8 of 8 requests)` was not used; the budget is already in the kind 17 record.
+- The first reason is kept; a later one does not replace it and writes no record.
+- **Time:** the guest has no clock and does not pretend to. `note_time_refusal` is called by the code that runs the
+  child when a call is refused because a grant expired (in tests, the test itself). It stops the child with `time`.
+  The child's `seconds` is checked as a subset of its owner's when it is made; the Runtime enforces it.
+
+### Result cap (R4)
+
+- `record_child_result` and `record_tool_result` on a child step both use `child_result_ok`, over the parent's
+  steps and the child host's steps: a result longer than `CHILD_RESULT_CAP` is refused, never cut, and a grant
+  string held by the host is refused as well as one held by the parent. Child text also needs verified host
+  context (`host_binding_ok`: this task, this child, its depth, the system head); a caller with no host is refused.
+  A long result goes as a spill pointer (`spill_pointer`, today's rules). The guest generates that text at its own
+  entry point (`record_spill_result`), which is the one child result that needs no host journal.
+- A stopped child's result is kept and marked `partial (<reason>): <result>` on both entry points.
+
+### Cancel (R5)
+
+- `cancel_tree(id)`: a child stops with `cancelled`, and its subtree with it. A step that is not a child is cancelled
+  as before (only from Prepared), and the children below it stop. A run that has already left cannot be cancelled as a
+  step; its tree cancellation is recorded in its step flag, so it holds no scope and takes no new child, before and
+  after a reload.
+- `cancel_task`: the header records `cancelled_from` (the last step id at that time). Every child stops with
+  `cancelled`, prepared steps become cancelled, and no model call or new child is accepted anywhere in the task. A
+  reload stays cancelled.
+- In the Runtime, cancelling should revoke each model grant in the subtree (RUNTIME-BUDGET.md). Not built here.
+
+### Grants (subset)
+
+- `authorize_child(journal, child, grant, grant_resource)` and an inbox answer for a child both go through
+  `child_grant_ok`. A grant is given only when:
+  - the child is usable (`usable_child`: a budget, nothing stopped, task not cancelled);
+  - `grant_resource` passes `path_refusal` and is the child's resource or under it (exact canonical path: a
+    different case spelling or `//` is refused, never treated as the same file);
+  - it sits in what the parent itself was granted: a child parent's granted scope, or another parent's resource;
+  - the parent holds a non-empty grant, and the child's grant is not the parent's.
+- The granted scope is kept with the grant, in memory: `grant_resource` for `authorize_child`, the child's whole
+  resource for an inbox answer. A child granted only `src/a` cannot hand `src/b` to a grandchild.
+- Grants are never stored, so after a reload the parent and every child are granted again through the same checks.
+
+### Checked again after reload (`stored_children_ok`)
+
+`stored_rules_ok` refuses, on decode, reread and resume, a journal where:
+- the header depth is past the limit;
+- a step names a parent that does not exist or comes after it, or a step other than a Child or a call under a Child
+  has a parent;
+- a step that is not a Child has a budget, a count or a stop;
+- a Child's resource is not strictly under its parent's ("not a subset"), or a budgeted Child is past the depth limit
+  (children from before idea 2 had no limit, and with no budget they can do nothing now);
+- a Child's count is not the number of calls in its subtree;
+- a Child below a stopped Child has not stopped;
+- a Child's budget is zero, below its count, or larger (requests or seconds) than its owner's budget, or the task's
+  ("over the parent's budget"); a Child without a budget has a count;
+- the task budget is zero, or fewer than the calls made;
+- a child does not have exactly its own child-budget record (one if it has a budget) and child-stop record (one if
+  it stopped), counted per child, not in total;
+- a child host journal (depth above 0) holds a budget or a model call;
+- a step is still prepared below a stopped Child, or at or before the cancel point;
+- the task is cancelled but a Child has not stopped, or a Child or call came after the cancel point.
+
+### Path rule
+
+- Which file: the child's resource, the grant resource and the result's spill pointer are exact canonical paths
+  (byte prefix under the parent). A case or alias spelling is a different path, and as a child of the parent it is
+  refused.
+- Limits: no idea 2 limit counts files, so no new `path_key` use was needed. Using the exact path for the subset is
+  the stricter choice here: `path_key` would accept `demo/SRC` under `demo` as the same tree.
+
+## Format stays 2
+
+Nothing already written changes meaning:
+- every idea 2 field (`cancelled_from`, `task_budget`, `depth` in the header; budget, requests used, stop and the
+  tree-cancelled flag in a step) is zero or "none" in a journal written before idea 2, and zero still means none,
+  depth 0, top task;
+- the step flag byte is 0 in a journal written before the tree-cancelled rule (depth is derived; 1 is only a run that
+  had left whose tree was cancelled), so older Child steps stay valid;
+- kinds 17 and 18 were refused by decode before, so no older journal holds them;
+- the 17 earlier kinds render byte for byte as before (`RENDERING_PIN` unchanged); kinds 17 and 18 have their own
+  pin (`IDEA_2_RENDERING_PIN`).
+
+Evidence: `a_journal_written_before_idea_2_still_loads` decodes a journal written by the guest at `cee6d55` and
+re-encodes it to the same bytes.
+
+**Behaviour changes (stated, not hidden):** a task with no recorded budget can no longer make a model call, an older
+Child step with no budget can make no model call and gets no grant, and a new child needs a budget. These fail
+closed (R2, PRINCIPLES 11). They change what the guest allows, not what a stored byte means.
+
+## Host context, spill entry and refusal reasons
+
+A child host is a second journal for the same child. Its grants live in the parent journal (`host_grants`, a list of
+child id and grant) for as long as the process runs; they are not stored, so the format stays 2. `without_grants`
+clears the list, so `decode(encode(j)) == without_grants(j)` still holds. One checker, `child_result_ok`, reads the
+result rules and every grant source (the parent's steps, the supplied host's steps, the parent's ledger) and returns
+the refusal reason. A caller that passes the original host or a different host for the same child gets the same
+refusal, `result holds a grant`.
+
+A model call under a child follows the nearest step at or above it that holds a grant (`nearest_granted`). An
+ungranted child therefore inherits the scope of the nearest granted step above it, and withdrawing that grant takes
+its call too. With no granted step above it, the call has no authority and is refused `no grant`.
+
+The spill pointer is the guest's own text, but its entry is narrow and its rule is in one place. `spill_ready` needs
+a dispatched, granted step with no result that covers the object, under the system head. `record_spill_result(journal,
+step_id, object_resource, version)` calls it and then needs the journal's last event to be a `Spill` node with the
+same resource and version; it builds the text itself. `spill_pointer` calls `spill_ready` before it writes the node,
+then the entry. Every refusal at that entry records its reason ("no resource", "host path", "not observed" or the
+admission rule's own words), never a bare false. No caller passes arbitrary text.
+
+A refused host write records the shared check's reason, or "not this child's host" when the parent context is
+missing. A refused result host binding records one reason for the missing host, the non-child step and the binding
+failure; a result that holds a grant records `result holds a grant` whichever host supplied it. The budget counter
+records "requests". A bad spill entry records its admission reason, or "no spill pointer" when the record is
+missing. All use `record_refusal_reason`; no new record kind.
+
+## Tests and falsifiers
+
+Each rule has a test, and each check has a mutation (CL01-CL92, report omp2-child-limits.md).
+
+| Test | What it proves |
+| --- | --- |
+| `a_child_at_the_depth_limit_cannot_propose_a_child` | depth limit, also in a child host journal |
+| `a_child_without_a_budget_is_refused` | no default, no unlimited |
+| `a_child_budget_larger_than_the_parent_remaining_is_refused` | requests and seconds are a subset of what is left |
+| `the_guest_never_sets_the_top_task_budget` | recorded once, never raised, never zero |
+| `hosted_and_local_model_calls_share_one_counter` | one counter |
+| `a_child_over_its_request_budget_stops_with_requests` | nothing asked after the limit |
+| `a_stopped_child_stops_its_children` | the subtree stops with `cancelled` |
+| `a_time_refusal_stops_the_child_with_time` | time is recorded |
+| `the_first_stop_reason_is_kept` | requests, then time |
+| `a_long_inline_child_result_is_refused`, `a_long_child_result_is_a_spill_pointer` | never inline, never cut |
+| `cancelling_a_parent_stops_started_children_at_their_next_model_call` | partial result kept, marked |
+| `no_model_call_anywhere_in_a_cancelled_tree` | grandchild too |
+| `a_cancelled_tree_stays_cancelled_after_resume` | `cancelled_from` survives encode |
+| `a_spill_pointer_cannot_carry_arbitrary_text` | the spill entry takes a resource and the journal's own pointer |
+| `a_child_result_needs_a_verified_host` | a second host journal cannot hide a parent-side grant |
+| `every_format_2_field_round_trips` | no field dropped |
+| `child_limits_are_checked_again_after_reload` | each stored rule, broken in bytes, refuses the load |
+| `a_child_grant_is_a_subset_of_its_parent` | parent grant needed, exact paths, again after reload |
+| `the_task_request_limit_is_one_rule_on_every_path` | below, equal to and above the budget through recording, authorization, dispatch, a new call and reload |
+| `request_limit_is_decided_only_by_the_shared_validator` | no production path copies the old request comparison |
+| `the_spill_entry_records_its_refusal_reason` | every public spill-entry refusal records its reason |
+| `a_journal_written_before_idea_2_still_loads` | format stays 2 |
+| `the_child_records_render_byte_for_byte_and_are_pinned` | kinds 17 and 18 rendering |
+
+## Not taken from omp
+
+- Children with `approvalMode: "yolo"`, child tools not narrowed to the parent's, and in-process children that
+  share the parent's authority (3, 7, 18).
+- No wall-clock limit by default: ours always has one.
+- A soft budget with a grace period: ours refuses before the next ask.
+- Cancel that lets started children run to the end: ours stops them at their next model call.
+- Concurrency (omp allows 32): children in one guest are proposed one at a time today; concurrency waits for
+  separate component instances (Bus v2).
+
+## Open
+
+- RUNTIME-BUDGET.md (for Anders, after 0.8.0): grant limits, revoking a tree, how the guest learns its granted
+  limits, and the refusal codes that let the guest record `time`.
+- Home does not show the budget yet; that goes with the Home-wide refusal display, after 0.8.0 with the capsule kit.

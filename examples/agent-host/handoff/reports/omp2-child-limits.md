@@ -1,0 +1,800 @@
+# OMP idea 2: child limits
+
+```text
+Slice:        OMP idea 2 (child limits), from the approved design in PR #25. Guest only.
+Branch / PR:  claude/omp2-child-limits  (draft PR in this repo, base spike/agent-host)
+Commit:       9a6fc72 (code and tests), ece49b0 (tests for the first-run survivors; the stopped-subtree reload rule;
+              a stale comment), 36a0021 and c9486c9 (notes); parent cee6d55f5 (spike/agent-host, #30 merged);
+              this report is the next commit
+Develop:      not merged in this slice (base is spike/agent-host at cee6d55f5).
+Machine:      Linux 6.18.44 x86_64 (cloud container), rustc 1.91.0.
+Changed:      examples/agent-host/src/lib.rs - kinds 17 and 18, the idea 2 header and step fields, the child rules,
+                the reload checks, the run fixture's idea 2 block; tests
+              examples/agent-host/handoff/OMP2-DESIGN.md - the design note from PR #25, updated to what was built
+              examples/agent-host/handoff/RUNTIME-BUDGET.md, EDIT-PROVIDER.md, JOURNAL-FORMAT-2.md,
+                reports/OMP2-DESIGN.md - brought over from PR #25 unchanged (JOURNAL-FORMAT-2.md gets a status line
+                and the two rendered texts), so nothing is lost when #25 closes
+              examples/agent-host/handoff/USERSAI-JOURNAL.md - format 2: kinds 17 and 18, header and step rules,
+                the reload refusals
+              examples/agent-host/handoff/reports/omp2-child-limits.md - this report
+              examples/agent-host/handoff/LOG.md - one line
+              No Runtime, Home or provider change.
+Invariant:    A child never gets more than its parent: its resource is strictly under the parent's, its budget
+              (requests and seconds) is no more than its owner has left, and its grant is its own, for its resource
+              or a part of it, and only while the parent holds one. Every model call, hosted or local, counts once
+              against the task and every child above it. A used-up, timed-out or cancelled child stops with that
+              reason (the first one is kept), and every child below it stops with "cancelled". All of this is
+              checked again when a journal is loaded.
+Refusals:     propose_child: "no parent", "not a subset", "parent stopped", "depth limit", "no budget",
+                "parent has no budget", "over the parent's budget"
+              open_child_host: "no parent", "not a subset", "depth limit"
+              ask_model: "host path", "not a child", "cancelled", "stopped", "no budget", "requests"
+              authorize_child, record_task_budget, record_child_result: false, nothing changes
+              decode_journal (stored_children_ok): "depth limit", "not a subset", "over the parent's budget",
+                "record" (see USERSAI-JOURNAL.md, Format 2)
+Tests run:    ./examples/agent-host/verify.sh -> fmt, "187 passed" (162 - 1 + 26), clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed" (the guest's run fixture in Wasmtime, now with an
+                idea 2 block)
+              ./examples/agent-host/run-e2e.sh -> "3 passed"
+Not run here: Mac checks (Cursor): verify.sh, run-local.sh, run-e2e.sh and the guest hash.
+```
+
+## Format stays 2
+
+Sasha's rule: format 2 stays only if nothing already written changes meaning. It holds:
+
+- Every idea 2 field is zero or "none" in a journal written before idea 2, and zero still means none: no cancel, no
+  task budget, depth 0, a step with no budget, no calls and no stop.
+- The step depth byte stays 0. Depth is derived from the `parent_id` chain, so an older Child step (depth byte 0) is
+  still valid.
+- Kinds 17 and 18 were refused by every earlier decoder, so no stored journal holds them.
+- The 17 earlier kinds render exactly as before: `RENDERING_PIN` is unchanged. Kinds 17 and 18 have their own pin.
+- Evidence: `a_journal_written_before_idea_2_still_loads` decodes a 911-byte journal the guest wrote at `cee6d55`
+  (a run and a child with no budget) and re-encodes it to the same bytes.
+
+**What changes is behaviour, not meaning** (fail closed, design R2, PRINCIPLES 11):
+- a task with no recorded budget can make no model call;
+- an older Child step with no budget can make no model call and gets no grant;
+- a new child needs an explicit budget.
+
+These are refusals of things the guest allowed before. If Sasha counts that as "changes meaning", the format would
+have to go to 3; I think it does not, because no stored byte reads differently.
+
+## What changed
+
+- **Kinds 17 and 18.** `ChildBudget { child, budget }` and `ChildStop { child, reason, requests_used }`: no free text,
+  role user, written only by the host, kept through compaction. Rendering: `child <id> budget: <requests> requests,
+  <seconds> s` and `child <id> stopped: <reason> (<used> requests used)`, pinned in `IDEA_2_RENDERING_PIN`.
+- **Fields.** Header: `cancelled_from`, `task_budget`, `depth`. Step: `budget`, `requests_used`, `stop`.
+- **Depth.** `CHILD_DEPTH_LIMIT = 2`, derived (`child_chain`, `depth_under`). `propose_child` and `open_child_host`
+  refuse past it; a child host journal records its depth.
+- **Budget.** `record_task_budget` records the Runtime's grant once (never zero, never raised). `propose_child`
+  needs an explicit, non-zero budget no larger than the owner's remaining requests and its seconds.
+- **Model calls.** `ask_model` (`propose_hosted` is now `ask_model(journal, None, model)`): one `Hosted` step per call,
+  hosted or local, so one counter. Refused before anything is asked when the task is cancelled, a child above has
+  stopped, there is no budget, or a budget is used up. A used-up child stops with `requests` (the top-most one, and
+  its subtree with it).
+- **Stop.** `stop_child`, `note_time_refusal` (the guest has no clock; the caller reports an expired grant),
+  `cancel_tree`, `cancel_task` (records `cancelled_from`). The first reason is kept; each stop writes one kind 18
+  record.
+- **Result.** `record_child_result` refuses over `CHILD_RESULT_CAP = 4000` bytes (never cut; use a spill pointer), and
+  marks a stopped child's result `partial (<reason>): <result>`.
+- **Grants.** `authorize_child` needs a budgeted, unstopped child, a parent that holds a grant, a different grant, and
+  a grant resource that passes `path_refusal` and is the child's resource or under it.
+- **Reload.** `stored_children_ok` runs after `stored_paths_ok` in `decode_journal` and checks each rule above in
+  stored bytes.
+- **Path rule.** The child resource, the grant resource and the spill pointer are exact canonical paths (which file).
+  No idea 2 limit counts files, so `path_key` had no new use; for the subset, the exact path is the stricter choice
+  (`path_key` would accept `demo/SRC` under `demo`).
+- **Guest fixture.** The run fixture records `FIXTURE_TASK_BUDGET` before its model call and its two child scenes,
+  and a new block runs a child to its request limit, a time stop, a cancelled task, and a reload.
+
+## Tests
+
+Removed: `idea_2_fields_must_be_empty_until_built` (its rule, "empty until idea 2", is what this PR replaces; `idea_2_fields_follow_their_rules` takes its place).
+
+New (26):
+- `a_cancelled_tree_stays_cancelled_after_resume`
+- `a_child_at_the_depth_limit_cannot_propose_a_child`
+- `a_child_below_a_stopped_child_gets_nothing`
+- `a_child_budget_larger_than_the_parent_remaining_is_refused`
+- `a_child_grant_is_a_subset_of_its_parent`
+- `a_child_over_its_request_budget_stops_with_requests`
+- `a_child_without_a_budget_is_refused`
+- `a_grandchild_budget_is_a_subset_of_its_parent_child`
+- `a_journal_written_before_idea_2_still_loads`
+- `a_long_child_result_is_a_spill_pointer`
+- `a_long_inline_child_result_is_refused`
+- `a_model_call_is_asked_only_for_a_budgeted_child`
+- `a_stopped_child_stops_its_children`
+- `a_time_refusal_stops_the_child_with_time`
+- `an_unbudgeted_child_or_a_non_child_gets_no_child_grant`
+- `an_unknown_step_stop_reason_is_refused`
+- `cancelling_a_parent_stops_started_children_at_their_next_model_call`
+- `child_limits_are_checked_again_after_reload`
+- `every_format_2_field_round_trips`
+- `hosted_and_local_model_calls_share_one_counter`
+- `idea_2_fields_follow_their_rules`
+- `no_model_call_anywhere_in_a_cancelled_tree`
+- `the_child_records_render_byte_for_byte_and_are_pinned`
+- `the_first_stop_reason_is_kept`
+- `the_guest_never_sets_the_top_task_budget`
+- `the_widest_used_up_child_stops_with_requests`
+
+Changed: the existing tests and the run fixture record `FIXTURE_TASK_BUDGET` before a model call or a child (fail closed: without it, both are refused). `an_unknown_kind_is_refused` now tries 0, 20, 21 and 255, plus a child-stop record with an unknown reason. `each_kind_renders_byte_for_byte` covers tags 1 to 19.
+
+## Falsifiers
+
+CL01-CL92: one mutation per check, each alone, restored with `git checkout`, tree clean after; command
+`cargo test` for the guest (scratchpad runner, as before).
+
+- **First run (CL01-CL91, at 9a6fc72): 26 survived.** Most were reload checks backed by a second rule (the old
+  tamper cases each broke two rules at once), plus CL10, CL18, CL20, CL26, CL49, CL76, CL77, CL79, CL82 and CL88 in
+  the live code. That is a finding, not a pass: ece49b0 rewrites the reload test so each case breaks exactly one
+  rule, and adds tests for the live ones. It also found one missing reload rule (a child below a stopped child must
+  have stopped), added with its failing-first case and CL92.
+- **Second run (CL01-CL92, at ece49b0): 92 of 92 caught. No survivors.**
+- **JF01-JF37 and the O* set rerun at ece49b0:** all caught except OZ01 (survives by design, as in #24). OY19 is
+  caught as a compile error, as before. OS01 and OP01 were retired in #24. JF14 and JF15 ("idea 2 fields must be
+  empty") no longer apply: that rule is what this PR replaces, and CL43-CL75 cover the new rules. OY06 and JF07 no
+  longer matched their lines; re-targeted as OY06b (stored path rule skipped: 3 tests FAILED) and JF07b (unknown
+  kind decodes as a message: `an_unknown_kind_is_refused` FAILED).
+
+| Id | Mutation | Caught by (second run) | First run |
+| --- | --- | --- | --- |
+| CL01 | propose_child allows one level deeper | `a_child_at_the_depth_limit_cannot_propose_a_child` | caught |
+| CL02 | open_child_host allows one level deeper | `a_child_at_the_depth_limit_cannot_propose_a_child` | caught |
+| CL03 | a child with no budget gets one | `a_child_without_a_budget_is_refused` | caught |
+| CL04 | a child budget of zero requests is accepted | `a_child_without_a_budget_is_refused` | caught |
+| CL05 | a child budget of zero seconds is accepted | `a_child_without_a_budget_is_refused` | caught |
+| CL06 | a parent with no budget gives unlimited | `the_guest_never_sets_the_top_task_budget` | caught |
+| CL07 | the requests over the parent are not checked | `a_child_budget_larger_than_the_parent_remaining_is_refused`, `a_grandchild_budget_is_a_subset_of_its_parent_child` | caught |
+| CL08 | the seconds over the parent are not checked | `a_child_budget_larger_than_the_parent_remaining_is_refused`, `a_grandchild_budget_is_a_subset_of_its_parent_child` | caught |
+| CL09 | remaining ignores what was used | `a_child_budget_larger_than_the_parent_remaining_is_refused` | caught |
+| CL10 | a grandchild is measured against the task, not its parent | `a_grandchild_budget_is_a_subset_of_its_parent_child` | survived |
+| CL11 | a child under a stopped parent is accepted | `a_stopped_child_stops_its_children`, `no_model_call_anywhere_in_a_cancelled_tree` | caught |
+| CL12 | the task budget can be set twice | `the_guest_never_sets_the_top_task_budget` | caught |
+| CL13 | a zero task budget is recorded | `the_guest_never_sets_the_top_task_budget` | caught |
+| CL14 | local model calls are not counted for children | `child_limits_are_checked_again_after_reload`, `every_format_2_field_round_trips` (+2) | caught |
+| CL15 | the task counter counts hosted models only | `child_limits_are_checked_again_after_reload`, `hosted_and_local_model_calls_share_one_counter` | caught |
+| CL16 | the task allows one call past its budget | `hosted_and_local_model_calls_share_one_counter` | caught |
+| CL17 | a child allows one call past its budget | `a_child_over_its_request_budget_stops_with_requests`, `a_stopped_child_stops_its_children` (+3) | caught |
+| CL18 | the nearest used-up child stops, not the top-most | `the_widest_used_up_child_stops_with_requests` | survived |
+| CL19 | a used-up child is refused but not stopped | `a_child_over_its_request_budget_stops_with_requests`, `a_stopped_child_stops_its_children` (+2) | caught |
+| CL20 | a chain child with no budget may call | `a_model_call_is_asked_only_for_a_budgeted_child` | survived |
+| CL21 | a task with no budget may call | `a_journal_written_before_idea_2_still_loads`, `the_guest_never_sets_the_top_task_budget` | caught |
+| CL22 | ask_model ignores a cancelled task (own check) | `a_cancelled_tree_stays_cancelled_after_resume`, `no_model_call_anywhere_in_a_cancelled_tree` | caught |
+| CL23 | chain_stopped ignores a cancelled task | `no_model_call_anywhere_in_a_cancelled_tree` | caught |
+| CL24 | chain_stopped ignores a stopped child | `a_child_below_a_stopped_child_gets_nothing`, `a_child_over_its_request_budget_stops_with_requests` (+4) | caught |
+| CL25 | ask_model ignores a stopped chain | `a_child_below_a_stopped_child_gets_nothing`, `a_child_over_its_request_budget_stops_with_requests` (+3) | caught |
+| CL26 | ask_model accepts a step that is not a child | `a_model_call_is_asked_only_for_a_budgeted_child` | survived |
+| CL27 | a call is not counted on the chain | `a_cancelled_tree_stays_cancelled_after_resume`, `a_child_budget_larger_than_the_parent_remaining_is_refused` (+9) | caught |
+| CL28 | a call forgets which child asked | `a_cancelled_tree_stays_cancelled_after_resume`, `child_limits_are_checked_again_after_reload` (+2) | caught |
+| CL29 | a stop does not reach the children | `a_stopped_child_stops_its_children`, `child_limits_are_checked_again_after_reload` (+2) | caught |
+| CL30 | the children take the parent's reason | `a_stopped_child_stops_its_children`, `the_widest_used_up_child_stops_with_requests` | caught |
+| CL31 | a later reason replaces the first | `child_limits_are_checked_again_after_reload`, `every_format_2_field_round_trips` (+1) | caught |
+| CL32 | the stop record carries the wrong count | `a_cancelled_tree_stays_cancelled_after_resume`, `a_child_over_its_request_budget_stops_with_requests` (+7) | caught |
+| CL33 | a stop leaves a prepared step prepared | `a_stopped_child_stops_its_children`, `no_model_call_anywhere_in_a_cancelled_tree` | caught |
+| CL34 | descendants finds nothing | `a_stopped_child_stops_its_children`, `cancelling_a_parent_stops_started_children_at_their_next_model_call` (+3) | caught |
+| CL35 | a time refusal records requests | `a_time_refusal_stops_the_child_with_time`, `an_unknown_step_stop_reason_is_refused` (+3) | caught |
+| CL36 | a time refusal acts on any step | `a_time_refusal_stops_the_child_with_time` | caught |
+| CL37 | cancel_tree on a child does not stop it | `no_model_call_anywhere_in_a_cancelled_tree` | caught |
+| CL38 | cancel_tree on a run leaves its children | `cancelling_a_parent_stops_started_children_at_their_next_model_call` | caught |
+| CL39 | cancel_task does not record the cancel | `a_cancelled_tree_stays_cancelled_after_resume`, `every_format_2_field_round_trips` (+1) | caught |
+| CL40 | cancel_task records the first step, not the last | `a_cancelled_tree_stays_cancelled_after_resume`, `child_limits_are_checked_again_after_reload` (+1) | caught |
+| CL41 | cancel_task leaves the children running | `a_cancelled_tree_stays_cancelled_after_resume`, `child_limits_are_checked_again_after_reload` (+2) | caught |
+| CL42 | cancel_task can cancel twice | `no_model_call_anywhere_in_a_cancelled_tree` | caught |
+| CL43 | the cancel point is not written | `a_cancelled_tree_stays_cancelled_after_resume`, `child_limits_are_checked_again_after_reload` (+1) | caught |
+| CL44 | the task budget is not written | `a_cancelled_tree_stays_cancelled_after_resume`, `a_child_grant_is_a_subset_of_its_parent` (+6) | caught |
+| CL45 | a step budget is not written | `a_cancelled_tree_stays_cancelled_after_resume`, `a_child_grant_is_a_subset_of_its_parent` (+6) | caught |
+| CL46 | the journal depth is not written | `child_limits_are_checked_again_after_reload`, `every_format_2_field_round_trips` | caught |
+| CL47 | a budget with the flag off and values is read as none | `idea_2_fields_follow_their_rules` | caught |
+| CL48 | a non-zero step depth byte is read | `idea_2_fields_follow_their_rules` | caught |
+| CL49 | an unknown step stop tag is read as cancelled | `an_unknown_step_stop_reason_is_refused` | survived |
+| CL50 | an unknown child-stop reason is read as cancelled | `an_unknown_kind_is_refused` | caught |
+| CL51 | stored: the header depth is not checked | `idea_2_fields_follow_their_rules` | caught |
+| CL52 | stored: a parent after its child is accepted | `child_limits_are_checked_again_after_reload` | survived |
+| CL53 | stored: a call under a non-child is accepted | `child_limits_are_checked_again_after_reload` | survived |
+| CL54 | stored: any step may have a parent | `child_limits_are_checked_again_after_reload` | survived |
+| CL55 | stored: a non-child may carry a budget | `child_limits_are_checked_again_after_reload` | survived |
+| CL56 | stored: a non-child may carry a count | `idea_2_fields_follow_their_rules` | caught |
+| CL57 | stored: a non-child may carry a stop | `child_limits_are_checked_again_after_reload` | survived |
+| CL58 | stored: a wider child resource is accepted | `child_limits_are_checked_again_after_reload` | caught |
+| CL59 | stored: one level deeper is accepted | `child_limits_are_checked_again_after_reload` | caught |
+| CL60 | stored: the child count is not matched to its calls | `child_limits_are_checked_again_after_reload` | caught |
+| CL61 | stored: a zero child budget is accepted | `child_limits_are_checked_again_after_reload` | survived |
+| CL62 | stored: a child over its own budget is accepted | `child_limits_are_checked_again_after_reload` | survived |
+| CL63 | stored: a child asking more requests than its owner is accepted | `child_limits_are_checked_again_after_reload` | caught |
+| CL64 | stored: a child asking more seconds than its owner is accepted | `child_limits_are_checked_again_after_reload` | survived |
+| CL65 | stored: a top child is not measured against the task | `child_limits_are_checked_again_after_reload` | caught |
+| CL66 | stored: an unbudgeted child may count calls | `child_limits_are_checked_again_after_reload` | survived |
+| CL67 | stored: the task may be over its budget | `child_limits_are_checked_again_after_reload` | survived |
+| CL68 | stored: a zero task budget is accepted | `child_limits_are_checked_again_after_reload` | survived |
+| CL69 | stored: a child-budget record need not match | `child_limits_are_checked_again_after_reload` | survived |
+| CL70 | stored: a child-stop record's reason need not match | `child_limits_are_checked_again_after_reload` | survived |
+| CL71 | stored: a child-stop record's count need not match | `child_limits_are_checked_again_after_reload` | survived |
+| CL72 | stored: the child-budget records are not counted | `child_limits_are_checked_again_after_reload` | caught |
+| CL73 | stored: the child-stop records are not counted | `child_limits_are_checked_again_after_reload` | caught |
+| CL74 | stored: a cancelled task may hold a running child | `child_limits_are_checked_again_after_reload` | survived |
+| CL75 | stored: a cancelled task may gain steps after the cancel | `child_limits_are_checked_again_after_reload` | survived |
+| CL76 | authorize_child grants a child with no budget | `an_unbudgeted_child_or_a_non_child_gets_no_child_grant` | survived |
+| CL77 | authorize_child skips the path check | `a_child_grant_is_a_subset_of_its_parent` | survived |
+| CL78 | authorize_child skips the resource subset | `a_child_grant_is_a_subset_of_its_parent` | caught |
+| CL79 | authorize_child grants a stopped child | `a_child_below_a_stopped_child_gets_nothing` | survived |
+| CL80 | authorize_child does not need a parent grant | `a_child_grant_is_a_subset_of_its_parent` | caught |
+| CL81 | authorize_child accepts the parent's own grant | `a_child_grant_is_a_subset_of_its_parent`, `a_child_grant_is_narrower_and_does_not_inherit_the_parent_grant` | caught |
+| CL82 | authorize_child grants a step that is not a child | `an_unbudgeted_child_or_a_non_child_gets_no_child_grant` | survived |
+| CL83 | a child host does not record its depth | `a_child_at_the_depth_limit_cannot_propose_a_child` | caught |
+| CL84 | a long child result is accepted | `a_long_inline_child_result_is_refused` | caught |
+| CL85 | a stopped child's result is not marked partial | `cancelling_a_parent_stops_started_children_at_their_next_model_call` | caught |
+| CL86 | a child result is recorded for a step that is not a child | `a_long_inline_child_result_is_refused` | caught |
+| CL87 | the depth limit is 3 | `a_child_at_the_depth_limit_cannot_propose_a_child`, `child_limits_are_checked_again_after_reload` | caught |
+| CL88 | the child result cap is doubled | `a_long_inline_child_result_is_refused` | survived |
+| CL89 | the child stop renders differently, format stays 2 | `a_child_over_its_request_budget_stops_with_requests`, `each_kind_renders_byte_for_byte` (+1) | caught |
+| CL90 | the child budget renders differently, format stays 2 | `each_kind_renders_byte_for_byte`, `the_child_records_render_byte_for_byte_and_are_pinned` | caught |
+| CL91 | propose_child does not write the budget record | `a_cancelled_tree_stays_cancelled_after_resume`, `a_child_budget_larger_than_the_parent_remaining_is_refused` (+7) | caught |
+| CL92 | stored: a child below a stopped child may run | `child_limits_are_checked_again_after_reload` | new |
+
+```text
+Guest hash:   09c712ef28242ba663ede78c46c9c2988c1606837462854887c667940fd0028f on verify.sh and a clean rebuild.
+              wasm_sections.py: file 652398 bytes (was 636434 at #30); /1/10 388475 991b3a3150a149c4 (code);
+              /1/11 176527 cfc784e95b91e5f0 (data).
+Import list:  unchanged: the core import section (/1/2, 149 bytes, 5ee6b40d46f6a045) is byte-identical to #30.
+Principles:   3, 7: a child's budget, resource and grant are each a subset of its parent's, at creation and after
+                reload.
+              11: no budget means refused, not unlimited; the guest does not pretend to measure time.
+              12: the earlier rendering pin is unchanged; the two new kinds have their own pin.
+              16: the child records are host-written; no person's or model's text becomes one.
+DeepSeek:     none. omp at 2220e58 for ideas only (cited in OMP2-DESIGN.md); no code copied.
+Not proven:   - Time is not measured: the guest records `time` only when told (`note_time_refusal`). The Runtime
+                side (grant expiry, revoking a tree, distinct refusal codes) is RUNTIME-BUDGET.md, after 0.8.0.
+              - The top task's budget is a fixture constant until the Runtime hands the granted limits to the guest.
+              - A budget is a cap, not a reservation: two siblings may each get what their parent has left, and
+                their calls together are still bounded, because every call counts against the parent too. The
+                reload check compares a child's budget with its owner's whole budget (not what was left when the
+                child was made); the stored counts bound the calls.
+              - Home does not show a budget or a stop; that goes with the Home-wide refusal display, after 0.8.0.
+Checklist:    no item moves.
+Questions:    1. Is "behaviour changes, meaning does not" (above) enough to keep format 2?
+```
+
+## Update: after the Mac check of b30580f4 (22 Oct)
+
+Cursor at b30580f4: verify 187, local 1, e2e 3/3, tree clean (Mac guest hash 0161bde9; Linux differs, as known).
+Sasha's answers: format 2 stays (stored bytes keep their meaning, and the new behaviour fails closed). The refusal for a
+task with no recorded budget now says what to do, like the format 1 reason.
+
+```text
+Changed:      examples/agent-host/src/lib.rs - TASK_BUDGET_REASON = "the task budget was not recorded; start a new
+                task", used by the run fixture's three refusals; the_guest_never_sets_the_top_task_budget pins the text
+Tests run:    ./examples/agent-host/verify.sh -> "187 passed", clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Falsifiers:   TB01 the reason loses "; start a new task" -> the_guest_never_sets_the_top_task_budget FAILED
+              CL01-CL92 rerun on this head -> 92 of 92 caught; no survivors; tree clean
+Guest hash:   032afd9244427b25211bd9799ed70586cb7c15668a0ad1b5b5115b5e6ba33883 on two clean builds and verify.sh.
+              wasm_sections.py: file 652410 bytes; /1/10 388475 301b48d231337dbd; /1/11 176543 5963e6487618a95e.
+Import list:  unchanged (the core import section /1/2 is byte-identical to #30).
+```
+
+## Update: Codex FAIL at 206da0d, seven findings (22 Oct)
+
+All seven reproduced. Root cause for 1-3, as Codex said: some paths skipped the checks. Now one function per kind of
+check, and every path calls it. A child's limits come only from the parent's journal.
+
+```text
+Commits:      3998623 (merge of spike/agent-host with #33; LOG.md kept both sides)
+              b796516 (the fixes and seven tests), bc16234 (propose_child through usable_child only),
+              b543367 (no second stopped or cancelled check), 8e6315f (notes); this report is the next commit
+Shared:       child_rules       every child, on every load (stored_children_ok) and every live use
+              usable_child      child_rules + a budget + not stopped + task not cancelled: propose_child (child
+                                parent), ask_model (each child in the chain), child_grant_ok, open_child_host
+              child_grant_ok    authorize_child and an inbox answer for a child
+              stored_rules_ok   paths and children: decode_journal, and read_stored_journal (reread, resume)
+Finding 1:    reread and resume used decode_bytes + stored_paths_ok only. Now stored_rules_ok.
+              a_reread_or_resume_refuses_a_journal_that_breaks_a_child_rule (a running child below a stopped one,
+              a wider child resource; reread Err, resume Refused, cursor unchanged)
+Finding 2:    an inbox answer checked only "not the parent's grant". Now child_grant_ok, for the child's whole
+              resource; a deny needs no check.
+              an_inbox_answer_grants_only_a_usable_child_under_a_granted_parent (legacy child, parent without a
+              grant, stopped child; journal unchanged; control granted)
+Finding 3:    open_child_host took a parent step and a resource, and the host could record its own budget. Now it
+              takes a child step that must be usable in the parent's journal; a host (depth above 0) refuses
+              record_task_budget and ask_model ("child host"), and a stored host with a budget or a model call is
+              refused. Its calls are ask_model(parent, Some(child), ..).
+              a_child_host_spends_the_parent_budget_and_keeps_its_stop (one-request child: one request, also after
+              reload; stopped child gives no host; forged host budget or call refused)
+Finding 4:    the granted resource was dropped. A child's grant now keeps its scope in memory (grant_scope: the
+              grant resource, or the whole resource for an inbox answer); a grandchild is granted only inside it.
+              a_child_grant_scope_bounds_its_children (granted src/a: src/b refused for authorize and inbox, src/a/x
+              granted; an inbox-granted child hands its scope on)
+Finding 5:    records were counted in total. Now per child.
+              each_child_has_exactly_its_own_records (B's budget or stop record moved to A)
+Finding 6:    the task was checked before the chain. Now the children first.
+              the_task_and_a_child_running_out_together_stops_the_child (child stops with requests, its child with
+              cancelled, journal reloads)
+Finding 7:    "no budget" and "parent has no budget" for a budget never recorded. Now TASK_BUDGET_REASON, also for
+              a child from before idea 2 (its task predates budgets: start a new task).
+              a_missing_budget_is_refused_with_the_task_budget_reason (ask_model and propose_child, task and
+              legacy child; a legacy parent is refused before the child's own budget)
+Failing first: the seven tests on 206da0d's lib.rs: "187 passed; 7 failed" (each of the seven FAILED).
+Also:         a_cancelled_task_says_cancelled_on_every_live_path; a_child_that_breaks_a_rule_is_refused_on_every_live_path
+              (an in-memory child with a wrong count is refused by every live path, through usable_child)
+Changed tests: open_child_host now takes the child step (four tests and the run fixture); every_format_2_field_round_trips
+              checks the header depth on a child host; the reload test's depth case is a host-with-a-budget case, plus a
+              child past the limit inside a host at the limit; "no budget" expectations are TASK_BUDGET_REASON.
+Tests run:    ./examples/agent-host/verify.sh -> "196 passed" (187 + 9), clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Falsifiers:   CF01-CF21 new; CL01-CL92 rerun, the moved ones re-targeted (same id, same intent); TB01.
+              First pass at bc16234: 4 of 113 survived (CL23, CL25, CF18, CF19), all redundancy from the one-path
+              change. b543367 removes the two second checks (CL23, CL25 retire with their code) and adds the two
+              tests above (CF18, CF19 then fail them).
+              Full rerun at b543367: CF, CL, TB 111 of 111 caught (CL24 re-targeted to the dedented line: caught).
+              CL02 retires (a host's depth is its child's; CF10 covers it).
+              JF01-JF37 and the O* set at b543367: all caught except OZ01 (survives by design, as in #24);
+              OY19 caught as a compile error; OS01, OP01, JF14, JF15 retired as before; OY06 and JF07 skip, and their
+              re-targets OY06c (stored_rules_ok without the path rule: 4 FAILED) and JF07b (1 FAILED) are caught.
+Guest hash:   35102c274fc29f59d187d7af0149361e1bf98a0d4b0813cb8753a63f5f702277 on verify.sh and a clean rebuild.
+              wasm_sections.py: file 653844 bytes; /1/10 389892 91384db4aedcf2a8; /1/11 176551 7ca2e33174526964.
+Import list:  unchanged (the core import section /1/2, 149 bytes, 5ee6b40d46f6a045, is byte-identical to #30).
+```
+
+## Update: the falsifier runner, and Codex FAIL at fe40437 (22 Oct)
+
+```text
+Runner:       examples/agent-host/falsify.py with examples/agent-host/falsifiers.json (ce522d1, 43ac688). Every
+              live mutation is data: id, file, exact original text, replacement, command (host or e2e), expectation,
+              and the named tests that must ALL fail. By id or prefix, --list, --self-test. The original is kept as a
+              hard link and renamed back after each mutation, also on error, Ctrl-C or SIGTERM; a run killed outright
+              is recovered at the next start; it stops below 2 GiB free or on a full-disk message.
+              Checked here: --self-test OK (one named test still passing gives SURVIVED); SIGINT, SIGTERM and SIGKILL
+              mid-mutation each leave src/lib.rs byte for byte as committed; the disk check stops with exit 3.
+Codex hole 1: a child host kept open after its child stopped still got a grant.
+Codex hole 2: a host reached src/b while its child was granted only src/a.
+Cause:        the host was checked once, when it opened.
+Fix:          d6129f5, 9328f13: every host action takes the parent's current journal and the child and goes through
+              host_step_ok (host_scope: usable_child in the parent's journal, the host at the child's depth, the child
+              granted; the step's resource on the path rule and inside the child's granted scope; not the parent
+              step's grant). The plain authorize, apply_inbox and dispatch refuse a host's steps.
+Other copies: a child's grant scope lives on the child step in the parent's journal and is read at each use; the
+              journal cursor's revision and head are meant to be kept (compare and swap); grants are in memory only.
+              No other object keeps a parent's or a child's state across calls.
+Tests:        a_child_host_gets_nothing_once_its_child_stops (time stop, parent stop, cancel; a deny is still
+              recorded) and a_child_host_touches_only_what_its_child_was_granted. Both failed on fe40437 (written
+              against its API: "1 passed; 2 failed"). The run fixture covers the host inbox and dispatch.
+Falsifiers:   HC01-HC14 added (HC03 survived first: its test case used "..", which host_path already refuses; the
+              case is now an NFD name, and HC03 is caught).
+Tests run:    ./examples/agent-host/verify.sh -> "198 passed", clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Full run:     python3 -I examples/agent-host/falsify.py at 8f29f73: "206 CAUGHT, 1 CAUGHT (does not build), 1 SURVIVED
+                (expected, by design) of 208", exit 0. The 208: CF01-CF21, CL01-CL92 without CL02, CL23, CL25,
+                TB01, HC01-HC14, JF01-JF37 without JF07, JF14, JF15 plus JF07b, and the O* set without OS01, OP01,
+                OY06 plus OY06c. OY19 must not build; OZ01 survives by design. The first full pass (43ac688) had one
+                NO MATCH, CF08: host_scope now has the same line as open_child_host; re-targeted in 8f29f73 and caught.
+Guest hash:   d05d64ddd6cb0d8563cc22d044e988dbc5b3c7c23b78492dc00199da5aae75dd on verify.sh and a clean rebuild.
+              wasm_sections.py: file 657248 bytes; /1/10 392957 766f332d45d8c9e0; /1/11 176647 638faf0d30d1afd1.
+Import list:  unchanged (the core import section /1/2, 149 bytes, 5ee6b40d46f6a045, is byte-identical to #30).
+```
+
+## Update: an independent review of 10a31e2 (22 Oct)
+
+Sasha: no cross-family reviewer is available now, so continue. I ran an independent review by a fresh agent in its
+own worktree, given only the code, the design note and the rules (not my conclusions). It is the same AI family
+(Claude), so it does not replace Codex; the record is reviews/31-10a31e2.md.
+
+```text
+Verdict:      FAIL, 10 findings. Each probe test reproduced here before any fix ("0 passed; 10 failed").
+Fixes:        63c54fc
+  R1  the plain authorize granted a child, even the parent's grant -> a child is granted only through
+      authorize_child or an inbox answer
+  R2  a denied child kept asking the model, making children, acting in its host -> usable_child needs every child
+      in the chain prepared or dispatched ("denied"; cancelled or crashed: "stopped")
+  R3  the plain cancel left a child running with no stop -> a child is cancelled as a stop (record and subtree)
+  R4  a host kept a scope after the scope above changed -> a child is granted once; scope_still_granted checks every
+      step above (a run denied after granting takes the scope away) for host actions and new child grants
+  R5  a child below a model call under a stopped child -> only a run or a child is a parent ("not a parent")
+  R6, R7  child records written during an open compaction were dropped at commit and at a crash restore, so the task
+      no longer loaded -> carried over
+  R8  a prepared step put back where a stop or a cancel had reached loaded -> refused on load
+  R9  a journal from before idea 2 with children three deep stopped loading -> the depth limit holds for budgeted
+      children; older ones load and can do nothing (format 2 promise kept)
+  R10 a host was not bound to its child -> host_of, in memory only (no format change); a reloaded host belongs to
+      no child
+Tests:        nine (R6 and R7 share one), each run on 10a31e2's code: "0 passed; 1 failed" for every one.
+Changed:      a_spill_pointer_keeps_the_file_text granted a child through the plain authorize (R1's path); it uses
+              authorize_child now. The reload test's depth case gives the over-deep child a budget.
+Falsifiers:   RV01-RV17 added, each caught by its test when recorded.
+              The full pass at 864c62f: 211 caught, OY19 does not build, OZ01 by design; 8 entries no longer
+              matched their moved lines (CF07, CF18, CL59, CL79, HC01, HC04, HC05, HC12) and were re-targeted with
+              the same intent; 4 survived because the new rules also covered their old cases (CL24, CL37, CL73,
+              CL74). 52442a6: CL24 and CL79 name the tests with a started child; CL37 gets a new test,
+              cancelling_a_started_child_stops_it; CL73 and CL74 get reload cases on a child with nothing below it.
+Tests run:    ./examples/agent-host/verify.sh -> "208 passed", clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Full run:     python3 -I examples/agent-host/falsify.py at 52442a6: "223 CAUGHT, 1 CAUGHT (does not build), 1 SURVIVED
+                (expected, by design) of 225", exit 0 (CF 21, CL 89, TB 1, HC 14, RV 17, JF 35, O* 48).
+Guest hash:   3e25a62cb23a74a94243e73adacff5542636448b85241db9eb31cbf4d2cf2d2a on verify.sh and a clean rebuild.
+              wasm_sections.py: file 658799 bytes; /1/10 393728 a739263005d0d442; /1/11 176695 2dcb984f836276f1.
+Import list:  unchanged (the core import section /1/2, 149 bytes, 5ee6b40d46f6a045, is byte-identical to #30).
+```
+
+## Update: Codex FAIL at 355e659, two findings (23 Oct)
+
+Codex: both fe40437 holes fixed; its run passed 208 / 1 / 3 and 58 of 58 focused mutations; OY19 and OZ01 stand.
+
+```text
+Finding 1:    a stored budgeted child moved beneath a model call (resource Models/hosted/x) loaded through decode
+              and the provider reread, and once granted its host acted outside the ancestor's src/a scope. Load used
+              a second, looser parent rule, and the scope walk stopped at the model call.
+Fix:          04a25cc, 6e00cb9: one function, may_hold_a_child (a run or a child), for propose_child, for every
+              budgeted child on load (child_rules: decode, reread, resume refuse "not a parent"), and for the scope
+              walk (no scope at a step that cannot hold a child). Children from before idea 2 keep loading, like the
+              depth limit (a test now also loads one under a read step, and refuses a budgeted one there).
+Tests:        a_stored_child_below_a_model_call_is_refused (decode, reread and resume refuse; no grant, inbox
+              answer, host or dispatch for it) and the_scope_walk_does_not_stop_at_a_model_call (a parent child
+              moved below a granted model call: its child's host gets no grant). Both failed on 355e659.
+Falsifiers:   PR01 the load path drops the parent rule; PR02 the walk stops at a step that cannot hold a child;
+              PR03 any step may hold a child; PR04 the rule also refuses older children; RV09 re-targeted to the
+              shared line. All caught.
+Finding 2:    the runner parsed test output, so a panic printing "test genuinely_passing ... FAILED" overwrote a
+              real pass (confirmed: the 355e659 parser gives CAUGHT on that case).
+Fix:          73843ef: the mutation is built first (a failed build is its own result); each named test is listed
+              with --exact (exactly one must match) and run alone with --exact; failed only if it exits non-zero.
+              Output is read only to stop on a full disk. --self-test reproduces Codex's case on a throwaway crate
+              and must report SURVIVED naming the passing test; verify.sh runs it. --self-test --with-repo also
+              runs TB01 with a passing name added (SURVIVED) and as listed (CAUGHT).
+Tests run:    ./examples/agent-host/verify.sh -> "210 passed", runner self-test OK, clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+              python3 -I examples/agent-host/falsify.py --self-test --with-repo -> OK
+Full run:     python3 -I examples/agent-host/falsify.py at 6e00cb9 -> 227 CAUGHT, 1 CAUGHT (does not build:
+              OY19), 1 SURVIVED (expected, by design: OZ01) of 229; no NOT RUN, no NO MATCH
+Guest hash:   39a003b2b1b421e3dc0fbdb6bb5580997d0dc264f060783fef8e5921a6501d9e on verify.sh and a clean rebuild.
+Import list:  unchanged (the core import section /1/2, 149 bytes, 5ee6b40d46f6a045, is byte-identical to #30).
+```
+
+**What is next:** the Mac check and Codex on #31. Sasha closes #25 when #31 merges.
+
+## Update: Codex FAIL at 75ac0ae, four findings (24 Oct)
+
+```text
+Finding 1:    provider_write_may_be_asked accepted a granted host edit after the parent task was cancelled,
+              while dispatch_in_host refused it.
+Fix:          the gate takes the parent journal and the child and calls host_step_ok, the one host check; a host
+              journal with no parent context asks nothing.
+Finding 2:    record_tool_result(parent, child, text, None) stored a host-only grant; the spill exception was open
+              to any caller.
+Fix:          child text needs verified host context (host_binding_ok: task mark, child id, depth, system head),
+              used by record_child_result and the generic path; the guest's own spill pointer is a separate entry,
+              record_spill_result, called only by spill_pointer. A host journal for a non-child step is refused.
+Finding 3:    record_task_budget accepted one request on a pre-idea-2 journal with two calls; authorize and
+              dispatch checked only presence.
+Fix:          the counter rule in record_task_budget (calls already made) and in call_parent_usable before live
+              use ("requests"), the same rule the reload check applies.
+Finding 4:    a model call under a granted child dispatched after the root run's grant was withdrawn.
+Fix:          call_parent_usable also walks the ancestor grants for a granted child (scope_still_granted).
+Tests:        a_host_write_needs_its_parent_still_granting_it, a_child_result_needs_a_verified_host,
+              an_older_journal_cannot_exceed_a_new_budget,
+              a_model_call_under_a_granted_child_needs_the_grant_above_it. Each is caught by the falsifier that
+              removes its fix.
+Falsifiers:   PX19-PX24 new; PX14 and CL13 re-targeted to the moved checks; CL86, HC01, HC05, RV16, PX03 and
+              PX04 re-targeted to host_binding_ok and the separate spill entry.
+Full run:     python3 -I examples/agent-host/falsify.py: 251 CAUGHT, 1 CAUGHT (does not build: OY19), 1 SURVIVED
+              (expected, by design: OZ01) of 253; no NOT RUN, no NO MATCH.
+Tests run:    ./examples/agent-host/verify.sh -> "222 passed", runner self-test OK, clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Guest hash:   0a1b2c0ca3660e0d9d166faf6f685c29d23f436989be7c546bf57ca30a4eb757 on verify.sh.
+              wasm_sections.py: file 660815 bytes; /1/2 149 5ee6b40d46f6a045 (import list unchanged).
+Principles:   3 (no new authority), 5 (all work stays in examples/agent-host), 10 (one shared check per rule),
+              11 (each refusal keeps its reason and denies by default), 12 (design note updated), 7 (each rule has
+              a failing-first test and a caught falsifier).
+```
+
+## Update: Codex FAIL at 75ac0ae, round 2 (24 Oct)
+
+```text
+Finding 1:    record_tool_result(parent, child, "host-only-grant", Some(&second_host)) stored the grant: the
+              binding accepted any host journal for the same child, and only the supplied journal's steps were
+              scanned.
+Fix:          the parent journal keeps `host_grants` (child id, grant) for the process lifetime; `record_result`
+              refuses child text containing any of them, so a second host for the same child cannot hide a grant
+              given through the first. `without_grants` clears the list, so reload equality holds.
+Finding 2:    record_spill_result accepted arbitrary text through the guest spill exception.
+Fix:          the entry takes (journal, step_id, object_resource, version) and needs a dispatched granted step,
+              a covering resource, and the journal's last event to be a `Spill` node for that resource and
+              version; it builds the text. `spill_pointer` is its only caller.
+Finding 3:    the write gate, the result host binding and the budget counter refused without a reason.
+Fix:          the gate records `host_step_ok`'s reason or "not this child's host"; the result path records one
+              reason for the missing host, the non-child step and the binding failure; the budget counter
+              records "requests". All use `record_refusal_reason`.
+Tests:        a_child_result_needs_a_verified_host (substituted host, 5 reasons),
+              a_spill_pointer_cannot_carry_arbitrary_text,
+              a_host_write_needs_its_parent_still_granting_it ("not this child's host", "cancelled"),
+              an_older_journal_cannot_exceed_a_new_budget ("requests").
+Falsifiers:   PX25-PX29 new; PX04, PX10, PX13, PX17, PX19-PX22, CL13, CL86 and HC07 re-targeted to the moved
+              checks. PX10 now removes `child_result_ok` from the shared path; the host-step grant it used to
+              remove is covered by the parent ledger (PX25).
+Full run:     python3 -I examples/agent-host/falsify.py: 256 CAUGHT, 1 CAUGHT (does not build: OY19), 1
+              SURVIVED (expected, by design: OZ01) of 258; no NOT RUN, no NO MATCH.
+Tests run:    ./examples/agent-host/verify.sh -> "223 passed", runner self-test OK, clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Guest hash:   9dae7f24f04bca6e9269e9d15cc0b92a0f48e5889900446abd479294bc6f75ea on verify.sh.
+              wasm_sections.py: file 663717 bytes; /1/2 149 5ee6b40d46f6a045 (import list unchanged).
+Principles:   3 (no new authority), 5 (all work stays in examples/agent-host), 10 (one shared check per rule),
+              11 (each refusal keeps its reason and denies by default), 12 (design note updated), 7 (each rule has
+              a failing-first test and a caught falsifier).
+```
+
+## Update: Codex FAIL at 75ac0ae, round 3 (24 Oct)
+
+```text
+Finding 1:    the ancestor grant walk ran only when the immediate child held a grant. An ungranted grandchild
+              under a granted child could dispatch its model call after the run's grant was withdrawn.
+Fix:          `nearest_granted` finds the nearest step at or above the call's child that holds a grant, and
+              `call_parent_usable` runs `scope_still_granted` on it. A granted child behaves as before; an
+              ungranted child inherits the scope above it.
+Finding 2:    the parent host ledger and a missing spill pointer refused with a bare false.
+Fix:          the ledger refusal says "granted through another host"; a missing pointer says "no spill pointer".
+              Both use `record_refusal_reason` with the child-result or spill-result label.
+Finding 3:    the spill admission rule was copied in `spill_pointer` and `record_spill_result`, and PX26 removed
+              the copy and the pointer-record check together, so the named test could not see the copy alone.
+Fix:          one `spill_ready` rule (dispatched, granted, no result, the step's resource, the system head);
+              `record_spill_result` calls it, and `spill_pointer` calls it before it writes the node. The test
+              now isolates admission (not dispatched, no grant, wrong resource) and the pointer record (missing,
+              another version), each with its reason.
+Tests:        a_model_call_under_a_granted_child_needs_the_grant_above_it (ungranted grandchild, run withdrawn),
+              a_child_result_needs_a_verified_host (6 reasons, one "granted through another host"),
+              a_spill_pointer_cannot_carry_arbitrary_text (admission and record cases with reasons).
+Falsifiers:   PX30 (pointer record removed), PX31 (ledger reason removed), PX32 (spill-record reason removed) and
+              PX33 (only the immediate child's grant walked) new; PX04, PX24, PX25 and PX26 re-targeted.
+              PX26 now removes the admission rule only; PX30 removes the record check only.
+Full run:     python3 -I examples/agent-host/falsify.py: 260 CAUGHT, 1 CAUGHT (does not build: OY19), 1
+              SURVIVED (expected, by design: OZ01) of 262; no NOT RUN, no NO MATCH.
+Tests run:    ./examples/agent-host/verify.sh -> "223 passed", runner self-test OK, clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Guest hash:   e935e2921204a09a719bf6560f298c7dedb6c49075166eda37fb2af2d344ff05 on verify.sh.
+              wasm_sections.py: file 664436 bytes; /1/2 149 5ee6b40d46f6a045 (import list unchanged).
+Principles:   2 (a withdrawn ancestor grant takes the call), 5 (all work stays in examples/agent-host), 10 (one
+              spill admission rule), 11 (each refusal keeps its reason and denies by default), 12 (design note
+              updated), 7 (each rule has a failing-first test and a caught falsifier, each condition alone).
+```
+
+## Update: Codex FAIL at 75ac0ae, round 4 (24 Oct)
+
+```text
+Finding 1:    `nearest_granted(...) == None` succeeded, so an ungranted child under a revoked run could still
+              dispatch its model call.
+Fix:          `call_parent_usable` requires a granted step above the child (`ok_or("no grant")`) and then the
+              scope walk. The regression test adds the ungranted child with a revoked run.
+Finding 2:    grant filtering had two implementations: `child_result_ok` over steps returned a bare false, and a
+              second substring check over `host_grants` recorded a reason. The same text was silent with the
+              original host and reasoned with a substituted one.
+Fix:          one checker, `child_result_ok`, takes every grant source (parent steps, supplied host steps, parent
+              ledger) and returns the reason `result holds a grant`. `record_result` records that reason for
+              either host choice; the duplicate ledger block is gone. The lifecycle check in the guest now counts
+              stored events, since a refused result leaves a record.
+Tests:        a_model_call_under_a_granted_child_needs_the_grant_above_it (no granted ancestor, "no grant"),
+              a_child_result_needs_a_verified_host (7 reasons: 5 binding, 2 "result holds a grant", one per host
+              choice), a_child_grant_is_narrower_and_does_not_inherit_the_parent_grant (empty, host path and grant
+              reasons), the cap tests count stored events only.
+Falsifiers:   CL84, PX04, PX10, PX17, PX24, PX25, PX31 and PX33 re-targeted to the one checker, the required
+              ancestor grant and the recorded reasons. PX25 removes the ledger from the checker; PX31 removes the
+              shared reason; PX33 restores the immediate-child-only conditional.
+Full run:     python3 -I examples/agent-host/falsify.py: 260 CAUGHT, 1 CAUGHT (does not build: OY19), 1
+              SURVIVED (expected, by design: OZ01) of 262; no NOT RUN, no NO MATCH.
+Tests run:    ./examples/agent-host/verify.sh -> "223 passed", runner self-test OK, clippy clean, build OK
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Guest hash:   787fd6c605366b2961fa62e83cf396999946dabc9d184182e31020c6b68cf25c on verify.sh.
+              Import set unchanged (capabilities, identity, providers, runtime; types is type-only); the core
+              import section /1/2 is 149 bytes d5e512ac (was 5ee6b40d): same names, different linker order.
+Principles:   2 (no granted step above means no authority), 5 (all work stays in examples/agent-host), 10 (one
+              grant checker for both hosts), 11 (the same refusal reason whichever host supplied the text), 12
+              (design note updated), 7 (each rule has a failing-first test and a caught falsifier).
+```
+
+## Update: Codex FAIL at 310bcb5, three findings (24 Oct)
+
+```text
+Finding 1:    edit_request bound a change and returned the provider request with no parent context, so a
+              cancelled parent still got a batch write request.
+Fix:          one `write_context_ok` (a child host asks with its parent through `host_step_ok`; a task journal
+              with a parent asks nothing) is the admission for `provider_write_may_be_asked` and for every
+              step of `edit_request`. The change binds first, then asks the shared rule for each file and
+              records the shared reason.
+Finding 2:    `stored_children_ok` checked child-budget and child-stop records only in `journal.events`; a
+              changed record in `compact_pending` loaded, `commit_compact` installed it, and the next load
+              failed. The saved backup had the same hole through `note_crash_during_compact`.
+Fix:          one `stored_child_records_ok` checks an event list. The load calls it for the current log, for
+              pending plus the records written during the compaction, and for the saved backup plus those
+              records. `child_records_since_compaction` now yields references, so one selection feeds both
+              the load check and the install.
+Finding 3:    `child_rules` folded a missing owner budget into the over-budget condition and returned "over
+              the parent's budget"; the recovery text never appeared on load or when a host opened.
+Fix:          a missing owner budget returns `TASK_BUDGET_REASON` before the comparisons.
+Tests:        a_host_change_request_needs_its_parent_still_granting_it (cancel between the dispatch and the
+              request; a host with no parent), a_pending_compaction_record_must_match_its_child,
+              a_saved_compaction_record_must_match_its_child, and
+              a_budgeted_child_with_no_task_budget_says_start_a_new_task. The reload table's
+              missing-task-budget case expects `TASK_BUDGET_REASON`.
+              `child_records_survive_an_open_compaction` also loads the open compaction with its carried
+              records.
+Falsifiers:   PX50 (the change request skips the shared check), PX51 and PX52 (the pending and saved views
+              are skipped) and PX53 (a missing task budget says over budget) new; PX19, PX27, CL63, CL64,
+              OY15 and RV10 re-targeted to the moved code. All caught.
+Tests run:    ./examples/agent-host/verify.sh -> "234 passed", runner self-test OK, clippy clean, build OK.
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Full run:     python3 -I examples/agent-host/falsify.py: 280 CAUGHT, 1 CAUGHT (does not build: OY19), 1
+              SURVIVED (expected, by design: OZ01) of 282; no NOT RUN, no NO MATCH.
+Guest hash:   ca4dc54fa3200c8a75aa361aee0c7c5bef940edd4dc7db9f639968207fb66e08 on verify.sh.
+              wasm_sections.py: file 667799 bytes; /1/2 149 5ee6b40d46f6a045 (import list unchanged).
+Principles:   2 (a cancelled parent takes the change request), 5 (all work stays in examples/agent-host), 10
+              (one write admission for both request shapes; one record check for every restored view), 11 (a
+              budget never recorded says so), 12 (this note), 7 (each rule has a failing test and a caught
+              falsifier).
+```
+
+## Update: Codex FAIL at 4368761, the compaction boundary (24 Oct)
+
+```text
+Finding:      a load accepted a saved compaction longer than the current log. `child_records_since_compaction`
+              uses the saved length as the boundary, so `commit_compact` and `note_crash_during_compact`
+              dropped the records after it and returned true; the next load refused them with "record".
+Fix:          one `compaction_boundary_ok`: the saved copy is the prefix of the current log at its length.
+              `stored_rules_ok` refuses a stored journal that breaks it, and both install paths refuse to
+              take the pending replacement or restore the saved copy when it does.
+Consequence:  once the boundary holds, the saved copy is the log's prefix and the carried records are the
+              log's suffix, so the current-log record check already covers the crash-restore view. The
+              separate saved-view record check is removed (one rule, no second copy) and PX52 retires.
+Tests:        a_saved_compaction_past_the_log_is_refused_on_load,
+              a_commit_refuses_a_saved_compaction_past_the_log and
+              a_crash_restore_refuses_a_saved_compaction_past_the_log. Each appends one ordinary node to the
+              saved copy only; the commit and crash cases also stop the child, so the record written after
+              the boundary is the one that must not be dropped.
+Changed:      the "path not canonical" stored case now keeps its saved copy equal to the log prefix, so
+              the path rule is still the only rule that case breaks.
+Falsifiers:   PX54 (a load skips the boundary), PX55 (a commit skips it) and PX56 (a crash restore skips it)
+              new; CF02 and OY06c re-targeted to `stored_rules_ok` with the boundary rule; PX52 retired
+              because the boundary covers the saved view. All caught.
+Tests run:    ./examples/agent-host/verify.sh -> "237 passed", runner self-test OK, clippy clean, build OK.
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Full run:     python3 -I examples/agent-host/falsify.py: 282 CAUGHT, 1 CAUGHT (does not build: OY19), 1
+              SURVIVED (expected, by design: OZ01) of 284; no NOT RUN, no NO MATCH.
+Guest hash:   9eacec737f40c6a376ae07cc7d0a0b777fc1b19afbcd3a14b991af92a604728e on verify.sh.
+              wasm_sections.py: file 667936 bytes; /1/2 149 5ee6b40d46f6a045 (import list unchanged).
+Principles:   2 (a broken boundary installs nothing), 5 (all work stays in examples/agent-host), 10 (one
+              boundary rule for the load and both install paths; the saved-view record check is the same
+              rule as the log's, so it is gone), 11 (a stored journal that breaks the boundary is refused
+              with "record"), 12 (this note), 7 (three failing-first tests; PX54-PX56 each remove one
+              call site and are caught).
+```
+
+## Update: Claude's merge for the Codex FAIL at 4368761, the compaction boundary (24 Oct)
+
+```text
+Context:      Claude fixed the same finding on claude/omp2-child-limits-fix (cd6d1f4b, off 4368761c) while
+              the Sparks pushed 28940a07. Both fixes are the same rule. The merge keeps the Sparks' code,
+              tests and PX54-PX56, and keeps the PX52 retirement: `stored_child_records_ok` looks only at
+              child-budget and child-stop records, and with the boundary holding the saved view has
+              exactly the log's records, so the current-log check covers it.
+Added:        a_saved_compaction_that_is_not_the_start_of_the_log_is_refused: a saved copy as long as the
+              log at the start, with one node changed, is refused on load, by a commit and by a crash
+              restore. It fails on 4368761c and passes now. PX57 (the boundary compares only the length)
+              new, caught by that test.
+Tests run:    ./examples/agent-host/verify.sh -> "238 passed", runner self-test OK, clippy clean, build OK.
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Full run:     python3 -I examples/agent-host/falsify.py: 283 CAUGHT, 1 CAUGHT (does not build: OY19), 1
+              SURVIVED (expected, by design: OZ01) of 285; no NOT RUN, no NO MATCH.
+Guest hash:   a33bd4acdf2f76cb2824efd73855bc2f1ec9de3677569813386fad8675f3ddba on verify.sh (Linux checkout).
+              wasm_sections.py: file 667923 bytes; /1/2 149 5ee6b40d46f6a045 (import list unchanged).
+Principles:   5 (a saved copy that is not the start of the log fails closed on load), 7 (the length-only
+              boundary has a test that fails first and a caught falsifier), 10 (still one boundary rule).
+```
+
+## Update: Codex FAIL at 28940a07, two findings and a falsifier check (24 Oct)
+
+```text
+Finding 1:    the boundary rule made the saved copy the start of the log, but `prune_tool_results` still
+              shortened tool results in place. A 200-character tool result, an open compaction, then a
+              prune: the journal encoded, the load refused it with "record", and commit and crash restore
+              both refused. `admit_system` on the incapable path (a new system head) rewrote node 0 the
+              same way; Codex did not name it, the same rule closes it.
+Fix:          one `log_may_change_in_place`: while a compaction is open the log only grows, so a step that
+              would change a node already in it is refused with `COMPACTION_OPEN_REASON` ("a compaction
+              is open; commit or restore it first") and changes nothing. `prune_tool_results` (now
+              `Result<usize, _>`) and the head rewrite in `admit_system` (now `Result<(), _>`) ask it
+              first. Appends are never refused; the same head text changes nothing and is not refused.
+Finding 2:    a refused commit or crash restore returned a bare false, so a caller could not tell a broken
+              compaction from one never opened.
+Fix:          one `open_compaction_ok` admits both paths. `commit_compact` and `note_crash_during_compact`
+              now return `Result<(), &'static str>`: `COMPACTION_NOT_OPEN_REASON` ("no compaction is open")
+              or `COMPACTION_BOUNDARY_REASON` ("the open compaction does not match the log; start a new
+              task"). A crash restore with no saved copy also refuses with the boundary reason and now
+              changes nothing (it used to close the compaction). The load still says "record", like every
+              other stored-rule refusal. Every caller now reads the result; none drops it.
+Finding 3:    PX57 targets exactly the saved-prefix equality: it removes
+              `|| journal.events[..saved.len()] != saved[..]` and keeps the length check, and
+              a_saved_compaction_that_is_not_the_start_of_the_log_is_refused catches it.
+Tests:        pruning_during_an_open_compaction_keeps_the_journal_loadable (Codex's sequence) and
+              a_head_rewrite_during_an_open_compaction_keeps_the_journal_loadable ask only operations
+              present at 28940a07, so they compile there and fail at the load (2 failed, 237 filtered out).
+              a_step_that_changes_the_log_in_place_says_a_compaction_is_open (both refusals give
+              `COMPACTION_OPEN_REASON`; the compaction then commits and restores, and once restored both
+              steps run) and a_refused_commit_or_restore_says_why (not open and broken boundary, for both
+              paths, journal unchanged) use the new results. The three boundary tests now expect
+              `COMPACTION_BOUNDARY_REASON`, not just a refusal.
+Falsifiers:   CB01 (pruning skips the rule), CB02 (the head rewrite skips it), CB03 (the rule refuses
+              nothing), CB04 (a broken boundary says not open) and CB05 (not open says broken boundary)
+              new; PX55 and PX56 re-targeted to `open_compaction_ok`. All caught.
+Tests run:    ./examples/agent-host/verify.sh -> "242 passed", runner self-test OK, clippy clean, build OK.
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Full run:     python3 -I examples/agent-host/falsify.py: 288 CAUGHT, 1 CAUGHT (does not build: OY19), 1
+              SURVIVED (expected, by design: OZ01) of 290; no NOT RUN, no NO MATCH.
+Guest hash:   ced6b73611c22006bdac39152b4b7025a47c638a90732278c6ad7a3a474de628 on verify.sh (Linux checkout).
+              wasm_sections.py: file 668152 bytes; /1/2 149 5ee6b40d46f6a045 (import list unchanged).
+Principles:   5 (no step can break the boundary of an open compaction; a refusal changes nothing), 10 (one
+              in-place rule for both steps that edit the log; one admission for commit and crash restore),
+              11 (each refusal says why and what to do), 12 (this note), 7 (Codex's sequence fails first on
+              28940a07; each new rule and reason has a caught falsifier).
+```
+
+## Update: Codex FAIL at 18278463f (Sparks round 3, on 28940a07), two findings (24 Oct)
+
+```text
+Base:         18278463f never reached GitHub; this round is built on the GitHub head 2a605c16, which
+              already holds the round 2 fixes below.
+Finding 1:    a head rewrite (`admit_system(.., false)`) under an open compaction changed the saved prefix;
+              the journal encoded but did not load, and commit and crash restore refused.
+Status:       fixed in 2a605c16 (round 2): `log_may_change_in_place` refuses it with
+              `COMPACTION_OPEN_REASON`. a_head_rewrite_during_an_open_compaction_keeps_the_journal_loadable
+              is Codex's exact sequence (two_turns, begin_compact, "Replacement head."), caught by CB02.
+              This round also guards the other in-place path in `admit_system`: the first-head insert at
+              node 0 (CB11).
+Finding 2:    an open compaction with no saved copy loaded (`compaction_boundary_ok` returned success with
+              no backup); `child_records_since_compaction` then selected no record and a commit dropped
+              the stop written during the compaction; the next load refused it with "record".
+Fix:          `compaction_boundary_ok` is now the one rule for the whole compaction state: the open flag,
+              the saved copy and the pending replacement are there together or not at all; the saved copy
+              is the start of the log; and the series is still the saved one (nothing can start a new
+              series while a compaction is open). The load refuses anything else with "record";
+              `open_compaction_ok` asks the same rule first, so a commit or crash restore refuses broken
+              leftovers with `COMPACTION_BOUNDARY_REASON` (never "not open") and changes nothing.
+Principles:   Codex: "the backup-only path fixture is also weakened". 28940a07 put the malformed path in the
+              log too, so the log check alone refused it, and removing the saved copy's path check went
+              unnoticed (OY07 removes both checks, and the pending case catches that). The fixture is
+              back to a path only in the saved copy; the path rule runs before the boundary, so it is
+              refused with "path not canonical". CB12 (only the saved copy's path check removed) survives
+              with the weakened fixture and is caught with the restored one.
+One guard:    every function that changes the journal was listed. Only `admit_system` (first-head insert
+              and head rewrite), `prune_tool_results`, and the commit and crash restore change nodes
+              already in the log or the series; every other step only appends. The first three ask
+              `log_may_change_in_place`; the last two ask `open_compaction_ok`. Every refusal returns its
+              reason.
+Tests:        an_open_compaction_without_its_saved_copy_keeps_its_records (Codex's sequence; asks only
+              operations present at 2a605c16, compiles there and on 28940a07 and fails on both),
+              an_open_compaction_has_its_flag_saved_copy_and_replacement_together (open with no saved copy,
+              open with no replacement, both with no flag, each alone, a new series: each refused on load
+              and by commit and crash restore with the reason, unchanged; a good one loads),
+              a_first_head_under_an_open_compaction_is_refused, and
+              every_step_under_an_open_compaction_keeps_it_recoverable (user, assistant, tool result,
+              system lines, same and new head, prune, snapshot, skill, goal, read, refusal, a child's stop
+              and a nested begin under an open compaction: after each the boundary holds and the journal
+              loads; then commit and crash restore keep the stop and load).
+              a_compaction_that_is_not_open_is_neither_committed_nor_rolled_back now expects
+              `COMPACTION_BOUNDARY_REASON`.
+All four:     pruning (round 2): pruning_during_an_open_compaction_keeps_the_journal_loadable, CB01. Bare
+              false (round 2): a_refused_commit_or_restore_says_why, CB04, CB05. Head change (round 3):
+              the head-rewrite test, the first-head test and the sweep, CB02, CB11. Missing saved copy
+              (round 3): the two state tests, CB06-CB10.
+Falsifiers:   CB06 (an open compaction with no saved copy loads), CB07 (no replacement needed), CB08 (no
+              open flag needed), CB09 (a new series loads), CB10 (leftovers read as "not open"), CB11 (the
+              first-head insert skips the guard) and CB12 (the saved copy's paths not checked) new; CB04
+              and CB05 re-targeted; CB02 and CB03 also name the sweep. All caught.
+Tests run:    ./examples/agent-host/verify.sh -> "246 passed", runner self-test OK, clippy clean, build OK.
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Full run:     python3 -I examples/agent-host/falsify.py: 295 CAUGHT, 1 CAUGHT (does not build: OY19), 1
+              SURVIVED (expected, by design: OZ01) of 297; no NOT RUN, no NO MATCH.
+Guest hash:   5b6ff6bec6ce5a70d1782426f148a972f0ecb82fda7078f1718a6c8f5a840e7f on verify.sh (Linux checkout).
+              wasm_sections.py: file 668322 bytes; /1/2 149 5ee6b40d46f6a045 (import list unchanged).
+Principles:   5 (a broken compaction state fails closed on load and in memory), 10 (one state rule for the
+              load and both install paths; one in-place guard for every step that edits the log), 11
+              (every refusal says why), 12 (this note), 7 (each sequence fails first and each rule has a
+              caught falsifier; the restored fixture makes CB12 catchable).
+```
