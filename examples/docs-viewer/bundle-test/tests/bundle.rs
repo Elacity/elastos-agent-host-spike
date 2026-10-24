@@ -194,6 +194,7 @@ fn each_capsule_ships_only_what_it_runs_from() {
     assert_eq!(
         names(&surface),
         [
+            "browser/docs-render.js",
             "browser/index.html",
             "browser/main.js",
             "browser/reader.css",

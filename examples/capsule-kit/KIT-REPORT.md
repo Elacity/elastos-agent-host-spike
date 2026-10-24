@@ -68,7 +68,7 @@ Measured as lines that match the source file, in order (blank lines and braces c
 | `host-test/tests/component.rs` | `photo-viewer/host-test/tests/component.rs` | 63% | The fake bridge, the `ComponentProvider` run, the admission check (itself a copy of private Runtime code), the fuel runner | A2 |
 | `build.sh`, `verify.sh`, `repro/build-in-container.sh` | the photo viewer's | 100%, 55%, 96% | The builder call, the manifest check, the pinned container | A3 |
 | `falsify.py`, `falsify-surface.py` | the photo viewer's | 28%, 59% | The mutation runner | A4 |
-| `surface/browser/reader.js` | `photos.js` | 37% | `launchToken`, the one-call-site client, the refusal text, cutting strings, the mount skeleton | A5 |
+| `surface/browser/reader.js` | `photos.js` | 37% | `launchToken`, the one-call-site client, the refusal text, the mount skeleton; the block renderer is the kit's `surface/docs-render.js`, shipped as a verified copy | A5 |
 | `surface/reader.test.mjs`, `reader-browser-smoke.mjs` | the Photos tests | 37%, 66% | The fake window and document; the stand-in server with Runtime's app headers and Home's sandbox | A5 |
 | `bundle-test/tests/bundle.rs` | `photo-viewer/bundle/tests/admission.rs` | 28% | `World`, `unseal`, `refused`, claim and policy setup | A6 |
 | `bus2/guests/busy`, `bus2/host-test/tests/common` | `bus2-proof` | 94%, 92% | The busy guest; `guest()` and the watchdog `within()` | A7 |
@@ -201,11 +201,22 @@ are.
 | A2 | A host-test crate: the fake bridge, the `ComponentProvider` run, the fuel runner, and the admission check exported by Runtime instead of copied | the 63% copy of `component.rs` |
 | A3 | `scripts/` for build, verify and the pinned container, each taking a capsule folder; pins in one file; a recorded hash and a check | `build.sh`, the manifest check in `verify.sh`, `repro/` |
 | A4 | One mutation runner that reads a case list per app, knows crates, and has `--check` and filters | three `falsify*.py` runners |
-| A5 | A page kit: `launchToken`, the client, `cut`, a typed-document renderer; the fake window for tests; the stand-in server with Runtime's app headers taken from Runtime | half of `reader.js`, the test fakes, the smoke server |
+| A5 | A page kit: `launchToken`, the client, `cut`, a typed-document renderer; the fake window for tests; the stand-in server with Runtime's app headers taken from Runtime. **Delivered:** `surface/docs-render.js` is the one owner of the typed-document renderer; each page's build copies it into its `browser/`, and a named drift test pins the copy byte for byte | half of `reader.js`, the test fakes, the smoke server |
 | A6 | `capsule-bundle pack` and test support (`World`, sealed stores) | `pack` and the helpers in `bundle.rs` |
 | A7 | The Bus v2 host as test support: `guest()`, `within()`, a busy guest, the toolchain pin | the copies in `bus2/` |
 | A8 | The checklist (`PATTERNS.md`), with the changes above: bounded body reads, read and output budgets, linear parsers with hostile inputs in the fuel gate, the page has no parser, the stop and skip rule for resident guests | - |
 | R1 to R4 | Runtime and Home, with Sasha's yes: the generic viewer route bound to the launch (missing 1), the viewer chosen by what it accepts (2), `requires[].cid` in the manifest (4), a typed UI document in the Bus v2 WIT (7) | - |
+
+### A5 delivered: one owner, verified copies
+
+`surface/docs-render.js` is now the one definition of the docs-model block renderer: `readBlock`,
+`drawBlock`, `readSpans`, `cut`, the style map (`STYLES`, `styleTag`) and the renderer bounds. Runtime serves a
+page from its own folder with `script-src 'self'`, so a page cannot import the kit's file at runtime: the
+page's `build.sh` copies the owner to `surface/browser/docs-render.js`, and the named surface test
+`the shipped renderer matches the kit owner` fails if any byte differs. The page keeps only its glue
+(`launchToken`, the one-call-site client, the document-list framing and the page bounds). A page that draws
+the docs model, such as the archive page, reuses this owner as a verified copy instead of carrying a second
+renderer.
 
 ## How to check it
 

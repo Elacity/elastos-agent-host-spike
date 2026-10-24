@@ -8,7 +8,6 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
-  MAX_BLOCKS,
   MAX_DOCUMENTS,
   PAGES_ROUTE,
   PAGES_SCHEMA,
@@ -17,11 +16,13 @@ import {
   mountReader,
   readPages,
 } from "./browser/reader.js";
+import { MAX_BLOCKS } from "./browser/docs-render.js";
 import { fakeDocument as kitDocument, response } from "../../capsule-kit/surface/test-kit.mjs";
 
 const TOKEN = "launch-token-for-this-frame";
 const HOSTILE = '<img src=x onerror="fetch(\'/api/apps/home/state\')">';
 const source = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+const bytes = (path) => readFileSync(new URL(path, import.meta.url));
 
 const IDS = ["titles", "article", "status", "skipped", "skipped-title"];
 const fakeDocument = () => kitDocument(IDS);
@@ -233,10 +234,15 @@ test("the titles and the arrow keys switch documents, in shelf order", async () 
   assert.equal(reader.state.index, 1);
 });
 
+test("the shipped renderer matches the kit owner", () => {
+  assert.deepEqual(bytes("./browser/docs-render.js"), bytes("../../capsule-kit/surface/docs-render.js"));
+});
+
 test("the page has no way to hold or reach anything else", () => {
   const page = source("./browser/reader.js");
+  const renderer = source("./browser/docs-render.js");
   const main = source("./browser/main.js");
-  for (const code of [page, main]) {
+  for (const code of [page, renderer, main]) {
     for (const forbidden of [
       "innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "Function(",
       "localStorage", "sessionStorage", "indexedDB", "document.cookie", "postMessage", "WebSocket",

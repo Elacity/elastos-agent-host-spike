@@ -49,7 +49,7 @@ const PAGES = {
 const { base, requests, close } = await standIn({
   app: "docs-reader",
   browserRoot,
-  files: ["index.html", "main.js", "reader.js", "reader.css"],
+  files: ["index.html", "main.js", "reader.js", "docs-render.js", "reader.css"],
   routes(method, path) {
     if (method === "GET" && path === "/api/viewers/docs-reader/pages") {
       return { type: "application/json", body: JSON.stringify(PAGES) };

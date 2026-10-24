@@ -14,7 +14,7 @@ What a capsule built from the photo patterns shares, in one place, so no copy ca
 | A2 host-test harness | `v1-host-test/` (crate `capsule-v1-host-test`) | A dev-dependency of its `host-test/`: `Bridge`, `run`, `admission`, `measure`, `imports_and_exports` |
 | A3 build scripts | `scripts/check-manifest.py`, `repro/build-in-container.sh` | Its `verify.sh` runs the manifest check; its `repro/build-in-container.sh` runs the recipe for its folder. The builder itself is the repository's `scripts/build-component-capsule.sh` |
 | A4 mutation runner | `falsify/falsify_kit.py` | Its falsify scripts keep their cases and import the runner |
-| A5 page test kit | `surface/test-kit.mjs`, `surface/stand-in.mjs` | Its page tests import the fakes; its browser smoke runs on the stand-in |
+| A5 page kit | `surface/test-kit.mjs`, `surface/stand-in.mjs`, `surface/docs-render.js` (the one owner of the docs-model block renderer) | Its page tests import the fakes; its browser smoke runs on the stand-in; a page that draws the docs model ships a byte-identical copy of `docs-render.js` in its `browser/` folder, made by its build and pinned by a named drift test |
 | A6 pack and bundle test helpers | the bundle tool, `examples/photo-viewer/bundle` (`capsule-bundle pack`, `capsule_bundle::testing`) | Its bundle test packs and admits its closures |
 | A7 Bus v2 test support | the Bus v2 proof, `examples/bus2-proof` (`host`, `host/tests/common`, `guests/busy`) | Its Bus v2 tests use the proof's host, helpers and busy guest as they are |
 | A8 checklist | `PATTERNS.md` | - |
