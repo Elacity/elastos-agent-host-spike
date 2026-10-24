@@ -4,14 +4,14 @@
  "falsifiers": [
   {
    "id": "PF01",
-   "title": "the packer moves the last prefix byte into the volatile tail",
+   "title": "the stable boundary includes the first conversation node, so a later turn moves the prefix",
    "command": "host",
    "expect": "caught",
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    Some(PackedPrompt {\n        prefix: prefix.into_bytes(),\n        tail: turn.as_bytes().to_vec(),\n    })",
-     "new": "    let mut prefix = prefix.into_bytes();\n    let mut tail = turn.as_bytes().to_vec();\n    let last = prefix.len() - 1;\n    tail.insert(0, prefix.remove(last));\n    Some(PackedPrompt { prefix, tail })"
+     "old": "    let boundary = visible\n        .iter()\n        .position(is_conversation)\n        .unwrap_or(visible.len());",
+     "new": "    let boundary = visible\n        .iter()\n        .position(is_conversation)\n        .map(|at| at + 1)\n        .unwrap_or(visible.len());"
     }
    ],
    "tests": [
@@ -20,14 +20,14 @@
   },
   {
    "id": "PF02",
-   "title": "the packer moves the first volatile byte into the prefix",
+   "title": "the stable boundary drops its last line into the volatile tail",
    "command": "host",
    "expect": "caught",
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    Some(PackedPrompt {\n        prefix: prefix.into_bytes(),\n        tail: turn.as_bytes().to_vec(),\n    })",
-     "new": "    let mut prefix = prefix.into_bytes();\n    let mut tail = turn.as_bytes().to_vec();\n    prefix.push(tail.remove(0));\n    Some(PackedPrompt { prefix, tail })"
+     "old": "    let boundary = visible\n        .iter()\n        .position(is_conversation)\n        .unwrap_or(visible.len());",
+     "new": "    let boundary = visible\n        .iter()\n        .position(is_conversation)\n        .map(|at| at.saturating_sub(1))\n        .unwrap_or(visible.len().saturating_sub(1));"
     }
    ],
    "tests": [
@@ -36,14 +36,30 @@
   },
   {
    "id": "PF03",
+   "title": "no node is conversation, so the whole journal becomes the prefix",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    matches!(node.source, NodeSource::Message | NodeSource::InHistory)",
+     "new": "    false"
+    }
+   ],
+   "tests": [
+    "tests::two_consecutive_turns_keep_the_packed_prefix_byte_for_byte"
+   ]
+  },
+  {
+   "id": "PF04",
    "title": "the packed prefix keeps only node 0, so a changed prefix line does not reach it",
    "command": "host",
    "expect": "caught",
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    for node in derive(&journal.events) {\n        prefix.push_str(&render_record(&node));\n        prefix.push('\\n');\n    }",
-     "new": "    for node in derive(&journal.events).iter().take(1) {\n        prefix.push_str(&render_record(node));\n        prefix.push('\\n');\n    }"
+     "old": "    for node in &visible[..boundary] {\n        prefix.push_str(&render_record(node));\n        prefix.push('\\n');\n    }",
+     "new": "    for node in &visible[..1] {\n        prefix.push_str(&render_record(node));\n        prefix.push('\\n');\n    }"
     }
    ],
    "tests": [
@@ -52,39 +68,7 @@
    ]
   },
   {
-   "id": "PF04",
-   "title": "the packer accepts a node 0 that is not a system node",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if head.role != Role::System || head.source != NodeSource::Head || turn.is_empty() {",
-     "new": "    if head.source != NodeSource::Head || turn.is_empty() {"
-    }
-   ],
-   "tests": [
-    "tests::a_prompt_without_node_zero_or_a_turn_text_is_not_packed"
-   ]
-  },
-  {
    "id": "PF05",
-   "title": "the packer accepts a system node 0 that is not the head",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if head.role != Role::System || head.source != NodeSource::Head || turn.is_empty() {",
-     "new": "    if head.role != Role::System || turn.is_empty() {"
-    }
-   ],
-   "tests": [
-    "tests::a_prompt_without_node_zero_or_a_turn_text_is_not_packed"
-   ]
-  },
-  {
-   "id": "PF06",
    "title": "the packer accepts an empty turn",
    "command": "host",
    "expect": "caught",
@@ -100,7 +84,39 @@
    ]
   },
   {
+   "id": "PF06",
+   "title": "the packer accepts a node 0 that is not a system node",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if head.role != Role::System || head.source != NodeSource::Head || turn.is_empty() {",
+     "new": "    if head.source != NodeSource::Head || turn.is_empty() {"
+    }
+   ],
+   "tests": [
+    "tests::a_prompt_without_node_zero_or_a_turn_text_is_not_packed"
+   ]
+  },
+  {
    "id": "PF07",
+   "title": "the packer accepts a system node 0 that is not the head",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if head.role != Role::System || head.source != NodeSource::Head || turn.is_empty() {",
+     "new": "    if head.role != Role::System || turn.is_empty() {"
+    }
+   ],
+   "tests": [
+    "tests::a_prompt_without_node_zero_or_a_turn_text_is_not_packed"
+   ]
+  },
+  {
+   "id": "PF08",
    "title": "the metrics reader matches by anything but the exact name, so an absent counter reads as present",
    "command": "host",
    "expect": "caught",
@@ -113,6 +129,54 @@
    ],
    "tests": [
     "tests::a_metric_value_is_read_by_exact_name_and_an_absent_prefix_counter_is_none"
+   ]
+  },
+  {
+   "id": "PF09",
+   "title": "any reply with a choices key counts as a completion, including choices null",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        reply\n            .get(\"choices\")\n            .and_then(|choices| choices.as_array())\n            .and_then(|choices| choices.first())\n            .and_then(|choice| choice.get(\"message\"))\n            .and_then(|message| message.get(\"content\"))\n            .is_some_and(|content| content.is_string())",
+     "new": "        reply.get(\"choices\").is_some()"
+    }
+   ],
+   "tests": [
+    "tests::a_reply_without_a_completion_is_refused"
+   ]
+  },
+  {
+   "id": "PF10",
+   "title": "a metrics snapshot without request_prefill_seconds is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let prefill = metric_value(metrics, \"tensorfold:request_prefill_seconds\")\n            .ok_or_else(|| \"tensorfold:request_prefill_seconds is absent\".to_string())?;",
+     "new": "        let prefill = metric_value(metrics, \"tensorfold:request_prefill_seconds\").unwrap_or(0.0);"
+    }
+   ],
+   "tests": [
+    "tests::a_metrics_snapshot_without_both_required_counters_is_refused"
+   ]
+  },
+  {
+   "id": "PF11",
+   "title": "a metrics snapshot without prompt_tokens_total is accepted",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let prompt = metric_value(metrics, \"tensorfold:prompt_tokens_total\")\n            .ok_or_else(|| \"tensorfold:prompt_tokens_total is absent\".to_string())?;",
+     "new": "        let prompt = metric_value(metrics, \"tensorfold:prompt_tokens_total\").unwrap_or(0.0);"
+    }
+   ],
+   "tests": [
+    "tests::a_metrics_snapshot_without_both_required_counters_is_refused"
    ]
   }
  ]

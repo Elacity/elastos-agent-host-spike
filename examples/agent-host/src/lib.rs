@@ -316,34 +316,54 @@ fn model_bytes(events: &[SurfaceNode]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// A packed prompt: the stable prefix and this turn's volatile tail. The
-/// prefix is the model-visible text of the journal in order, one record per
-/// line, node 0 first. The tail is the new user text of this turn and is not
-/// part of the prefix, so a server may reuse the prefix between turns. The
-/// guest does not call a model, so this packer is exercised by tests only.
-#[cfg(test)]
+/// A packed prompt: the stable prefix and the volatile tail. The prefix is
+/// the model-visible text of the journal from node 0 to the first
+/// conversation node, one record per line. The tail is that conversation
+/// plus this turn's new user text, so a later turn adds to the tail and does
+/// not move the prefix.
+#[cfg(any(test, target_arch = "wasm32"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PackedPrompt {
     prefix: Vec<u8>,
     tail: Vec<u8>,
 }
 
-/// Pack one turn. A journal whose first node is not the system head, or an
-/// empty turn, is not packed.
-#[cfg(test)]
+/// The kinds that are conversation. Everything before the first one is the
+/// stable prefix; the first one starts the volatile tail.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn is_conversation(node: &SurfaceNode) -> bool {
+    matches!(node.source, NodeSource::Message | NodeSource::InHistory)
+}
+
+/// Pack one turn. The stable prefix ends at the first conversation node; the
+/// volatile tail is the conversation from there plus this turn's new user
+/// text. A journal whose first node is not the system head, or an empty turn,
+/// is not packed.
+#[cfg(any(test, target_arch = "wasm32"))]
 fn pack_prompt(journal: &Journal, turn: &str) -> Option<PackedPrompt> {
     let head = journal.events.first()?;
     if head.role != Role::System || head.source != NodeSource::Head || turn.is_empty() {
         return None;
     }
+    let visible = derive(&journal.events);
+    let boundary = visible
+        .iter()
+        .position(is_conversation)
+        .unwrap_or(visible.len());
     let mut prefix = String::new();
-    for node in derive(&journal.events) {
-        prefix.push_str(&render_record(&node));
+    for node in &visible[..boundary] {
+        prefix.push_str(&render_record(node));
         prefix.push('\n');
     }
+    let mut tail = String::new();
+    for node in &visible[boundary..] {
+        tail.push_str(&render_record(node));
+        tail.push('\n');
+    }
+    tail.push_str(turn);
     Some(PackedPrompt {
         prefix: prefix.into_bytes(),
-        tail: turn.as_bytes().to_vec(),
+        tail: tail.into_bytes(),
     })
 }
 
@@ -4000,6 +4020,33 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             )));
         }
         let _identity = elastos::bus::identity::context();
+        let mut packed_journal = empty_journal();
+        admit_system(&mut packed_journal, SYSTEM_HEAD, true);
+        admit_snapshot(
+            &mut packed_journal,
+            "localhost://Users/self/Projects/demo",
+            "2026-10-24T09:00:00Z",
+            "localhost://Users/self/Projects/demo/index.html",
+        );
+        let first_pack = pack_prompt(&packed_journal, "read the page").ok_or_else(|| {
+            elastos::bus::types::BusError::Invalid("the first turn did not pack".to_string())
+        })?;
+        // The guest's turn transition: the first turn's text and the reply
+        // enter the journal before the second turn is packed.
+        admit_user(&mut packed_journal, "read the page");
+        admit_assistant(&mut packed_journal, "The page says demo.");
+        let second_pack = pack_prompt(&packed_journal, "change the title").ok_or_else(|| {
+            elastos::bus::types::BusError::Invalid("the second turn did not pack".to_string())
+        })?;
+        if first_pack.prefix != second_pack.prefix
+            || first_pack.tail != b"read the page"
+            || !second_pack.tail.starts_with(&first_pack.tail)
+            || !second_pack.prefix.starts_with(SYSTEM_HEAD.as_bytes())
+        {
+            return Err(elastos::bus::types::BusError::Invalid(
+                "the packed prefix moved between two turns".to_string(),
+            ));
+        }
         let mut journal = two_turns();
         let visible = derive(&journal.events);
         let head = system_head(&visible)
@@ -8249,47 +8296,54 @@ mod tests {
         );
     }
 
-    // Prefix proof. Two consecutive turns share one packed prefix; only the
-    // volatile tail (the new user text) changes. Node 0 stays its first line.
+    // Prefix proof. Two consecutive turns share one packed prefix; the
+    // conversation and the new user text stay in the volatile tail. Node 0
+    // is the first line of the prefix.
 
-    #[test]
-    fn two_consecutive_turns_keep_the_packed_prefix_byte_for_byte() {
-        let mut journal = one_turn();
+    /// The stable context before the first turn: node 0 and the snapshot.
+    fn packed_context() -> Journal {
+        let mut journal = empty_journal();
+        admit_system(&mut journal, SYSTEM_HEAD, true);
         assert!(admit_snapshot(
             &mut journal,
             "localhost://Users/self/Projects/demo",
             "2026-10-24T09:00:00Z",
             "localhost://Users/self/Projects/demo/index.html",
         ));
+        journal
+    }
+
+    #[test]
+    fn two_consecutive_turns_keep_the_packed_prefix_byte_for_byte() {
+        let mut journal = packed_context();
         let first = pack_prompt(&journal, "read the page").unwrap();
+        // The guest's turn transition: the first turn's text and the reply
+        // enter the journal before the second turn is packed.
+        admit_user(&mut journal, "read the page");
+        admit_assistant(&mut journal, "The page says demo.");
         let second = pack_prompt(&journal, "change the title").unwrap();
         let expected = format!(
-            "{SYSTEM_HEAD}\nhello\nReply in one short paragraph.\n\
-             localhost://Users/self/Projects/demo\n2026-10-24T09:00:00Z\n\
+            "{SYSTEM_HEAD}\nlocalhost://Users/self/Projects/demo\n\
+             2026-10-24T09:00:00Z\n\
              localhost://Users/self/Projects/demo/index.html\n"
         );
         assert_eq!(first.prefix, expected.as_bytes());
         assert_eq!(first.prefix, second.prefix);
         assert_eq!(first.tail, b"read the page");
-        assert_eq!(second.tail, b"change the title");
-        assert_ne!(first.tail, second.tail);
-        let mut first_prompt = first.prefix.clone();
-        first_prompt.extend_from_slice(&first.tail);
-        let mut second_prompt = second.prefix.clone();
-        second_prompt.extend_from_slice(&second.tail);
         assert_eq!(
-            first_prompt[..first.prefix.len()],
-            second_prompt[..second.prefix.len()]
+            second.tail,
+            b"read the page\nThe page says demo.\nchange the title"
         );
-        assert_ne!(
-            first_prompt[first.prefix.len()..],
-            second_prompt[second.prefix.len()..]
-        );
+        assert!(second.tail.starts_with(&first.tail));
+        assert_ne!(first.tail, second.tail);
+        // The first turn's text moved into the tail, not into the prefix.
+        assert!(!String::from_utf8_lossy(&second.prefix).contains("read the page"));
+        assert!(second.prefix.starts_with(SYSTEM_HEAD.as_bytes()));
     }
 
     #[test]
     fn a_changed_prefix_line_changes_the_packed_prefix() {
-        let mut journal = one_turn();
+        let mut journal = packed_context();
         let first = pack_prompt(&journal, "same question").unwrap();
         assert!(admit_skill(&mut journal, "Use the project style."));
         let second = pack_prompt(&journal, "same question").unwrap();
@@ -8335,6 +8389,29 @@ mod tests {
                 }
                 value.trim().parse::<f64>().ok()
             })
+    }
+
+    /// A reply is a completion only with a non-empty choices list whose
+    /// first choice carries a message with string content. `{"choices":null}`
+    /// and any other shape are refused.
+    fn completion_ok(reply: &serde_json::Value) -> bool {
+        reply
+            .get("choices")
+            .and_then(|choices| choices.as_array())
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("message"))
+            .and_then(|message| message.get("content"))
+            .is_some_and(|content| content.is_string())
+    }
+
+    /// One /metrics snapshot must carry both counters. An absent counter is a
+    /// refusal that names it; this never reads a prefix-hit counter.
+    fn required_metrics(metrics: &str) -> Result<(f64, f64), String> {
+        let prompt = metric_value(metrics, "tensorfold:prompt_tokens_total")
+            .ok_or_else(|| "tensorfold:prompt_tokens_total is absent".to_string())?;
+        let prefill = metric_value(metrics, "tensorfold:request_prefill_seconds")
+            .ok_or_else(|| "tensorfold:request_prefill_seconds is absent".to_string())?;
+        Ok((prompt, prefill))
     }
 
     fn sparks_get(url: &str) -> Result<String, String> {
@@ -8399,11 +8476,48 @@ mod tests {
         assert_eq!(metric_value(metrics, "vllm:prefix_cache_hits"), None);
     }
 
+    #[test]
+    fn a_reply_without_a_completion_is_refused() {
+        for reply in [
+            serde_json::json!({"choices": null, "error": "refused"}),
+            serde_json::json!({"choices": []}),
+            serde_json::json!({"choices": [{}]}),
+            serde_json::json!({"choices": [{"message": {}}]}),
+            serde_json::json!({"choices": [{"message": {"content": null}}]}),
+            serde_json::json!({"error": "refused"}),
+        ] {
+            assert!(!completion_ok(&reply), "accepted: {reply}");
+        }
+        assert!(completion_ok(&serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": "x"}}]
+        })));
+    }
+
+    #[test]
+    fn a_metrics_snapshot_without_both_required_counters_is_refused() {
+        let full = "tensorfold:prompt_tokens_total 100\n\
+                    tensorfold:request_prefill_seconds 0.5\n";
+        assert_eq!(required_metrics(full), Ok((100.0, 0.5)));
+        assert_eq!(
+            required_metrics("tensorfold:prompt_tokens_total 100\n").unwrap_err(),
+            "tensorfold:request_prefill_seconds is absent"
+        );
+        assert_eq!(
+            required_metrics("tensorfold:request_prefill_seconds 0.5\n").unwrap_err(),
+            "tensorfold:prompt_tokens_total is absent"
+        );
+        assert!(required_metrics("").is_err());
+        // A prefix-hit counter is not one of the required metrics.
+        assert!(required_metrics("vllm:prefix_cache_hits 5\n").is_err());
+    }
+
     /// Opt-in with SPARKS_MODEL_URL. Sends two turns that share one packed
-    /// prefix to the local model, and reads /metrics before and after. It
-    /// records tensorfold:prompt_tokens_total and
-    /// tensorfold:request_prefill_seconds. This engine publishes no
-    /// prefix-hit counter, so the test reads none and claims no cache hit.
+    /// prefix to the local model, and reads /metrics before and after. Both
+    /// snapshots and both completions must be valid; a failed read or a
+    /// reply without choices fails the test. It records
+    /// tensorfold:prompt_tokens_total and tensorfold:request_prefill_seconds.
+    /// This engine publishes no prefix-hit counter, so the test reads none
+    /// and claims no cache hit.
     #[test]
     #[ignore = "sends two turns to SPARKS_MODEL_URL; not in the normal gates"]
     fn two_turns_to_the_local_model_keep_one_packed_prefix() {
@@ -8411,19 +8525,20 @@ mod tests {
             return;
         };
         let base = base.trim_end_matches('/');
-        let journal = one_turn();
+        let mut journal = packed_context();
         let first = pack_prompt(&journal, "How does the journal fold?").unwrap();
+        admit_user(&mut journal, "How does the journal fold?");
+        admit_assistant(&mut journal, "It keeps the head.");
         let second = pack_prompt(&journal, "Which grants does the guest hold?").unwrap();
         assert_eq!(
             first.prefix, second.prefix,
             "the packed prefix moved between two consecutive turns"
         );
 
-        let before = sparks_get(&format!("{base}/metrics"));
-        if let Err(error) = &before {
-            println!("metrics before: unavailable ({error})");
-        }
-        let before = before.unwrap_or_default();
+        let before_text = sparks_get(&format!("{base}/metrics"))
+            .unwrap_or_else(|error| panic!("/metrics before the turns failed: {error}"));
+        let before = required_metrics(&before_text)
+            .unwrap_or_else(|error| panic!("/metrics before the turns: {error}"));
 
         for packed in [&first, &second] {
             let mut prompt = packed.prefix.clone();
@@ -8441,27 +8556,27 @@ mod tests {
             let reply: serde_json::Value =
                 serde_json::from_str(&reply).expect("the local model did not return JSON");
             assert!(
-                reply.get("choices").is_some(),
+                completion_ok(&reply),
                 "the local model did not return a completion: {reply}"
             );
         }
 
-        let after = sparks_get(&format!("{base}/metrics"));
-        if let Err(error) = &after {
-            println!("metrics after: unavailable ({error})");
-        }
-        let after = after.unwrap_or_default();
-        for name in [
-            "tensorfold:prompt_tokens_total",
-            "tensorfold:request_prefill_seconds",
-        ] {
-            let (before_value, after_value) =
-                (metric_value(&before, name), metric_value(&after, name));
-            println!("{name}: before={before_value:?} after={after_value:?}");
-            if let (Some(before_value), Some(after_value)) = (before_value, after_value) {
-                println!("{name}: delta={}", after_value - before_value);
-            }
-        }
+        let after_text = sparks_get(&format!("{base}/metrics"))
+            .unwrap_or_else(|error| panic!("/metrics after the turns failed: {error}"));
+        let after = required_metrics(&after_text)
+            .unwrap_or_else(|error| panic!("/metrics after the turns: {error}"));
+        println!(
+            "tensorfold:prompt_tokens_total: before={} after={} delta={}",
+            before.0,
+            after.0,
+            after.0 - before.0
+        );
+        println!(
+            "tensorfold:request_prefill_seconds: before={} after={} delta={}",
+            before.1,
+            after.1,
+            after.1 - before.1
+        );
         println!("no prefix-hit counter is read: this engine publishes none");
     }
 

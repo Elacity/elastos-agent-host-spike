@@ -4,7 +4,7 @@
 Usage (from anywhere):
   python3 -I examples/agent-host/falsify.py              # every falsifier
   python3 -I examples/agent-host/falsify.py CF           # one prefix
-  python3 -I examples/agent-host/falsify.py CL24 TB01    # some ids
+  python3 -I examples/agent-host/falsify.py PF01 PF05    # some ids
   python3 -I examples/agent-host/falsify.py --list       # ids, commands, expectations
   python3 -I examples/agent-host/falsify.py --self-test  # the runner checks itself
   python3 -I examples/agent-host/falsify.py --self-test --with-repo  # and one real falsifier
@@ -440,14 +440,14 @@ def self_test(entries, with_repo, only=None):
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
     if with_repo and only is None:
-        real = next(entry for entry in entries if entry["id"] == "TB01")
-        still_passing = "tests::a_child_without_a_budget_is_refused"
+        real = next(entry for entry in entries if entry["id"] == "PF01")
+        still_passing = "tests::a_prompt_without_node_zero_or_a_turn_text_is_not_packed"
         got = falsify(dict(real, tests=real["tests"] + [still_passing]))
-        print(f"self-test: TB01 with {still_passing} added -> {got[1]} ({got[2]})")
+        print(f"self-test: PF01 with {still_passing} added -> {got[1]} ({got[2]})")
         if got[:2] != (False, "SURVIVED") or still_passing not in got[2]:
             ok = False
         got = falsify(real)
-        print(f"self-test: TB01 as listed -> {got[1]}")
+        print(f"self-test: PF01 as listed -> {got[1]}")
         if got[:2] != (True, "CAUGHT"):
             ok = False
     if only is not None:
