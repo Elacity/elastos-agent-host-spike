@@ -5199,7 +5199,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "            task: TaskMark::new(),\n            // A host journal's binding belongs to the task it was opened from,",
+     "old": "            task: self.task.snapshot(),\n            // A host journal's binding belongs to the task it was opened from,",
      "new": "            task: self.task.clone(),\n            // A host journal's binding belongs to the task it was opened from,"
     }
    ],
@@ -5221,6 +5221,38 @@
    ],
    "tests": [
     "no rebuild after a full disk"
+   ]
+  },
+  {
+   "id": "PX60",
+   "title": "the append staging copy rotates the task identity and orphans active hosts",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let mut sent = journal.clone();\n    // Staging is internal: the sent copy keeps this journal's task identity\n    // and liveness, so hosts opened before the append stay bound to it.\n    sent.task = journal.task.clone();\n",
+     "new": "    let mut sent = journal.clone();\n"
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_stays_bound_across_an_append"
+   ]
+  },
+  {
+   "id": "PX61",
+   "title": "a snapshot keeps the task's authority and opens a host after cancellation",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            live: false,\n        }\n    }\n\n    fn is(",
+     "new": "            live: true,\n        }\n    }\n\n    fn is("
+    }
+   ],
+   "tests": [
+    "tests::a_child_host_gets_nothing_once_its_child_stops"
    ]
   }
  ]

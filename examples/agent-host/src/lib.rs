@@ -265,25 +265,47 @@ struct Turn {
     steps: Vec<u64>,
 }
 
-/// The in-memory identity of one task journal. A loaded journal, and a clone
-/// of one (`Journal::clone`), is a new task object; a child host keeps the
-/// mark of the journal it was opened from. It is not stored, and it is not
-/// compared as data: the format has no field for it, so a reloaded journal
-/// still equals the one it came from. A child host must name its task's mark,
-/// so another task's journal with the same child id, and a snapshot taken
-/// before a cancellation, are not its parent.
+/// The in-memory identity of one task journal. A loaded journal owns its
+/// task; a clone of one (`Journal::clone`) is a snapshot of the same task,
+/// and only the owning journal may open a child host (`open_child_host`).
+/// A child host keeps the mark of the journal it was opened from. The mark is
+/// not stored, and it is not compared as data: the format has no field for
+/// it, so a reloaded journal still equals the one it came from. A child host
+/// must name its task's mark, so another task's journal with the same child
+/// id, and a snapshot taken before a cancellation, are not its parent.
 #[cfg(any(test, target_arch = "wasm32"))]
 #[derive(Clone, Debug)]
-struct TaskMark(std::rc::Rc<()>);
+struct TaskMark {
+    /// Shared with every snapshot of this task and with its child hosts.
+    id: std::rc::Rc<()>,
+    /// True only on the journal that owns the task. A snapshot keeps the
+    /// data but holds no authority: it opens no host and is no parent.
+    live: bool,
+}
 
 #[cfg(any(test, target_arch = "wasm32"))]
 impl TaskMark {
     fn new() -> Self {
-        Self(std::rc::Rc::new(()))
+        Self {
+            id: std::rc::Rc::new(()),
+            live: true,
+        }
+    }
+
+    /// A snapshot of this task: new identity, no authority of its own.
+    fn snapshot(&self) -> Self {
+        Self {
+            id: std::rc::Rc::new(()),
+            live: false,
+        }
     }
 
     fn is(&self, other: &TaskMark) -> bool {
-        std::rc::Rc::ptr_eq(&self.0, &other.0)
+        std::rc::Rc::ptr_eq(&self.id, &other.id)
+    }
+
+    fn is_live(&self) -> bool {
+        self.live
     }
 }
 
@@ -342,11 +364,12 @@ struct Journal {
     host_grants: Vec<(u64, String)>,
 }
 
-/// A clone is a snapshot, not the task: it keeps the data but takes a new
-/// task mark. Every host action reads its parent's authority from the journal
-/// that opened the host (`host_binding_ok`), so a copy taken before a cancel,
-/// stop or grant change cannot act for it. A reload is a new task object for
-/// the same reason.
+/// A clone is a snapshot, not the task: it keeps the data but takes a new,
+/// non-live task mark. Every host action reads its parent's authority from
+/// the journal that opened the host (`host_binding_ok`), and only an owning
+/// journal opens a host (`open_child_host`), so a copy taken before a cancel,
+/// stop or grant change cannot act for it. A reloaded journal owns its task
+/// object for the same reason.
 #[cfg(any(test, target_arch = "wasm32"))]
 impl Clone for Journal {
     fn clone(&self) -> Self {
@@ -362,7 +385,7 @@ impl Clone for Journal {
             depth: self.depth,
             task_budget: self.task_budget,
             cancelled_from: self.cancelled_from,
-            task: TaskMark::new(),
+            task: self.task.snapshot(),
             // A host journal's binding belongs to the task it was opened from,
             // not to this copy.
             host_of: self.host_of.clone(),
@@ -4447,6 +4470,12 @@ fn open_child_host(
     child_id: u64,
     resource: &str,
 ) -> Result<Journal, &'static str> {
+    // Only the journal that owns the task opens a host. A snapshot keeps the
+    // task's data but not its authority, so copied grants, budgets and an
+    // uncancelled state act for nothing.
+    if !parent.task.is_live() {
+        return Err("stale parent");
+    }
     let child = usable_child(parent, child_id)?;
     if path_refusal(resource).is_some() || !resource_covers(&child.resource, resource) {
         return Err("not a subset");
@@ -5380,6 +5409,9 @@ fn append_journal(
         return AppendOutcome::Denied;
     };
     let mut sent = journal.clone();
+    // Staging is internal: the sent copy keeps this journal's task identity
+    // and liveness, so hosts opened before the append stay bound to it.
+    sent.task = journal.task.clone();
     if !dispatch(&mut sent, id) {
         *journal = sent;
         drop_step_grant(journal, id);
@@ -20432,6 +20464,13 @@ mod tests {
         ));
         let mut stale = parent.clone();
         assert!(cancel_task(&mut parent));
+        // A snapshot owns no authority: it cannot open a host and then spend
+        // the copied grants and budget of the cancelled task.
+        assert_eq!(
+            open_child_host(&stale, child, DEMO_SRC),
+            Err("stale parent"),
+            "a stale parent opens no host"
+        );
         let before = host.clone();
         assert!(
             !dispatch_in_host(&stale, child, &mut host, granted),
@@ -20470,6 +20509,40 @@ mod tests {
             "{added:?}"
         );
         assert_eq!(host.steps, before.steps);
+    }
+
+    /// Codex at 914948067: saving the journal stages a copy and swaps it in.
+    /// That staging keeps the journal's task identity, so a host opened
+    /// before the append is still its child's host after it.
+    #[test]
+    fn a_child_host_stays_bound_across_an_append() {
+        let (mut runtime, mut cursor) = fake_runtime();
+        let (mut parent, run) = task(budget(8, 600));
+        let child = propose_child(&mut parent, run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut parent,
+            child,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        let mut host = open_child_host(&parent, child, DEMO_SRC).unwrap();
+        let read = propose_read(&mut host, DEMO_SRC);
+        assert!(authorize_in_host(
+            &mut parent,
+            child,
+            &mut host,
+            read,
+            Some("read-grant")
+        ));
+        assert_eq!(
+            append_journal(&mut runtime, &mut parent, &mut cursor, Some(&write_grant())),
+            AppendOutcome::Written
+        );
+        assert!(
+            dispatch_in_host(&parent, child, &mut host, read),
+            "the append keeps the host bound"
+        );
+        assert_eq!(step_of(&host, read).state, StepState::Dispatched);
     }
 
     /// Hole 2: a host touches only what the parent granted its child. Every
