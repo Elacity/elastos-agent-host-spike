@@ -93,6 +93,30 @@ CASES = [
         ["a blank refusal reason is not shown as blank"],
     ),
     (
+        "a style name is added to the table",
+        'const STYLES = { plain: "span", strong: "strong", em: "em", code: "code" };',
+        'const STYLES = { plain: "span", strong: "strong", em: "em", code: "code", mark: "mark" };',
+        ["the block functions are the documents page's own"],
+    ),
+    (
+        "the text cap differs",
+        "const MAX_TEXT_CHARS = 20000;",
+        "const MAX_TEXT_CHARS = 20001;",
+        ["the block functions are the documents page's own", "the previews follow the documents page rules"],
+    ),
+    (
+        "a blank skip message stays blank",
+        '      message: message.trim() ? message : "Not shown.",',
+        "      message,",
+        ["a skipped preview with a blank message still explains why"],
+    ),
+    (
+        "a skip reason is dropped",
+        '      const reason = skip.reason ? ` (${skip.reason})` : "";',
+        '      const reason = "";',
+        ["a skipped preview with a blank message still explains why"],
+    ),
+    (
         "the block kind is own-property only",
         "  switch (block && block.kind) {",
         '  switch (own(block, "kind")) {',

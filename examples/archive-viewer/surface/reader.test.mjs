@@ -395,6 +395,24 @@ test("a refused archive with a blank reason still says why", async () => {
   assert.equal(drawn.previews.children.length, 0);
 });
 
+test("a skipped preview with a blank message still explains why", async () => {
+  const { view: drawn } = await mounted({
+    [VIEW_ROUTE]: response(
+      200,
+      view({
+        skipped: [
+          { index: 0, reason: "not_text", message: "   " },
+          { index: 1, reason: "ratio", message: "The entry is over the ratio cap." },
+        ],
+      }),
+    ),
+  });
+  assert.deepEqual(drawn.skipped.children.map((line) => line.textContent), [
+    "Entry 1: Not shown. (not_text)",
+    "Entry 2: The entry is over the ratio cap. (ratio)",
+  ]);
+});
+
 test("a refused archive is shown with its reason and lists no entry", async () => {
   // Content beside a refusal is not drawn: the refusal is the whole view.
   const { view: drawn, reader } = await mounted({
@@ -494,15 +512,40 @@ function functionSource(file, name) {
   throw new Error(`${name} not found in ${file}`);
 }
 
+/** One object declaration's exact text in a source file. */
+function objectSource(file, name) {
+  const text = source(file);
+  const start = text.search(new RegExp(`(?:export )?const ${name} = `));
+  const open = text.indexOf("{", start);
+  let depth = 0;
+  for (let at = open; at < text.length; at += 1) {
+    if (text[at] === "{") depth += 1;
+    else if (text[at] === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, at + 1);
+    }
+  }
+  throw new Error(`${name} not found in ${file}`);
+}
+
+/** One numeric constant's value in a source file. */
+function constantSource(file, name) {
+  const match = source(file).match(new RegExp(`(?:export )?const ${name} = ([0-9]+);`));
+  if (!match) throw new Error(`${name} not found in ${file}`);
+  return match[1];
+}
+
 test("the block functions are the documents page's own", () => {
-  // One text owns the rules: the copies are the documents page's functions,
-  // character for character, and any edit to one is caught here.
-  for (const name of ["styleTag", "readSpans", "readBlock", "drawBlock"]) {
-    assert.equal(
-      functionSource("./browser/reader.js", name),
-      functionSource("../../docs-viewer/surface/browser/reader.js", name),
-      name,
-    );
+  // One text owns the rules: every function, table and cap the block rules
+  // use is the documents page's, character for character, and any edit to
+  // one copy is caught here.
+  const documents = "../../docs-viewer/surface/browser/reader.js";
+  for (const name of ["styleTag", "readSpans", "readBlock", "drawBlock", "cut"]) {
+    assert.equal(functionSource("./browser/reader.js", name), functionSource(documents, name), name);
+  }
+  assert.equal(objectSource("./browser/reader.js", "STYLES"), objectSource(documents, "STYLES"), "STYLES");
+  for (const name of ["MAX_BLOCKS", "MAX_SPANS", "MAX_ITEMS", "MAX_TEXT_CHARS", "MAX_MESSAGE_CHARS"]) {
+    assert.equal(constantSource("./browser/reader.js", name), constantSource(documents, name), name);
   }
 });
 

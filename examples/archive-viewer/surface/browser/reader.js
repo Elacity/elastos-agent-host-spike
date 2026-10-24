@@ -173,9 +173,13 @@ export function readView(value) {
 
   for (const skip of (Array.isArray(skippedIn) ? skippedIn : []).slice(0, MAX_PREVIEWS)) {
     const index = own(skip, "index");
+    const message = cut(own(skip, "message"), MAX_MESSAGE_CHARS, "Not shown.");
     skipped.push({
       index: isCount(index) ? index : null,
-      message: cut(own(skip, "message"), MAX_MESSAGE_CHARS, "Not shown."),
+      // A blank message is no explanation: it falls back, and the core's
+      // reason code is kept so the line always says why.
+      message: message.trim() ? message : "Not shown.",
+      reason: cut(own(skip, "reason"), MAX_MESSAGE_CHARS, ""),
     });
   }
 
@@ -300,7 +304,9 @@ export function mountReader(env) {
   function renderSkipped(skipped) {
     for (const skip of skipped) {
       const line = doc.createElement("li");
-      line.textContent = skip.index === null ? skip.message : `Entry ${skip.index + 1}: ${skip.message}`;
+      const where = skip.index === null ? "" : `Entry ${skip.index + 1}: `;
+      const reason = skip.reason ? ` (${skip.reason})` : "";
+      line.textContent = `${where}${skip.message}${reason}`;
       view.skipped.appendChild(line);
     }
     view.skippedTitle.hidden = skipped.length === 0;

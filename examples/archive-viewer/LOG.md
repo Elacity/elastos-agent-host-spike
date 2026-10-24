@@ -466,7 +466,7 @@ draws the `elastos.archive-viewer.view/v1` view the core writes.
   previews as the documents model's typed blocks. Every text goes through
   `textContent`. It keeps no `uri` field, never builds a path, never fetches an
   entry and draws no image on Bus v1.
-- `falsify-surface.py` (29 cases) and `verify.sh`: the page tests, the page
+- `falsify-surface.py` (33 cases) and `verify.sh`: the page tests, the page
   falsifiers and the Chromium smoke run with the guest checks. A machine
   without Playwright's Chromium skips the smoke with a clear line; the page
   tests and the falsifiers still run.
@@ -486,15 +486,15 @@ draws the `elastos.archive-viewer.view/v1` view the core writes.
   `__proto__`, `hasOwnProperty` and `valueOf` draw "Other". The mutant uses
   prototype lookup. **F39b** covers the same rule for a view key: the page
   reads only the view's own fields, and an inherited `entries` draws nothing.
-- The other 26 page falsifiers cover the remaining page rules: the schema, the
+- The other 30 page falsifiers cover the remaining page rules: the schema, the
   entry and preview caps, unreadable entries and previews, a refused archive's
   reason, text cutting, cookies, the token guard, uri fields and the
   documents-model block and span rules.
 
 ### Checks on this Mac
 
-- `node --test surface/reader.test.mjs`: 28 tests pass.
-- `python3 -I falsify-surface.py`: 29 falsifiers, all caught.
+- `node --test surface/reader.test.mjs`: 29 tests pass.
+- `python3 -I falsify-surface.py`: 33 falsifiers, all caught.
 - `node surface/reader-browser-smoke.mjs` (real Chromium, Home's sandbox): the
   listing, the text preview and the hostile path appear, no image is drawn,
   one GET, no console errors.
@@ -574,6 +574,24 @@ draws the `elastos.archive-viewer.view/v1` view the core writes.
   (A5), so the page carries its copy; the byte-identical functions and the
   parity gate keep it one behavior until A5 lands. This remains the recorded
   dependency.
+
+### Review fixes (round 5)
+
+- **The ownership check now covers every dependency of the block rules.**
+  `the block functions are the documents page's own` compares the functions
+  `styleTag`, `readSpans`, `readBlock`, `drawBlock` and `cut`, the `STYLES`
+  table and the caps `MAX_BLOCKS`, `MAX_SPANS`, `MAX_ITEMS`, `MAX_TEXT_CHARS`
+  and `MAX_MESSAGE_CHARS`, all character for character. The review's
+  reproduction (a `mark` entry in the Archive table) now fails this test:
+  falsifier `a style name is added to the table`. Falsifier `the text cap
+  differs` fails both the ownership test and the parity test. With every
+  dependency compared, an edit to either copy cannot pass unnoticed; the
+  page still ships its own copy until kit item A5 lands.
+- **A skipped preview always explains itself.** A blank message falls back to
+  "Not shown." and the core's reason code is drawn with the message:
+  `Entry 1: Not shown. (not_text)`, `Entry 2: … (ratio)`. Test `a skipped
+  preview with a blank message still explains why`; falsifiers `a blank skip
+  message stays blank` and `a skip reason is dropped`.
 
 ### Kit gap, recorded not edited
 

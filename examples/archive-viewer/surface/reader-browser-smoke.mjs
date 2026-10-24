@@ -75,7 +75,7 @@ try {
     assert.deepEqual(await frame.locator("#previews ul li").allTextContents(), ["tent", "stove"]);
     // Markup in a path and in a preview is text: nothing ran or loaded.
     assert.equal(await frame.locator("#previews code").textContent(), HOSTILE);
-    assert.equal(await frame.locator("#skipped li").textContent(), "Entry 3: The entry is blocked by the path rules.");
+    assert.equal(await frame.locator("#skipped li").textContent(), "Entry 3: The entry is blocked by the path rules. (control_character)");
     assert.equal(await frame.locator("img, a, script:not([src]), iframe").count(), 0);
     assert.equal(await frame.locator("#status").textContent(), "");
 
