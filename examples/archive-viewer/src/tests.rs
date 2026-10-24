@@ -546,6 +546,29 @@ fn a_request_outside_the_users_folders_is_refused() {
 }
 
 #[test]
+fn a_request_at_its_cap_is_accepted_and_one_byte_over_is_refused() {
+    // JSON tolerates trailing whitespace, so the padding changes only the
+    // object's length. The literals pin the design's 4 KiB cap, not the
+    // constant's current value.
+    let cap = 4096;
+    let base = request(ARCHIVE, &[]);
+    let padded = |length: usize| {
+        let mut bytes = base.clone();
+        assert!(bytes.len() <= length);
+        bytes.resize(length, b' ');
+        bytes
+    };
+    let bus = run_fixture(padded(cap), ARCHIVE, build(&[Spec::file("a.txt")], &[]));
+    assert!(view(&bus).get("refused").is_none());
+
+    let mut bus = bus_with(padded(cap + 1), ARCHIVE, build(&[Spec::file("a.txt")], &[]));
+    let err = run(&mut bus).expect_err("a request over its cap stops the run");
+    assert!(matches!(err, Refusal::InputTooLarge), "{err:?}");
+    assert_nothing_written(&bus);
+    assert_no_archive_request(&bus, ARCHIVE);
+}
+
+#[test]
 fn a_request_with_unknown_fields_is_refused() {
     let mut value = serde_json::from_slice::<Value>(&request(ARCHIVE, &[])).unwrap();
     value["extra"] = json!(1);
@@ -1093,6 +1116,30 @@ fn a_zip64_end_record_is_refused() {
     patch_u16(&mut archive, at + 10, u16::MAX);
     let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
     assert_eq!(refused(&bus).0, "zip64");
+}
+
+#[test]
+fn an_entry_on_another_disk_refuses_the_archive() {
+    // The end record names one disk; the entry's own disk field says another.
+    let mut archive = build(&[Spec::file("a.txt")], &[]);
+    let at = directory_start(&archive);
+    patch_u16(&mut archive, at + 34, 1);
+    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
+    assert_eq!(refused(&bus).0, "multi_disk");
+}
+
+#[test]
+fn an_entry_with_a_zip64_sentinel_refuses_the_archive() {
+    // Each size field is a separate 32-bit value: a sentinel in any of them
+    // claims zip64, which this viewer does not parse.
+    let archive = build(&[Spec::file("a.txt")], &[]);
+    let at = directory_start(&archive);
+    for field in [20, 24, 42] {
+        let mut archive = archive.clone();
+        patch_u32(&mut archive, at + field, u32::MAX);
+        let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
+        assert_eq!(refused(&bus).0, "zip64", "field at the record + {field}");
+    }
 }
 
 #[test]

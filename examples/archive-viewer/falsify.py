@@ -11,7 +11,7 @@ The runner is the capsule kit's (`examples/capsule-kit/falsify`).
 F-numbers here are the design's (examples/archive-viewer/DESIGN.md, "Falsifier
 plan"); this slice's core covers F6, F6b, F6c, F7 to F17, F19 to F25, F29 to
 F31, F40 to F42. The lettered cases F6d to F6f, F15b, F16b, F19b, F21b to
-F21e, F22b, F23b to F23d, F25b to F25f, F30b and F41b to F41d cover bounds,
+F21g, F22b, F23b to F23d, F25b to F25f, F30b and F41b to F41e cover bounds,
 comparisons and request fields DESIGN states but gives no row, and F32 covers
 the whole view's cap. F18 (Bus v2 depth) and the preview falsifiers F1 to F5
 and F26 to F28 wait for their slices.
@@ -225,6 +225,11 @@ CASES = [
      "    check_object_uri(uri, USERS_PREFIX)",
      "    Ok(())",
      ["a_request_outside_the_users_folders_is_refused"]),
+    ("F41e the request cap is doubled",
+     "src/lib.rs",
+     "pub const MAX_REQUEST_BYTES: u64 = 4 * 1024;",
+     "pub const MAX_REQUEST_BYTES: u64 = 8 * 1024;",
+     ["a_request_at_its_cap_is_accepted_and_one_byte_over_is_refused"]),
     # Authority stops, never skips.
     ("F42 a denied read becomes a content skip",
      "src/zip.rs",
@@ -265,6 +270,23 @@ CASES = [
      "    if count == u16::MAX",
      "    if false && count == u16::MAX",
      ["a_zip64_end_record_is_refused"]),
+    ("F21f an entry on another disk is accepted",
+     "src/zip.rs",
+     "        if start_disk != 0 {",
+     "        if false && start_disk != 0 {",
+     ["an_entry_on_another_disk_refuses_the_archive"]),
+    ("F21g a central zip64 sentinel is accepted",
+     "src/zip.rs",
+     "        if compressed == u64::from(u32::MAX)\n"
+     "            || uncompressed == u64::from(u32::MAX)\n"
+     "            || local == u64::from(u32::MAX)\n"
+     "        {",
+     "        if false\n"
+     "            && (compressed == u64::from(u32::MAX)\n"
+     "                || uncompressed == u64::from(u32::MAX)\n"
+     "                || local == u64::from(u32::MAX))\n"
+     "        {",
+     ["an_entry_with_a_zip64_sentinel_refuses_the_archive"]),
     ("F23b a record signature is ignored",
      "src/zip.rs",
      "        if u32_at(directory, at) != Some(DIRECTORY_SIGNATURE) {",

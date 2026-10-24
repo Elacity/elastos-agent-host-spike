@@ -80,10 +80,19 @@ its statuses (`src/zip.rs`), the run and the view (`src/lib.rs`), the tests
   (`a_request_outside_the_users_folders_is_refused`: wrong prefix, traversal,
   empty segment, folder, `?`, `\` and a control character) and falsifier F41d
   replaces the call with `Ok(())`.
+- The request's 4 KiB bound has an app-level test too
+  (`a_request_at_its_cap_is_accepted_and_one_byte_over_is_refused`: 4,096
+  bytes lists, 4,097 returns `InputTooLarge` before the archive grant or the
+  view) and falsifier F41e doubles `MAX_REQUEST_BYTES` to 8,192.
+- The central directory's own disk and zip64 guards have fixtures with valid
+  end records: `an_entry_on_another_disk_refuses_the_archive` (`start_disk =
+  1`, refused `multi_disk`, F21f) and
+  `an_entry_with_a_zip64_sentinel_refuses_the_archive` (`compressed`,
+  `uncompressed` and `local` each set to `u32::MAX`, refused `zip64`, F21g).
 - **Done in this slice:** F6, F6b, F6c, F7 to F17, F19 to F25, F29 to F31,
   F40 to F42, plus the lettered cases F6d to F6f, F15b, F16b, F19b, F21b to
-  F21e, F22b, F23b to F23d, F25b to F25f, F30b, F32 and F41b to F41d
-  (53 falsifiers, all caught).
+  F21g, F22b, F23b to F23d, F25b to F25f, F30b, F32 and F41b to F41e
+  (56 falsifiers, all caught).
 - **Remaining for the next task:** F1 to F5, F18, F26 to F28, F33 to F39 and
   F43 (previews and inflate, the component and fuel gates, the page, Bus v2
   nesting and B5's declared totals).
