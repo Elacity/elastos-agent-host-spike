@@ -11,10 +11,10 @@ The runner is the capsule kit's (`examples/capsule-kit/falsify`).
 F-numbers here are the design's (examples/archive-viewer/DESIGN.md, "Falsifier
 plan"); this slice's core covers F6, F6b, F6c, F7 to F17, F19 to F25, F29 to
 F31, F40 to F42. The lettered cases F6d to F6f, F15b, F16b, F19b, F20b,
-F21b to F21g, F22b, F23b to F23d, F25b to F25g, F30b and F41b to F41e cover
-bounds, comparisons and request fields DESIGN states but gives no row, and F32
-covers the whole view's cap. F18 (Bus v2 depth) and the preview falsifiers F1
-to F5 and F26 to F28 wait for their slices.
+F21b to F21g, F22b, F23b to F23d, F25b to F25g, F30b, F41b to F41f and F42b
+cover bounds, comparisons and request fields DESIGN states but gives no row,
+and F32 covers the whole view's cap. F18 (Bus v2 depth) and the preview
+falsifiers F1 to F5 and F26 to F28 wait for their slices.
 """
 import pathlib
 import sys
@@ -235,6 +235,11 @@ CASES = [
      "pub const MAX_REQUEST_BYTES: u64 = 4 * 1024;",
      "pub const MAX_REQUEST_BYTES: u64 = 8 * 1024;",
      ["a_request_at_its_cap_is_accepted_and_one_byte_over_is_refused"]),
+    ("F41f the unknown-field refusal is removed",
+     "src/request.rs",
+     '        .find(|key| !matches!(key.as_str(), "schema" | "uri" | "show"))',
+     "        .find(|_| false)",
+     ["a_request_with_unknown_fields_is_refused"]),
     # Authority stops, never skips.
     ("F42 a denied read becomes a content skip",
      "src/zip.rs",
@@ -243,6 +248,11 @@ CASES = [
      "        read_counted(self.bus, self.uri, self.grant, self.left, offset, length)\n"
      "            .map_err(|_| ReadError::Budget)",
      ["a_provider_error_while_listing_stops_the_run_and_writes_nothing"]),
+    ("F42b a denied L5 reread becomes a content skip",
+     "src/zip.rs",
+     "        Err(ReadError::Refusal(refusal)) => return Err(refusal),",
+     '        Err(ReadError::Refusal(_)) => return Ok(Err("read_budget")),',
+     ["a_denied_local_header_reread_stops_the_run_and_writes_nothing"]),
     # Bounds DESIGN states but gives no row: an end record and a directory
     # that lie about where their bytes are must refuse the archive.
     ("F6d a local header outside the object is accepted",

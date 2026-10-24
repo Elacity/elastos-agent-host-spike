@@ -329,6 +329,51 @@ impl Bus for ChangedLocalHeaderBus {
     }
 }
 
+/// A fake Runtime that completes the listing, then denies the requested
+/// entry's local-header reread.
+struct DeniedLocalHeaderBus {
+    inner: FakeBus,
+    archive: String,
+    at: u64,
+}
+
+impl Bus for DeniedLocalHeaderBus {
+    fn request(
+        &mut self,
+        resource: &str,
+        action: &str,
+        reason: &str,
+    ) -> Result<String, BusFailure> {
+        self.inner.request(resource, action, reason)
+    }
+
+    fn invoke(
+        &mut self,
+        resource: &str,
+        operation: &str,
+        body: &[u8],
+        grant: &str,
+    ) -> Result<InvokeReply, BusFailure> {
+        if resource == self.archive && operation == "read" {
+            let ask: Value = serde_json::from_slice(body).expect("the kit sends JSON");
+            // B4a reads exactly the 30-byte prefix; L5 reads the prefix and
+            // the name.
+            if ask["offset"].as_u64() == Some(self.at) && ask["length"].as_u64().unwrap_or(0) > 30 {
+                return Ok(InvokeReply {
+                    status: "error".to_string(),
+                    body: serde_json::to_vec(&json!({
+                        "status": "error",
+                        "code": "read_failed",
+                        "message": "the object changed while it was listed",
+                    }))
+                    .unwrap(),
+                });
+            }
+        }
+        self.inner.invoke(resource, operation, body, grant)
+    }
+}
+
 /// A fake Runtime with one sparse object larger than ZIP can address: every
 /// byte in range reads as zero, with an empty-directory end record ending at
 /// 2^32.
@@ -1479,6 +1524,23 @@ fn a_local_header_over_the_read_cap_is_skipped_before_it_is_read() {
             }
         }
     }
+}
+
+#[test]
+fn a_denied_local_header_reread_stops_the_run_and_writes_nothing() {
+    // The listing completes; only L5's reread of entry 0 is denied. An
+    // authority failure there stops the run instead of becoming a skip.
+    let filler = Spec::file("filler.bin").data(&vec![0u8; 1000]);
+    let archive = build(&[Spec::file("a.txt"), filler], &[]);
+    let inner = bus_with(request(ARCHIVE, &[0]), ARCHIVE, archive);
+    let mut bus = DeniedLocalHeaderBus {
+        inner,
+        archive: ARCHIVE.to_string(),
+        at: 0,
+    };
+    let err = run(&mut bus).expect_err("a denied L5 read stops the run");
+    assert!(matches!(err, Refusal::Call { .. }), "{err:?}");
+    assert_nothing_written(&bus.inner);
 }
 
 #[test]

@@ -109,3 +109,21 @@ its statuses (`src/zip.rs`), the run and the view (`src/lib.rs`), the tests
   header is skipped `local_header_too_long` with no L5 read at the entry.
   Falsifier F25g disables the cap.
 - No production code changed: both guards already existed.
+
+## 2026-10-24: task 001, review fixes (round 8)
+
+- L5's own authority arm has a fixture:
+  `a_denied_local_header_reread_stops_the_run_and_writes_nothing` completes
+  the listing, then denies only the requested entry's local-header reread and
+  requires `Refusal::Call` with no view. Falsifier F42b turns that arm into a
+  `read_budget` skip.
+- The request's unknown-field refusal has falsifier F41f, which disables the
+  key check; `a_request_with_unknown_fields_is_refused` then fails.
+- **Done in this slice:** F6, F6b, F6c, F7 to F17, F19 to F25, F29 to F31,
+  F40 to F42, plus the lettered cases F6d to F6f, F15b, F16b, F19b, F20b,
+  F21b to F21g, F22b, F23b to F23d, F25b to F25g, F30b, F41b to F41f and F42b
+  (60 falsifiers, all caught).
+- **Remaining for the next task:** F1 to F5, F18, F26 to F28, F33 to F39 and
+  F43 (previews and inflate, the component and fuel gates, the page, Bus v2
+  nesting and B5's declared totals).
+- No production code changed: both handlers already existed.
