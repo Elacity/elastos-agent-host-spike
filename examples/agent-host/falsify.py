@@ -15,19 +15,22 @@ replaces exact text (found exactly once) in a file and requires every named
 test to FAIL. The mutated code is built first (a build that fails is its own
 result); then each named test is listed with `--exact` (exactly one test must
 match) and run alone with `--exact`. A non-zero exit alone is not a catch: the
-harness's own run must name the test and close with a summary that says it ran
-and failed. A harness or loading error leaves no closing summary, so it is
-NOT RUN and never a catch. One named test that still passes means SURVIVED.
-A `survives` entry that stops surviving is a catch only with that same proof.
+harness's own run must name the test, close with a summary that says it ran
+and failed, and report no error of its own on stderr. A harness or loading
+error is NOT RUN and never a catch. One named test that still passes means
+SURVIVED. A `survives` entry that stops surviving is a catch only with that
+same proof; a `compile_error` entry reports a failed build as its own result,
+never as a catch.
 
 The original file's bytes are kept as a hard link while the mutated copy is
 in place, and the restore is a rename, so it needs no free space. Every
 mutation runs inside guard_mutation, whose finally holds the restore in its
-own frame: an interrupt during the edit, or at the edit's own return, restores
-before the error propagates, and signals stay blocked until every original is
-back. A backup left by a killed run is put back before anything else. The
-runner stops when the disk has less than 2 GiB free or a command reports a
-full disk.
+own frame: an interrupt during the edit, at the edit's own return, or before
+the restore takes its own guard restores before the error propagates (the
+last case is retried), and signals stay blocked until every original is back.
+A backup left by a killed run is put back before anything else. The runner
+stops when the disk has less than 2 GiB free or a command reports a full
+disk.
 
 Exit status: 0 when every falsifier did what it expects, 1 otherwise, 2 for a
 usage or data error, 3 when it stopped for a full disk.
@@ -43,6 +46,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import namedtuple
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -190,13 +194,31 @@ def guard_mutation(entry, body, base=HERE):
 
     Every mutation goes through here. The restore sits in this frame's finally,
     so an interrupt at the return boundary of apply(), in body(), or at the
-    return of body() still restores before the error goes on."""
+    return of body() still restores before the error goes on. The restoration
+    can also be interrupted before restore() takes its own signal guard, so it
+    is retried until the originals are back; then the interrupt goes on."""
     mutation = Mutation(entry, base)
     try:
         mutation.apply()
         return body()
     finally:
-        mutation.restore()
+        restore_originals(mutation)
+
+
+def restore_originals(mutation):
+    """Restore until nothing is left to put back, then re-raise the interrupt
+    that came in. applied empties only after every original is back."""
+    pending = None
+    while True:
+        try:
+            mutation.restore()
+            break
+        except KeyboardInterrupt as error:
+            if not mutation.applied:
+                raise
+            pending = error
+    if pending is not None:
+        raise pending
 
 
 def spec(command, manifest=None, cargo_flags=("--locked",)):
@@ -223,22 +245,35 @@ def spec(command, manifest=None, cargo_flags=("--locked",)):
     }
 
 
+Finished = namedtuple("Finished", "code stdout stderr output")
+
+
 def run(argv, cwd):
-    """Run a command; return its exit code, its stdout and its combined output.
-    The stdout is read for the harness's own run and closing summary, so a fake
-    line from a test body cannot stand in for it; the combined output is read
-    only to stop on a full disk."""
+    """Run a command. The stdout is read for the harness's own run and closing
+    summary; the stderr is read for an error the harness reported itself; the
+    combined output is read only to stop on a full disk."""
     env = dict(os.environ, RUST_TEST_THREADS=os.environ.get("RUST_TEST_THREADS", "2"))
     done = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True)
     output = done.stdout + done.stderr
     if any(word in output for word in DISK_FULL):
         raise DiskFull("a command reported a full disk")
-    return done.returncode, done.stdout, output
+    return Finished(done.returncode, done.stdout, done.stderr, output)
 
 
 # A harness starts each run with this line; a test body cannot print after the
 # summary of its own run, so the run's last summary line is the harness's own.
 RUN_HEADER = re.compile(r"^running (\d+) tests?$", re.MULTILINE)
+# Cargo prints this line after a run whose named test really did fail; any
+# other error line on stderr comes from the harness itself, before or instead
+# of a run, so the run's closing summary cannot be a catch.
+CARGO_TEST_FAILED = "error: test failed, to rerun pass "
+
+
+def harness_error(stderr):
+    """True when stderr reports an error that is not cargo's line for a
+    completed, failed run. A loading error or a harness crash is not a run."""
+    errors = [line for line in stderr.splitlines() if line.startswith("error:")]
+    return any(not line.startswith(CARGO_TEST_FAILED) for line in errors)
 
 
 def run_blocks(stdout):
@@ -257,10 +292,13 @@ def summary_at_the_end(body):
     return (match.group(1), int(match.group(2)), int(match.group(3))) if match else None
 
 
-def named_outcome(stdout, name):
+def named_outcome(result, name):
     """failed, passed or not run, from the run that names this test. No run
-    that names it, or no closing summary for that run, means it did not run."""
-    for body in run_blocks(stdout):
+    that names it, no closing summary for that run, or an error the harness
+    reported itself means it did not run."""
+    if harness_error(result.stderr):
+        return "not run"
+    for body in run_blocks(result.stdout):
         if f"test {name} ... " not in body:
             continue
         summary = summary_at_the_end(body)
@@ -286,27 +324,26 @@ def named_outcomes(entry, how):
             # verdict for another. The case counts only when the child exits
             # with its result AND prints the marker it writes after the case
             # returns. A loading error, an unknown name, or a signal is not run.
-            code, output, _combined = run(argv + extra + ["--self-test-case", name], cwd)
-            lines = output.splitlines()
-            if code == CASE_PASSED and case_marker(name, "OK") in lines:
+            result = run(argv + extra + ["--self-test-case", name], cwd)
+            lines = result.stdout.splitlines()
+            if result.code == CASE_PASSED and case_marker(name, "OK") in lines:
                 outcomes[name] = "passed"
-            elif code == CASE_FAILED and case_marker(name, "FAILED") in lines:
+            elif result.code == CASE_FAILED and case_marker(name, "FAILED") in lines:
                 outcomes[name] = "failed"
             else:
                 outcomes[name] = "not run"
             continue
         # Exactly one test must answer to the name; the list is read for that
         # count only (a list run prints no test output).
-        _, listed, _combined = run(argv + extra + ["--exact", name, "--list"], cwd)
+        listed = run(argv + extra + ["--exact", name, "--list"], cwd).stdout
         if [line for line in listed.splitlines() if line == f"{name}: test"] != [f"{name}: test"]:
             outcomes[name] = "not run"
             continue
-        code, stdout, _combined = run(argv + extra + ["--exact", name], cwd)
-        # The run's own closing summary is the harness's; the exit code must
-        # agree with it. A harness or loading error leaves no closing summary,
-        # so it is not run whatever it printed.
-        proof = named_outcome(stdout, name)
-        if (proof == "failed" and code == 0) or (proof == "passed" and code != 0):
+        result = run(argv + extra + ["--exact", name], cwd)
+        # The run's own closing summary must name the test and end a run with
+        # no harness error; the exit code must agree with it.
+        proof = named_outcome(result, name)
+        if (proof == "failed" and result.code == 0) or (proof == "passed" and result.code != 0):
             proof = "not run"
         outcomes[name] = proof
     return outcomes
@@ -317,11 +354,11 @@ def evaluate(entry, how):
     "failed", "passed" or "not run"; suite_passed says whether the whole suite
     ran clean for a survives entry."""
     for argv, cwd in how["build"]:
-        if run(argv, cwd)[0] != 0:
+        if run(argv, cwd).code != 0:
             return True, {}, None
     if entry["expect"] == "survives":
         argv, cwd = how["suite"]
-        suite_passed = run(argv, cwd)[0] == 0
+        suite_passed = run(argv, cwd).code == 0
         # A suite that fails is not a catch by itself: prove it the same way
         # every mode proves a catch, with its named tests.
         return False, {} if suite_passed else named_outcomes(entry, how), suite_passed
@@ -332,7 +369,11 @@ def verdict(entry, build_failed, outcomes, suite_passed):
     """(ok, word, detail): ok is whether the falsifier did what it expects."""
     expect = entry["expect"]
     if expect == "compile_error":
-        return (True, "CAUGHT (does not build)", "") if build_failed else (False, "SURVIVED", "it builds")
+        # A failed build is its own result. No named test ran, so it cannot
+        # claim a catch, which is reserved for the named-test proof.
+        if build_failed:
+            return True, "COMPILE ERROR (as expected)", ""
+        return False, "SURVIVED", "it builds"
     if build_failed:
         return False, "BUILD FAILED", "the mutation must build so its tests can fail"
     if expect == "survives":
@@ -405,9 +446,23 @@ print("error: could not load the test harness")
 raise SystemExit(101)
 """
 
-# The test body prints its own run header, test line and summary, then the
-# harness errors. Only a summary closing the harness's own run is proof.
+# The test body prints its own run header, test line and summary on stdout,
+# then the harness reports an error on stderr. The fabricated summary ends a
+# run, so only a clean stderr keeps it from counting.
 STUB_FAKE_SUMMARY_THEN_ERROR = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("running 1 test")
+print("test tests::planted_check ... FAILED")
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+print("error: could not load the test harness", file=sys.stderr)
+raise SystemExit(101)
+"""
+
+# The same fabricated run with the error left on stdout: it ends the run, so
+# the closing-summary rule alone rejects it.
+STUB_FAKE_SUMMARY_ERROR_ON_STDOUT = """import sys
 if "--list" in sys.argv:
     print("tests::planted_check: test")
     raise SystemExit(0)
@@ -506,6 +561,12 @@ def verdict_cases():
         ((survivor, False, {"a": "not run"}, False), (False, "SUITE FAILED (not a catch)")),
         ((survivor, False, {"a": "passed"}, False), (False, "SUITE FAILED (not a catch)")),
         (({"id": "ST", "expect": "compile_error", "tests": []}, False, {}, None), (False, "SURVIVED")),
+        # A failed build is its own result, never a catch, even when the entry
+        # names tests that did not run (review finding 3).
+        (({"id": "ST", "expect": "compile_error", "tests": []}, True, {}, None),
+         (True, "COMPILE ERROR (as expected)")),
+        (({"id": "ST", "expect": "compile_error", "tests": ["never-ran"]}, True, {}, None),
+         (True, "COMPILE ERROR (as expected)")),
     ]
     for args, want in cases:
         got = verdict(*args)[:2]
@@ -526,7 +587,8 @@ def a_named_test_that_does_not_run_is_not_a_catch():
         entry = {"id": "ST", "command": "host", "expect": "caught", "tests": ["tests::planted_check"]}
         for title, text in (("name is not listed", STUB_LIST_MISSING),
                             ("harness error", STUB_HARNESS_ERROR),
-                            ("fake summary then harness error", STUB_FAKE_SUMMARY_THEN_ERROR),
+                            ("fake summary then harness error on stderr", STUB_FAKE_SUMMARY_THEN_ERROR),
+                            ("fake summary then harness error on stdout", STUB_FAKE_SUMMARY_ERROR_ON_STDOUT),
                             ("exit 0 but no test ran", STUB_FILTERED_OUT)):
             stub = SELF_TEST_DIR / "stub.py"
             stub.write_text(text, encoding="utf-8")
@@ -671,6 +733,43 @@ def interruption_at_the_end_of_the_edit():
     return bool(traced) and interrupted and restored and not backup.exists()
 
 
+def interruption_before_the_restore_runs():
+    """A KeyboardInterrupt at the call into Mutation.restore arrives before
+    restore() takes its own signal guard. The restoration is retried, the
+    original comes back, and only then does the interrupt go on (task 004,
+    review finding 2)."""
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+    path = SELF_TEST_DIR / "restore-entry.txt"
+    original = "original bytes\n"
+    path.write_text(original, encoding="utf-8")
+    injected = []
+
+    def trace(frame, event, _arg):
+        if frame.f_code is Mutation.restore.__code__ and event == "call" and not injected:
+            injected.append(frame)
+            raise KeyboardInterrupt
+        return trace
+
+    entry = {"id": "ST", "command": "host", "expect": "caught",
+             "edits": [{"file": "restore-entry.txt", "old": "original bytes", "new": "mutated bytes"}],
+             "tests": []}
+    interrupted = False
+    previous = sys.gettrace()
+    sys.settrace(trace)
+    try:
+        guard_mutation(entry, lambda: None, SELF_TEST_DIR)
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        sys.settrace(previous)
+    backup = path.with_name(path.name + BACKUP_SUFFIX)
+    restored = path.read_text(encoding="utf-8") == original
+    print(f"self-test: interruption before the restore runs: raised={interrupted}, "
+          f"restored={restored}, backup left={backup.exists()}")
+    return bool(injected) and interrupted and restored and not backup.exists()
+
+
 def a_self_test_case_counts_only_when_it_ran():
     """The named case ran and failed -> a catch. A loading error that exits
     non-zero, or a signal, is not run and not a catch (review finding 1)."""
@@ -708,6 +807,7 @@ SELF_TEST_CASES = {
     "a survives entry is a catch only with its named tests": a_survives_entry_caught_only_with_its_named_tests,
     "an interrupted edit is restored": interruption_restores,
     "an interrupt at the end of the edit is restored": interruption_at_the_end_of_the_edit,
+    "an interrupt before the restore runs is retried": interruption_before_the_restore_runs,
     "a real catch counts": real_catch_counts,
     "a self-test case counts only when it ran": a_self_test_case_counts_only_when_it_ran,
 }
@@ -811,7 +911,11 @@ def main(argv):
                   "the next e2e run builds before its tests")
         return 3
     except KeyboardInterrupt:
-        print("stopped: interrupted; every file is restored")
+        left = sorted(str(backup.relative_to(REPO)) for backup in HERE.rglob("*" + BACKUP_SUFFIX))
+        if left:
+            print("stopped: interrupted; originals left to restore: " + ", ".join(left))
+        else:
+            print("stopped: interrupted; every file is restored")
         return 1
     finally:
         if ran_e2e and not stopped_for_disk:

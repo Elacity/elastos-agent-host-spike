@@ -90,7 +90,7 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "    mutation = Mutation(entry, base)\n    try:\n        mutation.apply()\n        return body()\n    finally:\n        mutation.restore()",
+     "old": "    mutation = Mutation(entry, base)\n    try:\n        mutation.apply()\n        return body()\n    finally:\n        restore_originals(mutation)",
      "new": "    mutation = Mutation(entry, base)\n    mutation.apply()\n    return body()"
     }
    ],
@@ -106,8 +106,8 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "        proof = named_outcome(stdout, name)\n        if (proof == \"failed\" and code == 0) or (proof == \"passed\" and code != 0):\n            proof = \"not run\"\n        outcomes[name] = proof",
-     "new": "        proof = named_outcome(stdout, name)\n        outcomes[name] = \"passed\" if code == 0 else proof"
+     "old": "        proof = named_outcome(result, name)\n        if (proof == \"failed\" and result.code == 0) or (proof == \"passed\" and result.code != 0):\n            proof = \"not run\"\n        outcomes[name] = proof",
+     "new": "        proof = named_outcome(result, name)\n        outcomes[name] = \"passed\" if result.code == 0 else proof"
     }
    ],
    "tests": [
@@ -122,7 +122,7 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "    mutation = Mutation(entry, base)\n    try:\n        mutation.apply()\n        return body()\n    finally:\n        mutation.restore()",
+     "old": "    mutation = Mutation(entry, base)\n    try:\n        mutation.apply()\n        return body()\n    finally:\n        restore_originals(mutation)",
      "new": "    mutation = Mutation(entry, base)\n    mutation.apply()\n    return body()"
     },
     {
@@ -143,8 +143,8 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "            code, output, _combined = run(argv + extra + [\"--self-test-case\", name], cwd)\n            lines = output.splitlines()\n            if code == CASE_PASSED and case_marker(name, \"OK\") in lines:\n                outcomes[name] = \"passed\"\n            elif code == CASE_FAILED and case_marker(name, \"FAILED\") in lines:\n                outcomes[name] = \"failed\"\n            else:\n                outcomes[name] = \"not run\"\n            continue",
-     "new": "            code, _output, _combined = run(argv + extra + [\"--self-test-case\", name], cwd)\n            outcomes[name] = \"not run\" if code == CASE_USAGE else \"failed\" if code != 0 else \"passed\"\n            continue"
+     "old": "            result = run(argv + extra + [\"--self-test-case\", name], cwd)\n            lines = result.stdout.splitlines()\n            if result.code == CASE_PASSED and case_marker(name, \"OK\") in lines:\n                outcomes[name] = \"passed\"\n            elif result.code == CASE_FAILED and case_marker(name, \"FAILED\") in lines:\n                outcomes[name] = \"failed\"\n            else:\n                outcomes[name] = \"not run\"\n            continue",
+     "new": "            result = run(argv + extra + [\"--self-test-case\", name], cwd)\n            outcomes[name] = \"not run\" if result.code == CASE_USAGE else \"failed\" if result.code != 0 else \"passed\"\n            continue"
     }
    ],
    "tests": [
@@ -165,6 +165,54 @@
    ],
    "tests": [
     "a survives entry is a catch only with its named tests"
+   ]
+  },
+  {
+   "id": "FS11",
+   "title": "a failed build is reported as a test catch",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "            return True, \"COMPILE ERROR (as expected)\", \"\"",
+     "new": "            return True, \"CAUGHT (does not build)\", \"\""
+    }
+   ],
+   "tests": [
+    "verdict cases"
+   ]
+  },
+  {
+   "id": "FS12",
+   "title": "an interrupt at the start of the restore is not retried",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    pending = None\n    while True:\n        try:\n            mutation.restore()\n            break\n        except KeyboardInterrupt as error:\n            if not mutation.applied:\n                raise\n            pending = error\n    if pending is not None:\n        raise pending",
+     "new": "    mutation.restore()"
+    }
+   ],
+   "tests": [
+    "an interrupt before the restore runs is retried"
+   ]
+  },
+  {
+   "id": "FS13",
+   "title": "a harness error on stderr is ignored and its fabricated summary counts",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    if harness_error(result.stderr):\n        return \"not run\"",
+     "new": "    if False:\n        return \"not run\""
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
    ]
   }
  ]
