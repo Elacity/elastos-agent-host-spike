@@ -8076,9 +8076,8 @@ mod opt_in_model {
             .and_then(|message| message.get("content"))
             .and_then(|content| content.as_str())
             .ok_or_else(|| format!("response has no message content: {}", excerpt(&reply)))?;
-        if content.trim().is_empty() {
-            return Err("model returned an empty reply".to_string());
-        }
+        // Return the text unchanged. Whether it is empty or unsuitable is the
+        // caller's decision, not this transport's.
         Ok(content.to_string())
     }
 
@@ -8241,7 +8240,21 @@ mod opt_in_model {
                 "transfer-encoding" => {
                     chunked = value.to_ascii_lowercase().contains("chunked");
                 }
-                "content-length" => length = value.trim().parse().ok(),
+                "content-length" => {
+                    let text = value.trim();
+                    let parsed = text
+                        .parse::<usize>()
+                        .map_err(|_| format!("invalid content-length {text:?}"))?;
+                    match length {
+                        Some(previous) if previous != parsed => {
+                            return Err(format!(
+                                "conflicting content-length {previous} and {parsed}"
+                            ));
+                        }
+                        Some(_) => {}
+                        None => length = Some(parsed),
+                    }
+                }
                 _ => {}
             }
         }
@@ -8273,16 +8286,36 @@ mod opt_in_model {
                 .map_err(|_| format!("invalid chunk size {size_text:?}"))?;
             body = &body[line_end + 2..];
             if size == 0 {
-                return Ok(out);
+                // The last chunk carries no data and is followed by the
+                // trailer section and one empty line. A response that stops
+                // before that terminator is incomplete.
+                loop {
+                    let Some(trailer_end) = find(body, b"\r\n") else {
+                        return Err("a chunked response has no final empty line".to_string());
+                    };
+                    let trailer = &body[..trailer_end];
+                    body = &body[trailer_end + 2..];
+                    if trailer.is_empty() {
+                        return Ok(out);
+                    }
+                    let trailer = std::str::from_utf8(trailer)
+                        .map_err(|_| "a chunk trailer is not UTF-8".to_string())?;
+                    if trailer.split_once(':').is_none() {
+                        return Err("a chunk trailer is not a header field".to_string());
+                    }
+                }
             }
-            if body.len() < size + 2 {
+            let Some(chunk_end) = size.checked_add(2) else {
+                return Err(format!("invalid chunk size {size_text:?}"));
+            };
+            if body.len() < chunk_end {
                 return Err("a chunk is shorter than its size".to_string());
             }
             out.extend_from_slice(&body[..size]);
-            if &body[size..size + 2] != b"\r\n" {
+            if &body[size..chunk_end] != b"\r\n" {
                 return Err("a chunk has no terminator".to_string());
             }
-            body = &body[size + 2..];
+            body = &body[chunk_end..];
         }
     }
 
@@ -8907,14 +8940,67 @@ mod tests {
             })
     }
 
-    /// The two counters this engine publishes for a turn. An absent counter is
-    /// a refusal that names it; there is no prefix-hit counter here.
-    fn required_metrics(metrics: &str) -> Result<(f64, f64), String> {
+    /// The prefill time this engine exposes. It is a histogram: the family
+    /// name has `_sum` and `_count` samples. A build that exposes a plain
+    /// sample with the family name is read directly.
+    fn prefill_seconds(metrics: &str) -> Option<(f64, f64)> {
+        if let Some(value) = metric_value(metrics, "tensorfold:request_prefill_seconds") {
+            return Some((value, 1.0));
+        }
+        let sum = metric_value(metrics, "tensorfold:request_prefill_seconds_sum")?;
+        let count = metric_value(metrics, "tensorfold:request_prefill_seconds_count")?;
+        Some((sum, count))
+    }
+
+    /// The counters this engine publishes for a turn. An absent counter is a
+    /// refusal that names it; there is no prefix-hit counter here.
+    fn required_metrics(metrics: &str) -> Result<(f64, (f64, f64)), String> {
         let prompt = metric_value(metrics, "tensorfold:prompt_tokens_total")
             .ok_or_else(|| "tensorfold:prompt_tokens_total is absent".to_string())?;
-        let prefill = metric_value(metrics, "tensorfold:request_prefill_seconds")
-            .ok_or_else(|| "tensorfold:request_prefill_seconds is absent".to_string())?;
+        let prefill = prefill_seconds(metrics).ok_or_else(|| {
+            "tensorfold:request_prefill_seconds is absent or has no _sum and _count".to_string()
+        })?;
         Ok((prompt, prefill))
+    }
+
+    /// A one-shot local server. It writes `response` to one connection, then
+    /// closes.
+    fn one_shot_server(response: String) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let address = listener.local_addr().expect("the local address");
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("one connection");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .ok();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).expect("a request read");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = std::str::from_utf8(&request[..end]).expect("UTF-8 headers");
+                let length = head
+                    .split("\r\n")
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + length {
+                    break;
+                }
+            }
+            stream
+                .write_all(response.as_bytes())
+                .expect("the response write");
+        });
+        (format!("http://{address}/v1"), handle)
     }
 
     /// Opt-in: sends the two consecutive turns whose packed prefixes are
@@ -8960,7 +9046,7 @@ mod tests {
             "the packed prefix moved between two consecutive turns"
         );
 
-        let read = |when: &str| -> (f64, f64) {
+        let read = |when: &str| -> (f64, (f64, f64)) {
             let text = opt_in_model::metrics(&base_url)
                 .unwrap_or_else(|error| panic!("/metrics {when} the turns failed: {error}"));
             required_metrics(&text)
@@ -8974,6 +9060,12 @@ mod tests {
         }
 
         let after = read("after");
+        let prefill_before = before.1;
+        let prefill_after = after.1;
+        println!(
+            "real model: both requests ok; packed prefix {} bytes, byte-identical across the two turns",
+            first_prefix.len()
+        );
         println!(
             "tensorfold:prompt_tokens_total: before={} after={} delta={}",
             before.0,
@@ -8981,12 +9073,158 @@ mod tests {
             after.0 - before.0
         );
         println!(
-            "tensorfold:request_prefill_seconds: before={} after={} delta={}",
-            before.1,
-            after.1,
-            after.1 - before.1
+            "tensorfold:request_prefill_seconds: sum before={} after={} delta={}; count before={} after={} delta={}",
+            prefill_before.0,
+            prefill_after.0,
+            prefill_after.0 - prefill_before.0,
+            prefill_before.1,
+            prefill_after.1,
+            prefill_after.1 - prefill_before.1
         );
         println!("no prefix-hit counter is read: this engine publishes none");
+    }
+
+    /// One request to a one-shot server that answers with `response`.
+    fn ask_via_local_server(response: String) -> Result<String, String> {
+        let (base_url, server) = one_shot_server(response);
+        let result = opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, "hello");
+        server.join().expect("the server thread");
+        result
+    }
+
+    #[test]
+    fn a_model_response_with_an_invalid_content_length_is_refused() {
+        let response = "HTTP/1.1 200 OK\r\nContent-Length: invalid\r\n\r\n{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}".to_string();
+        let error =
+            ask_via_local_server(response).expect_err("an invalid content-length must be refused");
+        assert!(error.starts_with("invalid content-length"), "{error}");
+    }
+
+    #[test]
+    fn a_model_response_with_conflicting_content_lengths_is_refused() {
+        let body = serde_json::json!({
+            "choices": [{ "message": { "content": "ok" } }],
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let error = ask_via_local_server(response)
+            .expect_err("conflicting content-lengths must be refused");
+        assert!(error.starts_with("conflicting content-length"), "{error}");
+    }
+
+    #[test]
+    fn a_chunked_model_response_needs_its_final_empty_line() {
+        let body = serde_json::json!({
+            "choices": [{ "message": { "content": "ok" } }],
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{body}\r\n0\r\n",
+            body.len()
+        );
+        let error = ask_via_local_server(response)
+            .expect_err("a chunked response without its final empty line must be refused");
+        assert!(
+            error.starts_with("a chunked response has no final empty line"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_chunked_model_response_refuses_an_overflowing_chunk_size() {
+        let response =
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\n".to_string();
+        let error =
+            ask_via_local_server(response).expect_err("an overflowing chunk size must be refused");
+        assert!(error.starts_with("invalid chunk size"), "{error}");
+    }
+
+    #[test]
+    fn a_chunked_model_response_with_a_trailer_is_accepted() {
+        let body = serde_json::json!({
+            "choices": [{ "message": { "content": "ok" } }],
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{body}\r\n0\r\nX-Model: deepseek\r\n\r\n",
+            body.len()
+        );
+        assert_eq!(
+            ask_via_local_server(response).expect("a complete chunked response"),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn a_metric_value_is_read_by_its_exact_name() {
+        let metrics = "# TYPE tensorfold:prompt_tokens_total counter\n\
+                       tensorfold:prompt_tokens_total{model=\"deepseek-v4-flash\"} 1234\n\
+                       tensorfold:request_prefill_seconds_sum 1.5\n";
+        assert_eq!(
+            metric_value(metrics, "tensorfold:prompt_tokens_total"),
+            Some(1234.0)
+        );
+        assert_eq!(
+            metric_value(metrics, "tensorfold:request_prefill_seconds_sum"),
+            Some(1.5)
+        );
+        assert_eq!(
+            metric_value(metrics, "tensorfold:prompt_tokens_total_total"),
+            None
+        );
+        assert_eq!(
+            metric_value(
+                "tensorfold:prompt_tokens_total_total 99\n",
+                "tensorfold:prompt_tokens_total"
+            ),
+            None
+        );
+        assert_eq!(
+            metric_value(
+                "tensorfold:request_prefill_seconds_sum 1.5\n",
+                "tensorfold:request_prefill_seconds"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_prefill_histogram_is_read_from_its_sum_and_count() {
+        let metrics = "tensorfold:request_prefill_seconds_sum 1.5\n\
+                       tensorfold:request_prefill_seconds_count 3\n";
+        assert_eq!(prefill_seconds(metrics), Some((1.5, 3.0)));
+        assert_eq!(
+            prefill_seconds("tensorfold:request_prefill_seconds 0.25\n"),
+            Some((0.25, 1.0))
+        );
+        assert_eq!(
+            prefill_seconds("tensorfold:request_prefill_seconds_sum 1.5\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_metrics_snapshot_without_both_required_counters_is_refused() {
+        let full = "tensorfold:prompt_tokens_total 100\n\
+                    tensorfold:request_prefill_seconds_sum 0.5\n\
+                    tensorfold:request_prefill_seconds_count 2\n";
+        assert_eq!(required_metrics(full), Ok((100.0, (0.5, 2.0))));
+        assert_eq!(
+            required_metrics("tensorfold:prompt_tokens_total 100\n").unwrap_err(),
+            "tensorfold:request_prefill_seconds is absent or has no _sum and _count"
+        );
+        assert_eq!(
+            required_metrics(
+                "tensorfold:request_prefill_seconds_sum 0.5\n\
+                 tensorfold:request_prefill_seconds_count 2\n"
+            )
+            .unwrap_err(),
+            "tensorfold:prompt_tokens_total is absent"
+        );
+        assert!(required_metrics("").is_err());
     }
 
     #[test]

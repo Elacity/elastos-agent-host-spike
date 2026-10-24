@@ -393,6 +393,134 @@
     "tests::the_prompt_prefix_is_byte_identical_across_two_turns",
     "tests::changing_a_prefix_node_changes_the_prefix_bytes"
    ]
+  },
+  {
+   "id": "FP02",
+   "title": "the last conflicting content-length wins instead of a clear refusal",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                    let text = value.trim();\n                    let parsed = text\n                        .parse::<usize>()\n                        .map_err(|_| format!(\"invalid content-length {text:?}\"))?;\n                    match length {\n                        Some(previous) if previous != parsed => {\n                            return Err(format!(\n                                \"conflicting content-length {previous} and {parsed}\"\n                            ));\n                        }\n                        Some(_) => {}\n                        None => length = Some(parsed),\n                    }",
+     "new": "                    let text = value.trim();\n                    let parsed = text\n                        .parse::<usize>()\n                        .map_err(|_| format!(\"invalid content-length {text:?}\"))?;\n                    length = Some(parsed);"
+    }
+   ],
+   "tests": [
+    "tests::a_model_response_with_conflicting_content_lengths_is_refused"
+   ]
+  },
+  {
+   "id": "FP03",
+   "title": "an invalid content-length is read as zero instead of a clear refusal",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                    let parsed = text\n                        .parse::<usize>()\n                        .map_err(|_| format!(\"invalid content-length {text:?}\"))?;",
+     "new": "                    let parsed = text.parse::<usize>().unwrap_or(0);"
+    }
+   ],
+   "tests": [
+    "tests::a_model_response_with_an_invalid_content_length_is_refused"
+   ]
+  },
+  {
+   "id": "FP04",
+   "title": "a chunked response is accepted before its final empty line",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            if size == 0 {\n                // The last chunk carries no data and is followed by the\n                // trailer section and one empty line. A response that stops\n                // before that terminator is incomplete.\n                loop {\n                    let Some(trailer_end) = find(body, b\"\\r\\n\") else {\n                        return Err(\"a chunked response has no final empty line\".to_string());\n                    };\n                    let trailer = &body[..trailer_end];\n                    body = &body[trailer_end + 2..];\n                    if trailer.is_empty() {\n                        return Ok(out);\n                    }\n                    let trailer = std::str::from_utf8(trailer)\n                        .map_err(|_| \"a chunk trailer is not UTF-8\".to_string())?;\n                    if trailer.split_once(':').is_none() {\n                        return Err(\"a chunk trailer is not a header field\".to_string());\n                    }\n                }\n            }",
+     "new": "            if size == 0 {\n                return Ok(out);\n            }"
+    }
+   ],
+   "tests": [
+    "tests::a_chunked_model_response_needs_its_final_empty_line"
+   ]
+  },
+  {
+   "id": "FP05",
+   "title": "an overflowing chunk size panics instead of a clear refusal",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            let Some(chunk_end) = size.checked_add(2) else {\n                return Err(format!(\"invalid chunk size {size_text:?}\"));\n            };",
+     "new": "            let chunk_end = size + 2;"
+    }
+   ],
+   "tests": [
+    "tests::a_chunked_model_response_refuses_an_overflowing_chunk_size"
+   ]
+  },
+  {
+   "id": "FP06",
+   "title": "a metric name matches by prefix, so a longer sample name is read",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                if sample_name != name {\n                    return None;\n                }",
+     "new": "                if !sample_name.starts_with(name) {\n                    return None;\n                }"
+    }
+   ],
+   "tests": [
+    "tests::a_metric_value_is_read_by_its_exact_name"
+   ]
+  },
+  {
+   "id": "FP07",
+   "title": "a missing prefill counter is accepted as a zero value",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let prefill = prefill_seconds(metrics).ok_or_else(|| {\n            \"tensorfold:request_prefill_seconds is absent or has no _sum and _count\".to_string()\n        })?;",
+     "new": "        let prefill = prefill_seconds(metrics).unwrap_or((0.0, 1.0));"
+    }
+   ],
+   "tests": [
+    "tests::a_metrics_snapshot_without_both_required_counters_is_refused"
+   ]
+  },
+  {
+   "id": "FP08",
+   "title": "the prefill histogram sum is dropped and read as zero",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        let sum = metric_value(metrics, \"tensorfold:request_prefill_seconds_sum\")?;\n        let count = metric_value(metrics, \"tensorfold:request_prefill_seconds_count\")?;\n        Some((sum, count))",
+     "new": "        let count = metric_value(metrics, \"tensorfold:request_prefill_seconds_count\")?;\n        Some((0.0, count))"
+    }
+   ],
+   "tests": [
+    "tests::a_prefill_histogram_is_read_from_its_sum_and_count"
+   ]
+  },
+  {
+   "id": "FP09",
+   "title": "a chunked response with a valid trailer is refused",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                    let trailer = std::str::from_utf8(trailer)\n                        .map_err(|_| \"a chunk trailer is not UTF-8\".to_string())?;\n                    if trailer.split_once(':').is_none() {\n                        return Err(\"a chunk trailer is not a header field\".to_string());\n                    }",
+     "new": "                    return Err(\"a chunk trailer is not a header field\".to_string());"
+    }
+   ],
+   "tests": [
+    "tests::a_chunked_model_response_with_a_trailer_is_accepted"
+   ]
   }
  ]
 }
