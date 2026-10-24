@@ -1,0 +1,25 @@
+[package]
+name = "archive-viewer"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The capsule kit's guest crate: the Bus calls, refusals, reads, URI check and
+# the Bus v1 WIT glue.
+capsule-kit-guest = { path = "../capsule-kit/guest", features = ["wit"] }
+serde_json = "1.0.151"
+
+[dev-dependencies]
+capsule-kit-guest = { path = "../capsule-kit/guest", features = ["fake"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+
+# Keep this manual example outside the main ElastOS Cargo workspace.
+[workspace]
