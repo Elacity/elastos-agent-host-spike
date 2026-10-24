@@ -1,2 +1,4 @@
 /target/
 /agent-host.component.wasm
+# falsify.py --self-test: a throwaway crate, removed after the run
+.falsify-selftest/

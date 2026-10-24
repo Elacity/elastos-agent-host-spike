@@ -1,0 +1,575 @@
+#!/usr/bin/env python3
+"""Break each agent-host check, see its named tests fail, restore it.
+
+Usage (from anywhere):
+  python3 -I examples/agent-host/falsify.py              # every falsifier
+  python3 -I examples/agent-host/falsify.py FS           # one prefix
+  python3 -I examples/agent-host/falsify.py FS01 FS03    # some ids
+  python3 -I examples/agent-host/falsify.py --list       # ids, commands, expectations
+  python3 -I examples/agent-host/falsify.py --self-test  # the runner checks itself
+  python3 -I examples/agent-host/falsify.py --self-test --with-repo  # and one real falsifier
+  python3 -I examples/agent-host/falsify.py --self-test-case NAME  # one named case
+
+The falsifiers are data, in falsifiers.json next to this file. Each one
+replaces exact text (found exactly once) in a file and requires every named
+test to FAIL. The verdict comes from exit codes: the mutated code is built
+first (a build that fails is its own result); then each named test is listed
+with `--exact` (exactly one test must match) and run alone with `--exact`.
+A non-zero exit alone is not a catch: the last test-harness summary line must
+say that test ran and failed, so a harness or loading error is NOT RUN and
+never a catch. One named test that still passes means the falsifier SURVIVED.
+
+The original file's bytes are kept as a hard link while the mutated copy is
+in place, and the restore is a rename, so it needs no free space. The restore
+runs on error, Ctrl-C and SIGTERM, and signals stay blocked until every
+original is back, so an interrupt during the edit leaves the source unchanged
+before the error propagates. A backup left by a killed run is put back before
+anything else. The runner stops when the disk has less than 2 GiB free or a
+command reports a full disk.
+
+Exit status: 0 when every falsifier did what it expects, 1 otherwise, 2 for a
+usage or data error, 3 when it stopped for a full disk.
+"""
+import json
+import os
+import pathlib
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+HERE = pathlib.Path(__file__).resolve().parent
+REPO = HERE.parent.parent
+DATA = HERE / "falsifiers.json"
+BACKUP_SUFFIX = ".falsify-original"
+MIN_FREE_BYTES = int(os.environ.get("FALSIFY_MIN_FREE_BYTES", 2 * 1024**3))
+COMMANDS = ("host", "e2e", "selftest")
+SELF_TEST_DIR = HERE / ".falsify-selftest"
+DISK_FULL = ("No space left on device", "ENOSPC", "Disk quota exceeded")
+# The test harness prints this line after every run of the binary. A panic in
+# a test body can print anything, including a fake FAILED line, before it.
+TEST_RESULT = re.compile(r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed;", re.MULTILINE)
+
+
+class DiskFull(Exception):
+    pass
+
+
+def load():
+    doc = json.loads(DATA.read_text(encoding="utf-8"))
+    entries = doc["falsifiers"]
+    ids = [entry["id"] for entry in entries]
+    if len(ids) != len(set(ids)):
+        sys.exit("falsifiers.json: an id is used twice")
+    for entry in entries:
+        if entry["command"] not in COMMANDS or entry["expect"] not in (
+            "caught",
+            "compile_error",
+            "survives",
+        ):
+            sys.exit(f"falsifiers.json: {entry['id']}: unknown command or expect")
+        if entry["expect"] == "caught" and not entry["tests"]:
+            sys.exit(f"falsifiers.json: {entry['id']}: no named tests")
+    return entries
+
+
+def recover_backups():
+    """Put back any original left by a run that was killed mid-falsifier."""
+    for backup in HERE.rglob("*" + BACKUP_SUFFIX):
+        target = backup.with_name(backup.name[: -len(BACKUP_SUFFIX)])
+        os.replace(backup, target)
+        os.utime(target)
+        print(f"recovered {target.relative_to(REPO)} from a killed run")
+
+
+def check_disk():
+    free = shutil.disk_usage(REPO).free
+    if free < MIN_FREE_BYTES:
+        raise DiskFull(f"only {free // 1024**2} MiB free")
+
+
+def block_interruptions():
+    """Ignore Ctrl-C and SIGTERM while the originals are put back. Returns
+    (signal number, previous handler) pairs for restore_interruptions."""
+    saved = []
+    if threading.current_thread() is threading.main_thread():
+        for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            saved.append((number, signal.getsignal(number)))
+            signal.signal(number, signal.SIG_IGN)
+    return saved
+
+
+def restore_interruptions(saved):
+    for number, handler in saved:
+        signal.signal(number, handler)
+
+
+class Mutation:
+    """Apply one falsifier's edits; undo them on exit, whatever happened."""
+
+    def __init__(self, entry, base=HERE):
+        self.entry = entry
+        self.base = base
+        self.applied = []  # (path, backup, original bytes)
+
+    def __enter__(self):
+        by_file = {}
+        for edit in self.entry["edits"]:
+            by_file.setdefault(edit["file"], []).append(edit)
+        texts = {}
+        for name, edits in by_file.items():
+            path = self.base / name
+            text = path.read_text(encoding="utf-8")
+            for edit in edits:
+                count = text.count(edit["old"])
+                if count != 1:
+                    raise LookupError(f"{name}: the original text is found {count} times, not once")
+                text = text.replace(edit["old"], edit["new"])
+            texts[path] = text
+        try:
+            for path, text in texts.items():
+                original = path.read_bytes()
+                backup = path.with_name(path.name + BACKUP_SUFFIX)
+                # Record the backup before making it: an interrupt between the
+                # link and the next line leaves the source unchanged, and a
+                # backup that does exist is still restored.
+                self.applied.append((path, backup, original))
+                os.link(path, backup)
+                tmp = path.with_name(path.name + ".falsify-tmp")
+                try:
+                    tmp.write_text(text, encoding="utf-8")
+                    os.replace(tmp, path)
+                finally:
+                    if tmp.exists():
+                        tmp.unlink()
+        except BaseException as error:
+            # Python does not call __exit__ when __enter__ raises, and a
+            # Ctrl-C or SIGTERM can arrive just after a replacement. Put every
+            # original back before the interruption goes on.
+            self.restore()
+            if isinstance(error, OSError) and "No space" in str(error):
+                raise DiskFull(str(error)) from error
+            raise
+        return self
+
+    def restore(self):
+        saved = block_interruptions()
+        try:
+            for path, backup, original in reversed(self.applied):
+                if not backup.exists():
+                    continue
+                os.replace(backup, path)
+                # The rename brings back the original's old mtime; touch it, so
+                # cargo does not take the mutated build for a fresh one.
+                os.utime(path)
+                if path.read_bytes() != original:
+                    raise SystemExit(f"{path}: restored bytes differ from the saved original; stop")
+            self.applied = []
+        finally:
+            restore_interruptions(saved)
+
+    def __exit__(self, *_):
+        self.restore()
+        return False
+
+
+def spec(command, manifest=None, cargo_flags=("--locked",)):
+    """How to build, run one test, and run the whole suite, for a command."""
+    if command == "host":
+        cargo = ["cargo", "test", *cargo_flags, "--manifest-path", str(manifest or HERE / "Cargo.toml")]
+        return {
+            "build": [(cargo + ["--no-run"], REPO)],
+            "one": (cargo + ["--"], REPO, []),
+            "suite": (cargo, REPO),
+        }
+    if command == "selftest":
+        # A change to this runner is checked by its own self-test. A fresh
+        # process reads the mutated file; --keep-backups stops it from taking
+        # this run's backup of falsify.py for a killed run's leftover. Each
+        # named case runs in its own process, as each named test does.
+        base = ["python3", "-I", str(HERE / "falsify.py"), "--keep-backups"]
+        return {"build": [], "one": (base, REPO, []), "suite": (base + ["--self-test"], REPO)}
+    cargo = ["cargo", "test", "-p", "elastos-server", "--lib"]
+    return {
+        "build": [(["bash", str(HERE / "build.sh")], REPO), (cargo + ["--no-run"], REPO / "elastos")],
+        "one": (cargo + ["--"], REPO / "elastos", ["--ignored"]),
+        "suite": (["bash", str(HERE / "run-e2e.sh")], REPO),
+    }
+
+
+def run(argv, cwd):
+    """Run a command; return its exit code and its output. The output is read
+    only to stop on a full disk and to see the harness's own summary line,
+    never to decide that a test passed."""
+    env = dict(os.environ, RUST_TEST_THREADS=os.environ.get("RUST_TEST_THREADS", "2"))
+    done = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True)
+    output = done.stdout + done.stderr
+    if any(word in output for word in DISK_FULL):
+        raise DiskFull("a command reported a full disk")
+    return done.returncode, output
+
+
+def harness_results(output):
+    return [(status, int(passed), int(failed))
+            for status, passed, failed in TEST_RESULT.findall(output)]
+
+
+def ran_and_failed(output):
+    """True only when a harness summary says one test ran and failed, and no
+    other summary says a test ran and passed. A test body can print a fake
+    summary; the harness prints the real one after it."""
+    results = harness_results(output)
+    failed = any(status == "FAILED" and failed >= 1 and passed == 0
+                 for status, passed, failed in results)
+    returned = any(passed >= 1 for _status, passed, _failed in results)
+    return failed and not returned
+
+
+def evaluate(entry, how):
+    """(build_failed, outcomes, suite_passed), from exit codes only.
+    outcomes maps each named test to "failed", "passed" or "not run"."""
+    for argv, cwd in how["build"]:
+        if run(argv, cwd)[0] != 0:
+            return True, {}, None
+    if entry["expect"] == "survives":
+        argv, cwd = how["suite"]
+        return False, {}, run(argv, cwd)[0] == 0
+    argv, cwd, extra = how["one"]
+    outcomes = {}
+    for name in entry["tests"]:
+        if entry.get("command") == "selftest":
+            # Each named case is its own process, so one case cannot carry a
+            # verdict for another. Exit 2 means no case answers to the name.
+            code, _ = run(argv + extra + ["--self-test-case", name], cwd)
+            outcomes[name] = "not run" if code == 2 else "failed" if code != 0 else "passed"
+            continue
+        # Exactly one test must answer to the name; the list is read for that
+        # count only (a list run prints no test output).
+        _, listed = run(argv + extra + ["--exact", name, "--list"], cwd)
+        if [line for line in listed.splitlines() if line == f"{name}: test"] != [f"{name}: test"]:
+            outcomes[name] = "not run"
+            continue
+        code, output = run(argv + extra + ["--exact", name], cwd)
+        if code == 0:
+            ran = any(passed >= 1 for _status, passed, _failed in harness_results(output))
+            outcomes[name] = "passed" if ran else "not run"
+        elif ran_and_failed(output):
+            outcomes[name] = "failed"
+        else:
+            outcomes[name] = "not run"
+    return False, outcomes, None
+
+
+def verdict(entry, build_failed, outcomes, suite_passed):
+    """(ok, word, detail): ok is whether the falsifier did what it expects."""
+    expect = entry["expect"]
+    if expect == "compile_error":
+        return (True, "CAUGHT (does not build)", "") if build_failed else (False, "SURVIVED", "it builds")
+    if build_failed:
+        return False, "BUILD FAILED", "the mutation must build so its tests can fail"
+    if expect == "survives":
+        if suite_passed:
+            return True, "SURVIVED (expected, by design)", ""
+        return True, "CAUGHT (listed as a survivor)", ""
+    missing = [name for name in entry["tests"] if outcomes.get(name) == "not run"]
+    if missing:
+        return False, "NOT RUN", "did not run: " + ", ".join(missing)
+    passing = [name for name in entry["tests"] if outcomes.get(name) != "failed"]
+    if passing:
+        return False, "SURVIVED", "still pass: " + ", ".join(passing)
+    return True, "CAUGHT", ""
+
+
+def falsify(entry, how=None):
+    check_disk()
+    with Mutation(entry):
+        result = evaluate(entry, how or spec(entry["command"]))
+    return verdict(entry, *result)
+
+
+REAL_CRATE = {
+    "Cargo.toml": """[package]
+name = "falsify_selftest"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+""",
+    "src/lib.rs": """#[cfg(test)]
+mod tests {
+    #[test]
+    fn genuinely_passing() {
+        println!("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out");
+    }
+
+    #[test]
+    fn fails_with_a_fake_line() {
+        panic!("\\ntest tests::genuinely_passing ... FAILED");
+    }
+
+    #[test]
+    fn fails_plainly() {
+        assert!(false, "planted failure");
+    }
+}
+""",
+}
+
+STUB_LIST_MISSING = """import sys
+print("tests::some_other_test: test")
+raise SystemExit(0)
+"""
+
+STUB_HARNESS_ERROR = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("error: could not load the test harness")
+raise SystemExit(101)
+"""
+
+STUB_FILTERED_OUT = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out")
+raise SystemExit(0)
+"""
+
+INTERRUPTION_ENTRY = {
+    "id": "ST",
+    "command": "host",
+    "expect": "caught",
+    "edits": [{"file": "interrupted.txt", "old": "original bytes", "new": "mutated bytes"}],
+    "tests": [],
+}
+
+
+def verdict_cases():
+    """The verdict logic truth table."""
+    ok = True
+    two = {"id": "ST", "expect": "caught", "tests": ["a", "b"]}
+    cases = [
+        ((two, False, {"a": "failed", "b": "passed"}, None), (False, "SURVIVED")),
+        ((two, False, {"a": "failed", "b": "failed"}, None), (True, "CAUGHT")),
+        ((two, False, {"a": "failed", "b": "not run"}, None), (False, "NOT RUN")),
+        ((two, True, {}, None), (False, "BUILD FAILED")),
+        (({"id": "ST", "expect": "survives", "tests": []}, False, {}, True), (True, "SURVIVED (expected, by design)")),
+        (({"id": "ST", "expect": "compile_error", "tests": []}, False, {}, None), (False, "SURVIVED")),
+    ]
+    for args, want in cases:
+        got = verdict(*args)[:2]
+        if got != want:
+            print(f"self-test: verdict {args[1:]} -> {got}, want {want}")
+            ok = False
+    return ok
+
+
+def a_named_test_that_does_not_run_is_not_a_catch():
+    """Two planted failures: no test answers to the name, and a harness
+    error exits non-zero without running one. Neither is a catch (task 004)."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        entry = {"id": "ST", "command": "host", "expect": "caught", "tests": ["tests::planted_check"]}
+        for title, text in (("name is not listed", STUB_LIST_MISSING),
+                            ("harness error", STUB_HARNESS_ERROR),
+                            ("exit 0 but no test ran", STUB_FILTERED_OUT)):
+            stub = SELF_TEST_DIR / "stub.py"
+            stub.write_text(text, encoding="utf-8")
+            how = {"build": [], "one": (["python3", "-I", str(stub)], SELF_TEST_DIR, [])}
+            got = verdict(entry, *evaluate(entry, how))
+            print(f"self-test: {title}: {got[1]} ({got[2]})")
+            if got[:2] != (False, "NOT RUN"):
+                ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def interruption_restores():
+    """Ctrl-C or SIGTERM right after a replacement: the original comes back
+    before the interruption goes on (task 004)."""
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+    path = SELF_TEST_DIR / "interrupted.txt"
+    original = "original bytes\n"
+    path.write_text(original, encoding="utf-8")
+    real_replace = os.replace
+    replaced = []
+
+    def replace_then_interrupt(src, dst):
+        real_replace(src, dst)
+        replaced.append(dst)
+        if len(replaced) == 1:
+            raise KeyboardInterrupt
+
+    os.replace = replace_then_interrupt
+    interrupted = False
+    try:
+        with Mutation(INTERRUPTION_ENTRY, SELF_TEST_DIR):
+            pass
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        os.replace = real_replace
+    backup = path.with_name(path.name + BACKUP_SUFFIX)
+    restored = path.read_text(encoding="utf-8") == original
+    print(f"self-test: interruption during replacement: raised={interrupted}, "
+          f"restored={restored}, backup left={backup.exists()}")
+    return interrupted and restored and not backup.exists()
+
+
+def real_catch_counts():
+    """A real catch still counts when every named test runs and fails, and a
+    passing test beside them is SURVIVED. A fake FAILED line in a panic does
+    not change either verdict."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        for name, text in REAL_CRATE.items():
+            path = SELF_TEST_DIR / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        how = spec("host", SELF_TEST_DIR / "Cargo.toml", ("--offline",))
+        entry = {"id": "ST", "command": "host", "expect": "caught",
+                 "tests": ["tests::fails_with_a_fake_line", "tests::fails_plainly"]}
+        got = verdict(entry, *evaluate(entry, how))
+        print(f"self-test: every named test runs and fails: {got[1]} ({got[2]})")
+        if got[:2] != (True, "CAUGHT"):
+            ok = False
+        beside = {"id": "ST", "command": "host", "expect": "caught",
+                  "tests": ["tests::genuinely_passing", "tests::fails_plainly"]}
+        got = verdict(beside, *evaluate(beside, how))
+        print(f"self-test: a passing test beside a failing one: {got[1]} ({got[2]})")
+        if got[:2] != (False, "SURVIVED") or "tests::genuinely_passing" not in got[2]:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+# Each self-test case is named, so a falsifier names one and the runner runs
+# it on its own. A name not listed here is not a case: the runner reports it
+# as not run, never as caught.
+SELF_TEST_CASES = {
+    "verdict cases": verdict_cases,
+    "a named test that does not run is not a catch": a_named_test_that_does_not_run_is_not_a_catch,
+    "an interrupted edit is restored": interruption_restores,
+    "a real catch counts": real_catch_counts,
+}
+
+
+def self_test(entries, with_repo, only=None):
+    """Run the named self-test cases, or only `only`; with the repo, also one
+    real falsifier with a passing name added and as listed."""
+    ok = True
+    try:
+        for name, case in SELF_TEST_CASES.items():
+            if only is not None and name != only:
+                continue
+            if not case():
+                print(f"self-test: {name}: FAILED")
+                ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    if with_repo and only is None:
+        real = next(entry for entry in entries if entry["command"] == "host" and entry["expect"] == "caught")
+        still_passing = "tests::compaction_keeps_a_skill_node"
+        got = falsify(dict(real, tests=real["tests"] + [still_passing]))
+        print(f"self-test: {real['id']} with {still_passing} added -> {got[1]} ({got[2]})")
+        if got[:2] != (False, "SURVIVED") or still_passing not in got[2]:
+            ok = False
+        got = falsify(real)
+        print(f"self-test: {real['id']} as listed -> {got[1]}")
+        if got[:2] != (True, "CAUGHT"):
+            ok = False
+    if only is not None:
+        print(f"self-test case {only!r}: {'OK' if ok else 'FAILED'}")
+        return ok
+    print("self-test:", "OK" if ok else "FAILED")
+    return ok
+
+
+def stop_on_term(*_):
+    raise KeyboardInterrupt
+
+
+def main(argv):
+    signal.signal(signal.SIGTERM, stop_on_term)
+    # --keep-backups is for a self-test that runs on a mutated copy of this
+    # file: the backup belongs to the caller's mutation, not to a killed run.
+    if "--keep-backups" not in argv:
+        recover_backups()
+    entries = load()
+    if "--list" in argv:
+        for entry in entries:
+            print(f"{entry['id']:6} {entry['command']:8} {entry['expect']:13} {entry['title']}")
+        return 0
+    if "--self-test-cases" in argv:
+        for name in SELF_TEST_CASES:
+            print(name)
+        return 0
+    if "--self-test-case" in argv:
+        at = argv.index("--self-test-case")
+        if at + 1 >= len(argv):
+            print("--self-test-case needs a name")
+            return 2
+        name = argv[at + 1]
+        if name not in SELF_TEST_CASES:
+            print(f"no self-test case named {name}")
+            return 2
+        return 0 if self_test(entries, False, only=name) else 1
+    if "--self-test" in argv:
+        return 0 if self_test(entries, "--with-repo" in argv) else 1
+    chosen = [entry for entry in entries if not argv or any(
+        entry["id"] == arg or entry["id"].startswith(arg) for arg in argv)]
+    if not chosen:
+        print("no falsifier matches", " ".join(argv))
+        return 2
+    counts = {}
+    bad = []
+    ran_e2e = False
+    stopped_for_disk = False
+    try:
+        for entry in chosen:
+            start = time.monotonic()
+            try:
+                ok, word, detail = falsify(entry)
+            except LookupError as error:
+                ok, word, detail = False, "NO MATCH", str(error)
+            ran_e2e |= entry["command"] == "e2e"
+            counts[word] = counts.get(word, 0) + 1
+            if not ok:
+                bad.append(entry["id"])
+            print(f"{entry['id']:6} {word:30} {time.monotonic() - start:5.0f}s  {entry['title']}"
+                  + (f"\n       {detail}" if detail else ""), flush=True)
+    except DiskFull as error:
+        stopped_for_disk = True
+        print(f"stopped: disk full ({error}); every file is restored")
+        if ran_e2e:
+            print("the guest rebuild is deferred until there is free space; "
+                  "the next e2e run builds before its tests")
+        return 3
+    except KeyboardInterrupt:
+        print("stopped: interrupted; every file is restored")
+        return 1
+    finally:
+        if ran_e2e and not stopped_for_disk:
+            # run-e2e.sh rebuilt the guest from a mutated source; build it again.
+            # A full disk cannot build, so that rebuild waits for free space.
+            subprocess.run(["bash", str(HERE / "build.sh")], cwd=REPO, capture_output=True)
+    print("summary:", ", ".join(f"{count} {word}" for word, count in sorted(counts.items())),
+          f"of {len(chosen)}")
+    if bad:
+        print("not as expected:", " ".join(bad))
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
