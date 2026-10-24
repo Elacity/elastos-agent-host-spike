@@ -158,8 +158,10 @@ bomb**; the caps below do, and they are counted in the inflate loop, not taken f
   decompressor writes into a fixed 16 KiB window plus one byte: the first byte past
   the cap stops it, and the entry is skipped `oversize`.
 - **B2, ratio cap.** Output may never pass 100 times the compressed bytes consumed so far (plus 1 KiB of slack
-  for tiny entries). Checked after every inflate step; past it, the entry is skipped `ratio`. A declared ratio
-  over 100 is not even read. Text compresses about 7:1 here; a 16 KiB run of zeros about 800:1.
+  for tiny entries). Inflate takes at most 16 compressed bytes per step and the check runs after every step:
+  past the cap, the entry is skipped `ratio`. One step over the whole stream would hide an early burst, so the
+  16-byte step is what makes the rule observable (F3). A declared ratio over 100 is not even read. Text
+  compresses about 7:1 here; a 16 KiB run of zeros about 800:1.
 - **B3, total inflate cap.** All entries shown in one run inflate at most 64 KiB in all, counted as it comes out,
   whether the entry is then shown or skipped (PATTERNS 1, "count before any early return").
 - **B4, overlapping entries.** Two entries whose whole records overlap (one compressed stream reused by many
@@ -307,7 +309,7 @@ rebuild the component and run in `ComponentProvider`.
 |---|---|---|---|
 | F1 | B1 preview cap | the window grows to 64 KiB | `an_entry_over_the_preview_cap_is_skipped_after_one_byte_past_it` |
 | F2 | B1 declared size | the declared size is not checked first | `an_entry_declared_over_the_cap_is_not_read` |
-| F3 | B2 ratio | the streaming ratio check is removed (the declared-ratio check stays) | `a_bomb_entry_stops_at_the_ratio_cap` (in the component: a declared 10,000-byte entry with 100 compressed bytes, so the declared ratio is exactly 100 and F4's check passes and inflation starts. A crafted stream yields about 3,100 bytes from its first 20 bytes, past 100 × 20 + 1 KiB = 3,024, and its 100 bytes end at exactly 10,000. The test asserts status `ratio`, that the stop came mid-stream, and that the output count at the stop is at least 1 KiB, so it also proves inflation ran. Without the streaming check the entry inflates to 10,000 and lists, so both the status and the count fail) |
+| F3 | B2 ratio | the streaming ratio check is removed (the declared-ratio check stays) | `a_bomb_entry_stops_at_the_ratio_cap` (in the component: a declared 10,000-byte entry with 100 compressed bytes, so the declared ratio is exactly 100 and F4's check passes. Inflate steps take at most 16 compressed bytes (B2); a crafted stream yields about 3,096 bytes from its first 16 bytes, past 100 × 16 + 1 KiB = 2,624, and its 100 bytes end at exactly 10,000. The test asserts status `ratio`, consumed below 100 at the stop, and produced above both 1 KiB and 100 × consumed + 1 KiB, so it proves the step ended at the burst and inflation ran. Without the streaming check the entry inflates to 10,000 and lists, so the status and the count both fail) |
 | F4 | B2 declared ratio | the declared ratio is not checked | `an_entry_declared_past_the_ratio_is_not_read` |
 | F5 | B3 total inflate | output of skipped entries is not counted | `no_run_inflates_more_than_its_total` (sweep) |
 | F6 | B4 overlap | the range check is removed | `entries_that_share_data_refuse_the_archive` |
@@ -349,14 +351,16 @@ rebuild the component and run in `ComponentProvider`.
 | F40 | L9 directory | a directory's size is not checked | `a_nonempty_directory_is_blocked_and_the_valid_entry_still_lists` (one archive with a nonempty directory and a valid text file: the directory is listed `blocked` with `directory_with_data`, and the text file keeps its listing and preview; the run writes a view, it does not refuse the archive) |
 | F41 | Request URI | the `.AppData/` refusal is removed | `a_request_for_an_appdata_uri_is_refused` |
 | F42 | ReaderAt authority | a denied read is folded into an `io::Error` and becomes a content skip | `a_denied_read_during_the_directory_read_stops_the_run` |
-| F43 | B5 declared totals | the sum of declared sizes sizes a buffer | `a_declared_two_gigabyte_archive_is_listed_with_the_same_reads_as_a_small_one` |
+| F43 | B5 declared totals | the sum of declared sizes is used as a buffer capacity (allocation, not reads) | `a_declared_two_gigabyte_archive_is_listed_with_bounded_reads_and_memory` (in the component under the host's 128 MiB store limit with `trap_on_grow_failure`: 256 entries declare 2 GiB each, 512 GiB in all. The test asserts the complete listing and a read trace equal to the small archive's, all under the 128 MiB store limit; the allocation mutant traps on `memory.grow` or a capacity overflow, so it fails where the read trace alone would not) |
 
 F40 to F42 give the three rules the review named a mutant and a test: L9 is F40, the request's `.AppData/`
 refusal is F41, and the `ReaderAt` adapter's authority rule is F42. F43 covers B5, the last rule that had no
 row. Each mutant changes only its own rule, so each named test fails independently. F3 runs in the component
-and asserts the ratio status and the output count, so it does not depend on the fuel gate. F36's mutant adds
-fuel cost only and changes no rule: the gate's measured fuel must cross 80% under it. The Bus v2 limits (S2
-and the resident guest's S3) are tested with that proof when its guest is built.
+over a bounded 16-byte inflate step and asserts the ratio status, the consumed count and the produced count at
+the step that trips, so it does not depend on the fuel gate. F43 asserts the complete listing, the read trace
+and that the declared total never reaches a buffer, under the host's 128 MiB limit. F36's mutant adds fuel cost
+only and changes no rule: the gate's measured fuel must cross 80% under it. The Bus v2 limits (S2 and the
+resident guest's S3) are tested with that proof when its guest is built.
 
 The fuel gate (F36) runs one archive per hostile class at its caps: the largest directory, the most names at
 their longest, the most shown entries, a bomb at the ratio cap, a text entry of the worst inflate cost, and the
@@ -369,9 +373,10 @@ largest view. F3 is not the fuel proof.
    and the image header checks (M1 to M3), and the one photo hash change.
 3. Then this app, Bus v1 first, in `examples/archive-viewer`:
    - the core: request, end record, directory, listing, B4a and the statuses, all P and L rules, with tests and
-     falsifiers F6, F6b, F6c, F7 to F25, F29 to F31 and F40 to F43;
+     falsifiers F6, F6b, F6c, F7 to F25, F29 to F31 and F40 to F42;
    - text previews: inflate with B1 to B3, L6 to L8, the text checks; F1, F2, F4, F5, F26 to F28, F32, F33;
-   - the host test in `ComponentProvider` and the fuel gate; F3 (ratio), F35 and F36;
+   - the host test in `ComponentProvider` and the fuel gate; F3 (ratio), F35, F36 and F43 (declared totals and
+     the store memory limit);
    - the page and its smoke; F37 to F39;
    - the bundle and the container build;
    - then the Bus v2 guest in the proof's host, with N2 and F18; image previews (F34) once the typed UI
@@ -432,10 +437,10 @@ Build them in these groups; each group shares fixtures and a test helper, and la
 | Local header and the bytes | F24, F25 (L5), F26 to F28 (L6 to L8) | an entry fixture whose local header or data is changed after the fact |
 | Authority stops | F42 | the fake Runtime denies the directory read; the run stops and writes nothing |
 | Bomb caps | F1 to F5 (B1 to B3) | the inflate loop; F5 is a sweep (many entries, every order), like the docs viewer's budget sweeps; F3 also runs in the component |
-| Budgets | F31 (reads), F32 (the whole view), F43 (declared totals) | sweeps over shelves of mixed entries; they must also cover entries skipped after reading |
+| Budgets | F31 (reads), F32 (the whole view) | sweeps over shelves of mixed entries; they must also cover entries skipped after reading |
 | Text | F33 | the kit's text checks through this app's run |
 | Nesting | F17 (Bus v1), F18 (Bus v2) | a stored inner ZIP fixture |
-| In the component | F3 (ratio), F35 (grant), F36 (fuel gate) | `--runtime`: the component is rebuilt for each case |
+| In the component | F3 (ratio), F35 (grant), F36 (fuel gate), F43 (declared totals under the store limit) | `--runtime`: the component is rebuilt for each case; F43 also uses the host's 128 MiB memory limit |
 | Page | F37 to F39 (Bus v1); F38 becomes "no image drawn" | the kit's page test kit and stand-in |
 | Bus v2 images | F34 | waits for M5 and the typed UI document (decision 4) |
 
