@@ -3,76 +3,54 @@
 //! only under a policy that lets that publisher ship that role and name. The
 //! surface names its core by CID.
 //!
-//! The bundle tool (`capsule-bundle`) is used as it is. What it does not have,
-//! a step that decides which files ship, is `pack` here.
+//! It uses the bundle tool (`capsule-bundle`) as it is: `pack` makes each
+//! closure, and `testing` has the helpers.
 //!
 //! Build the core first: `../build.sh`.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use capsule_bundle::sign;
+use capsule_bundle::testing::{refused, unseal};
 use capsule_bundle::*;
 use ed25519_dalek::SigningKey;
 use serde_json::{json, Value};
+
+/// A temporary folder named by its real path. On macOS the system's temporary
+/// folder is under a link (`/var` is `/private/var`), and the bundle tool
+/// refuses a path through a link.
+struct Temp(#[allow(dead_code)] tempfile::TempDir, PathBuf);
+
+impl Temp {
+    fn path(&self) -> &Path {
+        &self.1
+    }
+}
+
+fn tempdir() -> Temp {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().canonicalize().unwrap();
+    Temp(dir, real)
+}
 
 /// Unix seconds; every test runs at this time (as in the bundle tool's tests).
 const NOW: u64 = 1_800_000_000;
 const DAY: u64 = 24 * 3600;
 
+/// The viewer's folder, named without a `..` part: the bundle tool refuses one.
 fn viewer_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("bundle-test is inside the viewer's folder")
+        .to_path_buf()
 }
 
 fn manifest_of(dir: &Path) -> Value {
     serde_json::from_slice(&std::fs::read(dir.join("capsule.json")).unwrap()).unwrap()
 }
 
-fn copy(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to.parent().unwrap()).unwrap();
-    std::fs::copy(from, to).unwrap_or_else(|err| panic!("{}: {err}", from.display()));
-}
-
-/// The files a capsule ships: its manifest, and its entrypoint, or for a page
-/// every file in the entrypoint's folder. Source, tests, fixtures and build
-/// output stay behind. `requires` is set on the shipped manifest.
-fn pack(source: &Path, into: &Path, requires: Option<Value>) -> PathBuf {
-    let mut manifest = manifest_of(source);
-    let entrypoint = manifest["entrypoint"].as_str().unwrap().to_string();
-    std::fs::create_dir_all(into).unwrap();
-    if manifest["execution"] == "web-projection" {
-        let folder = Path::new(&entrypoint).parent().unwrap();
-        let mut files: Vec<_> = std::fs::read_dir(source.join(folder))
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .collect();
-        files.sort();
-        for file in files {
-            assert!(file.is_file(), "{} is not a file", file.display());
-            copy(&file, &into.join(folder).join(file.file_name().unwrap()));
-        }
-    } else {
-        let artifact = source.join(&entrypoint);
-        assert!(
-            artifact.is_file(),
-            "{} is missing; run examples/docs-viewer/build.sh first",
-            artifact.display()
-        );
-        copy(&artifact, &into.join(&entrypoint));
-    }
-    if let Some(requires) = requires {
-        manifest["requires"] = requires;
-    }
-    std::fs::write(
-        into.join("capsule.json"),
-        serde_json::to_vec_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
-    into.to_path_buf()
-}
-
 struct World {
-    root: tempfile::TempDir,
+    root: Temp,
     release_root: SigningKey,
     publisher: SigningKey,
 }
@@ -80,7 +58,7 @@ struct World {
 impl World {
     fn new() -> World {
         World {
-            root: tempfile::tempdir().unwrap(),
+            root: tempdir(),
             release_root: sign::generate(),
             publisher: sign::generate(),
         }
@@ -95,24 +73,38 @@ impl World {
     }
 
     fn core(&self) -> PathBuf {
-        pack(&viewer_dir(), &self.path("core"), None)
+        let into = self.path("core");
+        pack(&viewer_dir(), &into, &[]).expect("build the core first: ../build.sh");
+        into
     }
 
     fn surface(&self, core_cid: Option<&str>) -> PathBuf {
-        let mut requirement = json!({ "name": "docs-viewer", "kind": "capsule" });
-        if let Some(cid) = core_cid {
-            requirement["cid"] = json!(cid);
+        let into = self.path(&format!("surface-{}", core_cid.unwrap_or("unpinned")));
+        let requires: Vec<(String, String)> = core_cid
+            .map(|cid| ("docs-viewer".to_string(), cid.to_string()))
+            .into_iter()
+            .collect();
+        pack(&viewer_dir().join("surface"), &into, &requires).unwrap();
+        if core_cid.is_none() {
+            // As the source has it: the core by name only.
+            let mut manifest = manifest_of(&into);
+            manifest["requires"] = json!([{ "name": "docs-viewer", "kind": "capsule" }]);
+            std::fs::write(
+                into.join("capsule.json"),
+                serde_json::to_vec_pretty(&manifest).unwrap(),
+            )
+            .unwrap();
         }
-        pack(
-            &viewer_dir().join("surface"),
-            &self.path(&format!("surface-{}", core_cid.unwrap_or("unpinned"))),
-            Some(json!([requirement])),
-        )
+        into
     }
 
     /// A policy from the pinned release root that lets `publisher` ship
     /// `entries`, on a new device.
     fn policy(&self, entries: Vec<PublisherEntry>) -> TrustPolicy {
+        self.try_policy(entries).unwrap()
+    }
+
+    fn try_policy(&self, entries: Vec<PublisherEntry>) -> Result<TrustPolicy, Refusal> {
         let release = ReleasePolicy {
             sequence: 1,
             expires_at: NOW + DAY,
@@ -127,12 +119,11 @@ impl World {
             NOW,
             &PolicyFloor::at(self.path(&format!("floor-{}", rand_name()))),
         )
-        .unwrap()
     }
 
     /// The publisher may ship the core and the surface, as an app and a
-    /// viewer, by name. One entry: the tool reads only the first entry for a
-    /// DID (`the_second_entry_for_a_publisher_is_ignored`).
+    /// viewer, by name: one entry with both roles and both names (a second
+    /// entry for the same DID is refused, `a_publisher_listed_twice_is_refused`).
     fn docs_policy(&self) -> TrustPolicy {
         self.policy(vec![PublisherEntry {
             did: sign::did(&self.publisher),
@@ -171,32 +162,12 @@ impl Drop for World {
     }
 }
 
-fn unseal(path: &Path) {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return;
-    };
-    if meta.is_dir() {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        for child in std::fs::read_dir(path).unwrap() {
-            unseal(&child.unwrap().path());
-        }
-    } else if meta.is_file() {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
-    }
-}
-
 fn rand_name() -> String {
     hex(&sign::generate().to_bytes()[..6])
 }
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn refused<T: std::fmt::Debug>(result: Result<T, Refusal>) -> &'static str {
-    let refusal = result.expect_err("expected a refusal");
-    println!("refused: {refusal}");
-    refusal.code()
 }
 
 fn installed(admitted: &Admitted) -> Installed {
@@ -410,14 +381,12 @@ fn the_runtime_manifest_type_takes_the_core_but_not_a_core_named_by_cid() {
     manifest.validate().unwrap();
 }
 
-/// A finding, pinned: a policy may list a publisher twice, and only the first
-/// entry counts. The second grants nothing and is not refused either.
+/// Capsule kit item 5, decided: a policy that lists a publisher twice is
+/// refused with its reason, not merged and not cut to the first entry.
 #[test]
-fn the_second_entry_for_a_publisher_is_ignored() {
+fn a_publisher_listed_twice_is_refused() {
     let world = World::new();
-    let core = world.core();
-    let surface = world.surface(Some(&closure_cid(&core).unwrap().0));
-    let split = world.policy(vec![
+    let split = world.try_policy(vec![
         PublisherEntry {
             did: sign::did(&world.publisher),
             roles: vec!["app".into()],
@@ -429,15 +398,5 @@ fn the_second_entry_for_a_publisher_is_ignored() {
             names: Some(vec!["docs-reader".into()]),
         },
     ]);
-    world
-        .admit(&core, &world.claim(&world.publisher, &core, "app"), &split)
-        .unwrap();
-    assert_eq!(
-        refused(world.admit(
-            &surface,
-            &world.claim(&world.publisher, &surface, "viewer"),
-            &split
-        )),
-        "publisher_role_refused"
-    );
+    assert_eq!(refused(split), "publisher_listed_twice");
 }

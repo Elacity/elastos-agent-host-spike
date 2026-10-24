@@ -12,6 +12,7 @@
 //!
 //! Unknown fields are refused, like manifest parsing.
 
+use capsule_kit_guest::uri::check_object_uri;
 use serde_json::Value;
 
 use crate::{
@@ -95,20 +96,5 @@ fn parse_item(item: &Value) -> Result<AlbumItem, String> {
 
 /// An item names one object under the person's Pictures folder.
 fn check_uri(uri: &str) -> Result<(), String> {
-    let Some(relative) = uri.strip_prefix(PICTURES_PREFIX) else {
-        return Err(format!("uri must start with {PICTURES_PREFIX}"));
-    };
-    if relative.is_empty() || relative.ends_with('/') {
-        return Err("uri must name an object, not a folder".to_string());
-    }
-    if relative
-        .split('/')
-        .any(|part| part.is_empty() || part == "." || part == "..")
-    {
-        return Err("uri must not contain empty, . or .. segments".to_string());
-    }
-    if relative.contains(['?', '#', '\\']) || relative.chars().any(char::is_control) {
-        return Err("uri must not contain ?, #, \\ or control characters".to_string());
-    }
-    Ok(())
+    check_object_uri(uri, PICTURES_PREFIX)
 }

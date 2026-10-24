@@ -65,8 +65,10 @@ Two kinds of failure, as in the photo viewer:
 | Pages per shelf | 64 KiB, the whole text written | Documents, skipped entries and the frame; room for every item's skipped entry is held back until it is decided. Markdown can render to several times its size; the write is each byte as a number, far under the 1 MiB bridge frame |
 | Blocks, spans, list items | 512, 256 per block, 256 per list | |
 
-Fuel: `ComponentProvider` gives every run 100,000,000. The worst shelf within these limits uses 51.6%, and
-`host-test` gates every worst case at 80%, including documents made of openers that never close. The inline
+Fuel: `ComponentProvider` gives every run 100,000,000. The worst shelf within these limits uses 50.2%, and
+`host-test` gates every worst case at 80%, including documents made of openers that never close and backtick
+runs of distinct lengths. (It was 62.2% while the shared write was the photo viewer's; the kit's crate now
+has this viewer's cheaper write, for both, see `../capsule-kit/CRATE-REPORT.md`.) The inline
 parser finds every closer through an index built once, so it is linear in the text.
 
 ## Verify
@@ -92,12 +94,12 @@ The reproducible build is separate: `repro/build-in-container.sh` (needs Docker)
 | Path | Owner |
 | --- | --- |
 | `capsule.json` | Identity, role, Component ABI, entrypoint, storage bounds |
-| `src/lib.rs` | Run order, limits, stop and skip rules, pages, WIT glue |
+| `src/lib.rs` | Run order, limits, stop and skip rules, pages |
 | `src/shelf.rs` | Shelf schema |
-| `src/bus.rs` | The two Bus calls behind a trait, and answer parsing (copied from the photo viewer; the write body changed) |
-| `src/fake.rs`, `src/tests.rs` | Fake Runtime (copied) and guest tests |
-| `model/` | Text checks and markdown to blocks; shared with the Bus v2 guest |
-| `host-test/` | The component in `ComponentProvider`, admission check, fuel gate (harness copied) |
+| `../capsule-kit/guest/` (path dependency `capsule-kit-guest`) | The two Bus calls and answer parsing, the write, the refusals and reads (counted reads too), the URI check, the text checks, the fake Runtime and the WIT glue, shared with the photo viewer |
+| `src/tests.rs` | Guest tests |
+| `model/` | Markdown to blocks (the text checks are the kit's, re-exported); shared with the Bus v2 guest |
+| `host-test/` | The component in `ComponentProvider`, admission check, fuel gate (harness from `../capsule-kit/v1-host-test/`) |
 | `bundle-test/` | Pack, CID, claim and admission of both capsules |
 | `bus2/` | The same reader as a resident Bus v2 guest, and its tests |
 | `repro/` | The pinned container build |

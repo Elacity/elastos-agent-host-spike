@@ -1,5 +1,8 @@
 // The Photos surface against a fake fetch and a fake document.
 // Run: node --test examples/photo-viewer/surface/photos.test.mjs
+//
+// The fake elements, document and responses are the capsule kit's
+// (examples/capsule-kit/surface/test-kit.mjs).
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -15,42 +18,13 @@ import {
   mountPhotos,
   readPlaylist,
 } from "./browser/photos.js";
+import { fakeDocument as kitDocument, response } from "../../capsule-kit/surface/test-kit.mjs";
 
 const TOKEN = "launch-token-for-this-frame";
 const source = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 
-function element(tag = "div") {
-  return {
-    tag,
-    textContent: "",
-    hidden: false,
-    src: undefined,
-    alt: "",
-    children: [],
-    listeners: {},
-    appendChild(child) {
-      this.children.push(child);
-      return child;
-    },
-    addEventListener(type, listener) {
-      this.listeners[type] = listener;
-    },
-  };
-}
-
-function fakeDocument() {
-  const ids = ["photo", "caption", "status", "skipped", "skipped-title", "previous", "pause", "next"];
-  const elements = Object.fromEntries(ids.map((id) => [id, element()]));
-  return {
-    elements,
-    listeners: {},
-    getElementById: (id) => elements[id] ?? null,
-    createElement: (tag) => element(tag),
-    addEventListener(type, listener) {
-      this.listeners[type] = listener;
-    },
-  };
-}
+const IDS = ["photo", "caption", "status", "skipped", "skipped-title", "previous", "pause", "next"];
+const fakeDocument = () => kitDocument(IDS);
 
 function playlist(items, skipped = []) {
   return { schema: PLAYLIST_SCHEMA, album: "localhost://Users/self/Pictures/album.json", items, skipped };
@@ -65,15 +39,6 @@ function item(order, extra = {}) {
     height: 480,
     duration_ms: 5000,
     ...extra,
-  };
-}
-
-function response(status, body, kind = "json") {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => (kind === "json" ? body : JSON.parse(body)),
-    arrayBuffer: async () => body,
   };
 }
 

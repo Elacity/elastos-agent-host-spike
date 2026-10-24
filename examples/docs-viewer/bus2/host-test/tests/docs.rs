@@ -2,6 +2,8 @@
 //! in the Bus v2 proof's stub host (`examples/bus2-proof/host`). It reads by
 //! grant under its own cap, draws with `ui.present`, stops when its events
 //! close, and does not starve a second guest.
+// The Bus v2 proof's own test helpers (`guest`, `within`), used as they are.
+#[path = "../../../../bus2-proof/host/tests/common/mod.rs"]
 mod common;
 
 use std::time::{Duration, Instant};
@@ -14,6 +16,17 @@ use wasmtime::component::Component;
 const NOTES: &str = "localhost://Users/self/Documents/notes.md";
 const TODO: &str = "localhost://Users/self/Documents/todo.txt";
 const GUEST_CAP: usize = 16 * 1024;
+
+/// A guest built in the Bus v2 proof's own workspace (`verify.sh` builds it),
+/// componentized: the proof's busy guest is used as it is.
+fn proof_guest(name: &str) -> Vec<u8> {
+    let path = common::root()
+        .join("../../bus2-proof/target/wasm32-unknown-unknown/release")
+        .join(format!("{name}.wasm"));
+    let core = std::fs::read(&path)
+        .unwrap_or_else(|err| panic!("{}: {err}; build it first (../verify.sh)", path.display()));
+    bus2_host::componentize(&core).unwrap()
+}
 
 fn reader_state(docs: &[(&str, Vec<u8>)]) -> HostState {
     let mut state = HostState::default();
@@ -246,7 +259,7 @@ fn a_busy_guest_does_not_starve_the_reader() {
         common::within(Duration::from_secs(30), async {
             let engine = bus2_host::engine().unwrap();
             let _ticker = Ticker::start(&engine, Duration::from_millis(10));
-            let busy = Component::new(&engine, common::guest("docs_bus2_busy_guest")).unwrap();
+            let busy = Component::new(&engine, proof_guest("bus2_busy_guest")).unwrap();
             let reader = Component::new(&engine, common::guest("docs_bus2_guest")).unwrap();
             let started = Instant::now();
             let busy_limits = Limits {

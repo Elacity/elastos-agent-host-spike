@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 
-use crate::fake::{Call, FakeBus};
 use crate::*;
+use capsule_kit_guest::fake::{Call, FakeBus};
 
 const A: &str = "localhost://Users/self/Pictures/a.png";
 const B: &str = "localhost://Users/self/Pictures/trip/b.jpg";
@@ -283,41 +283,6 @@ fn the_playlist_is_written_as_bytes_with_append_false() {
     assert_eq!(body["content"], json!(text.as_bytes()));
 }
 
-#[test]
-fn the_fake_refuses_bodies_the_localhost_provider_refuses() {
-    let mut bus = FakeBus::default()
-        .allow(PLAYLIST_URI, "write")
-        .allow(A, "read");
-    let write = bus.request(PLAYLIST_URI, "write", "").unwrap();
-    let read = bus.request(A, "read", "").unwrap();
-    for (uri, operation, grant, body) in [
-        (
-            PLAYLIST_URI,
-            "write",
-            &write,
-            json!({ "path": PLAYLIST_URI, "content": "text", "append": false }),
-        ),
-        (
-            PLAYLIST_URI,
-            "write",
-            &write,
-            json!({ "path": PLAYLIST_URI, "content": [1] }),
-        ),
-        (A, "read", &read, json!({ "path": A, "offset": 0 })),
-        (
-            A,
-            "read",
-            &read,
-            json!({ "path": A, "offset": 0, "length": 1, "token": "t" }),
-        ),
-    ] {
-        let reply = bus
-            .invoke(uri, operation, body.to_string().as_bytes(), grant)
-            .unwrap();
-        assert_eq!(reply.status, "error", "{body}");
-    }
-}
-
 // --- content failures skip the item --------------------------------------------------
 
 #[test]
@@ -469,7 +434,7 @@ fn album_without_a_read_grant_stops_before_any_read() {
 
     let err = run(&mut bus).unwrap_err();
     assert!(matches!(&err, Refusal::NoGrant { resource, .. } if resource == ALBUM_URI));
-    assert!(matches!(err.to_bus_failure(), BusFailure::Denied(_)));
+    assert!(matches!(err.to_bus_failure(&APP), BusFailure::Denied(_)));
     assert!(
         bus.invokes_on(ALBUM_URI).is_empty(),
         "album must not be read"
@@ -485,7 +450,7 @@ fn image_without_a_read_grant_stops_the_run_and_is_not_skipped() {
 
     let err = run(&mut bus).unwrap_err();
     assert!(matches!(&err, Refusal::NoGrant { resource, .. } if resource == B));
-    assert!(matches!(err.to_bus_failure(), BusFailure::Denied(_)));
+    assert!(matches!(err.to_bus_failure(&APP), BusFailure::Denied(_)));
     assert!(
         bus.invokes_on(B).is_empty(),
         "denied image must not be read"
@@ -556,8 +521,11 @@ fn a_provider_error_stops_the_run_and_is_not_skipped() {
         &err,
         Refusal::Call { resource, error: CallError::Provider { code, .. } } if resource == A && code == "read_failed"
     ));
-    assert!(matches!(err.to_bus_failure(), BusFailure::Unavailable(_)));
-    assert!(err.message().contains("disk gone"));
+    assert!(matches!(
+        err.to_bus_failure(&APP),
+        BusFailure::Unavailable(_)
+    ));
+    assert!(err.message(&APP).contains("disk gone"));
     assert!(bus.invokes_on(B).is_empty());
     assert_nothing_written(&bus);
 }
@@ -584,7 +552,7 @@ fn album_larger_than_its_limit_stops_the_run() {
     big.resize(MAX_ALBUM_BYTES as usize + 1, b' ');
     bus.objects.insert(ALBUM_URI.to_string(), big);
     let err = run(&mut bus).unwrap_err();
-    assert_eq!(err, Refusal::AlbumTooLarge);
+    assert_eq!(err, Refusal::InputTooLarge);
     assert!(bus.invokes_on(A).is_empty());
     assert_nothing_written(&bus);
 }
@@ -651,97 +619,12 @@ fn malformed_albums_stop_before_any_image_is_read() {
         let mut bus = granted(&[(A, png(1, 1, 64))]);
         bus.objects.insert(ALBUM_URI.to_string(), bytes);
         let err = run(&mut bus).unwrap_err();
-        assert!(matches!(err, Refusal::Album(_)), "{name}: {err:?}");
+        assert!(matches!(err, Refusal::Input(_)), "{name}: {err:?}");
         assert!(
-            matches!(err.to_bus_failure(), BusFailure::Invalid(_)),
+            matches!(err.to_bus_failure(&APP), BusFailure::Invalid(_)),
             "{name}"
         );
         assert!(bus.invokes_on(A).is_empty(), "{name}: no image may be read");
         assert_nothing_written(&bus);
     }
-}
-
-// --- Runtime answers ----------------------------------------------------------------
-
-/// A Runtime that grants everything and answers every call with `self.0`.
-struct OddAnswers(Value);
-
-impl Bus for OddAnswers {
-    fn request(&mut self, _: &str, _: &str, _: &str) -> Result<String, BusFailure> {
-        Ok("grant".into())
-    }
-
-    fn invoke(&mut self, _: &str, _: &str, _: &[u8], _: &str) -> Result<InvokeReply, BusFailure> {
-        Ok(InvokeReply {
-            status: "ok".into(),
-            body: serde_json::to_vec(&self.0).unwrap(),
-        })
-    }
-}
-
-#[test]
-fn an_answer_without_byte_content_stops_the_run() {
-    for answer in [
-        json!({ "status": "ok" }),
-        json!({ "status": "ok", "data": {} }),
-        json!({ "status": "ok", "data": { "content": "AAEC" } }),
-        json!({ "status": "ok", "data": { "content": [1, 2, 300] } }),
-        json!({ "status": "pending" }),
-    ] {
-        let err = run(&mut OddAnswers(answer.clone())).unwrap_err();
-        assert!(
-            matches!(
-                &err,
-                Refusal::Call {
-                    error: CallError::Shape(_),
-                    ..
-                }
-            ),
-            "{answer}: {err:?}"
-        );
-        assert!(matches!(err.to_bus_failure(), BusFailure::Internal(_)));
-    }
-}
-
-#[test]
-fn an_error_answer_that_also_carries_data_is_still_an_error() {
-    let answer = json!({
-        "status": "error",
-        "code": "read_failed",
-        "message": "partial",
-        "data": { "content": [0x89, 0x50] },
-    });
-    let err = run(&mut OddAnswers(answer)).unwrap_err();
-    assert!(
-        matches!(&err, Refusal::Call { error: CallError::Provider { code, .. }, .. } if code == "read_failed"),
-        "{err:?}"
-    );
-}
-
-#[test]
-fn a_read_answer_longer_than_asked_is_refused() {
-    let answer = json!({ "status": "ok", "data": { "content": [1, 2, 3, 4] } });
-    let err = crate::bus::read_window(&mut OddAnswers(answer), A, "grant", 0, 3).unwrap_err();
-    assert!(matches!(err, CallError::Shape(_)), "{err:?}");
-}
-
-#[test]
-fn a_runtime_denial_of_an_invoke_is_reported_as_denied() {
-    struct DeniesInvoke;
-    impl Bus for DeniesInvoke {
-        fn request(&mut self, _: &str, _: &str, _: &str) -> Result<String, BusFailure> {
-            Ok("grant".into())
-        }
-        fn invoke(
-            &mut self,
-            _: &str,
-            _: &str,
-            _: &[u8],
-            _: &str,
-        ) -> Result<InvokeReply, BusFailure> {
-            Err(BusFailure::Denied("Capability validation failed".into()))
-        }
-    }
-    let err = run(&mut DeniesInvoke).unwrap_err();
-    assert!(matches!(err.to_bus_failure(), BusFailure::Denied(_)));
 }

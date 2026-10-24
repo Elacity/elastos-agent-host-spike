@@ -1,16 +1,15 @@
 //! Runs the built `photo-viewer.component.wasm` in `ComponentProvider`, the
 //! Runtime's own Component runner (`elastos-compute/src/providers/component.rs`),
-//! with a fake Runtime bridge behind the Bus hostcall.
+//! with a fake Runtime bridge behind the Bus hostcall. The bridge, the run,
+//! the admission check and the fuel runner are the capsule kit's
+//! (`examples/capsule-kit/v1-host-test`), shared with the documents viewer.
 //!
 //! Build the component first: `../build.sh`.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
+use capsule_v1_host_test::{admission, Bridge, ALLOWED_BUS_IMPORTS};
 use elastos_common::CapsuleManifest;
-use elastos_compute::providers::ComponentProvider;
-use elastos_compute::ComputeProvider;
 use serde_json::{json, Value};
 
 const ALBUM: &str = "localhost://Users/self/.AppData/App/photo-viewer/album.json";
@@ -23,15 +22,9 @@ const MAX_ALBUM_BYTES: usize = 16 * 1024;
 const MAX_ALBUM_ITEMS: usize = 64;
 const MAX_JPEG_SEGMENTS: usize = 32;
 const HEADER_BYTES: usize = 32;
-
-/// The imports `elastos-server/src/component.rs:6-12` allows.
-const ALLOWED_BUS_IMPORTS: &[&str] = &[
-    "elastos:bus/types@1.0.0",
-    "elastos:bus/runtime@1.0.0",
-    "elastos:bus/identity@1.0.0",
-    "elastos:bus/capabilities@1.0.0",
-    "elastos:bus/providers@1.0.0",
-];
+/// Between the old `json!` write (64.9% of the Runtime budget) and the
+/// straight writer (59.1%) for the worst album.
+const CHEAPER_WRITE_GATE: u64 = 62_000_000;
 
 fn capsule_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
@@ -52,189 +45,17 @@ fn manifest() -> CapsuleManifest {
     serde_json::from_str(&text).unwrap()
 }
 
-// --- fake Runtime bridge ---------------------------------------------------------
+// --- the shared harness (examples/capsule-kit/v1-host-test) ---------------------
 
-#[derive(Default)]
-struct Bridge {
-    objects: BTreeMap<String, Vec<u8>>,
-    allowed: BTreeSet<(String, String)>,
-    issued: BTreeMap<String, (String, String)>,
-    written: BTreeMap<String, String>,
-    lines: Vec<Value>,
-    bytes_served: BTreeMap<String, usize>,
-    provider_errors: BTreeMap<String, String>,
-}
-
-impl Bridge {
-    fn with<S: AsRef<str>>(objects: &[(S, Vec<u8>)]) -> Self {
-        let items: Vec<Value> = objects
-            .iter()
-            .map(|(uri, _)| json!({ "uri": uri.as_ref() }))
-            .collect();
-        let mut bridge = Bridge::default();
-        bridge.put(
-            ALBUM,
-            serde_json::to_vec(
-                &json!({ "schema": "elastos.photo-viewer.album/v1", "items": items }),
-            )
-            .unwrap(),
-        );
-        bridge.allow(ALBUM, "read");
-        bridge.allow(PLAYLIST, "write");
-        for (uri, bytes) in objects {
-            bridge.put(uri.as_ref(), bytes.clone());
-            bridge.allow(uri.as_ref(), "read");
-        }
-        bridge
-    }
-
-    fn put(&mut self, uri: &str, bytes: Vec<u8>) {
-        self.objects.insert(uri.to_string(), bytes);
-    }
-
-    fn allow(&mut self, uri: &str, action: &str) {
-        self.allowed.insert((uri.to_string(), action.to_string()));
-    }
-
-    fn deny(&mut self, uri: &str, action: &str) {
-        self.allowed.remove(&(uri.to_string(), action.to_string()));
-    }
-
-    fn invokes_on(&self, uri: &str) -> usize {
-        self.lines
-            .iter()
-            .filter(|line| {
-                line["request"]["type"] == "resource_invoke" && line["request"]["uri"] == uri
-            })
-            .count()
-    }
-
-    fn answer(&mut self, line: &str) -> Value {
-        let envelope: Value = serde_json::from_str(line).expect("bridge line is JSON");
-        self.lines.push(envelope.clone());
-        let id = envelope["id"].clone();
-        let request = &envelope["request"];
-        let response = match request["type"].as_str() {
-            Some("request_capability") => self.capability(request),
-            Some("resource_invoke") => self.invoke(request),
-            other => error("invalid", &format!("unexpected request type {other:?}")),
-        };
-        json!({ "id": id, "response": response })
-    }
-
-    fn capability(&mut self, request: &Value) -> Value {
-        let resource = request["resource"].as_str().unwrap_or_default().to_string();
-        let action = request["action"].as_str().unwrap_or_default().to_string();
-        if !self.allowed.contains(&(resource.clone(), action.clone())) {
-            return error("denied", &format!("no {action} grant for {resource}"));
-        }
-        let token = format!("token-{}", self.issued.len() + 1);
-        self.issued.insert(token.clone(), (resource, action));
-        json!({ "type": "capability_token", "token": token })
-    }
-
-    fn invoke(&mut self, request: &Value) -> Value {
-        let uri = request["uri"].as_str().unwrap_or_default().to_string();
-        let operation = request["operation"].as_str().unwrap_or_default();
-        let body = &request["body"];
-        let token = request["token"].as_str().unwrap_or_default();
-        if token.is_empty() {
-            return error(
-                "missing_token",
-                "resource_invoke requires a capability token",
-            );
-        }
-        let action = match operation {
-            "read" => "read",
-            "write" => "write",
-            _ => return error("invalid_resource_invoke", "unsupported operation"),
-        };
-        match self.issued.get(token) {
-            Some((resource, granted)) if *resource == uri && granted == action => {}
-            _ => return error("capability_denied", "Capability validation failed"),
-        }
-        if body["path"].as_str() != Some(uri.as_str()) {
-            return error("invalid_resource_invoke", "path must equal the resource");
-        }
-        let result = if let Some(problem) = provider_body_problem(action, body) {
-            json!({ "status": "error", "code": "invalid_request", "message": problem })
-        } else if let Some(message) = self.provider_errors.get(&uri) {
-            json!({ "status": "error", "code": "read_failed", "message": message })
-        } else if action == "read" {
-            match self.objects.get(&uri) {
-                None => json!({ "status": "error", "code": "read_failed", "message": "not found" }),
-                Some(bytes) => {
-                    // resource_bridge.rs:594-604
-                    let start = body["offset"].as_u64().unwrap_or(0) as usize;
-                    let window: Vec<u8> = if start >= bytes.len() {
-                        Vec::new()
-                    } else {
-                        let length = body["length"].as_u64().unwrap() as usize;
-                        let end = start.saturating_add(length).min(bytes.len());
-                        bytes[start..end].to_vec()
-                    };
-                    *self.bytes_served.entry(uri.clone()).or_default() += window.len();
-                    json!({ "status": "ok", "data": { "content": window, "size": window.len() } })
-                }
-            }
-        } else {
-            let content: Vec<u8> = serde_json::from_value(body["content"].clone()).unwrap();
-            let written = content.len();
-            self.written
-                .insert(uri.clone(), String::from_utf8(content).unwrap());
-            json!({ "status": "ok", "data": { "bytes_written": written } })
-        };
-        json!({ "type": "resource_result", "result": result, "audit": "component-invoke:test" })
-    }
-}
-
-/// What the localhost provider would refuse in this body
-/// (`elastos/capsules/localhost-provider/src/main.rs:25-48`, unknown fields
-/// refused; `length` required here because the provider underflows without it).
-fn provider_body_problem(action: &str, body: &Value) -> Option<String> {
-    let allowed: &[&str] = match action {
-        "read" => &["path", "offset", "length", "encoding"],
-        _ => &["path", "content", "append"],
-    };
-    let object = body.as_object()?;
-    if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
-        return Some(format!("unknown field `{key}`"));
-    }
-    if action == "read" {
-        return (!body["length"].is_u64()).then(|| "read must name a length".into());
-    }
-    if serde_json::from_value::<Vec<u8>>(body["content"].clone()).is_err() {
-        return Some("write content must be a byte array".into());
-    }
-    (!body["append"].is_boolean()).then(|| "write must say append".into())
-}
-
-fn error(code: &str, message: &str) -> Value {
-    json!({ "type": "error", "code": code, "message": message })
+fn bridge_with<S: AsRef<str>>(objects: &[(S, Vec<u8>)]) -> Bridge {
+    Bridge::with_list(ALBUM, "elastos.photo-viewer.album/v1", PLAYLIST, objects)
 }
 
 /// Loads and starts the component once. Returns the Runtime's result and the
 /// bridge after the run.
 async fn run(bridge: Bridge) -> (Result<(), String>, Bridge) {
-    let bridge = Arc::new(Mutex::new(bridge));
-    let provider = ComponentProvider::new();
-    let host = bridge.clone();
-    provider.set_bus_hostcall(Arc::new(move |line, _capsule, _principal| {
-        let response = host.lock().unwrap().answer(line);
-        Ok(response.to_string())
-    }));
     let _ = component_path();
-    let handle = provider
-        .load(&capsule_dir(), manifest())
-        .await
-        .expect("ComponentProvider loads the capsule");
-    provider
-        .set_bridge_principal(&handle.id, Some("person:local:test".into()))
-        .await;
-    let result = provider.start(&handle).await.map_err(|err| err.to_string());
-    // The provider keeps the hostcall, so take the state out through the lock.
-    let bridge = std::mem::take(&mut *bridge.lock().unwrap());
-    (result, bridge)
+    capsule_v1_host_test::run(&capsule_dir(), manifest(), bridge).await
 }
 
 // --- fixtures ----------------------------------------------------------------------
@@ -279,17 +100,7 @@ fn webp_vp8l(width: u32, height: u32) -> Vec<u8> {
 
 #[test]
 fn component_imports_only_the_elastos_bus() {
-    let engine = wasmtime::Engine::new(wasmtime::Config::new().wasm_component_model(true)).unwrap();
-    let component = wasmtime::component::Component::from_file(&engine, component_path()).unwrap();
-    let ty = component.component_type();
-    let imports: Vec<String> = ty
-        .imports(&engine)
-        .map(|(name, _)| name.to_string())
-        .collect();
-    let exports: Vec<String> = ty
-        .exports(&engine)
-        .map(|(name, _)| name.to_string())
-        .collect();
+    let (imports, exports) = capsule_v1_host_test::imports_and_exports(&component_path());
     println!("imports: {imports:?}");
     println!("exports: {exports:?}");
     assert!(!imports.is_empty());
@@ -301,100 +112,6 @@ fn component_imports_only_the_elastos_bus() {
         assert!(!import.to_ascii_lowercase().contains("wasi"));
     }
     assert_eq!(exports, vec!["elastos:bus/lifecycle@1.0.0".to_string()]);
-}
-
-// Copied from `elastos-server/src/component.rs:14-136` (private there), so the
-// artifact passes the same import check Runtime runs before launch
-// (`elastos-server/src/runtime.rs:283`).
-mod admission {
-    use super::ALLOWED_BUS_IMPORTS;
-    use wasmparser::{ComponentTypeRef, Encoding, Parser, Payload};
-
-    const FORBIDDEN_AUTHORITY_MARKERS: &[&str] = &[
-        "wasi",
-        "env",
-        "preopen",
-        "socket",
-        "sock",
-        "fifo",
-        "fd_",
-        "path_",
-        "http",
-        "tcp",
-        "udp",
-        "ELASTOS_API",
-        "ELASTOS_TOKEN",
-        "ELASTOS_CARRIER_FIFOS",
-        "_carrier",
-    ];
-
-    pub fn validate_component_imports(bytes: &[u8]) -> Result<(), String> {
-        let mut saw_root_header = false;
-        for payload in Parser::new(0).parse_all(bytes) {
-            match payload.map_err(|err| format!("failed to parse component entrypoint: {err}"))? {
-                Payload::Version { encoding, .. } if !saw_root_header => {
-                    saw_root_header = true;
-                    if encoding != Encoding::Component {
-                        return Err("component entrypoint must be a WebAssembly component".into());
-                    }
-                }
-                Payload::ComponentImportSection(section) => {
-                    for import in section {
-                        let import = import.map_err(|err| err.to_string())?;
-                        let name = import.name.0;
-                        if name.starts_with("import-type-") {
-                            if !matches!(import.ty, ComponentTypeRef::Type(_)) {
-                                return Err(format!("generated type import {name} must be a type"));
-                            }
-                            continue;
-                        }
-                        if name == "import-func-run" {
-                            if !matches!(import.ty, ComponentTypeRef::Func(_)) {
-                                return Err("generated run import must be a function".into());
-                            }
-                            continue;
-                        }
-                        if !ALLOWED_BUS_IMPORTS.contains(&name) {
-                            return Err(format!("component import {name:?} is not allowed"));
-                        }
-                        if !matches!(import.ty, ComponentTypeRef::Instance(_)) {
-                            return Err(format!("component import {name:?} must be an instance"));
-                        }
-                    }
-                }
-                Payload::ImportSection(section) => {
-                    for import in section {
-                        let import = import.map_err(|err| err.to_string())?;
-                        validate_core_import(import.module, import.name)?;
-                    }
-                }
-                _ => {}
-            }
-        }
-        if !saw_root_header {
-            return Err("component entrypoint is empty".into());
-        }
-        Ok(())
-    }
-
-    fn validate_core_import(module: &str, name: &str) -> Result<(), String> {
-        let lower = format!("{module}::{name}").to_ascii_lowercase();
-        if FORBIDDEN_AUTHORITY_MARKERS
-            .iter()
-            .any(|marker| lower.contains(&marker.to_ascii_lowercase()))
-        {
-            return Err(format!("core import \"{module}::{name}\" is forbidden"));
-        }
-        if ALLOWED_BUS_IMPORTS.contains(&module) {
-            return Ok(());
-        }
-        if module.is_empty()
-            && (name == "$imports" || name.bytes().all(|byte| byte.is_ascii_digit()))
-        {
-            return Ok(());
-        }
-        Err(format!("core import \"{module}::{name}\" is not allowed"))
-    }
 }
 
 #[test]
@@ -442,7 +159,7 @@ async fn album_plays_and_the_playlist_is_written() {
         (B, jpeg(1920, 1080)),
         (C, webp_vp8l(300, 200)),
     ];
-    let (result, bridge) = run(Bridge::with(&objects)).await;
+    let (result, bridge) = run(bridge_with(&objects)).await;
     result.expect("component run succeeds");
     let playlist = playlist(&bridge);
     println!("playlist: {playlist}");
@@ -475,7 +192,7 @@ async fn a_photo_sized_jpeg_plays_from_its_headers() {
     // 12 MiB, frame header after 64 KiB of EXIF and a 40 KiB ICC profile.
     let mut bytes = jpeg_after(&[65_000, 40_000], 6000, 4000);
     bytes.resize(12 * 1024 * 1024, 0x11);
-    let (result, bridge) = run(Bridge::with(&[(B, bytes)])).await;
+    let (result, bridge) = run(bridge_with(&[(B, bytes)])).await;
     result.expect("component run succeeds");
     let item = &playlist(&bridge)["items"][0];
     assert_eq!(
@@ -508,7 +225,7 @@ async fn content_failures_are_skipped_and_listed_through_the_runtime() {
         ),
         ("localhost://Users/self/Pictures/zero.png", png(0, 10, 64)),
     ];
-    let (result, bridge) = run(Bridge::with(&objects)).await;
+    let (result, bridge) = run(bridge_with(&objects)).await;
     result.expect("content failures do not stop the run");
     let playlist = playlist(&bridge);
     assert_eq!(playlist["items"].as_array().unwrap().len(), 1);
@@ -539,7 +256,7 @@ async fn content_failures_are_skipped_and_listed_through_the_runtime() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_grant_stops_the_run_through_the_runtime() {
-    let mut bridge = Bridge::with(&[(A, png(1, 1, 64)), (B, jpeg(2, 2))]);
+    let mut bridge = bridge_with(&[(A, png(1, 1, 64)), (B, jpeg(2, 2))]);
     bridge.deny(A, "read");
     let (result, bridge) = run(bridge).await;
     let err = result.unwrap_err();
@@ -551,7 +268,7 @@ async fn no_grant_stops_the_run_through_the_runtime() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provider_error_stops_the_run_through_the_runtime() {
-    let mut bridge = Bridge::with(&[(A, png(1, 1, 64)), (B, jpeg(2, 2))]);
+    let mut bridge = bridge_with(&[(A, png(1, 1, 64)), (B, jpeg(2, 2))]);
     bridge
         .provider_errors
         .insert(A.to_string(), "disk gone".to_string());
@@ -568,7 +285,7 @@ async fn provider_error_stops_the_run_through_the_runtime() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_without_grant_is_denied_through_the_runtime() {
-    let mut bridge = Bridge::with(&[(A, png(1, 1, 64))]);
+    let mut bridge = bridge_with(&[(A, png(1, 1, 64))]);
     bridge.deny(PLAYLIST, "write");
     let (result, bridge) = run(bridge).await;
     let err = result.unwrap_err();
@@ -597,8 +314,8 @@ fn worst_case_albums() -> Vec<(&'static str, Bridge)> {
         .map(|(uri, _)| (uri.clone(), jpeg_after(&[0; MAX_JPEG_SEGMENTS], 10, 10)))
         .collect();
     vec![
-        ("64 JPEGs, 31 segments each", Bridge::with(&walked)),
-        ("64 JPEGs past the segment limit", Bridge::with(&skipped)),
+        ("64 JPEGs, 31 segments each", bridge_with(&walked)),
+        ("64 JPEGs past the segment limit", bridge_with(&skipped)),
     ]
 }
 
@@ -633,134 +350,35 @@ fn worst_case_albums_stay_under_80_percent_of_the_runtime_fuel() {
     }
 }
 
-// --- fuel measurement ---------------------------------------------------------------
-//
-// ComponentProvider fixes fuel at 100_000_000 (`component.rs:28`) and reports a
-// trap without its cause (`component.rs:134` formats only the outer context).
-// This runner uses the same world, engine config and store limits, but its own
-// Store, so it can read how much fuel a run used.
+/// The write is cheaper, and that is what the rule is for: `json!` builds a
+/// `serde_json::Value` per byte and costs 64.9% of the Runtime budget for the
+/// worst album; the straight writer costs 59.1%. The limit sits between the
+/// two, so a return to the old serializer fails here even while the 80% gate
+/// still passes.
+#[test]
+fn the_worst_case_album_is_written_without_a_value_per_byte() {
+    for (name, bridge) in worst_case_albums() {
+        let (outcome, used) = measure::run(bridge, measure::RUNTIME_FUEL);
+        outcome.unwrap_or_else(|err| panic!("{name}: {err}"));
+        println!("{name}: {used} fuel");
+        assert!(
+            used < CHEAPER_WRITE_GATE,
+            "{name} uses {used} fuel; the json! writer used 64.9% of {}",
+            measure::RUNTIME_FUEL
+        );
+    }
+}
+
+// --- fuel measurement (the shared runner) --------------------------------------------
 
 mod measure {
     use super::Bridge;
-    use serde_json::{json, Value};
-    use wasmtime::component::{bindgen, Component, HasSelf, Linker};
-    use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
+    pub use capsule_v1_host_test::measure::RUNTIME_FUEL;
 
-    bindgen!({
-        path: "../../../elastos/wit",
-        world: "product-capsule-v1",
-    });
-
-    use elastos::bus::types::{
-        BusError, CapabilityGrant, CapabilityRequest, IdentityContext, InvokeRequest,
-        InvokeResponse, RuntimeInfo,
-    };
-
-    pub const RUNTIME_FUEL: u64 = 100_000_000;
-
-    struct State {
-        bridge: Bridge,
-        limits: StoreLimits,
-    }
-
-    fn bus_error(response: &Value) -> BusError {
-        let message = response["message"].as_str().unwrap_or_default().to_string();
-        match response["code"].as_str().unwrap_or_default() {
-            "denied" | "capability_denied" | "missing_token" | "invalid_token" => {
-                BusError::Denied(message)
-            }
-            _ => BusError::Invalid(message),
-        }
-    }
-
-    impl elastos::bus::types::Host for State {}
-
-    impl elastos::bus::runtime::Host for State {
-        fn info(&mut self) -> RuntimeInfo {
-            RuntimeInfo {
-                abi: "elastos.component/v1".into(),
-                runtime_version: "host-test".into(),
-            }
-        }
-    }
-
-    impl elastos::bus::identity::Host for State {
-        fn context(&mut self) -> IdentityContext {
-            IdentityContext {
-                principal: Some("person:local:test".into()),
-                capsule: "photo-viewer".into(),
-                session: "photo-viewer".into(),
-                device: None,
-            }
-        }
-    }
-
-    impl elastos::bus::capabilities::Host for State {
-        fn request(&mut self, request: CapabilityRequest) -> Result<CapabilityGrant, BusError> {
-            let response = self.bridge.capability(&json!({
-                "resource": request.resource,
-                "action": request.actions[0],
-            }));
-            match response["token"].as_str() {
-                Some(token) => Ok(CapabilityGrant {
-                    id: token.into(),
-                    resource: request.resource,
-                    actions: request.actions,
-                    expires_at_ms: None,
-                }),
-                None => Err(bus_error(&response)),
-            }
-        }
-    }
-
-    impl elastos::bus::providers::Host for State {
-        fn invoke(&mut self, request: InvokeRequest) -> Result<InvokeResponse, BusError> {
-            let body: Value = serde_json::from_slice(&request.body).unwrap();
-            let response = self.bridge.invoke(&json!({
-                "uri": request.resource,
-                "operation": request.operation,
-                "body": body,
-                "token": request.grant.unwrap_or_default(),
-            }));
-            if response["type"] != "resource_result" {
-                return Err(bus_error(&response));
-            }
-            let result = &response["result"];
-            Ok(InvokeResponse {
-                status: result["status"].as_str().unwrap_or("ok").into(),
-                body: serde_json::to_vec(result).unwrap(),
-                audit: None,
-            })
-        }
-    }
-
-    /// Runs once with `fuel`. Returns the outcome and the fuel used.
+    /// Runs the built component once with `fuel`. Returns the outcome and the
+    /// fuel used.
     pub fn run(bridge: Bridge, fuel: u64) -> (Result<(), String>, u64) {
-        let mut config = Config::new();
-        config.wasm_component_model(true);
-        config.consume_fuel(true);
-        let engine = Engine::new(&config).unwrap();
-        let component = Component::from_file(&engine, super::component_path()).unwrap();
-        let limits = StoreLimitsBuilder::new()
-            .memory_size(128 * 1024 * 1024)
-            .instances(16)
-            .tables(32)
-            .memories(4)
-            .trap_on_grow_failure(true)
-            .build();
-        let mut store = Store::new(&engine, State { bridge, limits });
-        store.limiter(|state| &mut state.limits);
-        store.set_fuel(fuel).unwrap();
-        let mut linker = Linker::new(&engine);
-        ProductCapsuleV1::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state).unwrap();
-        let bindings = ProductCapsuleV1::instantiate(&mut store, &component, &linker).unwrap();
-        let outcome = match bindings.elastos_bus_lifecycle().call_run(&mut store) {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(err)) => Err(format!("{err:?}")),
-            Err(trap) => Err(format!("{:?}", trap.root_cause())),
-        };
-        let used = fuel - store.get_fuel().unwrap();
-        (outcome, used)
+        capsule_v1_host_test::measure::run(bridge, &super::component_path(), "photo-viewer", fuel)
     }
 }
 
@@ -795,7 +413,7 @@ fn fuel_probe() {
         ),
     ];
     for (name, objects) in shapes {
-        let (outcome, used) = measure::run(Bridge::with(&objects), u64::MAX / 2);
+        let (outcome, used) = measure::run(bridge_with(&objects), u64::MAX / 2);
         println!(
             "fuel_probe {name}: {used} fuel ({:.1}% of the Runtime budget), {}",
             used as f64 * 100.0 / measure::RUNTIME_FUEL as f64,

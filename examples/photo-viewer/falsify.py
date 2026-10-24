@@ -4,18 +4,23 @@
 Usage: python3 -I falsify.py            # guest falsifiers (host tests, fast)
        python3 -I falsify.py --runtime  # also rebuild the component once per
                                         # runtime falsifier and run host-test
+       --check                          # only confirm every anchor occurs once
+       name parts                       # run only the falsifiers they match
 
 Each falsifier replaces one exact line, runs the named tests, and requires
 them to FAIL. The file is restored from its saved bytes afterwards, also on
 error or Ctrl-C. The script exits non-zero if any falsifier is not caught or
-its line is not found exactly once.
+its line is not found exactly once. The runner is the capsule kit's
+(examples/capsule-kit/falsify). Cases on `../capsule-kit/guest/src/` break
+the kit crate's code and require the photo viewer's own tests to notice; the
+kit's own falsifiers are in `examples/capsule-kit/guest/falsify.py`.
 """
-import os
 import pathlib
-import subprocess
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / "capsule-kit" / "falsify"))
+import falsify_kit as kit  # noqa: E402
 
 # (name, file, exact old text, new text, guest test filters)
 GUEST = [
@@ -49,13 +54,6 @@ GUEST = [
         ["a_provider_error_stops_the_run_and_is_not_skipped"],
     ),
     (
-        "provider status ignored",
-        "src/bus.rs",
-        'Some("ok") if parsed.has_data => Ok(parsed),',
-        '_ if parsed.has_data => Ok(parsed),',
-        ["an_error_answer_that_also_carries_data_is_still_an_error"],
-    ),
-    (
         "unknown album fields allowed",
         "src/album.rs",
         '.find(|key| !matches!(key.as_str(), "schema" | "items"))',
@@ -64,7 +62,7 @@ GUEST = [
     ),
     (
         "dot-dot segments allowed",
-        "src/album.rs",
+        "../capsule-kit/guest/src/uri.rs",
         '.any(|part| part.is_empty() || part == "." || part == "..")',
         '.any(|part| part.is_empty() || part == ".")',
         ["malformed_albums_stop_before_any_image_is_read"],
@@ -74,19 +72,19 @@ GUEST = [
         "content failure stops the run instead of skipping",
         "src/lib.rs",
         "match check_item(bus, order, item)? {",
-        "match check_item(bus, order, item)?.map_err(|_| Refusal::AlbumTooLarge).map(Ok)? {",
+        "match check_item(bus, order, item)?.map_err(|_| Refusal::InputTooLarge).map(Ok)? {",
         ["a_bad_item_is_skipped_and_the_rest_play_in_order"],
     ),
     (
         "wrong type accepted as PNG",
-        "src/image.rs",
+        "../capsule-kit/guest/src/image.rs",
         "    Err(HeaderError::UnknownType)\n}",
         "    Ok(Kind::Png)\n}",
         ["wrong_type_is_skipped_after_reading_only_its_header"],
     ),
     (
         "truncated magic treated as unknown",
-        "src/image.rs",
+        "../capsule-kit/guest/src/image.rs",
         "if is_prefix_of_magic(header) {",
         "if false && is_prefix_of_magic(header) {",
         ["truncated_magic_is_skipped"],
@@ -107,33 +105,60 @@ GUEST = [
     ),
     (
         "JPEG segment cap doubled",
-        "src/image.rs",
+        "../capsule-kit/guest/src/image.rs",
         "for _ in 0..MAX_JPEG_SEGMENTS {",
         "for _ in 0..MAX_JPEG_SEGMENTS * 2 {",
         ["malformed_headers_are_skipped"],
     ),
     (
         "JPEG segment payloads read",
-        "src/image.rs",
+        "../capsule-kit/guest/src/image.rs",
         "let marker = read(at, 4)?;",
         "let _payload = read(at, 70_000)?;\n        let marker = read(at, 4)?;",
         ["a_jpeg_frame_header_after_large_exif_is_found_without_reading_the_payloads"],
     ),
     # Body shapes the localhost provider accepts.
     (
-        "playlist written as a string without append (the P1 shape)",
-        "src/bus.rs",
-        'json!({ "path": uri, "content": content, "append": false })',
-        'json!({ "path": uri, "content": String::from_utf8_lossy(content) })',
+        "playlist written without append (the P1 shape)",
+        "../capsule-kit/guest/src/bus.rs",
+        'body.push_str(r#"{"append":false,"content":["#);',
+        'body.push_str(r#"{"content":["#);',
         ["the_playlist_is_written_as_bytes_with_append_false", "plays_png_jpeg_and_webp_in_album_order"],
     ),
 ]
+
+# The kit's straight writer and the `json!` serializer it replaced. The JSON
+# bytes are the same, so only the fuel gate can tell them apart.
+WRITE_BODY = '''pub fn write_body(uri: &str, content: &[u8]) -> String {
+    let path = serde_json::to_string(uri).expect("a string always serializes");
+    let mut body = String::with_capacity(content.len() * 4 + path.len() + 40);
+    body.push_str(r#"{"append":false,"content":["#);
+    for (index, byte) in content.iter().enumerate() {
+        if index > 0 {
+            body.push(',');
+        }
+        if *byte >= 100 {
+            body.push(char::from(b'0' + byte / 100));
+        }
+        if *byte >= 10 {
+            body.push(char::from(b'0' + byte / 10 % 10));
+        }
+        body.push(char::from(b'0' + byte % 10));
+    }
+    body.push_str(r#"],"path":"#);
+    body.push_str(&path);
+    body.push('}');
+    body
+}'''
+JSON_WRITE_BODY = '''pub fn write_body(uri: &str, content: &[u8]) -> String {
+    json!({ "path": uri, "content": content, "append": false }).to_string()
+}'''
 
 # Built into the component and caught by host-test inside ComponentProvider.
 RUNTIME = [
     (
         "wrong type accepted as PNG (in the component)",
-        "src/image.rs",
+        "../capsule-kit/guest/src/image.rs",
         "    Err(HeaderError::UnknownType)\n}",
         "    Ok(Kind::Png)\n}",
         ["content_failures_are_skipped_and_listed_through_the_runtime"],
@@ -146,84 +171,58 @@ RUNTIME = [
         ["no_grant_stops_the_run_through_the_runtime"],
     ),
     (
-        "playlist written as a string (in the component)",
-        "src/bus.rs",
-        'json!({ "path": uri, "content": content, "append": false })',
-        'json!({ "path": uri, "content": String::from_utf8_lossy(content) })',
+        "playlist written without append (in the component)",
+        "../capsule-kit/guest/src/bus.rs",
+        'body.push_str(r#"{"append":false,"content":["#);',
+        'body.push_str(r#"{"content":["#);',
         ["album_plays_and_the_playlist_is_written"],
+    ),
+    (
+        "the write builds a value per byte (in the component)",
+        "../capsule-kit/guest/src/bus.rs",
+        WRITE_BODY,
+        JSON_WRITE_BODY,
+        ["the_worst_case_album_is_written_without_a_value_per_byte"],
     ),
 ]
 
 
-def env():
-    environment = dict(os.environ)
-    environment.setdefault("RUST_TEST_THREADS", "2")
-    return environment
+def cases(listed):
+    return [(name, HERE / relative, [(old, new)], tests) for name, relative, old, new, tests in listed]
 
 
-def run(cmd, cwd):
-    return subprocess.run(cmd, cwd=cwd, env=env(), capture_output=True, text=True)
+def build_guest():
+    kit.cargo_compiles(HERE, ["--lib"])
 
 
-def guest_tests_fail(filters):
-    # A mutant that does not compile proves nothing.
-    build = run(["cargo", "test", "--locked", "--lib", "--no-run"], HERE)
-    if build.returncode != 0:
-        print(build.stderr[-2000:])
-        raise SystemExit("a falsifier does not compile")
-    for name in filters:
-        result = run(["cargo", "test", "--locked", "--lib", "--", "--exact", f"tests::{name}"], HERE)
-        if result.returncode == 0:
-            return False
-    return True
+def guest_test_fails(name):
+    return kit.cargo_test_fails(HERE, ["--lib"], f"tests::{name}")
 
 
-def runtime_tests_fail(filters):
-    build = run([str(HERE / "build.sh")], HERE)
+def build_component():
+    build = kit.run([str(HERE / "build.sh")], HERE)
     if build.returncode != 0:
         print(build.stderr[-2000:])
         raise SystemExit("component build failed under a falsifier")
-    for name in filters:
-        result = run(
-            ["cargo", "test", "--locked", "--test", "component", "--", "--exact", name],
-            HERE / "host-test",
-        )
-        if result.returncode == 0:
-            return False
-    return True
 
 
-def falsify(cases, failing):
-    missed = []
-    for name, relative, old, new, filters in cases:
-        path = HERE / relative
-        saved = path.read_bytes()
-        text = saved.decode()
-        if text.count(old) != 1:
-            raise SystemExit(f"{name}: expected the line once in {relative}, found {text.count(old)}")
-        try:
-            path.write_text(text.replace(old, new))
-            caught = failing(filters)
-        finally:
-            path.write_bytes(saved)
-        print(f"{'caught' if caught else 'MISSED'}: {name} -> {', '.join(filters)}")
-        if not caught:
-            missed.append(name)
-    return missed
+def runtime_test_fails(name):
+    return kit.cargo_test_fails(HERE / "host-test", ["--test", "component"], name)
 
 
 def main():
-    missed = falsify(GUEST, guest_tests_fail)
-    if "--runtime" in sys.argv[1:]:
-        try:
-            missed += falsify(RUNTIME, runtime_tests_fail)
-        finally:
+    try:
+        kit.main(
+            [
+                (cases(GUEST), build_guest, guest_test_fails, None, True),
+                (cases(RUNTIME), build_component, runtime_test_fails, "--runtime", True),
+            ]
+        )
+    finally:
+        if "--runtime" in sys.argv[1:]:
             # Leave the unmutated component in place.
-            if run([str(HERE / "build.sh")], HERE).returncode != 0:
+            if kit.run([str(HERE / "build.sh")], HERE).returncode != 0:
                 raise SystemExit("restoring the component build failed")
-    if missed:
-        raise SystemExit(f"{len(missed)} falsifier(s) not caught: {missed}")
-    print("all falsifiers caught")
 
 
 if __name__ == "__main__":

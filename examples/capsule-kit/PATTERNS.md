@@ -129,8 +129,9 @@ checks what it reads before it trusts it, and reads no more than it needs.
 - [ ] **(review)** count every byte a read returns the moment it returns, before any early return: a short head
       that is then skipped counts too. Never ask for more than is left.
 - [ ] **(added)** cap what one run writes: on Bus v1 each output byte costs fuel and travels as a number of up
-      to four characters in a 1 MiB bridge frame. Write the output and the write body straight to bytes, never
-      through a `serde_json::Value` per byte.
+      to four characters in a 1 MiB bridge frame. Write the output straight to bytes, never through a
+      `serde_json::Value` per span, block or byte. The kit's write (`guest/src/bus.rs`, `write_body`) writes
+      the body straight to bytes; the fuel gate must include the largest output.
 - [ ] **(review)** cap the whole output you write (every entry, the skipped list and the frame around them),
       not only its largest part. Hold back room for what is still to be written before you spend the rest.
 - [ ] **(added)** keep every parser linear in its input. A content failure must never cost a trap.
@@ -154,8 +155,10 @@ checks what it reads before it trusts it, and reads no more than it needs.
 **Proof:** guest tests against a fake Runtime that checks bodies the way the localhost provider does, the same
 run inside the Runtime's own `ComponentProvider`, the admission import check, and a fuel gate.
 
-**In the photo viewer:** `src/lib.rs` (run order, stop and skip), `src/bus.rs` (the two calls), `src/album.rs`
-(strict input), `src/image.rs` (header checks), `src/fake.rs` and `src/tests.rs`, and `host-test/`.
+**In the photo viewer:** `src/lib.rs` (run order, stop and skip), `src/album.rs` (strict input), `src/tests.rs`,
+and `host-test/`. Shared in the kit's crate `guest/` (`capsule-kit-guest`): `bus` (the two calls and the
+write), `read` (refusals, grant, bounded and counted reads), `uri`, `text`, `image` (header checks), `fake`,
+`component` (WIT glue); and the harness `v1-host-test/`.
 
 ## 2. Render-only page with a launch token
 
@@ -242,7 +245,9 @@ Every check has a test, and every test is shown to catch its check being broken.
 
 - [ ] have one falsifier per refusal, per bound and per rule: an exact text replacement in the source.
 - [ ] require that each mutant **compiles**. A mutant that does not compile proves nothing.
-- [ ] require that the named tests **fail** under the mutant.
+- [ ] run **every** named test under the mutant and require **every one** to fail. A case where one named test
+      still passes has survived, however many others failed: that test does not notice the mutant
+      (`falsify/falsify_kit.py`, checked by its own self-test, `falsify/test_falsify_kit.py`).
 - [ ] restore the file from its saved bytes after each mutant, also on error or Ctrl-C, and leave a clean tree.
 - [ ] check that each anchor occurs exactly once (`--check`), so a refactor cannot silently disable one.
 - [ ] run every falsifier from the app's `verify.sh`, together with fmt, clippy and every test.

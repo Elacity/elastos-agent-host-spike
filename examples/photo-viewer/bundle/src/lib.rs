@@ -10,15 +10,20 @@
 //! version of an installed name, then stages a read-only copy under its CID,
 //! verifies that copy, and loads only from it.
 //!
+//! [`pack`] makes the closure out of a capsule's source folder: only what the
+//! capsule runs from, so its CID does not change with its tests or source.
+//!
 //! Every refusal has a code ([`Refusal::code`]) and names what was expected.
 
 pub mod admit;
 pub mod cid;
 pub mod claim;
 pub mod listing;
+pub mod pack;
 pub mod policy;
 pub mod provenance;
 pub mod sign;
+pub mod testing;
 
 pub use admit::{admit, load, resolve_requires, Admitted, Installed, Loaded};
 pub use cid::cid_v1_raw_sha256;
@@ -27,6 +32,7 @@ pub use listing::{
     check_unique_under_case_folding, closure_cid, list_closure, listing_bytes, Entry,
     LISTING_SCHEMA,
 };
+pub use pack::pack;
 pub use policy::{
     effective_policy, DevKey, LocalConfig, PolicyFloor, PublisherEntry, ReleasePolicy,
     SignedReleasePolicy, TrustPolicy, TrustedPublisher, MAX_DEV_KEY_LIFETIME_SECS,
@@ -46,6 +52,11 @@ pub enum Refusal {
     PathCaseCollision(String, String),
     /// A symlink, FIFO, socket or device file.
     SpecialFile(String),
+    /// A folder on the way to what is read or written is a symlink: the root
+    /// itself, or any folder between the root and a file. Nothing is read or
+    /// written through a link, because every check after it would describe
+    /// another place.
+    SymlinkInPath(String),
     /// The closure has no `capsule.json` at its root.
     ManifestMissing,
     /// The claim, the manifest or a version does not parse as required.
@@ -93,6 +104,9 @@ pub enum Refusal {
     },
     /// The publisher DID is revoked.
     PublisherRevoked(String),
+    /// The release policy lists this publisher DID in more than one entry.
+    /// One entry may list several roles and names.
+    PublisherListedTwice(String),
     /// The CID is revoked.
     CidRevoked(String),
     /// An installed capsule of the same name has a higher version.
@@ -124,6 +138,11 @@ pub enum Refusal {
     },
     /// A provenance record names another CID.
     ProvenanceCidMismatch { expected: String, named: String },
+    /// Pack: the manifest names no entrypoint, the entrypoint is not in the
+    /// source, or a page's entrypoint is not in a folder of its own.
+    PackEntrypointMissing(String),
+    /// Pack: the folder to pack into already exists.
+    PackDestinationExists(String),
     /// A filesystem error.
     Io(String),
 }
@@ -135,6 +154,7 @@ impl Refusal {
             Refusal::PathNotNfc(_) => "path_not_nfc",
             Refusal::PathCaseCollision(..) => "path_case_collision",
             Refusal::SpecialFile(_) => "special_file",
+            Refusal::SymlinkInPath(_) => "symlink_in_path",
             Refusal::ManifestMissing => "manifest_missing",
             Refusal::ClaimMalformed(_) => "claim_malformed",
             Refusal::CidMismatch { .. } => "cid_mismatch",
@@ -154,6 +174,7 @@ impl Refusal {
             Refusal::PublisherUntrusted(_) => "publisher_untrusted",
             Refusal::PublisherRoleRefused { .. } => "publisher_role_refused",
             Refusal::PublisherRevoked(_) => "publisher_revoked",
+            Refusal::PublisherListedTwice(_) => "publisher_listed_twice",
             Refusal::CidRevoked(_) => "cid_revoked",
             Refusal::VersionDowngrade { .. } => "version_downgrade",
             Refusal::VersionConflict { .. } => "version_conflict",
@@ -163,6 +184,8 @@ impl Refusal {
             Refusal::CoreMissing { .. } => "core_missing",
             Refusal::CoreMismatch { .. } => "core_mismatch",
             Refusal::ProvenanceCidMismatch { .. } => "provenance_cid_mismatch",
+            Refusal::PackEntrypointMissing(_) => "pack_entrypoint_missing",
+            Refusal::PackDestinationExists(_) => "pack_destination_exists",
             Refusal::Io(_) => "io",
         }
     }
@@ -170,7 +193,16 @@ impl Refusal {
 
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {self:?}", self.code())
+        match self {
+            // The path named is the link; the caller needs the path it stands
+            // for, which the same check accepts.
+            Refusal::SymlinkInPath(_) => write!(
+                f,
+                "{}: {self:?}; pass the physical path instead, for example /private/tmp for /tmp",
+                self.code()
+            ),
+            _ => write!(f, "{}: {self:?}", self.code()),
+        }
     }
 }
 

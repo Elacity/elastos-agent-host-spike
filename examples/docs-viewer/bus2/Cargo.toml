@@ -4,7 +4,7 @@
 # workspace, CI and release lists.
 [workspace]
 resolver = "2"
-members = ["host-test", "guests/docs", "guests/busy"]
+members = ["host-test", "guests/docs"]
 
 [workspace.package]
 edition = "2021"

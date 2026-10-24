@@ -19,19 +19,21 @@
 //! (`elastos/wit/elastos-bus-v1.wit:84-88`), so the shelf and the output are
 //! principal-scoped objects at fixed paths. The guest imports only
 //! `elastos:bus@v1`. It has no files, sockets, clock or environment.
+//!
+//! The Bus calls, the refusals, the reads and the WIT glue are the capsule
+//! kit's guest crate (`examples/capsule-kit/guest`), shared with the photo
+//! viewer.
 
-mod bus;
 mod shelf;
 
 #[cfg(test)]
-mod fake;
-#[cfg(test)]
 mod tests;
 
-use docs_model::text::{self, TextError};
+use capsule_kit_guest::text::{self, TextError};
+use capsule_kit_guest::{bus, grant, read_bounded, read_counted, App};
 use docs_model::{Kind, ModelError};
 
-pub use bus::{Bus, BusFailure, CallError, InvokeReply};
+pub use capsule_kit_guest::{Bus, BusFailure, CallError, InvokeReply, Refusal, READ_CHUNK_BYTES};
 pub use shelf::SHELF_SCHEMA;
 
 /// The documents the person asked to read.
@@ -61,79 +63,15 @@ pub const MAX_SHELF_TEXT_BYTES: u64 = 32 * 1024;
 /// its own size.
 pub const MAX_PAGES_BYTES: u64 = 64 * 1024;
 
-/// Bytes per read. Content travels as a JSON array of numbers, up to four
-/// characters a byte, so 8 KiB stays far under the 1 MiB bridge frame
-/// (`elastos-server/src/resource_bridge.rs:32`).
-pub const READ_CHUNK_BYTES: u64 = 8 * 1024;
 /// Bytes read before anything else: enough to tell text from a binary file.
 pub const HEAD_BYTES: u64 = 512;
 
-/// Why the run stopped. Each variant names what is missing.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Refusal {
-    NoGrant {
-        resource: String,
-        failure: BusFailure,
-    },
-    Call {
-        resource: String,
-        error: CallError,
-    },
-    ShelfTooLarge,
-    Shelf(String),
-}
-
-impl Refusal {
-    pub fn message(&self) -> String {
-        match self {
-            Refusal::NoGrant { resource, failure } => {
-                format!(
-                    "docs-viewer has no grant for {resource}: {}",
-                    failure.message()
-                )
-            }
-            Refusal::Call { resource, error } => match error {
-                CallError::Bus(failure) => {
-                    format!(
-                        "docs-viewer call on {resource} failed: {}",
-                        failure.message()
-                    )
-                }
-                CallError::Provider { code, message } => {
-                    format!("docs-viewer call on {resource} failed: {code}: {message}")
-                }
-                CallError::Shape(message) => {
-                    format!("docs-viewer call on {resource} had an unexpected answer: {message}")
-                }
-            },
-            Refusal::ShelfTooLarge => {
-                format!("docs-viewer shelf is larger than {MAX_SHELF_BYTES} bytes")
-            }
-            Refusal::Shelf(message) => format!("docs-viewer shelf refused: {message}"),
-        }
-    }
-
-    /// The `bus-error` Runtime receives from `lifecycle.run`.
-    pub fn to_bus_failure(&self) -> BusFailure {
-        let message = self.message();
-        match self {
-            Refusal::NoGrant { .. } => BusFailure::Denied(message),
-            Refusal::Call { error, .. } => match error {
-                CallError::Bus(BusFailure::Denied(_)) => BusFailure::Denied(message),
-                CallError::Bus(BusFailure::NotFound(_)) => BusFailure::NotFound(message),
-                CallError::Bus(BusFailure::Timeout(_)) => BusFailure::Timeout(message),
-                CallError::Bus(BusFailure::Unavailable(_)) | CallError::Provider { .. } => {
-                    BusFailure::Unavailable(message)
-                }
-                CallError::Bus(BusFailure::Invalid(_)) => BusFailure::Invalid(message),
-                CallError::Bus(BusFailure::Internal(_)) | CallError::Shape(_) => {
-                    BusFailure::Internal(message)
-                }
-            },
-            Refusal::ShelfTooLarge | Refusal::Shelf(_) => BusFailure::Invalid(message),
-        }
-    }
-}
+/// What the documents viewer's refusals say about it.
+pub const APP: App = App {
+    name: "docs-viewer",
+    input: "shelf",
+    max_input_bytes: MAX_SHELF_BYTES,
+};
 
 /// Why one document is left out.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -228,8 +166,8 @@ pub struct Skipped {
 pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
     let shelf_grant = grant(bus, SHELF_URI, "read", "read the shelf to show")?;
     let shelf_bytes = read_bounded(bus, SHELF_URI, &shelf_grant, Vec::new(), MAX_SHELF_BYTES)?
-        .ok_or(Refusal::ShelfTooLarge)?;
-    let items = shelf::parse(&shelf_bytes).map_err(Refusal::Shelf)?;
+        .ok_or(Refusal::InputTooLarge)?;
+    let items = shelf::parse(&shelf_bytes).map_err(Refusal::Input)?;
 
     let mut documents = Vec::with_capacity(items.len());
     let mut skipped = Vec::new();
@@ -285,52 +223,6 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
         }
     })?;
     Ok(text)
-}
-
-fn grant(bus: &mut dyn Bus, resource: &str, action: &str, reason: &str) -> Result<String, Refusal> {
-    bus.request(resource, action, reason)
-        .map_err(|failure| Refusal::NoGrant {
-            resource: resource.to_string(),
-            failure,
-        })
-}
-
-fn read_at(
-    bus: &mut dyn Bus,
-    uri: &str,
-    grant: &str,
-    offset: u64,
-    length: u64,
-) -> Result<Vec<u8>, Refusal> {
-    bus::read_window(bus, uri, grant, offset, length).map_err(|error| Refusal::Call {
-        resource: uri.to_string(),
-        error,
-    })
-}
-
-/// Reads on from the end of `bytes` in chunks, to the end of the object.
-/// `None` means it is larger than `limit`.
-fn read_bounded(
-    bus: &mut dyn Bus,
-    uri: &str,
-    grant: &str,
-    mut bytes: Vec<u8>,
-    limit: u64,
-) -> Result<Option<Vec<u8>>, Refusal> {
-    loop {
-        let offset = bytes.len() as u64;
-        // Ask for one byte past the limit so an exact fit is told apart from more.
-        let ask = READ_CHUNK_BYTES.min(limit + 1 - offset);
-        let chunk = read_at(bus, uri, grant, offset, ask)?;
-        let short = (chunk.len() as u64) < ask;
-        bytes.extend_from_slice(&chunk);
-        if bytes.len() as u64 > limit {
-            return Ok(None);
-        }
-        if short {
-            return Ok(Some(bytes));
-        }
-    }
 }
 
 /// The outer error stops the run; the inner one skips the document.
@@ -449,23 +341,6 @@ fn check_item(
     }))
 }
 
-/// One read of a document, taken off what the shelf may still read before
-/// anything else can happen to it. The read window refuses an answer longer
-/// than it asked for, so `length` is the most it can take off.
-fn read_counted(
-    bus: &mut dyn Bus,
-    uri: &str,
-    grant: &str,
-    left: &mut u64,
-    offset: u64,
-    length: u64,
-) -> Result<Vec<u8>, Refusal> {
-    assert!(length <= *left, "a read past what the shelf may read");
-    let bytes = read_at(bus, uri, grant, offset, length)?;
-    *left -= bytes.len() as u64;
-    Ok(bytes)
-}
-
 /// One document's entry in the pages, keys in sorted order.
 fn document_entry(
     rendered: &[u8],
@@ -530,102 +405,14 @@ pub fn pages_json(documents: &[Document], skipped: &[Skipped]) -> String {
 }
 
 #[cfg(target_arch = "wasm32")]
-wit_bindgen::generate!({
-    path: "../../elastos/wit",
-    world: "product-capsule-v1",
-});
-
-#[cfg(target_arch = "wasm32")]
-const EXPECTED_RUNTIME_ABI: &str = "elastos.component/v1";
-
-#[cfg(target_arch = "wasm32")]
-mod component {
-    use super::elastos::bus::{capabilities, providers, runtime, types};
-    use super::{Bus, BusFailure, InvokeReply};
-
-    pub struct WitBus;
-
-    fn from_wit(err: types::BusError) -> BusFailure {
-        match err {
-            types::BusError::Denied(message) => BusFailure::Denied(message),
-            types::BusError::NotFound(message) => BusFailure::NotFound(message),
-            types::BusError::Invalid(message) => BusFailure::Invalid(message),
-            types::BusError::Unavailable(message) => BusFailure::Unavailable(message),
-            types::BusError::Timeout(message) => BusFailure::Timeout(message),
-            types::BusError::Internal(message) => BusFailure::Internal(message),
-        }
-    }
-
-    pub fn to_wit(failure: BusFailure) -> types::BusError {
-        match failure {
-            BusFailure::Denied(message) => types::BusError::Denied(message),
-            BusFailure::NotFound(message) => types::BusError::NotFound(message),
-            BusFailure::Invalid(message) => types::BusError::Invalid(message),
-            BusFailure::Unavailable(message) => types::BusError::Unavailable(message),
-            BusFailure::Timeout(message) => types::BusError::Timeout(message),
-            BusFailure::Internal(message) => types::BusError::Internal(message),
-        }
-    }
-
-    impl Bus for WitBus {
-        fn request(
-            &mut self,
-            resource: &str,
-            action: &str,
-            reason: &str,
-        ) -> Result<String, BusFailure> {
-            capabilities::request(&types::CapabilityRequest {
-                resource: resource.to_string(),
-                actions: vec![action.to_string()],
-                reason: reason.to_string(),
-            })
-            .map(|grant| grant.id)
-            .map_err(from_wit)
-        }
-
-        fn invoke(
-            &mut self,
-            resource: &str,
-            operation: &str,
-            body: &[u8],
-            grant: &str,
-        ) -> Result<InvokeReply, BusFailure> {
-            providers::invoke(&types::InvokeRequest {
-                resource: resource.to_string(),
-                operation: operation.to_string(),
-                body: body.to_vec(),
-                grant: Some(grant.to_string()),
-            })
-            .map(|reply| InvokeReply {
-                status: reply.status,
-                body: reply.body,
-            })
-            .map_err(from_wit)
-        }
-    }
-
-    pub fn runtime_abi() -> String {
-        runtime::info().abi
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
 struct DocsViewer;
 
 #[cfg(target_arch = "wasm32")]
-impl exports::elastos::bus::lifecycle::Guest for DocsViewer {
-    fn run() -> Result<(), elastos::bus::types::BusError> {
-        let abi = component::runtime_abi();
-        if abi != EXPECTED_RUNTIME_ABI {
-            return Err(elastos::bus::types::BusError::Invalid(format!(
-                "docs-viewer requires {EXPECTED_RUNTIME_ABI}, received {abi}"
-            )));
-        }
-        run(&mut component::WitBus)
-            .map(|_| ())
-            .map_err(|refusal| component::to_wit(refusal.to_bus_failure()))
+impl capsule_kit_guest::wit::exports::elastos::bus::lifecycle::Guest for DocsViewer {
+    fn run() -> Result<(), capsule_kit_guest::wit::elastos::bus::types::BusError> {
+        capsule_kit_guest::component::lifecycle_run(&APP, |bus| run(bus).map(|_| ()))
     }
 }
 
 #[cfg(target_arch = "wasm32")]
-export!(DocsViewer);
+capsule_kit_guest::wit::export_lifecycle!(DocsViewer with_types_in capsule_kit_guest::wit);

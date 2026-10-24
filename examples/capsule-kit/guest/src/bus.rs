@@ -1,7 +1,8 @@
-//! The two Bus calls this guest makes, behind a trait so host tests can fake
+//! The two Bus calls a guest makes, behind a trait so host tests can fake
 //! the Runtime.
 //!
-//! On wasm32 the trait is implemented over the `elastos:bus@v1` imports. The
+//! On wasm32 the trait is implemented over the `elastos:bus@v1` imports
+//! (`component`, feature `wit`). The
 //! request and response shapes follow the Runtime bridge:
 //! `providers.invoke` returns the provider result as JSON bytes
 //! (`elastos-compute/src/providers/component.rs:396-414`), and a
@@ -115,8 +116,9 @@ pub fn write_bytes(
 }
 
 /// `{"append":false,"content":[..],"path":".."}`, written straight into a
-/// string. Building it with `json!` makes a `serde_json::Value` per byte, which
-/// costs more fuel than anything else in a run once the output is large.
+/// string: the same bytes `json!` gives with its sorted keys, without a
+/// `serde_json::Value` per byte, which costs more fuel than anything else in
+/// a run once the output is large.
 pub fn write_body(uri: &str, content: &[u8]) -> String {
     let path = serde_json::to_string(uri).expect("a string always serializes");
     let mut body = String::with_capacity(content.len() * 4 + path.len() + 40);

@@ -1,10 +1,11 @@
-//! Is this text? The checks the core runs on the head of a document before
-//! it reads further, and on the whole document after.
+//! Is this text? The checks a guest runs on the head of an object before it
+//! reads further, and on the whole object after. Moved here from the
+//! documents viewer's model (`docs-model` re-exports it).
 //!
 //! Text here is UTF-8, with an optional UTF-8 byte order mark, and no control
 //! character other than tab, line feed and carriage return. A UTF-16 or
 //! UTF-32 byte order mark, a NUL, or any other control byte means it is not
-//! a document this viewer shows.
+//! text.
 
 /// Why bytes are not text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

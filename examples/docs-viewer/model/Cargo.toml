@@ -9,4 +9,6 @@ publish = false
 # shared by the Bus v1 core (`..`) and the Bus v2 guest (`../bus2`).
 
 [dependencies]
+# The text checks only: no Bus v1 binding reaches the Bus v2 guest.
+capsule-kit-guest = { path = "../../capsule-kit/guest", default-features = false }
 serde_json = "1.0.151"

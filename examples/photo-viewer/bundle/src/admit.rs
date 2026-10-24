@@ -228,7 +228,7 @@ pub fn resolve_requires(
     Ok(cores)
 }
 
-fn parse_manifest(bytes: &[u8]) -> Result<Value, Refusal> {
+pub(crate) fn parse_manifest(bytes: &[u8]) -> Result<Value, Refusal> {
     let manifest: Value = serde_json::from_slice(bytes)
         .map_err(|err| Refusal::ClaimMalformed(format!("capsule.json: {err}")))?;
     if !manifest.is_object() {
@@ -245,7 +245,7 @@ fn parse_version(name: &str, version: &str) -> Result<Version, Refusal> {
 }
 
 /// `b` and base32 lower only, so a CID is one path segment.
-fn check_cid_form(cid: &str) -> Result<(), Refusal> {
+pub(crate) fn check_cid_form(cid: &str) -> Result<(), Refusal> {
     let body = cid.strip_prefix('b').unwrap_or_default();
     if body.is_empty()
         || !body
@@ -380,8 +380,10 @@ mod tests {
     #[test]
     fn a_source_changed_after_verification_is_not_staged() {
         let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("source");
-        let store = root.path().join("store");
+        // Its real path: on macOS the temporary folder is under a link.
+        let base = root.path().canonicalize().unwrap();
+        let source = base.join("source");
+        let store = base.join("store");
         std::fs::create_dir(&source).unwrap();
         std::fs::write(source.join("capsule.json"), b"{}").unwrap();
         std::fs::write(source.join("a.wasm"), b"verified").unwrap();
