@@ -58,8 +58,8 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "        elif ran_and_failed(output):\n            outcomes[name] = \"failed\"\n        else:\n            outcomes[name] = \"not run\"",
-     "new": "        elif ran_and_failed(output):\n            outcomes[name] = \"failed\"\n        else:\n            outcomes[name] = \"failed\""
+     "old": "        if summary is None:\n            return \"not run\"\n        status, passed, failed = summary",
+     "new": "        if summary is None:\n            return \"failed\"\n        status, passed, failed = summary"
     }
    ],
    "tests": [
@@ -90,8 +90,8 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "        except BaseException as error:\n            # Python does not call __exit__ when __enter__ raises, and a\n            # Ctrl-C or SIGTERM can arrive just after a replacement. Put every\n            # original back before the interruption goes on.\n            self.restore()\n            if isinstance(error, OSError) and \"No space\" in str(error):",
-     "new": "        except BaseException as error:\n            if isinstance(error, OSError) and \"No space\" in str(error):"
+     "old": "    mutation = Mutation(entry, base)\n    try:\n        mutation.apply()\n        return body()\n    finally:\n        mutation.restore()",
+     "new": "    mutation = Mutation(entry, base)\n    mutation.apply()\n    return body()"
     }
    ],
    "tests": [
@@ -106,8 +106,8 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "        if code == 0:\n            ran = any(passed >= 1 for _status, passed, _failed in harness_results(output))\n            outcomes[name] = \"passed\" if ran else \"not run\"",
-     "new": "        if code == 0:\n            outcomes[name] = \"passed\""
+     "old": "        proof = named_outcome(stdout, name)\n        if (proof == \"failed\" and code == 0) or (proof == \"passed\" and code != 0):\n            proof = \"not run\"\n        outcomes[name] = proof",
+     "new": "        proof = named_outcome(stdout, name)\n        outcomes[name] = \"passed\" if code == 0 else proof"
     }
    ],
    "tests": [
@@ -116,19 +116,19 @@
   },
   {
    "id": "FS08",
-   "title": "the return sits outside the restoration try, so an interrupt after the edit leaks",
+   "title": "the restore sits with the edit, so an interrupt at its return leaks",
    "command": "selftest",
    "expect": "caught",
    "edits": [
     {
      "file": "falsify.py",
-     "old": "            return self\n        except BaseException as error:",
-     "new": "            pass\n        except BaseException as error:"
+     "old": "    mutation = Mutation(entry, base)\n    try:\n        mutation.apply()\n        return body()\n    finally:\n        mutation.restore()",
+     "new": "    mutation = Mutation(entry, base)\n    mutation.apply()\n    return body()"
     },
     {
      "file": "falsify.py",
-     "old": "                raise DiskFull(str(error)) from error\n            raise\n\n    def restore(self):",
-     "new": "                raise DiskFull(str(error)) from error\n            raise\n        return self\n\n    def restore(self):"
+     "old": "        except BaseException as error:\n            # guard_mutation's finally puts the originals back, for a Ctrl-C\n            # or SIGTERM just after a replacement too. This frame only adds\n            # the disk-full reason.",
+     "new": "        except BaseException as error:\n            self.restore()\n            # guard_mutation's finally puts the originals back, for a Ctrl-C\n            # or SIGTERM just after a replacement too. This frame only adds\n            # the disk-full reason."
     }
    ],
    "tests": [
@@ -143,12 +143,28 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "            code, output = run(argv + extra + [\"--self-test-case\", name], cwd)\n            lines = output.splitlines()\n            if code == CASE_PASSED and case_marker(name, \"OK\") in lines:\n                outcomes[name] = \"passed\"\n            elif code == CASE_FAILED and case_marker(name, \"FAILED\") in lines:\n                outcomes[name] = \"failed\"\n            else:\n                outcomes[name] = \"not run\"\n            continue",
-     "new": "            code, _output = run(argv + extra + [\"--self-test-case\", name], cwd)\n            outcomes[name] = \"not run\" if code == CASE_USAGE else \"failed\" if code != 0 else \"passed\"\n            continue"
+     "old": "            code, output, _combined = run(argv + extra + [\"--self-test-case\", name], cwd)\n            lines = output.splitlines()\n            if code == CASE_PASSED and case_marker(name, \"OK\") in lines:\n                outcomes[name] = \"passed\"\n            elif code == CASE_FAILED and case_marker(name, \"FAILED\") in lines:\n                outcomes[name] = \"failed\"\n            else:\n                outcomes[name] = \"not run\"\n            continue",
+     "new": "            code, _output, _combined = run(argv + extra + [\"--self-test-case\", name], cwd)\n            outcomes[name] = \"not run\" if code == CASE_USAGE else \"failed\" if code != 0 else \"passed\"\n            continue"
     }
    ],
    "tests": [
     "a self-test case counts only when it ran"
+   ]
+  },
+  {
+   "id": "FS10",
+   "title": "a failing suite is a catch without its named tests",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "        if not entry[\"tests\"]:\n            return False, \"SUITE FAILED (not a catch)\", \"no named tests to prove it\"\n        missing = [name for name in entry[\"tests\"] if outcomes.get(name) == \"not run\"]\n        passing = [name for name in entry[\"tests\"] if outcomes.get(name) != \"failed\"]\n        if missing or passing:\n            return (False, \"SUITE FAILED (not a catch)\",\n                    \"no proof: \" + \", \".join(dict.fromkeys(missing + passing)))\n        return True, \"CAUGHT\", \"\"",
+     "new": "        return True, \"CAUGHT\", \"\""
+    }
+   ],
+   "tests": [
+    "a survives entry is a catch only with its named tests"
    ]
   }
  ]

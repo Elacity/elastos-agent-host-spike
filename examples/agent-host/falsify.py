@@ -12,26 +12,28 @@ Usage (from anywhere):
 
 The falsifiers are data, in falsifiers.json next to this file. Each one
 replaces exact text (found exactly once) in a file and requires every named
-test to FAIL. The verdict comes from exit codes: the mutated code is built
-first (a build that fails is its own result); then each named test is listed
-with `--exact` (exactly one test must match) and run alone with `--exact`.
-A non-zero exit alone is not a catch: the last test-harness summary line must
-say that test ran and failed, so a harness or loading error is NOT RUN and
-never a catch. One named test that still passes means the falsifier SURVIVED.
+test to FAIL. The mutated code is built first (a build that fails is its own
+result); then each named test is listed with `--exact` (exactly one test must
+match) and run alone with `--exact`. A non-zero exit alone is not a catch: the
+harness's own run must name the test and close with a summary that says it ran
+and failed. A harness or loading error leaves no closing summary, so it is
+NOT RUN and never a catch. One named test that still passes means SURVIVED.
+A `survives` entry that stops surviving is a catch only with that same proof.
 
 The original file's bytes are kept as a hard link while the mutated copy is
-in place, and the restore is a rename, so it needs no free space. The restore
-runs on error, Ctrl-C and SIGTERM, and signals stay blocked until every
-original is back, so an interrupt during the edit leaves the source unchanged
-before the error propagates. A backup left by a killed run is put back before
-anything else. The runner stops when the disk has less than 2 GiB free or a
-command reports a full disk.
+in place, and the restore is a rename, so it needs no free space. Every
+mutation runs inside guard_mutation, whose finally holds the restore in its
+own frame: an interrupt during the edit, or at the edit's own return, restores
+before the error propagates, and signals stay blocked until every original is
+back. A backup left by a killed run is put back before anything else. The
+runner stops when the disk has less than 2 GiB free or a command reports a
+full disk.
 
 Exit status: 0 when every falsifier did what it expects, 1 otherwise, 2 for a
 usage or data error, 3 when it stopped for a full disk.
 """
 import json
-import inspect
+import dis
 import os
 import pathlib
 import re
@@ -120,14 +122,15 @@ def restore_interruptions(saved):
 
 
 class Mutation:
-    """Apply one falsifier's edits; undo them on exit, whatever happened."""
+    """One falsifier's edits, applied by apply() and undone by restore().
+    guard_mutation is the only way in: it holds the restore in its own frame."""
 
     def __init__(self, entry, base=HERE):
         self.entry = entry
         self.base = base
         self.applied = []  # (path, backup, original bytes)
 
-    def __enter__(self):
+    def apply(self):
         by_file = {}
         for edit in self.entry["edits"]:
             by_file.setdefault(edit["file"], []).append(edit)
@@ -157,14 +160,10 @@ class Mutation:
                 finally:
                     if tmp.exists():
                         tmp.unlink()
-            # Inside the try: an interrupt after the last replacement but
-            # before __enter__ returns must still restore (task 004).
-            return self
         except BaseException as error:
-            # Python does not call __exit__ when __enter__ raises, and a
-            # Ctrl-C or SIGTERM can arrive just after a replacement. Put every
-            # original back before the interruption goes on.
-            self.restore()
+            # guard_mutation's finally puts the originals back, for a Ctrl-C
+            # or SIGTERM just after a replacement too. This frame only adds
+            # the disk-full reason.
             if isinstance(error, OSError) and "No space" in str(error):
                 raise DiskFull(str(error)) from error
             raise
@@ -185,9 +184,19 @@ class Mutation:
         finally:
             restore_interruptions(saved)
 
-    def __exit__(self, *_):
-        self.restore()
-        return False
+
+def guard_mutation(entry, body, base=HERE):
+    """Apply the edits, run body(), and always put the originals back.
+
+    Every mutation goes through here. The restore sits in this frame's finally,
+    so an interrupt at the return boundary of apply(), in body(), or at the
+    return of body() still restores before the error goes on."""
+    mutation = Mutation(entry, base)
+    try:
+        mutation.apply()
+        return body()
+    finally:
+        mutation.restore()
 
 
 def spec(command, manifest=None, cargo_flags=("--locked",)):
@@ -215,42 +224,60 @@ def spec(command, manifest=None, cargo_flags=("--locked",)):
 
 
 def run(argv, cwd):
-    """Run a command; return its exit code and its output. The output is read
-    only to stop on a full disk and to see the harness's own summary line,
-    never to decide that a test passed."""
+    """Run a command; return its exit code, its stdout and its combined output.
+    The stdout is read for the harness's own run and closing summary, so a fake
+    line from a test body cannot stand in for it; the combined output is read
+    only to stop on a full disk."""
     env = dict(os.environ, RUST_TEST_THREADS=os.environ.get("RUST_TEST_THREADS", "2"))
     done = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True)
     output = done.stdout + done.stderr
     if any(word in output for word in DISK_FULL):
         raise DiskFull("a command reported a full disk")
-    return done.returncode, output
+    return done.returncode, done.stdout, output
 
 
-def harness_results(output):
-    return [(status, int(passed), int(failed))
-            for status, passed, failed in TEST_RESULT.findall(output)]
+# A harness starts each run with this line; a test body cannot print after the
+# summary of its own run, so the run's last summary line is the harness's own.
+RUN_HEADER = re.compile(r"^running (\d+) tests?$", re.MULTILINE)
 
 
-def ran_and_failed(output):
-    """True only when a harness summary says one test ran and failed, and no
-    other summary says a test ran and passed. A test body can print a fake
-    summary; the harness prints the real one after it."""
-    results = harness_results(output)
-    failed = any(status == "FAILED" and failed >= 1 and passed == 0
-                 for status, passed, failed in results)
-    returned = any(passed >= 1 for _status, passed, _failed in results)
-    return failed and not returned
+def run_blocks(stdout):
+    """The body of each run a harness starts with "running N tests"; a body
+    ends where the next run starts."""
+    starts = list(RUN_HEADER.finditer(stdout))
+    return [stdout[match.end():starts[at + 1].start() if at + 1 < len(starts) else len(stdout)]
+            for at, match in enumerate(starts)]
 
 
-def evaluate(entry, how):
-    """(build_failed, outcomes, suite_passed), from exit codes only.
-    outcomes maps each named test to "failed", "passed" or "not run"."""
-    for argv, cwd in how["build"]:
-        if run(argv, cwd)[0] != 0:
-            return True, {}, None
-    if entry["expect"] == "survives":
-        argv, cwd = how["suite"]
-        return False, {}, run(argv, cwd)[0] == 0
+def summary_at_the_end(body):
+    """The summary that ends a run, or None. A test body can print a fake
+    summary inside the run, but its text comes before the harness's summary."""
+    lines = [line for line in body.splitlines() if line.strip()]
+    match = TEST_RESULT.match(lines[-1]) if lines else None
+    return (match.group(1), int(match.group(2)), int(match.group(3))) if match else None
+
+
+def named_outcome(stdout, name):
+    """failed, passed or not run, from the run that names this test. No run
+    that names it, or no closing summary for that run, means it did not run."""
+    for body in run_blocks(stdout):
+        if f"test {name} ... " not in body:
+            continue
+        summary = summary_at_the_end(body)
+        if summary is None:
+            return "not run"
+        status, passed, failed = summary
+        if status == "FAILED" and failed >= 1:
+            return "failed"
+        if status == "ok" and passed >= 1:
+            return "passed"
+        return "not run"
+    return "not run"
+
+
+def named_outcomes(entry, how):
+    """Map each named test to "failed", "passed" or "not run". Every mode
+    that reports a catch uses this one proof."""
     argv, cwd, extra = how["one"]
     outcomes = {}
     for name in entry["tests"]:
@@ -259,7 +286,7 @@ def evaluate(entry, how):
             # verdict for another. The case counts only when the child exits
             # with its result AND prints the marker it writes after the case
             # returns. A loading error, an unknown name, or a signal is not run.
-            code, output = run(argv + extra + ["--self-test-case", name], cwd)
+            code, output, _combined = run(argv + extra + ["--self-test-case", name], cwd)
             lines = output.splitlines()
             if code == CASE_PASSED and case_marker(name, "OK") in lines:
                 outcomes[name] = "passed"
@@ -270,19 +297,35 @@ def evaluate(entry, how):
             continue
         # Exactly one test must answer to the name; the list is read for that
         # count only (a list run prints no test output).
-        _, listed = run(argv + extra + ["--exact", name, "--list"], cwd)
+        _, listed, _combined = run(argv + extra + ["--exact", name, "--list"], cwd)
         if [line for line in listed.splitlines() if line == f"{name}: test"] != [f"{name}: test"]:
             outcomes[name] = "not run"
             continue
-        code, output = run(argv + extra + ["--exact", name], cwd)
-        if code == 0:
-            ran = any(passed >= 1 for _status, passed, _failed in harness_results(output))
-            outcomes[name] = "passed" if ran else "not run"
-        elif ran_and_failed(output):
-            outcomes[name] = "failed"
-        else:
-            outcomes[name] = "not run"
-    return False, outcomes, None
+        code, stdout, _combined = run(argv + extra + ["--exact", name], cwd)
+        # The run's own closing summary is the harness's; the exit code must
+        # agree with it. A harness or loading error leaves no closing summary,
+        # so it is not run whatever it printed.
+        proof = named_outcome(stdout, name)
+        if (proof == "failed" and code == 0) or (proof == "passed" and code != 0):
+            proof = "not run"
+        outcomes[name] = proof
+    return outcomes
+
+
+def evaluate(entry, how):
+    """(build_failed, outcomes, suite_passed). outcomes maps each named test to
+    "failed", "passed" or "not run"; suite_passed says whether the whole suite
+    ran clean for a survives entry."""
+    for argv, cwd in how["build"]:
+        if run(argv, cwd)[0] != 0:
+            return True, {}, None
+    if entry["expect"] == "survives":
+        argv, cwd = how["suite"]
+        suite_passed = run(argv, cwd)[0] == 0
+        # A suite that fails is not a catch by itself: prove it the same way
+        # every mode proves a catch, with its named tests.
+        return False, {} if suite_passed else named_outcomes(entry, how), suite_passed
+    return False, named_outcomes(entry, how), None
 
 
 def verdict(entry, build_failed, outcomes, suite_passed):
@@ -295,7 +338,16 @@ def verdict(entry, build_failed, outcomes, suite_passed):
     if expect == "survives":
         if suite_passed:
             return True, "SURVIVED (expected, by design)", ""
-        return True, "CAUGHT (listed as a survivor)", ""
+        # Not surviving is a catch only with the same proof every mode uses:
+        # every named test ran and failed. A failing suite alone proves nothing.
+        if not entry["tests"]:
+            return False, "SUITE FAILED (not a catch)", "no named tests to prove it"
+        missing = [name for name in entry["tests"] if outcomes.get(name) == "not run"]
+        passing = [name for name in entry["tests"] if outcomes.get(name) != "failed"]
+        if missing or passing:
+            return (False, "SUITE FAILED (not a catch)",
+                    "no proof: " + ", ".join(dict.fromkeys(missing + passing)))
+        return True, "CAUGHT", ""
     missing = [name for name in entry["tests"] if outcomes.get(name) == "not run"]
     if missing:
         return False, "NOT RUN", "did not run: " + ", ".join(missing)
@@ -307,8 +359,7 @@ def verdict(entry, build_failed, outcomes, suite_passed):
 
 def falsify(entry, how=None):
     check_disk()
-    with Mutation(entry):
-        result = evaluate(entry, how or spec(entry["command"]))
+    result = guard_mutation(entry, lambda: evaluate(entry, how or spec(entry["command"])))
     return verdict(entry, *result)
 
 
@@ -354,12 +405,57 @@ print("error: could not load the test harness")
 raise SystemExit(101)
 """
 
+# The test body prints its own run header, test line and summary, then the
+# harness errors. Only a summary closing the harness's own run is proof.
+STUB_FAKE_SUMMARY_THEN_ERROR = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("running 1 test")
+print("test tests::planted_check ... FAILED")
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+print("error: could not load the test harness")
+raise SystemExit(101)
+"""
+
 STUB_FILTERED_OUT = """import sys
 if "--list" in sys.argv:
     print("tests::planted_check: test")
     raise SystemExit(0)
 print("test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out")
 raise SystemExit(0)
+"""
+
+STUB_SUITE_ERROR = """import sys
+print("error: could not load the test harness")
+raise SystemExit(101)
+"""
+
+STUB_SUITE_FAILS_AND_TEST_FAILS = """import sys
+name = sys.argv[sys.argv.index('--exact') + 1] if '--exact' in sys.argv else 'tests::planted_check'
+if '--list' in sys.argv:
+    print(f"{name}: test")
+    raise SystemExit(0)
+print("running 1 test")
+print(f"test {name} ... FAILED")
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+raise SystemExit(101)
+"""
+
+STUB_SUITE_FAILS_TEST_PASSES = """import sys
+name = sys.argv[sys.argv.index('--exact') + 1] if '--exact' in sys.argv else 'tests::planted_check'
+if '--list' in sys.argv:
+    print(f"{name}: test")
+    raise SystemExit(0)
+if '--exact' in sys.argv:
+    print("running 1 test")
+    print(f"test {name} ... ok")
+    print("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out")
+    raise SystemExit(0)
+print("running 1 test")
+print(f"test {name} ... FAILED")
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+raise SystemExit(101)
 """
 
 STUB_CASE_RAN_FAILED = """import sys
@@ -398,12 +494,17 @@ def verdict_cases():
     """The verdict logic truth table."""
     ok = True
     two = {"id": "ST", "expect": "caught", "tests": ["a", "b"]}
+    survivor = {"id": "ST", "expect": "survives", "tests": ["a"]}
     cases = [
         ((two, False, {"a": "failed", "b": "passed"}, None), (False, "SURVIVED")),
         ((two, False, {"a": "failed", "b": "failed"}, None), (True, "CAUGHT")),
         ((two, False, {"a": "failed", "b": "not run"}, None), (False, "NOT RUN")),
         ((two, True, {}, None), (False, "BUILD FAILED")),
         (({"id": "ST", "expect": "survives", "tests": []}, False, {}, True), (True, "SURVIVED (expected, by design)")),
+        ((survivor, False, {"a": "failed"}, False), (True, "CAUGHT")),
+        ((survivor, False, {}, False), (False, "SUITE FAILED (not a catch)")),
+        ((survivor, False, {"a": "not run"}, False), (False, "SUITE FAILED (not a catch)")),
+        ((survivor, False, {"a": "passed"}, False), (False, "SUITE FAILED (not a catch)")),
         (({"id": "ST", "expect": "compile_error", "tests": []}, False, {}, None), (False, "SURVIVED")),
     ]
     for args, want in cases:
@@ -415,8 +516,9 @@ def verdict_cases():
 
 
 def a_named_test_that_does_not_run_is_not_a_catch():
-    """Two planted failures: no test answers to the name, and a harness
-    error exits non-zero without running one. Neither is a catch (task 004)."""
+    """Planted failures: no test answers to the name, a harness error exits
+    non-zero without running one, and a test body prints a summary line before
+    the harness errors. None is a catch (task 004)."""
     ok = True
     shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
     try:
@@ -424,6 +526,7 @@ def a_named_test_that_does_not_run_is_not_a_catch():
         entry = {"id": "ST", "command": "host", "expect": "caught", "tests": ["tests::planted_check"]}
         for title, text in (("name is not listed", STUB_LIST_MISSING),
                             ("harness error", STUB_HARNESS_ERROR),
+                            ("fake summary then harness error", STUB_FAKE_SUMMARY_THEN_ERROR),
                             ("exit 0 but no test ran", STUB_FILTERED_OUT)):
             stub = SELF_TEST_DIR / "stub.py"
             stub.write_text(text, encoding="utf-8")
@@ -431,6 +534,36 @@ def a_named_test_that_does_not_run_is_not_a_catch():
             got = verdict(entry, *evaluate(entry, how))
             print(f"self-test: {title}: {got[1]} ({got[2]})")
             if got[:2] != (False, "NOT RUN"):
+                ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def a_survives_entry_caught_only_with_its_named_tests():
+    """A survives entry whose suite fails is a catch only when its named
+    tests ran and failed. The suite exit code alone, or a named test that still
+    passes, is not a catch (task 004, review finding 3)."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        entry = {"id": "ST", "command": "host", "expect": "survives",
+                 "tests": ["tests::planted_check"]}
+        cases = (
+            ("suite errors, no test ran", STUB_SUITE_ERROR, (False, "SUITE FAILED (not a catch)")),
+            ("suite fails, the named test fails", STUB_SUITE_FAILS_AND_TEST_FAILS, (True, "CAUGHT")),
+            ("suite fails, the named test passes", STUB_SUITE_FAILS_TEST_PASSES,
+             (False, "SUITE FAILED (not a catch)")),
+        )
+        for title, text, want in cases:
+            stub = SELF_TEST_DIR / "stub.py"
+            stub.write_text(text, encoding="utf-8")
+            how = {"build": [], "one": (["python3", "-I", str(stub)], SELF_TEST_DIR, []),
+                   "suite": (["python3", "-I", str(stub)], SELF_TEST_DIR)}
+            got = verdict(entry, *evaluate(entry, how))
+            print(f"self-test: survives entry: {title}: {got[1]} ({got[2]})")
+            if got[:2] != want:
                 ok = False
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
@@ -457,8 +590,7 @@ def interruption_restores():
     os.replace = replace_then_interrupt
     interrupted = False
     try:
-        with Mutation(INTERRUPTION_ENTRY, SELF_TEST_DIR):
-            pass
+        guard_mutation(INTERRUPTION_ENTRY, lambda: None, SELF_TEST_DIR)
     except KeyboardInterrupt:
         interrupted = True
     finally:
@@ -500,23 +632,23 @@ def real_catch_counts():
 
 
 def interruption_at_the_end_of_the_edit():
-    """An interrupt after the last replacement but before __enter__ returns:
-    the original still comes back (task 004, review finding 2)."""
+    """An interrupt at apply()'s own return: Python 3.9 pops the handler
+    before RETURN_VALUE, so apply cannot restore itself. guard_mutation's
+    finally still restores first (task 004, review finding 2)."""
     shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
     SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
     path = SELF_TEST_DIR / "boundary.txt"
     original = "original bytes\n"
     path.write_text(original, encoding="utf-8")
-    lines, start = inspect.getsourcelines(Mutation.__enter__)
-    at = next(start + offset for offset, line in enumerate(lines) if line.strip() == "return self")
-    entered = []
+    at = [instruction.offset for instruction in dis.get_instructions(Mutation.apply)
+          if instruction.opname == "RETURN_VALUE"][-1]
+    traced = []
 
     def trace(frame, event, _arg):
-        if frame.f_code is Mutation.__enter__.__code__:
-            if event == "call":
-                entered.append(frame)
-            elif event == "line" and frame.f_lineno == at and len(entered) == 1:
-                entered.append(frame)
+        if frame.f_code is Mutation.apply.__code__:
+            frame.f_trace_opcodes = True
+            if event == "opcode" and frame.f_lasti == at:
+                traced.append(frame.f_lasti)
                 raise KeyboardInterrupt
         return trace
 
@@ -527,8 +659,7 @@ def interruption_at_the_end_of_the_edit():
     previous = sys.gettrace()
     sys.settrace(trace)
     try:
-        with Mutation(entry, SELF_TEST_DIR):
-            pass
+        guard_mutation(entry, lambda: None, SELF_TEST_DIR)
     except KeyboardInterrupt:
         interrupted = True
     finally:
@@ -537,7 +668,7 @@ def interruption_at_the_end_of_the_edit():
     restored = path.read_text(encoding="utf-8") == original
     print(f"self-test: interruption at the end of the edit: raised={interrupted}, "
           f"restored={restored}, backup left={backup.exists()}")
-    return interrupted and restored and not backup.exists()
+    return bool(traced) and interrupted and restored and not backup.exists()
 
 
 def a_self_test_case_counts_only_when_it_ran():
@@ -574,6 +705,7 @@ def a_self_test_case_counts_only_when_it_ran():
 SELF_TEST_CASES = {
     "verdict cases": verdict_cases,
     "a named test that does not run is not a catch": a_named_test_that_does_not_run_is_not_a_catch,
+    "a survives entry is a catch only with its named tests": a_survives_entry_caught_only_with_its_named_tests,
     "an interrupted edit is restored": interruption_restores,
     "an interrupt at the end of the edit is restored": interruption_at_the_end_of_the_edit,
     "a real catch counts": real_catch_counts,
