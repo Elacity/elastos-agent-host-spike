@@ -545,13 +545,17 @@ def prepare_f36():
     build_component()
 
 
-def restore_f36(args):
-    """Puts the unmutated preview back and rebuilds the clean component."""
+def restore_runtime(args):
+    """Puts the unmutated preview back and rebuilds the clean component.
+
+    Every runtime falsifier rebuilds the component, so the artifact must be
+    rebuilt from the restored source even when F36 did not run (an F35-only
+    or filtered run) or a run was interrupted.
+    """
     global copy_mutant_saved
-    if copy_mutant_saved is None:
-        return
-    (HERE / PREVIEW).write_bytes(copy_mutant_saved)
-    copy_mutant_saved = None
+    if copy_mutant_saved is not None:
+        (HERE / PREVIEW).write_bytes(copy_mutant_saved)
+        copy_mutant_saved = None
     if "--runtime" in args:
         build_component()
 
@@ -677,7 +681,7 @@ def main():
         )
     finally:
         if not check:
-            restore_f36(args)
+            restore_runtime(args)
     if not check:
         check_isolation(CASES, args, every_test)
 

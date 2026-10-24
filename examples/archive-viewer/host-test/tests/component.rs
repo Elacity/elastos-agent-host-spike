@@ -262,6 +262,23 @@ fn text_block(len: usize) -> Vec<u8> {
     out
 }
 
+/// Printable text with little repetition: a full-period xorshift sequence over
+/// the alphabet, so the deflate stream is mostly literals. It is the worst
+/// Huffman work the decompressor can be given within the caps; the fuel test
+/// compares it against [`text_block`].
+fn plain_text(len: usize) -> Vec<u8> {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut out = Vec::with_capacity(len);
+    let mut state = 0x2545_f491u32;
+    for _ in 0..len {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        out.push(ALPHABET[state as usize % ALPHABET.len()]);
+    }
+    out
+}
+
 /// The largest directory within the 256-entry and 16 KiB caps: 256 entries
 /// whose 18-byte names make the directory exactly 16,384 bytes.
 fn largest_directory() -> Vec<Fixture> {
@@ -285,6 +302,22 @@ fn most_shown() -> Vec<Fixture> {
     (0..MAX_REQUEST_SHOW)
         .map(|n| Fixture::deflated(&format!("p{n}.txt"), &text_block(6 * 1024)))
         .collect()
+}
+
+/// Five entries of 16 KiB: the first is shown, the next three inflate to the
+/// end and fail the text check (each ends in NUL), and the fifth is skipped
+/// `inflate_budget` before any read. The four inflated entries consume the
+/// whole 64 KiB B3 allowance; the view stays small because only the first
+/// entry renders.
+fn full_inflate_allowance() -> Vec<Fixture> {
+    let shown = text_block(MAX_PREVIEW_BYTES);
+    let mut fixtures = vec![Fixture::deflated("shown.txt", &shown)];
+    for n in 1..5 {
+        let mut not_text = text_block(MAX_PREVIEW_BYTES);
+        *not_text.last_mut().expect("16 KiB of text") = 0;
+        fixtures.push(Fixture::deflated(&format!("n{n}.bin"), &not_text));
+    }
+    fixtures
 }
 
 /// The compressed size a stream needs to stay inside B2's declared-ratio cap:
@@ -325,9 +358,10 @@ fn ratio_cap_bomb() -> Fixture {
     Fixture::deflated_with("bomb.bin", text, compressed)
 }
 
-/// One entry of the worst text inflate cost: 16 KiB shown.
+/// One entry of the worst text inflate cost: 16 KiB of low-compressibility
+/// text shown. The fuel test proves it costs more than the repeating text.
 fn worst_text() -> Vec<Fixture> {
-    vec![Fixture::deflated("t.txt", &text_block(MAX_PREVIEW_BYTES))]
+    vec![Fixture::deflated("t.txt", &plain_text(MAX_PREVIEW_BYTES))]
 }
 
 /// A listing of 256 entries and two 15 KiB previews: the whole view near its
@@ -357,6 +391,10 @@ fn worst_archives() -> Vec<(&'static str, Bridge)> {
         (
             "the most shown entries",
             bridge_with(zip(&most_shown()), &show_all),
+        ),
+        (
+            "the full inflate allowance",
+            bridge_with(zip(&full_inflate_allowance()), &[0, 1, 2, 3, 4]),
         ),
         (
             "a bomb at the ratio cap",
@@ -470,14 +508,50 @@ async fn the_worst_archives_run_and_write_their_views() {
             "the largest directory" => {
                 assert_eq!(view["entries"].as_array().unwrap().len(), MAX_ENTRIES);
             }
+            "the most names at their longest" => {
+                let entries = view["entries"].as_array().unwrap();
+                assert_eq!(entries.len(), 54);
+                assert!(entries
+                    .iter()
+                    .all(|entry| entry["path"].as_str().unwrap().len() == MAX_NAME_BYTES));
+            }
+            "the most shown entries" => {
+                assert_eq!(view["previews"].as_array().unwrap().len(), MAX_REQUEST_SHOW);
+            }
+            "the full inflate allowance" => {
+                assert_eq!(view["previews"].as_array().unwrap().len(), 1);
+                let skipped = view["skipped"].as_array().unwrap();
+                assert_eq!(skipped.len(), 4);
+                let reasons: Vec<&str> = skipped
+                    .iter()
+                    .map(|skip| skip["reason"].as_str().unwrap())
+                    .collect();
+                // The four inflated entries spend the whole allowance; the
+                // fifth is refused before any read.
+                assert_eq!(
+                    reasons,
+                    ["not_text", "not_text", "not_text", "inflate_budget"]
+                );
+            }
             "a bomb at the ratio cap" => {
                 assert_eq!(view["entries"][0]["status"], "listed");
                 assert_eq!(view["skipped"][0]["reason"], "not_text");
             }
+            "a worst-inflate text entry" => {
+                let previews = view["previews"].as_array().unwrap();
+                assert_eq!(previews.len(), 1);
+                assert_eq!(
+                    previews[0]["blocks"][0]["spans"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .len(),
+                    MAX_PREVIEW_BYTES
+                );
+            }
             "the largest view" => {
                 assert_eq!(view["previews"].as_array().unwrap().len(), 2);
                 assert!(
-                    text.len() > MAX_VIEW_BYTES * 7 / 8,
+                    text.len() > MAX_VIEW_BYTES * 15 / 16,
                     "{name}: {}",
                     text.len()
                 );
@@ -500,14 +574,39 @@ fn the_worst_archives_reach_their_caps() {
     let shown = most_shown();
     let inflated: usize = shown.iter().map(|fixture| fixture.text.len()).sum();
     assert_eq!(shown.len(), MAX_REQUEST_SHOW);
+    assert_eq!(inflated, 48 * 1024);
     assert!(inflated <= MAX_INFLATE_BYTES);
     let compressed: usize = shown
         .iter()
         .map(|fixture| miniz_oxide::deflate::compress_to_vec(&fixture.text, 6).len())
         .sum();
     assert!(compressed <= MAX_COMPRESSED_BYTES);
+
+    // The full-allowance archive: four 16 KiB entries spend the whole B3
+    // allowance exactly, and the fifth proves the allowance is at zero.
+    let allowance = full_inflate_allowance();
+    assert_eq!(allowance.len(), 5);
+    assert!(allowance
+        .iter()
+        .all(|fixture| fixture.text.len() == MAX_PREVIEW_BYTES));
+    assert_ne!(allowance[0].text.last(), Some(&0));
+    assert!(allowance[1..]
+        .iter()
+        .all(|fixture| fixture.text.last() == Some(&0)));
+    assert_eq!(4 * MAX_PREVIEW_BYTES, MAX_INFLATE_BYTES);
+    let allowance_compressed: usize = allowance
+        .iter()
+        .map(|fixture| miniz_oxide::deflate::compress_to_vec(&fixture.text, 6).len())
+        .sum();
+    assert!(allowance_compressed <= MAX_COMPRESSED_BYTES);
+
+    // The worst text is the low-compressibility one, which fits the declared
+    // ratio and the compressed budget.
     let text = worst_text();
     assert_eq!(text[0].text.len(), MAX_PREVIEW_BYTES);
+    let text_compressed = miniz_oxide::deflate::compress_to_vec(&text[0].text, 6);
+    assert!(text_compressed.len() <= MAX_COMPRESSED_BYTES);
+    assert!(text[0].text.len() <= text_compressed.len() * 100 + 1024);
 
     // The bomb's declared ratio is inside the cap: it is read, not refused.
     let bomb = ratio_cap_bomb();
@@ -516,6 +615,32 @@ fn the_worst_archives_reach_their_caps() {
     assert!(bomb.text.len() <= compressed * 100 + 1024);
 
     assert!(directory_bytes(&largest_view()) <= MAX_DIRECTORY_BYTES);
+}
+
+/// The worst text is chosen by measurement, not assumption: one 16 KiB entry
+/// of low-compressibility text costs more fuel than the repeating text.
+#[test]
+fn low_compressibility_text_costs_more_than_repeating_text() {
+    let repeating = measure::run(
+        bridge_with(
+            zip(&[Fixture::deflated("t.txt", &text_block(MAX_PREVIEW_BYTES))]),
+            &[0],
+        ),
+        measure::RUNTIME_FUEL,
+    );
+    let plain = measure::run(bridge_with(zip(&worst_text()), &[0]), measure::RUNTIME_FUEL);
+    repeating.0.unwrap();
+    plain.0.unwrap();
+    println!(
+        "16 KiB text: repeating {} fuel, low-compressibility {} fuel",
+        repeating.1, plain.1
+    );
+    assert!(
+        plain.1 > repeating.1,
+        "the low-compressibility text must cost more: {} vs {}",
+        plain.1,
+        repeating.1
+    );
 }
 
 // --- artifact ---------------------------------------------------------------------

@@ -266,20 +266,27 @@ gives as the reason for this app are proven there: a run with no grant stops
   app, entrypoint, storage bounds `Users/self/*` and its own view folder) and
   the repository's component builder.
 - New `host-test/` crate (layout of `examples/docs-viewer/host-test`), a
-  dev-only crate on `capsule-v1-host-test` by path. Nine tests: the manifest,
+  dev-only crate on `capsule-v1-host-test` by path. Ten tests: the manifest,
   the happy path through `ComponentProvider` (a stored text entry shown with
   its CRC, a directory listed, a deflated text entry), the admission import
   check, F35, the gate archives run through the provider, the caps they are
-  built to, and F36 through the kit's `measure` runner.
+  built to, the chosen worst text against the repeating text, and F36 through
+  the kit's `measure` runner.
 - The fixtures are built in the test (`M4`): a byte-by-byte ZIP writer, CRC-32
-  and `miniz_oxide` streams. Six gate archives, one per hostile class, at
+  and `miniz_oxide` streams. Seven gate archives, one per hostile class, at
   their caps: the largest directory (256 × 18-byte names = exactly 16 KiB),
   the most names at their longest (54 × 255 bytes under the 16 KiB directory),
-  the most shown entries (8 × 6 KiB text), a bomb whose declared ratio sits at
-  the cap (16 KiB of zero runs broken by one changing literal each, streamed
-  at the level closest to the 154-byte floor), a 16 KiB text entry (the worst
-  text inflate), and the largest view (256 entries and two 15 KiB previews,
-  63,432 bytes of view).
+  the most shown entries (8 × 6 KiB text, the 8-entry request cap), the full
+  inflate allowance (four 16 KiB entries spend the 64 KiB B3 allowance exactly;
+  a fifth is skipped `inflate_budget` before any read), a bomb whose declared
+  ratio sits at the cap (16 KiB of zero runs broken by one changing literal
+  each, streamed at the level closest to the 154-byte floor), a 16 KiB
+  low-compressibility text entry (the worst text inflate), and the largest
+  view (256 entries and two 15 KiB previews, 63,432 bytes of view).
+- The worst text is chosen by measurement: one 16 KiB low-compressibility
+  entry (a full-period xorshift over the alphabet, so the stream is mostly
+  literals) costs 9,950,533 fuel against 4,176,199 for the repeating text,
+  and a test asserts it costs more.
 - `verify.sh`: manifest check, the existing guest fmt/clippy/tests/falsify
   unchanged, then the component build, host-test fmt/clippy/tests and
   `falsify.py --runtime`.
@@ -303,16 +310,24 @@ gives as the reason for this app are proven there: a run with no grant stops
 | the largest directory | 18,291,996 | 18.3% |
 | the most names at their longest | 12,845,089 | 12.8% |
 | the most shown entries | 12,638,105 | 12.6% |
+| the full inflate allowance | 8,330,446 | 8.3% |
 | a bomb at the ratio cap | 1,350,041 | 1.4% |
-| a worst-inflate text entry | 4,176,199 | 4.2% |
+| a worst-inflate text entry | 9,950,533 | 10.0% |
 | the largest view | 24,540,259 | 24.5% |
 
-  The highest is 24.5%, well under the 80% gate. Under F36's mutant the same
-  gate records 100.0% for the largest directory, the longest names and the
-  largest view (they spend the whole budget), 72.9% for the most shown
-  entries, so its highest is 100.0% and the test fails on the 80% assertion.
-  The gate counts an out-of-fuel run as 100%, not as a broken fixture.
+  The highest is 24.5%, well under the 80% gate. Each case proves the work it
+  runs: 256 listed entries, 54 names of 255 bytes, eight previews, four
+  inflated 16 KiB entries and the fifth's `inflate_budget`, the bomb's
+  `not_text` after inflating, the 16 KiB preview, and a view of 63,432 bytes.
+  Under F36's mutant the same gate records 100.0% for the largest directory,
+  the longest names and the largest view (they spend the whole budget), 72.9%
+  for the most shown entries, so its highest is 100.0% and the test fails on
+  the 80% assertion. The gate counts an out-of-fuel run as 100%, not as a
+  broken fixture.
 - 74 falsifiers in all: the 72 core cases and F35, F36 under `--runtime`.
+  After every runtime run, including an F35-only or filtered one, the source is
+  restored and the component is rebuilt, so the artifact on disk always
+  matches the source.
 
 ### Notes for the next builder
 
