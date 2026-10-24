@@ -1,0 +1,32 @@
+[package]
+name = "capsule-kit-guest"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# The capsule kit's guest crate: what every Bus v1 component capsule here
+# shares (kit item A1, and M1 to M3 of examples/archive-viewer/DESIGN.md).
+# Used by the photo and documents viewers as a path dependency.
+#
+# Features:
+# - `bus` (default): the Bus calls, the refusals, the reads and the write;
+# - `fake`: the fake Runtime, for guests' tests;
+# - `wit`: the `elastos:bus@v1` glue for wasm32 (`WitBus`, `lifecycle_run`,
+#   the export macro). Only a Bus v1 component turns it on;
+# - with no features: the text and image checks and the URI check alone, for
+#   a Bus v2 guest that must not carry any Bus v1 binding.
+
+[features]
+default = ["bus"]
+bus = ["dep:serde", "dep:serde_json"]
+fake = ["bus"]
+wit = ["bus", "dep:wit-bindgen"]
+
+[dependencies]
+serde = { version = "1.0.229", default-features = false, features = ["std"], optional = true }
+serde_json = { version = "1.0.151", optional = true }
+wit-bindgen = { version = "0.57.1", optional = true }
+
+# Tested on its own here; when it is a dependency, this table is ignored.
+[workspace]

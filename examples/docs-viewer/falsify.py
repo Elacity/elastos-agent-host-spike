@@ -54,20 +54,6 @@ GUEST = [
         [("core", "a_provider_error_stops_the_run_and_is_not_skipped")],
     ),
     (
-        "provider status ignored",
-        "src/bus.rs",
-        'Some("ok") if parsed.has_data => Ok(parsed),',
-        '_ if parsed.has_data => Ok(parsed),',
-        [("core", "an_error_answer_that_also_carries_data_is_still_an_error")],
-    ),
-    (
-        "a read answer longer than asked is taken",
-        "src/bus.rs",
-        "    if content.len() as u64 > length {",
-        "    if false && content.len() as u64 > length {",
-        [("core", "a_read_answer_longer_than_asked_is_refused")],
-    ),
-    (
         "unknown shelf fields allowed",
         "src/shelf.rs",
         '.find(|key| !matches!(key.as_str(), "schema" | "items"))',
@@ -76,7 +62,7 @@ GUEST = [
     ),
     (
         "dot-dot segments allowed",
-        "src/shelf.rs",
+        "../capsule-kit/guest/src/uri.rs",
         '.any(|part| part.is_empty() || part == "." || part == "..")',
         '.any(|part| part.is_empty() || part == ".")',
         [("core", "malformed_shelves_stop_before_any_document_is_read")],
@@ -86,7 +72,7 @@ GUEST = [
         "content failure stops the run instead of skipping",
         "src/lib.rs",
         "match check_item(bus, order, uri, &mut budget)? {",
-        "match check_item(bus, order, uri, &mut budget)?.map_err(|_| Refusal::ShelfTooLarge).map(Ok)? {",
+        "match check_item(bus, order, uri, &mut budget)?.map_err(|_| Refusal::InputTooLarge).map(Ok)? {",
         [("core", "content_failures_are_skipped_and_listed_and_the_rest_are_shown_in_order")],
     ),
     (
@@ -184,33 +170,12 @@ GUEST = [
     ),
     (
         "the write does not say append",
-        "src/bus.rs",
-        'json!({ "path": uri, "content": content, "append": false })',
-        'json!({ "path": uri, "content": content })',
+        "../capsule-kit/guest/src/bus.rs",
+        'body.push_str(r#"{"append":false,"content":["#);',
+        'body.push_str(r#"{"content":["#);',
         [("core", "the_write_is_one_byte_array_with_append_false"), ("core", "a_shelf_is_read_and_its_pages_are_written")],
     ),
-    # The model: what counts as text, and what a block may hold.
-    (
-        "control characters count as text",
-        "model/src/text.rs",
-        "!c.is_control() || matches!(c, '\\t' | '\\n' | '\\r')",
-        "!c.is_control() || matches!(c, '\\t' | '\\n' | '\\r' | '\\0')",
-        [("model", "text_is_utf8_with_no_control_character_but_tab_and_line_ends")],
-    ),
-    (
-        "a UTF-16 head is read as UTF-8",
-        "model/src/text.rs",
-        "    if other_encoding(head) {",
-        "    if false && other_encoding(head) {",
-        [("model", "a_head_may_end_inside_a_character_only_if_the_document_goes_on")],
-    ),
-    (
-        "a head may end inside a character when the document does not go on",
-        "model/src/text.rs",
-        "Err(err) if more && err.error_len().is_none() => {",
-        "Err(err) if err.error_len().is_none() => {",
-        [("model", "a_head_may_end_inside_a_character_only_if_the_document_goes_on")],
-    ),
+    # The model: what a block may hold.
     (
         "no cap on blocks",
         "model/src/lib.rs",
@@ -233,6 +198,33 @@ GUEST = [
         [("model", "links_and_images_become_text_and_html_stays_text")],
     ),
 ]
+
+# The kit's straight writer and the `json!` serializer it replaced. The JSON
+# bytes are the same, so only the fuel gate can tell them apart.
+WRITE_BODY = '''pub fn write_body(uri: &str, content: &[u8]) -> String {
+    let path = serde_json::to_string(uri).expect("a string always serializes");
+    let mut body = String::with_capacity(content.len() * 4 + path.len() + 40);
+    body.push_str(r#"{"append":false,"content":["#);
+    for (index, byte) in content.iter().enumerate() {
+        if index > 0 {
+            body.push(',');
+        }
+        if *byte >= 100 {
+            body.push(char::from(b'0' + byte / 100));
+        }
+        if *byte >= 10 {
+            body.push(char::from(b'0' + byte / 10 % 10));
+        }
+        body.push(char::from(b'0' + byte % 10));
+    }
+    body.push_str(r#"],"path":"#);
+    body.push_str(&path);
+    body.push('}');
+    body
+}'''
+JSON_WRITE_BODY = '''pub fn write_body(uri: &str, content: &[u8]) -> String {
+    json!({ "path": uri, "content": content, "append": false }).to_string()
+}'''
 
 RUNTIME = [
     (
@@ -262,6 +254,13 @@ RUNTIME = [
         "        let close = Index::at(&self.next_bracket, start + 1);",
         "        let close = (start + 1..self.len).find(|&i| chars[i] == ']').unwrap_or(self.len);",
         ["worst_case_shelves_stay_under_80_percent_of_the_runtime_fuel"],
+    ),
+    (
+        "the write builds a value per byte (in the component)",
+        "../capsule-kit/guest/src/bus.rs",
+        WRITE_BODY,
+        JSON_WRITE_BODY,
+        ["the_worst_case_shelf_is_written_without_a_value_per_byte"],
     ),
 ]
 
@@ -354,7 +353,7 @@ pub fn write_string(bus: &mut dyn Bus, uri: &str, grant: &str, content: &str) ->
 def cases(listed):
     out = []
     for name, relative, old, new, tests in listed:
-        appends = [(HERE / "src/bus.rs", WRITE_STRING)] if "write_string" in new else []
+        appends = [(HERE.parent / "capsule-kit/guest/src/bus.rs", WRITE_STRING)] if "write_string" in new else []
         out.append((name, HERE / relative, [(old, new)], tests, appends))
     return out
 

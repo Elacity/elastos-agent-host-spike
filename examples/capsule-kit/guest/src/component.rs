@@ -1,10 +1,12 @@
 //! The Bus v1 WIT glue: `WitBus` implements `Bus` over the generated
-//! `elastos:bus@v1` imports. Shared by every Bus v1 guest of the capsule kit
-//! (linked as `src/component.rs`); it needs `wit_bindgen::generate!` for
-//! `product-capsule-v1` at the crate root.
+//! `elastos:bus@v1` imports, and `lifecycle_run` is the body of every guest's
+//! `lifecycle.run`.
 
-use super::elastos::bus::{capabilities, providers, runtime, types};
-use super::{Bus, BusFailure, InvokeReply};
+use crate::wit::elastos::bus::{capabilities, providers, runtime, types};
+use crate::{App, Bus, BusFailure, InvokeReply, Refusal};
+
+/// The Component ABI every Bus v1 guest here is built for.
+pub const EXPECTED_RUNTIME_ABI: &str = "elastos.component/v1";
 
 pub struct WitBus;
 
@@ -69,4 +71,20 @@ impl Bus for WitBus {
 
 pub fn runtime_abi() -> String {
     runtime::info().abi
+}
+
+/// `lifecycle.run`: checks the Runtime's ABI, runs `run` over the real Bus,
+/// and turns a refusal into the `bus-error` Runtime receives.
+pub fn lifecycle_run(
+    app: &App,
+    run: impl FnOnce(&mut dyn Bus) -> Result<(), Refusal>,
+) -> Result<(), types::BusError> {
+    let abi = runtime_abi();
+    if abi != EXPECTED_RUNTIME_ABI {
+        return Err(types::BusError::Invalid(format!(
+            "{} requires {EXPECTED_RUNTIME_ABI}, received {abi}",
+            app.name
+        )));
+    }
+    run(&mut WitBus).map_err(|refusal| to_wit(refusal.to_bus_failure(app)))
 }

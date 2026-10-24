@@ -9,6 +9,9 @@ export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
 
 python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" "${MANIFEST}" "${WIT}" docs-viewer
 
+# The capsule kit's guest crate this guest is built on: its own tests and falsifiers.
+bash "${VIEWER_DIR}/../capsule-kit/guest/verify.sh"
+
 # Guest and model: logic and refusals against a fake Runtime.
 cargo fmt --manifest-path "${VIEWER_DIR}/Cargo.toml" --all -- --check
 cargo test --locked --manifest-path "${VIEWER_DIR}/Cargo.toml" --workspace

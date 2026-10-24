@@ -19,6 +19,7 @@ repository builder) and the proxy options are the photo viewer's; see its README
 | `4df2ef7c` on `claude/photo-kit` (Codex fixes) | `2da051738952323727a1a3cf373ccf9e9e474f5f7cee3b0042a4c030663b73db` | the same |
 | `1eb9aee4` on `claude/photo-kit-shared` | `87e3f4540d74cb35fcac77b9d4150fee2bd2664ca720a3c0c82bf20ffd644e98` | the same; the guest took the kit's shared `bus.rs`, whose write builds a `serde_json::Value` per byte (`examples/capsule-kit/v1-guest/README.md`) |
 | the merge of the Codex fixes into `claude/photo-kit-shared` | `8765e7904ddb61f5e10f9514cd3df5a1a84ee9d7e33d0c2f2b45f581a1bfda40` | the same: both changes together |
+| `claude/photo-kit-crate` (the kit's crate, the cheaper write back) | `c946ad9e0959f8ef985e978d30d0543e0d2bb7b17883f621ef61167366a3a7cf` | in the pinned container only: the kit's crate is a path dependency outside this workspace and Cargo hashes it by its absolute path, so a native build gives a hash of its checkout path (here `a479a911…`) |
 
 The Mac's native build differs, as expected (Cursor's run of `779f37a8`); the Mac has not run the container
 yet.
@@ -27,4 +28,5 @@ The closure CID of the core packed by `capsule-bundle pack` (`bundle-test`) hold
 row: `bafkreib4tdd4fjkr6t7xmokqfb6baldvmpalbrzfg2hfbvpmgo66lolvjq` for `56a577fb…`,
 `bafkreihhnha75t4ghl7qb2uaf4iz5iv3bqoc6tpws5ahxx3ge6w6pstugu` for `2da05173…`,
 `bafkreibimy55y6ooocgvxqiswd5r37m2sgz2uqps2dythgrrbx3v4yo6si` for `87e3f454…`,
-`bafkreigkd6uflznru26llac44pfka4d2oqdzdthucyqvai3b4ln4uukr3a` for `8765e790…`.
+`bafkreigkd6uflznru26llac44pfka4d2oqdzdthucyqvai3b4ln4uukr3a` for `8765e790…`,
+`bafkreigqcrcg2nypz3rr3auincpaa3iis7eyrmq5pqhmjds54tiaepnxky` for `c946ad9e…`.

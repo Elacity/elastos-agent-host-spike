@@ -21,6 +21,9 @@ const B: &str = "localhost://Users/self/Documents/todo.txt";
 const MAX_DOCUMENT_BYTES: usize = 16 * 1024;
 const MAX_SHELF_BYTES: usize = 4 * 1024;
 const MAX_SHELF_ITEMS: usize = 8;
+/// Between the old `json!` write (62.2% of the Runtime budget) and the
+/// straight writer (50.2%) for the worst shelf.
+const CHEAPER_WRITE_GATE: u64 = 56_000_000;
 
 fn capsule_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
@@ -320,6 +323,25 @@ fn worst_case_shelves_stay_under_80_percent_of_the_runtime_fuel() {
         let percent = used as f64 * 100.0 / measure::RUNTIME_FUEL as f64;
         println!("{name}: {used} fuel ({percent:.1}% of the Runtime budget)");
         assert!(percent <= 80.0, "{name} uses {percent:.1}% of the fuel");
+    }
+}
+
+/// The write is cheaper, and that is what the rule is for: `json!` builds a
+/// `serde_json::Value` per byte and cost 62.2% of the Runtime budget for the
+/// worst shelf; the straight writer costs 50.2%. The limit sits between the
+/// two, so a return to the old serializer fails here even while the 80% gate
+/// still passes.
+#[test]
+fn the_worst_case_shelf_is_written_without_a_value_per_byte() {
+    for (name, bridge) in worst_case_shelves() {
+        let (outcome, used) = measure::run(bridge, measure::RUNTIME_FUEL);
+        outcome.unwrap_or_else(|err| panic!("{name}: {err}"));
+        println!("{name}: {used} fuel");
+        assert!(
+            used < CHEAPER_WRITE_GATE,
+            "{name} uses {used} fuel; the json! writer used 62.2% of {}",
+            measure::RUNTIME_FUEL
+        );
     }
 }
 

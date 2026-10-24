@@ -69,7 +69,8 @@ Two kinds of failure:
 `ComponentProvider` gives every run a fixed 100,000,000 fuel
 (`elastos-compute/src/providers/component.rs:28`). Fuel no longer depends on
 image size (one 64-byte PNG and one 12 MiB PNG both use 257,772). The worst
-album within these limits uses 65% of the budget; `host-test` gates it at 80%.
+album within these limits uses 59.1% of the budget (64.9% before the kit's
+cheaper write); `host-test` gates it at 80%.
 
 ## Build
 
@@ -85,7 +86,7 @@ rustup target add wasm32-unknown-unknown
 ```
 
 It checks the manifest against the WIT hash, runs the guest tests against a
-fake Runtime (`src/fake.rs`, `src/tests.rs`), builds the component, runs it
+fake Runtime (the kit's `fake`, `src/tests.rs`), builds the component, runs it
 inside the Runtime's own `ComponentProvider` with a fake bridge
 (`host-test/`), checks its imports with a copy of the Runtime admission check,
 gates the fuel of the worst albums, and runs every falsifier (`falsify.py`):
@@ -108,10 +109,9 @@ Measure fuel by album shape:
 | Path | Owner |
 | --- | --- |
 | `capsule.json` | Identity, role, Component ABI, entrypoint, storage bounds |
-| `src/lib.rs` | Run order, limits, stop and skip rules, playlist, WIT glue |
+| `src/lib.rs` | Run order, limits, stop and skip rules, playlist, the `lifecycle.run` export |
 | `src/album.rs` | Album schema |
-| `src/image.rs` | Magic bytes, PNG and WebP headers, ranged JPEG walk |
-| `src/bus.rs` | The two Bus calls behind a trait, and answer parsing |
-| `src/fake.rs`, `src/tests.rs` | Fake Runtime and guest tests |
+| `src/tests.rs` | Guest tests |
+| `../capsule-kit/guest/` (path dependency `capsule-kit-guest`) | The two Bus calls and answer parsing, the write, the refusals and reads, the URI check, the image header checks (magic bytes, PNG and WebP headers, ranged JPEG walk), the fake Runtime and the WIT glue, shared with the documents viewer |
 | `host-test/` | The component in `ComponentProvider`, admission check, fuel gate |
 | `falsify.py` | Break each check and see its test fail |

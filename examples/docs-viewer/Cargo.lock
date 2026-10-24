@@ -15,9 +15,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
+name = "capsule-kit-guest"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wit-bindgen",
+]
+
+[[package]]
 name = "docs-model"
 version = "0.1.0"
 dependencies = [
+ "capsule-kit-guest",
  "serde_json",
 ]
 
@@ -25,10 +35,9 @@ dependencies = [
 name = "docs-viewer"
 version = "0.1.0"
 dependencies = [
+ "capsule-kit-guest",
  "docs-model",
- "serde",
  "serde_json",
- "wit-bindgen",
 ]
 
 [[package]]
