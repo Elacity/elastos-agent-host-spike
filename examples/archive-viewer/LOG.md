@@ -62,3 +62,28 @@ its statuses (`src/zip.rs`), the run and the view (`src/lib.rs`), the tests
 - The `show` indexes in the request run L5 now (local name, method, flags and,
   without bit 3, sizes). The preview slice adds the inflate and the text
   checks; the statuses and `skipped` shape stay.
+
+## 2026-10-24: task 001, review fixes (round 6)
+
+- L1 refuses a short tail answer as `end_record_truncated`: the candidate
+  check needs the whole 22 + 1,024-byte tail, so a provider that drops the
+  comment cannot make a truncated archive list (test
+  `a_short_tail_response_refuses_the_archive`, falsifier F19b).
+- `kind_of` reads the DOS directory attribute (external low byte, bit 4), so a
+  directory entry without a trailing slash cannot bypass L9 (tests
+  `a_dos_directory_entry_is_listed_as_a_directory` and
+  `a_dos_directory_with_data_is_blocked`, falsifier F16b).
+- F17 now mutates `check_shown` to read the nested entry's data while keeping
+  its `archive` kind; `a_nested_archive_is_listed_not_opened` runs both an
+  ordinary listing and `show: [0]` and checks the read trace.
+- The request's kit URI check has an app-level test
+  (`a_request_outside_the_users_folders_is_refused`: wrong prefix, traversal,
+  empty segment, folder, `?`, `\` and a control character) and falsifier F41d
+  replaces the call with `Ok(())`.
+- **Done in this slice:** F6, F6b, F6c, F7 to F17, F19 to F25, F29 to F31,
+  F40 to F42, plus the lettered cases F6d to F6f, F15b, F16b, F19b, F21b to
+  F21e, F22b, F23b to F23d, F25b to F25f, F30b, F32 and F41b to F41d
+  (53 falsifiers, all caught).
+- **Remaining for the next task:** F1 to F5, F18, F26 to F28, F33 to F39 and
+  F43 (previews and inflate, the component and fuel gates, the page, Bus v2
+  nesting and B5's declared totals).

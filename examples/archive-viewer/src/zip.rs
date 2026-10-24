@@ -258,7 +258,18 @@ fn parse(reader: &mut Reader<'_>) -> Result<(u64, Vec<Entry>), ParseError> {
         return Err(Refused::new("end_record_missing", "the object is too short").into());
     }
     let tail_start = size.saturating_sub(END_RECORD_BYTES + MAX_COMMENT_BYTES);
-    let tail = read(reader, tail_start, size - tail_start)?;
+    let tail_length = size - tail_start;
+    let tail = read(reader, tail_start, tail_length)?;
+    // A provider that answers short must not leave a tail whose candidate
+    // check still adds the missing comment bytes back: the end record's
+    // comment has to run through bytes the answer really holds.
+    if tail.len() as u64 != tail_length {
+        return Err(Refused::new(
+            "end_record_truncated",
+            format!("the tail answered {} of {tail_length} bytes", tail.len()),
+        )
+        .into());
+    }
     let mut candidates = Vec::new();
     for at in 0..tail.len().saturating_sub(END_RECORD_BYTES as usize - 1) {
         if u32_at(&tail, at) != Some(END_SIGNATURE) {
@@ -496,13 +507,17 @@ fn make_entry(
 
 fn kind_of(name: &[u8], external: u32) -> Kind {
     let unix = (external >> 16) & 0o170000;
+    // The DOS attributes occupy the low byte of the external attributes. Bit
+    // 4 marks a directory, and a ZIP made on Windows can name it without the
+    // trailing slash.
+    let dos_directory = external & 0x10 != 0;
     // P9: only a regular file (or an unset DOS attribute) and a directory are
     // listed as such. A symlink, device, socket or any other kind is not.
     let other = !matches!(unix, 0 | 0o100000 | 0o040000);
     if other {
         return Kind::Other;
     }
-    if name.ends_with(b"/") || unix == 0o040000 {
+    if name.ends_with(b"/") || unix == 0o040000 || dos_directory {
         return Kind::Directory;
     }
     if archive_name(name) {

@@ -10,11 +10,11 @@ The runner is the capsule kit's (`examples/capsule-kit/falsify`).
 
 F-numbers here are the design's (examples/archive-viewer/DESIGN.md, "Falsifier
 plan"); this slice's core covers F6, F6b, F6c, F7 to F17, F19 to F25, F29 to
-F31, F40 to F42. The lettered cases F6d to F6f, F15b, F21b to F21e, F22b,
-F23b to F23d, F25b to F25f, F30b and F41b to F41c cover bounds, comparisons
-and request fields DESIGN states but gives no row, and F32 covers the whole
-view's cap. F18 (Bus v2 depth) and the preview falsifiers F1 to F5 and F26 to
-F28 wait for their slices.
+F31, F40 to F42. The lettered cases F6d to F6f, F15b, F16b, F19b, F21b to
+F21e, F22b, F23b to F23d, F25b to F25f, F30b and F41b to F41d cover bounds,
+comparisons and request fields DESIGN states but gives no row, and F32 covers
+the whole view's cap. F18 (Bus v2 depth) and the preview falsifiers F1 to F5
+and F26 to F28 wait for their slices.
 """
 import pathlib
 import sys
@@ -119,10 +119,19 @@ CASES = [
      "    let other = !matches!(unix, 0 | 0o100000 | 0o040000);",
      "    let other = false && !matches!(unix, 0 | 0o100000 | 0o040000);",
      ["a_symlink_entry_is_blocked", "other_entry_kinds_are_blocked"]),
-    ("F17 a nested archive is not listed as one",
+    ("F16b the DOS directory attribute is ignored",
      "src/zip.rs",
-     "    if archive_name(name) {",
-     "    if false {",
+     '    if name.ends_with(b"/") || unix == 0o040000 || dos_directory {',
+     '    if name.ends_with(b"/") || unix == 0o040000 {',
+     ["a_dos_directory_entry_is_listed_as_a_directory",
+      "a_dos_directory_with_data_is_blocked"]),
+    ("F17 a nested archive is opened",
+     "src/zip.rs",
+     "    let length = LOCAL_HEADER_BYTES + u64::from(entry.name_len);",
+     "    if entry.kind == Kind::Archive {\n"
+     "        let _ = reader.read(entry.data_start, entry.compressed_size);\n"
+     "    }\n"
+     "    let length = LOCAL_HEADER_BYTES + u64::from(entry.name_len);",
      ["a_nested_archive_is_listed_not_opened"]),
     # L1 to L4.
     ("F19 the tail search reads 64 KiB",
@@ -130,6 +139,11 @@ CASES = [
      "pub const MAX_COMMENT_BYTES: u64 = 1024;",
      "pub const MAX_COMMENT_BYTES: u64 = 64 * 1024;",
      ["a_comment_over_1_kib_refuses_the_archive_without_reading_it"]),
+    ("F19b a short tail answer is accepted",
+     "src/zip.rs",
+     "    if tail.len() as u64 != tail_length {",
+     "    if false {",
+     ["a_short_tail_response_refuses_the_archive"]),
     ("F20 the last end record wins",
      "src/zip.rs",
      "    match candidates.len() {\n        1 => {}",
@@ -206,6 +220,11 @@ CASES = [
      "            if list.len() > MAX_REQUEST_SHOW {",
      "            if false {",
      ["a_request_with_too_many_indexes_is_refused"]),
+    ("F41d the kit URI check is removed",
+     "src/request.rs",
+     "    check_object_uri(uri, USERS_PREFIX)",
+     "    Ok(())",
+     ["a_request_outside_the_users_folders_is_refused"]),
     # Authority stops, never skips.
     ("F42 a denied read becomes a content skip",
      "src/zip.rs",

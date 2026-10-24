@@ -236,16 +236,16 @@ fn single(name: &str) -> FakeBus {
     )
 }
 
-/// A fake Runtime that answers the directory read short, as a provider can
-/// when the object changes after the tail read.
-struct ShortDirectoryBus {
+/// A fake Runtime that answers one read short, as a provider can when the
+/// object changes after an earlier read.
+struct ShortReadBus {
     inner: FakeBus,
     archive: String,
     at: u64,
     keep: usize,
 }
 
-impl Bus for ShortDirectoryBus {
+impl Bus for ShortReadBus {
     fn request(
         &mut self,
         resource: &str,
@@ -513,6 +513,35 @@ fn a_request_for_an_appdata_case_alias_is_refused() {
         assert_nothing_written(&bus);
         assert!(bus.invokes_on(app_data).is_empty(), "{app_data}");
         assert_no_archive_request(&bus, app_data);
+    }
+}
+
+#[test]
+fn a_request_outside_the_users_folders_is_refused() {
+    // The kit's URI check is this caller's rule too: a wrong prefix, a
+    // traversal, an empty segment, a folder, or a malformed character all
+    // stop the run before the archive grant.
+    for uri in [
+        "localhost://Users/other/Documents/trip.zip",
+        "localhost://Users/selfX/Documents/trip.zip",
+        "localhost://Users/self/Documents/../secret.zip",
+        "localhost://Users/self/Documents//secret.zip",
+        "localhost://Users/self/Documents/",
+        "localhost://Users/self/Documents/trip.zip?x",
+        "localhost://Users/self/Documents/trip\\zip",
+        "localhost://Users/self/Documents/trip\n.zip",
+    ] {
+        let mut bus = FakeBus::default()
+            .object(REQUEST_URI, request(uri, &[]))
+            .allow(REQUEST_URI, "read")
+            .allow(VIEW_URI, "write")
+            .object(uri, build(&[Spec::file("a.txt")], &[]))
+            .allow(uri, "read");
+        let err = run(&mut bus).expect_err("a uri outside the person's folders is refused");
+        assert!(matches!(err, Refusal::Input(_)), "{uri:?}: {err:?}");
+        assert_nothing_written(&bus);
+        assert!(bus.invokes_on(uri).is_empty(), "{uri:?}");
+        assert_no_archive_request(&bus, uri);
     }
 }
 
@@ -788,20 +817,8 @@ fn other_entry_kinds_are_blocked() {
     assert_eq!(entries(&bus)[1]["kind"], "other");
 }
 
-#[test]
-fn a_nested_archive_is_listed_not_opened() {
-    let inner = build(&[Spec::file("x.txt")], &[]);
-    let spec = Spec::file("inner.zip").data(&inner);
-    // A filler keeps the object larger than the 22 + 1,024-byte tail, so the
-    // tail read cannot cover the nested archive either.
-    let filler = Spec::file("filler.bin").data(&vec![0u8; 1000]);
-    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, build(&[spec, filler], &[]));
-    assert_eq!(status_of(&bus, 0), ("listed".to_string(), None));
-    assert_eq!(entries(&bus)[0]["kind"], "archive");
-    // Its bytes were never read: no window reaches its data, which starts
-    // after the 30-byte local header and its 9-byte name.
-    let data_start = 30 + 9;
-    let data_end = data_start + inner.len();
+/// No read window reaches the bytes of the nested archive, in any run.
+fn assert_nested_data_unread(bus: &FakeBus, data_start: u64, data_end: u64) {
     for call in bus.invokes_on(ARCHIVE) {
         if let Call::Invoke {
             operation, body, ..
@@ -814,11 +831,33 @@ fn a_nested_archive_is_listed_not_opened() {
                 // The one-byte size probes may land anywhere; no other
                 // read window reaches the entry's data.
                 assert!(
-                    length == 1 || end <= data_start as u64 || offset >= data_end as u64,
+                    length == 1 || end <= data_start || offset >= data_end,
                     "a read reached the entry's data: {body}"
                 );
             }
         }
+    }
+}
+
+#[test]
+fn a_nested_archive_is_listed_not_opened() {
+    let inner = build(&[Spec::file("x.txt")], &[]);
+    let spec = Spec::file("inner.zip").data(&inner);
+    // A filler keeps the object larger than the 22 + 1,024-byte tail, so the
+    // tail read cannot cover the nested archive either.
+    let filler = Spec::file("filler.bin").data(&vec![0u8; 1000]);
+    let archive = build(&[spec, filler], &[]);
+    // Its data starts after the 30-byte local header and its 9-byte name.
+    let data_start = 30 + 9;
+    let data_end = data_start + inner.len() as u64;
+    // An ordinary listing and a request to show the entry both leave its
+    // bytes unread: N1 says a nested archive is listed, never opened.
+    for show in [Vec::new(), vec![0]] {
+        let bus = run_fixture(request(ARCHIVE, &show), ARCHIVE, archive.clone());
+        assert_eq!(status_of(&bus, 0), ("listed".to_string(), None));
+        assert_eq!(entries(&bus)[0]["kind"], "archive");
+        assert!(skipped(&bus).is_empty());
+        assert_nested_data_unread(&bus, data_start, data_end);
     }
 }
 
@@ -926,6 +965,36 @@ fn an_archive_without_an_end_record_is_refused() {
     let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
     let (code, _) = refused(&bus);
     assert_eq!(code, "end_record_missing");
+}
+
+#[test]
+fn a_short_tail_response_refuses_the_archive() {
+    // A valid archive with a seven-byte comment and a filler that puts the
+    // tail window inside the object. Truncating the last seven bytes (the
+    // comment) leaves the end record and every directory byte intact, so
+    // only the answer's own length proves that the tail is short.
+    let filler = Spec::file("filler.bin").data(&vec![0u8; 2000]);
+    let archive = build(&[Spec::file("a.txt"), filler], b"1234567");
+    let tail = 22 + MAX_COMMENT_BYTES;
+    assert!(archive.len() as u64 > tail);
+    let at = archive.len() as u64 - tail;
+    let inner = bus_with(request(ARCHIVE, &[]), ARCHIVE, archive);
+    let mut bus = ShortReadBus {
+        inner,
+        archive: ARCHIVE.to_string(),
+        at,
+        keep: (tail - 7) as usize,
+    };
+    run(&mut bus).expect("a content refusal still writes the view");
+    let view: Value = serde_json::from_str(
+        bus.inner
+            .written
+            .get(VIEW_URI)
+            .expect("the view was written"),
+    )
+    .unwrap();
+    assert!(view["entries"].as_array().unwrap().is_empty());
+    assert_eq!(view["refused"]["code"], "end_record_truncated");
 }
 
 #[test]
@@ -1088,7 +1157,7 @@ fn a_short_directory_response_refuses_the_archive() {
     let archive = build(&[Spec::file("a.txt")], &[]);
     let at = directory_start(&archive) as u64;
     let inner = bus_with(request(ARCHIVE, &[]), ARCHIVE, archive);
-    let mut bus = ShortDirectoryBus {
+    let mut bus = ShortReadBus {
         inner,
         archive: ARCHIVE.to_string(),
         at,
@@ -1339,6 +1408,34 @@ fn a_nonempty_directory_is_blocked_and_the_valid_entry_still_lists() {
     assert_eq!(entries(&bus)[0]["kind"], "directory");
     assert_eq!(status_of(&bus, 1), ("listed".to_string(), None));
     assert!(view(&bus).get("refused").is_none());
+}
+
+#[test]
+fn a_dos_directory_entry_is_listed_as_a_directory() {
+    // A ZIP made on Windows can mark a directory with the DOS attribute and
+    // no trailing slash; the low byte of the external attributes is DOS.
+    let mut directory = Spec::file("dir");
+    directory.external = 0x10;
+    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, build(&[directory], &[]));
+    assert_eq!(status_of(&bus, 0), ("listed".to_string(), None));
+    assert_eq!(entries(&bus)[0]["kind"], "directory");
+}
+
+#[test]
+fn a_dos_directory_with_data_is_blocked() {
+    // L9: the DOS attribute says directory, so its bytes are refused even
+    // though the name has no trailing slash.
+    let mut directory = Spec::file("dir").data(b"data!");
+    directory.external = 0x10;
+    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, build(&[directory], &[]));
+    assert_eq!(
+        status_of(&bus, 0),
+        (
+            "blocked".to_string(),
+            Some("directory_with_data".to_string())
+        )
+    );
+    assert_eq!(entries(&bus)[0]["kind"], "directory");
 }
 
 // --- The read budget: F31 --------------------------------------------------
