@@ -418,8 +418,8 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "    r\"^[ \\t]*(?:error(?:\\[[^\\]]*\\])?:|Error:|Traceback \\(most recent call last\\))\",",
-     "new": "    r\"^(?:error(?:\\[[^\\]]*\\])?:|Error:|Traceback \\(most recent call last\\))\","
+     "old": "HARNESS_ERROR = re.compile(\n    r\"\\b(?:error|Error)(?:\\[[^\\]]*\\])?:\\s|Traceback \\(most recent call last\\)\")",
+     "new": "HARNESS_ERROR = re.compile(\n    r\"^(?:error|Error)(?:\\[[^\\]]*\\])?:\\s|Traceback \\(most recent call last\\)\")"
     }
    ],
    "tests": [
@@ -450,8 +450,40 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "    output = done.stdout + \"\\n\" + done.stderr",
-     "new": "    output = done.stdout + done.stderr"
+     "old": "    output = ANSI.sub(\"\", done.stdout + \"\\n\" + done.stderr)",
+     "new": "    output = ANSI.sub(\"\", done.stdout + done.stderr)"
+    }
+   ],
+   "tests": [
+    "the streams keep their own lines"
+   ]
+  },
+  {
+   "id": "FS17",
+   "title": "a harness error after a prefix is not a marker",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "HARNESS_ERROR = re.compile(\n    r\"\\b(?:error|Error)(?:\\[[^\\]]*\\])?:\\s|Traceback \\(most recent call last\\)\")",
+     "new": "HARNESS_ERROR = re.compile(\n    r\"^[ \\t]*(?:error|Error)(?:\\[[^\\]]*\\])?:\\s|Traceback \\(most recent call last\\)\")"
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
+  },
+  {
+   "id": "FS18",
+   "title": "terminal formatting is not stripped, so a colored marker is missed",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    output = ANSI.sub(\"\", done.stdout + \"\\n\" + done.stderr)",
+     "new": "    output = done.stdout + \"\\n\" + done.stderr"
     }
    ],
    "tests": [
