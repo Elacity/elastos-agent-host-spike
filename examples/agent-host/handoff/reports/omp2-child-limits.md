@@ -687,3 +687,50 @@ Guest hash:   a33bd4acdf2f76cb2824efd73855bc2f1ec9de3677569813386fad8675f3ddba o
 Principles:   5 (a saved copy that is not the start of the log fails closed on load), 7 (the length-only
               boundary has a test that fails first and a caught falsifier), 10 (still one boundary rule).
 ```
+
+## Update: Codex FAIL at 28940a07, two findings and a falsifier check (24 Oct)
+
+```text
+Finding 1:    the boundary rule made the saved copy the start of the log, but `prune_tool_results` still
+              shortened tool results in place. A 200-character tool result, an open compaction, then a
+              prune: the journal encoded, the load refused it with "record", and commit and crash restore
+              both refused. `admit_system` on the incapable path (a new system head) rewrote node 0 the
+              same way; Codex did not name it, the same rule closes it.
+Fix:          one `log_may_change_in_place`: while a compaction is open the log only grows, so a step that
+              would change a node already in it is refused with `COMPACTION_OPEN_REASON` ("a compaction
+              is open; commit or restore it first") and changes nothing. `prune_tool_results` (now
+              `Result<usize, _>`) and the head rewrite in `admit_system` (now `Result<(), _>`) ask it
+              first. Appends are never refused; the same head text changes nothing and is not refused.
+Finding 2:    a refused commit or crash restore returned a bare false, so a caller could not tell a broken
+              compaction from one never opened.
+Fix:          one `open_compaction_ok` admits both paths. `commit_compact` and `note_crash_during_compact`
+              now return `Result<(), &'static str>`: `COMPACTION_NOT_OPEN_REASON` ("no compaction is open")
+              or `COMPACTION_BOUNDARY_REASON` ("the open compaction does not match the log; start a new
+              task"). A crash restore with no saved copy also refuses with the boundary reason and now
+              changes nothing (it used to close the compaction). The load still says "record", like every
+              other stored-rule refusal. Every caller now reads the result; none drops it.
+Finding 3:    PX57 targets exactly the saved-prefix equality: it removes
+              `|| journal.events[..saved.len()] != saved[..]` and keeps the length check, and
+              a_saved_compaction_that_is_not_the_start_of_the_log_is_refused catches it.
+Tests:        pruning_during_an_open_compaction_keeps_the_journal_loadable (Codex's sequence) and
+              a_head_rewrite_during_an_open_compaction_keeps_the_journal_loadable ask only operations
+              present at 28940a07, so they compile there and fail at the load (2 failed, 237 filtered out).
+              a_step_that_changes_the_log_in_place_says_a_compaction_is_open (both refusals give
+              `COMPACTION_OPEN_REASON`; the compaction then commits and restores, and once restored both
+              steps run) and a_refused_commit_or_restore_says_why (not open and broken boundary, for both
+              paths, journal unchanged) use the new results. The three boundary tests now expect
+              `COMPACTION_BOUNDARY_REASON`, not just a refusal.
+Falsifiers:   CB01 (pruning skips the rule), CB02 (the head rewrite skips it), CB03 (the rule refuses
+              nothing), CB04 (a broken boundary says not open) and CB05 (not open says broken boundary)
+              new; PX55 and PX56 re-targeted to `open_compaction_ok`. All caught.
+Tests run:    ./examples/agent-host/verify.sh -> "242 passed", runner self-test OK, clippy clean, build OK.
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Full run:     python3 -I examples/agent-host/falsify.py: 288 CAUGHT, 1 CAUGHT (does not build: OY19), 1
+              SURVIVED (expected, by design: OZ01) of 290; no NOT RUN, no NO MATCH.
+Guest hash:   ced6b73611c22006bdac39152b4b7025a47c638a90732278c6ad7a3a474de628 on verify.sh (Linux checkout).
+              wasm_sections.py: file 668152 bytes; /1/2 149 5ee6b40d46f6a045 (import list unchanged).
+Principles:   5 (no step can break the boundary of an open compaction; a refusal changes nothing), 10 (one
+              in-place rule for both steps that edit the log; one admission for commit and crash restore),
+              11 (each refusal says why and what to do), 12 (this note), 7 (Codex's sequence fails first on
+              28940a07; each new rule and reason has a caught falsifier).
+```

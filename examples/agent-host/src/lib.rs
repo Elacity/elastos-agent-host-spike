@@ -528,6 +528,19 @@ const FORMAT_1_REASON: &str = "journal format 1 not supported; start a new task"
 /// Like the format 1 reason, it says what to do.
 #[cfg(any(test, target_arch = "wasm32"))]
 const TASK_BUDGET_REASON: &str = "the task budget was not recorded; start a new task";
+/// Why a step that would change a node already in the log is refused while a
+/// compaction is open (`log_may_change_in_place`).
+#[cfg(any(test, target_arch = "wasm32"))]
+const COMPACTION_OPEN_REASON: &str = "a compaction is open; commit or restore it first";
+/// Why a commit or a crash restore is refused when no compaction is open.
+#[cfg(any(test, target_arch = "wasm32"))]
+const COMPACTION_NOT_OPEN_REASON: &str = "no compaction is open";
+/// Why a commit or a crash restore is refused when the open compaction does
+/// not match the log (`compaction_boundary_ok`). Like the format 1 reason, it
+/// says what to do.
+#[cfg(any(test, target_arch = "wasm32"))]
+const COMPACTION_BOUNDARY_REASON: &str =
+    "the open compaction does not match the log; start a new task";
 /// Bytes cross the Runtime bridge as a JSON number array, up to four characters
 /// per byte ("255,"), inside a 1 MiB frame. 192 KiB of 0xFF fits; 256 KiB does not.
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -1620,11 +1633,12 @@ fn bump_epoch(journal: &mut Journal) {
     journal.epoch = journal.epoch.saturating_add(1);
 }
 
-/// `in_history` appends a later system node. The incapable path rewrites node 0.
+/// `in_history` appends a later system node. The incapable path rewrites node 0,
+/// which `log_may_change_in_place` refuses while a compaction is open.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn admit_system(journal: &mut Journal, text: &str, in_history: bool) {
+fn admit_system(journal: &mut Journal, text: &str, in_history: bool) -> Result<(), &'static str> {
     if text.is_empty() {
-        return;
+        return Ok(());
     }
     let has_system = journal
         .events
@@ -1640,7 +1654,7 @@ fn admit_system(journal: &mut Journal, text: &str, in_history: bool) {
             },
         );
         bump_epoch(journal);
-        return;
+        return Ok(());
     }
     if in_history {
         journal.events.push(SurfaceNode {
@@ -1648,19 +1662,22 @@ fn admit_system(journal: &mut Journal, text: &str, in_history: bool) {
             text: text.to_string(),
             source: NodeSource::SystemLine,
         });
-        return;
+        return Ok(());
     }
-    if let Some(head) = journal
+    let Some(head) = journal
         .events
-        .iter_mut()
-        .find(|event| event.role == Role::System)
-    {
-        if head.text == text {
-            return;
-        }
-        head.text = text.to_string();
-        bump_epoch(journal);
+        .iter()
+        .position(|event| event.role == Role::System)
+    else {
+        return Ok(());
+    };
+    if journal.events[head].text == text {
+        return Ok(());
     }
+    log_may_change_in_place(journal)?;
+    journal.events[head].text = text.to_string();
+    bump_epoch(journal);
+    Ok(())
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -1997,46 +2014,58 @@ fn child_records_since_compaction(journal: &Journal) -> impl Iterator<Item = &Su
     })
 }
 
+/// While a compaction is open the log only grows, so the saved copy stays its
+/// start (`compaction_boundary_ok`). Every step that would change a node
+/// already in the log asks this one rule first and changes nothing when it
+/// is refused: pruning and the head rewrite.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn log_may_change_in_place(journal: &Journal) -> Result<(), &'static str> {
+    if journal.compaction_open || journal.compact_backup.is_some() {
+        return Err(COMPACTION_OPEN_REASON);
+    }
+    Ok(())
+}
+
+/// The one admission for a commit and a crash restore: a compaction is open
+/// and its saved copy is the start of the log. Each refusal says why, and
+/// neither path changes the journal when refused.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn open_compaction_ok(journal: &Journal) -> Result<(), &'static str> {
+    if !journal.compaction_open {
+        return Err(COMPACTION_NOT_OPEN_REASON);
+    }
+    compaction_boundary_ok(journal).map_err(|_| COMPACTION_BOUNDARY_REASON)
+}
+
 /// Apply an open compaction and start the next series.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn commit_compact(journal: &mut Journal) -> bool {
-    if !journal.compaction_open {
-        return false;
-    }
-    if compaction_boundary_ok(journal).is_err() {
-        return false;
-    }
+fn commit_compact(journal: &mut Journal) -> Result<(), &'static str> {
+    open_compaction_ok(journal)?;
     let Some(mut replacement) = journal.compact_pending.take() else {
-        return false;
+        return Err(COMPACTION_BOUNDARY_REASON);
     };
     replacement.extend(child_records_since_compaction(journal).cloned());
     journal.events = replacement;
     journal.compaction_open = false;
     journal.compact_backup = None;
     bump_epoch(journal);
-    true
+    Ok(())
 }
 
 /// A crash while compaction is open restores the saved bytes and series.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn note_crash_during_compact(journal: &mut Journal) -> bool {
-    if !journal.compaction_open {
-        return false;
-    }
-    if compaction_boundary_ok(journal).is_err() {
-        return false;
-    }
-    journal.compact_pending = None;
+fn note_crash_during_compact(journal: &mut Journal) -> Result<(), &'static str> {
+    open_compaction_ok(journal)?;
     let carried: Vec<SurfaceNode> = child_records_since_compaction(journal).cloned().collect();
     let Some((mut saved, saved_epoch)) = journal.compact_backup.take() else {
-        journal.compaction_open = false;
-        return false;
+        return Err(COMPACTION_BOUNDARY_REASON);
     };
+    journal.compact_pending = None;
     saved.extend(carried);
     journal.events = saved;
     journal.epoch = saved_epoch;
     journal.compaction_open = false;
-    true
+    Ok(())
 }
 
 /// Keep node 0. Replace the conversation tail with one summary only when that
@@ -2044,14 +2073,16 @@ fn note_crash_during_compact(journal: &mut Journal) -> bool {
 /// stay after the summary. A refused compaction leaves the journal unchanged.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn compact(journal: &mut Journal, summary: &str) -> bool {
-    begin_compact(journal, summary) && commit_compact(journal)
+    begin_compact(journal, summary) && commit_compact(journal).is_ok()
 }
 
 /// Shorten a tool result longer than 80 bytes to its first 40 characters
 /// plus an ellipsis. The series and the system head stay put. This does not
-/// call a model and does not write the summary.
+/// call a model and does not write the summary. It changes nodes in place, so
+/// it is refused while a compaction is open (`log_may_change_in_place`).
 #[cfg(any(test, target_arch = "wasm32"))]
-fn prune_tool_results(journal: &mut Journal) -> usize {
+fn prune_tool_results(journal: &mut Journal) -> Result<usize, &'static str> {
+    log_may_change_in_place(journal)?;
     let mut pruned = 0;
     for node in &mut journal.events {
         if node.role != Role::ToolResult || node.text.len() <= 80 {
@@ -2062,7 +2093,7 @@ fn prune_tool_results(journal: &mut Journal) -> usize {
         node.text = kept;
         pruned += 1;
     }
-    pruned
+    Ok(pruned)
 }
 
 /// Text a summary model would read after pruning: the system head, then the
@@ -4374,7 +4405,7 @@ fn open_child_host(
         task: parent.task.clone(),
         child: child_id,
     });
-    admit_system(&mut host, SYSTEM_HEAD, true);
+    admit_system(&mut host, SYSTEM_HEAD, true)?;
     propose_run(&mut host, resource, &["true".to_string()])?;
     if host.steps.iter().any(|step| step.grant.is_some()) {
         return Err("inherited");
@@ -5499,9 +5530,11 @@ impl ResourceBus for WasmBus {
 #[cfg(any(test, target_arch = "wasm32"))]
 fn one_turn() -> Journal {
     let mut journal = empty_journal();
-    admit_system(&mut journal, SYSTEM_HEAD, true);
+    admit_system(&mut journal, SYSTEM_HEAD, true)
+        .expect("a journal with no open compaction takes a system line");
     admit_user(&mut journal, "hello");
-    admit_system(&mut journal, "Reply in one short paragraph.", true);
+    admit_system(&mut journal, "Reply in one short paragraph.", true)
+        .expect("a journal with no open compaction takes a system line");
     journal
 }
 
@@ -5510,7 +5543,8 @@ fn one_turn() -> Journal {
 fn two_turns() -> Journal {
     let mut journal = one_turn();
     admit_user(&mut journal, "second turn");
-    admit_system(&mut journal, "Keep the first system line unchanged.", true);
+    admit_system(&mut journal, "Keep the first system line unchanged.", true)
+        .expect("a journal with no open compaction takes a system line");
     journal
 }
 
@@ -5546,7 +5580,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         admit_tool_result(&mut journal, &"x".repeat(200));
         admit_tool_result(&mut journal, "ok");
         let summary_input = shadowed_summary_input(&journal);
-        let long_result_shortened = prune_tool_results(&mut journal) == 1
+        let long_result_shortened = prune_tool_results(&mut journal) == Ok(1)
             && journal.epoch == 1
             && journal.events[0].text == head
             && journal.events.iter().any(|node| {
@@ -5921,21 +5955,21 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || !open.compaction_open
             || open.events != saved_events
             || open.epoch != saved_epoch
-            || !note_crash_during_compact(&mut open)
+            || note_crash_during_compact(&mut open).is_err()
             || open.compaction_open
             || open.compact_backup.is_some()
             || open.compact_pending.is_some()
             || open.events != saved_events
             || open.epoch != saved_epoch
-            || note_crash_during_compact(&mut open)
-            || commit_compact(&mut open)
+            || note_crash_during_compact(&mut open).is_ok()
+            || commit_compact(&mut open).is_ok()
             || !begin_compact(&mut open, COMPACTION_SUMMARY)
-            || !commit_compact(&mut open)
+            || commit_compact(&mut open).is_err()
             || open.compaction_open
             || open.epoch != saved_epoch + 1
             || open.events.get(1).map(|node| node.source.clone())
                 != Some(NodeSource::CompactionCheckpoint)
-            || commit_compact(&mut open)
+            || commit_compact(&mut open).is_ok()
         {
             return Err(elastos::bus::types::BusError::Invalid(
                 "a crash during compaction kept the summary".to_string(),
@@ -7229,9 +7263,9 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         }
         let mut crashed = folded.clone();
         if !begin_compact(&mut crashed, COMPACTION_SUMMARY)
-            || !note_crash_during_compact(&mut crashed)
+            || note_crash_during_compact(&mut crashed).is_err()
             || crashed.compaction_open
-            || commit_compact(&mut crashed)
+            || commit_compact(&mut crashed).is_ok()
             || current_observed_text(
                 &crashed.events,
                 "localhost://Users/self/Projects/demo/notes.txt",
@@ -9188,8 +9222,9 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             ));
         }
         let epoch_before = repeats.epoch;
-        admit_system(&mut repeats, SYSTEM_HEAD, false);
-        if system_head(&repeats.events) != Some(SYSTEM_HEAD)
+        let rewritten = admit_system(&mut repeats, SYSTEM_HEAD, false);
+        if rewritten.is_err()
+            || system_head(&repeats.events) != Some(SYSTEM_HEAD)
             || repeats
                 .events
                 .first()
@@ -9591,9 +9626,9 @@ mod tests {
         journal.compact_pending = Some(vec![journal.events[0].clone()]);
         journal.compact_backup = Some((Vec::new(), 7));
         let before = journal.clone();
-        assert!(!commit_compact(&mut journal));
+        assert!(commit_compact(&mut journal).is_err());
         assert_eq!(journal, before);
-        assert!(!note_crash_during_compact(&mut journal));
+        assert!(note_crash_during_compact(&mut journal).is_err());
         assert_eq!(journal, before);
     }
 
@@ -9932,7 +9967,7 @@ mod tests {
     #[test]
     fn the_same_head_text_does_not_start_a_new_series() {
         let mut journal = one_turn();
-        admit_system(&mut journal, SYSTEM_HEAD, false);
+        admit_system(&mut journal, SYSTEM_HEAD, false).unwrap();
         assert_eq!(journal.epoch, 1);
         assert_eq!(journal.events.len(), 3);
         assert_eq!(system_head(&journal.events), Some(SYSTEM_HEAD));
@@ -9941,7 +9976,7 @@ mod tests {
     #[test]
     fn an_incapable_prompt_rewrites_the_head_and_starts_a_series() {
         let mut journal = one_turn();
-        admit_system(&mut journal, "Replacement head.", false);
+        admit_system(&mut journal, "Replacement head.", false).unwrap();
         assert_eq!(system_head(&journal.events), Some("Replacement head."));
         assert_eq!(journal.epoch, 2);
         assert_eq!(
@@ -9997,18 +10032,18 @@ mod tests {
         assert_eq!(journal.epoch, before.epoch);
         assert!(!begin_compact(&mut journal, COMPACTION_SUMMARY));
         assert_eq!(journal.events, before.events);
-        assert!(note_crash_during_compact(&mut journal));
+        assert!(note_crash_during_compact(&mut journal).is_ok());
         assert!(!journal.compaction_open);
         assert!(journal.compact_backup.is_none());
         assert!(journal.compact_pending.is_none());
         assert_eq!(journal.events, before.events);
         assert_eq!(journal.epoch, before.epoch);
-        assert!(!note_crash_during_compact(&mut journal));
-        assert!(!commit_compact(&mut journal));
+        assert!(note_crash_during_compact(&mut journal).is_err());
+        assert!(commit_compact(&mut journal).is_err());
         assert_eq!(journal.events, before.events);
 
         assert!(begin_compact(&mut journal, COMPACTION_SUMMARY));
-        assert!(commit_compact(&mut journal));
+        assert!(commit_compact(&mut journal).is_ok());
         assert!(!journal.compaction_open);
         assert_eq!(journal.epoch, before.epoch + 1);
         assert_eq!(journal.events[0], before.events[0]);
@@ -10017,7 +10052,7 @@ mod tests {
             .events
             .iter()
             .any(|node| { node.source == NodeSource::Skill && node.text == skill }));
-        assert!(!commit_compact(&mut journal));
+        assert!(commit_compact(&mut journal).is_err());
     }
 
     #[test]
@@ -12268,7 +12303,7 @@ mod tests {
         assert_eq!(head[..], bytes[bytes.len() - 32..]);
         assert_eq!(encode_journal(&back, &[0; 32]).unwrap(), bytes);
         let mut committed = journal.clone();
-        assert!(commit_compact(&mut committed));
+        assert!(commit_compact(&mut committed).is_ok());
         assert!(committed.compact_backup.is_none() && committed.compact_pending.is_none());
         let bytes = encode_journal(&committed, &[0; 32]).unwrap();
         assert_eq!(decode_journal(&bytes).unwrap().0, committed);
@@ -12339,7 +12374,7 @@ mod tests {
         assert_eq!(back.events[0], journal.events[0]);
         assert_eq!(back.events[0].text, SYSTEM_HEAD);
         let mut compacted = a_rich_journal();
-        assert!(commit_compact(&mut compacted));
+        assert!(commit_compact(&mut compacted).is_ok());
         assert_eq!(compacted.epoch, 2);
         let back = decode_journal(&encode_journal(&compacted, &[0; 32]).unwrap())
             .unwrap()
@@ -12516,7 +12551,7 @@ mod tests {
         let journal = two_turns();
         let original = model_bytes(&journal.events).unwrap();
         let mut rewritten = journal.clone();
-        admit_system(&mut rewritten, "Replacement head.", false);
+        admit_system(&mut rewritten, "Replacement head.", false).unwrap();
         assert_ne!(model_bytes(&rewritten.events).unwrap(), original);
         let mut with_step = journal.clone();
         let _id = propose_step(&mut with_step);
@@ -12861,9 +12896,9 @@ mod tests {
         );
         let mut crashed = journal.clone();
         assert!(begin_compact(&mut crashed, COMPACTION_SUMMARY));
-        assert!(note_crash_during_compact(&mut crashed));
+        assert!(note_crash_during_compact(&mut crashed).is_ok());
         assert!(!crashed.compaction_open);
-        assert!(!commit_compact(&mut crashed));
+        assert!(commit_compact(&mut crashed).is_err());
         assert_eq!(
             current_observed_text(&crashed.events, notes).as_deref(),
             Some("hello once more")
@@ -14694,7 +14729,7 @@ mod tests {
             .windows(b"/tmp".len())
             .any(|window| window == b"/tmp"));
         let epoch_before = journal.epoch;
-        admit_system(&mut journal, SYSTEM_HEAD, false);
+        admit_system(&mut journal, SYSTEM_HEAD, false).unwrap();
         assert_eq!(system_head(&journal.events), Some(SYSTEM_HEAD));
         assert!(journal
             .events
@@ -14867,7 +14902,7 @@ mod tests {
         assert!(before.starts_with(SYSTEM_HEAD));
         assert!(before.contains(&"x".repeat(200)));
         assert!(!before.contains("Prefer the Runtime grant."));
-        assert_eq!(prune_tool_results(&mut journal), 1);
+        assert_eq!(prune_tool_results(&mut journal), Ok(1));
         assert_eq!(journal.epoch, epoch);
         assert_eq!(journal.events[0].text, head);
         assert!(journal.events.iter().any(|node| {
@@ -18206,7 +18241,7 @@ mod tests {
     #[test]
     fn only_the_host_writes_a_later_system_line() {
         let mut journal = two_turns();
-        admit_system(&mut journal, "Reply in one short paragraph.", true);
+        admit_system(&mut journal, "Reply in one short paragraph.", true).unwrap();
         let line = journal.events.last().unwrap().clone();
         assert_eq!(
             (line.role, &line.source),
@@ -21457,9 +21492,9 @@ mod tests {
                 "open {crash}"
             );
             if crash {
-                assert!(note_crash_during_compact(&mut journal));
+                assert!(note_crash_during_compact(&mut journal).is_ok());
             } else {
-                assert!(commit_compact(&mut journal));
+                assert!(commit_compact(&mut journal).is_ok());
             }
             assert_eq!(
                 child_stops(&journal)
@@ -21572,7 +21607,10 @@ mod tests {
         saved_past_the_log(&mut journal);
         assert!(note_time_refusal(&mut journal, child));
         let before = journal.clone();
-        assert!(!commit_compact(&mut journal));
+        assert_eq!(
+            commit_compact(&mut journal),
+            Err(COMPACTION_BOUNDARY_REASON)
+        );
         assert_eq!(journal, before);
     }
 
@@ -21583,7 +21621,10 @@ mod tests {
         saved_past_the_log(&mut journal);
         assert!(note_time_refusal(&mut journal, child));
         let before = journal.clone();
-        assert!(!note_crash_during_compact(&mut journal));
+        assert_eq!(
+            note_crash_during_compact(&mut journal),
+            Err(COMPACTION_BOUNDARY_REASON)
+        );
         assert_eq!(journal, before);
     }
 
@@ -21599,8 +21640,96 @@ mod tests {
             decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
             Err("record")
         );
-        assert!(!commit_compact(&mut journal.clone()));
-        assert!(!note_crash_during_compact(&mut journal));
+        assert_eq!(
+            commit_compact(&mut journal.clone()),
+            Err(COMPACTION_BOUNDARY_REASON)
+        );
+        assert_eq!(
+            note_crash_during_compact(&mut journal),
+            Err(COMPACTION_BOUNDARY_REASON)
+        );
+    }
+
+    /// Codex at 28940a07, finding 1: a 200-character tool result, an open
+    /// compaction, then a prune. Pruning changed the saved start of the log in
+    /// place, so the journal encoded but no longer loaded. Only operations
+    /// present at 28940a07 are asked, so this compiles and fails there.
+    #[test]
+    fn pruning_during_an_open_compaction_keeps_the_journal_loadable() {
+        let mut journal = two_turns();
+        admit_tool_result(&mut journal, &"x".repeat(200));
+        assert!(begin_compact(&mut journal, COMPACTION_SUMMARY));
+        let before = journal.clone();
+        let _ = prune_tool_results(&mut journal);
+        assert!(decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok());
+        assert_eq!(journal, before, "a refused prune changes nothing");
+    }
+
+    /// The same hole through the head rewrite (`admit_system` on the incapable
+    /// path): node 0 changed in place under an open compaction.
+    #[test]
+    fn a_head_rewrite_during_an_open_compaction_keeps_the_journal_loadable() {
+        let mut journal = two_turns();
+        assert!(begin_compact(&mut journal, COMPACTION_SUMMARY));
+        let before = journal.clone();
+        let _ = admit_system(&mut journal, "Replacement head.", false);
+        assert!(decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).is_ok());
+        assert_eq!(journal, before, "a refused rewrite changes nothing");
+    }
+
+    /// Both in-place steps say a compaction is open, and the compaction still
+    /// commits or restores afterwards. Once it is restored they run again.
+    #[test]
+    fn a_step_that_changes_the_log_in_place_says_a_compaction_is_open() {
+        let mut journal = two_turns();
+        admit_tool_result(&mut journal, &"x".repeat(200));
+        assert!(begin_compact(&mut journal, COMPACTION_SUMMARY));
+        assert_eq!(
+            prune_tool_results(&mut journal),
+            Err(COMPACTION_OPEN_REASON)
+        );
+        assert_eq!(
+            admit_system(&mut journal, "Replacement head.", false),
+            Err(COMPACTION_OPEN_REASON)
+        );
+        // The same head changes nothing, so it is not refused.
+        assert_eq!(admit_system(&mut journal, SYSTEM_HEAD, false), Ok(()));
+        assert_eq!(commit_compact(&mut journal.clone()), Ok(()));
+        assert_eq!(note_crash_during_compact(&mut journal), Ok(()));
+        assert_eq!(prune_tool_results(&mut journal), Ok(1));
+        assert_eq!(
+            admit_system(&mut journal, "Replacement head.", false),
+            Ok(())
+        );
+        assert_eq!(system_head(&journal.events), Some("Replacement head."));
+    }
+
+    /// Codex at 28940a07, finding 2: a refused commit or crash restore says
+    /// why, so a caller tells a broken compaction from one never opened.
+    #[test]
+    fn a_refused_commit_or_restore_says_why() {
+        let mut closed = two_turns();
+        let before = closed.clone();
+        assert_eq!(commit_compact(&mut closed), Err(COMPACTION_NOT_OPEN_REASON));
+        assert_eq!(
+            note_crash_during_compact(&mut closed),
+            Err(COMPACTION_NOT_OPEN_REASON)
+        );
+        assert_eq!(closed, before);
+
+        let (mut journal, _child) = compacting_with_a_child();
+        saved_past_the_log(&mut journal);
+        let before = journal.clone();
+        assert_eq!(
+            commit_compact(&mut journal),
+            Err(COMPACTION_BOUNDARY_REASON)
+        );
+        assert_eq!(
+            note_crash_during_compact(&mut journal),
+            Err(COMPACTION_BOUNDARY_REASON)
+        );
+        assert_eq!(journal, before);
+        assert!(COMPACTION_BOUNDARY_REASON.ends_with("start a new task"));
     }
 
     /// R8: on load, no step is still prepared at or before a cancel point or
