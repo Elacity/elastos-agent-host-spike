@@ -120,48 +120,14 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
         zip::listing(&mut reader)?
     };
 
-    let mut previews = Vec::new();
-    let mut previews_budget = preview::Budget::new();
-    let mut skipped = Vec::new();
-    for index in &request.show {
-        match listing.entries.get(*index) {
-            None => skipped.push(Skipped {
-                index: *index,
-                reason: "no_such_entry",
-                message: format!("the archive has no entry {index}"),
-            }),
-            Some(entry) => {
-                let mut reader = zip::Reader::new(bus, &request.uri, &archive_grant, &mut left);
-                match zip::check_shown(&mut reader, entry)? {
-                    Ok(()) => {
-                        // N1: a directory, a nested archive or another kind is
-                        // listed only, and its bytes stay unread.
-                        if entry.kind != Kind::File {
-                            continue;
-                        }
-                        let outcome = preview::preview(&mut reader, entry, &previews_budget)?;
-                        previews_budget.take(&outcome);
-                        match outcome.blocks {
-                            Ok(blocks) => previews.push(Preview {
-                                index: *index,
-                                blocks,
-                            }),
-                            Err(reason) => skipped.push(Skipped {
-                                index: *index,
-                                reason,
-                                message: preview::message(entry, reason),
-                            }),
-                        }
-                    }
-                    Err(reason) => skipped.push(Skipped {
-                        index: *index,
-                        reason,
-                        message: format!("entry {} is not shown: {reason}", entry.path),
-                    }),
-                }
-            }
-        }
-    }
+    let (previews, skipped, _) = previews_for(
+        bus,
+        &request.uri,
+        &archive_grant,
+        &mut left,
+        &listing,
+        &request.show,
+    )?;
 
     let mut text = view_json(&request.uri, &listing, &previews, &skipped);
     let over = text.len() as u64;
@@ -191,6 +157,61 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
         }
     })?;
     Ok(text)
+}
+
+/// The previews and skips of the entries a request names, and the budget they
+/// used. `run` writes the view; the tests read the budget to prove the total.
+pub fn previews_for(
+    bus: &mut dyn Bus,
+    uri: &str,
+    grant: &str,
+    left: &mut u64,
+    listing: &Listing,
+    show: &[usize],
+) -> Result<(Vec<Preview>, Vec<Skipped>, preview::Budget), Refusal> {
+    let mut previews = Vec::new();
+    let mut budget = preview::Budget::new();
+    let mut skipped = Vec::new();
+    for index in show {
+        match listing.entries.get(*index) {
+            None => skipped.push(Skipped {
+                index: *index,
+                reason: "no_such_entry",
+                message: format!("the archive has no entry {index}"),
+            }),
+            Some(entry) => {
+                let mut reader = zip::Reader::new(bus, uri, grant, left);
+                match zip::check_shown(&mut reader, entry)? {
+                    Ok(()) => {
+                        // N1: a directory, a nested archive or another kind is
+                        // listed only, and its bytes stay unread.
+                        if entry.kind != Kind::File {
+                            continue;
+                        }
+                        let outcome = preview::preview(&mut reader, entry, &budget)?;
+                        budget.take(&outcome);
+                        match outcome.blocks {
+                            Ok(blocks) => previews.push(Preview {
+                                index: *index,
+                                blocks,
+                            }),
+                            Err(reason) => skipped.push(Skipped {
+                                index: *index,
+                                reason,
+                                message: preview::message(entry, reason),
+                            }),
+                        }
+                    }
+                    Err(reason) => skipped.push(Skipped {
+                        index: *index,
+                        reason,
+                        message: format!("entry {} is not shown: {reason}", entry.path),
+                    }),
+                }
+            }
+        }
+    }
+    Ok((previews, skipped, budget))
 }
 
 /// The view, keys in sorted order so the text is deterministic.

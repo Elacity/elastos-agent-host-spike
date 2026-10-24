@@ -1848,6 +1848,49 @@ fn a_preview_stops_for_its_budget_before_any_corruption_reason() {
 }
 
 #[test]
+fn an_exact_fit_stream_ends_within_its_budget() {
+    // A stored block of "hello world" followed by the final empty block. The
+    // first 16 compressed bytes produce all 11 output bytes; the last five
+    // end the stream with no output. With exactly 11 bytes of allowance the
+    // entry must still be shown.
+    let compressed: Vec<u8> = vec![
+        0x00, 0x0b, 0x00, 0xf4, 0xff, b'h', b'e', b'l', b'l', b'o', b' ', b'w', b'o', b'r', b'l',
+        b'd', 0x01, 0x00, 0x00, 0xff, 0xff,
+    ];
+    let mut spec = Spec::file("a.txt");
+    spec.method = 8;
+    spec.data = compressed;
+    spec.uncompressed = Some(11);
+    spec.crc = preview::crc32(b"hello world");
+    let archive = build(&[spec], &[]);
+    let (mut bus, grant, entries) = listing_of(archive);
+    let mut left = MAX_READ_BYTES;
+    let budget = preview::Budget {
+        inflate: 11,
+        compressed: u64::MAX,
+    };
+    let outcome = {
+        let mut reader = zip::Reader::new(&mut bus, ARCHIVE, &grant, &mut left);
+        preview::preview(&mut reader, &entries[0], &budget).unwrap()
+    };
+    assert_eq!(outcome.produced, 11);
+    let blocks = outcome.blocks.expect("an exact fit is shown");
+    let blocks: Value = serde_json::from_slice(&blocks).unwrap();
+    assert_eq!(blocks[0]["spans"][0]["text"], "hello world");
+}
+
+#[test]
+fn an_entry_with_junk_after_the_stream_is_skipped() {
+    // L6: the stream must end exactly at the declared compressed size. The
+    // junk is inside the declared bytes, and the output and CRC are right.
+    let mut spec = deflated("a.txt", b"hello");
+    spec.data.extend_from_slice(b"!!!");
+    let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, build(&[spec], &[]));
+    assert_eq!(skipped(&bus)[0]["reason"], "size_mismatch");
+    assert!(previews(&bus).is_empty());
+}
+
+#[test]
 fn an_entry_declared_over_the_cap_is_not_read() {
     // B1: the declared uncompressed size is checked before any read.
     let text = vec![b'a'; preview::MAX_PREVIEW_BYTES as usize + 1];
@@ -1949,9 +1992,8 @@ fn a_text_entry_with_too_many_blocks_is_skipped() {
 #[test]
 fn no_run_inflates_more_than_its_total() {
     // B3 through the run's own accounting: five deflated entries inflate and
-    // are then skipped, in every order, and the fifth stops at the total. A
-    // NUL at the end makes each entry not text with a correct CRC, so no
-    // other rule decides whether it costs output.
+    // are then skipped, in every order. The output of skipped entries is
+    // measured, not inferred, and the fifth stops at 65,536 bytes in all.
     let mut text = text_block(14 * 1024);
     let last = text.len() - 1;
     text[last] = 0;
@@ -1961,11 +2003,21 @@ fn no_run_inflates_more_than_its_total() {
     let archive = build(&specs, &[]);
     let orders = [[0usize, 1, 2, 3, 4], [4, 0, 1, 2, 3], [2, 3, 4, 0, 1]];
     for order in orders {
-        let bus = run_fixture(request(ARCHIVE, &order), ARCHIVE, archive.clone());
-        let skipped = skipped(&bus);
-        let budget_skips: Vec<&Value> = skipped
+        let mut bus = bus_with(request(ARCHIVE, &order), ARCHIVE, archive.clone());
+        let grant = capsule_kit_guest::grant(&mut bus, ARCHIVE, "read", "test the total").unwrap();
+        let mut left = MAX_READ_BYTES;
+        let listing = {
+            let mut reader = zip::Reader::new(&mut bus, ARCHIVE, &grant, &mut left);
+            zip::listing(&mut reader).unwrap()
+        };
+        let (previews, skipped, budget) =
+            previews_for(&mut bus, ARCHIVE, &grant, &mut left, &listing, &order).unwrap();
+        let used = preview::MAX_INFLATE_BYTES - budget.inflate;
+        assert!(used <= 65_536, "used {used} in order {order:?}");
+        assert_eq!(used, 65_536, "the total is the cap in order {order:?}");
+        let budget_skips: Vec<&Skipped> = skipped
             .iter()
-            .filter(|skip| skip["reason"] == "inflate_budget")
+            .filter(|skip| skip.reason == "inflate_budget")
             .collect();
         assert_eq!(
             budget_skips.len(),
@@ -1973,11 +2025,11 @@ fn no_run_inflates_more_than_its_total() {
             "one entry stops at the total: {order:?}"
         );
         assert_eq!(
-            budget_skips[0]["index"], order[4],
+            budget_skips[0].index, order[4],
             "the last entry stops at the total: {order:?}"
         );
         assert_eq!(
-            previews(&bus).len() + skipped.len(),
+            previews.len() + skipped.len(),
             5,
             "every requested entry was decided: {order:?}"
         );

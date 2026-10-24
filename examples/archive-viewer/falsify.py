@@ -14,7 +14,7 @@ F-numbers here are the design's (examples/archive-viewer/DESIGN.md, "Falsifier
 plan"); the core covers F1, F2, F4, F5, F6, F6b, F6c, F7 to F17, F19 to F25,
 F26 to F28, F29 to F31, F32, F33, F40 to F42. The lettered cases F6d to F6f,
 F15b, F16b, F19b, F21b to F21g, F22b, F23b to F23d, F25b to F25f, F30b, F30c,
-F41b to F41e and F5b cover bounds, comparisons and request fields DESIGN states
+F41b to F41e, F5b to F5e and F26b cover bounds, comparisons and request fields DESIGN states
 but gives no row, and F32 covers the whole view's cap. F3 (the B2 streaming
 ratio check) and F18 (Bus v2 depth) run in the component and wait for the
 host-test task; F35, F36 and F43 wait for the same task.
@@ -366,9 +366,9 @@ CASES = [
      ["an_entry_declared_past_the_ratio_is_not_read"]),
     ("F5 the output of skipped entries is not counted",
      "src/lib.rs",
-     "                        previews_budget.take(&outcome);",
+     "                        budget.take(&outcome);",
      "                        if outcome.blocks.is_ok() {\n"
-     "                            previews_budget.take(&outcome);\n"
+     "                            budget.take(&outcome);\n"
      "                        }",
      ["no_run_inflates_more_than_its_total"]),
     ("F5c the remaining allowance is not counted down",
@@ -377,6 +377,21 @@ CASES = [
      "        let left = allowance;",
      ["no_run_inflates_more_than_its_total",
       "a_preview_stops_for_its_budget_before_any_corruption_reason"]),
+    ("F5d an exact-fit stream is refused before it can end",
+     "src/preview.rs",
+     "        let ask = room.min(left);\n"
+     "        // The decompressor does not wrap",
+     "        let ask = room.min(left);\n"
+     "        if ask == 0 {\n"
+     "            return Err((produced, \"inflate_budget\"));\n"
+     "        }\n"
+     "        // The decompressor does not wrap",
+     ["an_exact_fit_stream_ends_within_its_budget"]),
+    ("F5e the total inflate cap is raised",
+     "src/preview.rs",
+     "pub const MAX_INFLATE_BYTES: u64 = 64 * 1024;",
+     "pub const MAX_INFLATE_BYTES: u64 = 65 * 1024;",
+     ["no_run_inflates_more_than_its_total"]),
     ("F1b the byte past the cap is judged after the stream's own verdict",
      "src/preview.rs",
      "        if produced > MAX_PREVIEW_BYTES {",
@@ -393,6 +408,11 @@ CASES = [
      "                if consumed != data.len() || produced != declared {",
      "                if consumed != data.len() || produced > declared {",
      ["an_entry_longer_or_shorter_than_declared_is_skipped"]),
+    ("F26b the compressed stream boundary is ignored",
+     "src/preview.rs",
+     "                if consumed != data.len() || produced != declared {",
+     "                if produced != declared {",
+     ["an_entry_with_junk_after_the_stream_is_skipped"]),
     ("F27 the CRC compare is removed",
      "src/preview.rs",
      "    if crc32(&output) != entry.crc {",

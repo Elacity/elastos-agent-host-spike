@@ -230,3 +230,24 @@ blocks.
 - F1's fixture is now one 20,000-byte DEFLATE stored block, so the whole
   payload would leave the decompressor in one call without the window.
 - 69 falsifiers, all caught and isolated.
+
+### Review fixes (round 3)
+
+- **An exact fit can end.** A spent output allowance still gets a zero-output
+  decompressor call, because the last stored or empty block carries no bytes.
+  `an_exact_fit_stream_ends_within_its_budget` uses the stored "hello world"
+  stream plus its final empty block with 11 bytes of allowance: the first step
+  produces 11 bytes, the next consumes the last five with no output, and the
+  entry is shown. F5d refuses that zero-output step.
+- **F5 measures the total.** The preview loop moved into `previews_for`, which
+  returns the budget, so the test proves the run really consumed 65,536 bytes
+  across four skipped entries and the fifth. Raising `MAX_INFLATE_BYTES` to
+  65 KiB (F5e) makes it consume 66,560 and fail.
+- **L6 proves the compressed boundary.** `an_entry_with_junk_after_the_stream_is_skipped`
+  appends junk inside the declared compressed size, with the right output
+  length and CRC; the entry is `size_mismatch`. F26b removes the consumed
+  check.
+- **One stored-size check stays.** The stored branch uses its validated bytes
+  directly: the early L8 check and the returned-length check already prove the
+  length, so the unreachable comparison is gone.
+- 72 falsifiers.

@@ -151,12 +151,10 @@ pub fn preview(
     }
 
     let (output, produced, failure) = if entry.method == 0 {
+        // L8 and the length check above already proved the stored bytes are
+        // the declared bytes, so they are used directly.
         let produced = data.len() as u64;
-        if produced != entry.uncompressed_size {
-            (Vec::new(), produced, Some("size_mismatch"))
-        } else {
-            (data, produced, None)
-        }
+        (data, produced, None)
     } else {
         match inflate_bounded(&data, entry.uncompressed_size, budget.inflate) {
             Ok((output, produced)) => (output, produced, None),
@@ -228,16 +226,14 @@ fn inflate_bounded(
     let mut out_pos = 0usize;
     loop {
         let room = OUTPUT_WINDOW_BYTES.saturating_sub(produced);
-        let left = allowance.saturating_sub(produced);
-        let ask = room.min(left);
-        if ask == 0 {
-            let reason = if produced > MAX_PREVIEW_BYTES {
-                "oversize"
-            } else {
-                "inflate_budget"
-            };
-            return Err((produced, reason));
+        if room == 0 {
+            return Err((produced, "oversize"));
         }
+        let left = allowance.saturating_sub(produced);
+        // A spent output budget can still finish the stream: the last blocks
+        // of a stored or empty stream carry no bytes, so ask for zero output
+        // instead of refusing an exact fit before it can end.
+        let ask = room.min(left);
         // The decompressor does not wrap: stop at the ring's end and continue
         // from zero next time. The ask stays inside the cap and the budget.
         let ask = ask.min((DICTIONARY_BYTES - out_pos) as u64) as usize;
@@ -273,11 +269,21 @@ fn inflate_bounded(
                 }
                 return Ok((output, produced));
             }
-            TINFLStatus::NeedsMoreInput | TINFLStatus::HasMoreOutput => {}
+            TINFLStatus::NeedsMoreInput => {}
+            TINFLStatus::HasMoreOutput => {
+                if ask == 0 {
+                    return Err((produced, "inflate_budget"));
+                }
+            }
             _ => return Err((produced, "size_mismatch")),
         }
         if in_used == 0 && out_used == 0 {
-            return Err((produced, "size_mismatch"));
+            let reason = if ask == 0 {
+                "inflate_budget"
+            } else {
+                "size_mismatch"
+            };
+            return Err((produced, reason));
         }
     }
 }
