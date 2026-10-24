@@ -10,11 +10,11 @@ The runner is the capsule kit's (`examples/capsule-kit/falsify`).
 
 F-numbers here are the design's (examples/archive-viewer/DESIGN.md, "Falsifier
 plan"); this slice's core covers F6, F6b, F6c, F7 to F17, F19 to F25, F29 to
-F31, F40 to F42. The lettered cases F6d to F6f, F15b, F16b, F19b, F21b to
-F21g, F22b, F23b to F23d, F25b to F25f, F30b and F41b to F41e cover bounds,
-comparisons and request fields DESIGN states but gives no row, and F32 covers
-the whole view's cap. F18 (Bus v2 depth) and the preview falsifiers F1 to F5
-and F26 to F28 wait for their slices.
+F31, F40 to F42. The lettered cases F6d to F6f, F15b, F16b, F19b, F20b,
+F21b to F21g, F22b, F23b to F23d, F25b to F25g, F30b and F41b to F41e cover
+bounds, comparisons and request fields DESIGN states but gives no row, and F32
+covers the whole view's cap. F18 (Bus v2 depth) and the preview falsifiers F1
+to F5 and F26 to F28 wait for their slices.
 """
 import pathlib
 import sys
@@ -149,6 +149,11 @@ CASES = [
      "    match candidates.len() {\n        1 => {}",
      "    match candidates.len() {\n        1 | 2 => {}",
      ["two_end_records_refuse_the_archive"]),
+    ("F20b an end record before the last byte is accepted",
+     "src/zip.rs",
+     "        if end == size {",
+     "        if true {",
+     ["bytes_after_the_end_record_refuse_the_archive"]),
     ("F21 the gap check is removed",
      "src/zip.rs",
      "    if directory_offset + directory_size != end_offset {",
@@ -356,6 +361,11 @@ CASES = [
      "    if entry.flags & (1 << 3) == 0 {",
      "    if true {",
      ["a_data_descriptor_flag_is_ignored"]),
+    ("F25g the local-header read cap is removed",
+     "src/zip.rs",
+     "    if length > MAX_LOCAL_HEADER_BYTES {",
+     "    if false {",
+     ["a_local_header_over_the_read_cap_is_skipped_before_it_is_read"]),
 ]
 
 

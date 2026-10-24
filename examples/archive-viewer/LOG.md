@@ -90,9 +90,22 @@ its statuses (`src/zip.rs`), the run and the view (`src/lib.rs`), the tests
   `an_entry_with_a_zip64_sentinel_refuses_the_archive` (`compressed`,
   `uncompressed` and `local` each set to `u32::MAX`, refused `zip64`, F21g).
 - **Done in this slice:** F6, F6b, F6c, F7 to F17, F19 to F25, F29 to F31,
-  F40 to F42, plus the lettered cases F6d to F6f, F15b, F16b, F19b, F21b to
-  F21g, F22b, F23b to F23d, F25b to F25f, F30b, F32 and F41b to F41e
-  (56 falsifiers, all caught).
+  F40 to F42, plus the lettered cases F6d to F6f, F15b, F16b, F19b, F20b,
+  F21b to F21g, F22b, F23b to F23d, F25b to F25g, F30b, F32 and F41b to F41e
+  (58 falsifiers, all caught).
 - **Remaining for the next task:** F1 to F5, F18, F26 to F28, F33 to F39 and
   F43 (previews and inflate, the component and fuel gates, the page, Bus v2
   nesting and B5's declared totals).
+
+## 2026-10-24: task 001, review fixes (round 7)
+
+- L1's end-of-object rule has a negative fixture:
+  `bytes_after_the_end_record_refuse_the_archive` appends one byte to a valid
+  zero-comment archive and requires `end_record_missing`. Falsifier F20b makes
+  every end-record signature a candidate (`if true`).
+- The 350-byte local-header read cap has a boundary fixture:
+  `a_local_header_over_the_read_cap_is_skipped_before_it_is_read` shows a
+  350-byte header is read (and skipped `local_header_name`), while a 351-byte
+  header is skipped `local_header_too_long` with no L5 read at the entry.
+  Falsifier F25g disables the cap.
+- No production code changed: both guards already existed.

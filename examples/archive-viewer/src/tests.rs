@@ -1021,6 +1021,19 @@ fn a_short_tail_response_refuses_the_archive() {
 }
 
 #[test]
+fn bytes_after_the_end_record_refuse_the_archive() {
+    // L1: the end record's comment must run exactly to the object's last
+    // byte. One trailing byte leaves a valid record in the tail, but not at
+    // the end, so it is not a candidate.
+    let mut archive = build(&[Spec::file("a.txt")], &[]);
+    archive.push(0);
+    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, archive);
+    let (code, message) = refused(&bus);
+    assert_eq!(code, "end_record_missing");
+    assert!(message.contains("last byte"), "{message}");
+}
+
+#[test]
 fn a_comment_over_1_kib_refuses_the_archive_without_reading_it() {
     let comment = vec![b'c'; 2000];
     let bus = run_fixture(
@@ -1413,6 +1426,58 @@ fn a_local_length_that_differs_skips_the_entry() {
             view["skipped"][0]["reason"], "local_header_lengths",
             "byte {byte}"
         );
+    }
+}
+
+#[test]
+fn a_local_header_over_the_read_cap_is_skipped_before_it_is_read() {
+    // The cap is 350 bytes. A 320-byte local name makes a 350-byte header,
+    // which L5 reads; one more byte makes 351 and skips before the read. The
+    // filler puts the object's tail window past the entry, so a read at
+    // offset 0 can only be a size probe or B4a's 30-byte prefix.
+    let filler = Spec::file("filler.bin").data(&vec![0u8; 1000]);
+    let mut at_cap = Spec::file("a.txt");
+    at_cap.local_name = Some(vec![b'b'; 320]);
+    let bus = run_fixture(
+        request(ARCHIVE, &[0]),
+        ARCHIVE,
+        build(&[at_cap, filler.clone()], &[]),
+    );
+    assert_eq!(skipped(&bus)[0]["reason"], "local_header_name");
+    assert!(
+        bus.invokes_on(ARCHIVE).iter().any(|call| matches!(
+            call,
+            Call::Invoke {
+                operation, body, ..
+            } if operation == "read"
+                && body["offset"].as_u64() == Some(0)
+                && body["length"].as_u64() == Some(350)
+        )),
+        "the 350-byte header is read"
+    );
+
+    let mut over_cap = Spec::file("a.txt");
+    over_cap.local_name = Some(vec![b'b'; 321]);
+    let bus = run_fixture(
+        request(ARCHIVE, &[0]),
+        ARCHIVE,
+        build(&[over_cap, filler], &[]),
+    );
+    assert_eq!(skipped(&bus)[0]["reason"], "local_header_too_long");
+    // B4a reads the 30-byte prefix; the size probes read one byte. No L5
+    // window may start at the entry.
+    for call in bus.invokes_on(ARCHIVE) {
+        if let Call::Invoke {
+            operation, body, ..
+        } = call
+        {
+            if operation == "read" && body["offset"].as_u64() == Some(0) {
+                assert!(
+                    body["length"].as_u64().unwrap_or(0) <= 30,
+                    "an L5 read past the prefix: {body}"
+                );
+            }
+        }
     }
 }
 
