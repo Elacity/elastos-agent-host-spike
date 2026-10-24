@@ -10,7 +10,9 @@ import test from "node:test";
 import {
   MAX_BLOCKS,
   MAX_ENTRIES,
+  MAX_ITEMS,
   MAX_PREVIEWS,
+  MAX_SPANS,
   TOKEN_HEADER,
   VIEW_ROUTE,
   VIEW_SCHEMA,
@@ -18,6 +20,7 @@ import {
   mountReader,
   readView,
 } from "./browser/reader.js";
+import { PAGES_SCHEMA, readPages } from "../../docs-viewer/surface/browser/reader.js";
 import { fakeDocument as kitDocument, response } from "../../capsule-kit/surface/test-kit.mjs";
 
 const TOKEN = "launch-token-for-this-frame";
@@ -300,6 +303,24 @@ test("views that are not ones are refused", () => {
   );
 });
 
+test("a preview with more spans than the model allows is not shown", () => {
+  const spans = Array.from({ length: MAX_SPANS + 1 }, () => span("x"));
+  const { previews, skipped } = readView(
+    view({ previews: [{ index: 0, blocks: [{ kind: "paragraph", spans }] }] }),
+  );
+  assert.deepEqual(previews, []);
+  assert.deepEqual(skipped.map((skip) => skip.message), ["This preview could not be read."]);
+});
+
+test("a preview with more list items than the model allows is not shown", () => {
+  const items = Array.from({ length: MAX_ITEMS + 1 }, () => [span("x")]);
+  const { previews, skipped } = readView(
+    view({ previews: [{ index: 0, blocks: [{ kind: "list", ordered: false, items }] }] }),
+  );
+  assert.deepEqual(previews, []);
+  assert.deepEqual(skipped.map((skip) => skip.message), ["This preview could not be read."]);
+});
+
 test("a preview with more blocks than the model allows is not shown", () => {
   const blocks = Array.from({ length: MAX_BLOCKS + 1 }, () => ({ kind: "rule" }));
   const { previews, skipped } = readView(view({ previews: [{ index: 0, blocks }] }));
@@ -336,15 +357,31 @@ test("an unreadable entry or preview is not shown, and the rest are", async () =
 });
 
 test("a refused archive is shown with its reason and lists no entry", async () => {
-  const { view: drawn } = await mounted({
+  // Content beside a refusal is not drawn: the refusal is the whole view.
+  const { view: drawn, reader } = await mounted({
     [VIEW_ROUTE]: response(
       200,
-      view({ refused: { code: "ambiguous_end", message: "The archive has two end records." }, skipped: [{ index: 0, message: "Not read.", reason: "read_budget" }] }),
+      view({
+        entries: [entry(0)],
+        previews: [{ index: 0, blocks: [{ kind: "paragraph", spans: [span("not drawn")] }] }],
+        refused: { code: "ambiguous_end", message: "The archive has two end records." },
+        skipped: [{ index: 0, message: "Not read.", reason: "read_budget" }],
+      }),
     ),
   });
   assert.equal(drawn.status.textContent, "The archive has two end records.");
   assert.equal(drawn.entries.children.length, 0);
-  assert.deepEqual(drawn.skipped.children.map((line) => line.textContent), ["Entry 1: Not read."]);
+  assert.equal(drawn.previews.children.length, 0);
+  assert.equal(drawn.skipped.children.length, 0);
+  assert.deepEqual(reader.state.entries, []);
+  assert.deepEqual(reader.state.previews, []);
+});
+
+test("a refused archive without a reason still says why", async () => {
+  const { view: drawn } = await mounted({
+    [VIEW_ROUTE]: response(200, view({ refused: { code: "ambiguous_end", message: "" } })),
+  });
+  assert.equal(drawn.status.textContent, "This archive could not be read.");
 });
 
 test("the page has no way to hold or reach anything else", () => {
@@ -379,6 +416,43 @@ test("the page has no way to hold or reach anything else", () => {
   assert.deepEqual(manifest.capabilities ?? [], []);
   assert.deepEqual(manifest.permissions ?? {}, {});
   assert.deepEqual(manifest.requires ?? [], []);
+});
+
+test("the previews follow the documents page rules", () => {
+  // One block format, two pages: every block rule of this page is compared
+  // with the documents page's, so a change in either is caught here.
+  const blocks = [
+    [{ kind: "heading", level: 2, spans: [span("Title")] }],
+    [{ kind: "paragraph", spans: [span("a "), span("b", "strong"), span("c", "em"), span("d", "code")] }],
+    [{ kind: "list", ordered: false, items: [[span("one")], [span("two")]] }],
+    [{ kind: "list", ordered: true, items: [[span("first")]] }],
+    [{ kind: "quote", spans: [span("q")] }],
+    [{ kind: "code", text: "fn x() {}\n<b>not bold</b>" }],
+    [{ kind: "rule" }],
+    [{ kind: "script", text: "alert(1)" }],
+    [{ kind: "paragraph", spans: "not a list" }],
+    [{ kind: "paragraph", spans: Array.from({ length: MAX_SPANS + 1 }, () => span("x")) }],
+    [{ kind: "list", ordered: false, items: Array.from({ length: MAX_ITEMS + 1 }, () => [span("x")]) }],
+    [{ kind: "list", ordered: false, items: [[span("a")], "not a list"] }],
+    [{ kind: "heading", level: 9, spans: [span("deep")] }, { kind: "heading", level: 0, spans: [span("top")] }],
+    [{ kind: "paragraph", spans: ["constructor", "__proto__", "toString", "hasOwnProperty"].map((style) => span(style, style)) }],
+    [{ kind: "code", text: "x".repeat(20001) }],
+    Array.from({ length: MAX_BLOCKS + 1 }, () => ({ kind: "rule" })),
+  ];
+  for (const [at, each] of blocks.entries()) {
+    const pages = {
+      schema: PAGES_SCHEMA,
+      shelf: "localhost://Users/self/.AppData/App/docs-viewer/shelf.json",
+      documents: [{ order: 0, title: "t", blocks: each }],
+      skipped: [],
+    };
+    const shown = readPages(pages);
+    const { previews } = readView(view({ entries: [entry(0)], previews: [{ index: 0, blocks: each }] }));
+    assert.equal(previews.length > 0, shown.documents.length > 0, `case ${at}: one page keeps it, the other does not`);
+    if (previews.length > 0 && shown.documents.length > 0) {
+      assert.deepEqual(previews[0].blocks, shown.documents[0].blocks, `case ${at}: the block rules differ`);
+    }
+  }
 });
 
 test("it reads the view the core writes, and shows its markup as text", async () => {

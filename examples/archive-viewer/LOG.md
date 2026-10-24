@@ -466,7 +466,7 @@ draws the `elastos.archive-viewer.view/v1` view the core writes.
   previews as the documents model's typed blocks. Every text goes through
   `textContent`. It keeps no `uri` field, never builds a path, never fetches an
   entry and draws no image on Bus v1.
-- `falsify-surface.py` (20 cases) and `verify.sh`: the page tests, the page
+- `falsify-surface.py` (23 cases) and `verify.sh`: the page tests, the page
   falsifiers and the Chromium smoke run with the guest checks. A machine
   without Playwright's Chromium skips the smoke with a clear line; the page
   tests and the falsifiers still run.
@@ -486,19 +486,41 @@ draws the `elastos.archive-viewer.view/v1` view the core writes.
   `__proto__`, `hasOwnProperty` and `valueOf` draw "Other". The mutant uses
   prototype lookup. **F39b** covers the same rule for a view key: the page
   reads only the view's own fields, and an inherited `entries` draws nothing.
-- The other 17 page falsifiers cover the remaining page rules: the schema, the
+- The other 20 page falsifiers cover the remaining page rules: the schema, the
   entry and preview caps, unreadable entries and previews, a refused archive's
   reason, text cutting, cookies, the token guard, uri fields and the
   documents-model block and span rules.
 
 ### Checks on this Mac
 
-- `node --test surface/reader.test.mjs`: 20 tests pass.
-- `python3 -I falsify-surface.py`: 20 falsifiers, all caught.
+- `node --test surface/reader.test.mjs`: 24 tests pass.
+- `python3 -I falsify-surface.py`: 23 falsifiers, all caught.
 - `node surface/reader-browser-smoke.mjs` (real Chromium, Home's sandbox): the
   listing, the text preview and the hostile path appear, no image is drawn,
   one GET, no console errors.
 - `verify.sh` (guest path) passes, including the core's 74 falsifiers.
+
+### Review fixes (round 2)
+
+- **The span and list-item caps had no effective test.** `a preview with more
+  spans than the model allows is not shown` and `a preview with more list items
+  than the model allows is not shown` cover 257 of each; the falsifiers that
+  remove either guard now make both the cap test and the parity test fail.
+- **A refused archive no longer draws its content.** `mountReader` draws the
+  header, then returns on `refused` before entries, previews or skipped lines;
+  `readView` keeps the reason and falls back to "This archive could not be
+  read." when the reason is empty. The refusal test now supplies an entry, a
+  preview and a skipped line beside the refusal and requires none of them to
+  appear; `a refused archive without a reason still says why` covers the empty
+  message. Two falsifiers: drawing after the refusal, and an empty reason.
+- **The documents block rules are compared, not independent.**
+  `the previews follow the documents page rules` drives `readPages` and
+  `readView` with one corpus (all six kinds, unknown kinds, the span, item and
+  block caps, heading clamps, inherited styles, text cutting) and requires the
+  same kept-or-skipped verdict and the same normalized blocks. A change to
+  either page's block rule now fails a named test. The kit gap (A5's shared
+  typed-document renderer) still stands; this page carries its copy only
+  because a page ships its own files.
 
 ### Kit gap, recorded not edited
 

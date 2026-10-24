@@ -181,7 +181,11 @@ export function readView(value) {
 
   const refusedIn = own(value, "refused");
   const refused = refusedIn && typeof refusedIn === "object"
-    ? { message: cut(own(refusedIn, "message"), MAX_MESSAGE_CHARS, "This archive could not be read.") }
+    ? {
+        message:
+          cut(own(refusedIn, "message"), MAX_MESSAGE_CHARS, "This archive could not be read.") ||
+          "This archive could not be read.",
+      }
     : null;
   return { archive, entries, previews, skipped, refused };
 }
@@ -311,13 +315,21 @@ export function mountReader(env) {
     try {
       const read = readView(await client.view());
       state.archive = read.archive;
+      view.archive.textContent = read.archive.uri
+        ? `${read.archive.uri} (${read.archive.size} bytes)`
+        : `Archive (${read.archive.size} bytes)`;
+      // A refused archive has no listing to trust: the reason is the whole
+      // view, and any entries or previews beside it are not drawn.
+      if (read.refused) {
+        state.entries = [];
+        state.previews = [];
+        setStatus(read.refused.message);
+        return;
+      }
       state.entries = read.entries;
       state.previews = read.previews;
       renderSkipped(read.skipped);
 
-      view.archive.textContent = read.archive.uri
-        ? `${read.archive.uri} (${read.archive.size} bytes)`
-        : `Archive (${read.archive.size} bytes)`;
       for (const entry of read.entries) view.entries.appendChild(drawEntry(doc, entry));
 
       const byIndex = new Map(read.entries.map((entry) => [entry.index, entry.path]));
@@ -326,8 +338,7 @@ export function mountReader(env) {
         view.previews.appendChild(drawPreview(doc, preview, pathFor));
       }
 
-      if (read.refused) setStatus(read.refused.message);
-      else if (read.entries.length === 0) setStatus("This archive has no entries to show.");
+      if (read.entries.length === 0) setStatus("This archive has no entries to show.");
       else if (read.previews.length === 0) setStatus("No text preview is shown.");
     } catch (error) {
       setStatus(error.message);

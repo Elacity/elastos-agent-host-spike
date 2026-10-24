@@ -81,6 +81,42 @@ CASES = [
         ["a preview with more blocks than the model allows is not shown"],
     ),
     (
+        "the span cap is not checked",
+        "  if (!Array.isArray(spans) || spans.length > MAX_SPANS) return null;",
+        "  if (!Array.isArray(spans)) return null;",
+        ["a preview with more spans than the model allows is not shown", "the previews follow the documents page rules"],
+    ),
+    (
+        "the list item cap is not checked",
+        "      if (!Array.isArray(items) || items.length > MAX_ITEMS) return null;",
+        "      if (!Array.isArray(items)) return null;",
+        ["a preview with more list items than the model allows is not shown", "the previews follow the documents page rules"],
+    ),
+    (
+        "a refused archive still draws its content",
+        "      if (read.refused) {\n"
+        "        state.entries = [];\n"
+        "        state.previews = [];\n"
+        "        setStatus(read.refused.message);\n"
+        "        return;\n"
+        "      }",
+        "      if (false) {\n"
+        "        state.entries = [];\n"
+        "        state.previews = [];\n"
+        "        setStatus(read.refused.message);\n"
+        "        return;\n"
+        "      }",
+        ["a refused archive is shown with its reason and lists no entry",
+         "a refused archive without a reason still says why"],
+    ),
+    (
+        "an empty refusal reason stays empty",
+        "          cut(own(refusedIn, \"message\"), MAX_MESSAGE_CHARS, \"This archive could not be read.\") ||\n"
+        "          \"This archive could not be read.\",",
+        "          cut(own(refusedIn, \"message\"), MAX_MESSAGE_CHARS, \"This archive could not be read.\"),",
+        ["a refused archive without a reason still says why"],
+    ),
+    (
         "an unknown block kind is drawn",
         "    default:\n      return null;",
         '    default:\n      return { kind: "rule" };',
@@ -115,12 +151,6 @@ CASES = [
         "    if (read) previews.push(read);",
         "    if (true) previews.push(read);",
         ["an unreadable entry or preview is not shown, and the rest are"],
-    ),
-    (
-        "a refused archive's reason is not shown",
-        "      if (read.refused) setStatus(read.refused.message);",
-        "      if (false) setStatus(read.refused.message);",
-        ["a refused archive is shown with its reason and lists no entry"],
     ),
     (
         "a text is not cut short",
