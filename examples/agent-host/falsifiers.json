@@ -274,7 +274,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    } else if journal.cancelled_from.is_some() || !live_step(parent) {\n        return Err(\"parent stopped\");",
+     "old": "    } else if journal.cancelled_from.is_some() || live_step(parent).is_err() {\n        return Err(\"parent stopped\");",
      "new": "    } else if false {\n        return Err(\"parent stopped\");"
     }
    ],
@@ -1191,14 +1191,14 @@
   },
   {
    "id": "CL48",
-   "title": "a non-zero step depth byte is read",
+   "title": "a tree-cancelled byte on a step that cannot carry it is read",
    "command": "host",
    "expect": "caught",
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if reader.byte().map_err(fail)? != 0 {\n        return Err(\"record\");\n    }\n    let budget = reader.budget()",
-     "new": "    let _ = reader.byte().map_err(fail)?;\n    let budget = reader.budget()"
+     "old": "    let tree_cancelled = match reader.byte().map_err(fail)? {\n        0 => false,\n        1 if kind == ProposalKind::Run\n            && matches!(state, StepState::Dispatched | StepState::SettlementUnknown) =>\n        {\n            true\n        }\n        _ => return Err(\"record\"),\n    };",
+     "new": "    let tree_cancelled = match reader.byte().map_err(fail)? {\n        0 => false,\n        _ => true,\n    };"
     }
    ],
    "tests": [
@@ -3738,8 +3738,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "            Some(StepState::Prepared | StepState::Dispatched) => {}\n            Some(StepState::Denied) => return Err(\"denied\"),\n            _ => return Err(\"stopped\"),",
-     "new": "            _ => {}"
+     "old": "        StepState::Prepared | StepState::Dispatched if !step.tree_cancelled => Ok(()),\n        StepState::Denied => Err(\"denied\"),\n        _ => Err(\"stopped\"),",
+     "new": "        _ => Ok(()),"
     }
    ],
    "tests": [
@@ -3754,8 +3754,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "            Some(StepState::Denied) => return Err(\"denied\"),\n",
-     "new": ""
+     "old": "        StepState::Denied => Err(\"denied\"),\n",
+     "new": "        StepState::Denied => Err(\"stopped\"),\n"
     }
    ],
    "tests": [
@@ -4014,7 +4014,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        if !may_hold_a_child(above) || !live_step(above) {\n            return None;\n        }\n",
+     "old": "        if !may_hold_a_child(above) || live_step(above).is_err() {\n            return None;\n        }\n",
      "new": ""
     }
    ],
@@ -4751,12 +4751,12 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    let scope = granted_scope(step)?;\n    // A step that is denied, cancelled or crashed carries no scope, and\n    // neither does one under such a step.\n    if !live_step(step) {\n        return None;\n    }\n",
+     "old": "    let scope = granted_scope(step)?;\n    // A step that is denied, cancelled or crashed carries no scope, and\n    // neither does one under such a step.\n    if live_step(step).is_err() {\n        return None;\n    }\n",
      "new": "    let scope = granted_scope(step)?;\n"
     },
     {
      "file": "src/lib.rs",
-     "old": "        // A step that cannot hold a child, or that has been denied, cancelled\n        // or crashed since, stands for no scope: the walk does not stop there\n        // with the scope granted.\n        if !may_hold_a_child(above) || !live_step(above) {\n",
+     "old": "        // A step that cannot hold a child, or that has been denied, cancelled\n        // or crashed since, stands for no scope: the walk does not stop there\n        // with the scope granted.\n        if !may_hold_a_child(above) || live_step(above).is_err() {\n",
      "new": "        if !may_hold_a_child(above) {\n"
     }
    ],
@@ -4772,7 +4772,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    } else if journal.cancelled_from.is_some() || !live_step(parent) {\n        return Err(\"parent stopped\");\n    }",
+     "old": "    } else if journal.cancelled_from.is_some() || live_step(parent).is_err() {\n        return Err(\"parent stopped\");\n    }",
      "new": "    } else if journal.cancelled_from.is_some() {\n        return Err(\"parent stopped\");\n    }"
     }
    ],
@@ -4826,6 +4826,54 @@
    ],
    "tests": [
     "tests::a_plain_entry_point_that_refuses_a_child_or_host_says_why"
+   ]
+  },
+  {
+   "id": "PX47",
+   "title": "cancelling a dispatched run's tree records nothing",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let revoked = !cancelled\n        && kind == ProposalKind::Run\n        && state == StepState::Dispatched\n        && journal\n            .steps\n            .iter_mut()\n            .find(|step| step.id == id)\n            .is_some_and(|step| {\n                let first = !step.tree_cancelled;\n                step.tree_cancelled = true;\n                first\n            });",
+     "new": "    let revoked = false;\n    let _ = state;"
+    }
+   ],
+   "tests": [
+    "tests::a_cancelled_parent_holds_no_scope_and_no_new_child"
+   ]
+  },
+  {
+   "id": "PX48",
+   "title": "a stored tree cancellation still counts as live",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        StepState::Prepared | StepState::Dispatched if !step.tree_cancelled => Ok(()),",
+     "new": "        StepState::Prepared | StepState::Dispatched => Ok(()),"
+    }
+   ],
+   "tests": [
+    "tests::a_cancelled_parent_holds_no_scope_and_no_new_child"
+   ]
+  },
+  {
+   "id": "PX49",
+   "title": "usable_child copies the live-state rule back",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        live_step(step)?;\n",
+     "new": "        match step.state {\n            StepState::Prepared | StepState::Dispatched => {}\n            StepState::Denied => return Err(\"denied\"),\n            _ => return Err(\"stopped\"),\n        }\n"
+    }
+   ],
+   "tests": [
+    "tests::the_live_state_rule_is_one_shared_validator"
    ]
   }
  ]

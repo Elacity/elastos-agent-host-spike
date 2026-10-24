@@ -126,11 +126,13 @@ trailer  head [32]
 - **Compaction keeps child records.** A child-budget or child-stop record written while a compaction is open is
   carried into the committed log, and into the restored log after a crash.
 - **Depth on load** holds for budgeted children; children from before idea 2 (no budget) keep loading.
-- **Step payload:** format 1's fields, then `depth u8 | budget (u8 flag + requests u32 + seconds u64) | requests_used u32
-  | stop u8`. The depth byte is always 0 (depth is derived from the `parent_id` chain). The budget is a Child step's;
-  `requests_used` counts the model calls in its subtree; stop is 0 none, 1 requests, 2 time, 3 cancelled. Steps that
-  are not Child steps keep all of them zero. A budget flag of 0 with non-zero values is `record`. No existing field
-  changes meaning: a journal written before idea 2 decodes and re-encodes to the same bytes.
+- **Step payload:** format 1's fields, then `tree_cancelled u8 | budget (u8 flag + requests u32 + seconds u64) |
+  requests_used u32 | stop u8`. The tree-cancelled byte is 0, or 1 only on a run that had left (dispatched or
+  settlement unknown) and whose tree was cancelled (depth is derived from the `parent_id` chain). The budget is a
+  Child step's; `requests_used` counts the model calls in its subtree; stop is 0 none, 1 requests, 2 time,
+  3 cancelled. Steps that are not Child steps keep the budget, count and stop zero. A budget flag of 0 with non-zero
+  values is `record`. No existing field changes meaning: a journal written before idea 2 decodes and re-encodes to
+  the same bytes.
 - **Turn payload:** unchanged.
 - **Node payload:** `role u8 | kind u8 | fields`. Each kind fixes its role; any other pairing is `record`, and the
   encoder gives nothing. Kinds without free text keep the node's text empty (the encoder refuses otherwise).
@@ -199,7 +201,7 @@ grants). A spill pointer's resource follows the path rule on load, like a read's
 | an unknown kind (0, or 20 and above), or a kind with the wrong role | `record` |
 | an observation whose fields do not fit its text, or an absent revision or window with a value | `record` |
 | an unknown inbox answer | `record` |
-| a non-zero step depth byte, an unknown stop reason, or a budget flag of 0 with values | `record` |
+| a tree-cancelled byte on a step that is not a run that had left, an unknown stop reason, or a budget flag of 0 with values | `record` |
 | a journal past the depth limit, or a budgeted child past it in its chain | `depth limit` |
 | a budgeted child whose parent is not a run or a child | `not a parent` |
 | a child resource not strictly under its parent's | `not a subset` |

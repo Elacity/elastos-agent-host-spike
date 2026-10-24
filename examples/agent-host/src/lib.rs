@@ -178,6 +178,9 @@ struct Step {
     requests_used: u32,
     /// Why this child stopped; the first reason is kept (Child steps only).
     stop: Option<StopReason>,
+    /// A dispatched run whose tree was cancelled: it keeps its state and its
+    /// result, holds no scope and takes no new child.
+    tree_cancelled: bool,
     /// What a granted child may hand on: the resource it was granted, which
     /// may be narrower than its own. Held in memory with the grant, never
     /// stored; a reload grants again through the same checks.
@@ -651,10 +654,11 @@ fn step_payload(step: &Step) -> Option<Vec<u8>> {
     put_str(&mut out, &step.seat)?;
     put_opt(&mut out, step.seen_version);
     put_str(&mut out, &step.inbox)?;
-    // OMP idea 2: depth (always 0: a child's depth is derived from its
-    // parent_id links and the header depth, never stored per step), budget
+    // OMP idea 2: depth is always 0 (a child's depth is derived from its
+    // parent_id links and the header depth, never stored per step); the flag
+    // byte is 1 for a dispatched run whose tree was cancelled, else 0; budget
     // (flag, requests, seconds), requests_used, stop (0 none, else the reason).
-    out.push(0);
+    out.push(u8::from(step.tree_cancelled));
     put_budget(&mut out, step.budget);
     out.extend_from_slice(&step.requests_used.to_le_bytes());
     out.push(step.stop.map_or(0, StopReason::tag));
@@ -968,11 +972,17 @@ fn decode_step(payload: &[u8]) -> Result<Step, &'static str> {
     let seat = reader.text()?;
     let seen_version = reader.opt().map_err(fail)?;
     let inbox = reader.text()?;
-    // OMP idea 2: the depth byte stays 0 (depth is derived); a stop is 0 for
-    // none or a known reason.
-    if reader.byte().map_err(fail)? != 0 {
-        return Err("record");
-    }
+    // OMP idea 2: depth is derived, so this byte is a tree-cancelled flag.
+    // Only a run that had left can carry it; every other step has 0.
+    let tree_cancelled = match reader.byte().map_err(fail)? {
+        0 => false,
+        1 if kind == ProposalKind::Run
+            && matches!(state, StepState::Dispatched | StepState::SettlementUnknown) =>
+        {
+            true
+        }
+        _ => return Err("record"),
+    };
     let budget = reader.budget().map_err(fail)?;
     let requests_used = reader.u32().map_err(fail)?;
     let stop = match reader.byte().map_err(fail)? {
@@ -998,6 +1008,7 @@ fn decode_step(payload: &[u8]) -> Result<Step, &'static str> {
         budget,
         requests_used,
         stop,
+        tree_cancelled,
         grant_scope: None,
     })
 }
@@ -1260,14 +1271,20 @@ fn may_hold_a_child(parent: &Step) -> bool {
     matches!(parent.kind, ProposalKind::Run | ProposalKind::Child)
 }
 
-/// The one live-state rule for a parent: it is prepared or dispatched, so it
-/// has not been denied, cancelled or crashed since. `propose_child` asks it of
-/// the parent, and `scope_still_granted` asks it of every step that carries a
-/// scope. A stored child of a cancelled task still loads: `child_rules` checks
-/// the kind only, because the cancel already stopped its children.
+/// The one live-state rule: a step is prepared or dispatched, and a
+/// dispatched run's tree has not been cancelled. `propose_child` asks it of a
+/// run parent, `scope_still_granted` asks it of every step that carries a
+/// scope, and `usable_child` asks it of every child above. The error is the
+/// step's own reason. A stored child of a cancelled task still loads:
+/// `child_rules` checks the kind only, because the cancel already stopped its
+/// children.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn live_step(step: &Step) -> bool {
-    matches!(step.state, StepState::Prepared | StepState::Dispatched)
+fn live_step(step: &Step) -> Result<(), &'static str> {
+    match step.state {
+        StepState::Prepared | StepState::Dispatched if !step.tree_cancelled => Ok(()),
+        StepState::Denied => Err("denied"),
+        _ => Err("stopped"),
+    }
 }
 
 /// The rules every child keeps, wherever its journal comes from: made here,
@@ -1370,16 +1387,10 @@ fn usable_child(journal: &Journal, id: u64) -> Result<&Step, &'static str> {
     }
     // A child denied, cancelled, or crashed, here or above, does nothing more.
     for above in &chain {
-        match journal
-            .steps
-            .iter()
-            .find(|step| step.id == *above)
-            .map(|step| step.state)
-        {
-            Some(StepState::Prepared | StepState::Dispatched) => {}
-            Some(StepState::Denied) => return Err("denied"),
-            _ => return Err("stopped"),
-        }
+        let Some(step) = journal.steps.iter().find(|step| step.id == *above) else {
+            return Err("stopped");
+        };
+        live_step(step)?;
     }
     Ok(step)
 }
@@ -1406,7 +1417,7 @@ fn scope_still_granted<'a>(journal: &'a Journal, step: &'a Step) -> Option<&'a s
     let scope = granted_scope(step)?;
     // A step that is denied, cancelled or crashed carries no scope, and
     // neither does one under such a step.
-    if !live_step(step) {
+    if live_step(step).is_err() {
         return None;
     }
     let mut below = step;
@@ -1417,7 +1428,7 @@ fn scope_still_granted<'a>(journal: &'a Journal, step: &'a Step) -> Option<&'a s
         // A step that cannot hold a child, or that has been denied, cancelled
         // or crashed since, stands for no scope: the walk does not stop there
         // with the scope granted.
-        if !may_hold_a_child(above) || !live_step(above) {
+        if !may_hold_a_child(above) || live_step(above).is_err() {
             return None;
         }
         if !granted_scope(above).is_some_and(|wider| resource_covers(wider, scope)) {
@@ -2864,6 +2875,7 @@ fn propose_step(journal: &mut Journal) -> u64 {
         budget: None,
         requests_used: 0,
         stop: None,
+        tree_cancelled: false,
         grant_scope: None,
     });
     id
@@ -4092,11 +4104,11 @@ fn note_time_refusal(journal: &mut Journal, child: u64) -> bool {
 /// below it stop.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn cancel_tree(journal: &mut Journal, id: u64) -> bool {
-    let Some(kind) = journal
+    let Some((kind, state)) = journal
         .steps
         .iter()
         .find(|step| step.id == id)
-        .map(|step| step.kind)
+        .map(|step| (step.kind, step.state))
     else {
         return false;
     };
@@ -4108,7 +4120,22 @@ fn cancel_tree(journal: &mut Journal, id: u64) -> bool {
     for below in descendants(journal, id) {
         stopped |= stop_one(journal, below, StopReason::Cancelled);
     }
-    cancelled || stopped
+    // A dispatched run cannot be cancelled as a step, but cancelling its tree
+    // still closes its authority: it holds no scope and takes no new child.
+    // The flag is stored, so the closure survives a reload.
+    let revoked = !cancelled
+        && kind == ProposalKind::Run
+        && state == StepState::Dispatched
+        && journal
+            .steps
+            .iter_mut()
+            .find(|step| step.id == id)
+            .is_some_and(|step| {
+                let first = !step.tree_cancelled;
+                step.tree_cancelled = true;
+                first
+            });
+    cancelled || stopped || revoked
 }
 
 /// Cancel the whole task: no model call anywhere in it from now on, every
@@ -4158,7 +4185,7 @@ fn propose_child(
             Err("stopped" | "cancelled") => return Err("parent stopped"),
             Err(reason) => return Err(reason),
         }
-    } else if journal.cancelled_from.is_some() || !live_step(parent) {
+    } else if journal.cancelled_from.is_some() || live_step(parent).is_err() {
         return Err("parent stopped");
     }
     let chain = child_chain(journal, Some(parent_id));
@@ -17965,8 +17992,9 @@ mod tests {
                 "header offset {offset}"
             );
         }
-        // Step: the last 19 bytes are depth (always 0), budget, requests_used
-        // and stop. A step that is not a child holds none of them.
+        // Step: the last 19 bytes are the tree-cancelled flag (1 only on a
+        // dispatched run), budget, requests_used and stop. A step that is not
+        // a run holds none of them.
         let step_at = records.iter().position(|(tag, _)| *tag == 3).unwrap();
         let len = records[step_at].1.len();
         for (offset, value) in [
@@ -18911,6 +18939,72 @@ mod tests {
         assert_eq!(step_of(&tree, tree_run).state, StepState::Cancelled);
         assert_eq!(
             propose_child(&mut tree, tree_run, DEMO_SRC, Some(budget(1, 60))),
+            Err("parent stopped")
+        );
+        // A run that has already left cannot be cancelled as a step.
+        // Cancelling its tree records that in the step, so the run holds no
+        // scope and takes no new child, before and after a reload.
+        let (mut running, running_run) = task(budget(8, 600));
+        let existing =
+            propose_child(&mut running, running_run, DEMO_SRC, Some(budget(2, 60))).unwrap();
+        let other =
+            propose_child(&mut running, running_run, DEMO_DOC, Some(budget(2, 60))).unwrap();
+        assert!(authorize_child(
+            &mut running,
+            existing,
+            Some("child-grant"),
+            DEMO_SRC
+        ));
+        assert!(dispatch(&mut running, running_run));
+        assert!(cancel_tree(&mut running, running_run));
+        assert_eq!(step_of(&running, running_run).state, StepState::Dispatched);
+        assert!(step_of(&running, running_run).tree_cancelled);
+        assert_eq!(
+            scope_still_granted(&running, step_of(&running, running_run)),
+            None
+        );
+        assert!(!authorize_child(
+            &mut running,
+            other,
+            Some("other-grant"),
+            DEMO_DOC
+        ));
+        assert_eq!(
+            propose_child(
+                &mut running,
+                running_run,
+                "localhost://Users/self/Projects/demo/x",
+                Some(budget(1, 60))
+            ),
+            Err("parent stopped")
+        );
+        let mut back = reloaded(&running);
+        assert!(step_of(&back, running_run).tree_cancelled);
+        assert_eq!(
+            propose_child(
+                &mut back,
+                running_run,
+                "localhost://Users/self/Projects/demo/x",
+                Some(budget(1, 60))
+            ),
+            Err("parent stopped")
+        );
+        // A crash after the cancel keeps the closure, and the flag survives
+        // the settlement-unknown state.
+        assert!(note_crash(&mut back, running_run));
+        assert_eq!(
+            step_of(&back, running_run).state,
+            StepState::SettlementUnknown
+        );
+        let mut crashed = reloaded(&back);
+        assert!(step_of(&crashed, running_run).tree_cancelled);
+        assert_eq!(
+            propose_child(
+                &mut crashed,
+                running_run,
+                "localhost://Users/self/Projects/demo/x",
+                Some(budget(1, 60))
+            ),
             Err("parent stopped")
         );
     }
@@ -20803,6 +20897,51 @@ mod tests {
             6,
             "every acceptance site calls the shared rule"
         );
+    }
+
+    /// The live-state rule has one implementation: `live_step` accepts
+    /// `Prepared | Dispatched` (and nothing whose tree was cancelled), and
+    /// `usable_child` asks it instead of matching the states itself.
+    fn assert_live_state_rule_is_shared() {
+        let source = include_str!("lib.rs");
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module follows the production code")
+            .0;
+        assert!(
+            !production.contains("Some(StepState::Prepared | StepState::Dispatched) => {}"),
+            "usable_child keeps its own live-state rule"
+        );
+        assert_eq!(
+            production.matches("fn live_step(").count(),
+            1,
+            "one validator"
+        );
+        let body = |name: &str| {
+            production
+                .split_once(name)
+                .and_then(|(_, rest)| rest.split_once("\n}\n"))
+                .map(|(body, _)| body)
+                .unwrap_or_else(|| panic!("{name} is in the production code"))
+        };
+        assert!(
+            body("fn live_step(").contains("StepState::Prepared | StepState::Dispatched"),
+            "live_step does not accept the live states"
+        );
+        let usable = body("fn usable_child");
+        assert!(
+            !usable.contains("StepState::"),
+            "usable_child matches states itself"
+        );
+        assert!(
+            usable.contains("live_step("),
+            "usable_child does not ask the shared rule"
+        );
+    }
+
+    #[test]
+    fn the_live_state_rule_is_one_shared_validator() {
+        assert_live_state_rule_is_shared();
     }
 
     /// Codex at f9badef, finding 1: one validator decides the task request

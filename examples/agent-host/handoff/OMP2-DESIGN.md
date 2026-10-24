@@ -61,7 +61,7 @@ child step (the parent's journal), never from a child host's own journal.
 
 - Depth is derived, not stored per step: a step's depth is the number of Child steps up its `parent_id` chain
   (`child_chain`), plus the journal's own `depth`. A child host journal stores `depth` in its header (the depth of
-  its child step). The step's depth byte stays 0.
+  its child step). The step's flag byte is 0, or 1 for a run that had left whose tree was cancelled.
 - `propose_child` refuses anything past `CHILD_DEPTH_LIMIT` with "depth limit", and no step is made. A child at the
   limit cannot propose a child, and neither can a child host at the limit.
 
@@ -163,7 +163,9 @@ child step (the parent's journal), never from a child host's own journal.
 ### Cancel (R5)
 
 - `cancel_tree(id)`: a child stops with `cancelled`, and its subtree with it. A step that is not a child is cancelled
-  as before (only from Prepared), and the children below it stop.
+  as before (only from Prepared), and the children below it stop. A run that has already left cannot be cancelled as a
+  step; its tree cancellation is recorded in its step flag, so it holds no scope and takes no new child, before and
+  after a reload.
 - `cancel_task`: the header records `cancelled_from` (the last step id at that time). Every child stops with
   `cancelled`, prepared steps become cancelled, and no model call or new child is accepted anywhere in the task. A
   reload stays cancelled.
@@ -213,9 +215,11 @@ child step (the parent's journal), never from a child host's own journal.
 ## Format stays 2
 
 Nothing already written changes meaning:
-- every idea 2 field (`cancelled_from`, `task_budget`, `depth` in the header; budget, requests used and stop in a
-  step) is zero or "none" in a journal written before idea 2, and zero still means none, depth 0, top task;
-- the step depth byte stays 0 (depth is derived), so older Child steps stay valid;
+- every idea 2 field (`cancelled_from`, `task_budget`, `depth` in the header; budget, requests used, stop and the
+  tree-cancelled flag in a step) is zero or "none" in a journal written before idea 2, and zero still means none,
+  depth 0, top task;
+- the step flag byte is 0 in a journal written before the tree-cancelled rule (depth is derived; 1 is only a run that
+  had left whose tree was cancelled), so older Child steps stay valid;
 - kinds 17 and 18 were refused by decode before, so no older journal holds them;
 - the 17 earlier kinds render byte for byte as before (`RENDERING_PIN` unchanged); kinds 17 and 18 have their own
   pin (`IDEA_2_RENDERING_PIN`).
