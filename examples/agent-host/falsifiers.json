@@ -418,8 +418,40 @@
    "edits": [
     {
      "file": "falsify.py",
-     "old": "    r\"^[ \\t]*(?:error(?:\\[[^\\]]*\\])?:|Error:|Traceback \\(most recent call last\\)\"\n    r\"|dyld: |error while loading)\",",
-     "new": "    r\"^(?:error(?:\\[[^\\]]*\\])?:|Error:|Traceback \\(most recent call last\\)\"\n    r\"|dyld: |error while loading)\","
+     "old": "    r\"^[ \\t]*(?:error(?:\\[[^\\]]*\\])?:|Error:|Traceback \\(most recent call last\\))\",",
+     "new": "    r\"^(?:error(?:\\[[^\\]]*\\])?:|Error:|Traceback \\(most recent call last\\))\","
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
+  },
+  {
+   "id": "FS15",
+   "title": "only a bare dyld marker counts as a loader error",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "LOADER_ERROR = re.compile(\n    r\"dyld(?:\\[[^\\]]*\\])?: |error while loading shared libraries|Library not loaded:\")",
+     "new": "LOADER_ERROR = re.compile(\n    r\"dyld: \")"
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
+  },
+  {
+   "id": "FS16",
+   "title": "the streams are joined without a line boundary",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    output = done.stdout + \"\\n\" + done.stderr",
+     "new": "    output = done.stdout + done.stderr"
     }
    ],
    "tests": [

@@ -59,12 +59,16 @@ DISK_FULL = ("No space left on device", "ENOSPC", "Disk quota exceeded")
 TEST_RESULT = re.compile(r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed;", re.MULTILINE)
 # A test harness or loader error means the named test's own evidence is
 # missing: the harness could not run the test the name asks for. A test body
-# prints to both streams, so the marker is found anywhere in the joined
-# output, at any indentation, never at column zero only.
+# prints to both streams, so the marker is found after any indentation, never
+# at column zero only.
 HARNESS_ERROR = re.compile(
-    r"^[ \t]*(?:error(?:\[[^\]]*\])?:|Error:|Traceback \(most recent call last\)"
-    r"|dyld: |error while loading)",
+    r"^[ \t]*(?:error(?:\[[^\]]*\])?:|Error:|Traceback \(most recent call last\))",
     re.MULTILINE)
+# A loader reports these with a prefix, for example `/test-bin: error while
+# loading shared libraries: ...` or `dyld[1234]: Library not loaded: ...`, so
+# the line start does not carry the marker and the phrase counts anywhere.
+LOADER_ERROR = re.compile(
+    r"dyld(?:\[[^\]]*\])?: |error while loading shared libraries|Library not loaded:")
 # Cargo prints this line after an ordinary failing test: the harness ran the
 # test and the test failed, so it is not a harness error.
 TEST_FAILED = "error: test failed, to rerun pass"
@@ -233,7 +237,11 @@ def run(argv, cwd):
     never to decide that a test passed."""
     env = dict(os.environ, RUST_TEST_THREADS=os.environ.get("RUST_TEST_THREADS", "2"))
     done = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True)
-    output = done.stdout + done.stderr
+    # Keep each stream's line structure: a marker at the start of stderr is
+    # still at the start of a line when stdout ends without a newline. Joining
+    # the bytes directly would fuse the last stdout line with the first stderr
+    # line and hide the marker.
+    output = done.stdout + "\n" + done.stderr
     if any(word in output for word in DISK_FULL):
         raise DiskFull("a command reported a full disk")
     return done.returncode, output
@@ -249,6 +257,8 @@ def harness_is_error_free(output):
     test body can print a fake FAILED summary, and a harness that fails to
     load the test prints no summary of its own, so any error marker makes
     every summary in that output untrustworthy."""
+    if LOADER_ERROR.search(output):
+        return False
     return not [line for line in output.splitlines()
                 if HARNESS_ERROR.match(line) and not line.strip().startswith(TEST_FAILED)]
 
@@ -410,6 +420,34 @@ print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtere
 raise SystemExit(101)
 """
 
+STUB_FAKE_SUMMARY_SPLIT_STREAMS = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+sys.stdout.write("partial output: ")
+sys.stderr.write("error: could not load the test harness")
+raise SystemExit(101)
+"""
+
+STUB_FAKE_SUMMARY_DYLD_PID = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+print("dyld[1234]: Library not loaded: libmissing.dylib")
+raise SystemExit(101)
+"""
+
+STUB_FAKE_SUMMARY_PREFIXED_LOADER = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+print("/test-bin: error while loading shared libraries: libmissing.so: cannot open shared object file")
+raise SystemExit(101)
+"""
+
 STUB_SURVIVOR_RAN = """import sys
 if "--exact" in sys.argv:
     if "--list" in sys.argv:
@@ -498,7 +536,13 @@ def a_named_test_that_does_not_run_is_not_a_catch():
                             ("fake summary with an indented error",
                              STUB_FAKE_SUMMARY_INDENTED_ERROR),
                             ("fake summary with an error on stdout",
-                             STUB_FAKE_SUMMARY_STDOUT_ERROR)):
+                             STUB_FAKE_SUMMARY_STDOUT_ERROR),
+                            ("fake summary then an error across the stream boundary",
+                             STUB_FAKE_SUMMARY_SPLIT_STREAMS),
+                            ("fake summary with a dyld process id error",
+                             STUB_FAKE_SUMMARY_DYLD_PID),
+                            ("fake summary with a prefixed loader error",
+                             STUB_FAKE_SUMMARY_PREFIXED_LOADER)):
             stub = SELF_TEST_DIR / "stub.py"
             stub.write_text(text, encoding="utf-8")
             how = {"build": [], "one": (["python3", "-I", str(stub)], SELF_TEST_DIR, [])}
