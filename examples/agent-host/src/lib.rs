@@ -1283,15 +1283,21 @@ fn compact_replacement(journal: &Journal, summary: &str) -> Option<Vec<SurfaceNo
     Some(replacement)
 }
 
-/// A character that holds a token together. A dot holds one only between
-/// alphanumerics, so a version number keeps its parts and a sentence period
-/// ends a token.
+/// A character that holds a token together: a letter, a digit, a combining
+/// mark, or one of the separators that keep an identifier or a value whole.
+/// A combining mark joins the character it follows, so `cafe` plus U+0301 is
+/// one token and does not carry the fact `cafe`. A dot holds a token only
+/// between alphanumerics, so a version number keeps its parts and a sentence
+/// period ends a token.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn token_continues(chars: &[char], index: usize) -> bool {
     let Some(&ch) = chars.get(index) else {
         return false;
     };
-    if ch.is_alphanumeric() || matches!(ch, '_' | '-' | '=') {
+    if ch.is_alphanumeric()
+        || unicode_normalization::char::is_combining_mark(ch)
+        || matches!(ch, '_' | '-' | '=')
+    {
         return true;
     }
     ch == '.'
@@ -10812,6 +10818,22 @@ mod tests {
             Err("summary drops a required fact")
         );
         assert_eq!(journal.events, before);
+    }
+
+    #[test]
+    fn a_model_summary_that_changes_a_required_fact_with_a_combining_mark_is_refused() {
+        let mut journal = summary_journal();
+        admit_user(&mut journal, "cafe");
+        let before = journal.events.clone();
+        let epoch = journal.epoch;
+        let id = dispatched_summary_step(&mut journal, &["cafe"]);
+        let accented = "The cafe\u{301} was open, and the earlier answer was kept.";
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(accented.to_string())),
+            Err("summary drops a required fact")
+        );
+        assert_eq!(journal.events, before);
+        assert_eq!(journal.epoch, epoch);
     }
 
     #[test]
