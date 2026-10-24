@@ -73,9 +73,10 @@ HARNESS_ERROR = re.compile(
 # the line start does not carry the marker and the phrase counts anywhere.
 LOADER_ERROR = re.compile(
     r"dyld(?:\[[^\]]*\])?: |error while loading shared libraries|Library not loaded:")
-# Cargo prints this line after an ordinary failing test: the harness ran the
-# test and the test failed, so it is not a harness error.
-TEST_FAILED = "error: test failed, to rerun pass"
+# Cargo prints this footer after an ordinary failing test: the harness ran the
+# test and the test failed, so the footer itself is not a harness error. Only
+# the footer text is removed; anything after it on the same line is checked.
+TEST_FAILED = re.compile(r"^[ \t]*error: test failed, to rerun pass", re.MULTILINE)
 # A named self-test case runs in its own process. A non-zero exit alone does
 # not say the case ran: a loading error also exits non-zero. The child prints
 # one marker line only after the case returns, and the runner requires both.
@@ -261,11 +262,12 @@ def harness_is_error_free(output):
     """True only when no harness or loader error marker is in the output. A
     test body can print a fake FAILED summary, and a harness that fails to
     load the test prints no summary of its own, so any error marker makes
-    every summary in that output untrustworthy."""
+    every summary in that output untrustworthy. The text keeps its separators:
+    a marker may end at a line break, and only the Cargo footer text is
+    removed."""
     if LOADER_ERROR.search(output):
         return False
-    return not [line for line in output.splitlines()
-                if HARNESS_ERROR.search(line) and not line.strip().startswith(TEST_FAILED)]
+    return not HARNESS_ERROR.search(TEST_FAILED.sub("", output))
 
 
 def ran_and_failed(output):
@@ -471,6 +473,25 @@ print("\\x1b[31merror\\x1b[0m: could not load the test harness")
 raise SystemExit(101)
 """
 
+STUB_FAKE_SUMMARY_FOOTER_THEN_ERROR = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+print("error: test failed, to rerun pass `--lib` error: could not load the test harness")
+raise SystemExit(101)
+"""
+
+STUB_FAKE_SUMMARY_SPLIT_ERROR = """import sys
+if "--list" in sys.argv:
+    print("tests::planted_check: test")
+    raise SystemExit(0)
+print("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out")
+print("error:")
+print("  could not load the test harness")
+raise SystemExit(101)
+"""
+
 STUB_SURVIVOR_RAN = """import sys
 if "--exact" in sys.argv:
     if "--list" in sys.argv:
@@ -575,7 +596,11 @@ def a_named_test_that_does_not_run_is_not_a_catch():
                             ("fake summary with a prefixed harness error",
                              STUB_FAKE_SUMMARY_PREFIXED_HARNESS),
                             ("fake summary with a colored error label",
-                             STUB_FAKE_SUMMARY_COLORED_ERROR)):
+                             STUB_FAKE_SUMMARY_COLORED_ERROR),
+                            ("fake summary with an error after the cargo footer",
+                             STUB_FAKE_SUMMARY_FOOTER_THEN_ERROR),
+                            ("fake summary with an error split after its colon",
+                             STUB_FAKE_SUMMARY_SPLIT_ERROR)):
             stub = SELF_TEST_DIR / "stub.py"
             stub.write_text(text, encoding="utf-8")
             how = {"build": [], "one": (["python3", "-I", str(stub)], SELF_TEST_DIR, [])}

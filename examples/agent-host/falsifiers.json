@@ -489,6 +489,38 @@
    "tests": [
     "a named test that does not run is not a catch"
    ]
+  },
+  {
+   "id": "FS19",
+   "title": "the whole cargo footer line is exempt, so a later error on it is missed",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    return not HARNESS_ERROR.search(TEST_FAILED.sub(\"\", output))",
+     "new": "    dropped = [line for line in output.splitlines()\n               if not line.strip().startswith(\"error: test failed, to rerun pass\")]\n    return not HARNESS_ERROR.search(\"\\n\".join(dropped))"
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
+  },
+  {
+   "id": "FS20",
+   "title": "line separators are dropped, so an error split after its colon is missed",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    return not HARNESS_ERROR.search(TEST_FAILED.sub(\"\", output))",
+     "new": "    return not [line for line in TEST_FAILED.sub(\"\", output).splitlines()\n                if HARNESS_ERROR.search(line)]"
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
   }
  ]
 }
