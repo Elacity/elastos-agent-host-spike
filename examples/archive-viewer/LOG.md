@@ -148,3 +148,106 @@ must change only its own rule.
   status is not `listed` (encrypted, unsupported, blocked), or the encrypted
   tests above fail, as they should: F30 says an encrypted entry is listed
   and never read.
+
+## 2026-10-24: task 003, text previews (inflate, the bomb caps, the byte checks)
+
+Step 3b's second half: a shown entry is inflated under B1 to B3, checked
+against its declaration (L6 to L8), and shown as the documents model's typed
+blocks.
+
+### What changed
+
+- New `src/preview.rs`: `preview` (the per-entry checks), `inflate_bounded`
+  (B1's fixed window, B3's total, 16-byte steps for the later B2 streaming
+  check), `Budget` (the run's inflate and compressed bytes, taken by
+  `Budget::take` whether the entry is shown or skipped), CRC-32 and the skip
+  messages. Caps: `MAX_PREVIEW_BYTES` 16 KiB, `MAX_RATIO` 100 with 1 KiB
+  slack, `MAX_INFLATE_BYTES` 64 KiB, `MAX_COMPRESSED_BYTES` 24 KiB.
+- `src/lib.rs`: the run checks the local header (L5), then previews a listed
+  file; a directory, a nested archive or another kind stays listed and unread.
+  The view gains `previews`, each `{"blocks":[…],"index":N}` in sorted keys.
+  Skipped reasons are `oversize`, `ratio`, `size_mismatch`, `crc_mismatch`,
+  `not_text`, `too_long`, `compressed_budget`, `inflate_budget` and
+  `read_budget`.
+- `src/zip.rs`: `Entry.crc` is crate-visible for the L7 compare.
+- `Cargo.toml`: `miniz_oxide` 0.9.1 (DESIGN's decompressor) and `docs-model`
+  (the typed blocks, M2). No other crate changed.
+- New tests: 87 pass. The existing fixtures that show a stored entry now carry
+  a correct CRC (`a_consistent_local_header_is_shown`,
+  `a_data_descriptor_flag_is_ignored`).
+- `no_view_is_longer_than_its_cap` is now a sweep: a giant name, a
+  preview-heavy view and a mixed one.
+
+### Falsifiers done (67, all caught, `falsify.py`)
+
+- F1 (B1 window), F2 (B1 declared size), F4 (B2 declared ratio), F5 (B3 total,
+  a sweep), F5b (the 24 KiB compressed cap).
+- F26 (L6 sizes from the bytes), F27 (L7 CRC), F28 (L8 stored sizes).
+- F32 (the whole view's cap, now over previews too).
+- F33 (the text checks), F33b (the model's block cap).
+
+### Falsifiers left for the next tasks
+
+- **F3 (B2 streaming ratio): deferred to the host-test task** because its test
+  runs in the component. The inflate loop already takes at most 16 compressed
+  bytes a step, so the check lands after every step without moving a rule.
+- The host test and the fuel gate: F35 (grant), F36 (fuel), F43 (declared
+  totals under the store's memory limit).
+- The page: F37 to F39. Bus v2: F18, F34. tar: not in this slice.
+
+### Notes
+
+- **Kit gap:** `capsule-kit-guest` has no inflate and no CRC-32; both live in
+  this app, as DESIGN's kit list (M1 to M3) gives only the counted reader, the
+  text checks and the image checks. A second archive format would move them to
+  the kit rather than copy them.
+- The previews are typed blocks (`docs-model`, plain text as paragraphs), so
+  the page task draws the same shape the documents viewer uses.
+- `deflated` fixtures use `miniz_oxide`'s compressor; `crc32` is pinned to the
+  standard check value (`crc32_matches_the_standard_check_value`).
+
+### Review fixes (round 2)
+
+- **The caps now count real decompressor work.** `inflate_bounded` uses
+  `miniz_oxide::inflate::core::decompress_with_limit` with a 32 KiB ring buffer
+  as both history and output, and `out_max` set to the smaller of the B1 window
+  and the run's allowance. Every inflated byte is written into counted memory,
+  so `Outcome.produced` is the actual output; the streaming wrapper's internal
+  dictionary could retain output that neither cap nor `produced` saw.
+- **A spent limit is not a corruption reason.** `HasMoreOutput` continues the
+  loop, an exhausted ask reports `inflate_budget` (or `oversize` when the
+  window is full), and the B1 check runs before the `Done`/L6 verdict.
+  `a_preview_stops_for_its_budget_before_any_corruption_reason` covers both: a
+  valid `hello` with one byte of allowance, and a stored block producing
+  16,385 bytes while declaring 16,384.
+- **F5 proves the run's own accounting.** The sweep now runs five deflated
+  14 KiB entries through `run` in three orders. Each ends in a NUL, so it is
+  not text with a correct CRC: no other rule decides whether it costs output.
+  The fifth is `inflate_budget`; under F5's mutant the fifth inflates too and
+  no entry stops for the total. F5's mutant removes
+  `previews_budget.take(&outcome)` in `run`; F5c stops the allowance countdown;
+  F1b judges the byte past the cap after the stream's verdict.
+- F1's fixture is now one 20,000-byte DEFLATE stored block, so the whole
+  payload would leave the decompressor in one call without the window.
+- 69 falsifiers, all caught and isolated.
+
+### Review fixes (round 3)
+
+- **An exact fit can end.** A spent output allowance still gets a zero-output
+  decompressor call, because the last stored or empty block carries no bytes.
+  `an_exact_fit_stream_ends_within_its_budget` uses the stored "hello world"
+  stream plus its final empty block with 11 bytes of allowance: the first step
+  produces 11 bytes, the next consumes the last five with no output, and the
+  entry is shown. F5d refuses that zero-output step.
+- **F5 measures the total.** The preview loop moved into `previews_for`, which
+  returns the budget, so the test proves the run really consumed 65,536 bytes
+  across four skipped entries and the fifth. Raising `MAX_INFLATE_BYTES` to
+  65 KiB (F5e) makes it consume 66,560 and fail.
+- **L6 proves the compressed boundary.** `an_entry_with_junk_after_the_stream_is_skipped`
+  appends junk inside the declared compressed size, with the right output
+  length and CRC; the entry is `size_mismatch`. F26b removes the consumed
+  check.
+- **One stored-size check stays.** The stored branch uses its validated bytes
+  directly: the early L8 check and the returned-length check already prove the
+  length, so the unreachable comparison is gone.
+- 72 falsifiers.

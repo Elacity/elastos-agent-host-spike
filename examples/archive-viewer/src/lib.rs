@@ -14,11 +14,15 @@
 //! lies, overlapping records, too many entries) writes the view with the
 //! reason and no entries.
 //!
-//! This first slice has no inflate and no preview: it lists, and it checks the
-//! local header of each entry the request names to show. The Bus calls, the
-//! refusals, the counted reads, the URI check and the WIT glue are the capsule
-//! kit's guest crate (`examples/capsule-kit/guest`).
+//! For each entry the request names to show, it checks the local header (L5),
+//! then inflates at most one entry into a fixed window under the zip-bomb caps
+//! (B1 to B3), checks the output against the declared sizes and CRC (L6 to L8)
+//! and the capsule kit's text checks, and writes the text. A nested archive or
+//! a directory is listed only. The Bus calls, the refusals, the counted reads,
+//! the URI and text checks and the WIT glue are the capsule kit's guest crate
+//! (`examples/capsule-kit/guest`).
 
+mod preview;
 mod request;
 mod zip;
 
@@ -77,6 +81,15 @@ pub const APP: App = App {
     max_input_bytes: MAX_REQUEST_BYTES,
 };
 
+/// One shown entry's checked text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Preview {
+    pub index: usize,
+    /// The typed blocks of the entry's text, already rendered as one JSON
+    /// array (the documents viewer's block kinds).
+    pub blocks: Vec<u8>,
+}
+
 /// A requested entry that could not be shown, and why.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Skipped {
@@ -86,7 +99,8 @@ pub struct Skipped {
 }
 
 /// Reads the request and the archive, checks a local header for each entry the
-/// request names, and writes the view. Returns the view text.
+/// request names, inflates the listed files within the caps, and writes the
+/// view. Returns the view text.
 pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
     let request_grant = grant(bus, REQUEST_URI, "read", "read which archive to show")?;
     let request_bytes = read_bounded(
@@ -106,29 +120,16 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
         zip::listing(&mut reader)?
     };
 
-    let mut skipped = Vec::new();
-    for index in &request.show {
-        match listing.entries.get(*index) {
-            None => skipped.push(Skipped {
-                index: *index,
-                reason: "no_such_entry",
-                message: format!("the archive has no entry {index}"),
-            }),
-            Some(entry) => {
-                let mut reader = zip::Reader::new(bus, &request.uri, &archive_grant, &mut left);
-                match zip::check_shown(&mut reader, entry)? {
-                    Ok(()) => {}
-                    Err(reason) => skipped.push(Skipped {
-                        index: *index,
-                        reason,
-                        message: format!("entry {} is not shown: {reason}", entry.path),
-                    }),
-                }
-            }
-        }
-    }
+    let (previews, skipped, _) = previews_for(
+        bus,
+        &request.uri,
+        &archive_grant,
+        &mut left,
+        &listing,
+        &request.show,
+    )?;
 
-    let mut text = view_json(&request.uri, &listing, &skipped);
+    let mut text = view_json(&request.uri, &listing, &previews, &skipped);
     let over = text.len() as u64;
     if over > MAX_VIEW_BYTES {
         // The view is capped as a whole (PATTERNS 1). Never serialize past
@@ -144,6 +145,7 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
                 }),
             },
             &[],
+            &[],
         );
     }
     debug_assert!(text.len() as u64 <= MAX_VIEW_BYTES, "{} bytes", text.len());
@@ -157,8 +159,68 @@ pub fn run(bus: &mut dyn Bus) -> Result<String, Refusal> {
     Ok(text)
 }
 
+/// The previews and skips of the entries a request names, and the budget they
+/// used. `run` writes the view; the tests read the budget to prove the total.
+pub fn previews_for(
+    bus: &mut dyn Bus,
+    uri: &str,
+    grant: &str,
+    left: &mut u64,
+    listing: &Listing,
+    show: &[usize],
+) -> Result<(Vec<Preview>, Vec<Skipped>, preview::Budget), Refusal> {
+    let mut previews = Vec::new();
+    let mut budget = preview::Budget::new();
+    let mut skipped = Vec::new();
+    for index in show {
+        match listing.entries.get(*index) {
+            None => skipped.push(Skipped {
+                index: *index,
+                reason: "no_such_entry",
+                message: format!("the archive has no entry {index}"),
+            }),
+            Some(entry) => {
+                let mut reader = zip::Reader::new(bus, uri, grant, left);
+                match zip::check_shown(&mut reader, entry)? {
+                    Ok(()) => {
+                        // N1: a directory, a nested archive or another kind is
+                        // listed only, and its bytes stay unread.
+                        if entry.kind != Kind::File {
+                            continue;
+                        }
+                        let outcome = preview::preview(&mut reader, entry, &budget)?;
+                        budget.take(&outcome);
+                        match outcome.blocks {
+                            Ok(blocks) => previews.push(Preview {
+                                index: *index,
+                                blocks,
+                            }),
+                            Err(reason) => skipped.push(Skipped {
+                                index: *index,
+                                reason,
+                                message: preview::message(entry, reason),
+                            }),
+                        }
+                    }
+                    Err(reason) => skipped.push(Skipped {
+                        index: *index,
+                        reason,
+                        message: format!("entry {} is not shown: {reason}", entry.path),
+                    }),
+                }
+            }
+        }
+    }
+    Ok((previews, skipped, budget))
+}
+
 /// The view, keys in sorted order so the text is deterministic.
-pub fn view_json(uri: &str, listing: &Listing, skipped: &[Skipped]) -> String {
+pub fn view_json(
+    uri: &str,
+    listing: &Listing,
+    previews: &[Preview],
+    skipped: &[Skipped],
+) -> String {
     let mut out = String::new();
     out.push_str(r#"{"archive":{"size":"#);
     out.push_str(&listing.size.to_string());
@@ -170,6 +232,17 @@ pub fn view_json(uri: &str, listing: &Listing, skipped: &[Skipped]) -> String {
             out.push(',');
         }
         push_entry(&mut out, entry);
+    }
+    out.push_str(r#"],"previews":["#);
+    for (position, preview) in previews.iter().enumerate() {
+        if position > 0 {
+            out.push(',');
+        }
+        out.push_str(r#"{"blocks":"#);
+        out.push_str(std::str::from_utf8(&preview.blocks).expect("the blocks are JSON"));
+        out.push_str(r#","index":"#);
+        out.push_str(&preview.index.to_string());
+        out.push('}');
     }
     out.push(']');
     if let Some(refused) = &listing.refused {

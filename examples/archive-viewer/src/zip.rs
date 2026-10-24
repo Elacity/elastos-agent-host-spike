@@ -66,7 +66,7 @@ pub struct Entry {
     name_len: u16,
     extra_len: u16,
     flags: u16,
-    crc: u32,
+    pub(crate) crc: u32,
     name: Vec<u8>,
 }
 
