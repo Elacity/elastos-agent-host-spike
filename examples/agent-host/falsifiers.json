@@ -1,0 +1,203 @@
+{
+ "about": "Agent host falsifiers: each entry breaks one check (exact text, replaced once), and every named test must then FAIL. Run with falsify.py. expect: caught (all named tests fail), compile_error (the mutation must not build), survives (known survivor, by design). Files are relative to examples/agent-host. command: host (cargo test of the guest), e2e (run-e2e.sh: the guest in a test Runtime), or selftest (this runner's own named self-test case, for a change to falsify.py).",
+ "retired": {},
+ "falsifiers": [
+  {
+   "id": "FS01",
+   "title": "the skill budget guard is gone, so an over-budget skill is appended",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if text.is_empty() || text.len() > SKILL_BUDGET || host_path(text) {",
+     "new": "    if text.is_empty() || host_path(text) {"
+    }
+   ],
+   "tests": [
+    "tests::an_over_budget_skill_leaves_the_journal_unchanged"
+   ]
+  },
+  {
+   "id": "FS02",
+   "title": "a skill may carry a host path",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if text.is_empty() || text.len() > SKILL_BUDGET || host_path(text) {",
+     "new": "    if text.is_empty() || text.len() > SKILL_BUDGET {"
+    }
+   ],
+   "tests": [
+    "tests::an_over_budget_skill_leaves_the_journal_unchanged"
+   ]
+  },
+  {
+   "id": "FS03",
+   "title": "an empty skill is appended",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if text.is_empty() || text.len() > SKILL_BUDGET || host_path(text) {",
+     "new": "    if text.len() > SKILL_BUDGET || host_path(text) {"
+    }
+   ],
+   "tests": [
+    "tests::an_over_budget_skill_leaves_the_journal_unchanged"
+   ]
+  },
+  {
+   "id": "FS04",
+   "title": "a harness error that exits non-zero is counted as a failed test",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "        elif ran_and_failed(output):\n            outcomes[name] = \"failed\"\n        else:\n            outcomes[name] = \"not run\"",
+     "new": "        elif ran_and_failed(output):\n            outcomes[name] = \"failed\"\n        else:\n            outcomes[name] = \"failed\""
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
+  },
+  {
+   "id": "FS05",
+   "title": "a name no test answers to is counted as a failed test",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "        if [line for line in listed.splitlines() if line == f\"{name}: test\"] != [f\"{name}: test\"]:\n            outcomes[name] = \"not run\"\n            continue",
+     "new": "        if [line for line in listed.splitlines() if line == f\"{name}: test\"] != [f\"{name}: test\"]:\n            outcomes[name] = \"failed\"\n            continue"
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
+  },
+  {
+   "id": "FS06",
+   "title": "an interrupted edit is not put back before the error propagates",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "        except BaseException as error:\n            # Python does not call __exit__ when __enter__ raises, and a\n            # Ctrl-C or SIGTERM can arrive just after a replacement. Put every\n            # original back before the interruption goes on.\n            self.restore()\n            if isinstance(error, OSError) and \"No space\" in str(error):",
+     "new": "        except BaseException as error:\n            if isinstance(error, OSError) and \"No space\" in str(error):"
+    }
+   ],
+   "tests": [
+    "an interrupted edit is restored"
+   ]
+  },
+  {
+   "id": "FS07",
+   "title": "a test that exits zero without running is counted as a pass",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "        if code == 0:\n            ran = any(passed >= 1 for _status, passed, _failed in harness_results(output))\n            outcomes[name] = \"passed\" if ran else \"not run\"",
+     "new": "        if code == 0:\n            outcomes[name] = \"passed\""
+    }
+   ],
+   "tests": [
+    "a named test that does not run is not a catch"
+   ]
+  },
+  {
+   "id": "FS08",
+   "title": "the return sits outside the restoration try, so an interrupt after the edit leaks",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "            return self\n        except BaseException as error:",
+     "new": "            pass\n        except BaseException as error:"
+    },
+    {
+     "file": "falsify.py",
+     "old": "                raise DiskFull(str(error)) from error\n            raise\n\n    def restore(self):",
+     "new": "                raise DiskFull(str(error)) from error\n            raise\n        return self\n\n    def restore(self):"
+    }
+   ],
+   "tests": [
+    "an interrupt at the end of the edit is restored"
+   ]
+  },
+  {
+   "id": "FS09",
+   "title": "a self-test non-zero exit is a failure without proof that the case ran",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "            code, output = run(argv + extra + [\"--self-test-case\", name], cwd)\n            lines = output.splitlines()\n            if code == CASE_PASSED and case_marker(name, \"OK\") in lines:\n                outcomes[name] = \"passed\"\n            elif code == CASE_FAILED and case_marker(name, \"FAILED\") in lines:\n                outcomes[name] = \"failed\"\n            else:\n                outcomes[name] = \"not run\"\n            continue",
+     "new": "            code, _output = run(argv + extra + [\"--self-test-case\", name], cwd)\n            outcomes[name] = \"not run\" if code == CASE_USAGE else \"failed\" if code != 0 else \"passed\"\n            continue"
+    }
+   ],
+   "tests": [
+    "a self-test case counts only when it ran"
+   ]
+  },
+  {
+   "id": "FS10",
+   "title": "a survives entry is a survivor from the suite alone, with no named-test proof",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    missing = [name for name in entry[\"tests\"] if outcomes.get(name, \"not run\") == \"not run\"]",
+     "new": "    if expect == \"survives\":\n        return True, \"SURVIVED (expected, by design)\", \"\"\n    missing = [name for name in entry[\"tests\"] if outcomes.get(name, \"not run\") == \"not run\"]"
+    }
+   ],
+   "tests": [
+    "a survivor needs its named test to run"
+   ]
+  },
+  {
+   "id": "FS11",
+   "title": "a survives entry skips the named tests the caught path proves",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "    argv, cwd, extra = how[\"one\"]\n    outcomes = {}",
+     "new": "    if entry[\"expect\"] == \"survives\":\n        return False, {}\n    argv, cwd, extra = how[\"one\"]\n    outcomes = {}"
+    }
+   ],
+   "tests": [
+    "a survivor is proved by its named tests"
+   ]
+  },
+  {
+   "id": "FS12",
+   "title": "a survives entry may name no test",
+   "command": "selftest",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "falsify.py",
+     "old": "        if entry[\"expect\"] in (\"caught\", \"survives\") and not entry[\"tests\"]:",
+     "new": "        if entry[\"expect\"] == \"caught\" and not entry[\"tests\"]:"
+    }
+   ],
+   "tests": [
+    "a survivor needs its named test to run"
+   ]
+  }
+ ]
+}
