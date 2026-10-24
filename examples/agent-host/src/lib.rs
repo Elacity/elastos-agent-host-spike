@@ -8981,8 +8981,9 @@ mod tests {
 
     fn read_metrics(base_url: &str, when: &str) -> Result<(f64, PrefillSeconds), String> {
         let text = opt_in_model::metrics(base_url)
-            .map_err(|error| format!("/metrics {when} the turns failed: {error}"))?;
-        required_metrics(&text).map_err(|error| format!("/metrics {when} the turns: {error}"))
+            .map_err(|error| format!("/metrics read {when} failed: {error}"))?;
+        required_metrics(&text)
+            .map_err(|error| format!("/metrics read {when} is missing a required counter: {error}"))
     }
 
     /// The two consecutive turns of the prefix proof.
@@ -9023,12 +9024,12 @@ mod tests {
         if first_prefix != second_prefix {
             return Err("the packed prefix moved between two consecutive turns".to_string());
         }
-        let before = read_metrics(&base_url, "before")?;
+        let before = read_metrics(&base_url, "before the turns")?;
         opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, &first_prompt)
             .map_err(|error| format!("the local model refused the first turn: {error}"))?;
         opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, &second_prompt)
             .map_err(|error| format!("the local model refused the second turn: {error}"))?;
-        let after = read_metrics(&base_url, "after")?;
+        let after = read_metrics(&base_url, "after the turns")?;
         Ok(Some(PrefixProbe {
             prefix_bytes: first_prefix.len(),
             before,
@@ -9350,7 +9351,7 @@ mod tests {
                     "tensorfold:request_prefill_seconds: {}",
                     prefill_report(&report.before.1, &report.after.1)
                 );
-                println!("no prefix-hit counter is read: this engine publishes none");
+                println!("no prefix-hit counter is read and no cache hit is claimed");
             }
             Err(reason) => panic!("{reason}"),
         }

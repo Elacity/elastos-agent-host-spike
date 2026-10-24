@@ -562,7 +562,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        let before = read_metrics(&base_url, \"before\")?;",
+     "old": "        let before = read_metrics(&base_url, \"before the turns\")?;",
      "new": "        let before = (0.0, PrefillSeconds::Scalar(0.0));"
     }
    ],
@@ -594,7 +594,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        let after = read_metrics(&base_url, \"after\")?;",
+     "old": "        let after = read_metrics(&base_url, \"after the turns\")?;",
      "new": "        let after = (before.0, before.1.clone());"
     }
    ],
