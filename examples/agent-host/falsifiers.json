@@ -9,7 +9,8 @@
   "JF15": "same as JF14",
   "OS01": "retired in #24 (fix 1)",
   "OP01": "retired in #24",
-  "OY06": "re-targeted as OY06c (stored_rules_ok)"
+  "OY06": "re-targeted as OY06c (stored_rules_ok)",
+  "PX52": "the compaction boundary makes the saved copy the log's prefix, so the current-log record check covers the saved view; PX54 covers the boundary"
  },
  "falsifiers": [
   {
@@ -36,8 +37,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    stored_paths_ok(journal)?;\n    stored_children_ok(journal)\n}",
-     "new": "    stored_paths_ok(journal)\n}"
+     "old": "    stored_paths_ok(journal)?;\n    compaction_boundary_ok(journal)?;\n    stored_children_ok(journal)\n}",
+     "new": "    stored_paths_ok(journal)?;\n    compaction_boundary_ok(journal)\n}"
     }
    ],
    "tests": [
@@ -3180,8 +3181,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    stored_paths_ok(journal)?;\n    stored_children_ok(journal)\n}",
-     "new": "    stored_children_ok(journal)\n}"
+     "old": "    stored_paths_ok(journal)?;\n    compaction_boundary_ok(journal)?;\n    stored_children_ok(journal)\n}",
+     "new": "    compaction_boundary_ok(journal)?;\n    stored_children_ok(journal)\n}"
     }
    ],
    "tests": [
@@ -4909,22 +4910,6 @@
    ]
   },
   {
-   "id": "PX52",
-   "title": "a load skips the child records in the saved compaction",
-   "command": "host",
-   "expect": "caught",
-   "edits": [
-    {
-     "file": "src/lib.rs",
-     "old": "    if let Some((saved, _)) = &journal.compact_backup {\n        stored_child_records_ok(\n            journal,\n            saved.iter().chain(child_records_since_compaction(journal)),\n        )?;\n    }\n",
-     "new": ""
-    }
-   ],
-   "tests": [
-    "tests::a_saved_compaction_record_must_match_its_child"
-   ]
-  },
-  {
    "id": "PX53",
    "title": "a missing task budget says the child is over the parent's budget",
    "command": "host",
@@ -4939,6 +4924,54 @@
    "tests": [
     "tests::a_budgeted_child_with_no_task_budget_says_start_a_new_task",
     "tests::child_limits_are_checked_again_after_reload"
+   ]
+  },
+  {
+   "id": "PX54",
+   "title": "a load skips the compaction boundary",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    compaction_boundary_ok(journal)?;\n    stored_children_ok(journal)\n}",
+     "new": "    stored_children_ok(journal)\n}"
+    }
+   ],
+   "tests": [
+    "tests::a_saved_compaction_past_the_log_is_refused_on_load"
+   ]
+  },
+  {
+   "id": "PX55",
+   "title": "a commit skips the compaction boundary",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if compaction_boundary_ok(journal).is_err() {\n        return false;\n    }\n    let Some(mut replacement) = journal.compact_pending.take() else {",
+     "new": "    let Some(mut replacement) = journal.compact_pending.take() else {"
+    }
+   ],
+   "tests": [
+    "tests::a_commit_refuses_a_saved_compaction_past_the_log"
+   ]
+  },
+  {
+   "id": "PX56",
+   "title": "a crash restore skips the compaction boundary",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if compaction_boundary_ok(journal).is_err() {\n        return false;\n    }\n    journal.compact_pending = None;",
+     "new": "    journal.compact_pending = None;"
+    }
+   ],
+   "tests": [
+    "tests::a_crash_restore_refuses_a_saved_compaction_past_the_log"
    ]
   }
  ]

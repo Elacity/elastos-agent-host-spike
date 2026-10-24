@@ -630,3 +630,38 @@ Principles:   2 (a cancelled parent takes the change request), 5 (all work stays
               budget never recorded says so), 12 (this note), 7 (each rule has a failing test and a caught
               falsifier).
 ```
+
+## Update: Codex FAIL at 4368761, the compaction boundary (24 Oct)
+
+```text
+Finding:      a load accepted a saved compaction longer than the current log. `child_records_since_compaction`
+              uses the saved length as the boundary, so `commit_compact` and `note_crash_during_compact`
+              dropped the records after it and returned true; the next load refused them with "record".
+Fix:          one `compaction_boundary_ok`: the saved copy is the prefix of the current log at its length.
+              `stored_rules_ok` refuses a stored journal that breaks it, and both install paths refuse to
+              take the pending replacement or restore the saved copy when it does.
+Consequence:  once the boundary holds, the saved copy is the log's prefix and the carried records are the
+              log's suffix, so the current-log record check already covers the crash-restore view. The
+              separate saved-view record check is removed (one rule, no second copy) and PX52 retires.
+Tests:        a_saved_compaction_past_the_log_is_refused_on_load,
+              a_commit_refuses_a_saved_compaction_past_the_log and
+              a_crash_restore_refuses_a_saved_compaction_past_the_log. Each appends one ordinary node to the
+              saved copy only; the commit and crash cases also stop the child, so the record written after
+              the boundary is the one that must not be dropped.
+Changed:      the "path not canonical" stored case now keeps its saved copy equal to the log prefix, so
+              the path rule is still the only rule that case breaks.
+Falsifiers:   PX54 (a load skips the boundary), PX55 (a commit skips it) and PX56 (a crash restore skips it)
+              new; CF02 and OY06c re-targeted to `stored_rules_ok` with the boundary rule; PX52 retired
+              because the boundary covers the saved view. All caught.
+Tests run:    ./examples/agent-host/verify.sh -> "237 passed", runner self-test OK, clippy clean, build OK.
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Full run:     python3 -I examples/agent-host/falsify.py: 282 CAUGHT, 1 CAUGHT (does not build: OY19), 1
+              SURVIVED (expected, by design: OZ01) of 284; no NOT RUN, no NO MATCH.
+Guest hash:   9eacec737f40c6a376ae07cc7d0a0b777fc1b19afbcd3a14b991af92a604728e on verify.sh.
+              wasm_sections.py: file 667936 bytes; /1/2 149 5ee6b40d46f6a045 (import list unchanged).
+Principles:   2 (a broken boundary installs nothing), 5 (all work stays in examples/agent-host), 10 (one
+              boundary rule for the load and both install paths; the saved-view record check is the same
+              rule as the log's, so it is gone), 11 (a stored journal that breaks the boundary is refused
+              with "record"), 12 (this note), 7 (three failing-first tests; PX54-PX56 each remove one
+              call site and are caught).
+```

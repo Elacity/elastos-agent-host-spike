@@ -1140,7 +1140,26 @@ fn decode_journal(bytes: &[u8]) -> Result<(Journal, [u8; 32], [u8; 32]), &'stati
 #[cfg(any(test, target_arch = "wasm32"))]
 fn stored_rules_ok(journal: &Journal) -> Result<(), &'static str> {
     stored_paths_ok(journal)?;
+    compaction_boundary_ok(journal)?;
     stored_children_ok(journal)
+}
+
+/// The compaction boundary: the saved copy is the prefix of the log it was
+/// taken from, so the events after it are exactly the records written while
+/// the compaction is open. A saved copy longer than the log, or one that
+/// differs from the log at its length, makes
+/// `child_records_since_compaction` drop records at a commit or a crash
+/// restore, and the next load refuses them. Every load and both install
+/// paths ask this one rule.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn compaction_boundary_ok(journal: &Journal) -> Result<(), &'static str> {
+    let Some((saved, _)) = &journal.compact_backup else {
+        return Ok(());
+    };
+    if saved.len() > journal.events.len() || journal.events[..saved.len()] != saved[..] {
+        return Err("record");
+    }
+    Ok(())
 }
 
 /// A stored journal keeps every child rule a live one does (OMP idea 2):
@@ -1205,9 +1224,9 @@ fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
             return Err("record");
         }
     }
-    // Every event list a compaction can install keeps the record rules: the
-    // log now, the pending replacement, and the saved backup, each with the
-    // records written while the compaction was open.
+    // The current log covers the crash restore: the boundary rule makes the
+    // saved copy its prefix, and the carried records are its suffix. The
+    // pending replacement is its own list, so it needs its own check.
     stored_child_records_ok(journal, journal.events.iter())?;
     if let Some(pending) = &journal.compact_pending {
         stored_child_records_ok(
@@ -1215,12 +1234,6 @@ fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
             pending
                 .iter()
                 .chain(child_records_since_compaction(journal)),
-        )?;
-    }
-    if let Some((saved, _)) = &journal.compact_backup {
-        stored_child_records_ok(
-            journal,
-            saved.iter().chain(child_records_since_compaction(journal)),
         )?;
     }
     // A stop cancels every prepared step below it, and a task cancel every
@@ -1990,6 +2003,9 @@ fn commit_compact(journal: &mut Journal) -> bool {
     if !journal.compaction_open {
         return false;
     }
+    if compaction_boundary_ok(journal).is_err() {
+        return false;
+    }
     let Some(mut replacement) = journal.compact_pending.take() else {
         return false;
     };
@@ -2005,6 +2021,9 @@ fn commit_compact(journal: &mut Journal) -> bool {
 #[cfg(any(test, target_arch = "wasm32"))]
 fn note_crash_during_compact(journal: &mut Journal) -> bool {
     if !journal.compaction_open {
+        return false;
+    }
+    if compaction_boundary_ok(journal).is_err() {
         return false;
     }
     journal.compact_pending = None;
@@ -16876,7 +16895,10 @@ mod tests {
         legacy_edit(&mut journal, upper, Some(first));
         cases.push((journal, "one file twice in one change"));
         let mut journal = empty_journal();
-        journal.compact_backup = Some((vec![raw_read(doubled, 1, "rev-1", None, "alpha\n")], 0));
+        journal
+            .events
+            .push(raw_read(doubled, 1, "rev-1", None, "alpha\n"));
+        journal.compact_backup = Some((journal.events.clone(), 0));
         cases.push((journal, "path not canonical"));
         let mut journal = empty_journal();
         journal.compact_pending = Some(vec![raw_read(nfd, 1, "rev-1", None, "alpha\n")]);
@@ -21518,6 +21540,51 @@ mod tests {
             decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
             Err("record")
         );
+    }
+
+    /// One ordinary node appended to the saved compaction only.
+    fn saved_past_the_log(journal: &mut Journal) {
+        journal.compact_backup.as_mut().unwrap().0.push(node(
+            Role::Assistant,
+            NodeSource::InHistory,
+            "a line saved past the log",
+        ));
+    }
+
+    /// Codex at 4368761: the saved copy is the boundary of the events the
+    /// compaction replaces. One saved node past the log is refused on load,
+    /// so no install can take the records after it from the wrong offset.
+    #[test]
+    fn a_saved_compaction_past_the_log_is_refused_on_load() {
+        let (mut journal, _child) = compacting_with_a_child();
+        saved_past_the_log(&mut journal);
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+    }
+
+    /// The same boundary at commit: a record written after a saved copy that
+    /// is past the log is not dropped; the commit installs nothing.
+    #[test]
+    fn a_commit_refuses_a_saved_compaction_past_the_log() {
+        let (mut journal, child) = compacting_with_a_child();
+        saved_past_the_log(&mut journal);
+        assert!(note_time_refusal(&mut journal, child));
+        let before = journal.clone();
+        assert!(!commit_compact(&mut journal));
+        assert_eq!(journal, before);
+    }
+
+    /// And at a crash restore.
+    #[test]
+    fn a_crash_restore_refuses_a_saved_compaction_past_the_log() {
+        let (mut journal, child) = compacting_with_a_child();
+        saved_past_the_log(&mut journal);
+        assert!(note_time_refusal(&mut journal, child));
+        let before = journal.clone();
+        assert!(!note_crash_during_compact(&mut journal));
+        assert_eq!(journal, before);
     }
 
     /// R8: on load, no step is still prepared at or before a cancel point or
