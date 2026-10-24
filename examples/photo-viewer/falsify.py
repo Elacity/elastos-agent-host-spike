@@ -127,6 +127,33 @@ GUEST = [
     ),
 ]
 
+# The kit's straight writer and the `json!` serializer it replaced. The JSON
+# bytes are the same, so only the fuel gate can tell them apart.
+WRITE_BODY = '''pub fn write_body(uri: &str, content: &[u8]) -> String {
+    let path = serde_json::to_string(uri).expect("a string always serializes");
+    let mut body = String::with_capacity(content.len() * 4 + path.len() + 40);
+    body.push_str(r#"{"append":false,"content":["#);
+    for (index, byte) in content.iter().enumerate() {
+        if index > 0 {
+            body.push(',');
+        }
+        if *byte >= 100 {
+            body.push(char::from(b'0' + byte / 100));
+        }
+        if *byte >= 10 {
+            body.push(char::from(b'0' + byte / 10 % 10));
+        }
+        body.push(char::from(b'0' + byte % 10));
+    }
+    body.push_str(r#"],"path":"#);
+    body.push_str(&path);
+    body.push('}');
+    body
+}'''
+JSON_WRITE_BODY = '''pub fn write_body(uri: &str, content: &[u8]) -> String {
+    json!({ "path": uri, "content": content, "append": false }).to_string()
+}'''
+
 # Built into the component and caught by host-test inside ComponentProvider.
 RUNTIME = [
     (
@@ -149,6 +176,13 @@ RUNTIME = [
         'body.push_str(r#"{"append":false,"content":["#);',
         'body.push_str(r#"{"content":["#);',
         ["album_plays_and_the_playlist_is_written"],
+    ),
+    (
+        "the write builds a value per byte (in the component)",
+        "../capsule-kit/guest/src/bus.rs",
+        WRITE_BODY,
+        JSON_WRITE_BODY,
+        ["the_worst_case_album_is_written_without_a_value_per_byte"],
     ),
 ]
 

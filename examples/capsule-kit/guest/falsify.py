@@ -83,9 +83,11 @@ CASES = [
      "",
      ["a_counted_read_never_asks_past_what_is_left"]),
     # The URI check.
-    ("any prefix is taken", "uri.rs",
+    # Strips the real prefix when it fits and any localhost path otherwise:
+    # the valid URIs still pass, and the wrong-folder assertion is what fails.
+    ("a path outside the folder is taken as under it", "uri.rs",
      "    let Some(relative) = uri.strip_prefix(prefix) else {",
-     "    let Some(relative) = Some(uri) else {",
+     '    let Some(relative) = uri.strip_prefix(prefix).or_else(|| uri.strip_prefix("localhost://")) else {',
      ["an_input_uri_names_one_object_under_its_folder"]),
     ("dot-dot segments allowed", "uri.rs",
      '.any(|part| part.is_empty() || part == "." || part == "..")',
