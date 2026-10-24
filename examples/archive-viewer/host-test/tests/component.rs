@@ -175,9 +175,23 @@ fn u32b(value: u32) -> [u8; 4] {
     value.to_le_bytes()
 }
 
+/// One built archive, with where its records sit: each entry's local-header
+/// offset and the central directory's range.
+struct Archive {
+    bytes: Vec<u8>,
+    local_offsets: Vec<u64>,
+    directory_offset: u64,
+    directory_size: u64,
+}
+
+/// The archive's bytes.
+fn zip(fixtures: &[Fixture]) -> Vec<u8> {
+    archive(fixtures).bytes
+}
+
 /// Builds a ZIP byte by byte: local headers and data, then the central
 /// directory, then the end record.
-fn zip(fixtures: &[Fixture]) -> Vec<u8> {
+fn archive(fixtures: &[Fixture]) -> Archive {
     let mut out = Vec::new();
     let mut built = Vec::new();
     let mut offsets = Vec::new();
@@ -245,7 +259,12 @@ fn zip(fixtures: &[Fixture]) -> Vec<u8> {
     out.extend_from_slice(&u32b(directory_size));
     out.extend_from_slice(&u32b(directory_offset));
     out.extend_from_slice(&u16b(0));
-    out
+    Archive {
+        bytes: out,
+        local_offsets: offsets.iter().map(|offset| u64::from(*offset)).collect(),
+        directory_offset: u64::from(directory_offset),
+        directory_size: u64::from(directory_size),
+    }
 }
 
 /// The central directory's size for these fixtures: a record is 46 bytes plus
@@ -388,23 +407,26 @@ fn worst_text() -> Vec<Fixture> {
     vec![Fixture::deflated("t.txt", &plain_text(MAX_PREVIEW_BYTES))]
 }
 
-/// B2 (F3): 100 compressed bytes that inflate to exactly 10,000. The stream
-/// starts with a 5,000-byte zero run, then runs of 152 zeros and one literal
-/// each, so its tree makes the first bytes very cheap: after two 16-byte steps
-/// 5,152 bytes have come out, past 100 × 32 + 1 KiB = 4,224. The declared
-/// ratio is 100 × 100 + 1 KiB = 11,024, so F4's declared-ratio check passes
-/// and only the streaming check can stop this entry.
+/// B2 (F3): a hand-built deflate stream of exactly 100 bytes that inflates to
+/// exactly 10,000. Its first block is dynamic with a 1-bit code for the
+/// 258-byte length, a 1-bit distance code and a 2-bit literal that seeds the
+/// history, so after the first 16 compressed bytes it has produced 2,839
+/// bytes: past 100 × 16 + 1 KiB = 2,624. The rest of the stream is a valid
+/// fixed block, so the whole stream ends at byte 100 with 10,000 out, and the
+/// declared ratio (10,000 from 100) passes F4. Without the per-step check the
+/// entry inflates to its declared size instead of stopping at the burst.
+const BOMB_STREAM: [u8; 100] = [
+    0xec, 0xc0, 0x01, 0x01, 0x00, 0x00, 0x00, 0x80, 0x90, 0xfe, 0xaf, 0xee, 0x08, 0x01, 0x00, 0x00,
+    0x0b, 0x20, 0x80, 0x00, 0x63, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60,
+    0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60,
+    0x60, 0x60, 0x60, 0x60, 0x18, 0x05, 0xa3, 0x60, 0x14, 0x8c, 0x82, 0x51, 0x30, 0x0a, 0x46, 0xc1,
+    0x28, 0x18, 0x05, 0xa3, 0x60, 0x14, 0x8c, 0x82, 0x51, 0x30, 0x0a, 0x46, 0xc1, 0x28, 0x18, 0x05,
+    0xa3, 0x60, 0x14, 0x8c, 0x82, 0x51, 0x30, 0x0a, 0x46, 0xc1, 0x28, 0x18, 0x05, 0xa3, 0x60, 0x28,
+    0x80, 0x11, 0x0f, 0x00,
+];
+
 fn ratio_burst_bomb() -> Fixture {
-    let mut text = vec![0u8; 5_000];
-    let mut literal = 1u8;
-    while text.len() < 10_000 {
-        text.extend(std::iter::repeat_n(0u8, 152));
-        text.push(literal);
-        literal = if literal == 255 { 1 } else { literal + 1 };
-    }
-    text.truncate(10_000);
-    let compressed = miniz_oxide::deflate::compress_to_vec(&text, 6);
-    Fixture::deflated_with("bomb.bin", text, compressed)
+    Fixture::deflated_with("bomb.bin", vec![0u8; 10_000], BOMB_STREAM.to_vec())
 }
 
 /// The output of the first `steps` compressed bytes of a stream, decoded the
@@ -567,30 +589,36 @@ async fn a_small_archive_is_listed_and_its_text_is_shown_through_the_runtime() {
     assert_eq!(uris, [REQUEST, ARCHIVE, VIEW]);
 }
 
+/// The produced and consumed counts a `ratio` skip message states:
+/// `... (2839 bytes from 16 compressed bytes)`.
+fn ratio_counts(message: &str) -> (u64, u64) {
+    let (_, tail) = message.split_once('(').expect("the counts");
+    let (produced, rest) = tail.split_once(" bytes from ").expect("the consumed count");
+    let (consumed, _) = rest.split_once(' ').expect("the trailing words");
+    (
+        produced.parse().expect("produced is a number"),
+        consumed.parse().expect("consumed is a number"),
+    )
+}
+
 /// F3: the streaming ratio check runs after every 16-byte inflate step inside
 /// the component. The fixture's declared ratio (10,000 from 100 bytes) is
-/// inside F4's cap, so the declared check lets it read; its first two steps
-/// then produce 5,152 bytes, past 100 × 32 + 1 KiB, and the entry is skipped
-/// `ratio` with the stream still unread.
+/// inside F4's cap, so the declared check lets it read; its first 16-byte step
+/// then produces 2,839 bytes, past 100 × 16 + 1 KiB, and the component skips
+/// it `ratio` and states the counters it stopped at.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_bomb_entry_stops_at_the_ratio_cap() {
     let bomb = ratio_burst_bomb();
-    let compressed = bomb.compressed.as_ref().expect("the crafted stream");
+    let compressed = bomb.compressed.clone().expect("the crafted stream");
     assert_eq!(compressed.len(), 100, "the fixture is 100 compressed bytes");
     assert_eq!(bomb.text.len(), 10_000);
     // F4's declared-ratio check passes: 10,000 ≤ 100 × 100 + 1 KiB.
     assert!(bomb.text.len() as u64 <= 100 * 100 + 1024);
 
-    // The step the component stops on: step one is under the cap, step two is
-    // the burst. A single 32-byte window is the same two 16-byte steps.
-    let (used, produced) = step_output(compressed, 1);
+    // The step the component stops on: the first 16 bytes are the burst. A
+    // single 16-byte window is that step.
+    let (used, produced) = step_output(&compressed, 1);
     assert_eq!(used, 16);
-    assert!(
-        produced <= 100 * used as u64 + 1024,
-        "step one is under the cap: {produced} bytes"
-    );
-    let (used, produced) = step_output(compressed, 2);
-    assert_eq!(used, 32);
     assert!(
         used < compressed.len(),
         "the stop is before the stream ends"
@@ -600,11 +628,10 @@ async fn a_bomb_entry_stops_at_the_ratio_cap() {
         produced > 100 * used as u64 + 1024,
         "{produced} bytes from {used} is inside the cap"
     );
-
     // The whole stream is valid: all 100 bytes inflate to exactly 10,000, so
     // only the per-step check can stop this entry. Without it, the entry
     // inflates to its declared size instead of being skipped at the burst.
-    let (used, produced) = step_output(compressed, compressed.len());
+    let (used, produced) = step_output(&compressed, compressed.len());
     assert_eq!(used, compressed.len());
     assert_eq!(produced, 10_000);
 
@@ -614,25 +641,59 @@ async fn a_bomb_entry_stops_at_the_ratio_cap() {
     let view = view(&bridge);
     assert_eq!(view["entries"][0]["status"], "listed");
     assert_eq!(view["skipped"][0]["reason"], "ratio");
+    // The component's own counters, at the step it stopped on.
+    let (stopped_produced, stopped_consumed) =
+        ratio_counts(view["skipped"][0]["message"].as_str().expect("a message"));
+    assert_eq!(stopped_consumed, 16, "the first 16-byte step");
+    assert_eq!(stopped_produced, 2839);
+    assert!(stopped_produced > 1024);
+    assert!(stopped_produced > 100 * stopped_consumed + 1024);
+    assert!(stopped_consumed < compressed.len() as u64);
+}
+
+/// The ordered archive-read tuples a bridge saw: URI, operation, requested
+/// offset and requested length.
+fn archive_reads(bridge: &Bridge) -> Vec<(String, String, u64, u64)> {
+    bridge
+        .lines
+        .iter()
+        .filter(|line| {
+            line["request"]["type"] == "resource_invoke"
+                && line["request"]["uri"] == ARCHIVE
+                && line["request"]["operation"] == "read"
+        })
+        .map(|line| {
+            (
+                line["request"]["uri"].as_str().expect("a uri").to_string(),
+                line["request"]["operation"]
+                    .as_str()
+                    .expect("an operation")
+                    .to_string(),
+                line["request"]["body"]["offset"].as_u64().unwrap_or(0),
+                line["request"]["body"]["length"].as_u64().unwrap_or(0),
+            )
+        })
+        .collect()
 }
 
 /// F43: a declared total is display only (B5). 256 entries declare 1 MiB
-/// each. The complete listing is written, the bytes read are exactly the ones
-/// the same records with a small declaration read, and no buffer is sized
+/// each. The complete listing is written, every read window is the one the
+/// same records with a small declaration ask for, and no buffer is sized
 /// from the declared 268,435,456-byte total (the allocation mutant traps on
 /// `memory.grow` in the host's 128 MiB store).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_declared_256_mib_total_is_listed_with_bounded_reads_and_memory() {
     const MIB: u64 = 1024 * 1024;
+    const LOCAL_HEADER: u64 = 30;
     let declared = declared_256_mib();
     let total = MIB * declared.len() as u64;
     assert_eq!(total, 268_435_456);
     assert!(usize::try_from(total).is_ok(), "fits a wasm32 usize");
     assert!(total > 128 * 1024 * 1024, "above the host's store limit");
 
-    let archive = zip(&declared);
-    let size = archive.len();
-    let (result, bridge) = run(bridge_with(archive, &[])).await;
+    let built = archive(&declared);
+    let size = built.bytes.len() as u64;
+    let (result, bridge) = run(bridge_with(built.bytes.clone(), &[])).await;
     result.unwrap();
     let view = view(&bridge);
     let entries = view["entries"].as_array().expect("the listing");
@@ -650,20 +711,51 @@ async fn a_declared_256_mib_total_is_listed_with_bounded_reads_and_memory() {
     assert_eq!(shown, total, "the declared total is shown, not acted on");
     assert_eq!(view["previews"], json!([]));
     assert_eq!(view["skipped"], json!([]));
-    assert!(size < MAX_READ_BYTES, "{size} bytes of archive");
+    assert!(size < MAX_READ_BYTES as u64, "{size} bytes of archive");
+
+    // The read trace, not only its total: one-byte size probes, then the
+    // tail, the directory and each 30-byte local header, at the record's own
+    // offset and in offset order.
+    let reads = archive_reads(&bridge);
+    let tail_start = size.saturating_sub(22 + 1024);
+    let mut expected: Vec<(u64, u64)> = vec![
+        (tail_start, size - tail_start),
+        (built.directory_offset, built.directory_size),
+    ];
+    expected.extend(built.local_offsets.iter().map(|at| (*at, LOCAL_HEADER)));
+    let (probes, records) = reads.split_at(reads.len() - expected.len());
+    assert!(!probes.is_empty(), "the one-byte size probes");
+    assert!(
+        probes.iter().all(|(_, _, _, length)| *length == 1),
+        "the size probes ask for one byte"
+    );
+    let windows: Vec<(u64, u64)> = records
+        .iter()
+        .map(|(_, _, offset, length)| (*offset, *length))
+        .collect();
+    assert_eq!(windows, expected);
+    assert!(
+        records[2..].windows(2).all(|pair| pair[0].2 < pair[1].2),
+        "the local headers are read in offset order"
+    );
+    assert!(reads
+        .iter()
+        .all(|(uri, operation, _, _)| uri == ARCHIVE && operation == "read"));
 
     // The same records with a 1-byte declaration have the same bytes and the
-    // same layout, so they must read exactly as many bytes: the declared
-    // total never reaches a read.
-    let (control_result, control) = run(bridge_with(zip(&declared_small()), &[])).await;
+    // same layout, so every window must match exactly: the declared total
+    // never reaches a read.
+    let control = archive(&declared_small());
+    assert_eq!(control.bytes.len(), size as usize);
+    let (control_result, control_bridge) = run(bridge_with(control.bytes.clone(), &[])).await;
     control_result.unwrap();
-    let read = bridge.bytes_served.get(ARCHIVE).copied().unwrap_or(0);
+    assert_eq!(archive_reads(&control_bridge), reads);
     assert_eq!(
-        control.bytes_served.get(ARCHIVE).copied().unwrap_or(0),
-        read
+        control_bridge.bytes_served.get(ARCHIVE),
+        bridge.bytes_served.get(ARCHIVE)
     );
-    assert_eq!(control.invokes_on(ARCHIVE), bridge.invokes_on(ARCHIVE));
-    assert!(read <= MAX_READ_BYTES, "{read} bytes read");
+    let read: u64 = reads.iter().map(|(_, _, _, length)| *length).sum();
+    assert!(read <= MAX_READ_BYTES as u64, "{read} bytes read");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -381,15 +381,19 @@ prove.
 
 - `src/preview.rs`: `inflate_bounded` now checks B2 after every 16-byte step.
   When the output passes 100 times the compressed bytes consumed so far plus
-  the 1 KiB slack, it stops the entry `ratio`. The declared-ratio check (F4),
-  the B1 window and the B3 budget are unchanged. The module doc and
-  `INFLATE_STEP_BYTES` no longer call the check deferred.
+  the 1 KiB slack, it stops the entry `ratio`. The stop reports the output and
+  compressed bytes it reached, and the `ratio` skip message states both, so the
+  component's own counters are visible in the view. The declared-ratio check
+  (F4), the B1 window and the B3 budget are unchanged.
 - `host-test/tests/component.rs`: the `Fixture` writer can declare an
-  uncompressed size that is not its data's (`Fixture::declaring`, B5), and two
-  fixtures are added: `ratio_burst_bomb` (5,000 zero bytes then 152-zero runs
-  with one literal each, compressed at level 6 to exactly 100 bytes that
-  inflate to exactly 10,000) and `declared_256_mib` / `declared_small` (256
-  records that differ only in their declared size).
+  uncompressed size that is not its data's (`Fixture::declaring`, B5), the
+  builder exposes each record's local-header offset and the directory range
+  (`archive()`), and two fixtures are added. `ratio_burst_bomb` is a
+  hand-built 100-byte stream: a dynamic block whose tree gives the 258-byte
+  length code 1 bit and the distance 1 bit, seeded by a 2-bit literal, so its
+  first 16 bytes emit 2,839 bytes; a fixed block then finishes a valid stream
+  of exactly 10,000 bytes. `declared_256_mib` / `declared_small` are 256
+  records that differ only in their declared size.
 - `falsify.py`: the `--runtime` group gains F3 and F43.
 - `verify.sh`: the lane gate now also requires the caught F3 and F43 lines.
 - No kit change and no other viewer changed.
@@ -398,20 +402,23 @@ prove.
 
 - **F3** `a_bomb_entry_stops_at_the_ratio_cap`: the fixture's declared ratio is
   10,000 from 100 compressed bytes, inside F4's cap (100 × 100 + 1 KiB), so the
-  entry is read. Its first 16-byte step emits 0 bytes; the second emits 5,152,
-  past 100 × 32 + 1 KiB = 4,224. Through `ComponentProvider` the entry is
-  listed and skipped `ratio`. The test pins the fixture at the step where the
-  check trips (32 compressed bytes used of 100, produced above 1 KiB and above
-  100 × consumed + 1 KiB). The mutant removes the loop check and leaves F4:
-  the same 100 bytes then inflate to exactly 10,000 and consume the whole
-  stream, so the entry is skipped `not_text` instead of `ratio` and the test
-  fails.
+  entry is read. Its first 16-byte step emits 2,839 bytes, past
+  100 × 16 + 1 KiB = 2,624; the whole 100 bytes still finish a valid stream of
+  10,000. Through `ComponentProvider` the entry is listed and skipped `ratio`,
+  and the view message states the component's own stop counters (2,839 bytes
+  from 16 compressed bytes). The test pins both: the host-side step output and
+  the view's counts. The mutant removes the loop check and leaves F4: the same
+  100 bytes then inflate to all 10,000 and the entry is skipped `not_text`
+  instead of `ratio`, so the test fails.
 - **F43** `a_declared_256_mib_total_is_listed_with_bounded_reads_and_memory`:
   256 entries declare 1 MiB each (268,435,456 bytes, inside a wasm32 `usize`,
   above the host's 128 MiB store limit). The run writes the complete listing
   (every path, index and declared size, the shown sum equal to the declared
-  total) and reads exactly what the identical records with a 1-byte
-  declaration read, so the total never reaches a read. The mutant inserts
+  total) and its ordered read trace matches the identical records with a
+  1-byte declaration, so the total never reaches a read. The trace itself is
+  pinned, not just its total: one-byte size probes, then the tail window, the
+  directory window, and each entry's 30-byte local header at the record's own
+  offset, in offset order. The mutant inserts
   `Vec::<u8>::with_capacity(total as usize)` in `view_json`; under
   `trap_on_grow_failure` the 256 MiB grow fails, `run` traps and the test
   fails. A 512 GiB total is not used: `as usize` would wrap it to 0 and the
@@ -420,8 +427,13 @@ prove.
 ### Measurements
 
 - Guest: 90 tests pass. Host: 12 tests pass, including the two new ones.
-- Falsifiers: 76 in all (72 core, F3, F35, F36, F43 under `--runtime`); the two
-  runtime mutants this task adds leave every unnamed host test passing.
+- Falsifiers: 76 in all (72 core, F3, F35, F36, F43 under `--runtime`). Each
+  runtime mutant also runs the whole guest suite: every unnamed host test and
+  every guest test pass under F3, F35, F36 and F43. The F35 and F36 reader
+  mutants apply in the component only (`cfg!(target_arch = "wasm32")`): their
+  observable change is the request trace and the grant use that guest tests
+  pin as correct, so the guest suite stays green while the named component
+  tests still fail.
 - F36's fuel mutant also breaks the F43 test: reading each local header one
   byte a call turns the 256-entry listing's ~21,000 byte reads into Bus calls
   and spends the fixed 100,000,000 fuel. The mutant changes no rule, so the

@@ -385,7 +385,7 @@ CASES = [
      "        // The decompressor does not wrap",
      "        let ask = room.min(left);\n"
      "        if ask == 0 {\n"
-     "            return Err((produced, \"inflate_budget\"));\n"
+     "            return Err((produced, consumed as u64, \"inflate_budget\"));\n"
      "        }\n"
      "        // The decompressor does not wrap",
      ["an_exact_fit_stream_ends_within_its_budget"]),
@@ -427,12 +427,12 @@ CASES = [
      ["a_stored_entry_with_two_sizes_is_skipped"]),
     ("F33 the whole-text check is removed",
      "src/preview.rs",
-     '        Err(_) => return Ok(skipped_after(produced, read, "not_text")),',
+     '        Err(_) => return Ok(skipped_after(produced, read, consumed, "not_text")),',
      '        Err(_) => "",',
      ["a_text_entry_that_is_not_text_is_skipped"]),
     ("F33b the block cap is ignored",
      "src/preview.rs",
-     '        Err(ModelError::TooLong) => return Ok(skipped_after(produced, read, "too_long")),',
+     '        Err(ModelError::TooLong) => return Ok(skipped_after(produced, read, consumed, "too_long")),',
      '        Err(ModelError::TooLong) => Vec::new(),',
      ["a_text_entry_with_too_many_blocks_is_skipped"]),
     # Answers that do not hold what the end record promised.
@@ -483,9 +483,13 @@ RUNTIME = [
     (
         "F35 the archive read uses no grant (in the component)",
         "src/lib.rs",
-        'let archive_grant = grant(bus, &request.uri, "read", "read the archive to list")?;',
-        'let archive_grant = grant(bus, &request.uri, "read", "read the archive to list")\n'
-        "        .unwrap_or_default();",
+        '    let archive_grant = grant(bus, &request.uri, "read", "read the archive to list")?;',
+        '    let archive_grant = if cfg!(target_arch = "wasm32") {\n'
+        '        grant(bus, &request.uri, "read", "read the archive to list")\n'
+        "            .unwrap_or_default()\n"
+        "    } else {\n"
+        '        grant(bus, &request.uri, "read", "read the archive to list")?\n'
+        "    };",
         ["no_grant_stops_the_run_through_the_runtime"],
     ),
     (
@@ -500,7 +504,7 @@ RUNTIME = [
         "                .saturating_mul(MAX_RATIO)\n"
         "                .saturating_add(RATIO_SLACK_BYTES)\n"
         "        {\n"
-        '            return Err((produced, "ratio"));\n'
+        '            return Err((produced, consumed as u64, "ratio"));\n'
         "        }",
         "        // F3 mutant: the per-step streaming ratio check is removed.",
         ["a_bomb_entry_stops_at_the_ratio_cap"],
@@ -532,13 +536,19 @@ F36 = (
     "src/zip.rs",
     "        read_counted(self.bus, self.uri, self.grant, self.left, offset, length)\n"
     "            .map_err(ReadError::Refusal)",
-    "        let mut bytes = Vec::with_capacity(length as usize);\n"
-    "        for at in 0..length {\n"
-    "            let one = read_counted(self.bus, self.uri, self.grant, self.left, offset + at, 1)\n"
-    "                .map_err(ReadError::Refusal)?;\n"
-    "            bytes.extend_from_slice(&one);\n"
-    "        }\n"
-    "        Ok(bytes)",
+    "        if cfg!(target_arch = \"wasm32\") {\n"
+    "            let mut bytes = Vec::with_capacity(length as usize);\n"
+    "            for at in 0..length {\n"
+    "                let one =\n"
+    "                    read_counted(self.bus, self.uri, self.grant, self.left, offset + at, 1)\n"
+    "                        .map_err(ReadError::Refusal)?;\n"
+    "                bytes.extend_from_slice(&one);\n"
+    "            }\n"
+    "            Ok(bytes)\n"
+    "        } else {\n"
+    "            read_counted(self.bus, self.uri, self.grant, self.left, offset, length)\n"
+    "                .map_err(ReadError::Refusal)\n"
+    "        }",
     ["worst_archives_stay_under_80_percent_of_the_runtime_fuel",
      "the_worst_archives_run_and_write_their_views",
      "low_compressibility_text_costs_more_than_repeating_text",
@@ -742,11 +752,13 @@ def host_baseline():
     return set(results)
 
 
-def check_runtime_isolation(args, every_test):
-    """Every host test a runtime mutant does not name must still pass.
+def check_runtime_isolation(args, host_tests, guest_tests):
+    """Every host test a runtime mutant does not name must still pass, and so
+    must the whole guest suite.
 
     The kit runs only the named tests for a runtime case, so the whole host
-    suite runs under each mutant here: same rule as the guest cases.
+    suite and the whole guest suite run under each mutant here: same rule as
+    the guest cases.
     """
     parts = [arg for arg in args if not arg.startswith("--")]
     groups = [
@@ -763,6 +775,7 @@ def check_runtime_isolation(args, every_test):
             saved = path.read_bytes()
             problems = []
             code, summaries, results = 1, [], {}
+            guest_code, guest_summaries, guest_results = 1, [], {}
             try:
                 text = saved.decode()
                 for old, new in replacements:
@@ -771,6 +784,7 @@ def check_runtime_isolation(args, every_test):
                 if apply_extra is not None:
                     apply_extra()
                 build_component()
+                guest_code, guest_summaries, guest_results = suite()
                 code, summaries, results = host_suite()
             finally:
                 path.write_bytes(saved)
@@ -792,15 +806,30 @@ def check_runtime_isolation(args, every_test):
                     problems.append(f"the summary counts {npass}+{nfail} but {len(results)} ran")
                 if int(nfail) != len(named):
                     problems.append(f"{nfail} tests failed, {len(named)} are named")
-            if set(results) != every_test:
+            if set(results) != host_tests:
                 problems.append("the suite did not run every test")
+            # The guest suite runs under the same mutant and must pass whole:
+            # a mutant that reaches a rule the guest tests check is not the
+            # isolated change the case claims.
+            gfailed = {test for test, state in guest_results.items() if state == "FAILED"}
+            gpassed = {test for test, state in guest_results.items() if state == "ok"}
+            if guest_code != 0 or gfailed:
+                problems.append(f"the guest suite failed: {sorted(gfailed)}")
+            if len(guest_summaries) != 1:
+                problems.append("the guest suite did not complete")
+            elif guest_summaries[0][0] != "ok" or int(guest_summaries[0][2]) != 0:
+                problems.append(f"the guest suite did not pass: {guest_summaries[0]}")
+            if set(guest_results) != guest_tests:
+                problems.append("the guest suite did not run every guest test")
+            if (guest_tests - gpassed):
+                problems.append(f"guest tests did not pass: {sorted(guest_tests - gpassed)}")
             if failed != named:
                 problems.append(
                     f"failed {sorted(failed - named)} beyond the named tests"
                     if failed - named
                     else f"named tests passed: {sorted(named - failed)}"
                 )
-            unnamed_not_passed = (every_test - named) - passed
+            unnamed_not_passed = (host_tests - named) - passed
             if unnamed_not_passed:
                 problems.append(f"unnamed tests did not pass: {sorted(unnamed_not_passed)}")
             if problems:
@@ -809,7 +838,10 @@ def check_runtime_isolation(args, every_test):
         for name, problems in leaked:
             print(f"LEAKED: {name}: {', '.join(problems)}", flush=True)
         raise SystemExit(f"{len(leaked)} runtime falsifier(s) break a test they do not name")
-    print(f"all {len(executed)} runtime mutants leave every unnamed host test passing")
+    print(
+        f"all {len(executed)} runtime mutants leave every unnamed host test "
+        f"and the whole guest suite passing"
+    )
 
 
 FUEL_LINE = re.compile(r"^(.+?): (\d+) fuel \(([\d.]+)% of the Runtime budget\)$", re.M)
@@ -884,7 +916,7 @@ def main():
         if "--runtime" in args:
             host_tests = host_baseline()
             try:
-                check_runtime_isolation(args, host_tests)
+                check_runtime_isolation(args, host_tests, every_test)
             finally:
                 restore_runtime(args)
 
