@@ -17,10 +17,9 @@ plan"); the core covers F1, F2, F4, F5, F6, F6b, F6c, F7 to F17, F19 to F25,
 F26 to F28, F29 to F31, F32, F33, F40 to F42. The lettered cases F6d to F6f,
 F15b, F16b, F19b, F21b to F21g, F22b, F23b to F23d, F25b to F25f, F30b, F30c,
 F41b to F41e, F5b to F5e and F26b cover bounds, comparisons and request fields DESIGN states
-but gives no row, and F32 covers the whole view's cap. The runtime group
-(`--runtime`) runs F35 (grant) and F36 (fuel) in the host test, in the
-component; F3 (the B2 streaming ratio check) and F43 (declared totals) are
-task 005's.
+but gives no row, and F32 covers the whole view's cap. The runtime group (`--runtime`) runs F3 (the streaming ratio check), F35
+(grant), F36 (fuel) and F43 (declared totals) in the host test, in the
+component.
 """
 import pathlib
 import re
@@ -489,6 +488,38 @@ RUNTIME = [
         "        .unwrap_or_default();",
         ["no_grant_stops_the_run_through_the_runtime"],
     ),
+    (
+        "F3 the streaming ratio check is removed (in the component)",
+        "src/preview.rs",
+        "        // B2 after every step: one step over the whole stream would hide an\n"
+        "        // early burst, so the output is checked against the bytes consumed\n"
+        "        // so far. The declared ratio (F4) checked this before the read; this\n"
+        "        // is the same rule on the bytes that really came out.\n"
+        "        if produced\n"
+        "            > (consumed as u64)\n"
+        "                .saturating_mul(MAX_RATIO)\n"
+        "                .saturating_add(RATIO_SLACK_BYTES)\n"
+        "        {\n"
+        '            return Err((produced, "ratio"));\n'
+        "        }",
+        "        // F3 mutant: the per-step streaming ratio check is removed.",
+        ["a_bomb_entry_stops_at_the_ratio_cap"],
+    ),
+    (
+        "F43 the declared total sizes a buffer (in the component)",
+        "src/lib.rs",
+        "    let mut out = String::new();\n"
+        '    out.push_str(r#"{"archive":{"size":"#);',
+        "    let total: u64 = listing\n"
+        "        .entries\n"
+        "        .iter()\n"
+        "        .map(|entry| entry.uncompressed_size)\n"
+        "        .sum();\n"
+        "    let _sized = Vec::<u8>::with_capacity(total as usize);\n"
+        "    let mut out = String::new();\n"
+        '    out.push_str(r#"{"archive":{"size":"#);',
+        ["a_declared_256_mib_total_is_listed_with_bounded_reads_and_memory"],
+    ),
 ]
 
 # F36 changes two files: the counted reader asks one byte a call, and the
@@ -510,7 +541,11 @@ F36 = (
     "        Ok(bytes)",
     ["worst_archives_stay_under_80_percent_of_the_runtime_fuel",
      "the_worst_archives_run_and_write_their_views",
-     "low_compressibility_text_costs_more_than_repeating_text"],
+     "low_compressibility_text_costs_more_than_repeating_text",
+     # A 30-byte local header per entry read one byte a call pushes the
+     # 256-entry F43 listing past the fixed 100,000,000 fuel. The mutant
+     # changes no rule, and F43's own rule is proven by its own mutant.
+     "a_declared_256_mib_total_is_listed_with_bounded_reads_and_memory"],
 )
 
 # The inflate loop's copy: once per produced window in the real code; the

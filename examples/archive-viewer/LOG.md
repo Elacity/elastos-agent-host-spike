@@ -365,8 +365,74 @@ gives as the reason for this app are proven there: a run with no grant stops
   entries are `name|command`, and the command holds `gates-photo`, which the
   script matches; under the gate the script also fails if the guest-only path
   was selected and checks the log for the passing host suite and the caught
-  F35/F36 lines. Running `verify.sh --runtime` directly does the same on this
-  Mac.
-- **Remaining for task 005:** F3 (B2's streaming ratio check, in the
-  component), F43 (declared totals under the 128 MiB store limit). Then the
-  page (F37 to F39), and tar after ZIP on both buses.
+  F3/F35/F36/F43 lines. Running `verify.sh --runtime` directly does the same on
+  this Mac.
+- **Remaining after task 005:** the page (F37 to F39), and tar after ZIP on
+  both buses. The in-component group (F3, F35, F36, F43) is complete; see
+  "task 005" below.
+
+## 2026-10-24: task 005, the streaming ratio and declared totals in the component
+
+Step 3c's second half, on top of the host test task 004 built. Both rules are
+decompressor-as-attack-surface guarantees that only the real component can
+prove.
+
+### What changed
+
+- `src/preview.rs`: `inflate_bounded` now checks B2 after every 16-byte step.
+  When the output passes 100 times the compressed bytes consumed so far plus
+  the 1 KiB slack, it stops the entry `ratio`. The declared-ratio check (F4),
+  the B1 window and the B3 budget are unchanged. The module doc and
+  `INFLATE_STEP_BYTES` no longer call the check deferred.
+- `host-test/tests/component.rs`: the `Fixture` writer can declare an
+  uncompressed size that is not its data's (`Fixture::declaring`, B5), and two
+  fixtures are added: `ratio_burst_bomb` (5,000 zero bytes then 152-zero runs
+  with one literal each, compressed at level 6 to exactly 100 bytes that
+  inflate to exactly 10,000) and `declared_256_mib` / `declared_small` (256
+  records that differ only in their declared size).
+- `falsify.py`: the `--runtime` group gains F3 and F43.
+- `verify.sh`: the lane gate now also requires the caught F3 and F43 lines.
+- No kit change and no other viewer changed.
+
+### F3 and F43 done
+
+- **F3** `a_bomb_entry_stops_at_the_ratio_cap`: the fixture's declared ratio is
+  10,000 from 100 compressed bytes, inside F4's cap (100 × 100 + 1 KiB), so the
+  entry is read. Its first 16-byte step emits 0 bytes; the second emits 5,152,
+  past 100 × 32 + 1 KiB = 4,224. Through `ComponentProvider` the entry is
+  listed and skipped `ratio`. The test pins the fixture at the step where the
+  check trips (32 compressed bytes used of 100, produced above 1 KiB and above
+  100 × consumed + 1 KiB). The mutant removes the loop check and leaves F4:
+  the same 100 bytes then inflate to exactly 10,000 and consume the whole
+  stream, so the entry is skipped `not_text` instead of `ratio` and the test
+  fails.
+- **F43** `a_declared_256_mib_total_is_listed_with_bounded_reads_and_memory`:
+  256 entries declare 1 MiB each (268,435,456 bytes, inside a wasm32 `usize`,
+  above the host's 128 MiB store limit). The run writes the complete listing
+  (every path, index and declared size, the shown sum equal to the declared
+  total) and reads exactly what the identical records with a 1-byte
+  declaration read, so the total never reaches a read. The mutant inserts
+  `Vec::<u8>::with_capacity(total as usize)` in `view_json`; under
+  `trap_on_grow_failure` the 256 MiB grow fails, `run` traps and the test
+  fails. A 512 GiB total is not used: `as usize` would wrap it to 0 and the
+  mutant would survive.
+
+### Measurements
+
+- Guest: 90 tests pass. Host: 12 tests pass, including the two new ones.
+- Falsifiers: 76 in all (72 core, F3, F35, F36, F43 under `--runtime`); the two
+  runtime mutants this task adds leave every unnamed host test passing.
+- F36's fuel mutant also breaks the F43 test: reading each local header one
+  byte a call turns the 256-entry listing's ~21,000 byte reads into Bus calls
+  and spends the fixed 100,000,000 fuel. The mutant changes no rule, so the
+  test is listed with F36's other fuel victims, and F43's own rule is proven
+  by its own mutant, where only F43's test fails. The F43 fixture uses 2-byte
+  hex names to keep its read trace small; the baseline run uses 15.7% of the
+  fuel.
+- The F36 gate fuel numbers are unchanged by B2's loop check (the same seven
+  archives, highest 24.5%).
+
+### Remaining
+
+The page and its smoke (F37 to F39) are task 006. tar remains after ZIP. The
+in-component group (F3, F35, F36, F43) is complete.

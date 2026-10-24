@@ -8,9 +8,10 @@
 //! - **B1** (`MAX_PREVIEW_BYTES`): the declared uncompressed size is checked
 //!   before any read, and the output window is the cap plus one byte, so the
 //!   first byte past the cap stops the entry `oversize`.
-//! - **B2** (`MAX_RATIO`): a declared ratio past the cap is not even read. The
-//!   streaming ratio check over 16-byte steps (F3) belongs to the same rule
-//!   and runs in the component; it is deferred to the host-test task.
+//! - **B2** (`MAX_RATIO`): a declared ratio past the cap is not even read; the
+//!   inflate loop also checks, after every step of at most
+//!   [`INFLATE_STEP_BYTES`] compressed bytes, that the output stays inside 100
+//!   times the bytes consumed so far plus the slack (F3).
 //! - **B3** (`MAX_INFLATE_BYTES`): every output byte of a run is taken off
 //!   one budget, whether the entry is then shown or skipped.
 //!
@@ -41,7 +42,7 @@ pub const MAX_INFLATE_BYTES: u64 = 64 * 1024;
 /// The compressed bytes of the shown entries one run may read.
 pub const MAX_COMPRESSED_BYTES: u64 = 24 * 1024;
 /// B2: one inflate step asks for at most this many compressed bytes, so the
-/// streaming ratio check can run after every step (deferred, F3).
+/// streaming ratio check runs after every step (F3).
 pub const INFLATE_STEP_BYTES: usize = 16;
 
 /// What one run may still inflate and read. Every byte comes off as it comes
@@ -259,6 +260,17 @@ fn inflate_bounded(
         // says about itself.
         if produced > MAX_PREVIEW_BYTES {
             return Err((produced, "oversize"));
+        }
+        // B2 after every step: one step over the whole stream would hide an
+        // early burst, so the output is checked against the bytes consumed
+        // so far. The declared ratio (F4) checked this before the read; this
+        // is the same rule on the bytes that really came out.
+        if produced
+            > (consumed as u64)
+                .saturating_mul(MAX_RATIO)
+                .saturating_add(RATIO_SLACK_BYTES)
+        {
+            return Err((produced, "ratio"));
         }
         match status {
             TINFLStatus::Done => {

@@ -83,14 +83,17 @@ if [[ $RUNTIME -eq 1 ]]; then
     python3 -I "${VIEWER_DIR}/falsify.py" --runtime 2>&1 | tee "$runtime_log"
 
     # The lane gate certifies the runtime step only when it actually ran:
-    # the host suite passed and the component falsifiers caught F35 and F36.
+    # the host suite passed and the component falsifiers caught F3, F35, F36
+    # and F43.
     if [[ $GATE -eq 1 ]]; then
         grep -q '^test result: ok\. [1-9][0-9]* passed; 0 failed;' "$host_log"
+        grep -q '^caught: F3 ' "$runtime_log"
         grep -q '^caught: F35 ' "$runtime_log"
         grep -q '^caught: F36 ' "$runtime_log"
+        grep -q '^caught: F43 ' "$runtime_log"
     fi
 else
-    echo "archive-viewer: guest checks only; pass --runtime for the component, host test and F35/F36"
+    echo "archive-viewer: guest checks only; pass --runtime for the component, host test and F3/F35/F36/F43"
 fi
 
 echo "archive-viewer verification: OK"

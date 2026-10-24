@@ -8,10 +8,14 @@
 //! capsule kit's (`examples/capsule-kit/v1-host-test`), shared with the photo
 //! and documents viewers.
 //!
-//! Two rules get their proof here, in the way the capsule really runs:
-//! F35 (a run with no read grant on the archive stops with the authority
-//! failure and writes no view) and F36 (one archive per hostile class at its
-//! caps stays at or below 80% of the Runtime's fixed 100,000,000 fuel).
+//! Both zip-bomb rules that only the component can prove get their evidence
+//! here: F3 (the B2 streaming ratio check stops an entry whose first 16-byte
+//! steps burst past the cap, while its declared ratio passes F4) and F43 (B5:
+//! a 256 MiB declared total is shown and never sizes a buffer, under the
+//! host's 128 MiB store limit). F35 (a run with no read grant stops with the
+//! authority failure and writes no view) and F36 (one archive per hostile
+//! class at its caps stays at or below 80% of the Runtime's 100,000,000 fuel)
+//! are here too.
 
 use std::path::{Path, PathBuf};
 
@@ -35,6 +39,7 @@ const MAX_NAME_BYTES: usize = 255;
 const MAX_PREVIEW_BYTES: usize = 16 * 1024;
 const MAX_INFLATE_BYTES: usize = 64 * 1024;
 const MAX_COMPRESSED_BYTES: usize = 24 * 1024;
+const MAX_READ_BYTES: usize = 64 * 1024;
 const MAX_VIEW_BYTES: usize = 64 * 1024;
 const MAX_REQUEST_SHOW: usize = 8;
 
@@ -88,12 +93,15 @@ fn request(uri: &str, show: &[usize]) -> Vec<u8> {
 }
 
 /// One entry the builder writes: its name, its stored or deflated bytes, and
-/// the uncompressed text. The stream may be supplied (the ratio-cap bomb).
+/// the uncompressed text. The stream may be supplied (the ratio-cap bomb), and
+/// the declared uncompressed size may differ from the text (B5's declared
+/// totals).
 struct Fixture {
     name: String,
     method: u16,
     text: Vec<u8>,
     compressed: Option<Vec<u8>>,
+    declared: Option<u64>,
 }
 
 impl Fixture {
@@ -103,6 +111,7 @@ impl Fixture {
             method: 0,
             text: Vec::new(),
             compressed: None,
+            declared: None,
         }
     }
 
@@ -112,6 +121,7 @@ impl Fixture {
             method: 0,
             text: text.to_vec(),
             compressed: None,
+            declared: None,
         }
     }
 
@@ -121,6 +131,7 @@ impl Fixture {
             method: 8,
             text: text.to_vec(),
             compressed: None,
+            declared: None,
         }
     }
 
@@ -130,6 +141,19 @@ impl Fixture {
             method: 8,
             text,
             compressed: Some(compressed),
+            declared: None,
+        }
+    }
+
+    /// A deflated entry whose declared uncompressed size is not its data's:
+    /// B5 says a declaration is display only and never sizes a buffer.
+    fn declaring(name: &str, text: &[u8], declared: u64) -> Self {
+        Fixture {
+            name: name.to_string(),
+            method: 8,
+            text: text.to_vec(),
+            compressed: None,
+            declared: Some(declared),
         }
     }
 }
@@ -172,7 +196,7 @@ fn zip(fixtures: &[Fixture]) -> Vec<u8> {
             method,
             crc: crc32(&fixture.text),
             data,
-            uncompressed: fixture.text.len() as u32,
+            uncompressed: fixture.declared.unwrap_or(fixture.text.len() as u64) as u32,
         });
     }
     for entry in &built {
@@ -364,6 +388,74 @@ fn worst_text() -> Vec<Fixture> {
     vec![Fixture::deflated("t.txt", &plain_text(MAX_PREVIEW_BYTES))]
 }
 
+/// B2 (F3): 100 compressed bytes that inflate to exactly 10,000. The stream
+/// starts with a 5,000-byte zero run, then runs of 152 zeros and one literal
+/// each, so its tree makes the first bytes very cheap: after two 16-byte steps
+/// 5,152 bytes have come out, past 100 × 32 + 1 KiB = 4,224. The declared
+/// ratio is 100 × 100 + 1 KiB = 11,024, so F4's declared-ratio check passes
+/// and only the streaming check can stop this entry.
+fn ratio_burst_bomb() -> Fixture {
+    let mut text = vec![0u8; 5_000];
+    let mut literal = 1u8;
+    while text.len() < 10_000 {
+        text.extend(std::iter::repeat_n(0u8, 152));
+        text.push(literal);
+        literal = if literal == 255 { 1 } else { literal + 1 };
+    }
+    text.truncate(10_000);
+    let compressed = miniz_oxide::deflate::compress_to_vec(&text, 6);
+    Fixture::deflated_with("bomb.bin", text, compressed)
+}
+
+/// The output of the first `steps` compressed bytes of a stream, decoded the
+/// way the guest decodes them: a bounded step with the rest of the stream
+/// still behind it. Returns the compressed bytes used and the output bytes.
+///
+/// The guest runs the same step size (`INFLATE_STEP_BYTES`), so this pins the
+/// fixture's counts at the step where its streaming check trips.
+fn step_output(compressed: &[u8], steps: usize) -> (usize, u64) {
+    use miniz_oxide::inflate::core::{decompress_with_limit, inflate_flags, DecompressorOxide};
+    const STEP: usize = 16;
+    const DICTIONARY_BYTES: usize = 32 * 1024;
+    let end = (steps * STEP).min(compressed.len());
+    let mut state = DecompressorOxide::new();
+    let mut dictionary = vec![0u8; DICTIONARY_BYTES];
+    let flags = if end < compressed.len() {
+        inflate_flags::TINFL_FLAG_HAS_MORE_INPUT
+    } else {
+        0
+    };
+    let (_, used, produced) = decompress_with_limit(
+        &mut state,
+        &compressed[..end],
+        &mut dictionary,
+        0,
+        DICTIONARY_BYTES,
+        flags,
+    );
+    (used, produced as u64)
+}
+
+/// B5 (F43): 256 entries that declare 1 MiB each, 268,435,456 bytes in all.
+/// That fits a wasm32 `usize` and is above the host's 128 MiB store limit, so
+/// `total as usize` stays 268,435,456 and cannot become 0. A 512 GiB total is
+/// not used: it exceeds `usize::MAX`, and `as usize` would wrap it to 0, which
+/// the allocation mutant would survive.
+fn declared_256_mib() -> Vec<Fixture> {
+    const MIB: u64 = 1024 * 1024;
+    (0..MAX_ENTRIES)
+        .map(|n| Fixture::declaring(&format!("{n:02x}"), &[], MIB))
+        .collect()
+}
+
+/// The same 256 records with a small declared size: the bytes and so the read
+/// trace are identical, and only the declared total differs.
+fn declared_small() -> Vec<Fixture> {
+    (0..MAX_ENTRIES)
+        .map(|n| Fixture::declaring(&format!("{n:02x}"), &[], 1))
+        .collect()
+}
+
 /// A listing of 256 entries and two 15 KiB previews: the whole view near its
 /// 64 KiB cap.
 fn largest_view() -> Vec<Fixture> {
@@ -473,6 +565,105 @@ async fn a_small_archive_is_listed_and_its_text_is_shown_through_the_runtime() {
         .map(|line| line["request"]["resource"].as_str().unwrap())
         .collect();
     assert_eq!(uris, [REQUEST, ARCHIVE, VIEW]);
+}
+
+/// F3: the streaming ratio check runs after every 16-byte inflate step inside
+/// the component. The fixture's declared ratio (10,000 from 100 bytes) is
+/// inside F4's cap, so the declared check lets it read; its first two steps
+/// then produce 5,152 bytes, past 100 × 32 + 1 KiB, and the entry is skipped
+/// `ratio` with the stream still unread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bomb_entry_stops_at_the_ratio_cap() {
+    let bomb = ratio_burst_bomb();
+    let compressed = bomb.compressed.as_ref().expect("the crafted stream");
+    assert_eq!(compressed.len(), 100, "the fixture is 100 compressed bytes");
+    assert_eq!(bomb.text.len(), 10_000);
+    // F4's declared-ratio check passes: 10,000 ≤ 100 × 100 + 1 KiB.
+    assert!(bomb.text.len() as u64 <= 100 * 100 + 1024);
+
+    // The step the component stops on: step one is under the cap, step two is
+    // the burst. A single 32-byte window is the same two 16-byte steps.
+    let (used, produced) = step_output(compressed, 1);
+    assert_eq!(used, 16);
+    assert!(
+        produced <= 100 * used as u64 + 1024,
+        "step one is under the cap: {produced} bytes"
+    );
+    let (used, produced) = step_output(compressed, 2);
+    assert_eq!(used, 32);
+    assert!(
+        used < compressed.len(),
+        "the stop is before the stream ends"
+    );
+    assert!(produced > 1024, "{produced} bytes came out");
+    assert!(
+        produced > 100 * used as u64 + 1024,
+        "{produced} bytes from {used} is inside the cap"
+    );
+
+    // The whole stream is valid: all 100 bytes inflate to exactly 10,000, so
+    // only the per-step check can stop this entry. Without it, the entry
+    // inflates to its declared size instead of being skipped at the burst.
+    let (used, produced) = step_output(compressed, compressed.len());
+    assert_eq!(used, compressed.len());
+    assert_eq!(produced, 10_000);
+
+    let archive = zip(&[bomb]);
+    let (result, bridge) = run(bridge_with(archive, &[0])).await;
+    result.unwrap();
+    let view = view(&bridge);
+    assert_eq!(view["entries"][0]["status"], "listed");
+    assert_eq!(view["skipped"][0]["reason"], "ratio");
+}
+
+/// F43: a declared total is display only (B5). 256 entries declare 1 MiB
+/// each. The complete listing is written, the bytes read are exactly the ones
+/// the same records with a small declaration read, and no buffer is sized
+/// from the declared 268,435,456-byte total (the allocation mutant traps on
+/// `memory.grow` in the host's 128 MiB store).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_declared_256_mib_total_is_listed_with_bounded_reads_and_memory() {
+    const MIB: u64 = 1024 * 1024;
+    let declared = declared_256_mib();
+    let total = MIB * declared.len() as u64;
+    assert_eq!(total, 268_435_456);
+    assert!(usize::try_from(total).is_ok(), "fits a wasm32 usize");
+    assert!(total > 128 * 1024 * 1024, "above the host's store limit");
+
+    let archive = zip(&declared);
+    let size = archive.len();
+    let (result, bridge) = run(bridge_with(archive, &[])).await;
+    result.unwrap();
+    let view = view(&bridge);
+    let entries = view["entries"].as_array().expect("the listing");
+    assert_eq!(entries.len(), MAX_ENTRIES, "every entry is listed");
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(entry["index"], index);
+        assert_eq!(entry["path"], format!("{index:02x}"));
+        assert_eq!(entry["status"], "listed");
+        assert_eq!(entry["uncompressed_size"], MIB);
+    }
+    let shown: u64 = entries
+        .iter()
+        .map(|entry| entry["uncompressed_size"].as_u64().unwrap())
+        .sum();
+    assert_eq!(shown, total, "the declared total is shown, not acted on");
+    assert_eq!(view["previews"], json!([]));
+    assert_eq!(view["skipped"], json!([]));
+    assert!(size < MAX_READ_BYTES, "{size} bytes of archive");
+
+    // The same records with a 1-byte declaration have the same bytes and the
+    // same layout, so they must read exactly as many bytes: the declared
+    // total never reaches a read.
+    let (control_result, control) = run(bridge_with(zip(&declared_small()), &[])).await;
+    control_result.unwrap();
+    let read = bridge.bytes_served.get(ARCHIVE).copied().unwrap_or(0);
+    assert_eq!(
+        control.bytes_served.get(ARCHIVE).copied().unwrap_or(0),
+        read
+    );
+    assert_eq!(control.invokes_on(ARCHIVE), bridge.invokes_on(ARCHIVE));
+    assert!(read <= MAX_READ_BYTES, "{read} bytes read");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
