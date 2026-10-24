@@ -11,12 +11,13 @@ from its saved bytes afterwards, also on error or Ctrl-C.
 The runner is the capsule kit's (`examples/capsule-kit/falsify`).
 
 F-numbers here are the design's (examples/archive-viewer/DESIGN.md, "Falsifier
-plan"); this slice's core covers F6, F6b, F6c, F7 to F17, F19 to F25, F29 to
-F31, F40 to F42. The lettered cases F6d to F6f, F15b, F16b, F19b, F21b to
-F21g, F22b, F23b to F23d, F25b to F25f, F30b, F30c and F41b to F41e cover
-bounds, comparisons and request fields DESIGN states but gives no row, and
-F32 covers the whole view's cap. F18 (Bus v2 depth) and the preview falsifiers F1 to F5
-and F26 to F28 wait for their slices.
+plan"); the core covers F1, F2, F4, F5, F6, F6b, F6c, F7 to F17, F19 to F25,
+F26 to F28, F29 to F31, F32, F33, F40 to F42. The lettered cases F6d to F6f,
+F15b, F16b, F19b, F21b to F21g, F22b, F23b to F23d, F25b to F25f, F30b, F30c,
+F41b to F41e and F5b cover bounds, comparisons and request fields DESIGN states
+but gives no row, and F32 covers the whole view's cap. F3 (the B2 streaming
+ratio check) and F18 (Bus v2 depth) run in the component and wait for the
+host-test task; F35, F36 and F43 wait for the same task.
 """
 import pathlib
 import re
@@ -336,6 +337,71 @@ CASES = [
      "    if over > MAX_VIEW_BYTES {",
      "    if false {",
      ["no_view_is_longer_than_its_cap"]),
+    # B1 to B3: the preview window and the bomb caps.
+    ("F1 the preview window grows to 64 KiB",
+     "src/preview.rs",
+     "pub const OUTPUT_WINDOW_BYTES: u64 = MAX_PREVIEW_BYTES + 1;",
+     "pub const OUTPUT_WINDOW_BYTES: u64 = 64 * 1024;",
+     ["an_entry_over_the_preview_cap_is_skipped_after_one_byte_past_it"]),
+    ("F2 the declared size is not checked first",
+     "src/preview.rs",
+     "    if entry.uncompressed_size > MAX_PREVIEW_BYTES {",
+     "    if false && entry.uncompressed_size > MAX_PREVIEW_BYTES {",
+     ["an_entry_declared_over_the_cap_is_not_read"]),
+    ("F4 the declared ratio is not checked",
+     "src/preview.rs",
+     "    if entry.uncompressed_size\n"
+     "        > entry\n"
+     "            .compressed_size\n"
+     "            .saturating_mul(MAX_RATIO)\n"
+     "            .saturating_add(RATIO_SLACK_BYTES)\n"
+     "    {",
+     "    if false\n"
+     "        && entry.uncompressed_size\n"
+     "            > entry\n"
+     "                .compressed_size\n"
+     "                .saturating_mul(MAX_RATIO)\n"
+     "                .saturating_add(RATIO_SLACK_BYTES)\n"
+     "    {",
+     ["an_entry_declared_past_the_ratio_is_not_read"]),
+    ("F5 the output of skipped entries is not counted",
+     "src/preview.rs",
+     "        self.inflate = self.inflate.saturating_sub(outcome.produced);",
+     "        if outcome.blocks.is_ok() {\n"
+     "            self.inflate = self.inflate.saturating_sub(outcome.produced);\n"
+     "        }",
+     ["no_run_inflates_more_than_its_total"]),
+    ("F5b the compressed cap is not checked",
+     "src/preview.rs",
+     "    if entry.compressed_size > budget.compressed {",
+     "    if false && entry.compressed_size > budget.compressed {",
+     ["no_run_reads_more_compressed_data_than_its_cap"]),
+    # L6 to L8: the bytes, not the declaration.
+    ("F26 the output length is not the declared size",
+     "src/preview.rs",
+     "                if consumed != data.len() || produced != declared {",
+     "                if consumed != data.len() || produced > declared {",
+     ["an_entry_longer_or_shorter_than_declared_is_skipped"]),
+    ("F27 the CRC compare is removed",
+     "src/preview.rs",
+     "    if crc32(&output) != entry.crc {",
+     "    if false {",
+     ["a_crc_mismatch_skips_the_entry"]),
+    ("F28 the stored sizes compare is removed",
+     "src/preview.rs",
+     "    if entry.method == 0 && entry.compressed_size != entry.uncompressed_size {",
+     "    if false {",
+     ["a_stored_entry_with_two_sizes_is_skipped"]),
+    ("F33 the whole-text check is removed",
+     "src/preview.rs",
+     '        Err(_) => return Ok(skipped_after(produced, read, "not_text")),',
+     '        Err(_) => "",',
+     ["a_text_entry_that_is_not_text_is_skipped"]),
+    ("F33b the block cap is ignored",
+     "src/preview.rs",
+     '        Err(ModelError::TooLong) => return Ok(skipped_after(produced, read, "too_long")),',
+     '        Err(ModelError::TooLong) => Vec::new(),',
+     ["a_text_entry_with_too_many_blocks_is_skipped"]),
     # Answers that do not hold what the end record promised.
     ("F21e an object larger than 2^32 is accepted",
      "src/zip.rs",

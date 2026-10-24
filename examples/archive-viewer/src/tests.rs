@@ -1420,6 +1420,7 @@ fn a_local_header_that_differs_skips_the_entry() {
 fn a_consistent_local_header_is_shown() {
     let mut spec = Spec::file("a.txt").data(b"hello");
     spec.method = 0;
+    spec.crc = preview::crc32(b"hello");
     let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, build(&[spec], &[]));
     assert!(skipped(&bus).is_empty());
     assert_eq!(entries(&bus)[0]["status"], "listed");
@@ -1440,6 +1441,7 @@ fn a_data_descriptor_flag_is_ignored() {
     // the sizes still have to agree.
     let mut local = Spec::file("a.txt").data(b"hello");
     local.local_flags = Some(1 << 3);
+    local.crc = preview::crc32(b"hello");
     let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, build(&[local], &[]));
     assert!(skipped(&bus).is_empty(), "{:?}", skipped(&bus));
 
@@ -1447,6 +1449,7 @@ fn a_data_descriptor_flag_is_ignored() {
     // local CRC and sizes are not compared.
     let mut descriptor = Spec::file("a.txt").data(b"hello");
     descriptor.flags = 1 << 3;
+    descriptor.crc = preview::crc32(b"hello");
     descriptor.local_flags = Some(0);
     descriptor.local_crc = Some(0xffff_ffff);
     descriptor.local_compressed = Some(0);
@@ -1628,22 +1631,343 @@ fn no_listing_reads_more_than_the_run_may() {
 
 #[test]
 fn no_view_is_longer_than_its_cap() {
-    // A UTF-8-marked name of 12,000 NUL bytes fits the 16 KiB directory but
-    // escapes to 72,000 bytes of JSON. The view cap refuses it instead.
-    let mut spec = Spec::file("a");
-    spec.flags = 1 << 11;
-    spec.name = vec![0u8; 12_000];
-    let bus = run_fixture(request(ARCHIVE, &[]), ARCHIVE, build(&[spec], &[]));
-    let written = bus
-        .written
-        .get(VIEW_URI)
-        .expect("a refused view is still written");
-    assert!(
-        written.len() as u64 <= MAX_VIEW_BYTES,
-        "{} bytes",
-        written.len()
+    // A sweep: a giant name, a preview-heavy request and a mixed one. Each
+    // view, written or refused, stays inside the cap.
+    let mut giant = Spec::file("a");
+    giant.flags = 1 << 11;
+    giant.name = vec![0u8; 12_000];
+    let mut over: Vec<Spec> = (0..8)
+        .map(|index| deflated(&format!("e{index}.txt"), &text_block(16 * 1024)))
+        .collect();
+    // Long names in the listing count against the same cap as the previews.
+    over.extend((0..60).map(|index| Spec::file(&format!("{index:0>3}{}", "n".repeat(196)))));
+    let mixed: Vec<Spec> = (0..3)
+        .map(|index| deflated(&format!("m{index}.txt"), &text_block(12 * 1024)))
+        .collect();
+    let cases: Vec<(Vec<Spec>, Vec<usize>, bool)> = vec![
+        (vec![giant], Vec::new(), true),
+        (over, (0..8).collect(), true),
+        (mixed, (0..3).collect(), false),
+    ];
+    for (specs, show, refused) in cases {
+        let bus = run_fixture(request(ARCHIVE, &show), ARCHIVE, build(&specs, &[]));
+        let written = bus.written.get(VIEW_URI).expect("a view is written");
+        assert!(
+            written.len() as u64 <= MAX_VIEW_BYTES,
+            "{} bytes",
+            written.len()
+        );
+        let view = view(&bus);
+        if refused {
+            assert!(view["entries"].as_array().unwrap().is_empty());
+            assert_eq!(view["refused"]["code"], "view_too_large");
+        } else {
+            assert!(view.get("refused").is_none());
+            assert_eq!(view["previews"].as_array().unwrap().len(), 3);
+        }
+    }
+}
+
+// --- Text previews: B1 to B3, L6 to L8, F1, F2, F4, F5, F26 to F28, F33 -----
+
+fn previews(bus: &FakeBus) -> Vec<Value> {
+    view(bus)["previews"].as_array().unwrap().clone()
+}
+
+/// A stored entry whose sizes agree and whose CRC is right.
+fn stored(name: &str, text: &[u8]) -> Spec {
+    let mut spec = Spec::file(name).data(text);
+    spec.method = 0;
+    spec.crc = preview::crc32(text);
+    spec
+}
+
+/// A deflated entry whose declared sizes and CRC are right.
+fn deflated(name: &str, text: &[u8]) -> Spec {
+    let mut spec = Spec::file(name);
+    spec.method = 8;
+    spec.data = miniz_oxide::deflate::compress_to_vec(text, 6);
+    spec.crc = preview::crc32(text);
+    spec.uncompressed = Some(text.len() as u32);
+    spec
+}
+
+/// Bytes that do not compress, so a lying declared size still has a
+/// compressed stream under the caps.
+fn noise(len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len);
+    let mut state = 0x1234_5678u32;
+    for _ in 0..len {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        out.push((state >> 24) as u8);
+    }
+    out
+}
+
+/// Printable text with a moderate deflate ratio: a 200-byte run repeated to
+/// `len`. It passes B2 and stays small enough for the compressed budget.
+fn text_block(len: usize) -> Vec<u8> {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut block = Vec::with_capacity(200);
+    let mut state = 0x9e37_79b9u32;
+    for _ in 0..200 {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        block.push(ALPHABET[(state >> 16) as usize % ALPHABET.len()]);
+    }
+    let mut out = Vec::with_capacity(len);
+    while out.len() < len {
+        out.extend_from_slice(&block);
+    }
+    out.truncate(len);
+    out
+}
+
+/// The listed entries of an archive, and the bus its reads go through.
+fn listing_of(archive: Vec<u8>) -> (FakeBus, String, Vec<zip::Entry>) {
+    let mut bus = bus_with(request(ARCHIVE, &[]), ARCHIVE, archive);
+    let grant = capsule_kit_guest::grant(&mut bus, ARCHIVE, "read", "test a preview").unwrap();
+    let mut left = MAX_READ_BYTES;
+    let entries = {
+        let mut reader = zip::Reader::new(&mut bus, ARCHIVE, &grant, &mut left);
+        zip::listing(&mut reader).unwrap().entries
+    };
+    (bus, grant, entries)
+}
+
+#[test]
+fn crc32_matches_the_standard_check_value() {
+    // The check value every CRC-32 implementation is measured by.
+    assert_eq!(preview::crc32(b"123456789"), 0xCBF4_3926);
+    assert_eq!(preview::crc32(b""), 0);
+    assert_eq!(preview::crc32(b"hello"), 0x3610_A686);
+}
+
+#[test]
+fn a_text_entry_is_shown_with_its_text() {
+    let bus = run_fixture(
+        request(ARCHIVE, &[0]),
+        ARCHIVE,
+        build(&[stored("a.txt", b"hello\n")], &[]),
     );
-    let view = view(&bus);
-    assert!(view["entries"].as_array().unwrap().is_empty());
-    assert_eq!(view["refused"]["code"], "view_too_large");
+    assert!(skipped(&bus).is_empty());
+    let previews = previews(&bus);
+    assert_eq!(previews.len(), 1);
+    assert_eq!(previews[0]["index"], 0);
+    assert_eq!(previews[0]["blocks"][0]["kind"], "paragraph");
+    assert_eq!(previews[0]["blocks"][0]["spans"][0]["text"], "hello");
+}
+
+#[test]
+fn a_deflated_text_entry_is_shown() {
+    let text = vec![b'a'; 1000];
+    let bus = run_fixture(
+        request(ARCHIVE, &[0]),
+        ARCHIVE,
+        build(&[deflated("a.txt", &text)], &[]),
+    );
+    assert!(skipped(&bus).is_empty());
+    assert_eq!(
+        previews(&bus)[0]["blocks"][0]["spans"][0]["text"],
+        String::from_utf8(text).unwrap()
+    );
+}
+
+#[test]
+fn an_entry_over_the_preview_cap_is_skipped_after_one_byte_past_it() {
+    // The declared size is at the cap, but the stream inflates past it. The
+    // window stops after exactly one byte past the cap.
+    let mut spec = deflated("a.bin", &noise(20_000));
+    spec.uncompressed = Some(preview::MAX_PREVIEW_BYTES as u32);
+    assert!(spec.data.len() as u64 <= preview::MAX_COMPRESSED_BYTES);
+    let archive = build(&[spec], &[]);
+    let (mut bus, grant, entries) = listing_of(archive.clone());
+    let mut left = MAX_READ_BYTES;
+    let budget = preview::Budget::new();
+    let outcome = {
+        let mut reader = zip::Reader::new(&mut bus, ARCHIVE, &grant, &mut left);
+        preview::preview(&mut reader, &entries[0], &budget).unwrap()
+    };
+    assert_eq!(
+        outcome.produced,
+        preview::MAX_PREVIEW_BYTES + 1,
+        "the window stops one byte past the cap"
+    );
+    assert_eq!(outcome.blocks, Err("oversize"));
+    let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, archive);
+    assert_eq!(skipped(&bus)[0]["reason"], "oversize");
+    assert!(previews(&bus).is_empty());
+}
+
+#[test]
+fn an_entry_declared_over_the_cap_is_not_read() {
+    // B1: the declared uncompressed size is checked before any read.
+    let text = vec![b'a'; preview::MAX_PREVIEW_BYTES as usize + 1];
+    let filler = Spec::file("filler.bin").data(&vec![0u8; 2000]);
+    let archive = build(&[stored("a.txt", &text), filler], &[]);
+    let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, archive);
+    assert_eq!(skipped(&bus)[0]["reason"], "oversize");
+    assert!(previews(&bus).is_empty());
+    // The entry's data starts after its 30-byte local header and 5-byte name.
+    let data_start = 30 + 5;
+    assert_data_unread(&bus, data_start, data_start + text.len() as u64);
+}
+
+#[test]
+fn an_entry_declared_past_the_ratio_is_not_read() {
+    // B2: a declared ratio past the cap is not even read.
+    let text = vec![b'0'; 15_000];
+    let spec = deflated("a.txt", &text);
+    let declared = spec.uncompressed.unwrap() as u64;
+    let compressed = spec.data.len() as u64;
+    assert!(
+        declared > compressed * preview::MAX_RATIO + preview::RATIO_SLACK_BYTES,
+        "{declared} from {compressed} is inside the ratio"
+    );
+    let filler = Spec::file("filler.bin").data(&vec![0u8; 2000]);
+    let archive = build(&[spec, filler], &[]);
+    let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, archive);
+    assert_eq!(skipped(&bus)[0]["reason"], "ratio");
+    assert!(previews(&bus).is_empty());
+    let data_start = 30 + 5;
+    assert_data_unread(&bus, data_start, data_start + compressed);
+}
+
+#[test]
+fn an_entry_longer_or_shorter_than_declared_is_skipped() {
+    // L6: the bytes, not the declaration, decide the sizes.
+    let mut longer = deflated("longer.txt", b"abcdef");
+    longer.uncompressed = Some(4);
+    let mut shorter = deflated("shorter.txt", b"abcd");
+    shorter.uncompressed = Some(8);
+    let bus = run_fixture(
+        request(ARCHIVE, &[0, 1]),
+        ARCHIVE,
+        build(&[longer, shorter], &[]),
+    );
+    assert_eq!(skipped(&bus)[0]["reason"], "size_mismatch");
+    assert_eq!(skipped(&bus)[1]["reason"], "size_mismatch");
+    assert!(previews(&bus).is_empty());
+}
+
+#[test]
+fn a_crc_mismatch_skips_the_entry() {
+    let mut spec = stored("a.txt", b"hello");
+    spec.crc ^= 1;
+    let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, build(&[spec], &[]));
+    assert_eq!(skipped(&bus)[0]["reason"], "crc_mismatch");
+    assert!(previews(&bus).is_empty());
+}
+
+#[test]
+fn a_stored_entry_with_two_sizes_is_skipped() {
+    // L8: a stored entry's two sizes must agree, before its bytes are read.
+    let text = b"abcdef";
+    let mut spec = stored("a.txt", text);
+    spec.uncompressed = Some(5);
+    let filler = Spec::file("filler.bin").data(&vec![0u8; 2000]);
+    let archive = build(&[spec, filler], &[]);
+    let bus = run_fixture(request(ARCHIVE, &[0]), ARCHIVE, archive);
+    assert_eq!(skipped(&bus)[0]["reason"], "size_mismatch");
+    assert!(previews(&bus).is_empty());
+    let data_start = 30 + 5;
+    assert_data_unread(&bus, data_start, data_start + text.len() as u64);
+}
+
+#[test]
+fn a_text_entry_that_is_not_text_is_skipped() {
+    let bus = run_fixture(
+        request(ARCHIVE, &[0]),
+        ARCHIVE,
+        build(&[stored("a.txt", b"abc\0def")], &[]),
+    );
+    assert_eq!(skipped(&bus)[0]["reason"], "not_text");
+    assert!(previews(&bus).is_empty());
+}
+
+#[test]
+fn a_text_entry_with_too_many_blocks_is_skipped() {
+    // 600 paragraphs pass the text checks but not the model's block cap.
+    let text = "x\n\n".repeat(600);
+    let bus = run_fixture(
+        request(ARCHIVE, &[0]),
+        ARCHIVE,
+        build(&[stored("a.txt", text.as_bytes())], &[]),
+    );
+    assert_eq!(skipped(&bus)[0]["reason"], "too_long");
+    assert!(previews(&bus).is_empty());
+}
+
+#[test]
+fn no_run_inflates_more_than_its_total() {
+    // B3, a sweep: five stored entries are skipped after their bytes are
+    // counted, in every order, and the run's total stops the last one. The
+    // compressed and read caps are separate rules (F5b, F31), so they are
+    // not what this sweep measures.
+    let text = vec![b'a'; 14 * 1024];
+    let specs: Vec<Spec> = (0..5)
+        .map(|index| {
+            let mut spec = stored(&format!("e{index}.txt"), &text);
+            spec.crc ^= 1;
+            spec
+        })
+        .collect();
+    let archive = build(&specs, &[]);
+    let (mut bus, grant, entries) = listing_of(archive);
+    let orders = [[0usize, 1, 2, 3, 4], [4, 0, 1, 2, 3], [2, 3, 4, 0, 1]];
+    for order in orders {
+        let mut budget = preview::Budget {
+            inflate: preview::MAX_INFLATE_BYTES,
+            compressed: u64::MAX,
+        };
+        let mut left = u64::MAX;
+        let mut produced = 0u64;
+        let mut skipped_for_total = 0;
+        for index in order {
+            let outcome = {
+                let mut reader = zip::Reader::new(&mut bus, ARCHIVE, &grant, &mut left);
+                preview::preview(&mut reader, &entries[index], &budget).unwrap()
+            };
+            produced += outcome.produced;
+            if outcome.blocks == Err("inflate_budget") {
+                skipped_for_total += 1;
+            }
+            budget.take(&outcome);
+        }
+        assert!(
+            produced <= preview::MAX_INFLATE_BYTES,
+            "produced {produced} in order {order:?}"
+        );
+        assert_eq!(
+            skipped_for_total, 1,
+            "one entry stops at the run's total in order {order:?}"
+        );
+    }
+}
+
+#[test]
+fn no_run_reads_more_compressed_data_than_its_cap() {
+    // The compressed budget is separate from the inflate one: the third
+    // stored entry would pass it, and is not read.
+    let text = vec![b'a'; 9 * 1024];
+    let specs: Vec<Spec> = (0..3)
+        .map(|index| stored(&format!("e{index}.txt"), &text))
+        .collect();
+    let archive = build(&specs, &[]);
+    let (mut bus, grant, entries) = listing_of(archive);
+    let mut budget = preview::Budget::new();
+    let mut left = MAX_READ_BYTES;
+    for entry in &entries[..2] {
+        let outcome = {
+            let mut reader = zip::Reader::new(&mut bus, ARCHIVE, &grant, &mut left);
+            preview::preview(&mut reader, entry, &budget).unwrap()
+        };
+        assert!(outcome.blocks.is_ok(), "{:?}", outcome.blocks);
+        budget.take(&outcome);
+    }
+    let outcome = {
+        let mut reader = zip::Reader::new(&mut bus, ARCHIVE, &grant, &mut left);
+        preview::preview(&mut reader, &entries[2], &budget).unwrap()
+    };
+    assert_eq!(outcome.read, 0, "the third entry's bytes are not read");
+    assert_eq!(outcome.blocks, Err("compressed_budget"));
 }

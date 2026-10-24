@@ -12,6 +12,12 @@ crate-type = ["cdylib", "rlib"]
 # The capsule kit's guest crate: the Bus calls, refusals, reads, URI check and
 # the Bus v1 WIT glue.
 capsule-kit-guest = { path = "../capsule-kit/guest", features = ["wit"] }
+# The typed blocks of a preview: the documents model's, so the page draws one
+# shape (DESIGN.md, "What the kit gives", M2).
+docs-model = { path = "../docs-viewer/model" }
+# The decompressor (DESIGN.md, "Crates"): streaming inflate into the caller's
+# fixed window, so every output byte is counted and the caps are in the loop.
+miniz_oxide = "0.9.1"
 serde_json = "1.0.151"
 
 [dev-dependencies]

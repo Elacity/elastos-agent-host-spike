@@ -148,3 +148,60 @@ must change only its own rule.
   status is not `listed` (encrypted, unsupported, blocked), or the encrypted
   tests above fail, as they should: F30 says an encrypted entry is listed
   and never read.
+
+## 2026-10-24: task 003, text previews (inflate, the bomb caps, the byte checks)
+
+Step 3b's second half: a shown entry is inflated under B1 to B3, checked
+against its declaration (L6 to L8), and shown as the documents model's typed
+blocks.
+
+### What changed
+
+- New `src/preview.rs`: `preview` (the per-entry checks), `inflate_bounded`
+  (B1's fixed window, B3's total, 16-byte steps for the later B2 streaming
+  check), `Budget` (the run's inflate and compressed bytes, taken by
+  `Budget::take` whether the entry is shown or skipped), CRC-32 and the skip
+  messages. Caps: `MAX_PREVIEW_BYTES` 16 KiB, `MAX_RATIO` 100 with 1 KiB
+  slack, `MAX_INFLATE_BYTES` 64 KiB, `MAX_COMPRESSED_BYTES` 24 KiB.
+- `src/lib.rs`: the run checks the local header (L5), then previews a listed
+  file; a directory, a nested archive or another kind stays listed and unread.
+  The view gains `previews`, each `{"blocks":[…],"index":N}` in sorted keys.
+  Skipped reasons are `oversize`, `ratio`, `size_mismatch`, `crc_mismatch`,
+  `not_text`, `too_long`, `compressed_budget`, `inflate_budget` and
+  `read_budget`.
+- `src/zip.rs`: `Entry.crc` is crate-visible for the L7 compare.
+- `Cargo.toml`: `miniz_oxide` 0.9.1 (DESIGN's decompressor) and `docs-model`
+  (the typed blocks, M2). No other crate changed.
+- New tests: 87 pass. The existing fixtures that show a stored entry now carry
+  a correct CRC (`a_consistent_local_header_is_shown`,
+  `a_data_descriptor_flag_is_ignored`).
+- `no_view_is_longer_than_its_cap` is now a sweep: a giant name, a
+  preview-heavy view and a mixed one.
+
+### Falsifiers done (67, all caught, `falsify.py`)
+
+- F1 (B1 window), F2 (B1 declared size), F4 (B2 declared ratio), F5 (B3 total,
+  a sweep), F5b (the 24 KiB compressed cap).
+- F26 (L6 sizes from the bytes), F27 (L7 CRC), F28 (L8 stored sizes).
+- F32 (the whole view's cap, now over previews too).
+- F33 (the text checks), F33b (the model's block cap).
+
+### Falsifiers left for the next tasks
+
+- **F3 (B2 streaming ratio): deferred to the host-test task** because its test
+  runs in the component. The inflate loop already takes at most 16 compressed
+  bytes a step, so the check lands after every step without moving a rule.
+- The host test and the fuel gate: F35 (grant), F36 (fuel), F43 (declared
+  totals under the store's memory limit).
+- The page: F37 to F39. Bus v2: F18, F34. tar: not in this slice.
+
+### Notes
+
+- **Kit gap:** `capsule-kit-guest` has no inflate and no CRC-32; both live in
+  this app, as DESIGN's kit list (M1 to M3) gives only the counted reader, the
+  text checks and the image checks. A second archive format would move them to
+  the kit rather than copy them.
+- The previews are typed blocks (`docs-model`, plain text as paragraphs), so
+  the page task draws the same shape the documents viewer uses.
+- `deflated` fixtures use `miniz_oxide`'s compressor; `crc32` is pinned to the
+  standard check value (`crc32_matches_the_standard_check_value`).
