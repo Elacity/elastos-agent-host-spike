@@ -410,6 +410,22 @@
    ]
   },
   {
+   "id": "FC14",
+   "title": "an invalid content-length falls back to an EOF-delimited body",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "                \"content-length\" => {\n                    let text = value.trim();\n                    length = Some(\n                        text.parse::<usize>()\n                            .map_err(|_| format!(\"invalid content-length {text:?}\"))?,\n                    );\n                }",
+     "new": "                \"content-length\" => length = value.trim().parse().ok(),"
+    }
+   ],
+   "tests": [
+    "tests::a_model_failure_leaves_the_history_unchanged"
+   ]
+  },
+  {
    "id": "FP01",
    "title": "a snapshot overwrites the last history node, so volatile bytes enter the prefix",
    "command": "host",

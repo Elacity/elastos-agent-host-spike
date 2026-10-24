@@ -8215,7 +8215,13 @@ mod opt_in_model {
                 "transfer-encoding" => {
                     chunked = value.to_ascii_lowercase().contains("chunked");
                 }
-                "content-length" => length = value.trim().parse().ok(),
+                "content-length" => {
+                    let text = value.trim();
+                    length = Some(
+                        text.parse::<usize>()
+                            .map_err(|_| format!("invalid content-length {text:?}"))?,
+                    );
+                }
                 _ => {}
             }
         }
@@ -11244,6 +11250,16 @@ mod tests {
                 .expect_err("a malformed chunk must be refused");
         server.join().expect("the server thread");
         assert!(error.starts_with("invalid chunk size"), "{error}");
+
+        // An invalid or unrepresentable Content-Length is a clear transport
+        // refusal; it must not fall back to an EOF-delimited body.
+        let overflow_length = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 18446744073709551616\r\nConnection: close\r\n\r\n{\"choices\":[{\"message\":{\"content\":\"hello second turn\"}}]}".to_string();
+        let (base_url, server) = one_shot_server(overflow_length);
+        let error =
+            opt_in_model::chat_completion(&base_url, opt_in_model::MODEL_ID, "summary prompt")
+                .expect_err("an invalid content-length must be refused");
+        server.join().expect("the server thread");
+        assert!(error.starts_with("invalid content-length"), "{error}");
     }
 
     /// Opt-in: sends the real prompt to the local model, then judges the answer
