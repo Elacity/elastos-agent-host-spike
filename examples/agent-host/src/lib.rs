@@ -9414,6 +9414,31 @@ mod tests {
         the_opt_in_probe_refuses_a_rejected_second_turn();
     }
 
+    /// The opt-in entry point: the configuration guard runs first, so an
+    /// unset URL skips before any check can open a local socket.
+    fn run_opt_in_prefix(
+        configured: Option<String>,
+        checks: impl FnOnce(),
+    ) -> Result<Option<PrefixProbe>, String> {
+        let Some(base_url) = configured else {
+            return Ok(None);
+        };
+        checks();
+        probe_prefix_turns_with(Some(base_url), packed_turns())
+    }
+
+    /// The entry point must not run the checks, which open local listeners,
+    /// when no endpoint is configured.
+    fn the_entry_point_skips_before_any_check() {
+        let mut checks_ran = false;
+        let result = run_opt_in_prefix(None, || checks_ran = true);
+        assert!(matches!(result, Ok(None)));
+        assert!(
+            !checks_ran,
+            "the entry point ran its checks before the guard"
+        );
+    }
+
     /// Opt-in: sends the two consecutive turns whose packed prefixes are
     /// byte-identical to the local model, then records the counters the engine
     /// publishes. Ignored by default, and it skips when `SPARKS_MODEL_URL` is
@@ -9422,8 +9447,8 @@ mod tests {
     #[test]
     #[ignore = "opt-in: set SPARKS_MODEL_URL to the local DeepSeek endpoint"]
     fn an_opt_in_real_model_keeps_one_packed_prefix_across_two_turns() {
-        deterministic_checks();
-        match probe_prefix_turns(opt_in_model::configured_url()) {
+        the_entry_point_skips_before_any_check();
+        match run_opt_in_prefix(opt_in_model::configured_url(), deterministic_checks) {
             Ok(None) => println!(
                 "SKIP: SPARKS_MODEL_URL is unset; the opt-in real-model prefix test did not run"
             ),
