@@ -1377,10 +1377,25 @@ fn compact(journal: &mut Journal, summary: &str) -> bool {
     begin_compact(journal, summary) && commit_compact(journal)
 }
 
+/// Lower-case hex of a digest. A summary step keeps its request digest in
+/// `new`, so an answer can be matched to the history the request saw.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn hex_digest(bytes: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        out.push(HEX[usize::from(byte >> 4)] as char);
+        out.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    out
+}
+
 /// Record a compaction summary request through the hosted model proposal
 /// path. The resource names the model; the facts the task marks as required
-/// ride in the step's `argv` as data. This calls `propose_hosted`, so there is
-/// no second proposal path, no model call, and no secret.
+/// ride in the step's `argv` as data, and the digest of the request text rides
+/// in `new`, so a later answer is bound to the history the request saw. This
+/// calls `propose_hosted`, so there is no second proposal path, no model call,
+/// and no secret. A journal with no summarisable input creates no step.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn propose_compact_summary(
     journal: &mut Journal,
@@ -1397,6 +1412,16 @@ fn propose_compact_summary(
         .find(|step| step.id == id)
         .expect("just pushed");
     step.argv = required.iter().map(|fact| (*fact).to_string()).collect();
+    let Some(prompt) = compact_summary_prompt(journal, id) else {
+        journal.steps.retain(|step| step.id != id);
+        return Err("no summary input");
+    };
+    let step = journal
+        .steps
+        .iter_mut()
+        .find(|step| step.id == id)
+        .expect("just pushed");
+    step.new = hex_digest(&sha256(prompt.as_bytes()));
     Ok(id)
 }
 
@@ -1423,10 +1448,13 @@ fn compact_summary_prompt(journal: &Journal, step_id: u64) -> Option<String> {
 }
 
 /// Record the model's answer for a dispatched hosted summary step. Only a
-/// dispatched hosted step is accepted. The answer is checked by
-/// `compact_refusal` against the facts the step carries; a refusal or a
-/// provider failure returns its reason and leaves the history unchanged. The
-/// step is settled either way, so the same step is not recorded twice.
+/// dispatched, unsettled hosted step with a matching request digest is
+/// accepted. The digest binds the answer to the history the request saw, so
+/// an instruction appended after the request makes the answer stale and it is
+/// refused. The answer is checked by `compact_refusal` against the facts the
+/// step carries; a refusal or a provider failure returns its reason and
+/// leaves the history unchanged. The step is settled either way, so the same
+/// step is not recorded twice.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn record_compact_summary(
     journal: &mut Journal,
@@ -1439,7 +1467,20 @@ fn record_compact_summary(
     if step.kind != ProposalKind::Hosted || step.state != StepState::Dispatched {
         return Err("summary step not dispatched");
     }
+    if step.has_result {
+        return Err("summary step settled");
+    }
     let required = step.argv.clone();
+    let request_digest = step.new.clone();
+    if request_digest.is_empty() {
+        return Err("summary step has no request digest");
+    }
+    let Some(prompt) = compact_summary_prompt(journal, step_id) else {
+        return Err("summary input changed");
+    };
+    if hex_digest(&sha256(prompt.as_bytes())) != request_digest {
+        return Err("summary is stale");
+    }
     let outcome = match answer {
         Err(reason) => Err(reason),
         Ok(summary) => match compact_refusal(journal, &summary, &required) {
@@ -10637,6 +10678,7 @@ mod tests {
         assert_eq!(step.grant, None);
         assert_eq!(step.state, StepState::Prepared);
         assert_eq!(step.argv, ["hello".to_string(), "second turn".to_string()]);
+        assert_eq!(step.new.len(), 64);
         assert_eq!(journal.events, before);
         let prompt = compact_summary_prompt(&journal, id).unwrap();
         assert!(prompt.starts_with("Summarise the history after the system head"));
@@ -10752,6 +10794,70 @@ mod tests {
         assert_eq!(journal.events, before);
     }
 
+    #[test]
+    fn a_settled_summary_step_does_not_accept_another_answer() {
+        let good = "The person said hello, then second turn; the earlier answer and the build result were kept.";
+        let mut journal = summary_journal();
+        let id = dispatched_summary_step(&mut journal, &["hello", "second turn"]);
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(good.to_string())),
+            Ok(())
+        );
+        let recorded = journal.events.clone();
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(good.to_string())),
+            Err("summary step settled")
+        );
+        assert_eq!(journal.events, recorded);
+
+        let mut journal = summary_journal();
+        let before = journal.events.clone();
+        let id = dispatched_summary_step(&mut journal, &["hello", "second turn"]);
+        let long = format!("{} hello second turn", "x".repeat(10_000));
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(long)),
+            Err("summary does not shrink")
+        );
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(good.to_string())),
+            Err("summary step settled")
+        );
+        assert_eq!(journal.events, before);
+
+        let mut journal = summary_journal();
+        let before = journal.events.clone();
+        let id = dispatched_summary_step(&mut journal, &["hello"]);
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Err("model offline")),
+            Err("model offline")
+        );
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(good.to_string())),
+            Err("summary step settled")
+        );
+        assert_eq!(journal.events, before);
+    }
+
+    #[test]
+    fn a_summary_answer_after_new_history_is_stale() {
+        let mut journal = summary_journal();
+        let id = dispatched_summary_step(&mut journal, &["hello", "second turn"]);
+        admit_user(&mut journal, "a new instruction");
+        let before = journal.events.clone();
+        let epoch = journal.epoch;
+        let good = "The person said hello, then second turn; the earlier answer and the build result were kept.";
+        assert_eq!(
+            record_compact_summary(&mut journal, id, Ok(good.to_string())),
+            Err("summary is stale")
+        );
+        assert_eq!(journal.events, before);
+        assert_eq!(journal.epoch, epoch);
+        assert!(journal
+            .events
+            .iter()
+            .any(|node| node.text == "a new instruction"));
+    }
+
     /// One HTTP/1.1 POST, no TLS. Only the opt-in local-model test uses it.
     fn http_post_json(base: &str, path: &str, body: &str) -> Result<String, String> {
         use std::io::{Read, Write};
@@ -10800,9 +10906,11 @@ mod tests {
     }
 
     /// Opt-in: a real local model writes the summary, and the same checks
-    /// decide. It runs only when `SPARKS_MODEL_URL` is set. The test harness
-    /// is the provider; the guest itself has no model or network access.
+    /// decide. Normal gates skip it; set `SPARKS_MODEL_URL` and run with
+    /// `--ignored` to run it. The test harness is the provider; the guest
+    /// itself has no model or network access.
     #[test]
+    #[ignore = "opt-in: set SPARKS_MODEL_URL and run with --ignored"]
     fn a_real_model_summary_passes_the_same_checks() {
         let Ok(url) = std::env::var("SPARKS_MODEL_URL") else {
             return;

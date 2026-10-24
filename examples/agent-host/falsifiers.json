@@ -82,6 +82,71 @@
    "tests": [
     "tests::a_summary_from_a_step_that_was_not_dispatched_is_refused"
    ]
+  },
+  {
+   "id": "FC06",
+   "title": "a settled summary step accepts another answer",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if step.has_result {\n        return Err(\"summary step settled\");\n    }",
+     "new": "    if false {\n        return Err(\"summary step settled\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_settled_summary_step_does_not_accept_another_answer"
+   ]
+  },
+  {
+   "id": "FC07",
+   "title": "a delayed answer erases history the request never saw",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if hex_digest(&sha256(prompt.as_bytes())) != request_digest {\n        return Err(\"summary is stale\");\n    }",
+     "new": "    if false {\n        return Err(\"summary is stale\");\n    }"
+    }
+   ],
+   "tests": [
+    "tests::a_summary_answer_after_new_history_is_stale"
+   ]
+  },
+  {
+   "id": "FC08",
+   "title": "compaction replaces node 0 instead of keeping the head",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    let replacement_head = [\n        head.clone(),\n        SurfaceNode {\n            role: Role::User,\n            text: summary.to_string(),\n            source: NodeSource::CompactionCheckpoint,\n        },\n    ];",
+     "new": "    let replacement_head = [\n        SurfaceNode {\n            role: Role::User,\n            text: String::new(),\n            source: NodeSource::Message,\n        },\n        SurfaceNode {\n            role: Role::User,\n            text: summary.to_string(),\n            source: NodeSource::CompactionCheckpoint,\n        },\n    ];"
+    }
+   ],
+   "tests": [
+    "tests::compaction_keeps_node_zero_and_starts_a_new_series",
+    "tests::a_model_written_compaction_summary_is_recorded"
+   ]
+  },
+  {
+   "id": "FC09",
+   "title": "a model failure writes history instead of leaving it unchanged",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "        Err(reason) => Err(reason),",
+     "new": "        Err(_) => {\n            journal.events.push(SurfaceNode {\n                role: Role::User,\n                text: \"model failed\".to_string(),\n                source: NodeSource::CompactionCheckpoint,\n            });\n            Ok(())\n        }"
+    }
+   ],
+   "tests": [
+    "tests::a_model_failure_leaves_the_history_unchanged"
+   ]
   }
  ]
 }
