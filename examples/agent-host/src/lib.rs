@@ -1205,6 +1205,11 @@ fn stored_children_ok(journal: &Journal) -> Result<(), &'static str> {
             return Err("record");
         }
     }
+    // The saved backup marks where the records written during the compaction
+    // start; both views below select them from that point.
+    if !compaction_boundary_ok(journal) {
+        return Err("record");
+    }
     // Every event list a compaction can install keeps the record rules: the
     // log now, the pending replacement, and the saved backup, each with the
     // records written while the compaction was open.
@@ -1967,6 +1972,21 @@ fn begin_compact(journal: &mut Journal, summary: &str) -> bool {
     true
 }
 
+/// The saved backup is the log as it was when the compaction opened, and the
+/// log only grows while it is open. The backup's length is where the records
+/// written during the compaction start (`child_records_since_compaction`), so
+/// a backup that is not a prefix of the log, longer or changed, would drop or
+/// misplace them. No backup has no boundary to check.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn compaction_boundary_ok(journal: &Journal) -> bool {
+    journal.compact_backup.as_ref().is_none_or(|(saved, _)| {
+        journal
+            .events
+            .get(..saved.len())
+            .is_some_and(|start| start == saved.as_slice())
+    })
+}
+
 /// Child-budget and child-stop records written while a compaction is open.
 /// The step already holds what they record, so they are carried into the
 /// committed or restored log, never dropped.
@@ -1987,7 +2007,7 @@ fn child_records_since_compaction(journal: &Journal) -> impl Iterator<Item = &Su
 /// Apply an open compaction and start the next series.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn commit_compact(journal: &mut Journal) -> bool {
-    if !journal.compaction_open {
+    if !journal.compaction_open || !compaction_boundary_ok(journal) {
         return false;
     }
     let Some(mut replacement) = journal.compact_pending.take() else {
@@ -2004,7 +2024,7 @@ fn commit_compact(journal: &mut Journal) -> bool {
 /// A crash while compaction is open restores the saved bytes and series.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn note_crash_during_compact(journal: &mut Journal) -> bool {
-    if !journal.compaction_open {
+    if !journal.compaction_open || !compaction_boundary_ok(journal) {
         return false;
     }
     journal.compact_pending = None;
@@ -21518,6 +21538,94 @@ mod tests {
             decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
             Err("record")
         );
+    }
+
+    /// Codex at 4368761c: the saved backup with one ordinary node added only to
+    /// it, so it is longer than the log. Before the fix it loaded, and the
+    /// records written during the compaction were selected from past the end.
+    fn compacting_with_a_longer_backup() -> (Journal, u64) {
+        let (mut journal, child) = compacting_with_a_child();
+        journal
+            .compact_backup
+            .as_mut()
+            .unwrap()
+            .0
+            .push(SurfaceNode {
+                role: Role::User,
+                text: "only in the backup".to_string(),
+                source: NodeSource::Message,
+            });
+        (journal, child)
+    }
+
+    /// How many stop records the child has in the log.
+    fn stops_of(journal: &Journal, child: u64) -> usize {
+        child_stops(journal)
+            .iter()
+            .filter(|stop| stop.0 == child)
+            .count()
+    }
+
+    /// Codex at 4368761c, the commit path: a backup longer than the log is
+    /// refused on load, and a commit refuses it in memory, so a stop record
+    /// written during the compaction is never dropped.
+    #[test]
+    fn a_commit_refuses_a_backup_longer_than_the_log() {
+        // The same steps with a good backup commit, keep the stop and reload.
+        let (mut good, child) = compacting_with_a_child();
+        assert!(note_time_refusal(&mut good, child));
+        assert!(commit_compact(&mut good));
+        assert_eq!(stops_of(&good, child), 1);
+        assert!(decode_journal(&encode_journal(&good, &[0; 32]).unwrap()).is_ok());
+
+        let (mut journal, child) = compacting_with_a_longer_backup();
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        assert!(note_time_refusal(&mut journal, child));
+        let before = journal.clone();
+        assert!(!commit_compact(&mut journal));
+        assert_eq!(journal, before, "a refused commit changes nothing");
+        assert_eq!(stops_of(&journal, child), 1);
+    }
+
+    /// Codex at 4368761c, the crash path: the same backup, restored after a
+    /// crash, is refused the same way.
+    #[test]
+    fn a_crash_restore_refuses_a_backup_longer_than_the_log() {
+        let (mut good, child) = compacting_with_a_child();
+        assert!(note_time_refusal(&mut good, child));
+        assert!(note_crash_during_compact(&mut good));
+        assert_eq!(stops_of(&good, child), 1);
+        assert!(decode_journal(&encode_journal(&good, &[0; 32]).unwrap()).is_ok());
+
+        let (mut journal, child) = compacting_with_a_longer_backup();
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        assert!(note_time_refusal(&mut journal, child));
+        let before = journal.clone();
+        assert!(!note_crash_during_compact(&mut journal));
+        assert_eq!(journal, before, "a refused restore changes nothing");
+        assert_eq!(stops_of(&journal, child), 1);
+    }
+
+    /// A backup that is as long as the log at the start but not equal to it is
+    /// refused too: the boundary is the whole saved prefix, not only its length.
+    #[test]
+    fn a_saved_backup_that_is_not_the_start_of_the_log_is_refused() {
+        let (mut journal, _child) = compacting_with_a_child();
+        let saved = &mut journal.compact_backup.as_mut().unwrap().0;
+        let last = saved.len() - 1;
+        saved[last].text.push_str(" changed");
+        assert_eq!(
+            decode_journal(&encode_journal(&journal, &[0; 32]).unwrap()).map(|_| ()),
+            Err("record")
+        );
+        assert!(!commit_compact(&mut journal.clone()));
+        assert!(!note_crash_during_compact(&mut journal));
     }
 
     /// R8: on load, no step is still prepared at or before a cancel point or

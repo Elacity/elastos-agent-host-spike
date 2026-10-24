@@ -630,3 +630,33 @@ Principles:   2 (a cancelled parent takes the change request), 5 (all work stays
               budget never recorded says so), 12 (this note), 7 (each rule has a failing test and a caught
               falsifier).
 ```
+## Update: Codex FAIL at 4368761c, one finding (24 Oct)
+
+```text
+Finding 1:    the load checked the child records of every view but took a saved backup longer than the log.
+              `child_records_since_compaction` skips the backup's length of the log, so with such a backup
+              a stop record written during the compaction was skipped: `commit_compact` or
+              `note_crash_during_compact` dropped it and returned success, and the next load failed with
+              "record".
+Fix:          one `compaction_boundary_ok`: the saved backup must be the start of the log (the log only
+              grows while a compaction is open). The load refuses a journal that fails it with "record"
+              (fails closed), and a commit or a crash restore refuses it in memory and changes nothing.
+Tests:        a_commit_refuses_a_backup_longer_than_the_log and
+              a_crash_restore_refuses_a_backup_longer_than_the_log (Codex's case: one user node only in the
+              backup, then a time refusal; each first runs the same steps with a good backup, which commits
+              or restores, keeps the stop and reloads), and
+              a_saved_backup_that_is_not_the_start_of_the_log_is_refused (same length, one node changed).
+              All three fail on 4368761c and pass now.
+Falsifiers:   PX54 (no boundary check anywhere, the old behaviour), PX55 (the load skips it), PX56 (the
+              commit skips it), PX57 (the crash restore skips it) and PX58 (the check compares only the
+              length) new. All caught.
+Tests run:    ./examples/agent-host/verify.sh -> "237 passed", runner self-test OK, clippy clean, build OK.
+              ./examples/agent-host/run-local.sh -> "1 passed"; ./examples/agent-host/run-e2e.sh -> "3 passed"
+Full run:     PX54-PX58: 5 CAUGHT of 5 on this branch; the full falsify.py run is recorded at the merge
+              into #31.
+Guest hash:   dc105a62cc01d16d47a2e04fa30df412205ae6dffa77db91d897d2d838e4a1c4 on verify.sh.
+              wasm_sections.py: file 667953 bytes; /1/2 149 5ee6b40d46f6a045 (import list unchanged).
+Principles:   5 (the load fails closed on a bad compaction boundary; all work stays in examples/agent-host),
+              7 (the commit and crash paths each have a test that fails on 4368761c, and each check has a
+              caught falsifier), 10 (one boundary rule for the load and both in-memory paths), 12 (this note).
+```

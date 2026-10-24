@@ -4940,6 +4940,92 @@
     "tests::a_budgeted_child_with_no_task_budget_says_start_a_new_task",
     "tests::child_limits_are_checked_again_after_reload"
    ]
+  },
+  {
+   "id": "PX54",
+   "title": "the compaction boundary is not checked anywhere (the old behaviour)",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    journal.compact_backup.as_ref().is_none_or(|(saved, _)| {",
+     "new": "    true || journal.compact_backup.as_ref().is_none_or(|(saved, _)| {"
+    }
+   ],
+   "tests": [
+    "tests::a_commit_refuses_a_backup_longer_than_the_log",
+    "tests::a_crash_restore_refuses_a_backup_longer_than_the_log",
+    "tests::a_saved_backup_that_is_not_the_start_of_the_log_is_refused"
+   ]
+  },
+  {
+   "id": "PX55",
+   "title": "a load does not check the compaction boundary",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    if !compaction_boundary_ok(journal) {\n        return Err(\"record\");\n    }\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "tests::a_commit_refuses_a_backup_longer_than_the_log",
+    "tests::a_crash_restore_refuses_a_backup_longer_than_the_log",
+    "tests::a_saved_backup_that_is_not_the_start_of_the_log_is_refused"
+   ]
+  },
+  {
+   "id": "PX56",
+   "title": "a commit does not check the compaction boundary",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "fn commit_compact(journal: &mut Journal) -> bool {\n    if !journal.compaction_open || !compaction_boundary_ok(journal) {",
+     "new": "fn commit_compact(journal: &mut Journal) -> bool {\n    if !journal.compaction_open {"
+    }
+   ],
+   "tests": [
+    "tests::a_commit_refuses_a_backup_longer_than_the_log",
+    "tests::a_saved_backup_that_is_not_the_start_of_the_log_is_refused"
+   ]
+  },
+  {
+   "id": "PX57",
+   "title": "a crash restore does not check the compaction boundary",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "fn note_crash_during_compact(journal: &mut Journal) -> bool {\n    if !journal.compaction_open || !compaction_boundary_ok(journal) {",
+     "new": "fn note_crash_during_compact(journal: &mut Journal) -> bool {\n    if !journal.compaction_open {"
+    }
+   ],
+   "tests": [
+    "tests::a_crash_restore_refuses_a_backup_longer_than_the_log",
+    "tests::a_saved_backup_that_is_not_the_start_of_the_log_is_refused"
+   ]
+  },
+  {
+   "id": "PX58",
+   "title": "the compaction boundary checks only the backup's length, not that it is the start of the log",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "            .is_some_and(|start| start == saved.as_slice())",
+     "new": "            .is_some()"
+    }
+   ],
+   "tests": [
+    "tests::a_saved_backup_that_is_not_the_start_of_the_log_is_refused"
+   ]
   }
  ]
 }
